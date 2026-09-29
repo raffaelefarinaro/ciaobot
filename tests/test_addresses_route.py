@@ -36,12 +36,9 @@ _URLS = [
 ]
 
 
-def _client(trusted_url: str) -> TestClient:
+def _client() -> TestClient:
     app = Starlette(routes=[Route("/api/addresses", addresses_endpoint)])
     app.state.config = SimpleNamespace(pwa_port=9443)
-    app.state.app_settings = SimpleNamespace(
-        settings=SimpleNamespace(trusted_url=trusted_url)
-    )
     return TestClient(app)
 
 
@@ -57,9 +54,9 @@ def _patch_addresses(monkeypatch, tailscale: list[str] | None = None) -> None:
     )
 
 
-def test_addresses_list_trusted_first_then_lan_then_loopback(monkeypatch) -> None:
-    _patch_addresses(monkeypatch)
-    body = _client("https://mini.ts.net/").get("/api/addresses").json()
+def test_addresses_list_tailscale_first_then_lan_then_loopback(monkeypatch) -> None:
+    _patch_addresses(monkeypatch, tailscale=["https://mini.ts.net/"])
+    body = _client().get("/api/addresses").json()
 
     assert [entry["kind"] for entry in body["addresses"]] == [
         "trusted",
@@ -69,38 +66,25 @@ def test_addresses_list_trusted_first_then_lan_then_loopback(monkeypatch) -> Non
     ]
     assert body["addresses"][0]["url"] == "https://mini.ts.net/"
     assert body["addresses"][0]["secure"] is True
-    assert body["trusted_url"] == "https://mini.ts.net/"
     assert body["port"] == 9443
 
 
-def test_addresses_without_trusted_url(monkeypatch) -> None:
+def test_addresses_without_tailscale_have_no_trusted_entry(monkeypatch) -> None:
     _patch_addresses(monkeypatch)
-    body = _client("").get("/api/addresses").json()
+    body = _client().get("/api/addresses").json()
 
     assert "trusted" not in [entry["kind"] for entry in body["addresses"]]
-    assert body["trusted_url"] is None
 
 
 def test_addresses_never_include_credentials(monkeypatch) -> None:
     _patch_addresses(monkeypatch)
-    body = _client("https://mini.ts.net/").get("/api/addresses").json()
+    body = _client().get("/api/addresses").json()
 
     for entry in body["addresses"]:
         url = entry["url"]
         assert "@" not in url
         assert "?" not in url
         assert "token" not in url
-
-
-def test_addresses_drop_invalid_stored_trusted_url(monkeypatch) -> None:
-    # app_settings.json can be hand-edited, so a stored value the setter would
-    # have refused must not be handed to the card: a query token here would end
-    # up printed as the "Full app" address and encoded into the QR code.
-    _patch_addresses(monkeypatch)
-    body = _client("https://host/?token=x").get("/api/addresses").json()
-
-    assert "trusted" not in [entry["kind"] for entry in body["addresses"]]
-    assert body["trusted_url"] is None
 
 
 def test_addresses_route_is_session_protected() -> None:
@@ -182,7 +166,7 @@ def test_normalize_trusted_url_rejects_unsafe_values() -> None:
 
 def test_addresses_include_tailscale_serve_origin(monkeypatch) -> None:
     _patch_addresses(monkeypatch, tailscale=["https://mini.tail1.ts.net/"])
-    body = _client("").get("/api/addresses").json()
+    body = _client().get("/api/addresses").json()
 
     first = body["addresses"][0]
     assert first == {
@@ -192,31 +176,6 @@ def test_addresses_include_tailscale_serve_origin(monkeypatch) -> None:
         "secure": True,
         "loopback": False,
     }
-    # The field only reflects what was typed, so a detected name does not
-    # fill it and "Leave it empty to clear" stays true.
-    assert body["trusted_url"] is None
-
-
-def test_addresses_typed_url_wins_over_matching_tailscale(monkeypatch) -> None:
-    _patch_addresses(
-        monkeypatch,
-        tailscale=["https://mini.tail1.ts.net/", "https://mini.tail1.ts.net:8444/"],
-    )
-    body = _client("https://mini.tail1.ts.net/").get("/api/addresses").json()
-
-    trusted = [(e["url"], e["source"]) for e in body["addresses"] if e["kind"] == "trusted"]
-    assert trusted == [
-        ("https://mini.tail1.ts.net/", "manual"),
-        ("https://mini.tail1.ts.net:8444/", "tailscale"),
-    ]
-
-
-def test_addresses_typed_default_port_matches_tailscale(monkeypatch) -> None:
-    _patch_addresses(monkeypatch, tailscale=["https://mini.tail1.ts.net/"])
-    body = _client("https://mini.tail1.ts.net:443").get("/api/addresses").json()
-
-    trusted = [(e["url"], e["source"]) for e in body["addresses"] if e["kind"] == "trusted"]
-    assert trusted == [("https://mini.tail1.ts.net/", "manual")]
 
 
 def test_parse_tailscale_serve_keeps_only_root_proxies_to_our_port() -> None:

@@ -22,8 +22,6 @@ from pathlib import Path
 
 import pytest
 
-from ciao import job_runs
-from ciao.job_runs import JobSpec, automation_summary
 from ciao.schedules import (
     ScheduleStore,
     system_base_id,
@@ -321,50 +319,6 @@ def test_a_case_only_workspace_difference_is_not_a_move(tmp_path: Path) -> None:
     assert reloaded.workspace == "Work"
 
 
-# ---- consumers of the literal ids -----------------------------------------
-
-
-@pytest.fixture
-def schedule_only_spec(monkeypatch: pytest.MonkeyPatch) -> JobSpec:
-    """A `schedule_only` job bound to a per-workspace system routine.
-
-    The skill-evolution job was the only shipped one, and it went in #697, so
-    the resolution it exercised is pinned here on a synthetic spec instead: a
-    `schedule_only` job is hidden when its schedule is not installed here, and
-    the check compares base ids because the fan-out makes the stored id
-    workspace-qualified. Marking a real one `per_workspace` later must not be
-    able to make its row silently disappear.
-    """
-    spec = JobSpec(
-        "probe_job",
-        "Probe",
-        "content",
-        schedule_id="system-memory-curation",
-        schedule_only=True,
-    )
-    monkeypatch.setattr(job_runs, "REGISTRY", (spec,))
-    return spec
-
-
-def test_schedule_only_job_is_found_through_a_fanned_out_id(
-    schedule_only_spec: JobSpec,
-) -> None:
-    """Only the fanned-out form is present here, so an exact-match check hides
-    the row even though the routine is installed."""
-    rows = automation_summary(installed_schedules={"system-memory-curation@work"})
-
-    assert "probe_job" in {row["job"] for row in _flatten(rows)}
-
-
-def test_schedule_only_job_is_still_hidden_when_nothing_installs_it(
-    schedule_only_spec: JobSpec,
-) -> None:
-    """The other half: base-id resolution must not make the check vacuous."""
-    rows = automation_summary(installed_schedules=set())
-
-    assert "probe_job" not in {row["job"] for row in _flatten(rows)}
-
-
 # ---- retirement of the skill-reflection routine (#697) ---------------------
 
 
@@ -475,18 +429,3 @@ def test_a_user_schedule_named_like_the_retired_routine_survives(
     colliding = rows["system-skill-evolution-mine"]
     assert colliding.prompt == "also mine"
     assert colliding.scope == "user"
-
-
-def _flatten(rows: object) -> list[dict]:
-    """Walk the nested (group/step/child) automation rows."""
-    out: list[dict] = []
-    items = rows if isinstance(rows, list) else rows.get("jobs", [])  # type: ignore[union-attr]
-    stack = list(items)
-    while stack:
-        row = stack.pop()
-        if not isinstance(row, dict):
-            continue
-        out.append(row)
-        for key in ("steps", "children"):
-            stack.extend(row.get(key) or [])
-    return out

@@ -108,12 +108,18 @@
       <ul>
         <li><strong>Per workspace:</strong> Settings → Workspaces sets which tool each workspace uses by default, for example Claude for Work and a local model for Personal.</li>
         <li><strong>Per chat:</strong> click the model chip in the chat header (<kbd>⌥</kbd>+<kbd>M</kbd>) to change model or thinking level. Switching to the other tool hands the chat over with its visible history.</li>
-        <li><strong>Per job:</strong> automations, memory extraction and the <code>/critique</code> review panel each have their own model setting, so you can put cheaper models on background work.</li>
+        <li><strong>Per job:</strong> automations, memory extraction and the <code>/critique</code> review panel each have their own model setting.</li>
       </ul>
       <figure>
         <a href="assets/img/voice.webp"><img src="assets/img/voice.webp" alt="Settings, Models &amp; providers: the background models used for memory extraction and the critique panel" loading="lazy" width="1600" height="1000"></a>
         <figcaption>Settings → Models &amp; providers: separate models for memory extraction and for second opinions.</figcaption>
       </figure>
+    </section>
+
+    <section id="critique">
+      <h2>Get independent second opinions with the critique panel</h2>
+      <p>Ask for a critique in a chat with <code>/critique</code> or the critique skill. Ciaobot sends the same plan, answer or file to each model in the panel for an independent adversarial review, then compares their findings and recommends whether to ship, revise or block. You can also run <code>ciao critique --input plan.md --type plan</code> in a terminal.</p>
+      <p>Settings → Models &amp; providers → Critique panel controls which models take part. On <strong>Automatic</strong>, the panel combines the distinct effective default models of your configured workspaces: each workspace’s default provider uses its configured model default. A provider you have not signed in to is skipped. Choose models in the picker to override the automatic panel; clear the selection to use workspace defaults again.</p>
     </section>
 
 

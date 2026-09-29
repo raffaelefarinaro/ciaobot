@@ -453,7 +453,8 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     # setup now builds the per-workspace layout directly instead of the shared one
     # that then had to be migrated.
     root = workspace / "research"
-    assert (root / ".claude" / "agents" / "memory.md").is_file()
+    assert (root / ".claude" / "skills" / "ciao-memory" / "SKILL.md").is_file()
+    assert not (root / ".claude" / "agents" / "memory.md").exists()
     assert (root / "commands" / "remember.md").is_file()
     assert "ciao:memory" in (
         root / "commands" / "remember.md"

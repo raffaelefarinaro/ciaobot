@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   activeInsightSummary,
   memoryInsights,
-  unfinishedInsightSummary,
   type MemoryInsightInput,
 } from '../memoryInsights'
 import { MEMORY_PASS_KIND } from '../memoryPass'
@@ -62,7 +61,7 @@ function run(chats: ChatInfo[], over: Partial<MemoryInsightInput> = {}) {
 describe('memoryInsights', () => {
   it('reports nothing for a settled conversation', () => {
     expect(run([
-      source({ postprocess: { state: 'done', steps: { trajectory: { status: 'ok' } } } as never }),
+      source({ postprocess: { steps: { memory_pass: { status: 'ok', extra: { chat_id: 'pass-1' } } } } }),
       chat(),
     ])).toEqual([])
   })
@@ -79,19 +78,6 @@ describe('memoryInsights', () => {
     expect(row.label).toBe('updating memory…')
     expect(row.active).toBe(true)
     expect(row.blocking).toBe(false)
-  })
-
-  it('keeps one row for a conversation whose pipeline and pass both run', () => {
-    // The trajectory is saved in seconds and the pass takes minutes, so this
-    // overlap is the normal case, not an edge — and it is the case that used
-    // to show the same conversation twice.
-    const rows = run([
-      source({ postprocess: { state: 'running', step: 'trajectory', steps: {} } as never }),
-      pass('running'),
-    ])
-    expect(rows).toHaveLength(1)
-    expect(rows[0].phase).toBe('running')
-    expect(rows[0].retryable).toBe(false)
   })
 
   it('follows the pass through queued, blocked and unclean', () => {
@@ -128,15 +114,8 @@ describe('memoryInsights', () => {
     })
   })
 
-  it('names the stage it is saving, and says something for an unknown one', () => {
-    expect(run([source({ postprocess: { state: 'running', step: 'trajectory', steps: {} } as never })])[0])
-      .toMatchObject({ phase: 'tidying', label: 'saving trajectory…', passChatId: '' })
-    expect(run([source({ postprocess: { state: 'running', step: 'memory_pass', steps: {} } as never })])[0])
-      .toMatchObject({ phase: 'tidying', label: 'tidying up…' })
-  })
-
   it('falls back to the transcript while there is no pass to open', () => {
-    const [row] = run([source({ postprocess: { state: 'running', step: 'trajectory', steps: {} } as never })])
+    const [row] = run([source()], { isArchiving: id => id === 'src' })
     expect(row.passChatId).toBe('')
     expect(row.archivePath).toBe('chats/src.md')
   })
@@ -144,7 +123,7 @@ describe('memoryInsights', () => {
   it('disables the row when there is nothing at all to open', () => {
     // An archive with no file and no pass is a dead entry; the caller reads the
     // empty pass id and the empty path and disables it.
-    const [row] = run([source({ archive_path: '', postprocess: { state: 'running', step: 'trajectory', steps: {} } as never })])
+    const [row] = run([source({ archive_path: '' })], { isArchiving: id => id === 'src' })
     expect(row.passChatId).toBe('')
     expect(row.archivePath).toBe('')
   })
@@ -155,40 +134,13 @@ describe('memoryInsights', () => {
     expect(row.label).toBe('archiving…')
   })
 
-  it('offers the retry on a pipeline that stopped with a stage left to run', () => {
-    const [unfinished] = run([source({
-      postprocess: {
-        state: 'incomplete',
-        job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
-      } as never,
-    })])
-    expect(unfinished).toMatchObject({
-      phase: 'unfinished',
-      label: 'trajectory not finished',
-      retryable: true,
-    })
-    // Neither in flight nor blocked: processing has stopped, and the row is the
-    // only thing on Home that offers the fix.
-    expect(unfinished.active).toBe(false)
-    expect(unfinished.blocking).toBe(false)
-  })
-
-  it('names a legacy failure from the step statuses it has', () => {
-    expect(run([source({ postprocess: { state: 'incomplete', steps: { trajectory: { status: 'error' } } } as never })])[0].label)
-      .toBe('trajectory failed')
-  })
-
   it('never gives a pass a row of its own for its own auto-archive', () => {
-    // A cleanly finished pass is archived, which starts a trajectory save of
-    // its own. A row keyed on the pass would be a second entry for the same
-    // memory work, so only the conversation it was spawned for is listed.
-    const rows = run([
-      source({ postprocess: { state: 'running', step: 'memory_pass', steps: {} } as never }),
-      pass('done', {
-        archived: true,
-        postprocess: { state: 'running', step: 'trajectory', steps: {} } as never,
-      }),
-    ])
+    // A cleanly finished pass is auto-archived. A row keyed on the pass would
+    // be a second entry for the same memory work, so only the conversation it
+    // was spawned for is listed.
+    const rows = run([source(), pass('done', { archived: true })], {
+      isArchiving: id => id === 'pass-1' || id === 'src',
+    })
     expect(rows).toHaveLength(1)
     expect(rows[0].sourceChatId).toBe('src')
   })
@@ -205,43 +157,39 @@ describe('memoryInsights', () => {
   it('orders newest first, by the conversation rather than by the pass', () => {
     // A pass that finishes now did not change when the conversation happened;
     // dating the row by the pass made a workspace's rows jump around.
-    const saving = { state: 'running', step: 'trajectory', steps: {} } as never
     const rows = run([
-      source({ postprocess: saving }),
-      source({ chat_id: 'older', last_activity_at: '2026-08-01T09:00:00Z', postprocess: saving }),
-      source({ chat_id: 'newer', last_activity_at: '2026-08-01T11:00:00Z', postprocess: saving }),
+      source(),
+      source({ chat_id: 'older', last_activity_at: '2026-08-01T09:00:00Z' }),
+      source({ chat_id: 'newer', last_activity_at: '2026-08-01T11:00:00Z' }),
       pass('running', { last_activity_at: '2026-08-02T12:00:00Z' }),
-    ])
+    ], { isArchiving: id => id === 'older' || id === 'newer' })
     expect(rows.map(row => row.sourceChatId)).toEqual(['newer', 'src', 'older'])
   })
 
   it('breaks a tie towards the live pass, not towards creation order', () => {
     // The backend truncates activity timestamps to whole seconds, so two
     // conversations archived in the same second tie — and a stable sort then
-    // falls back to whichever loop created the row first. Live work belongs
-    // above a stalled pipeline, and the order must not depend on that accident.
+    // falls back to whichever loop created the row first. The pass row comes
+    // first, and the order must not depend on that accident.
     const rows = run([
-      source({ chat_id: 'stalled', postprocess: { state: 'incomplete', job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] } } as never }),
-      source({ chat_id: 'src', postprocess: { state: 'running', step: 'memory_pass', steps: {} } as never }),
+      source({ chat_id: 'archiving' }),
+      source({ chat_id: 'src' }),
       pass('running', { last_activity_at: '2026-08-01T12:00:00Z' }),
-    ])
-    expect(rows.map(row => row.sourceChatId)).toEqual(['src', 'stalled'])
-    // The join is in the other direction too: a pipeline row that already has a
-    // pass keeps the pass's phase and only gains the retry.
-    expect(rows[1]).toMatchObject({ phase: 'unfinished', retryable: true, passChatId: '' })
+    ], { isArchiving: id => id === 'archiving' || id === 'src' })
+    expect(rows.map(row => row.sourceChatId)).toEqual(['src', 'archiving'])
+    // An archiving chat that already has a pass keeps the pass's phase.
+    expect(rows[0]).toMatchObject({ phase: 'running', passChatId: 'pass-1' })
+    expect(rows[1]).toMatchObject({ phase: 'archiving', passChatId: '' })
   })
 })
 
 describe('memory insight lane fragments', () => {
   it('says nothing when there is nothing to say', () => {
     expect(activeInsightSummary(0)).toBe('')
-    expect(unfinishedInsightSummary(0)).toBe('')
   })
 
   it('phrases the counts for a lane status sentence', () => {
     expect(activeInsightSummary(1)).toBe('1 updating memory')
     expect(activeInsightSummary(2)).toBe('2 updating memory')
-    expect(unfinishedInsightSummary(1)).toBe('1 chat with unfinished steps')
-    expect(unfinishedInsightSummary(2)).toBe('2 chats with unfinished steps')
   })
 })

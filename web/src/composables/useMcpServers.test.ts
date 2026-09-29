@@ -5,6 +5,7 @@
 // stub API client.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ref } from 'vue'
 import { useMcpServers, type McpApiClient, type McpServersOptions } from './useMcpServers'
 import type { McpProjectServer, McpStatus } from '../lib/types'
 
@@ -424,5 +425,81 @@ describe('add and delete', () => {
     mcp.fastMcpEnabled.value = false
     mcp.saveFastMcpToggle()
     expect(notifySaved).toHaveBeenCalledWith('Ciaobot FastMCP disabled.')
+  })
+})
+
+// A workspace's `.mcp.json` and `.env` live in its own agent root, so the
+// workspace name has to ride every read AND write. Omitting it would edit the
+// install root: a different file from the one the list showed, which is the
+// failure these pin.
+describe('workspace scoping', () => {
+  it('scopes the status read to the workspace', async () => {
+    const { mcp, api } = make({ workspace: () => 'personal' })
+    api.get.mockResolvedValueOnce(status() as never)
+    await mcp.fetchStatus()
+    expect(api.get).toHaveBeenCalledWith('/api/mcp/status?workspace=personal')
+  })
+
+  it('reads the install root when no workspace is selected', async () => {
+    const { mcp, api } = make({ workspace: () => '' })
+    api.get.mockResolvedValueOnce(status() as never)
+    await mcp.fetchStatus()
+    expect(api.get).toHaveBeenCalledWith('/api/mcp/status')
+  })
+
+  it('encodes a workspace name that needs escaping', async () => {
+    const { mcp, api } = make({ workspace: () => 'client a/b' })
+    api.get.mockResolvedValueOnce(status() as never)
+    await mcp.fetchStatus()
+    expect(api.get).toHaveBeenCalledWith('/api/mcp/status?workspace=client%20a%2Fb')
+  })
+
+  it('scopes the create, update, delete, secret and probe calls', async () => {
+    const { mcp, api } = make({ workspace: () => 'work' })
+    api.post.mockResolvedValue({} as never)
+    api.patch.mockResolvedValue({} as never)
+    api.del.mockResolvedValue({} as never)
+    api.get.mockResolvedValue({ ok: true, tools: [] } as never)
+    mcp.newName.value = 'linear'
+    mcp.newUrl.value = 'https://mcp.linear.app/mcp'
+    // A secret save only fires for a key the server declares, with a value typed.
+    mcp.envInputs.value.NOTION_TOKEN = 'secret'
+
+    await mcp.addCustomServer()
+    await mcp.saveServer(server())
+    await mcp.saveEnvKeys(server({ env_keys: [
+      { key: 'NOTION_TOKEN', configured: false, source: 'env' },
+    ] }))
+    await mcp.refreshServerTools(server())
+    await mcp.deleteCustomServer('notion')
+
+    const scope = '?workspace=work'
+    expect(api.post).toHaveBeenCalledWith(`/api/mcp/servers${scope}`, expect.anything())
+    expect(api.patch).toHaveBeenCalledWith(`/api/mcp/servers/notion${scope}`, expect.anything())
+    expect(api.post).toHaveBeenCalledWith(`/api/mcp/env-keys${scope}`, expect.anything())
+    expect(api.get).toHaveBeenCalledWith(`/api/mcp/servers/notion/tools${scope}`)
+    expect(api.del).toHaveBeenCalledWith(`/api/mcp/servers/notion${scope}`)
+  })
+
+  it('follows a workspace that changes after construction', async () => {
+    // Switching the sidebar's workspace must switch which root the next read
+    // describes, without rebuilding the controller.
+    const name = ref('personal')
+    const { mcp, api } = make({ workspace: () => name.value })
+    api.get.mockResolvedValueOnce(status() as never)
+    await mcp.fetchStatus()
+    expect(api.get).toHaveBeenLastCalledWith('/api/mcp/status?workspace=personal')
+
+    name.value = 'work'
+    api.get.mockResolvedValueOnce(status() as never)
+    await mcp.fetchStatus()
+    expect(api.get).toHaveBeenLastCalledWith('/api/mcp/status?workspace=work')
+  })
+
+  it('accepts a ref as well as a getter', async () => {
+    const { mcp, api } = make({ workspace: ref('work') })
+    api.get.mockResolvedValueOnce(status() as never)
+    await mcp.fetchStatus()
+    expect(api.get).toHaveBeenCalledWith('/api/mcp/status?workspace=work')
   })
 })

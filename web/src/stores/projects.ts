@@ -12,14 +12,12 @@ import {
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
-import { isPostprocessing, postprocessNeedsRetry } from '../lib/postprocessView'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
 import type {
   ArchiveChatResponse,
   ArchivedWorkspace,
   ArchivedWorkspacesResponse,
-  ArchiveJobView,
   ProjectInfo,
   ChatInfo,
   ChatPostprocess,
@@ -1103,18 +1101,12 @@ export const useProjectStore = defineStore('projects', () => {
       || chatHasRunningSubagents(chatId)
   }
 
-  // ── Post-archive pipeline ────────────────────────────────────────────────
-  // Archiving a chat writes the session trajectory; the vault work went to the
-  // memory pass, a chat of the app's own, in #627. The state lives on the chat
-  // itself (so an archived chat can still report what was taken from it after a
-  // reload); these are the read paths every surface shares.
+  // ── Memory pass record ───────────────────────────────────────────────
+  // An archived chat records the memory pass spawned for it on its own
+  // postprocess record, so a reload can still link the two.
 
   function chatPostprocess(chatId: string): ChatPostprocess | null {
     return chats.value.find(c => c.chat_id === chatId)?.postprocess || null
-  }
-
-  function chatIsPostprocessing(chatId: string): boolean {
-    return isPostprocessing(chatPostprocess(chatId))
   }
 
   // ── Memory pass ───────────────────────────────────────────────────────
@@ -1140,28 +1132,6 @@ export const useProjectStore = defineStore('projects', () => {
   // confirms. A failed POST rolls `archived` back and clears the entry.
   function isArchiving(chatId: string): boolean {
     return Boolean(archivingChats.value[chatId])
-  }
-
-  /**
-   * Reconcile against the server's list of live pipelines. A chat the server
-   * omits has settled: downgrade it to 'done' rather than dropping the record,
-   * because the outcomes it already collected are still worth showing.
-   */
-  function applyPostprocessingSnapshot(runningIds: string[]): void {
-    const running = new Set(runningIds)
-    for (const chat of chats.value) {
-      const pp = chat.postprocess
-      if (!pp) continue
-      if (pp.state === 'running' && !running.has(chat.chat_id)) {
-        // The server is not running this pipeline. Use the manifest to tell a
-        // clean settle from an interrupted one: an unfinished job stays
-        // retryable rather than being reported as done.
-        const state = pp.job?.unfinished?.length
-          ? (pp.job.state === 'blocked' ? 'blocked' : 'incomplete')
-          : 'done'
-        chat.postprocess = { ...pp, state, step: '' }
-      }
-    }
   }
 
   function projectIsStreaming(projectId: string): boolean {
@@ -1726,12 +1696,13 @@ export const useProjectStore = defineStore('projects', () => {
         // fetch resolves would let an incoming message be clobbered by the
         // fetch result overwriting messages[chatId].
         //
-        // A deep link to an archived chat stops before this: the panel renders
-        // read-only from whatever transcript is held locally, exactly as
-        // `switchChat` leaves it, so booting must not dial a socket or fetch a
-        // history the archive is not served from.
+        // A deep link to an archived chat fetches its history once and stops,
+        // exactly as `switchChat` leaves it: /messages serves the archived
+        // vault transcript, but there is no session left to dial a socket to.
         const bootChatId = activeChatId.value
-        if (!isArchivedChat(bootChatId)) {
+        if (isArchivedChat(bootChatId)) {
+          void loadMessages(bootChatId)
+        } else {
           void (async () => {
             await loadMessages(bootChatId, { waitForSettledReply: true })
             connectWs(bootChatId)
@@ -2550,47 +2521,6 @@ export const useProjectStore = defineStore('projects', () => {
     return c
   }
 
-  /** Resume the unfinished post-archive steps for one archived chat. */
-  async function retryInsights(chatId: string): Promise<void> {
-    const res = await api.post<{ status: string; job?: ArchiveJobView | null }>(
-      `/api/chats/${chatId}/retry-insights`,
-    )
-    const status = res?.status
-    if (res?.job) applyArchiveJob(chatId, res.job)
-    if (status === 'running') {
-      pushToast({ chat_id: '', title: 'Already tidying', body: 'This chat is already being processed.' })
-    } else if (status === 'complete') {
-      pushToast({ chat_id: '', title: 'Nothing to finish', body: 'Every post-archive step is already complete.' })
-    } else if (status === 'blocked') {
-      pushToast({
-        chat_id: '',
-        title: 'Cannot resume yet',
-        body: res?.job?.blocked_reason || 'This chat needs attention before its unfinished steps can run.',
-      })
-    }
-  }
-
-  /** Fold a manifest view onto the chat's postprocess record. */
-  function applyArchiveJob(chatId: string, job: ArchiveJobView | null | undefined) {
-    if (!job) return
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (!chat) return
-    const pp: ChatPostprocess = { ...(chat.postprocess || { state: 'done' }) }
-    pp.job = job
-    if (job.unfinished?.length) {
-      if (pp.state !== 'running') {
-        pp.state = job.state === 'blocked' ? 'blocked' : 'incomplete'
-      }
-    } else if (pp.state === 'incomplete' || pp.state === 'blocked') {
-      // The server confirmed nothing is unfinished (e.g. a completion event was
-      // missed). Clear a stale incomplete/blocked state, or the UI keeps
-      // showing "not finished" and a retry control forever.
-      pp.state = 'done'
-      pp.step = ''
-    }
-    chat.postprocess = pp
-  }
-
   function replaceChat(chat: ChatInfo) {
     const idx = chats.value.findIndex(x => x.chat_id === chat.chat_id)
     if (idx >= 0) chats.value[idx] = chat
@@ -3383,12 +3313,15 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     // Fire-and-forget: clears overlay + SW cache + hits /read for cross-device sync.
     void markRead(chatId)
-    // An archived chat stops here. ChatPanel renders it from the stored
-    // transcript with no composer, and the provider has already reclaimed the
-    // session, so the three calls below would buy nothing: a socket that can
-    // only stay silent, a `/messages` fetch the archive is not served from,
-    // and subagent rows for agents that are gone.
-    if (isArchivedChat(chatId)) return
+    // An archived chat stops after one history fetch. /messages serves the
+    // archived vault transcript (the provider already reclaimed the session),
+    // and ChatPanel renders it with no composer. Without the fetch a browser
+    // that had not cached the transcript showed an empty chat. The socket and
+    // subagent rows would buy nothing: nothing can stream, the agents are gone.
+    if (isArchivedChat(chatId)) {
+      if (!opts?.skipHistory) await loadMessages(chatId)
+      return
+    }
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)
@@ -3927,10 +3860,6 @@ export const useProjectStore = defineStore('projects', () => {
         // over — the runner resolves them as orphans — so an empty map after
         // one is the truth, not a gap.)
         backgroundRuns.value = { ...(msg.background_runs || {}) }
-        // Post-archive pipelines still in flight. Authoritative like the counts
-        // above: a chat the server no longer lists as running has settled, so
-        // clear a stale 'running' rather than leaving it pulsing forever.
-        applyPostprocessingSnapshot(msg.postprocessing || [])
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -4031,7 +3960,16 @@ export const useProjectStore = defineStore('projects', () => {
             }
           }
           // In-app toast for the document-visible-but-different-chat case.
-          if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+          // A memory pass is the app updating its own memory, not a
+          // conversation the owner started, and the server already refuses its
+          // OS push (`_schedule_push`). Toasting here is what made archiving a
+          // chat pop a "Memory pass · <title>" notification. A pass reports
+          // itself on Home's memory-insight row and on the archived source's
+          // `postprocess` record; only `attention` — blocked on the owner —
+          // earns an interruption anywhere. Keyed on the helper, not the
+          // title: a user project may legitimately be called "Memory".
+          if (!isMemoryPassChat(resultChat)
+            && typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
               chat_id: msg.chat_id,
               title: msg.title || 'ciaobot',
@@ -5771,7 +5709,7 @@ export const useProjectStore = defineStore('projects', () => {
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
-    chatPostprocess, chatIsPostprocessing,
+    chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
     // Actions
@@ -5782,7 +5720,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchCompletedProjects, restoreProject,
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, archiveChat, continueArchivedChat, newSession,
-    setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
+    setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,

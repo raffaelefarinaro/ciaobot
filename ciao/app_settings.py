@@ -78,8 +78,6 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
 }
 _BOOLEAN_FIELDS = {
     "insights_enabled",
-    "trajectories_enabled",
-    "push_all_devices",
     "backup_enabled",
     "backup_paused",
 }
@@ -126,15 +124,8 @@ class AppSettings:
     """
 
     insights_enabled: bool = True
-    trajectories_enabled: bool = True
-    # Web Push every subscription (this machine included) and skip the
-    # tray notification log. Off while Ciaobot.app's menu bar still shows
-    # this machine's banners; the PWA-only engine turns it on (#562).
-    push_all_devices: bool = False
     # Model used by the post-archive memory pass.
     insights_model: str = ""
-    # HTTPS origin other devices should use (e.g. Tailscale Serve); "" = none.
-    trusted_url: str = ""
 
     # The unattended backup service (ciao/backup_service.py). `backup_enabled`
     # is the owner's standing decision and defaults on, so an existing install
@@ -270,10 +261,6 @@ class AppSettingsStore:
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
-            if key == "trusted_url":
-                from ciao.network_addresses import normalize_trusted_url
-
-                value = normalize_trusted_url(value)
             setattr(self.settings, key, value)
         _drop_retired_models(self.settings)
         self._save()
@@ -291,25 +278,9 @@ class AppSettingsStore:
         self._save()
         logger.warning(
             "CIAO_INSIGHTS_DISABLED is no longer read; migrated it to Settings → "
-            "Automations once. Remove it from .env."
+            "General once. Remove it from .env."
         )
         return self.settings.insights_enabled
-
-    def migrate_legacy_trajectories_enabled(
-        self, legacy_disabled: bool | None
-    ) -> bool | None:
-        if legacy_disabled is None:
-            return None
-        if "trajectories_enabled" in self._explicit_fields:
-            return None
-        self.settings.trajectories_enabled = not legacy_disabled
-        self._explicit_fields.add("trajectories_enabled")
-        self._save()
-        logger.warning(
-            "CIAO_TRAJECTORIES_DISABLED is no longer read; migrated it to "
-            "Settings → Automations once. Remove it from .env."
-        )
-        return self.settings.trajectories_enabled
 
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
@@ -335,7 +306,6 @@ class AppSettingsStore:
         d = self._defaults
         s = self.settings
         config.insights_enabled = s.insights_enabled
-        config.trajectories_enabled = s.trajectories_enabled
         config.insights_model_override = s.insights_model or d["insights_model_override"]
         config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default models / thinking / routine models have no

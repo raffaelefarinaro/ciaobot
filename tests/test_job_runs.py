@@ -25,11 +25,11 @@ def test_record_and_load_groups_by_job(tmp_path: Path) -> None:
     jr.record_run(jr.JobRun(job="title", label="Title", status="ok", duration_ms=10))
     jr.record_run(jr.JobRun(job="title", label="Title", status="error",
                             duration_ms=20, error="boom"))
-    jr.record_run(jr.JobRun(job="trajectory", label="Trajectory capture", status="ok",
+    jr.record_run(jr.JobRun(job="vault_index", label="Vault index refresh", status="ok",
                             duration_ms=30))
 
     grouped = jr.load_runs()
-    assert set(grouped) == {"title", "trajectory"}
+    assert set(grouped) == {"title", "vault_index"}
 
     title = grouped["title"]
     # newest-first: the error run is most recent
@@ -40,7 +40,7 @@ def test_record_and_load_groups_by_job(tmp_path: Path) -> None:
     assert title["stats"]["avg_duration_ms"] == 15
     assert title["stats"]["last_error"]["error"] == "boom"
 
-    assert grouped["trajectory"]["stats"]["last_error"] is None
+    assert grouped["vault_index"]["stats"]["last_error"] is None
 
 
 def test_recent_capped_per_job(tmp_path: Path) -> None:
@@ -54,8 +54,8 @@ def test_recent_capped_per_job(tmp_path: Path) -> None:
 
 def test_load_runs_uses_latest_index_when_history_missing(tmp_path: Path) -> None:
     jr.record_run(jr.JobRun(
-        job="trajectory",
-        label="Trajectory capture",
+        job="vault_index",
+        label="Vault index refresh",
         status="ok",
         started_at="2026-07-02T06:00:00+00:00",
         ended_at="2026-07-02T06:00:02+00:00",
@@ -65,16 +65,16 @@ def test_load_runs_uses_latest_index_when_history_missing(tmp_path: Path) -> Non
 
     grouped = jr.load_runs()
 
-    assert grouped["trajectory"]["last_run"]["status"] == "ok"
-    assert grouped["trajectory"]["last_run"]["ended_at"] == "2026-07-02T06:00:02+00:00"
+    assert grouped["vault_index"]["last_run"]["status"] == "ok"
+    assert grouped["vault_index"]["last_run"]["ended_at"] == "2026-07-02T06:00:02+00:00"
 
 
 def test_trim_preserves_latest_line_for_each_job(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(jr, "MAX_BYTES", 400)
     monkeypatch.setattr(jr, "KEEP_LINES", 3)
     jr.record_run(jr.JobRun(
-        job="trajectory",
-        label="Trajectory capture",
+        job="vault_index",
+        label="Vault index refresh",
         status="ok",
         started_at="2026-07-02T06:00:00+00:00",
         ended_at="2026-07-02T06:00:02+00:00",
@@ -89,7 +89,7 @@ def test_trim_preserves_latest_line_for_each_job(tmp_path: Path, monkeypatch) ->
         ))
 
     rows = _read_lines(tmp_path)
-    assert any(row["job"] == "trajectory" for row in rows)
+    assert any(row["job"] == "vault_index" for row in rows)
 
 
 # ── track (async) ────────────────────────────────────────────────────────
@@ -177,171 +177,33 @@ def test_record_startup_phase_maps_and_skips(tmp_path: Path) -> None:
     assert jobs["vault_index"]["error"] == "index refresh failed"
 
 
-# ── automation_summary ───────────────────────────────────────────────────
-
-
-def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
-    jr.record_run(jr.JobRun(job="trajectory", label="Trajectory capture", status="ok",
-                           duration_ms=5))
-    summary = {item["job"]: item for item in jr.automation_summary()}
-    # every registry job is present, except bulk variants (nested under their
-    # parent) and pipeline steps (nested under the job that owns the pipeline)
-    # — a never-installed schedule only filters when the caller says so
-    for spec in jr.REGISTRY:
-        if spec.parent or spec.step_of:
-            assert spec.job not in summary
-        else:
-            assert spec.job in summary
-    assert summary["trajectory"]["last_run"]["status"] == "ok"
-    # a job that never ran has empty stats
-    assert summary["gws_health"]["last_run"] is None
-    assert summary["gws_health"]["stats"]["total_runs"] == 0
-    # categories carried through
-    assert summary["vault_index"]["category"] == "system"
-    assert summary["trajectory"]["uses_model"] is False
-    assert summary["vault_index"]["uses_model"] is False
-    assert summary["vault_index"]["produces_outcome"] is False
-    # every row can answer "when does this run?"
-    assert summary["trajectory"]["trigger"]
-    # the trajectory is a top-level row now, not a step of a pipeline group
-    assert not summary["trajectory"]["pipeline_label"]
-    assert not summary["trajectory"].get("steps")
-    # no bulk variants remain: the insights backfill was retired in #627, and
-    # the key is omitted entirely rather than shipped empty
-    assert "sub_jobs" not in summary["trajectory"]
+# ── Retired jobs ─────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("retired", sorted(jr.RETIRED_JOBS))
-def test_summary_hides_retired_jobs(tmp_path: Path, retired: str) -> None:
-    """A job removed from the code must not linger on the Automation page."""
+def test_retired_jobs_are_hidden_unless_asked_for(tmp_path: Path, retired: str) -> None:
+    """A job removed from the code must not linger in what readers see."""
     jr.record_run(jr.JobRun(job=retired, label=retired, status="ok",
                             category="system", duration_ms=5))
-    jr.record_run(jr.JobRun(job="trajectory", label="Trajectory capture", status="ok",
-                           duration_ms=5))
+    jr.record_run(jr.JobRun(job="vault_index", label="Vault index refresh",
+                            status="ok", duration_ms=5))
 
-    assert retired not in {item["job"] for item in jr.automation_summary()}
+    assert retired not in jr.load_runs()
+    assert "vault_index" in jr.load_runs()
     # the record itself is untouched on disk, and readable on request
     assert retired in {r["job"] for r in _read_lines(tmp_path)}
     assert retired in jr.load_runs(keep_retired=True)
 
 
 def test_a_retired_job_leaves_no_stale_latest_row(tmp_path: Path) -> None:
-    """`job_runs_latest.json` keeps a job's last run forever.
-
-    Dropping a job from the registry without retiring its id leaves that row
-    visible on the Automation page with a badge describing a run that can never
-    happen again — the skill-evolution job and its `system-skill-evolution`
-    schedule went together in #697, and this is the other half of that.
-    """
-    jr.record_run(jr.JobRun(job="skill_evolution", label="Skill reflection",
+    """`job_runs_latest.json` keeps a job's last run forever, so a retired id
+    must be filtered from it too, not only from the rotating log."""
+    jr.record_run(jr.JobRun(job="trajectory", label="Trajectory capture",
                             status="ok", duration_ms=5))
-    assert "skill_evolution" in json.loads(
+    (tmp_path / jr.JOB_RUNS_NAME).write_text("", encoding="utf-8")
+    assert "trajectory" in json.loads(
         (tmp_path / jr.JOB_RUNS_LATEST_NAME).read_text()
     )
 
-    assert "skill_evolution" not in jr.load_runs()
-    assert "skill_evolution" in jr.load_runs(keep_retired=True)
-    assert "skill_evolution" not in {item["job"] for item in jr.automation_summary()}
-
-
-def test_a_job_with_another_trigger_stays_visible_without_its_schedule(
-    tmp_path: Path,
-) -> None:
-    """`installed_schedules` may only hide what the schedule is the sole trigger of.
-
-    `vault_index` names `system-memory-curation` but also runs on startup and
-    during the full Workspace care pass, so passing an installed set that
-    contains no schedule at all must still leave its row up. The half of the
-    rule that hides a `schedule_only` job is pinned against a synthetic spec in
-    `tests/test_system_schedule_fanout.py`: no shipped job is `schedule_only`
-    since the skill-evolution row went in #697.
-    """
-    summary = {
-        item["job"]: item for item in jr.automation_summary(installed_schedules=set())
-    }
-    assert "vault_index" in summary
-    assert "trajectory" in summary
-    # And nothing claims the retired producer's row back.
-    assert "skill_evolution" not in summary
-
-
-# ── Live state: in-flight registry + publisher ────────────────────────────
-
-
-def test_inflight_registers_during_the_block_and_clears_after() -> None:
-    """The recorder only wrote on completion, so nothing could say "running"."""
-    assert jr.inflight_runs() == []
-    with jr.track_sync("trajectory", "Trajectory capture", extra={"chat_id": "c1"}):
-        live = jr.inflight_runs()
-        assert [(r["job"], r["chat_id"]) for r in live] == [("trajectory", "c1")]
-        assert live[0]["started_at"]
-    assert jr.inflight_runs() == []
-
-
-def test_inflight_clears_even_when_the_job_raises() -> None:
-    with pytest.raises(RuntimeError):
-        with jr.track_sync("trajectory", "Trajectory capture"):
-            raise RuntimeError("boom")
-    # A crashed job that stayed "running" forever would pin a spinner on.
-    assert jr.inflight_runs() == []
-
-
-def test_publisher_sees_start_and_finish_with_status() -> None:
-    events: list[dict] = []
-    jr.set_publisher(events.append)
-    with jr.track_sync("trajectory", "Trajectory capture",
-                       extra={"chat_id": "c9"}) as run:
-        run.extra["path"] = "/x.json"
-    assert [e["event"] for e in events] == ["started", "finished"]
-    assert events[0]["job"] == "trajectory"
-    assert events[0]["chat_id"] == "c9"
-    assert events[1]["status"] == "ok"
-    # Extras collected inside the block ride along on the finish event, which is
-    # how a surface learns *what* the step produced.
-    assert events[1]["extra"]["path"] == "/x.json"
-
-
-def test_publisher_reports_a_failed_step() -> None:
-    events: list[dict] = []
-    jr.set_publisher(events.append)
-    with pytest.raises(ValueError), jr.track_sync("trajectory", "Trajectory capture"):
-        raise ValueError("nope")
-    assert events[-1]["status"] == "error"
-    assert "nope" in events[-1]["error"]
-
-
-def test_publisher_marks_a_skipped_step() -> None:
-    events: list[dict] = []
-    jr.set_publisher(events.append)
-    with jr.track_sync("memory_proposals", "Memory proposals") as run:
-        run.skip("nothing to propose")
-    assert events[-1]["status"] == "skipped"
-
-
-def test_a_broken_publisher_never_breaks_the_job() -> None:
-    def explode(_event: dict) -> None:
-        raise RuntimeError("subscriber is broken")
-
-    jr.set_publisher(explode)
-    with jr.track_sync("trajectory", "Trajectory capture") as run:
-        run.extra["ok"] = True
-    # The durable record is what matters; a bad subscriber must not cost it.
-    assert jr.load_runs()["trajectory"]["last_run"]["extra"] == {"ok": True}
-
-
-@pytest.mark.asyncio
-async def test_async_track_reports_live_state_too() -> None:
-    events: list[dict] = []
-    jr.set_publisher(events.append)
-    assert jr.inflight_runs() == []
-    async with jr.track("trajectory", "Trajectory capture", extra={"chat_id": "c2"}):
-        assert [r["chat_id"] for r in jr.inflight_runs()] == ["c2"]
-    assert jr.inflight_runs() == []
-    assert [e["event"] for e in events] == ["started", "finished"]
-
-
-def test_summary_marks_a_running_job(tmp_path: Path) -> None:
-    with jr.track_sync("trajectory", "Trajectory capture"):
-        summary = {item["job"]: item for item in jr.automation_summary()}
-        assert summary["trajectory"]["running"] is True
-        assert summary["gws_health"]["running"] is False
+    assert "trajectory" not in jr.load_runs()
+    assert "trajectory" in jr.load_runs(keep_retired=True)

@@ -9,7 +9,7 @@ import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
-import { pendingNewChat } from '../../lib/newChat'
+import { homeNewChatProjectId, pendingNewChat } from '../../lib/newChat'
 
 const toggleModelPicker = vi.fn()
 const handleSendShortcut = vi.fn(() => true)
@@ -214,8 +214,8 @@ describe('ChatLayout', () => {
       local: true,
       last_activity_at: '2026-08-12T11:00:00Z',
       last_read_at: '2026-08-12T11:00:00Z',
-      postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} },
     }] as unknown as typeof store.chats
+    store.archivingChats = { 'tidy-chat': true }
     store.activeChatId = null
     store.bootstrapped = true
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
@@ -540,7 +540,7 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  it('Option+N opens the new-chat picker instead of creating a chat directly', async () => {
+  it('Option+N starts in the project Home already names instead of asking again', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -558,7 +558,7 @@ describe('ChatLayout', () => {
     }] as unknown as typeof store.projects
     store.bootstrapped = true
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
-    const newChatInGeneral = vi.spyOn(store, 'newChatInGeneral')
+    const newChatInProject = vi.spyOn(store, 'newChatInProject').mockResolvedValue(undefined)
 
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
@@ -587,9 +587,8 @@ describe('ChatLayout', () => {
     await flushPromises()
 
     expect(event.defaultPrevented).toBe(true)
-    expect(newChatInGeneral).not.toHaveBeenCalled()
-    expect(pendingNewChat.value).not.toBeNull()
-    pendingNewChat.value?.resolve(null)
+    expect(pendingNewChat.value).toBeNull()
+    expect(newChatInProject).toHaveBeenCalledWith('project-1')
     wrapper.unmount()
   })
 
@@ -1746,6 +1745,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     const textarea = document.createElement('textarea')
     document.body.appendChild(textarea)
     textarea.focus()
+    homeNewChatProjectId.value = ''
 
     const event = press(init, textarea)
     await flushPromises()
@@ -1760,6 +1760,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
 
   it('Mac ⌥N fires its shortcut when focus is on the body', async () => {
     const wrapper = await mountWebLayout()
+    homeNewChatProjectId.value = ''
     const newChat = press({ key: 'Dead', code: 'KeyN' }, document.body)
     await flushPromises()
     expect(newChat.defaultPrevented).toBe(true)
@@ -1778,6 +1779,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     const textarea = document.createElement('textarea')
     document.body.appendChild(textarea)
     textarea.focus()
+    homeNewChatProjectId.value = ''
 
     const event = press(init, textarea)
     await flushPromises()

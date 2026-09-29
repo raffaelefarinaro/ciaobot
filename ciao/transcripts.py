@@ -22,14 +22,14 @@ from claude_agent_sdk import (
 from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
-# The SDK's slash-command / auto-activation marker, injected into an
-# assistant's text when a skill is loaded without a tool call. Defined once, in
-# the module that mines it out of the raw session JSONL, and imported here for
-# the same reason: a second copy of the tag convention is a second thing to keep
-# in step with the first.
-from ciao.trajectory_builder import _COMMAND_NAME_RE as _SKILL_MARKER_RE
 
 logger = logging.getLogger(__name__)
+
+# The SDK's slash-command / auto-activation marker, injected into an
+# assistant's text when a skill is loaded without a tool call. Either plain
+# ``<command-name>name</command-name>`` or namespaced ``plugin:name``; the full
+# inner string is kept so namespaced skills stay distinct.
+_SKILL_MARKER_RE = re.compile(r"<command-name>([^<\s]+)</command-name>")
 
 # Turn-journal flush cadence: buffered event records spill to disk when this
 # many seconds have elapsed since the last write or the buffer grows past the
@@ -531,56 +531,6 @@ class TranscriptStore:
                 rows.append(row)
         return rows
 
-    def current_filtered_jsonl(
-        self, ctx: ChatContext, provider: str = "claude"
-    ) -> str:
-        """Return provider-neutral line JSON for the memory pass and trajectories."""
-        transcript = self._load_current(ctx, provider)
-        turns = transcript.get("turns") if isinstance(transcript, dict) else None
-        if not isinstance(turns, list):
-            return ""
-        lines: list[str] = []
-        # 1-based to match `ciao.insights.filter_session_jsonl`: the memory pass
-        # tells the model "Indices start at 1; never cite `[idx=0]`", so a
-        # 0-based transcript shifted every citation by one turn. Harmless while
-        # citations were only decoration, but they are now checked — a correct
-        # `[idx=1]` citation resolved to the assistant turn here and the fact
-        # was queued as unsupported.
-        index = 1
-        for turn in turns:
-            if not isinstance(turn, dict):
-                continue
-            prompt = str(turn.get("prompt") or "").strip()
-            if prompt:
-                lines.append(json.dumps({
-                    "idx": index,
-                    "type": "user",
-                    "content": [{"type": "text", "text": prompt}],
-                }, ensure_ascii=False))
-                index += 1
-            content: list[dict[str, Any]] = []
-            response = str(turn.get("response") or "").strip()
-            if response:
-                content.append({"type": "text", "text": response})
-            events = turn.get("tool_events")
-            for event in events if isinstance(events, list) else []:
-                if not isinstance(event, dict):
-                    continue
-                content.append({
-                    "type": "tool_use",
-                    "id": str(event.get("id") or ""),
-                    "name": str(event.get("name") or "tool"),
-                    "input": event.get("input") or {},
-                })
-            if content:
-                lines.append(json.dumps({
-                    "idx": index,
-                    "type": "assistant",
-                    "content": content,
-                }, ensure_ascii=False))
-                index += 1
-        return "\n".join(lines)
-
     @staticmethod
     def delete_sdk_session_blob(workspace_root: Path, session_id: str) -> bool:
         """Delete the Claude Code SDK session JSONL blob for a session_id.
@@ -807,8 +757,7 @@ class TranscriptStore:
 # turn it was used in — the ``## Turn N`` heading the archive already numbers,
 # which is the anchor the pass quotes. The third thing a proposal carries, a
 # short excerpt, needs nothing added: the turn's own fenced blocks are the
-# source a reader quotes it from. Not a tool dump, and not the old
-# trajectory-summary pipeline rebuilt: `ciao.memory_pass` reads these names back
+# source a reader quotes it from. Not a tool dump: `ciao.memory_pass` reads these names back
 # and resolves them against the workspace's own `skills/` catalog, and anything
 # that fails that resolution is simply never a candidate.
 
@@ -825,9 +774,7 @@ _SKILL_TOOL_NAMES = frozenset({"Skill", "skill"})
 _SKILL_SOURCE_RE = re.compile(r"(?:^|[/\\])skills[/\\]([^/\\]+)[/\\]SKILL\.md\b")
 
 #: The keys a skill tool's serialized input may carry the name under, in the
-#: order the more specific ones win. Mirrors
-#: ``ciao.trajectory_builder._extract_skill_id``, which reads the same call out
-#: of the raw session JSONL.
+#: order the more specific ones win.
 _SKILL_INPUT_KEYS = ("skill", "skill_name", "name", "id")
 
 #: What joins the names on one ``- Skills:`` line. A tab, because a skill
@@ -875,8 +822,7 @@ def turn_skills(turn: dict[str, Any]) -> tuple[str, ...]:
 
     The marker is read out of both the prompt and the response, because the
     providers put it in either: an SDK session records a slash command in the
-    *user* message, and this mirrors ``ciao.trajectory_builder``, which reads
-    the same tag out of user text and thinking blocks.
+    *user* message.
 
     Everything is read from the normalized turn, so both providers answer the
     same question. A name that is not a plain directory segment is dropped: it

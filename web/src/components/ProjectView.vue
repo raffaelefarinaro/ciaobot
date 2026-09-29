@@ -278,27 +278,12 @@
               :key="chat.chat_id"
               type="button"
               class="chat-row archived"
-              :class="{ clickable: chat.archive_path, tidying: store.chatIsPostprocessing(chat.chat_id) }"
+              :class="{ clickable: chat.archive_path }"
               :disabled="!chat.archive_path"
               @click="openArchive(chat)"
             >
               <span class="chat-row-main">
                 <span class="chat-name">{{ chat.title }}</span>
-                <!-- What Ciaobot is taking from this chat, or took. Doubles as an
-                     index: it separates archives that produced durable knowledge
-                     from the ones that were dead ends. -->
-                <span
-                  v-if="store.chatIsPostprocessing(chat.chat_id)"
-                  class="chat-archive-note"
-                >
-                  <span class="chat-archive-dot" aria-hidden="true" />
-                  {{ postprocessLabel(store.chatPostprocess(chat.chat_id)) }}…
-                </span>
-                <span
-                  v-else-if="archiveSummary(chat.chat_id)"
-                  class="chat-archive-note"
-                  :class="{ failed: postprocessFailed(store.chatPostprocess(chat.chat_id)) }"
-                >{{ archiveSummary(chat.chat_id) }}</span>
               </span>
               <span class="chat-row-time">{{ formatDate(chat.created_at) }}</span>
             </button>
@@ -354,9 +339,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { askConfirm } from '../lib/confirm'
 import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
-import { postprocessFailed, postprocessLabel, postprocessSummary } from '../lib/postprocessView'
 import { colorForWorkspace } from '../lib/workspaceColors'
-import { openNewChatPicker } from '../lib/newChat'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
@@ -515,13 +498,6 @@ const pagedArchivedChats = computed(() => {
 })
 const totalArchivedPages = computed(() => Math.ceil(archivedChats.value.length / ARCHIVED_PER_PAGE) || 1)
 
-// What the post-archive pipeline produced for an archived chat, once it has
-// settled. Empty for chats archived before this existed, so old rows stay clean
-// rather than claiming "nothing durable to save".
-function archiveSummary(chatId: string): string {
-  return postprocessSummary(store.chatPostprocess(chatId))
-}
-
 // ── Name edit ──────────────────────────────────────────────────────────
 const editingName = ref(false)
 const nameDraft = ref('')
@@ -650,12 +626,7 @@ async function saveContext() {
 // ── Actions ────────────────────────────────────────────────────────────
 async function newChat() {
   if (!project.value) return
-  const projectId = await openNewChatPicker({
-    workspace: project.value.workspace,
-    projectId: project.value.project_id,
-  })
-  if (!projectId) return
-  const chat = await store.newChatInProject(projectId)
+  const chat = await store.newChatInProject(project.value.project_id)
   if (chat) router.push(`/chat/${chat.chat_id}`)
 }
 
@@ -1125,8 +1096,6 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 .chat-row.archived:hover .chat-name { color: var(--fg2); }
 .chat-row.archived.clickable { cursor: pointer; }
 .chat-row.archived.clickable:hover .chat-name { color: var(--accent); }
-/* A row with work actually happening in it is not "past" yet. */
-.chat-row.archived.tidying .chat-name { color: var(--fg); }
 .chat-row.remote { opacity: 0.5; cursor: default; }
 .chat-row.remote:hover .chat-name { color: var(--fg); }
 .chat-row:disabled { opacity: 0.55; }
@@ -1183,33 +1152,6 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   white-space: nowrap;
-}
-
-.chat-archive-note {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-sm);
-  color: var(--fg3);
-  min-width: 0;
-}
-
-/* The one case that is not ambient: a failed step is the only place a user
-   would ever see this, so it is allowed to carry the warning colour. */
-.chat-archive-note.failed { color: var(--warning); }
-
-.chat-archive-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--fg3);
-  flex: 0 0 auto;
-  animation: chat-archive-breathe 2.6s ease-in-out infinite;
-}
-
-@keyframes chat-archive-breathe {
-  0%, 100% { opacity: 0.35; }
-  50%      { opacity: 0.9; }
 }
 
 .pagination {
@@ -1458,7 +1400,6 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-archive-dot { animation: none; opacity: 0.75; }
   .chat-name,
   .project-files { transition: none; }
 }

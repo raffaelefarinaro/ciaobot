@@ -31,6 +31,17 @@ export interface McpServersOptions {
   notifyFailed(title: string, detail: string): void
   /** Destructive confirmation for "Delete server". */
   confirmDelete(name: string): Promise<boolean>
+  /**
+   * The workspace whose agent root this tab is editing, or `''` for the
+   * install root. Passed in rather than read from a store, to keep the
+   * composable store-free.
+   *
+   * A workspace's `.mcp.json` and `.env` live in its own agent root, so the
+   * name rides every read AND write: a server listed here is the server a
+   * save, a secret or a delete reaches. Omitting it silently edits the
+   * install root, which is a different file from the one the list showed.
+   */
+  workspace?: Ref<string> | (() => string)
 }
 
 export type McpEditDraft = {
@@ -152,9 +163,19 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
     return EMBEDDED_TOOLS_FALLBACK
   })
 
+  const workspaceName = computed(() =>
+    typeof options.workspace === 'function' ? options.workspace() : options.workspace?.value ?? '',
+  )
+
+  /** `?workspace=<name>` for the scoped routes, or '' when unscoped. */
+  function scope(): string {
+    const name = workspaceName.value
+    return name ? `?workspace=${encodeURIComponent(name)}` : ''
+  }
+
   async function fetchStatus(): Promise<void> {
     try {
-      status.value = await api.get<McpStatus>('/api/mcp/status')
+      status.value = await api.get<McpStatus>(`/api/mcp/status${scope()}`)
     } catch {
       status.value = { enabled: false, bound: false, tool_count: 0 }
     }
@@ -342,7 +363,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
     envError.value = false
     envResultServer.value = srv.name
     try {
-      const res = await api.post<McpStatus>('/api/mcp/env-keys', { keys, server: srv.name })
+      const res = await api.post<McpStatus>(`/api/mcp/env-keys${scope()}`, { keys, server: srv.name })
       status.value = res
       for (const key of Object.keys(keys)) {
         envInputs.value[key] = ''
@@ -378,7 +399,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
         body.args = splitArgs(draft.argsText)
         body.url = ''
       }
-      const res = await api.patch<McpStatus>(`/api/mcp/servers/${encodeURIComponent(srv.name)}`, body)
+      const res = await api.patch<McpStatus>(`/api/mcp/servers/${encodeURIComponent(srv.name)}${scope()}`, body)
       status.value = res
       adoptDraftFrom(res, srv.name)
       serverResult.value = 'Connection saved to .mcp.json.'
@@ -404,7 +425,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
         error?: string
         tools_note?: string
         tools_source?: string
-      }>(`/api/mcp/servers/${encodeURIComponent(srv.name)}/tools`)
+      }>(`/api/mcp/servers/${encodeURIComponent(srv.name)}/tools${scope()}`)
       const tools = res.tools || []
       serverTools.value[srv.name] = tools
       if (status.value?.project_servers) {
@@ -447,7 +468,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
         body.command = parts[0] || ''
         body.args = parts.slice(1)
       }
-      const res = await api.post<McpStatus>('/api/mcp/servers', body)
+      const res = await api.post<McpStatus>(`/api/mcp/servers${scope()}`, body)
       status.value = res
       newName.value = ''
       newUrl.value = ''
@@ -467,7 +488,7 @@ export function useMcpServers(options: McpServersOptions): McpServersController 
   async function deleteCustomServer(name: string): Promise<void> {
     if (!await confirmDelete(name)) return
     try {
-      const res = await api.del<McpStatus>(`/api/mcp/servers/${encodeURIComponent(name)}`)
+      const res = await api.del<McpStatus>(`/api/mcp/servers/${encodeURIComponent(name)}${scope()}`)
       status.value = res
       delete editDrafts.value[name]
       delete serverTools.value[name]

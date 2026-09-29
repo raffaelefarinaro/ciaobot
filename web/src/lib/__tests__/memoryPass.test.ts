@@ -64,10 +64,9 @@ describe('memoryPass', () => {
   })
 
   it('reads the pass chat off the source postprocess record', () => {
-    const pp = {
-      state: 'done',
+    const pp: ChatPostprocess = {
       steps: { memory_pass: { status: 'ok', extra: { chat_id: 'pass-1' } } },
-    } as unknown as ChatPostprocess
+    }
     expect(memoryPassChatId(pp)).toBe('pass-1')
   })
 
@@ -76,15 +75,13 @@ describe('memoryPass', () => {
     // switchChat as a non-string.
     expect(memoryPassChatId(undefined)).toBe('')
     expect(memoryPassChatId(null)).toBe('')
-    expect(memoryPassChatId({ state: 'done', steps: {} } as unknown as ChatPostprocess)).toBe('')
+    expect(memoryPassChatId({ steps: {} })).toBe('')
     expect(memoryPassChatId({
-      state: 'done',
       steps: { insights: { status: 'ok', extra: { wrote: true } } },
-    } as unknown as ChatPostprocess)).toBe('')
+    })).toBe('')
     expect(memoryPassChatId({
-      state: 'done',
       steps: { memory_pass: { status: 'ok', extra: { chat_id: 7 } } },
-    } as unknown as ChatPostprocess)).toBe('')
+    })).toBe('')
   })
 
   it('identifies the app-owned memory project by kind', () => {

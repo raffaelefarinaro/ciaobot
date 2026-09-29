@@ -102,14 +102,14 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
   // other spec sees the same rows it saw before, while a deep link to its id
   // has something to open. `archive_path` is what a real archive carries (the
   // chat is viewable with or without it), and the settled `memory_pass` step
-  // puts the post-archive summary and the "Open memory pass" link from #618 on
-  // screen, unreachable for the same reason.
+  // puts the "Open memory pass" link from #618 on screen, unreachable for the
+  // same reason.
   ...(workspace === WORKSPACES[0]
     ? [
       chat(workspace.name, 3, `${workspace.name}-general`, `${workspace.name} archived conversation`, {
         archived: true,
         archive_path: '/synthetic/alpha/archive/alpha-chat-3.jsonl',
-        postprocess: { state: 'done', steps: { memory_pass: { status: 'ok', extra: { chat_id: 'alpha-chat-2' } } } },
+        postprocess: { steps: { memory_pass: { status: 'ok', extra: { chat_id: 'alpha-chat-2' } } } },
       }),
       // A running memory pass and the archived conversation it is distilling.
       // This is the surface the narrow-viewport journey has to measure: the
@@ -120,7 +120,7 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
         archived: true,
         archive_path: '/synthetic/alpha/archive/alpha-chat-4.jsonl',
         last_activity_at: '2026-01-01T11:00:00Z',
-        postprocess: { state: 'done', steps: { memory_pass: { status: 'running', extra: { chat_id: 'alpha-chat-5' } } } },
+        postprocess: { steps: { memory_pass: { status: 'running', extra: { chat_id: 'alpha-chat-5' } } } },
       }),
       chat(workspace.name, 5, `${workspace.name}-memory`, 'Memory pass · conversation with a running memory pass', {
         helper: passHelper('alpha-chat-4', 'alpha conversation with a running memory pass', 'running'),
@@ -141,18 +141,6 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
           questions: [{ question: 'Which project does the ITF rollout belong to?', header: 'Project' }],
         }),
         last_snippet: '',
-      }),
-      // A pipeline that stopped with a stage left to run: the one row that
-      // carries a second control, so its two-child layout is measured too.
-      chat(workspace.name, 8, `${workspace.name}-general`, `${workspace.name} conversation with an unfinished step`, {
-        archived: true,
-        archive_path: '/synthetic/alpha/archive/alpha-chat-8.jsonl',
-        last_activity_at: '2026-01-01T09:00:00Z',
-        postprocess: {
-          state: 'incomplete',
-          steps: { trajectory: { status: 'error' } },
-          job: { job_id: 'alpha-job-8', state: 'incomplete', unfinished: ['trajectory'] },
-        },
       }),
     ]
     : []),
@@ -325,7 +313,6 @@ export function snapshotFrame(activeStreams) {
     active_streams: activeStreams.map((chat_id) => ({ chat_id, project_id: '' })),
     background_agents: {},
     background_runs: {},
-    postprocessing: [],
     restarting: false,
   }
 }

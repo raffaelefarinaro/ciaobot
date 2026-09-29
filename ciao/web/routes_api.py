@@ -40,7 +40,6 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import backup_service
-from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
@@ -59,6 +58,7 @@ from ciao.config import (
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
+    agent_root_for,
     persist_workspaces,
     workspace_from_request,
     workspace_provider_options,
@@ -470,7 +470,7 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             return JSONResponse(
                 {
                     "error": (
-                        f"a chat in '{name}' is still working or being archived; "
+                        f"a chat in '{name}' is still working; "
                         "let it finish or stop it, then archive the workspace"
                     )
                 },
@@ -2358,8 +2358,7 @@ async def chat_archive(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     # Capture chat/project metadata BEFORE archive_chat() mutates the chat
-    # (it flips ``archived=True`` but leaves project_id intact; pull project
-    # info too so the trajectory record carries workspace + context).
+    # (it flips ``archived=True`` but leaves project_id intact).
     chat_meta = pcm.get_chat(chat_id)
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
@@ -2371,70 +2370,14 @@ async def chat_archive(request: Request) -> JSONResponse:
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,
         # The initiating client clears the active pane as soon as this response
-        # arrives. Return the lifecycle record as well as publishing it over
-        # /ws/events, so that client cannot miss the first "running" state in
-        # the archive/event race.
+        # arrives. Return the memory-pass record as well as publishing it over
+        # /ws/events, so that client cannot miss it in the archive/event race.
         "postprocess": (
             dict(chat_meta.postprocess)
             if chat_meta and chat_meta.postprocess
             else None
         ),
     })
-
-
-async def chat_retry_insights(request: Request) -> JSONResponse:
-    """Resume unfinished post-archive stages for a single archived chat.
-
-    Re-runs whatever is still pending/failed on the archive's manifest — the
-    session trajectory is the only stage left. Returns the retry status and the
-    manifest view so the archived-chat panel can render partial completion. A
-    pipeline already running for the chat is left alone.
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    result = pcm.retry_archive_steps(chat_id)
-    status = result["status"]
-    if status == "not_found":
-        return JSONResponse({"error": "not found"}, status_code=404)
-    if status == "not_archived":
-        return JSONResponse(
-            {"error": "chat is not archived", "chat_id": chat_id}, status_code=409
-        )
-    if status == "no_archive":
-        return JSONResponse(
-            {"error": "no archive file for this chat", "chat_id": chat_id}, status_code=409
-        )
-    if status == "running":
-        return JSONResponse(
-            {"status": "running", "chat_id": chat_id, "job": result["job"]},
-            status_code=202,
-        )
-    if status == "complete":
-        return JSONResponse({"status": "complete", "chat_id": chat_id, "job": result["job"]})
-    if status == "blocked":
-        return JSONResponse(
-            {"status": "blocked", "chat_id": chat_id, "job": result["job"]}
-        )
-    return JSONResponse(
-        {"status": "started", "chat_id": chat_id, "job": result["job"]},
-        status_code=202,
-    )
-
-
-async def chat_archive_job(request: Request) -> JSONResponse:
-    """The persisted post-archive manifest for one archived chat.
-
-    Returns the per-stage statuses, the unfinished list and any blocked reason
-    so a surface can report partial completion without a live pipeline. A chat
-    with no manifest (archived before this feature, or never processed) returns
-    ``{"job": null}`` rather than 404: the absence is a normal state, not an
-    error.
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    if pcm.get_chat(chat_id) is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"job": pcm.archive_job_view(chat_id)})
 
 
 _MSG_PAGE_DEFAULT_LIMIT = 50
@@ -4518,38 +4461,6 @@ async def list_schedules(request: Request) -> JSONResponse:
     return JSONResponse([_enrich_schedule(s, pcm) for s in schedules])
 
 
-async def list_automation(request: Request) -> JSONResponse:
-    """Status of background automations for the Settings → Automation page.
-
-    Reads the job-run log and returns one entry per automation this machine
-    can actually run (jobs that never ran still appear), each with its last
-    run, recent history, and aggregate stats. Scheduled jobs whose schedule is
-    not installed here are omitted — nothing would ever trigger them.
-    Read-only.
-
-    ``?include=outcomes`` answers ``{"jobs": [...], "proposal_outcomes":
-    {...}}`` instead of the bare list, adding the memory-proposal
-    promoted-vs-dismissed tally the page renders next to the job stats. The
-    default stays a bare list so existing consumers keep working unchanged.
-    """
-    from ciao import job_runs
-
-    installed: set[str] | None = None
-    try:
-        sm = request.app.state.schedule_manager
-        installed = {entry.schedule_id for entry in sm.list_entries()}
-    except Exception:  # noqa: BLE001 — no schedule manager: filter nothing
-        installed = None
-
-    summary = job_runs.automation_summary(installed_schedules=installed)
-    if request.query_params.get("include", "") != "outcomes":
-        return JSONResponse(summary)
-    return JSONResponse({
-        "jobs": summary,
-        "proposal_outcomes": proposal_outcomes.tally_cached(),
-    })
-
-
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
@@ -4917,12 +4828,7 @@ def _routines_payload(config, app_settings) -> dict:
     return {
         # Overrides as stored ("" = automatic default).
         "insights_model": s.insights_model,
-        # The HTTPS origin other devices should use, as stored ("" = none).
-        "trusted_url": s.trusted_url,
         "insights_enabled": config.insights_enabled,
-        "trajectories_enabled": config.trajectories_enabled,
-        "push_all_devices": s.push_all_devices,
-
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
@@ -6080,18 +5986,29 @@ async def admin_deploy(request: Request) -> JSONResponse:
 async def admin_skills(request: Request) -> JSONResponse:
     """List skills known to Ciaobot, labelled as custom or GitHub/package.
 
-    Merged across every agent root. Reading `workspace_root` alone showed
-    `{custom: 0, github: 0, stock: 29}` on a migrated install — measured — while
-    19 custom and 7 upstream skills sat in the primary root's catalog. The page
-    looked empty.
+    With `?workspace=<name>`, only that workspace's own agent root. The PWA
+    Settings → Skills tab passes the active workspace, so the list is the
+    catalog the user can actually act on: editing or deleting a row writes
+    into the same root. Stock skills still appear, because `sync-skills`
+    installs them into every agent root.
+
+    Without the parameter the listing stays merged across every agent root,
+    which is what the audit and CLI callers want. Reading `workspace_root`
+    alone showed `{custom: 0, github: 0, stock: 29}` on a migrated install —
+    measured — while 19 custom and 7 upstream skills sat in the primary
+    root's catalog, so a bare install root is never the answer.
 
     A skill of the same name in two roots is reported once, with the workspaces
     that hold it, because the page is a catalog rather than a per-root listing
     and two rows for one name reads as a duplicate rather than as sharing.
     """
     config = request.app.state.config
-    targets = getattr(config, "agent_root_targets", None)
-    roots = list(targets()) if callable(targets) else [(config.workspace_root, "")]
+    requested = request.query_params.get("workspace", "").strip()
+    if requested and config.workspace(requested):
+        roots = [(agent_root_for(config, requested), requested)]
+    else:
+        targets = getattr(config, "agent_root_targets", None)
+        roots = list(targets()) if callable(targets) else [(config.workspace_root, "")]
 
     merged: dict[str, dict] = {}
     counts: dict[str, int] = {}
@@ -7342,7 +7259,6 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                     text=swept_text,
                     kind=swept_kind,
                     via="pwa",
-                    workspace=workspace,
                     source=swept_source,
                     outcome="swept",
                 )
@@ -7714,7 +7630,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     text=str(row.get("text") or ""),
                     kind=str(row.get("kind") or ""),
                     via="pwa",
-                    workspace=entry["workspace"],
                     source=str(row.get("source") or ""),
                     destination=destination,
                     outcome=(
@@ -8213,7 +8128,6 @@ async def proposal_action(request: Request) -> JSONResponse:
                 text=str(row.get("text") or ""),
                 kind=str(row.get("kind") or ""),
                 via="pwa",
-                workspace=ctx["workspace"],
                 source=str(row.get("source") or ""),
                 destination=proposal_service._decision_destination(accept.action, row, promoted),
                 outcome="duplicate" if promoted.duplicate else "written",
@@ -8234,7 +8148,6 @@ async def proposal_action(request: Request) -> JSONResponse:
             text=str(row.get("text") or ""),
             kind=str(row.get("kind") or ""),
             via="pwa",
-            workspace=ctx["workspace"],
             source=str(row.get("source") or ""),
             proposal_id=pid,
         )
@@ -8440,46 +8353,25 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
     """
     from ciao.network_addresses import (
         is_loopback_url,
-        normalize_trusted_url,
         server_addresses,
         tailscale_serve_urls,
     )
 
     config = request.app.state.config
     port = int(getattr(config, "pwa_port", 8443) or 8443)
-    app_settings = getattr(request.app.state, "app_settings", None)
-    stored = getattr(getattr(app_settings, "settings", None), "trusted_url", "") or ""
-    # Re-validate what was stored: app_settings.json can be hand-edited, and a
-    # token smuggled into the stored value must never reach the QR code. A
-    # value the setter would have refused is treated as no trusted URL at all.
-    try:
-        trusted = normalize_trusted_url(stored)
-    except ValueError:
-        trusted = ""
     entries: list[dict[str, object]] = []
-    if trusted:
+    # Tailscale Serve's HTTPS name never appears on an interface, so it is
+    # asked for directly.
+    for url in await asyncio.to_thread(tailscale_serve_urls, port):
         entries.append(
             {
-                "url": trusted,
+                "url": url,
                 "kind": "trusted",
-                "source": "manual",
+                "source": "tailscale",
                 "secure": True,
                 "loopback": False,
             }
         )
-    # Tailscale Serve's HTTPS name never appears on an interface, so it is
-    # asked for directly. A typed address that matches it stays "manual".
-    for url in await asyncio.to_thread(tailscale_serve_urls, port):
-        if url != trusted:
-            entries.append(
-                {
-                    "url": url,
-                    "kind": "trusted",
-                    "source": "tailscale",
-                    "secure": True,
-                    "loopback": False,
-                }
-            )
     urls = await asyncio.to_thread(server_addresses, port)
     for url in urls:
         if is_loopback_url(url):
@@ -8488,4 +8380,4 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
     for url in urls:
         if is_loopback_url(url):
             entries.append({"url": url, "kind": "loopback", "secure": False, "loopback": True})
-    return JSONResponse({"port": port, "trusted_url": trusted or None, "addresses": entries})
+    return JSONResponse({"port": port, "addresses": entries})

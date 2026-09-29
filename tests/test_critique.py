@@ -148,14 +148,19 @@ def _panel(
     opencode: bool,
     anthropic: bool = True,
     opencode_model: str = "",
+    workspace_providers: tuple[str, ...] = ("claude",),
 ) -> list[str]:
     """Resolve the default panel with each vendor probe pinned."""
-    from ciao.config import CiaoConfig
+    from ciao.config import CiaoConfig, WorkspaceConfig
 
     monkeypatch.setattr(crt, "is_anthropic_available", lambda: anthropic)
     monkeypatch.setattr(crt, "is_opencode_available", lambda: opencode)
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
     config.opencode = SimpleNamespace(default_model=opencode_model)
+    config.workspaces = {
+        f"space-{i}": WorkspaceConfig(name=f"space-{i}", vault_root=f"space-{i}", default_provider=provider)
+        for i, provider in enumerate(workspace_providers)
+    }
     return crt.default_critique_panel(config)
 
 
@@ -169,7 +174,7 @@ def test_default_critique_panel_drops_anthropic_when_it_is_not_signed_in(
     monkeypatch,
 ) -> None:
     """Every entry is gated, Anthropic included."""
-    panel = _panel(monkeypatch, opencode=True, anthropic=False)
+    panel = _panel(monkeypatch, opencode=True, anthropic=False, workspace_providers=("claude", "opencode"))
     assert panel == ["opencode:"]
 
 
@@ -179,19 +184,15 @@ def test_default_critique_panel_never_resolves_empty(monkeypatch) -> None:
     assert panel == ["opus"]
 
 
-def test_default_critique_panel_adds_one_voice_per_signed_in_vendor(
+def test_default_critique_panel_uses_workspace_provider_defaults(
     monkeypatch,
 ) -> None:
-    """The point of the panel is disagreement, so prefer vendor diversity.
-
-    One entry per signed-in vendor, each that vendor's own default model. Two
-    Anthropic models would largely agree with each other, which is why pairing
-    `opus` with `fable` contradicted the rule this test names.
-    """
-    assert _panel(monkeypatch, opencode=True) == [
+    """Only providers used by configured workspaces participate automatically."""
+    assert _panel(monkeypatch, opencode=True, workspace_providers=("claude", "opencode", "claude")) == [
         "opus",
         "opencode:",
     ]
+    assert _panel(monkeypatch, opencode=True) == ["opus"]
 
 
 def test_default_critique_panel_uses_per_provider_default_models(
@@ -206,6 +207,7 @@ def test_default_critique_panel_uses_per_provider_default_models(
         monkeypatch,
         opencode=True,
         opencode_model="ollama-cloud/deepseek-v4-flash",
+        workspace_providers=("claude", "opencode"),
     ) == [
         "opus",
         "opencode:ollama-cloud/deepseek-v4-flash",
@@ -214,8 +216,10 @@ def test_default_critique_panel_uses_per_provider_default_models(
 
 def test_default_critique_panel_omits_vendors_that_are_signed_out(monkeypatch) -> None:
     """An unavailable provider would put a guaranteed failure in the panel."""
-    opencode_only = _panel(monkeypatch, opencode=True)
+    opencode_only = _panel(monkeypatch, opencode=True, workspace_providers=("claude", "opencode"))
     assert opencode_only == ["opus", "opencode:"]
+
+    assert _panel(monkeypatch, opencode=True, anthropic=False, workspace_providers=("claude", "opencode")) == ["opencode:"]
 
 
 def test_the_panel_follows_the_operator_default_model(monkeypatch) -> None:
