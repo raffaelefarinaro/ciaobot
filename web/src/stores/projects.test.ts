@@ -3397,7 +3397,7 @@ describe('memoryInsightRows', () => {
       chat_id: 'src', project_id: 'p1', title: 'Deck figures',
       archived: true, local: true, archive_path: 'chats/src.md',
       created_at: '2026-08-27T00:00:00Z', last_activity_at: '2026-08-27T00:00:00Z',
-      postprocess: { state: 'running', step: 'memory_pass', steps: {} },
+      postprocess: { steps: { memory_pass: { status: 'running', extra: { chat_id: 'pass-1' } } } },
       ...over,
     }
   }
@@ -3463,67 +3463,6 @@ describe('memoryInsightRows', () => {
     // The row says the same thing out loud, with the question on it.
     const row = store.memoryInsightRows.find(r => r.passChatId === 'blocked')
     expect(row).toMatchObject({ phase: 'needsYou', blocking: true, question: 'Which project?' })
-  })
-
-  test('offers the retry for a pipeline that stopped with a stage left', () => {
-    const store = useProjectStore()
-    store.chats = [sourceChat({
-      postprocess: {
-        state: 'incomplete',
-        job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
-      },
-    })] as unknown as typeof store.chats
-
-    expect(store.memoryInsightRows[0]).toMatchObject({
-      phase: 'unfinished',
-      retryable: true,
-      label: 'trajectory not finished',
-    })
-  })
-})
-
-describe('retryInsights', () => {
-  test('posts to the per-chat retry-insights endpoint', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValue({ status: 'started' })
-    await store.retryInsights('c1')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/retry-insights')
-  })
-
-  test('folds the returned manifest onto the chat record', async () => {
-    const store = useProjectStore()
-    store.chats = [
-      { chat_id: 'c1', project_id: 'p1', title: 'A', archived: true, postprocess: { state: 'done', steps: {} } },
-    ] as unknown as typeof store.chats
-    apiPost.mockResolvedValue({
-      status: 'started',
-      job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
-    })
-    await store.retryInsights('c1')
-    expect(store.chatPostprocess('c1')?.state).toBe('incomplete')
-    expect(store.chatPostprocess('c1')?.job?.unfinished).toEqual(['memory_proposals'])
-  })
-
-  test('clears a stale incomplete state when the server reports completion', async () => {
-    const store = useProjectStore()
-    store.chats = [
-      {
-        chat_id: 'c1', project_id: 'p1', title: 'A', archived: true,
-        postprocess: {
-          state: 'incomplete',
-          job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
-        },
-      },
-    ] as unknown as typeof store.chats
-    // The completion event was missed, so the client still thinks work remains;
-    // the server now confirms nothing is unfinished.
-    apiPost.mockResolvedValue({
-      status: 'complete',
-      job: { job_id: 'j', state: 'done', unfinished: [] },
-    })
-    await store.retryInsights('c1')
-    expect(store.chatPostprocess('c1')?.state).toBe('done')
-    expect(store.chatPostprocess('c1')?.job?.unfinished).toEqual([])
   })
 })
 
@@ -4037,25 +3976,22 @@ describe('deep-link chat navigation', () => {
     expect(store.chats.map(chat => chat.archived)).toEqual([true, false])
   })
 
-  test('archive response keeps the background pipeline status visible', async () => {
+  test('archive response keeps the queued memory pass visible', async () => {
     const store = useProjectStore()
     store.chats = twoChats()
     apiPost.mockResolvedValue({
       ok: true,
       postprocess: {
-        state: 'running',
-        step: 'trajectory',
-        expected: ['trajectory'],
-        steps: {},
+        steps: { memory_pass: { status: 'queued', extra: { chat_id: 'pass-1' } } },
       },
     })
 
     await store.archiveChat('parent')
 
-    expect(store.chatPostprocess('parent')?.state).toBe('running')
+    expect(store.chatPostprocess('parent')?.steps?.memory_pass?.status).toBe('queued')
     // The "Chat archived — processing insights in the background" toast was
-    // removed: archiving is immediate and the pipeline is visible via
-    // postprocess state, so no toast is needed.
+    // removed: archiving is immediate and the memory pass is visible on Home,
+    // so no toast is needed.
     expect(store.toasts.find(t => t.title === 'Chat archived')).toBeUndefined()
   })
 

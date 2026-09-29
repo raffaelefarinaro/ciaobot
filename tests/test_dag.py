@@ -537,37 +537,6 @@ def test_subagent_requires_rejects_bad_item_shape(
 # ── Retention kind: never blocks ────────────────────────────────────────
 
 
-def test_retention_failure_does_not_propagate(monkeypatch, tmp_path) -> None:
-    """If prune_old_trajectories raises, the retention node returns
-    ok=true and the chain continues. This matches the design: retention
-    failures shouldn't block the schedule."""
-
-    def boom(**kwargs):
-        raise RuntimeError("disk full")
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "ciao.trajectory_builder",
-        type("M", (), {"prune_old_trajectories": staticmethod(boom)}),
-    )
-    # Re-import dag so the lazy import resolves to our fake module.
-    import importlib
-    from ciao import dag as dag_mod
-    importlib.reload(dag_mod)
-
-    dag = [Node(id="retain", kind="retention", payload={"months": 6})]
-    ctx = dag_mod.run(dag, [], job="unit", label="retention-ok")
-    assert ctx["retain"].ok is True
-    # chain to a bash node that must still run
-    dag2 = [
-        Node(id="retain", kind="retention", payload={"months": 6}),
-        Node(id="done", kind="bash", payload={"cmd": "echo ok"}),
-    ]
-    edges2 = [Edge(src="retain", dst="done", when="always")]
-    ctx2 = dag_mod.run(dag2, edges2, job="unit", label="retention-then-bash")
-    assert ctx2["done"].ok is True
-
-
 # ── BASH: timeout, command shape ─────────────────────────────────────────
 
 

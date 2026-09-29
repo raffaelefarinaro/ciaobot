@@ -49,7 +49,7 @@ from ciao import job_runs
 logger = logging.getLogger(__name__)
 
 
-NodeKind = Literal["bash", "prompt", "gate", "subagent", "retention"]
+NodeKind = Literal["bash", "prompt", "gate", "subagent"]
 EdgeWhen = Literal["ok", "fail", "always"]
 
 
@@ -382,29 +382,11 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
     )
 
 
-def _exec_retention(node: Node, ctx: dict[str, Any]) -> NodeResult:
-    """Tail retention prune step. Delegates to ``ciao.trajectory_builder``
-    if installed, otherwise no-ops. ``payload['months']`` is the cutoff
-    (default 6). Always returns ok=true (retention failures shouldn't
-    block the schedule)."""
-    months = int(node.payload.get("months", 6))
-    try:
-        from ciao.trajectory_builder import prune_old_trajectories  # type: ignore[attr-defined]
-    except ImportError:
-        return NodeResult(ok=True, output="trajectory_builder.prune_old_trajectories not available; skipped")
-    try:
-        pruned = prune_old_trajectories(months=months)
-    except Exception as exc:  # noqa: BLE001
-        return NodeResult(ok=True, output=f"prune failed: {exc!r}; continuing")
-    return NodeResult(ok=True, output=f"pruned {pruned} trajectory months older than {months}")
-
-
 _EXECUTORS: dict[str, Callable[[Node, dict[str, Any]], NodeResult]] = {
     "bash": _exec_bash,
     "prompt": _exec_prompt,
     "gate": _exec_gate,
     "subagent": _exec_subagent,
-    "retention": _exec_retention,
 }
 
 
@@ -485,10 +467,9 @@ def run(
     same ``run_id``, completed nodes are skipped and execution resumes from the
     first incomplete step.
 
-    Returns the final ctx (a dict of ``{node_id: NodeResult}``). On any
-    non-retention node failure, the ``ok`` branch is short-circuited and
-    the exception is re-raised after the run is recorded. ``retention``
-    nodes always return ok=true (see ``_exec_retention``).
+    Returns the final ctx (a dict of ``{node_id: NodeResult}``). On any node
+    failure, the ``ok`` branch is short-circuited and the exception is
+    re-raised after the run is recorded.
     """
     import json
     from pathlib import Path
@@ -547,7 +528,7 @@ def run(
         if executor is None:
             raise ValueError(f"unknown node kind '{node.kind}' for node '{node.id}'")
         # The whole DAG is recorded as one outer job_run; per-node
-        # detail goes into ``extra`` so the Automation page can drill in.
+        # detail goes into ``extra``.
         with job_runs.track_sync(
             job=job,
             label=f"{label}:{node.id}",
@@ -575,9 +556,6 @@ def run(
                 result = NodeResult(ok=False, error=str(exc))
                 ctx[node.id] = result
                 _save_checkpoint()
-                if node.kind == "retention":
-                    current = _next_node(node.id, True, edges)
-                    continue
                 # Re-raise so the caller sees the failure; the outer
                 # track_sync block still records the run.
                 raise

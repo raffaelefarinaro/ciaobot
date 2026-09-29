@@ -4,7 +4,6 @@ import pytest
 from pathlib import Path
 from ciao import config as ciao_config
 from ciao import job_runs as jr
-from ciao import proposal_outcomes as po
 from ciao import transcripts
 from types import SimpleNamespace
 
@@ -149,31 +148,10 @@ def _isolate_queue_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 @pytest.fixture(autouse=True)
 def _isolate_job_runs(tmp_path: Path) -> None:
-    """Isolate job runs recording by pointing to a temp directory for every test.
-
-    Also resets the live-state globals: the publisher and the in-flight registry
-    are module-level, so a test that installs a sink or leaves a run open would
-    otherwise leak into every test after it.
-    """
+    """Isolate job runs recording by pointing to a temp directory for every test."""
     jr.configure(tmp_path)
-    jr.set_publisher(None)
-    jr._inflight.clear()
     yield
     jr._runtime_dir_override = None
-    jr.set_publisher(None)
-    jr._inflight.clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolate_proposal_outcomes(tmp_path: Path) -> None:
-    """Isolate proposal-outcome recording the same way ``_isolate_job_runs``
-    isolates the job-run log: without this, any route test exercising an
-    accept/dismiss would append to the developer's real ``.runtime``."""
-    po.configure(tmp_path)
-    po.reset_tally_cache()
-    yield
-    po._runtime_dir_override = None
-    po.reset_tally_cache()
 
 
 def attach_stub_mcp(manager):

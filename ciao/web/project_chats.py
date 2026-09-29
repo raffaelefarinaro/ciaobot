@@ -70,7 +70,6 @@ import yaml
 
 from ciao import job_runs, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
-from ciao.archive_jobs import ArchiveJob
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -475,16 +474,12 @@ class ChatInfo:
     # UI. Resolution helpers may auto-archive only after their target proposal
     # IDs have durably left the queue; discussion helpers always remain manual.
     helper: dict = field(default_factory=dict)
-    # What the post-archive pipeline is doing, or did. Archiving a chat kicks
-    # off the trajectory stage (ciao/insights.py:run_archive_pipeline) and enqueues
-    # a memory pass chat, and until now none of that was visible anywhere in the
-    # app. Lives on the chat rather than in job_runs because it has to survive a
-    # restart and the run-log's own rotation: an archived chat opened next month
-    # should still be able to say what Ciaobot took from it.
+    # What the memory pass queued by archiving this chat is doing, or did.
+    # Lives on the chat so it survives a restart: an archived chat opened next
+    # month should still be able to say what Ciaobot took from it.
     #
-    # {"state": "running"|"done", "step": "<job id>",
-    #  "steps": {"<job id>": {"status": ..., "extra": {...}}},
-    #  "started_at": iso, "updated_at": iso}
+    # {"steps": {"memory_pass": {"status": ..., "extra": {"chat_id": ...}}},
+    #  "updated_at": iso}
     postprocess: dict = field(default_factory=dict)
 
     def to_dict(self, *, local: bool | None = None) -> dict:
@@ -534,15 +529,12 @@ class ChatInfo:
 class ArchiveOutcome:
     """Result of archiving a chat.
 
-    Carries enough metadata for the route handler to enqueue the post-archive
-    memory pass and run the trajectory stage without re-loading the transcript
-    or re-reading the JSONL (the JSONL is deleted as part of archiving).
+    Carries enough for the caller to enqueue the post-archive memory pass
+    without re-loading the transcript.
     """
 
     path: Path
-    session_id: str
     turn_count: int
-    filtered_jsonl: str | None
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -3241,12 +3233,6 @@ class ProjectChatManager:
         # Archive intentionally keeps them: archived chats are read-only but
         # their history viewer should still work.
         self._snapshots.delete_chat(chat_id)
-        # Deleting an archived chat must cancel/tombstone its pending archive
-        # job: a running task would otherwise finish and write derived memory
-        # for a chat that no longer exists, and a startup resume could revive
-        # it. The tombstone is durable even if the in-process task is mid-write.
-        # The row is already out of `self._chats`, so hand it over explicitly.
-        self._cancel_archive_job(chat_id, chat)
         self._delete_archived_transcript(chat_id)
         self._save(reason="user_chat_delete")
         self._events.publish({
@@ -3322,48 +3308,17 @@ class ProjectChatManager:
     # ── Session management ───────────────────────────────────────────────
 
     def _read_archive_inputs(
-        self, chat_id: str, ctx: ChatContext, chat: ChatInfo, agent_root: Path
-    ) -> tuple[int, str | None, Path | None]:
+        self, ctx: ChatContext, chat: ChatInfo
+    ) -> tuple[int, Path | None]:
         """Disk half of archiving one chat, safe to run off the event loop.
 
-        Everything here is file I/O keyed by this chat's own context and session
-        id — read the turn count and the filtered JSONL, then render and write
-        the markdown archive. It touches no shared in-memory state and no
-        asyncio primitives, which is what lets ``archive_chat`` hand it to a
-        worker thread. ``agent_root`` is resolved by the caller on the loop for
-        that reason.
-
-        Ordering matters: the turn count has to be taken before
-        ``archive_session`` consumes the in-progress transcript, and the
-        filtered JSONL before the caller deletes the session blob.
-
-        The Claude SDK writes a chat's session blob under the agent root the
-        chat actually ran in, so that root — not ``workspace_root`` — is what
-        finds it. Resolving it against the install root instead returned None
-        for every workspace-scoped chat, and a None here is indistinguishable
-        from "nothing to extract": ``run_archive_postprocess`` skipped insights,
-        the project-doc fold, the trajectory and memory proposals in silence,
-        with no job run and no log line.
+        Everything here is file I/O keyed by this chat's own context — read the
+        turn count, then render and write the markdown archive. It touches no
+        shared in-memory state and no asyncio primitives, which is what lets
+        ``archive_chat`` hand it to a worker thread. The turn count has to be
+        taken before ``archive_session`` consumes the in-progress transcript.
         """
         turn_count = self._transcripts.peek_turn_count(ctx, chat.provider)
-        filtered_jsonl: str | None = None
-        if chat.session_id and chat.provider == "claude":
-            from ciao.insights import filter_session_jsonl
-            try:
-                filtered_jsonl = filter_session_jsonl(
-                    self._config.workspace_root,
-                    chat.session_id,
-                    agent_root=agent_root,
-                )
-            except Exception:  # noqa: BLE001 — never fail archive over transcript prep
-                logger.exception(
-                    "Failed to pre-filter JSONL for chat %s", chat_id
-                )
-                filtered_jsonl = None
-        elif chat.provider == "opencode":
-            filtered_jsonl = self._transcripts.current_filtered_jsonl(
-                ctx, chat.provider
-            ) or None
         result = self._transcripts.archive_session(
             ctx=ctx,
             active_model=chat.model,
@@ -3371,7 +3326,7 @@ class ProjectChatManager:
             session_id=chat.session_id,
             provider=chat.provider,
         )
-        return turn_count, filtered_jsonl, result
+        return turn_count, result
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         """Serialize concurrent archive requests for one chat."""
@@ -3407,10 +3362,9 @@ class ProjectChatManager:
         storage (Claude SDK JSONL blob or an opencode session). The markdown
         transcript in the vault is the durable record.
 
-        Returns the archive path plus a pre-filtered JSONL string captured
-        before blob deletion, so the caller can run the trajectory stage and
-        hand the transcript to the memory pass without racing against the disk
-        reclaim. None means the chat does not exist, or had nothing to write.
+        Returns the archive path and turn count, so the caller can hand the
+        transcript to the memory pass. None means the chat does not exist, or
+        had nothing to write.
         """
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -3422,9 +3376,8 @@ class ProjectChatManager:
         # every streaming turn until it finished, so it runs in a worker
         # thread. Awaited before anything else happens, so the chat_archived
         # event still fires in the same place it always did.
-        agent_root = self._agent_root_for_chat(chat_id)
-        turn_count, filtered_jsonl, result = await asyncio.to_thread(
-            self._read_archive_inputs, chat_id, ctx, chat, agent_root
+        turn_count, result = await asyncio.to_thread(
+            self._read_archive_inputs, ctx, chat
         )
         # The await above is a suspension point, so the chat may have been
         # deleted while the transcript was being written. Marking a row that is
@@ -3455,12 +3408,7 @@ class ProjectChatManager:
         })
         if result is None:
             return None
-        return ArchiveOutcome(
-            path=result,
-            session_id=chat.session_id,
-            turn_count=turn_count,
-            filtered_jsonl=filtered_jsonl,
-        )
+        return ArchiveOutcome(path=result, turn_count=turn_count)
 
     # ── Archive pipeline seams ────────────────────────────────────────────
 
@@ -3473,152 +3421,14 @@ class ProjectChatManager:
             self._archive_pipeline = pipeline
             return pipeline
 
-    @property
-    def _postprocessing(self) -> set[str]:
-        return self._archive_pipeline_for().postprocessing
-
-    @_postprocessing.setter
-    def _postprocessing(self, value: set[str]) -> None:
-        state = self._archive_pipeline_for().postprocessing
-        state.clear()
-        state.update(value)
-
-    @property
-    def _archive_jobs(self) -> dict[str, ArchiveJob]:
-        return self._archive_pipeline_for().jobs
-
-    @_archive_jobs.setter
-    def _archive_jobs(self, value: dict[str, ArchiveJob]) -> None:
-        jobs = self._archive_pipeline_for().jobs
-        jobs.clear()
-        jobs.update(value)
-
-    @property
-    def _archive_tasks(self) -> dict[str, asyncio.Task[object]]:
-        return self._archive_pipeline_for().tasks
-
-    @_archive_tasks.setter
-    def _archive_tasks(self, value: dict[str, asyncio.Task[object]]) -> None:
-        tasks = self._archive_pipeline_for().tasks
-        tasks.clear()
-        tasks.update(value)
-
-    def attach_job_runs_publisher(self) -> None:
-        """Route live archive job events into the manager."""
-        self._archive_pipeline_for().attach_job_runs_publisher()
-
-    def _on_job_event(self, event: dict[str, object]) -> None:
-        return self._archive_pipeline_for()._on_job_event(event)
-
-    def _apply_job_event(self, chat_id: str, event: dict[str, object]) -> None:
-        return self._archive_pipeline_for()._apply_job_event(chat_id, event)
-
     def _publish_postprocess(self, chat: ChatInfo) -> None:
         return self._archive_pipeline_for()._publish_postprocess(chat)
-
-    def postprocessing_chat_ids(self) -> list[str]:
-        return self._archive_pipeline_for().postprocessing_chat_ids()
-
-    def _begin_postprocess(self, chat_id: str, expected: list[str]) -> None:
-        return self._archive_pipeline_for()._begin_postprocess(chat_id, expected)
-
-    def _end_postprocess(self, chat_id: str) -> None:
-        return self._archive_pipeline_for()._end_postprocess(chat_id)
-
-    async def _tracked_postprocess(
-        self, chat_id: str, coro: Coroutine[object, object, object]
-    ) -> None:
-        return await self._archive_pipeline_for()._tracked_postprocess(chat_id, coro)
-
-    def retry_insights(self, chat_id: str) -> str:
-        return self._archive_pipeline_for().retry_insights(chat_id)
-
-    def retry_archive_steps(self, chat_id: str) -> dict[str, object]:
-        return self._archive_pipeline_for().retry_archive_steps(chat_id)
-
-    def archive_job_view(self, chat_id: str) -> dict[str, object] | None:
-        return self._archive_pipeline_for().archive_job_view(chat_id)
 
     def _delete_archived_transcript(self, chat_id: str) -> None:
         return self._archive_pipeline_for()._delete_archived_transcript(chat_id)
 
-    def _cancel_archive_job(
-        self, chat_id: str, chat: ChatInfo | None = None
-    ) -> None:
-        return self._archive_pipeline_for()._cancel_archive_job(chat_id, chat)
-
-    def _archive_path_for_chat(self, chat: ChatInfo) -> Path:
-        return self._archive_pipeline_for()._archive_path_for_chat(chat)
-
-    def _job_inputs(
-        self,
-        chat: ChatInfo,
-        project: ProjectInfo | None,
-        *,
-        filtered_jsonl: str = "",
-        session_id: str = "",
-    ) -> dict[str, object]:
-        return self._archive_pipeline_for()._job_inputs(
-            chat,
-            project,
-            filtered_jsonl=filtered_jsonl,
-            session_id=session_id,
-        )
-
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
         return self._archive_pipeline_for()._insights_model_for(chat, workspace)
-
-    def _persist_job_inputs(
-        self, job: ArchiveJob, inputs: dict[str, object]
-    ) -> None:
-        return self._archive_pipeline_for()._persist_job_inputs(job, inputs)
-
-    def _restore_job_inputs(
-        self, chat: ChatInfo, project: ProjectInfo | None, job: ArchiveJob
-    ) -> dict[str, object]:
-        return self._archive_pipeline_for()._restore_job_inputs(chat, project, job)
-
-    def _new_job_for_chat(
-        self, chat: ChatInfo, inputs: dict[str, object]
-    ) -> ArchiveJob:
-        return self._archive_pipeline_for()._new_job_for_chat(chat, inputs)
-
-    def _resume_job(
-        self, chat_id: str, archive_path: Path
-    ) -> tuple[ArchiveJob, dict[str, object]] | tuple[None, None]:
-        return self._archive_pipeline_for()._resume_job(chat_id, archive_path)
-
-    def _launch_job(
-        self,
-        chat_id: str,
-        job: ArchiveJob,
-        inputs: dict[str, object],
-        *,
-        stages: list[str] | None = None,
-    ) -> None:
-        return self._archive_pipeline_for()._launch_job(
-            chat_id, job, inputs, stages=stages
-        )
-
-    async def _run_job(
-        self,
-        chat_id: str,
-        job: ArchiveJob,
-        inputs: dict[str, object],
-        *,
-        stages: list[str] | None = None,
-    ) -> None:
-        return await self._archive_pipeline_for()._run_job(
-            chat_id, job, inputs, stages=stages
-        )
-
-    def _overlay_job_postprocess(self, chat_id: str, job: ArchiveJob) -> None:
-        return self._archive_pipeline_for()._overlay_job_postprocess(chat_id, job)
-
-    async def resume_interrupted_jobs(self, *, max_concurrency: int = 2) -> int:
-        return await self._archive_pipeline_for().resume_interrupted_jobs(
-            max_concurrency=max_concurrency
-        )
 
     def run_archive_postprocess(
         self,
@@ -4380,18 +4190,9 @@ class ProjectChatManager:
         return project_ids, chat_ids
 
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
-        """Chats in *workspace* with a turn, subagent or archive job running.
-
-        An archive job (the trajectory stage) keeps writing into the workspace
-        after the chat itself is archived, so it counts too: finishing after the
-        folder moved would recreate the folder at its old path, outside the
-        archive, and block the restore.
-        """
+        """Chats in *workspace* with a turn or subagent running."""
         _project_ids, chat_ids = self.workspace_scope(workspace)
         busy = set(self.active_chat_ids())
-        busy.update(
-            cid for cid, task in self._archive_tasks.items() if not task.done()
-        )
         return sorted(cid for cid in busy if cid in chat_ids)
 
     def workspace_counts(self, workspace: str) -> dict[str, int]:

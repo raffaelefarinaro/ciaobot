@@ -1006,41 +1006,9 @@
               {{ isContinuing ? 'Continuing...' : 'Continue in new chat' }}
             </button>
           </div>
-          <!-- What Ciaobot took from this conversation. Runs as a live line
-               while the pipeline works, then settles and stays: the archived
-               chat is the permanent record of what was learned from it, and
-               nothing else in the app ever reported this. -->
-          <p
-            v-if="archiveTidying"
-            class="archived-postprocess"
-            aria-live="polite"
-          >
-            <span class="archived-postprocess-dot" aria-hidden="true" />
-            {{ archiveTidyLabel }}…
-          </p>
-          <div
-            v-else-if="archiveTidySummary"
-            class="archived-postprocess-row"
-          >
-            <p
-              class="archived-postprocess"
-              :class="{ failed: archiveTidyFailed }"
-              aria-live="polite"
-            >{{ archiveTidySummary }}</p>
-            <button
-              v-if="archiveNeedsRetry"
-              class="btn-sm archived-postprocess-retry"
-              type="button"
-              :disabled="archiveRetrying"
-              :aria-label="`Retry unfinished post-archive steps for ${chat.title}`"
-              @click="retryArchiveSteps"
-            >{{ archiveRetrying ? 'Retrying…' : 'Retry unfinished steps' }}</button>
-          </div>
           <!-- The memory pass this chat spawned, if one did. The pass lives in
                a project the sidebar hides, so this is the durable way back to
-               it — and the one thing here that opens another chat rather than
-               re-running work on this one, which is why it stays out of the
-               retry row above. -->
+               it. -->
           <button
             v-if="archiveMemoryPassChatId"
             class="btn-sm archive-memory-pass-btn"
@@ -1308,13 +1276,6 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { isApplePlatform } from '../lib/platform'
-import {
-  isPostprocessing,
-  postprocessFailed,
-  postprocessLabel,
-  postprocessNeedsRetry,
-  postprocessSummary,
-} from '../lib/postprocessView'
 import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
@@ -1644,35 +1605,12 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => store.activeChat!)
 
-// Post-archive pipeline, reported in the archived-chat footer. Reads through the
-// chat record rather than a transient flag so the settled summary is still there
-// when this chat is reopened weeks later.
 const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_id))
-const archiveTidying = computed(() => isPostprocessing(archivePostprocess.value))
-const archiveTidyLabel = computed(() => postprocessLabel(archivePostprocess.value))
-const archiveTidySummary = computed(() => postprocessSummary(archivePostprocess.value))
-const archiveTidyFailed = computed(() => postprocessFailed(archivePostprocess.value))
-// Whether the archived chat's pipeline still has stages to finish. A partial
-// completion (crash, provider failure) is retryable from here, so the user does
-// not have to hunt for the Home lane.
-const archiveNeedsRetry = computed(() => postprocessNeedsRetry(archivePostprocess.value))
-// The memory pass this chat spawned, recorded on its own postprocess record
-// because the pass outlives the archive job that queued it. Present from the
+// The memory pass this chat spawned, recorded on its own postprocess record.
+// Present from the
 // moment the pass is enqueued, so the link works while it is still running and
 // after the pass is archived.
 const archiveMemoryPassChatId = computed(() => memoryPassChatId(archivePostprocess.value))
-const archiveRetrying = ref(false)
-async function retryArchiveSteps(): Promise<void> {
-  if (archiveRetrying.value) return
-  archiveRetrying.value = true
-  try {
-    await store.retryInsights(chat.value.chat_id)
-  } catch (e) {
-    store.pushErrorToast('Could not retry unfinished steps', errorMessage(e))
-  } finally {
-    archiveRetrying.value = false
-  }
-}
 function openMemoryPass(): void {
   if (archiveMemoryPassChatId.value) void store.switchChat(archiveMemoryPassChatId.value)
 }
@@ -6314,73 +6252,11 @@ details[open] > .activity-summary::before {
   flex-wrap: wrap;
 }
 
-/* A footnote, not a component: no card, no border, no background. It reports
-   work the user did not ask for and does not need to act on, so it stays in the
-   muted register even once it has something to say. */
-.archived-postprocess {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-  color: var(--fg3);
-  text-align: center;
-  flex-wrap: wrap;
-}
-
-/* The single exception to the muted rule: a failed step is only ever visible
-   here, so it is allowed to say so. */
-.archived-postprocess.failed { color: var(--warning); }
-
-/* Partial completion is actionable, so the row pairs the muted summary with a
-   retry control that meets the 44px touch target. */
-.archived-postprocess-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
-.archived-postprocess-retry {
-  min-height: 44px;
-  min-width: 44px;
-  cursor: pointer;
-}
-
-.archived-postprocess-retry:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* The link back to the memory pass this chat spawned. It sits on its own line
-   under the postprocess rows — the pass is a separate chat, not a stage of this
-   one's pipeline, so it reads as its own action. 44px like every control in
-   this footer. */
+/* The link back to the memory pass this chat spawned. 44px like every control
+   in this footer. */
 .archive-memory-pass-btn {
   min-height: 44px;
   min-width: 44px;
-}
-
-.archived-postprocess-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--fg3);
-  flex: 0 0 auto;
-  animation: archived-postprocess-breathe 2.6s ease-in-out infinite;
-}
-
-@keyframes archived-postprocess-breathe {
-  0%, 100% { opacity: 0.35; }
-  50%      { opacity: 0.9; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .archived-postprocess-dot { animation: none; opacity: 0.75; }
 }
 
 .image-btn {

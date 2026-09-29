@@ -572,10 +572,9 @@ const currentProjectId = computed(() => {
 // "needs the user".
 //
 // A memory-insight row counts as activity: a workspace whose only thing
-// happening is a memory pass is not empty, and neither is one whose only
-// activity is a chat still saving its trajectory — post-archive work is not
-// part of `activeChatsAll`, but it is still something this surface reports
-// before the user starts a new chat.
+// happening is a memory pass is not empty — post-archive work is not part of
+// `activeChatsAll`, but it is still something this surface reports before the
+// user starts a new chat.
 const hasHomeActivity = computed(
   () => store.activeChatsAll.length > 0 || store.memoryInsightRows.length > 0,
 )

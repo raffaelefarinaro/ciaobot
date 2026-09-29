@@ -323,16 +323,9 @@ cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
-The Settings → Automations list is registry-driven: `GET /api/automation` carries
-each job's static `trigger` sentence, `schedule_id`, `one_time`, `uses_model`,
-and `produces_outcome`. Do not infer those from a job's latest run — never-run
-jobs are intentionally included in the response. When adding a job to
-`job_runs.REGISTRY`, give it a `trigger` (the page's answer to "when does this
-run?"); when removing one, add its id to `job_runs.RETIRED_JOBS`, because
-`job_runs_latest.json` keeps the last run of every job it ever saw and the row
-would otherwise linger with a stale badge. Set `schedule_only=True` only when a
-schedule is the job's *sole* trigger: such a job is hidden on machines where
-that schedule is not installed.
+When removing a background job, add its id to `job_runs.RETIRED_JOBS`:
+`job_runs_latest.json` keeps the last run of every job it ever saw, and the
+debug report would otherwise keep listing it with a stale last run.
 
 For memory-backup changes, use `tests/test_backup_service.py`: it drives a temporary
 install against a local bare remote on an injected clock, so it never touches a real
@@ -341,9 +334,8 @@ loop asked to wait for, the offline path is exercised by making a push time out,
 run's own scope and readiness rules are pinned from both sides (a note is committed, a
 file outside the scope is not, a clean run creates nothing). `tests/test_local_routes.py`
 covers the three routes. The five-minute interval is the named constant
-`BACKUP_INTERVAL_S` in `ciao/backup_service.py` and the job is registered in
-`job_runs.REGISTRY` under the id `branch_backup` with its five-minute trigger sentence —
-keep that id, or the Automation page loses the row its history belongs to.
+`BACKUP_INTERVAL_S` in `ciao/backup_service.py`, and its runs are recorded in
+`job_runs` under the id `branch_backup`.
 Settings → General shows a compact online backup state and last successful upload;
 the configured scope, repository, and raw diagnostic are in a native "Backup details"
 disclosure ("Review details" when attention is needed). The five-minute cadence is
@@ -353,17 +345,16 @@ For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` 
 
 For engine-update changes, `tests/test_engine_update.py` is the contract: launchd, uv, the service starter, the engine's HTTP surface, the clock and sleep are all doubles, so nothing in it may start a real service, move a real environment or open a socket. An update that a reboot or a killed job interrupted is picked up by a durable `com.ciao.recover` LaunchAgent that `apply_update` installs (from the staged interpreter, `StartInterval` 30) *before* the engine is stopped, and that `run_apply` re-points at the retained `previous-env` the instant the live env is renamed aside — so the swap never consumes the directory the net runs from — the crash window where the live env is renamed aside leaves the engine unable to start, so a recovery reached from inside the engine is a recovery that cannot run. Its program is `run-recover --operation <id>`: `recover_apply` takes the lock without waiting, stands down for a tick when a swap holds it, never posts (it owns no drain) and never mutates a record it did not find stranded, retires its own job and plist when there is nothing left to recover or once the rollback has settled, and otherwise runs the same total `_rollback` the apply would have, using the retained `previous-env` as the evidence that the move happened. `recover_interrupted_apply` from `ciao/main.py` (macOS only) stays as the fast path for the cases where the engine does come back: it recognises the record and bootstraps the detached `com.ciao.updater` job in `run-recover` mode. The rollback is never the engine's own doing, because it cannot boot itself out and restore the env it is running out of. In the other direction, `run_apply` refuses an apply when the loaded `com.ciao.server` does not run the env the install receipt names. Staging resolves the release once, into a real `uv tool env` under `<stage>/tool/<dist>` with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` pinned to the stage dir, and records the resolved set as `Operation.env_freeze`; the apply then *moves* that env into the live env's place instead of installing the wheel again, re-pointing only what a move breaks (the `bin` shebangs and the `bin_dir` entry points), so the swap needs no network and cannot pick up a dependency released since staging. Do not run `ciao update apply`, `run-apply`, `run-recover` or real `launchctl` against your own install to check any of it.
 
-For post-archive pipeline changes, use `tests/test_archive_jobs.py`. It exercises the manifest in isolation and the resumable stage runner, covering: the trajectory stage settling or skipping, a write failure staying retryable, deletion tombstoning, the blocked states (changed archive content, missing archive), and the legacy four-stage manifest settling on its own. `tests/test_archive_postprocess_state.py` owns the chat-visible lifecycle and the retry route; `web/src/lib/postprocessView.test.ts` owns the settled/partial wording. The runner is the single implementation behind the manager's live archive path, so a change to stage ordering belongs in `ciao/insights.py:run_archive_pipeline` and a change to the stage list itself in `ciao/archive_jobs.py:PIPELINE_STAGES`.
 For HTML artifact changes, keep the preview self-contained: inline scripts/styles and `data:` media are allowed, while external requests and `blob:` sources must remain blocked. Use the fixtures under `tests/fixtures/html_artifacts/` plus the focused workspace-HTML tests. The response body carries the injected comment bridge (`ciao/web/artifact_bridge.py`): keep it ES5, marker-tagged, and idempotent, never inject ahead of a doctype (a `<script>` before it renders the artifact in quirks mode), and keep `action: 'ready'` deferred to `DOMContentLoaded` — that message is the parent's only cue to push comment highlights, and anything pushed earlier reaches a frame that is still loading. `tests/test_workspace_html.py` asserts the injection and the header contract together; `web/src/lib/artifactBridgeScript.test.ts` runs the script itself in jsdom for anchoring and highlight behaviour.
 For workspace navigation changes, verify that unmodified `1`–`9` keys follow the visible sidebar workspace order, do not fire from text inputs, and keep working in the automations view. The sidebar key labels should remain visible and accessible at narrow widths. An open `AskUserQuestion` card takes those digits over for its own options while it is up (Design System rule S7) and hands them back when it closes, so check both states after touching either handler.
 On the home screen, also verify that it shows only the selected workspace's chats (switching workspaces swaps the content) and that arrow keys follow the rendered lane layout: up/down moves between stacked lanes, left/right moves within a lane.
 A memory pass is not a chat row anywhere, so its whole surface is the one
 **memory insights** section below the tiers. `web/src/lib/memoryInsights.ts` owns
-that derivation — one row per archived conversation, the archive pipeline and the
+that derivation — one row per archived conversation, the in-flight archive and the
 pass joined, the pass winning the phase, and every label — and
 `web/src/lib/__tests__/memoryInsights.test.ts` drives it with no Pinia. When you
-touch it, check the overlap case (a trajectory still saving while its pass is
-already running must stay ONE row), the fallback (no pass yet, so the row opens
+touch it, check the overlap case (an archive request still in flight while its
+pass is already running must stay ONE row), the fallback (no pass yet, so the row opens
 the archived transcript), the dead entry (no file and no pass, so the row is
 disabled), the counter rules (`chatIsAttentionItem` is what the Home nav badge
 and the lane status sentence both ask), and that the pass never reappears in
@@ -550,7 +541,7 @@ disconnected.
 
 A schedule that is a multi-step workflow (load state, gate, model call, write) can use `ciao.dag` rather than a long `async def`:
 
-- `Node(id, kind, model='', timeout_s=180.0, payload={})` — kinds: `bash`, `prompt`, `gate`, `subagent`, `retention`.
+- `Node(id, kind, model='', timeout_s=180.0, payload={})` — kinds: `bash`, `prompt`, `gate`, `subagent`.
 - `Edge(src, dst, when='ok')` — `when` is `ok` (default), `fail`, or `always`.
 - `run(dag, edges, job=..., label=..., initial_ctx={})` — records each node in `.runtime/job_runs.jsonl`.
 - `subagent` nodes accept an opt-in `payload['requires']` post-condition list: each item is a file path that must exist and be non-empty after the node ran, or `{"path": ..., "contains": "<regex>"}` where at least one line must match. Paths may reference ctx like the prompt and resolve against `payload['cwd']`; `contains` regexes are used verbatim (never ctx-formatted, so quantifiers like `{2}` are safe). Exit 0 with unmet requirements fails the node (guards against an unauthenticated subagent silently doing nothing); DAGs without `requires` are unchanged.

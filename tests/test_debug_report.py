@@ -204,7 +204,7 @@ def test_a_retired_job_is_not_re_triaged_from_its_old_runs(
         },
     ))
     job_runs.record_run(JobRun(
-        job="trajectory", label="trajectory:write",
+        job="vault_index", label="Vault index refresh",
         started_at=_ago(hours=2),
         ended_at=_ago(hours=2),
         status="error", error="could not write",

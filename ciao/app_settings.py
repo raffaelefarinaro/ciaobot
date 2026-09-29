@@ -78,7 +78,6 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
 }
 _BOOLEAN_FIELDS = {
     "insights_enabled",
-    "trajectories_enabled",
     "backup_enabled",
     "backup_paused",
 }
@@ -125,7 +124,6 @@ class AppSettings:
     """
 
     insights_enabled: bool = True
-    trajectories_enabled: bool = True
     # Model used by the post-archive memory pass.
     insights_model: str = ""
 
@@ -280,25 +278,9 @@ class AppSettingsStore:
         self._save()
         logger.warning(
             "CIAO_INSIGHTS_DISABLED is no longer read; migrated it to Settings → "
-            "Automations once. Remove it from .env."
+            "General once. Remove it from .env."
         )
         return self.settings.insights_enabled
-
-    def migrate_legacy_trajectories_enabled(
-        self, legacy_disabled: bool | None
-    ) -> bool | None:
-        if legacy_disabled is None:
-            return None
-        if "trajectories_enabled" in self._explicit_fields:
-            return None
-        self.settings.trajectories_enabled = not legacy_disabled
-        self._explicit_fields.add("trajectories_enabled")
-        self._save()
-        logger.warning(
-            "CIAO_TRAJECTORIES_DISABLED is no longer read; migrated it to "
-            "Settings → Automations once. Remove it from .env."
-        )
-        return self.settings.trajectories_enabled
 
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
@@ -324,7 +306,6 @@ class AppSettingsStore:
         d = self._defaults
         s = self.settings
         config.insights_enabled = s.insights_enabled
-        config.trajectories_enabled = s.trajectories_enabled
         config.insights_model_override = s.insights_model or d["insights_model_override"]
         config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default models / thinking / routine models have no

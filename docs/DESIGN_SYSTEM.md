@@ -197,8 +197,8 @@ A transient *working* mark where the work originates, and a persistent
 *needs you* count where its output waits. One without the other either hides
 that anything happened, or hides that something is now pending. Worked
 example — the memory pass and the proposals queue: post-archive work shows a
-transient `tidying` working signal (ChatSignals + `chatIsPostprocessing` in
-the store), and the persistent waiting count is the memory rail badge
+transient memory-insights row on Home while its pass runs
+(`lib/memoryInsights.ts`), and the persistent waiting count is the memory rail badge
 (proposals store counts rendered in `ProjectSidebar.vue`).
 
 **Rule S5 — Counts are real counts.**
@@ -261,7 +261,7 @@ sites), then settings incrementally per tab. Do not big-bang 28 cards.
 `SettingsView.vue` is the largest file in the app: a 2,210-line template and
 2,051 lines of scoped CSS covering seven routed tabs. The routes already exist
 (`/settings/workspaces`, `/settings/models`,
-`/settings/context`, `/settings/skills`, `/settings/automations`), so the tabs
+`/settings/context`, `/settings/skills`), so the tabs
 are separable with no router change — each becomes its own SFC. This is also
 where most of the L1.1 violations live, and splitting makes them visible.
 

@@ -218,37 +218,6 @@ def test_delete_project_allows_manual_project_without_vault_folder(tmp_path: Pat
     assert p.project_id not in pcm._projects
 
 
-@pytest.mark.asyncio
-async def test_archive_postprocess_runs_insights_for_all_chats(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("insights-project", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="insights chat")
-    calls: list[dict] = []
-
-    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
-        calls.append(inputs)
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    pcm.run_archive_postprocess(
-        chat.chat_id,
-        ArchiveOutcome(
-            path=tmp_path / "archive.md",
-            session_id="session-1",
-            turn_count=1,
-            filtered_jsonl="filtered transcript",
-        ),
-        chat,
-        project,
-    )
-    await asyncio.sleep(0)
-
-    assert bool(calls) is True
-
-
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
@@ -456,7 +425,6 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
 
     monkeypatch.setattr(async_reads, "keyed_lock", _recording_keyed_lock)
     monkeypatch.setattr(fts_search, "index_file", _recording_index_file)
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", _noop_pipeline)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
@@ -464,9 +432,7 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
         chat.chat_id,
         ArchiveOutcome(
             path=archive_path,
-            session_id="session-index",
             turn_count=1,
-            filtered_jsonl=None,
         ),
         chat,
         project,
@@ -501,7 +467,6 @@ def test_synchronous_archive_indexing_is_best_effort(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(fts_search, "index_file", _explode)
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", _noop_pipeline)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nbody\n", encoding="utf-8")
@@ -512,14 +477,8 @@ def test_synchronous_archive_indexing_is_best_effort(
         chat.chat_id,
         ArchiveOutcome(
             path=archive_path,
-            session_id="session-best-effort",
             turn_count=1,
-            filtered_jsonl=None,
         ),
         chat,
         project,
     )
-
-
-async def _noop_pipeline(**_kwargs: object) -> None:
-    return None

@@ -214,8 +214,8 @@ describe('ChatLayout', () => {
       local: true,
       last_activity_at: '2026-08-12T11:00:00Z',
       last_read_at: '2026-08-12T11:00:00Z',
-      postprocess: { state: 'running', step: 'trajectory', expected: [], steps: {} },
     }] as unknown as typeof store.chats
+    store.archivingChats = { 'tidy-chat': true }
     store.activeChatId = null
     store.bootstrapped = true
     vi.spyOn(store, 'fetchAll').mockResolvedValue()

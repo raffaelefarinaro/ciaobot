@@ -153,6 +153,12 @@
              so it emits the setup chat's id for this view to open. -->
         <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
 
+        <SettingsInsights
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
+
         <!-- Package update -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
@@ -828,7 +834,6 @@
               <p class="hint">
                 These background tasks use their own model setting, separate from the chat defaults above.
                 "Automatic" keeps the built-in default.
-                System automations without a model picker are tracked on the Automations page.
               </p>
             </div>
 
@@ -836,17 +841,6 @@
               <div class="routine-info">
                 <span class="routine-name">Session insights</span>
                 <span class="routine-detail">Runs the end-of-conversation memory pass when a chat is archived.</span>
-                <div v-if="getJobTelemetry('insights')" class="routine-telemetry">
-                  <span class="badge" :class="getJobBadgeClass('insights')">
-                    {{ getJobStatus('insights') }}
-                  </span>
-                  <span v-if="hasJobLastRun('insights')" class="telemetry-meta">
-                    Last run: {{ getJobLastRunLabel('insights') }} ({{ getJobDuration('insights') }})
-                  </span>
-                  <span v-if="getJobStatus('insights') === 'error' && getJobLastError('insights')" class="telemetry-error" :title="getJobLastError('insights')">
-                    &middot; {{ getJobLastError('insights') }}
-                  </span>
-                </div>
               </div>
               <div class="routine-model-controls">
                 <select
@@ -916,22 +910,6 @@
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
         </template>
-      </template>
-
-      <!-- AUTOMATIONS TAB -->
-      <template v-if="currentTab === 'automations'">
-        <SettingsAutomation
-          :automation-items="automationItems"
-          :automation-loaded="automationLoaded"
-          :automation-error="automationError"
-          :fetch-automation="fetchAutomation"
-          :proposal-outcomes="proposalOutcomes"
-          :notify-saved="notifySaved"
-          :notify-failed="notifyFailed"
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
       </template>
 
       <!-- WORKSPACES TAB -->
@@ -2022,7 +2000,6 @@ import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
-import { formatTime, formatDuration } from '../lib/time'
 import { isApplePlatform } from '../lib/platform'
 import {
   DEFAULT_FONT_SCALE,
@@ -2035,8 +2012,6 @@ import { useModalFocus } from '../composables/useModalFocus'
 import type {
   AgentAssetsResponse,
   ArchivedWorkspace,
-  AutomationPayload,
-  AutomationProcess,
   CommandAsset,
   CommandsResponse,
   CreatedAgentAssetResponse,
@@ -2047,7 +2022,6 @@ import type {
   ModelsResponse,
   ProviderConfigSettings,
   ProviderConnection,
-  ProposalOutcomes,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
@@ -2085,7 +2059,7 @@ import {
 import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
-import SettingsAutomation from './settings/SettingsAutomation.vue'
+import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
@@ -3701,72 +3675,6 @@ async function createAssetViaChat(kind: keyof typeof ASSET_CHAT_PROMPTS) {
 }
 
 
-const automationItems = ref<AutomationProcess[]>([])
-const automationLoaded = ref(false)
-const automationError = ref('')
-const proposalOutcomes = ref<ProposalOutcomes | null>(null)
-
-function getJobTelemetry(job: string): AutomationProcess | undefined {
-  return automationItems.value.find((i) => i.job === job)
-}
-function getTelemetryBadgeClass(status: string | undefined): string {
-  if (status === 'ok') return 'badge--success'
-  if (status === 'error') return 'badge--error'
-  if (status === 'skipped') return 'badge--warn'
-  return 'badge--muted'
-}
-
-function getJobStatus(job: string): string {
-  const item = getJobTelemetry(job)
-  return item?.last_run ? item.last_run.status : 'never run'
-}
-function getJobBadgeClass(job: string): string {
-  const status = getJobTelemetry(job)?.last_run?.status
-  return getTelemetryBadgeClass(status)
-}
-function getJobDuration(job: string): string {
-  const dur = getJobTelemetry(job)?.last_run?.duration_ms
-  return formatDuration(dur) || 'unknown'
-}
-function getJobLastRunLabel(job: string): string {
-  const item = getJobTelemetry(job)
-  return item ? lastRunLabel(item) : ''
-}
-function getJobLastError(job: string): string {
-  const item = getJobTelemetry(job)
-  return item ? lastError(item) : ''
-}
-function hasJobLastRun(job: string): boolean {
-  return !!getJobTelemetry(job)?.last_run
-}
-
-function lastRunLabel(item: AutomationProcess): string {
-  if (!item.last_run) return ''
-  return formatTime(item.last_run.ended_at || item.last_run.started_at)
-}
-function lastError(item: AutomationProcess): string {
-  return item.stats.last_error?.error || ''
-}
-
-async function fetchAutomation() {
-  automationError.value = ''
-  try {
-    const data = await api.get<AutomationPayload | AutomationProcess[]>('/api/automation?include=outcomes')
-    if (Array.isArray(data)) {
-      // An older server ignores the include hint and answers with the bare
-      // job list; the outcomes line simply stays hidden.
-      automationItems.value = data
-    } else {
-      automationItems.value = data.jobs
-      proposalOutcomes.value = data.proposal_outcomes ?? null
-    }
-  } catch (e) {
-    automationError.value = `Failed to load automation: ${errorMessage(e)}`
-  } finally {
-    automationLoaded.value = true
-  }
-}
-
 // ── Workspaces settings (Workspaces tab) ───────────────────────────────────
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
@@ -4146,7 +4054,6 @@ onMounted(async () => {
   })
   fetchAuthSettings()
   fetchRoutines()
-  fetchAutomation()
   fetchPackageStatus()
   fetchUpdateStatus()
   fetchProviderKeys().then(scrollToChatProvidersIfLinked)
@@ -5436,26 +5343,6 @@ a.btn-secondary {
   border-radius: 3px;
   background: var(--bg);
   color: var(--fg);
-}
-.routine-telemetry {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  flex-wrap: wrap;
-}
-.telemetry-meta {
-  color: var(--fg3, var(--fg2));
-}
-.telemetry-error {
-  color: var(--error);
-  font-weight: 500;
-  max-width: 250px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .workspace-root-path {
   display: block;

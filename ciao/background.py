@@ -12,7 +12,7 @@ Shape borrowed from two existing modules:
   (``.runtime/background/state.json``) plus a manager that owns runtime state
   and a janitor task.
 * :mod:`ciao.job_runs` for the recorder side — every finished run is also
-  recorded as a ``background_run`` job so the Automation page shows it, and the
+  recorded as a ``background_run`` job in the run log, and the
   log rotates on the same 2 MB threshold as ``job_runs._trim_if_large``.
 
 Two deliberate divergences from the sketch in issue #282:
@@ -914,7 +914,7 @@ class BackgroundRunner:
         if not self._record_job_runs:
             return
         # "cancelled" is not a failure of the command, so it is recorded as
-        # skipped rather than painting the Automation page red.
+        # skipped rather than as an error run.
         status = {"ok": "ok", "cancelled": "skipped", "error": "error"}.get(run.status, "error")
         started = _parse_iso_utc(run.started_at)
         ended = _parse_iso_utc(run.ended_at)

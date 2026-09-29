@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from ciao.entity_types import EntityTypeRegistry
 
 # Matches the excerpt width os_audit already uses for memory findings, so the
-# Automation page and the audit markdown do not disagree on truncation.
+# two reports do not disagree on truncation.
 EXCERPT_CHARS = 160
 
 # Transcript residue. Each of these says "this entry is a record of something

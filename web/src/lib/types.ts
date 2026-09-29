@@ -242,58 +242,22 @@ export interface ChatInfo {
     state: 'queued' | 'running' | 'done' | 'attention'
     archive_policy: 'when_clean'
   }
-  // What the post-archive pipeline is doing, or did. Present only on archived
-  // chats that ran it. Drives the greyed activity signal and the settled
-  // "here is what was learned from this chat" line.
+  // The memory pass spawned for this archived chat, as recorded on the source
+  // chat (ciao/web/memory_pass.py). Present only on archived chats that queued
+  // one.
   postprocess?: ChatPostprocess | null
 }
 
-/** One stage of the persisted archive-job manifest (ciao/archive_jobs.py). */
-export interface ArchiveJobStep {
-  status: 'ok' | 'error' | 'skipped' | 'blocked' | 'pending' | 'running'
-  reason?: string
-  attempts?: number
-}
-
-/** The postprocess-friendly view of an archive job manifest. */
-export interface ArchiveJobView {
-  job_id: string
-  state: 'running' | 'incomplete' | 'blocked' | 'done' | 'tombstoned'
-  tombstoned?: boolean
-  blocked_reason?: string
-  /** Stages still pending/failed/blocked, in execution order. */
-  unfinished?: string[]
-  steps?: Record<string, ArchiveJobStep>
-  updated_at?: string
-}
-
-/** One step of the post-archive pipeline, as reported by ciao/job_runs.py. */
+/** The memory pass's step on an archived chat's postprocess record. */
 export interface ChatPostprocessStep {
-  // 'queued' | 'running' | 'attention' come from the memory-pass stages; the
-  // one-shot pipeline only ever settles a step to ok/error/skipped.
-  status: 'ok' | 'error' | 'skipped' | 'queued' | 'running' | 'attention'
+  status: 'ok' | 'queued' | 'running' | 'attention'
   extra?: Record<string, unknown>
-  /** Manifest projection: pending/running/blocked/ok/skipped/error. */
-  manifest_status?: ArchiveJobStep['status']
 }
 
 export interface ChatPostprocess {
-  /** 'running' while the pipeline task is alive; 'done' once it settles. */
-  state: 'running' | 'done' | 'incomplete' | 'blocked'
-  /** Job id of the step that is running, or the last one that ran. */
-  step?: string
-  /** Steps that can run for this chat, in execution order. */
-  expected?: string[]
-  /** Outcome per step, keyed by job id. Only finished steps appear. */
+  /** Keyed by step id; only `memory_pass` is written. */
   steps?: Record<string, ChatPostprocessStep>
-  started_at?: string
   updated_at?: string
-  /** Set when a server restart killed the pipeline mid-flight. */
-  interrupted?: boolean
-  /** Persisted manifest view, once the job settles or loads. */
-  job?: ArchiveJobView | null
-  /** Human-readable reason a job is blocked. */
-  blocked_reason?: string
 }
 
 export interface ChatRetryInfo {
@@ -492,7 +456,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, number>; postprocessing?: string[]; restarting?: boolean }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, number>; restarting?: boolean }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
@@ -655,7 +619,6 @@ export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
   insights_model: string
   insights_enabled?: boolean
-  trajectories_enabled?: boolean
 
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
@@ -892,89 +855,6 @@ export interface WorkspaceHealthCheck {
 export interface WorkspaceHealthResponse {
   status: 'ok' | 'warn' | 'error' | string
   checks: WorkspaceHealthCheck[]
-}
-
-// ── Automation status (Settings → Automation) ──────────────────────────────
-
-export interface JobRun {
-  job: string
-  label: string
-  category: 'content' | 'system'
-  started_at: string
-  ended_at: string
-  duration_ms: number
-  status: 'ok' | 'error' | 'skipped'
-  model: string
-  provider: string
-  error: string | null
-  extra: Record<string, unknown>
-}
-
-export interface AutomationStats {
-  total_runs: number
-  success_rate: number | null
-  avg_duration_ms: number
-  last_error: { error: string; ts: string } | null
-}
-
-export interface ProposalOutcomeCounts {
-  promoted: number
-  dismissed: number
-}
-
-// Memory-proposal resolutions (promoted vs dismissed), the honest health
-// measure for the extraction pipeline. Served by GET /api/automation with
-// `?include=outcomes`, next to the job stats it sits beside in Settings →
-// Automation.
-export interface ProposalOutcomes {
-  promoted: number
-  dismissed: number
-  by_workspace: Record<string, ProposalOutcomeCounts>
-  recent_30d: ProposalOutcomeCounts
-}
-
-// GET /api/automation answers `?include=outcomes` with this envelope instead
-// of the bare job list; older servers ignore the hint and still answer with
-// the array.
-export interface AutomationPayload {
-  jobs: AutomationProcess[]
-  proposal_outcomes?: ProposalOutcomes
-}
-
-export interface AutomationProcess {
-  job: string
-  label: string
-  category: 'content' | 'system'
-  description: string
-  // Optional for compatibility with servers upgraded before capability
-  // metadata was added to GET /api/automation.
-  uses_model?: boolean
-  produces_outcome?: boolean
-  // Plain-language "when does this run?", the system schedule that fires it,
-  // and whether it is a one-shot migration. Optional: older servers omit them.
-  trigger?: string
-  schedule_id?: string
-  one_time?: boolean
-  // Bulk/manual variants of this job, reported nested so the page keeps one row
-  // per automation.
-  sub_jobs?: AutomationProcess[]
-  // Steps that run inside this job's task, on this job's trigger, in execution
-  // order. A step is not an automation — it has no trigger of its own — so it is
-  // reported here rather than as a peer row. No job owns one since the archive
-  // pipeline lost its stages in #627, but the shape is kept: a job that grows a
-  // multi-step task again should report it here, not as peer rows.
-  steps?: AutomationProcess[]
-  // Name of the whole pipeline, set only on the job that owns one
-  // ("When you archive a chat"). The job keeps `label` for its own step.
-  pipeline_label?: string
-  // Set on a step: when it is skipped, in the user's terms. A step answers this
-  // instead of "when does this run?", which its pipeline already answers.
-  step_condition?: string
-  // True while this job is inside a tracked run right now.
-  running?: boolean
-  last_run: JobRun | null
-  recent: JobRun[]
-  stats: AutomationStats
 }
 
 /**

@@ -155,9 +155,6 @@ def apply_app_settings_overlay(config: CiaoConfig) -> None:
     store.migrate_legacy_insights_enabled(
         getattr(config, "legacy_insights_disabled", None)
     )
-    store.migrate_legacy_trajectories_enabled(
-        getattr(config, "legacy_trajectories_disabled", None)
-    )
     store.apply_to_config(config)
 
 

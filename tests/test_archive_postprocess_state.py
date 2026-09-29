@@ -1,23 +1,19 @@
-"""Post-archive pipeline visibility.
+"""The memory-pass record an archived chat carries.
 
-Archiving a chat starts one background task that extracts insights, folds the
-project doc, saves a trajectory and files memory proposals. None of that used to
-be visible anywhere in the app. These tests cover the state the PWA reads: what
-is running now, and what an archived chat reports about itself afterwards.
+Archiving a chat queues a memory pass; the pass writes its status onto the
+archived chat's ``postprocess`` record so the PWA can link to it. These tests
+cover what that record looks like after a restart, and the disk half of
+archiving that feeds it.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 from pathlib import Path
 
-from ciao import job_runs as jr
 from ciao.config import CiaoConfig
 from ciao.models import ChatContext
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web import memory_pass
 from ciao.web.chat_service import _restored_postprocess
 from ciao.web.project_chats import ProjectChatManager
 
@@ -44,346 +40,80 @@ def _chat(manager: ProjectChatManager) -> str:
     return manager.create_chat(project.project_id, title="A chat").chat_id
 
 
-# ── Lifecycle ─────────────────────────────────────────────────────────────
-
-
-def test_begin_marks_the_chat_as_being_tidied(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-
-    manager._begin_postprocess(chat_id, ["insights", "trajectory"])
-
-    chat = manager.get_chat(chat_id)
-    assert chat.postprocess["state"] == "running"
-    # The first step is named up front so a surface has something to say
-    # immediately, before any step event has landed.
-    assert chat.postprocess["step"] == "insights"
-    assert chat.postprocess["expected"] == ["insights", "trajectory"]
-    assert manager.postprocessing_chat_ids() == [chat_id]
-
-
-def test_end_settles_the_record_and_persists_it(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-
-    manager._begin_postprocess(chat_id, ["insights"])
-    manager._end_postprocess(chat_id)
-
-    chat = manager.get_chat(chat_id)
-    assert chat.postprocess["state"] == "done"
-    assert chat.postprocess["step"] == ""
-    assert manager.postprocessing_chat_ids() == []
-    # Persisted, because an archived chat opened next month should still be able
-    # to report what was learned from it. The run log rotates; this does not.
-    payload = json.loads(
-        (tmp_path / ".runtime" / "web_projects.json").read_text(encoding="utf-8")
-    )
-    assert payload["chats"][chat_id]["postprocess"]["state"] == "done"
-
-
-def test_step_events_fold_into_the_chat_record(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-    manager.attach_job_runs_publisher()
-    manager._begin_postprocess(chat_id, ["insights", "memory_proposals"])
-
-    with jr.track_sync("insights", "Session insights", extra={"chat_id": chat_id}):
-        assert manager.get_chat(chat_id).postprocess["step"] == "insights"
-    with jr.track_sync(
-        "memory_proposals", "Memory proposals", extra={"chat_id": chat_id}
-    ) as run:
-        run.extra["proposals"] = 3
-
-    steps = manager.get_chat(chat_id).postprocess["steps"]
-    assert steps["insights"]["status"] == "ok"
-    # The count is what the archived chat reports back ("3 memory proposals").
-    assert steps["memory_proposals"]["extra"]["proposals"] == 3
-
-
-def test_a_failed_step_is_recorded_rather_than_swallowed(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-    manager.attach_job_runs_publisher()
-    manager._begin_postprocess(chat_id, ["insights"])
-
-    try:
-        with jr.track_sync("insights", "Session insights", extra={"chat_id": chat_id}):
-            raise RuntimeError("model unavailable")
-    except RuntimeError:
-        pass
-
-    steps = manager.get_chat(chat_id).postprocess["steps"]
-    assert steps["insights"]["status"] == "error"
-
-
-def test_events_for_unknown_chats_are_ignored(tmp_path: Path) -> None:
-    """Most tracked jobs are not per-chat; they must not create phantom state."""
-    manager = _make_manager(tmp_path)
-    manager.attach_job_runs_publisher()
-
-    with jr.track_sync("vault_index", "Vault index refresh", category="system"):
-        pass
-    with jr.track_sync("insights", "Session insights", extra={"chat_id": "ghost"}):
-        pass
-
-    assert manager.postprocessing_chat_ids() == []
-
-
-def test_tracked_postprocess_settles_even_when_the_task_raises(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-    manager._begin_postprocess(chat_id, ["insights"])
-
-    async def failing() -> None:
-        raise RuntimeError("pipeline blew up")
-
-    async def drive() -> None:
-        try:
-            await manager._tracked_postprocess(chat_id, failing())
-        except RuntimeError:
-            pass
-
-    asyncio.run(drive())
-
-    # A crashed pipeline that stayed "running" would pulse forever.
-    assert manager.get_chat(chat_id).postprocess["state"] == "done"
-    assert manager.postprocessing_chat_ids() == []
-
-
 # ── Restore across restarts ───────────────────────────────────────────────
 
 
-def test_a_running_record_is_downgraded_on_load() -> None:
-    """The pipeline is an in-process task: it died with the old process."""
+def test_restore_keeps_only_the_memory_pass_step() -> None:
+    """Records from the trajectory pipeline carry run state nothing reads."""
     restored = _restored_postprocess({
         "state": "running",
-        "step": "insights",
-        "steps": {"insights": {"status": "ok", "extra": {}}},
+        "step": "trajectory",
+        "job": {"state": "incomplete"},
+        "steps": {
+            "trajectory": {"status": "ok", "extra": {}},
+            "memory_pass": {"status": "ok", "extra": {"chat_id": "m1"}},
+        },
+        "updated_at": "2026-09-01T00:00:00Z",
     })
-    assert restored["state"] == "done"
-    assert restored["step"] == ""
-    assert restored["interrupted"] is True
-    # Whatever did land is kept: it is still true and still worth showing.
-    assert restored["steps"]["insights"]["status"] == "ok"
+    assert restored == {
+        "steps": {"memory_pass": {"status": "ok", "extra": {"chat_id": "m1"}}},
+        "updated_at": "2026-09-01T00:00:00Z",
+    }
 
 
-def test_a_settled_record_survives_load_unchanged() -> None:
-    original = {"state": "done", "steps": {"trajectory": {"status": "ok"}}}
-    assert _restored_postprocess(original) == original
-    assert "interrupted" not in _restored_postprocess(original)
+def test_a_record_without_a_memory_pass_loads_as_empty() -> None:
+    assert _restored_postprocess(
+        {"state": "done", "steps": {"trajectory": {"status": "ok"}}}
+    ) == {}
 
 
 def test_missing_or_junk_records_load_as_empty() -> None:
     assert _restored_postprocess(None) == {}
     assert _restored_postprocess({}) == {}
     assert _restored_postprocess("nonsense") == {}
+    assert _restored_postprocess({"steps": "nope"}) == {}
 
 
-def test_archive_inputs_include_opencode_transcripts(tmp_path: Path, monkeypatch) -> None:
+def test_the_memory_pass_record_survives_a_reload(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    record = {"steps": {"memory_pass": {"status": "queued", "extra": {"chat_id": "m1"}}}}
+    manager.get_chat(chat_id).postprocess = dict(record)
+    manager._save()
+
+    reloaded = _make_manager(tmp_path)
+
+    assert reloaded.get_chat(chat_id).postprocess == record
+
+
+# ── Archive inputs ────────────────────────────────────────────────────────
+
+
+def test_archive_inputs_read_the_turn_count_before_archiving(
+    tmp_path: Path, monkeypatch
+) -> None:
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     chat = manager.get_chat(chat_id)
     assert chat is not None
     chat.provider = "opencode"
-    chat.session_id = "opencode-session"
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# archived", encoding="utf-8")
-    providers: list[str] = []
+    calls: list[str] = []
 
     monkeypatch.setattr(
         manager._transcripts,
         "peek_turn_count",
-        lambda _ctx, provider: providers.append(provider) or 1,
-    )
-    monkeypatch.setattr(
-        manager._transcripts,
-        "current_filtered_jsonl",
-        lambda _ctx, provider: providers.append(provider) or "opencode-jsonl",
+        lambda _ctx, provider: calls.append(f"peek:{provider}") or 1,
     )
     monkeypatch.setattr(
         manager._transcripts,
         "archive_session",
-        lambda **_kwargs: archive_path,
+        lambda **_kwargs: calls.append("archive") or archive_path,
     )
 
-    turn_count, filtered_jsonl, result = manager._read_archive_inputs(
-        chat_id,
-        ChatContext.for_web(chat_id),
-        chat,
-        manager._agent_root_for_chat(chat_id),
-    )
+    turn_count, result = manager._read_archive_inputs(ChatContext.for_web(chat_id), chat)
 
     assert turn_count == 1
-    assert filtered_jsonl == "opencode-jsonl"
     assert result == archive_path
-    assert providers == ["opencode", "opencode"]
-
-
-def test_a_restart_mid_pipeline_leaves_no_chat_pulsing(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-    manager._begin_postprocess(chat_id, ["insights"])
-    manager._save()
-
-    reloaded = _make_manager(tmp_path)
-
-    assert reloaded.postprocessing_chat_ids() == []
-    assert reloaded.get_chat(chat_id).postprocess["state"] == "done"
-
-
-# ── retry_insights ───────────────────────────────────────────────────────
-
-
-def test_retry_insights_starts_a_resume_pipeline(tmp_path: Path, monkeypatch) -> None:
-    """A pending trajectory is what a retry is for, and the archive is resolved."""
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-    chat = manager.get_chat(chat_id)
-    assert chat is not None
-    chat.archived = True
-    archive = tmp_path / "archive.md"
-    archive.write_text("# chat\n\nbody\n", encoding="utf-8")
-    chat.archive_path = str(archive.relative_to(tmp_path))
-    manager._save()
-
-    inputs = manager._job_inputs(
-        chat,
-        manager._projects[chat.project_id],
-        session_id="sess-1",
-        filtered_jsonl="line",
-    )
-    manager._new_job_for_chat(chat, inputs)
-
-    called: dict[str, object] = {}
-
-    async def fake_pipeline(job: object, inputs_arg: dict, **kwargs: object) -> object:
-        called.update(inputs_arg)
-        return job
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    async def run() -> str:
-        return manager.retry_insights(chat_id)
-
-    status = asyncio.run(run())
-
-    assert status == "started"
-    # The retry resolves archive_path relative to the workspace root.
-    assert called["archive_path"] == archive
-
-
-def test_retry_insights_refuses_non_archived_and_missing(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-
-    assert manager.retry_insights(chat_id) == "not_archived"
-
-    chat = manager.get_chat(chat_id)
-    assert chat is not None
-    chat.archived = True
-    chat.archive_path = ""
-    assert manager.retry_insights(chat_id) == "no_archive"
-
-
-def test_retry_insights_is_noop_when_pipeline_already_running(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-    chat = manager.get_chat(chat_id)
-    assert chat is not None
-    chat.archived = True
-    chat.archive_path = "archive.md"
-    manager._begin_postprocess(chat_id, ["insights"])
-
-    assert manager.retry_insights(chat_id) == "running"
-
-
-def test_retry_insights_reports_complete_when_only_insights_are_settled(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """A settled trajectory is "complete": there is nothing left to resume."""
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-    chat = manager.get_chat(chat_id)
-    assert chat is not None
-    chat.archived = True
-    archive = tmp_path / "archive.md"
-    archive.write_text(
-        "# chat\n\n<!-- ciao:session-insights -->\n## Session insights\n\n- existing\n",
-        encoding="utf-8",
-    )
-    chat.archive_path = str(archive.relative_to(tmp_path))
-
-    started: list[dict] = []
-
-    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> object:
-        started.append(inputs)
-        return job
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    async def run() -> str:
-        return manager.retry_insights(chat_id)
-
-    status = asyncio.run(run())
-
-    # The archive carries no session payload, so the trajectory can never run:
-    # a retry has nothing to launch and says so instead of firing an empty task.
-    assert status == "complete"
-    assert not started
-
-
-def test_retry_resets_an_exhausted_trajectory(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """An exhausted stage must be reset, or a user retry is a silent no-op.
-
-    `resumable()` is empty once the automatic budget is spent, so an old guard
-    that reset only on a non-empty `resumable()` returned "complete" here and
-    the user could never retry the stage the budget gave up on.
-    """
-    from ciao import archive_jobs as aj
-
-    manager = _make_manager(tmp_path)
-    chat_id = _chat(manager)
-    chat = manager.get_chat(chat_id)
-    assert chat is not None
-    chat.archived = True
-    archive = tmp_path / "archive.md"
-    archive.write_text("# chat\n\nbody\n", encoding="utf-8")
-    chat.archive_path = str(archive.relative_to(tmp_path))
-
-    inputs = manager._job_inputs(
-        chat,
-        manager._projects[chat.project_id],
-        session_id="sess-1",
-        filtered_jsonl="line",
-    )
-    job = manager._new_job_for_chat(chat, inputs)
-    for _ in range(aj.MAX_AUTO_ATTEMPTS):
-        job.mark("trajectory", aj.RUNNING)
-        job.mark("trajectory", aj.FAILED, "boom")
-    # An automatic resume leaves an exhausted stage alone.
-    assert job.resumable() == []
-    assert job.unfinished()
-
-    launched: list[object] = []
-
-    async def fake_pipeline(job_arg: object, inputs_arg: dict, **kwargs: object) -> object:
-        launched.append(job_arg)
-        return job_arg
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    async def run() -> str:
-        return manager.retry_insights(chat_id)
-
-    status = asyncio.run(run())
-
-    assert status == "started"
-    assert launched
-    reloaded = aj.load_job(manager._runtime_root, job.job_id)
-    assert reloaded is not None
-    assert reloaded.status_of("trajectory") == aj.PENDING
-    assert reloaded.stage("trajectory").attempts == 0
+    assert calls == ["peek:opencode", "archive"]

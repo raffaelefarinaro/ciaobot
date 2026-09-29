@@ -113,13 +113,6 @@ def test_capsule_unattended_guidance_defers_approval_requiring_work() -> None:
     assert "Defer and report" in text
 
 
-def test_insights_extractor_and_capsule_share_one_marker() -> None:
-    """The marker cannot diverge between the capsule and the extractor again."""
-    from ciao import insights
-
-    assert insights._UNATTENDED_MARKER == mp.UNATTENDED_MARKER
-
-
 def test_capsule_renders_the_shared_guidance_verbatim() -> None:
     capsule = build_context_capsule(prompt="hi", workspace="work", unattended=True)
     assert mp.UNATTENDED_CAPSULE_GUIDANCE in capsule
