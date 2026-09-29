@@ -686,6 +686,45 @@ Cover changes in `tests/test_async_vault_reads.py`, which pins the heartbeat,
 bounded-concurrency, no-cross-thread-SQLite, cancellation and recovery
 contracts and reports p50/p95 heartbeat latency before and after.
 
+### Update tasks: state, applicability and the freshness window
+
+`ciao/update_task_catalog.py` holds the task *definitions*; `ciao/update_tasks.py`
+(#756) holds where a task's progress is remembered and whether it applies. The
+state document is `{"schema": 1, "tasks": {"<id>@<revision>": {...}}}`, in
+`<vault>/Workspace/Update-Tasks.json` for a `scope: "workspace"` task and
+`<runtime>/update-tasks.json` for a `scope: "install"` one. `Workspace/Update-Tasks.json`
+is in `vault_index.RESERVED_UNINDEXED_FILES` — a guard rather than a fix for a
+live leak, since every consumer of that set reads markdown only today, so no
+index or lint consumer can treat the file as a note. Reading a record and writing
+the one that replaces it is one `keyed_lock` section (a read outside it drops a
+concurrent `chat_id`/`attempted_fingerprint` with no error), and a write refuses
+to build on a state document it could not read.
+
+Adding a task means adding its detector name to
+`update_task_catalog.DETECTORS` **and** an implementation to
+`update_tasks.DETECTOR_FUNCTIONS`, plus the same pair for its
+`completion_check`. A name with no implementation resolves to `unknown` (and
+loads as a `not_implemented` warning), which is why no task ships without one:
+the three applicability states are `applicable` and `not_applicable` — both
+positive claims, each requiring a detector that ran and returned evidence — and
+`unknown` for an absent or failing detector, a detector returning something that
+is not a `Detection`, and a state file that exists but cannot be read. Never make
+a failure path return `applicable`, and never let a cached answer answer for a
+state file the install cannot read.
+
+`APPLICABILITY_TTL_S` (300s) is a named constant, not an env var and not a
+Settings option: it is how long a detector answer may be reused, not a decision
+an operator has asked to make. The window is **per task**, not per scope, and both
+its token and its age are checked per answer: a task recomputed never extends
+another task's window, and no answer is reused under a change token it was not
+computed for. The state file is re-read on every call (so a dismissal takes effect
+immediately) and an unreadable one is never served from the cache; a caller that
+knows the workspace changed passes a different `change_token` to invalidate at
+once. Answers whose reason is in `UNCACHEABLE_REASONS` (a detector that raised, a
+detector that returned the wrong shape, an unreadable state file) are not cached
+at all. Change the constant or the token contract and update the tests that pin
+them, and see `tests/test_update_tasks.py`.
+
 ## Change guidelines
 
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `AGENTS.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.

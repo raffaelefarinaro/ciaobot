@@ -99,11 +99,12 @@ def is_generated_vault_file(name: str) -> bool:
 ARCHIVED_WORKSPACES_DIR = ".archived-workspaces"
 EXCLUDED_PATH_PARTS: set[str] = {".vault-trash", ARCHIVED_WORKSPACES_DIR}
 
-# Vault bookkeeping the memory pipeline itself writes (casefolded names).
+# Vault bookkeeping the app itself writes (casefolded names). Mostly the memory
+# pipeline's own files; `Update-Tasks.json` is the update-task state store.
 # Indexing them made the proposals queue and the curation logs rank above real
-# notes for ordinary recall queries — the memory system's paperwork must never
-# compete with the memories it manages. Matched only directly under a
-# `Workspace/` directory — where the pipeline writes them — so a user's own
+# notes for ordinary recall queries — the system's paperwork must never compete
+# with the memories it manages. Matched only directly under a
+# `Workspace/` directory — where the app writes them — so a user's own
 # note that happens to share a name (`projects/team/Weekly-Review-Log.md`)
 # stays searchable. Shared with `fts_search` so the two cannot drift.
 #
@@ -118,18 +119,29 @@ RESERVED_UNINDEXED_FILES = frozenset(
         "curation-log.md",
         "weekly-review-log.md",
         "vault-review.md",
+        # The update-task state store (`ciao/update_tasks.py`): a per-workspace
+        # record of which "After this update" tasks were offered, dismissed or
+        # completed. A guard, not a fix for a live leak: every consumer of this
+        # set reads markdown only today (`fts_search._index_directory`'s `.md`
+        # default, `fts_search.index_file`, `vault_index`'s `rglob("*.md")`,
+        # `vault_lint._markdown_source_paths`), so nothing here can reach a
+        # `.json` file. It is listed because that is where the vault's own
+        # bookkeeping belongs, and because the day a consumer widens to
+        # non-markdown files this name has to be in the set already rather than
+        # becoming an index row and a recall hit.
+        "update-tasks.json",
         "note-checks.json",
     }
 )
 
 
 def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
-    """True for the memory pipeline's own files, exactly where it writes them.
+    """True for the app's own vault bookkeeping, exactly where it writes it.
 
-    ``rel_to_root`` is the path relative to the vault root. The pipeline only
-    ever writes these files at ``<vault>/Workspace/<name>``, so the match is
-    exact: a user's note under any other directory that happens to be named
-    ``workspace`` (``projects/acme/workspace/Curation-Log.md``) stays indexed.
+    ``rel_to_root`` is the path relative to the vault root. These files are only
+    ever written at ``<vault>/Workspace/<name>``, so the match is exact: a user's
+    note under any other directory that happens to be named ``workspace``
+    (``projects/acme/workspace/Curation-Log.md``) stays indexed.
     """
     return (
         len(rel_to_root.parts) in {2, 3}
