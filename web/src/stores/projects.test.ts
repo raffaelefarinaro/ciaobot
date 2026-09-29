@@ -3464,6 +3464,70 @@ describe('memoryInsightRows', () => {
     const row = store.memoryInsightRows.find(r => r.passChatId === 'blocked')
     expect(row).toMatchObject({ phase: 'needsYou', blocking: true, question: 'Which project?' })
   })
+
+  // Archiving a chat spawns a pass, and the pass ends as an ordinary turn, so
+  // it announced itself as one: a "Memory pass · <title>" toast at whoever
+  // archived. The server already refuses the OS push for a pass
+  // (`_schedule_push`); the in-app toast had no such guard.
+  test('a finished memory pass does not toast the owner', () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [passChat()] as unknown as typeof store.chats
+    // The archived source closed the pane it was archived from, so nothing is
+    // focused: the exact state the toast used to fire in.
+    store.activeChatId = null
+
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const resultReady = (chatId: string, title: string) =>
+      sock.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_result_ready',
+          chat_id: chatId,
+          project_id: 'p-mem',
+          title,
+          snippet: 'Stamped the pricing note.',
+        }),
+      })
+
+    resultReady('pass-1', 'Memory pass · Deck figures')
+    expect(store.toasts).toHaveLength(0)
+
+    // An ordinary chat in the same state still notifies, or the guard is
+    // swallowing real results too.
+    store.chats = [
+      { chat_id: 'plain', project_id: 'p1', title: 'Pricing rework', archived: false, local: true, created_at: '', last_activity_at: '' },
+    ] as unknown as typeof store.chats
+    resultReady('plain', 'Pricing rework')
+    expect(store.toasts.map(t => t.title)).toEqual(['Pricing rework'])
+  })
+
+  test('a pass title alone does not suppress a real result', () => {
+    // A user project may legitimately be called "Memory", and a user may
+    // retitle anything. Only the helper kind is a discriminator.
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'c-mem', project_id: 'p1', title: 'Memory pass · my own notes', archived: false, local: true, created_at: '', last_activity_at: '' },
+    ] as unknown as typeof store.chats
+    store.activeChatId = null
+
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_result_ready',
+        chat_id: 'c-mem',
+        project_id: 'p1',
+        title: 'Memory pass · my own notes',
+        snippet: 'done',
+      }),
+    })
+
+    expect(store.toasts.map(t => t.title)).toEqual(['Memory pass · my own notes'])
+  })
 })
 
 describe('chat_streaming_done clears stale streaming for inactive chats', () => {

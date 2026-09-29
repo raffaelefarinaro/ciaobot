@@ -3960,7 +3960,16 @@ export const useProjectStore = defineStore('projects', () => {
             }
           }
           // In-app toast for the document-visible-but-different-chat case.
-          if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+          // A memory pass is the app updating its own memory, not a
+          // conversation the owner started, and the server already refuses its
+          // OS push (`_schedule_push`). Toasting here is what made archiving a
+          // chat pop a "Memory pass · <title>" notification. A pass reports
+          // itself on Home's memory-insight row and on the archived source's
+          // `postprocess` record; only `attention` — blocked on the owner —
+          // earns an interruption anywhere. Keyed on the helper, not the
+          // title: a user project may legitimately be called "Memory".
+          if (!isMemoryPassChat(resultChat)
+            && typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
               chat_id: msg.chat_id,
               title: msg.title || 'ciaobot',
