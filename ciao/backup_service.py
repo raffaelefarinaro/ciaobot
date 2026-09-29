@@ -302,19 +302,62 @@ def _scope_summary(config) -> str:
     workspace adds, the trailing slash) is dropped, and a vault that *is* the
     data root — whose scope is everything under it — is named as such instead
     of being listed among the trees it already contains.
+
+    A file carved out of a refused directory is named by its whole path
+    (``.runtime/schedules.json``), because that is the pathspec the commit gets
+    and collapsing it to a directory name would read as a claim the scope does
+    not make. The matching ``ineligible`` entry then says ``.runtime/*``, so
+    the two surfaces agree about which part of that directory is refused
+    (#734) — a status page that called the whole of ``.runtime`` excluded while
+    committing a file inside it would be confidently wrong.
     """
     prefixes = backup_scope.eligible_relpaths(config)
     if _WHOLE_ROOT_PREFIX in prefixes:
         return _WHOLE_ROOT_NAME
     names: list[str] = []
     for prefix in prefixes:
+        if prefix in backup_scope.ALLOWED_FILES:
+            # Rendered below, whole: the directory loop would name its parent.
+            continue
         segments = [part for part in prefix.split("/") if part and part != "*"]
         durable = next((s for s in segments if s in backup_scope.DURABLE_ROOTS), None)
         if durable is None:
             durable = segments[0]
         if durable not in names:
             names.append(durable)
-    return ", ".join(names)
+    names.extend(name for name in backup_scope.ALLOWED_FILES if name in prefixes)
+    line = ", ".join(names)
+    missing = _missing_bare_roots(config, prefixes)
+    if not missing:
+        return line
+    return f"{line}; not a top-level {' or '.join(f'{name}/' for name in missing)} folder"
+
+
+def _missing_bare_roots(config, prefixes: tuple[str, ...]) -> list[str]:
+    """The durable roots with no top-level prefix in this install's scope.
+
+    A root reaches the top of the data root only when the data root *is* an
+    agent root — which the default shared-vault layout is, and the per-workspace
+    layout is not. Where one does not, a bare ``commands/`` there is refused
+    while ``personal/commands/`` is not, and the status has to say which is
+    which rather than list a scope the owner will find empty (#734).
+
+    Deliberate, not an omission: widening the base to the data root would put a
+    developer checkout's application source in scope, and the answer for an
+    install keeping its catalog at the root is a workspace subfolder.
+
+    The vault is excluded from the comparison because it is a scope base by
+    provenance wherever it sits: its directory name is the operator's choice
+    (``CIAO_VAULT_ROOT``), so the install that keeps its notes in ``brain``
+    must not be told its notes are out of scope.
+    """
+    vault_name = Path(config.vault_root).name
+    top_level = {prefix.rstrip("/") for prefix in prefixes if "/" not in prefix.rstrip("/")}
+    return [
+        root
+        for root in backup_scope.DURABLE_ROOTS
+        if root != vault_name and root not in top_level
+    ]
 
 
 def _gap_count(report: dict) -> int:
@@ -1206,9 +1249,24 @@ Then:
    and connect it as `origin`, over the authentication they already have.
 3. Configure the scope and the ignore rules. Everything under "backed up" is
    durable and belongs in the repository; everything under "never backed up"
-   does not, and must not reach the remote. Check the already-tracked paths
-   that fall outside the scope (`git ls-files` will list them) and tell the
-   user which ones you would untrack rather than untracking them silently.
+   does not, and must not reach the remote. A glob such as `.runtime/*` under
+   "never backed up" covers every file in that directory except
+   `.runtime/schedules.json`, which is listed under "backed up": the two lines
+   are one rule read from either side, and that file belongs to exactly one of
+   them. To write it, do not ignore the directory itself — git cannot re-include
+   a file inside an ignored directory, so a `.runtime/` line would win over any
+   negation and the automations would be dropped. Ignore every runtime
+   directory's contents, at any depth, and negate the one root file back, in
+   that order:
+     **/.runtime/*
+     !/.runtime/schedules.json
+   The leading `**` matters: a pattern containing a slash is anchored to the
+   repository root, so `client/.runtime/` and `a/b/.runtime/` would stop being
+   ignored — and those hold credentials. The negation is pinned to the root
+   for the mirror-image reason, so a nested `sub/.runtime/schedules.json`
+   stays ignored. Check the already-tracked paths that fall outside the scope
+   (`git ls-files` will list them) and tell the user which ones you would
+   untrack rather than untracking them silently.
 4. Before you commit or push anything, check the two things that fail quietly
    on a machine nobody has set git up on: that this repository has a committer
    identity (`git config user.name` and `git config user.email` — set them if

@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao import backup_service, job_runs, local_session
+from ciao import backup_scope, backup_service, job_runs, local_session
 from ciao.app_settings import AppSettingsStore
 from ciao.backup_service import (
     BACKOFF_MULTIPLIER,
@@ -43,9 +43,10 @@ from ciao.backup_service import (
     BackupService,
     sanitize_remote,
 )
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, reset_reroot_cache
 from ciao.git_proc import GIT_TIMEOUT_DETAIL
 from ciao.legacy_node_state import LegacyNodeState
+from ciao.workspace_reroot import mark_born_per_root
 
 
 # ── a temporary install ──────────────────────────────────────────────────────
@@ -334,6 +335,120 @@ async def test_a_credential_in_the_scope_stops_the_run_before_it_stages(
     assert world.remote_head() == before
     assert _git(world.workspace, "status", "--porcelain") != ""
     assert status.last_success_at == ""
+
+
+# ── the automation store inside the scope (#734) ─────────────────────────────
+#
+# `.runtime/schedules.json` is the one file carved out of a refused directory:
+# it is the durable store every automation is read from and written back to,
+# prompts included, and the product is built to restore it from git. A carve-out
+# of a directory that exists because it holds credentials is only defensible if
+# it does not become a way to commit one, so both halves are pinned here — the
+# run that commits the store, and the run a token in a schedule prompt stops.
+
+
+def _schedules(world: _World, payload: str) -> Path:
+    return _write(world.workspace / ".runtime" / "schedules.json", payload)
+
+
+async def test_the_automation_store_is_committed_and_pushed(tmp_path: Path) -> None:
+    world = _world(tmp_path)
+    service = _service(world)
+    _schedules(world, json.dumps({"schedules": [{"name": "weekly", "prompt": "summarise"}]}))
+
+    status = await service.run_backup()
+
+    assert status.state == backup_service.STATE_READY, status.reason
+    assert world.commit_paths() == [".runtime/schedules.json"]
+    assert world.remote_head() == world.head()
+
+
+async def test_a_credential_in_the_automation_store_stops_the_run_before_it_stages(
+    tmp_path: Path,
+) -> None:
+    """The check the carve-out has to pass, and the reason it is safe.
+
+    A schedule prompt is free text an operator or an agent writes, and a header
+    pasted into one looks exactly like a note that happens to contain a token.
+    The preflight scans every eligible path rather than the durable trees, so
+    being eligible is what subjects the store to the scan, not an exemption
+    from it — and the run stops before it stages anything, so the token is
+    never written into a commit that the next `git add` could carry to the
+    remote.
+    """
+    world = _world(tmp_path)
+    service = _service(world)
+    _schedules(
+        world,
+        json.dumps(
+            {"schedules": [{"name": "weekly", "prompt": "use sk-" + "a" * 48 + " please"}]}
+        ),
+    )
+    before = world.head()
+
+    status = await service.run_backup()
+
+    assert status.state == backup_service.STATE_NEEDS_ATTENTION
+    assert "OpenAI API key" in status.reason
+    assert world.head() == before
+    assert world.remote_head() == before
+    assert _git(world.workspace, "status", "--porcelain") != ""
+    assert status.last_success_at == ""
+
+
+async def test_the_rest_of_the_runtime_root_is_still_refused(tmp_path: Path) -> None:
+    """The carve-out is one file, and the preflight report is where that shows:
+    the other `.runtime` paths are reported as pending work this run will not
+    commit, beside the one it will."""
+    world = _world(tmp_path)
+    service = _service(world)
+    _schedules(world, json.dumps({"schedules": []}))
+    _write(world.workspace / ".runtime" / "custom_providers.json", "{}")
+    _write(world.workspace / ".runtime" / "node_state.json", "{}")
+
+    report = await local_session.preflight_scoped(world.config, world.workspace)
+
+    assert report["eligible"] == [".runtime/schedules.json"]
+    assert sorted(report["excluded"]) == [
+        ".runtime/custom_providers.json",
+        ".runtime/node_state.json",
+    ]
+    assert report["ok"] is True
+
+
+async def test_a_data_repo_that_ignores_the_runtime_root_does_not_back_it_up(
+    tmp_path: Path,
+) -> None:
+    """What the carve-out does *not* reach, pinned so the limit is a fact.
+
+    ``ciao setup`` writes ``.runtime/`` into a fresh workspace's ``.gitignore``
+    (``cli._WORKSPACE_GITIGNORE_ENTRIES``), and a repository that ignores a
+    file never reports it: ``git status --porcelain`` does not list it, so the
+    preflight never sees it at all. On such an install the carve-out changes
+    nothing — the automations are still not backed up, and unlike an
+    ignored-but-pending path there is not even a coverage gap to report,
+    because there is no pending work to report as uncovered.
+
+    The remedy belongs to the operator's own ignore rules (negate
+    ``.runtime/schedules.json`` back out, as the issue's reporter has) rather
+    than to the scope: the scope says what *may* be committed, and git decides
+    what *can* be. Changing the scaffold is a separate decision, because
+    ``.gitignore`` also governs the manual sync path's blanket ``git add -A``.
+    """
+    world = _world(tmp_path)
+    _write(world.workspace / ".gitignore", ".runtime/\n")
+    _git(world.workspace, "add", "-A")
+    _git(world.workspace, "commit", "-q", "-m", "gitignore")
+    _schedules(world, json.dumps({"schedules": [{"name": "weekly"}]}))
+
+    # The scope is what changed: the file is eligible, on a repository that
+    # never offers it up.
+    assert backup_scope.is_eligible(".runtime/schedules.json", world.config) is True
+    report = await local_session.preflight_scoped(world.config, world.workspace)
+    assert ".runtime/schedules.json" not in report["eligible"]
+    assert _git(world.workspace, "status", "--porcelain", "--ignored").splitlines() == [
+        "!! .runtime/"
+    ]
 
 
 # ── the coverage gap ─────────────────────────────────────────────────────────
@@ -1067,12 +1182,54 @@ async def test_the_status_reports_the_scope_and_the_interval(tmp_path: Path) -> 
     assert status.enabled is True
     # The scope is rendered from the scope itself, so it cannot describe
     # something other than what `commit_scoped` enforces: the durable trees, the
-    # workspace guide, and the container holding archived agent roots.
+    # workspace guide, the container holding archived agent roots, and the one
+    # file carved out of a refused directory (#734).
     assert status.scope == (
-        "memory-vault, skills, subagents, commands, .archived-workspaces, AGENTS.md"
+        "memory-vault, skills, subagents, commands, .archived-workspaces, AGENTS.md, "
+        ".runtime/schedules.json"
     )
     assert status.remote.endswith("origin.git")
     assert status.as_dict()["state"] == backup_service.STATE_READY
+
+
+async def test_the_scope_says_bare_top_level_roots_are_not_covered(
+    tmp_path: Path,
+) -> None:
+    """#734, decision 1: the base set is unchanged, so the status has to say so.
+
+    On the per-workspace layout the agent assets live one directory per
+    workspace, so a bare ``commands/`` or ``skills/`` at the top of the data
+    root is refused while ``personal/commands/`` is not. A scope line that names
+    the trees without saying that leaves the owner looking for a ``commands/``
+    they have and not finding it in a backup.
+    """
+    workspace = tmp_path / "install"
+    (workspace / ".runtime").mkdir(parents=True)
+    (workspace / "personal" / "memory-vault").mkdir(parents=True)
+    _git(workspace, "init", "-q", "-b", "main")
+    mark_born_per_root(workspace, workspace / ".runtime", ["personal"])
+    reset_reroot_cache()
+    world = _World(
+        workspace,
+        CiaoConfig(
+            pwa_auth_token="t",
+            workspace_root=workspace,
+            state_path=workspace / ".runtime" / "state.json",
+            media_root=workspace / ".runtime" / "media",
+            vault_root=workspace / "memory-vault",
+        ),
+        None,
+    )
+
+    status = await _service(world).status()
+
+    assert "not a top-level skills/ or subagents/ or commands/ folder" in status.scope
+    # The trees that *are* covered are still named, so the note narrows the
+    # scope rather than replacing it.
+    assert "memory-vault" in status.scope
+    # The default shared-vault layout has the data root itself as an agent root,
+    # so a bare `commands/` there is in scope and the note would be a lie.
+    assert "not a top-level" not in (await _service(_world(tmp_path / "shared")).status()).scope
 
 
 def test_a_remote_is_never_reported_with_a_credential_in_it() -> None:
@@ -1206,6 +1363,48 @@ def test_the_setup_prompt_names_this_install(tmp_path: Path) -> None:
     # The scope is rendered from the scope itself, so the prompt names the
     # exact paths the unattended commit would take.
     assert "memory-vault/" in prompt
+    # ...including the one file carved out of a refused directory, whose
+    # matching "never backed up" entry is a glob rather than the bare directory
+    # (#734). A prompt that said the whole of `.runtime` was excluded while
+    # listing a file inside it as in scope would send the agent the other way.
+    assert ".runtime/schedules.json" in prompt
+    never = next(
+        line for line in prompt.splitlines() if line.startswith("  never backed up:")
+    )
+    assert ".runtime/*," in never
+    assert ".runtime/," not in never
+
+
+def test_the_prompt_does_not_put_one_path_in_both_lists(tmp_path: Path) -> None:
+    """The prompt tells an agent to configure ignore rules, so its two lists
+    have to be able to be written down without contradiction.
+
+    It first says everything under "never backed up" must not reach the remote,
+    and then explains the runtime glob — which, read the way it was first
+    written, covered a file the same prompt lists under "backed up". An agent
+    resolving that by ignoring the directory wholesale would untrack the
+    automations (#734). The step now states the exception, gives the two rules
+    in the order git honours them, and says why the glob is `**`-prefixed: a
+    pattern with a slash is anchored to the repository root, so the
+    root-anchored spelling silently stopped ignoring `client/.runtime/` — a
+    directory holding credentials, which the manual sync path stages whole.
+    """
+    world = _world_in(tmp_path / "ciao install")
+    prompt = backup_service.render_setup_prompt(world.config)
+
+    # Step 3 is where the agent is told to write the ignore rules, so it is the
+    # step whose two halves have to agree. Rejoined first: the prose is wrapped
+    # for a terminal, and a claim that only holds on one line break is not a
+    # claim the prompt makes.
+    step = " ".join(prompt.split("\n3. ", 1)[1].split("\n4. ", 1)[0].split())
+    assert "except `.runtime/schedules.json`" in step
+    assert "including" not in step
+    # The re-include has to come after the glob it overrides, or git ignores
+    # both; and the glob has to be depth-spanning, or nested runtime
+    # directories stop being ignored.
+    assert step.index("**/.runtime/*") < step.index("!/.runtime/schedules.json")
+    assert "git cannot re-include a file inside an ignored directory" in step
+    assert "anchored to the repository root" in step
 
 
 def test_a_folder_with_spaces_stays_one_path(tmp_path: Path) -> None:
