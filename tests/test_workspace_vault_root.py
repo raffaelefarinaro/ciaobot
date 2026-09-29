@@ -213,21 +213,6 @@ def test_primary_workspace_prefers_personal_then_falls_back(tmp_path: Path) -> N
     assert _config(tmp_path, {"research": "research", "family": "family"}).primary_workspace() == "research"
 
 
-def test_legacy_entity_owner_is_the_workspace_that_owns_the_global_vault(
-    tmp_path: Path,
-) -> None:
-    config = _config(
-        tmp_path,
-        {
-            "research": "memory-vault",
-            "personal": "memory-vault/personal",
-        },
-    )
-
-    assert config.primary_workspace() == "personal"
-    assert config.legacy_entity_workspace() == "research"
-
-
 def test_upgrade_notice_reports_a_vault_left_outside_the_vault_root(tmp_path: Path) -> None:
     """The install tells the operator, instead of a release note hoping they read it."""
     from ciao.os_audit import audit_upgrade_notices

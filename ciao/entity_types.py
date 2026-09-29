@@ -3,7 +3,7 @@
 The kinds of notes the agent keeps were hardcoded in six places that had to be
 edited in step: ``vault_index``'s ``DIR_TYPE_MAP`` / ``CANONICAL_TYPES`` /
 ``TYPE_ALIASES``, ``config``'s ``_WORKSPACE_EVIDENCE_DIRS``,
-``context.entity_tagger._CATEGORY_PARTS``, ``vault_lint``'s orphan-candidate
+``vault_lint``'s orphan-candidate
 folders and ``memory_audit``'s ``STALE_NOTE_THRESHOLDS_DAYS``. Nothing showed
 the user that list, and adding a category was an edit in five modules with no
 schema to fill in.
@@ -67,10 +67,9 @@ is the record *of* the thing — a person, a project, a place, an idea, a
 resource — and a note otherwise, including a product, a feature or an
 automation, whose note describes the thing rather than being it.
 
-**Three views are not fully derivable**, because the wire format they feed
+**Two views are not fully derivable**, because the wire format they feed
 predates this file and must not change. They are stock-only and documented at
-their definitions: :data:`_LEGACY_DIR_TYPE_MAP`, :data:`_ORPHAN_EXTRA_DIRS` and
-:data:`_CATEGORY_PART_FOLDERS`.
+their definitions: :data:`_LEGACY_DIR_TYPE_MAP` and :data:`_ORPHAN_EXTRA_DIRS`.
 
 ``config._WORKSPACE_EVIDENCE_DIRS`` is the one consumer that asks for the
 **stock** registry rather than a vault's, and that is structural rather than a
@@ -143,23 +142,6 @@ _LEGACY_DIR_TYPE_MAP: dict[str, str] = {"active": "project", "completed": "proje
 # derived from the entries, so the two extras are spelled out here.
 _ORPHAN_EXTRA_DIRS: frozenset[str] = frozenset({"projects", "references"})
 
-# The folders an ``INDEX.md`` bullet may name, in both cases. This is the wire
-# format of ``context.entity_tagger``: a bullet carries the folder as the indexer
-# wrote it, and the tagger maps that part back to a category. Deriving it from
-# every entry's folder would silently widen the tagger to the lower-case folders
-# (``products``, ``references``, …) and change what an ``INDEX.md`` line resolves
-# to, so the set is fixed here and a new category does not join it without a
-# decision.
-_CATEGORY_PART_FOLDERS: tuple[str, ...] = (
-    "People",
-    "Projects",
-    "Places",
-    "Ideas",
-    "Resources",
-    "Documents",
-    "Workspace",
-)
-
 
 class EntityTypeFileError(ValueError):
     """A category file that cannot be trusted.
@@ -221,7 +203,6 @@ class EntityTypeRegistry:
         "_aliases",
         "_by_id",
         "_canonical_types",
-        "_category_parts",
         "_dir_type_map",
         "_entries",
         "_entity_folders",
@@ -256,11 +237,6 @@ class EntityTypeRegistry:
             if entry.stale_after_days > 0
         }
         self._orphan_dirs: frozenset[str] = frozenset(self._entity_folders) | _ORPHAN_EXTRA_DIRS
-        self._category_parts: dict[str, str] = {
-            case: folder
-            for folder in _CATEGORY_PART_FOLDERS
-            for case in (folder, folder.lower())
-        }
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -319,17 +295,6 @@ class EntityTypeRegistry:
         list this is exactly the set ``vault_lint`` lints against.
         """
         return self._orphan_dirs
-
-    def category_parts(self) -> dict[str, str]:
-        """``INDEX.md`` path part -> category label, in the case variants.
-
-        With the stock list this is exactly
-        ``context.entity_tagger._CATEGORY_PARTS``. Built from
-        :data:`_CATEGORY_PART_FOLDERS` rather than from the entries: it is the
-        tagger's wire format, and a new category must not silently change which
-        ``INDEX.md`` lines resolve to a category.
-        """
-        return self._category_parts
 
 
 def _read_stock() -> list[EntityType]:

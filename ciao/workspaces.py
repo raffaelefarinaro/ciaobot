@@ -94,8 +94,7 @@ def vault_root_owner(config: Any, target: Path) -> str | None:
     workspace can read and rewrite the other workspace's data.
 
     One nesting is legitimate: the shared vault root itself. On installs where
-    setup pointed a workspace at ``CIAO_VAULT_ROOT`` (see
-    ``CiaoConfig.legacy_entity_workspace``) every standard per-workspace folder
+    setup pointed a workspace at ``CIAO_VAULT_ROOT`` every standard per-workspace folder
     lives inside that workspace's vault by design, so counting it as a conflict
     would refuse every new workspace on those installs.
     """

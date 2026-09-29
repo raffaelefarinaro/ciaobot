@@ -393,8 +393,7 @@ def test_plan_refuses_when_the_shared_vault_root_has_multiple_owners(tmp_path: P
 
     Classifying loose top-level entries as one workspace's own content would
     hand every one of them to whichever workspace is relocated first,
-    stranding the other — CiaoConfig.legacy_entity_workspace treats this same
-    shape as ambiguous, and plan() must refuse it too rather than guess.
+    stranding the other, so plan() must refuse rather than guess.
     """
     install = _git_install(tmp_path)
     vault_root = install / "memory-vault"

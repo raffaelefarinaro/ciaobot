@@ -234,8 +234,7 @@ def plan(config: Any, workspace: str) -> RelocationPlan:
     # folders and vault-wide shared state.
 
     # A legacy install can have MORE THAN ONE workspace pinned to the shared
-    # vault root itself (CiaoConfig.legacy_entity_workspace treats this as
-    # ambiguous ownership too). Classifying loose entries as "this
+    # vault root itself. Classifying loose entries as "this
     # workspace's own content" would hand every one of them to whichever
     # workspace is relocated first, stranding the other owner(s) — so this
     # refuses rather than guessing who owns what.
