@@ -1,0 +1,681 @@
+"""Contract tests for the idempotent update-task launch API (#761).
+
+What is proved here is the part no shipped task can prove yet: ``ciao/stock/
+update-tasks/catalog.json`` is ``[]`` (the first real task is #729-E), so a
+catalog is injected through ``update_task_catalog.packaged_root`` — the same seam
+``tests/test_update_tasks.py`` uses — and the launch is driven against a *fake*
+manager. No real chat store, no engine, no vault, no model: the fake records
+``create_chat``/``start_stream`` and nothing else, which is also how "no model
+call in the launch path" is checked — a launch that reached for anything else
+would have to go through the manager this stands in for.
+
+The idempotency cases are the ones the plan names, one test each: a first start,
+a second start (the double click, the second tab, the retry after a dropped
+response), a restart (the record re-read from disk, nothing in process), a
+deleted chat, a new revision, and the routes.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from ciao import async_reads, update_task_catalog, update_tasks
+from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.update_task_catalog import CATALOG_FILENAME, UpdateTask
+from ciao.web import chat_service, update_task_launch
+from ciao.web.routes_api import dismiss_update_task
+from ciao.web.routes_api import list_update_tasks
+from ciao.web.routes_api import reopen_update_task
+from ciao.web.routes_api import start_update_task
+from ciao.web.update_task_launch import UPDATE_TASK_KIND
+from ciao.web.update_task_launch import launch_task as launch
+
+DETECTOR = "has-legacy-rows"
+CHECK = "no-legacy-rows"
+VERSION = "1.2.0"
+WORKSPACE = "personal"
+PROMPT_R1 = "# Review the legacy rows\n\nOne at a time.\n"
+PROMPT_R2 = "# Review the legacy rows\n\nRewritten instructions.\n"
+
+
+# ── Fakes ────────────────────────────────────────────────────────────────────
+
+
+class _Project:
+    def __init__(self, project_id: str, name: str, workspace: str) -> None:
+        self.project_id = project_id
+        self.name = name
+        self.workspace = workspace
+
+    @property
+    def is_auto(self) -> bool:
+        # The same rule `ProjectInfo.is_auto` uses, so a fake project answers
+        # the same question a real one does.
+        return self.name == "General" or self.name == "Claude Code CLI"
+
+
+class _Chat:
+    def __init__(self, chat_id: str, project_id: str, title: str, helper: Any) -> None:
+        self.chat_id = chat_id
+        self.project_id = project_id
+        self.title = title
+        self.helper = helper
+        self.archived = False
+
+
+class _FakePCM:
+    """The chat manager, as far as a launch touches it — and no further.
+
+    Records every call, so a test can assert the *number* of chats created and
+    the exact prompt dispatched. ``fail_stream`` makes the dispatch raise, which
+    is the one recoverable half-failure a launch has to survive.
+    """
+
+    def __init__(self, workspace: str = WORKSPACE, *, with_general: bool = True) -> None:
+        self.projects: list[_Project] = (
+            [_Project("proj-general", "General", workspace)] if with_general else []
+        )
+        self.chats: dict[str, _Chat] = {}
+        self.created: list[_Chat] = []
+        self.dispatched: list[tuple[str, str]] = []
+        self.fail_stream = False
+
+    def list_projects(self, workspace: str | None = None) -> list[_Project]:
+        return [p for p in self.projects if not workspace or p.workspace == workspace]
+
+    def create_project(self, name: str, workspace: str) -> _Project:
+        project = _Project(f"proj-{name.lower()}", name, workspace)
+        self.projects.append(project)
+        return project
+
+    def create_chat(
+        self, project_id: str, title: str = "New Chat", helper: dict | None = None
+    ) -> _Chat:
+        # The real manager validates the helper on the way in; the fake does too,
+        # so a helper the store would reject cannot pass a launch test.
+        chat = _Chat(
+            f"chat-{len(self.created) + 1}",
+            project_id,
+            title,
+            chat_service._normalize_chat_helper(helper),
+        )
+        self.chats[chat.chat_id] = chat
+        self.created.append(chat)
+        return chat
+
+    def get_chat(self, chat_id: str) -> _Chat | None:
+        return self.chats.get(chat_id)
+
+    def delete_chat(self, chat_id: str) -> None:
+        self.chats.pop(chat_id, None)
+
+    def start_stream(self, chat_id: str, prompt: str) -> None:
+        if self.fail_stream:
+            raise RuntimeError("the bridge is down")
+        self.dispatched.append((chat_id, prompt))
+
+
+# ── Fixtures ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def clean_caches() -> Iterator[None]:
+    """The applicability cache and the read executor are process-wide."""
+    update_tasks.clear_applicability_cache()
+    yield
+    update_tasks.clear_applicability_cache()
+    async_reads.reset_vault_read_executor()
+
+
+def _config(tmp_path: Path) -> CiaoConfig:
+    return CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            WORKSPACE: WorkspaceConfig(
+                name=WORKSPACE, vault_root=f"memory-vault/{WORKSPACE}"
+            )
+        },
+    )
+
+
+def _row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "id": "review-legacy-rows",
+        "revision": 1,
+        "since_version": "1.0.0",
+        "scope": "workspace",
+        "title": "Review legacy rows",
+        "why": "Older entries need a decision before they can be indexed.",
+        "detector": DETECTOR,
+        "completion_check": CHECK,
+        "prompt_resource": "prompts/review-legacy-rows-1.md",
+        "depends_on": [],
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.fixture
+def packaged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A packaged catalog root holding one workspace-scoped task.
+
+    ``packaged_root`` is the seam, so ``load_catalog()`` and ``read_prompt()``
+    are the real functions reading a real file — the path an installed wheel
+    runs. The returned ``publish`` swaps in another revision mid-test, which is
+    how an engine update is modelled.
+    """
+    root = tmp_path / "packaged"
+    (root / "prompts").mkdir(parents=True)
+    monkeypatch.setattr(update_task_catalog, "packaged_root", lambda: root)
+    monkeypatch.setattr(update_task_catalog, "DETECTORS", frozenset({DETECTOR}))
+    monkeypatch.setattr(update_task_catalog, "COMPLETION_CHECKS", frozenset({CHECK}))
+
+    def publish(revision: int = 1, **overrides: Any) -> None:
+        overrides.setdefault(
+            "prompt_resource", f"prompts/review-legacy-rows-{revision}.md"
+        )
+        (root / CATALOG_FILENAME).write_text(
+            json.dumps([_row(revision=revision, **overrides)]), encoding="utf-8"
+        )
+        (root / "prompts" / f"review-legacy-rows-{revision}.md").write_text(
+            PROMPT_R1 if revision == 1 else PROMPT_R2, encoding="utf-8"
+        )
+
+    publish()
+    return publish
+
+
+def _launch(
+    tmp_path: Path, pcm: Any, task_id: str = "review-legacy-rows", **kw: Any
+) -> dict[str, Any]:
+    return launch(
+        task_id,
+        config=_config(tmp_path),
+        pcm=pcm,
+        workspace=kw.pop("workspace", WORKSPACE),
+        installed_version=kw.pop("installed_version", VERSION),
+        **kw,
+    )
+
+
+def _task(revision: int = 1) -> UpdateTask:
+    """The task as the catalog defines it, addressed by revision."""
+    return UpdateTask(
+        **_row(revision=revision, prompt_resource=f"prompts/review-legacy-rows-{revision}.md")
+    )
+
+
+def _state(tmp_path: Path, revision: int = 1) -> Any:
+    """The record as the store reads it back from disk — a restart, in effect."""
+    return update_tasks.read_task_state(
+        _task(revision), config=_config(tmp_path), workspace=WORKSPACE
+    )
+
+
+# ── The first start ──────────────────────────────────────────────────────────
+
+
+def test_first_start_creates_one_chat_with_the_packaged_prompt(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """One chat, the packaged prompt, a stamped record, and no second turn.
+
+    The launch service takes no prompt argument at all, so "the prompt is the
+    packaged one" is asserted the only way it can be: what reached
+    ``start_stream`` is the file ``read_prompt`` returns, and the digest in the
+    record and in the helper is that prompt's.
+    """
+    pcm = _FakePCM()
+    digest = update_task_launch.prompt_digest(PROMPT_R1)
+
+    outcome = _launch(tmp_path, pcm)
+
+    assert len(pcm.created) == 1
+    chat = pcm.created[0]
+    assert outcome["chat_id"] == chat.chat_id
+    assert outcome["resumed"] is False
+    assert outcome["created"] is True
+    # Hosted in the workspace's own General project, titled by the task.
+    assert chat.project_id == "proj-general"
+    assert chat.title == "Review legacy rows"
+    # The helper the store kept is the launch's own, recognised rather than
+    # dropped: this is what makes the chat findable after a restart.
+    assert chat.helper == {
+        "kind": UPDATE_TASK_KIND,
+        "task_id": "review-legacy-rows",
+        "revision": 1,
+        "scope": "workspace",
+        "prompt_digest": digest,
+    }
+    assert pcm.dispatched == [(chat.chat_id, PROMPT_R1)]
+
+    state = _state(tmp_path)
+    assert state.lifecycle == "in_progress"
+    assert state.chat_id == chat.chat_id
+    assert state.prompt_digest == digest
+    assert state.attempted_fingerprint
+    assert state.evidence == {"actor": "operator"}
+
+
+def test_launch_refuses_what_it_cannot_run(tmp_path: Path, packaged: Any) -> None:
+    """An unknown id, an unsupported id, a nameless workspace: a refusal each.
+
+    All three are ``ValueError`` because all three are the caller's problem, not
+    a fault: there is no task to start, this engine cannot run it, or there is
+    nowhere to put its chat. An install-scoped task refuses in its own words —
+    its *state* needs no workspace, so the one it cannot name is the host of its
+    chat.
+    """
+    pcm = _FakePCM()
+    with pytest.raises(ValueError, match="unknown update task"):
+        _launch(tmp_path, pcm, task_id="no-such-task")
+    with pytest.raises(ValueError, match="needs engine"):
+        _launch(tmp_path, pcm, installed_version="0.9.0")
+    with pytest.raises(ValueError, match="workspace-scoped"):
+        _launch(tmp_path, pcm, workspace="")
+    with pytest.raises(ValueError, match="chat manager is not running"):
+        _launch(tmp_path, None)
+    packaged(scope="install")
+    with pytest.raises(ValueError, match="install-scoped"):
+        _launch(tmp_path, pcm, workspace="")
+    assert pcm.created == [], "a refused launch creates nothing"
+
+
+# ── Idempotency ──────────────────────────────────────────────────────────────
+
+
+def test_second_start_resumes_the_same_chat(tmp_path: Path, packaged: Any) -> None:
+    """A double click, a second tab and a retry all get the one chat back.
+
+    The second start reads the record rather than any in-process state, so this
+    holds across a lost response, a second device and a restart — all of which
+    are the same call twice. The assertions that matter are the counts: one
+    chat, and one dispatch, however many times Start is pressed.
+    """
+    pcm = _FakePCM()
+    first = _launch(tmp_path, pcm)
+    second = _launch(tmp_path, pcm)
+    third = _launch(tmp_path, pcm)
+
+    assert len(pcm.created) == 1
+    assert len(pcm.dispatched) == 1, "the packaged prompt ran once, not three times"
+    assert first["chat_id"] == second["chat_id"] == third["chat_id"]
+    assert first["resumed"] is False
+    assert second["resumed"] is third["resumed"] is True
+    # `resume_task` is the same read without the create, and it is what a
+    # client asking "open the work" rather than "start it" uses.
+    resumed = update_task_launch.resume_task(
+        "review-legacy-rows",
+        config=_config(tmp_path),
+        pcm=pcm,
+        workspace=WORKSPACE,
+        installed_version=VERSION,
+    )
+    assert resumed["chat_id"] == first["chat_id"]
+    assert resumed["resumed"] is True
+
+
+def test_concurrent_starts_create_exactly_one_chat(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """The race the lock exists for: four starts at once, one chat.
+
+    A double click and two tabs are the same thing on the wire, and neither is a
+    polite caller. Every thread enters the launch at the same moment, so the
+    only thing separating them is the state file's own write lock: the thread
+    that gets it stamps the record, and the three that wait behind it find a
+    live chat where they expected none.
+    """
+    pcm = _FakePCM()
+    config = _config(tmp_path)
+    threads = 4
+    start = threading.Barrier(threads)
+    results: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            start.wait(timeout=10)
+            results.append(
+                launch(
+                    "review-legacy-rows",
+                    config=config,
+                    pcm=pcm,
+                    workspace=WORKSPACE,
+                    installed_version=VERSION,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
+            errors.append(exc)
+
+    workers = [threading.Thread(target=run) for _ in range(threads)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=20)
+
+    assert errors == []
+    assert len(results) == threads
+    assert len(pcm.created) == 1, "one chat, however many buttons were pressed"
+    assert len(pcm.dispatched) == 1, "the packaged prompt ran once"
+    assert {outcome["chat_id"] for outcome in results} == {pcm.created[0].chat_id}
+    assert sum(1 for outcome in results if outcome["resumed"]) == threads - 1
+
+
+def test_a_restart_still_resumes(tmp_path: Path, packaged: Any) -> None:
+    """A fresh manager and a fresh config, the same chat back: the state is it.
+
+    Nothing about a launch may live in the process. The second call here builds
+    its own config object and its own manager, so the only thing that can answer
+    it is the record on disk.
+    """
+    first = _launch(tmp_path, _FakePCM())
+    rebuilt = _FakePCM()
+    # A manager that has to be told about the chat, the way a restarted engine
+    # reloads it from its own state file.
+    rebuilt.chats[first["chat_id"]] = _Chat(
+        first["chat_id"],
+        "proj-general",
+        "Review legacy rows",
+        {"kind": UPDATE_TASK_KIND},
+    )
+    outcome = _launch(tmp_path, rebuilt)
+
+    assert outcome["chat_id"] == first["chat_id"]
+    assert outcome["resumed"] is True
+    assert rebuilt.created == []
+    assert rebuilt.dispatched == [], "a resume sends nothing into the chat"
+
+
+def test_a_deleted_chat_is_recoverable(tmp_path: Path, packaged: Any) -> None:
+    """A stamped record whose chat is gone gets a fresh one, not a dead end.
+
+    The operator deleted the chat, so the record is stale. Starting again must
+    create a new chat and re-stamp the record to it — otherwise the task is
+    offered forever with an id nobody can open, which is the failure a durable
+    binding was supposed to prevent.
+    """
+    pcm = _FakePCM()
+    first = _launch(tmp_path, pcm)
+    pcm.delete_chat(first["chat_id"])
+
+    second = _launch(tmp_path, pcm)
+
+    assert len(pcm.created) == 2
+    assert second["chat_id"] != first["chat_id"]
+    assert second["resumed"] is False
+    assert _state(tmp_path).chat_id == second["chat_id"]
+    assert [chat_id for chat_id, _ in pcm.dispatched] == [
+        first["chat_id"],
+        second["chat_id"],
+    ], "the new chat got the prompt; the deleted one is not touched again"
+
+
+def test_a_new_revision_does_not_reuse_the_old_chat(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """Revision 2 launches its own chat and leaves revision 1's alone.
+
+    A record is keyed by ``"<id>@<revision>"``, so a launch of the revised task
+    does not even see the record the old one wrote: it cannot resume, and it must
+    not. Substituting new instructions into a chat that is already running the
+    old ones is the substitution this rule exists to prevent.
+    """
+    pcm = _FakePCM()
+    first = _launch(tmp_path, pcm)
+    packaged(2)
+
+    second = _launch(tmp_path, pcm)
+
+    assert len(pcm.created) == 2
+    assert second["resumed"] is False
+    assert second["chat_id"] != first["chat_id"]
+    assert second["revision"] == 2
+    assert second["prompt_digest"] != first["prompt_digest"]
+    # The old record is untouched, not overwritten, and each revision's chat got
+    # exactly one dispatch of its own prompt.
+    assert _state(tmp_path, revision=1).chat_id == first["chat_id"]
+    assert _state(tmp_path, revision=2).chat_id == second["chat_id"]
+    assert [prompt for _, prompt in pcm.dispatched] == [PROMPT_R1, PROMPT_R2]
+
+
+def test_a_failed_dispatch_keeps_the_chat_and_names_it(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """A dispatch that raises is recoverable, and says which chat to open.
+
+    The record is written before the turn starts, so a failure cannot orphan the
+    chat: the error carries its id, the record marks the attempt ``failed``, and
+    the next start resumes that same chat instead of doing the work twice.
+    """
+    pcm = _FakePCM()
+    pcm.fail_stream = True
+    with pytest.raises(update_task_launch.UpdateTaskLaunchError) as raised:
+        _launch(tmp_path, pcm)
+    assert raised.value.chat_id == pcm.created[0].chat_id
+
+    state = _state(tmp_path)
+    assert state.chat_id == raised.value.chat_id
+    assert state.lifecycle == "failed"
+
+    pcm.fail_stream = False
+    resumed = _launch(tmp_path, pcm)
+    assert resumed["chat_id"] == raised.value.chat_id
+    assert resumed["resumed"] is True
+    assert len(pcm.created) == 1
+
+
+# ── Dismiss, reopen and the check ────────────────────────────────────────────
+
+
+def test_dismiss_and_reopen_route_through_update_tasks(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """The two decisions are ``update_tasks``' to record, and they round-trip.
+
+    A dismissal suppresses the offer at this revision only and keeps the chat the
+    task was in; a reopen clears the attempt fingerprint and puts it back. Both
+    go through the ``update_tasks`` recorders, so a card and a direct call cannot
+    produce two different records for the same decision.
+    """
+    config = _config(tmp_path)
+    chat_id = _launch(tmp_path, _FakePCM())["chat_id"]
+
+    dismissed = update_task_launch.dismiss_task(
+        "review-legacy-rows",
+        config=config,
+        workspace=WORKSPACE,
+        installed_version=VERSION,
+        reason="looked at them",
+    )
+    assert dismissed["lifecycle"] == "dismissed"
+    state = update_tasks.read_task_state(_task(), config=config, workspace=WORKSPACE)
+    assert state is not None
+    assert state.lifecycle == "dismissed"
+    assert state.chat_id == chat_id, "a dismissal does not lose the chat"
+    assert state.evidence == {"dismiss_reason": "looked at them"}
+
+    reopened = update_task_launch.reopen_task(
+        "review-legacy-rows",
+        config=config,
+        workspace=WORKSPACE,
+        installed_version=VERSION,
+    )
+    assert reopened["lifecycle"] == "offered"
+    after = update_tasks.read_task_state(_task(), config=config, workspace=WORKSPACE)
+    assert after is not None
+    assert after.lifecycle == "offered"
+    assert after.chat_id == chat_id
+    assert after.attempted_fingerprint == ""
+
+
+def test_record_check_proves_nothing_without_a_registered_check(
+    tmp_path: Path, packaged: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launch is not completion, and a check nobody implemented proves nothing.
+
+    The check name is registered — so the catalog row loads — but has no
+    implementation, so the wrapper reports ``None`` rather than marking the task
+    done. This is the rule that keeps "the chat was opened" from ever reading as
+    "the work was finished".
+    """
+    monkeypatch.setattr(update_tasks, "COMPLETION_FUNCTIONS", {})
+    assert (
+        update_task_launch.record_check(
+            "review-legacy-rows",
+            config=_config(tmp_path),
+            workspace=WORKSPACE,
+            installed_version=VERSION,
+        )
+        is None
+    )
+
+
+# ── The routes ───────────────────────────────────────────────────────────────
+
+
+def _client(config: CiaoConfig, pcm: _FakePCM) -> TestClient:
+    app = Starlette(
+        routes=[
+            Route("/api/update-tasks", list_update_tasks, methods=["GET"]),
+            Route("/api/update-tasks/{task_id}/start", start_update_task, methods=["POST"]),
+            Route(
+                "/api/update-tasks/{task_id}/dismiss", dismiss_update_task, methods=["POST"]
+            ),
+            Route(
+                "/api/update-tasks/{task_id}/reopen", reopen_update_task, methods=["POST"]
+            ),
+        ]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = pcm
+    return TestClient(app)
+
+
+def test_get_lists_tasks_with_their_state(tmp_path: Path, packaged: Any) -> None:
+    """The list is a detector pass, and a row says everything a card needs."""
+    client = _client(_config(tmp_path), _FakePCM())
+    listed = client.get(f"/api/update-tasks?workspace={WORKSPACE}")
+    assert listed.status_code == 200
+    body = listed.json()
+    rows = body["tasks"]
+    assert [row["id"] for row in rows] == ["review-legacy-rows"]
+    row = rows[0]
+    assert row["revision"] == 1
+    assert row["scope"] == "workspace"
+    assert row["title"] == "Review legacy rows"
+    assert row["why"]
+    # No detector is registered for this name, so applicability is `unknown` and
+    # nothing is offered. The row is still listed — a caller has to be able to
+    # see *why* a task it knows about is not being asked for — and the payload
+    # says so in words rather than with an empty list.
+    assert row["applicability"] == "unknown"
+    assert row["offered"] is False
+    assert row["status"] == "offered"
+    assert row["chat_id"] == ""
+    assert body["coverage_gap"]["reason"] == "not_substantiated"
+
+    # A missing workspace is a bad request, not a guess at one.
+    assert client.get("/api/update-tasks").status_code == 400
+
+
+def test_start_route_answers_the_housekeeping_envelope(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """POST start replies in the envelope, resumes, and re-lists the tasks."""
+    pcm = _FakePCM()
+    client = _client(_config(tmp_path), pcm)
+    url = f"/api/update-tasks/review-legacy-rows/start?workspace={WORKSPACE}"
+
+    first = client.post(url)
+    assert first.status_code == 200
+    body = first.json()
+    assert body["ok"] is True
+    assert body["resumed"] is False
+    assert body["chat_id"] == pcm.created[0].chat_id
+    assert body["result"]["prompt_digest"] == update_task_launch.prompt_digest(PROMPT_R1)
+    # The fresh list travels with the reply, so the client cannot render a card
+    # for a task whose state this very call just changed.
+    listed = {row["id"]: row for row in body["tasks"]}
+    assert listed["review-legacy-rows"]["status"] == "in_progress"
+    assert listed["review-legacy-rows"]["chat_id"] == body["chat_id"]
+
+    again = client.post(url).json()
+    assert again["resumed"] is True
+    assert again["chat_id"] == body["chat_id"]
+    assert len(pcm.created) == 1
+
+    dismissed = client.post(
+        f"/api/update-tasks/review-legacy-rows/dismiss?workspace={WORKSPACE}",
+        json={"reason": "not now"},
+    )
+    assert dismissed.status_code == 200
+    assert dismissed.json()["ok"] is True
+    assert dismissed.json()["result"]["lifecycle"] == "dismissed"
+    reopened = client.post(f"/api/update-tasks/review-legacy-rows/reopen?workspace={WORKSPACE}")
+    assert reopened.json()["result"]["lifecycle"] == "offered"
+
+
+def test_unknown_task_id_is_409_not_500(tmp_path: Path, packaged: Any) -> None:
+    """Every state-changing route refuses an unknown id the same way."""
+    client = _client(_config(tmp_path), _FakePCM())
+    for verb in ("start", "dismiss", "reopen"):
+        resp = client.post(f"/api/update-tasks/no-such-task/{verb}?workspace={WORKSPACE}")
+        assert resp.status_code == 409, verb
+        assert resp.json()["ok"] is False
+        assert resp.json()["error"]
+
+
+# ── The helper shape, against the store that validates it ────────────────────
+
+
+def test_update_task_helper_survives_the_store_normalizer(packaged: Any) -> None:
+    """The launch's helper and the store's validator are the same shape.
+
+    Written out rather than imported, because the point is that changing one
+    side without the other fails here: the digest is this module's function, the
+    rest is the literal dict a launched chat carries.
+    """
+    helper = {
+        "kind": UPDATE_TASK_KIND,
+        "task_id": "review-legacy-rows",
+        "revision": 1,
+        "scope": "workspace",
+        "prompt_digest": update_task_launch.prompt_digest(PROMPT_R1),
+    }
+    assert chat_service._normalize_chat_helper(helper) == helper
+
+
+def test_real_app_registers_the_update_task_routes() -> None:
+    """Every update-task route must exist in the real app.py route table.
+
+    A route registered nowhere does not exist however well it is unit-tested.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    app_source = (repo / "ciao" / "web" / "app.py").read_text(encoding="utf-8")
+    assert 'Route("/api/update-tasks", list_update_tasks, methods=["GET"])' in app_source
+    assert (
+        'Route("/api/update-tasks/{task_id}/start", start_update_task, methods=["POST"])'
+        in app_source
+    )
+    assert (
+        'Route("/api/update-tasks/{task_id}/dismiss", dismiss_update_task, methods=["POST"])'
+        in app_source
+    )
+    assert (
+        'Route("/api/update-tasks/{task_id}/reopen", reopen_update_task, methods=["POST"])'
+        in app_source
+    )

@@ -122,6 +122,10 @@ from ciao.web.routes_api import (
     list_housekeeping,
     run_housekeeping_action,
     dismiss_housekeeping_action,
+    list_update_tasks,
+    start_update_task,
+    dismiss_update_task,
+    reopen_update_task,
     list_schedules,
     list_workspaces,
     project_chats,
@@ -332,6 +336,14 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/housekeeping", list_housekeeping, methods=["GET"]),
         Route("/api/housekeeping/{action_id}/run", run_housekeeping_action, methods=["POST"]),
         Route("/api/housekeeping/{action_id}/dismiss", dismiss_housekeeping_action, methods=["POST"]),
+        # "After this update" tasks: the offered list, and the one idempotent
+        # launch that turns a task into a chat with the packaged prompt in it.
+        # Session-protected like every other /api route; not loopback-only,
+        # because a second device is exactly the race the idempotency is for.
+        Route("/api/update-tasks", list_update_tasks, methods=["GET"]),
+        Route("/api/update-tasks/{task_id}/start", start_update_task, methods=["POST"]),
+        Route("/api/update-tasks/{task_id}/dismiss", dismiss_update_task, methods=["POST"]),
+        Route("/api/update-tasks/{task_id}/reopen", reopen_update_task, methods=["POST"]),
         Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
         Route("/api/agent-assets/subagents/{name}", update_subagent_endpoint, methods=["PATCH"]),
         Route("/api/agent-assets/subagents/{name}", delete_subagent_endpoint, methods=["DELETE"]),

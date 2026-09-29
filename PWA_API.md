@@ -92,6 +92,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/housekeeping` | List the home-screen operator actions (detector pass; each carries `run_label`, `chat_label`, `chat_prompt`) |
 | POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
 | POST | `/api/housekeeping/{action_id}/dismiss` | Record a "not now" for an ask-style action (e.g. the GitHub star nudge), re-run detection, and return the fresh action list; unknown id is 404 |
+| GET | `/api/update-tasks` | The "After this update" tasks this engine version supports for `?workspace=`, one row per task: `id`, `revision`, `scope`, `title`, `why`, `since_version`, `status` (the recorded lifecycle — `offered` when there is no record yet — through `dismissed`), `applicability` (`applicable`/`not_applicable`/`unknown`), `offered`, `suppressed`, and the `chat_id`/`prompt_digest`/`attempted_fingerprint`/`updated_at` of its last attempt. `coverage_gap` is present only when nothing is being offered, and says which of `no_eligible_task`/`not_substantiated`/`nothing_offered` applies. `?workspace=` is required (400 otherwise): applicability and state are per workspace. No `change_token`, so applicability falls back to the freshness window; the state file is still read on every call, so a dismissal or a launch shows up at once |
+| POST | `/api/update-tasks/{task_id}/start` | Start this task's chat with the **packaged** prompt for its revision, or hand back the chat the last start created. `{ok, task_id, chat_id, resumed, result, tasks}`; `resumed: false` means this call created the chat and dispatched the prompt, `true` means nothing was created and nothing was sent (double click, second tab, retry, restart — all the same call twice). 409 for a refused task (unknown id, one this engine version cannot support, no `?workspace=`, no chat manager), 500 with the `chat_id` when the chat exists but the turn could not be dispatched — which is recoverable: the next start resumes that same chat |
+| POST | `/api/update-tasks/{task_id}/dismiss` | Record "not this one" for this task at this revision (optional `{"reason": "..."}` body, kept as the record's evidence), suppressing the offer at this revision only and keeping the chat it was in. `{ok, task_id, result, tasks}`; 409 for a refused task |
+| POST | `/api/update-tasks/{task_id}/reopen` | Undo that dismissal at this revision and re-offer the task. `{ok, task_id, result, tasks}`; only `dismissed` is reopened, so an offered or in-flight task succeeds and writes nothing. 409 for a refused task |
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, stale_after_days, enabled, builtin, note_count}`. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, a negative `stale_after_days`, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
@@ -316,6 +320,35 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/housek
 # Record a "not now" for an ask-style action (e.g. the GitHub star nudge). The
 # response re-runs detection and returns the fresh action list.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/housekeeping/github-star/dismiss"
+```
+
+**Update tasks (the "After this update" catalog)**
+
+```bash
+# List the tasks this engine supports for a workspace, with their state. Each row
+# carries its lifecycle (`status`), the applicability answer behind it, and the
+# chat a previous start created — so a caller never has to remember a chat id.
+# `?workspace=` is required.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/update-tasks?workspace=personal"
+
+# Start a task. Idempotent per (task, revision): press it twice and you get the
+# SAME chat back with `"resumed": true`, and the packaged prompt runs once. There
+# is no prompt field — the instructions are read from the packaged catalog on the
+# server, and the response's `prompt_digest` is what they hash to. 409 means the
+# task was refused (unknown id, or one this engine version cannot support).
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/start?workspace=personal"
+
+# Decline this task at this revision. Suppresses the offer at this revision only;
+# a later revision is new work and is offered again. `reason` is optional.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/dismiss?workspace=personal" \
+  -H 'content-type: application/json' \
+  -d '{"reason":"reviewed them by hand"}'
+
+# Undo that dismissal and put the task back on offer.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/reopen?workspace=personal"
 ```
 
 **Projects**

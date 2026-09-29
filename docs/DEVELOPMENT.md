@@ -725,6 +725,58 @@ detector that returned the wrong shape, an unreadable state file) are not cached
 at all. Change the constant or the token contract and update the tests that pin
 them, and see `tests/test_update_tasks.py`.
 
+### Update tasks: the launch
+
+`ciao/web/update_task_launch.py` (#761) is the only thing that turns a task into
+a chat. Two rules, and both are the reason it is a server module rather than
+browser code:
+
+- **The prompt is server-owned.** It is read from the packaged
+  `prompt_resource` with `read_prompt`, and no parameter accepts prompt text from
+  a caller — a chat launched for "review the legacy rows" that is told to do
+  something else is worse than no chat, because the record says the task ran.
+  What travels instead is `prompt_digest = sha256(prompt)[:16]`, carried in the
+  record and in the chat's helper, so a reader can tell whether the instructions
+  changed without shipping them twice.
+- **Start is idempotent per `(task id, revision)`.** The whole launch runs inside
+  `update_tasks._record_lock` — the same read-and-replace section the recorders
+  use, and deliberately the same one, because a chat id written outside it is
+  lost with no error. Inside it: read the record, and if it already names a chat
+  that still exists, return it with `resumed: true` and create nothing. A record
+  naming a chat that is gone is the recoverable case, not a failure: a fresh chat
+  is created and the record re-stamped, so a deleted chat never leaves a task
+  permanently pointing at an id nobody can open. Records are keyed
+  `"<id>@<revision>"`, which is why a revised task cannot resume, or even see,
+  the previous revision's chat — an engine update never substitutes new
+  instructions into a running chat.
+
+Two ordering rules fall out of that, and both are load-bearing. The record is
+written **before** the turn is dispatched, so a process that dies between minting
+the chat and stamping the record cannot orphan it; a dispatch that raises raises
+`UpdateTaskLaunchError` (which carries the `chat_id`), marks the attempt
+`failed`, and the next start resumes that same chat instead of doing the work
+twice. And `start_stream` creates an asyncio task, so `launch_task` is called
+**on the event loop**, not through `asyncio.to_thread` like the vault-scanning
+routes — the same split `proposal_implement` documents for
+`accept_skill_proposal`.
+
+A launched chat carries `helper = {"kind": "update_task", "task_id", "revision",
+"scope", "prompt_digest"}`, validated fail-closed by
+`chat_service._normalize_chat_helper` next to the `memory_pass` and `proposal`
+kinds. That helper is the only record of which task a chat is for, so the
+launcher builds it and the store re-checks it; if you change one, change the
+other in the same commit — `tests/test_update_task_launch.py` pins them against
+each other, and `tests/test_memory_pass.py` pins the fail-closed cases.
+
+The launch path runs no detector, no completion check, no model, no `eval`, no
+shell and no remote fetch. Applicability is a separate, TTL-cached answer
+(`update_tasks.evaluate`) that `GET /api/update-tasks` reports and a start does
+not re-ask for: a start is a decision the operator already made.
+`dismiss_task`/`reopen_task`/`record_check` are thin wrappers over the
+`update_tasks` recorders, so the card and a direct API call cannot produce two
+records for one decision. See `tests/test_update_task_launch.py` for the
+idempotency cases, each driven against a fake manager over a temp packaged root.
+
 ## Change guidelines
 
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `AGENTS.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.

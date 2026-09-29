@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable
 # Imported lazily inside the handlers (see `_housekeeping_context`); only
 # the annotations need the name at module scope.
 if TYPE_CHECKING:
-    from ciao import operator_actions
+    from ciao import operator_actions, update_tasks
 
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
@@ -8362,6 +8362,274 @@ async def dismiss_housekeeping_action(request: Request) -> JSONResponse:
             "result": result,
             "summary": summary,
             "actions": [action.as_dict() for action in actions],
+        }
+    )
+
+
+# ── Update tasks: the offered list, and the launch that starts one ───────────
+
+#: The actor stamped on an attempt this API started. The service's own default
+#: is ``operator`` (a decision somebody made); a call that arrived over HTTP is
+#: a client, and the state file — which travels between machines and is the only
+#: place that claim survives a restart — is where the difference is worth
+#: recording.
+ACTOR_PWA = "pwa"
+
+
+def _update_task_workspace(request: Request) -> str:
+    """The workspace this request is about, or an empty string.
+
+    Required rather than defaulted. An update task's applicability and its
+    state are per workspace, and the chat it launches needs a host project that
+    lives in one, so a request that did not name a workspace has said nothing
+    about which install record it means. Defaulting to the primary workspace
+    would answer a question nobody asked with a guess — the same refusal the
+    launch service makes on its own.
+    """
+    return str(request.query_params.get("workspace") or "").strip()
+
+
+async def _update_task_rows(request: Request, workspace: str) -> list[dict[str, Any]]:
+    """Every task this install supports for ``workspace``, one row each.
+
+    Built from ``update_tasks.evaluate``, so the applicability answer is the
+    cached, detector-backed one and this route never runs a detector itself. No
+    ``change_token`` is passed: this caller has no honest way to say whether the
+    workspace changed, so the answer falls back to the freshness window rather
+    than being invalidated by a guess. The state file is still read on every
+    call, so a dismissal or a launch takes effect at once.
+    """
+    from ciao import __version__
+    from ciao import update_tasks
+
+    statuses = await update_tasks.evaluate(
+        request.app.state.config,
+        workspace=workspace,
+        installed_version=__version__,
+    )
+    return [_update_task_row(status) for status in statuses]
+
+
+def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
+    """One task, its lifecycle, and the chat its attempt is in.
+
+    ``status`` is the durable answer and ``applicability`` is the computed one,
+    and they are reported separately because they say different things: a task
+    can be ``applicable`` and ``dismissed`` (the operator decided against work
+    that does apply), or ``not_applicable`` and ``completed``. A row with no
+    record at all reports ``offered``, which is also what an absent record means.
+    """
+    task = status.task
+    state = status.state
+    return {
+        "id": task.id,
+        "revision": task.revision,
+        "scope": task.scope,
+        "title": task.title,
+        "why": task.why,
+        "since_version": task.since_version,
+        "status": state.lifecycle if state is not None else "offered",
+        "applicability": status.applicability.status,
+        "offered": status.offered,
+        "suppressed": status.suppressed,
+        "chat_id": state.chat_id if state is not None else "",
+        "prompt_digest": state.prompt_digest if state is not None else "",
+        "attempted_fingerprint": (
+            state.attempted_fingerprint if state is not None else ""
+        ),
+        "updated_at": state.updated_at if state is not None else "",
+    }
+
+
+def _update_task_coverage_gap(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Why nothing is being offered, or an empty dict when something is.
+
+    The housekeeping card has to say *something* when the list is empty, and
+    "no tasks" is not the same answer as "this install cannot substantiate one".
+    The shipped catalog defines no task yet, so the first branch is the one a
+    fresh install sees; the second is a real install whose tasks all resolve to
+    ``unknown``, which is the applicability layer refusing to claim a condition
+    it cannot check.
+    """
+    from ciao.update_tasks import UNKNOWN
+
+    if any(row["offered"] for row in rows):
+        return {}
+    if not rows:
+        return {
+            "reason": "no_eligible_task",
+            "detail": (
+                "the packaged catalog defines no update task this engine version "
+                "supports"
+            ),
+        }
+    if all(row["applicability"] == UNKNOWN for row in rows):
+        return {
+            "reason": "not_substantiated",
+            "detail": (
+                "every eligible task answered unknown, so none is offered rather "
+                "than offered on a claim this install cannot make"
+            ),
+        }
+    return {
+        "reason": "nothing_offered",
+        "detail": "no eligible task applies right now, or the operator decided",
+    }
+
+
+async def list_update_tasks(request: Request) -> JSONResponse:
+    """The update tasks this install has for one workspace, and their state.
+
+    A detector pass, not a launch: nothing here creates a chat, writes state or
+    sends a prompt. Every row carries the lifecycle a caller renders (``offered``
+    through ``dismissed``), the applicability answer behind it, and the chat an
+    earlier launch is in — so a card can offer "Resume" without the browser
+    holding the id. ``coverage_gap`` is present only when nothing is being
+    offered, and says which of the two reasons that is.
+    """
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    rows = await _update_task_rows(request, workspace)
+    gap = _update_task_coverage_gap(rows)
+    return JSONResponse(
+        {"tasks": rows, "coverage_gap": gap} if gap else {"tasks": rows}
+    )
+
+
+async def start_update_task(request: Request) -> JSONResponse:
+    """Start this task's chat, or hand back the one its last start created.
+
+    Idempotent per ``(task, revision)``, and the reply says which happened:
+    ``resumed`` true means a chat already existed and nothing was sent into it,
+    so a double click, a second tab, a retry after a dropped response and a
+    restart all land in the same chat. A refused task — unknown id, one this
+    engine version cannot support, no host workspace, no chat manager — is 409,
+    never 500; a chat that exists but whose turn could not be dispatched is 500
+    *with* the ``chat_id``, because that is the one case a retry must not turn
+    into a second chat.
+
+    The prompt is the packaged one for this revision, read on the server. There
+    is no request field for prompt text and there will not be one.
+    """
+    from ciao import __version__
+    from ciao.web import update_task_launch
+
+    task_id = request.path_params["task_id"]
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        # Not off the event loop, unlike most state work here: `start_stream`
+        # creates an asyncio task and is only legal where a loop is running.
+        outcome = update_task_launch.launch_task(
+            task_id,
+            config=request.app.state.config,
+            pcm=getattr(request.app.state, "project_chat_manager", None),
+            workspace=workspace,
+            installed_version=__version__,
+            actor=ACTOR_PWA,
+        )
+    except update_task_launch.UpdateTaskLaunchError as exc:
+        logger.exception("Update task %s could not start its chat", task_id)
+        return JSONResponse(
+            {"ok": False, "task_id": task_id, "chat_id": exc.chat_id, "error": str(exc)},
+            status_code=500,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "task_id": task_id,
+            "chat_id": outcome["chat_id"],
+            "resumed": outcome["resumed"],
+            "result": outcome,
+            "tasks": await _update_task_rows(request, workspace),
+        }
+    )
+
+
+async def dismiss_update_task(request: Request) -> JSONResponse:
+    """Record "not this one" for this task at this revision.
+
+    Takes an optional ``{"reason": "..."}`` body, stored as the record's
+    evidence, and re-lists the tasks in the same response so the client cannot
+    render a card for something the operator just declined. An unknown or
+    unsupported id is 409: refusing to record a decision against a task this
+    engine does not support is the honest answer, and it is a refusal rather
+    than a failure.
+    """
+    from ciao import __version__
+    from ciao.web import update_task_launch
+
+    task_id = request.path_params["task_id"]
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    try:
+        result = update_task_launch.dismiss_task(
+            task_id,
+            config=request.app.state.config,
+            workspace=workspace,
+            installed_version=__version__,
+            reason=str(body.get("reason") or ""),
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "task_id": task_id,
+            "result": result,
+            "tasks": await _update_task_rows(request, workspace),
+        }
+    )
+
+
+async def reopen_update_task(request: Request) -> JSONResponse:
+    """Undo a dismissal for this task at this revision, and re-offer it.
+
+    Only ``dismissed`` is reopened: the other lifecycles are an attempt in
+    flight or a verdict already reached, and overriding either is a decision
+    nobody asked this route to make. So reopening an offered or in-progress task
+    succeeds and writes nothing, which the returned record shows.
+    """
+    from ciao import __version__
+    from ciao.web import update_task_launch
+
+    task_id = request.path_params["task_id"]
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        result = update_task_launch.reopen_task(
+            task_id,
+            config=request.app.state.config,
+            workspace=workspace,
+            installed_version=__version__,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "task_id": task_id,
+            "result": result,
+            "tasks": await _update_task_rows(request, workspace),
         }
     )
 
