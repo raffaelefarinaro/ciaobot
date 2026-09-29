@@ -173,8 +173,101 @@ def test_skip_frontmatter_fences_headings_blockquotes_and_tables() -> None:
     for base in ("- an item", "    code", "> quoted", "| a | b |"):
         doc = _parse(f"## Later\n\n{base}\n---\n\n- a fact\n")
         assert doc.entries[0].section == "Later", base
-    # A closing `...` is a frontmatter delimiter too.
-    assert _parse("---\ntype: person\n...\n- a fact\n").entries[0].text == "- a fact"
+
+    # A rule after a *wrapped* bullet is a rule too. The line above it belongs
+    # to an entry, not to a paragraph, so lifting it as a heading would file
+    # every later entry in the note under a section named after a bullet's
+    # continuation line — and a section name is half an entry's identity.
+    wrapped = _parse("## A\n- one\n  wrapped\n---\n- two\n")
+    assert [(e.text, e.section) for e in wrapped.entries] == [
+        ("- one\n  wrapped", "A"),
+        ("- two", "A"),
+    ]
+    # The same after an entry that ends in a fenced block.
+    fenced = _parse("## A\n- one\n    ```\n    x\n    ```\n---\n- two\n")
+    assert [e.section for e in fenced.entries] == ["A", "A"]
+
+    # A heading indented up to three spaces still names a section; the level is
+    # its own `#` run, not a difference between two differently stripped
+    # strings.
+    for indent in ("", " ", "  ", "   "):
+        doc = _parse(f"## A\n{indent}## B\n- one\n")
+        assert doc.entries[0].section == "B", repr(indent)
+        assert doc.entries[0].section_level == 2, repr(indent)
+    for marks, level in (("#", 1), ("###", 3), ("######", 6)):
+        doc = _parse(f"{marks} Heading\n- one\n")
+        assert doc.entries[0].section == "Heading", marks
+        assert doc.entries[0].section_level == level, marks
+
+    # A heading's text is its own words, not every `#` stripped from both ends.
+    # A `#` only closes the heading when whitespace precedes it, so `## C#` is
+    # about C# and `# #tag` is about a `#tag`; a whitespace-preceded one does
+    # close it, which is what `## Trailing #` is.
+    for heading, expected in (
+        ("## C#", "C#"),
+        ("# #tag", "#tag"),
+        ("## Title ##", "Title"),
+        ("### Deep ###", "Deep"),
+        ("## Trailing #", "Trailing"),
+        ("# ", ""),
+    ):
+        doc = _parse(f"{heading}\n- one\n")
+        assert doc.entries[0].section == expected, heading
+        # The level is the *leading* run of `#`, which a `#` inside the
+        # heading's own text does not extend.
+        run = heading.lstrip()
+        assert doc.entries[0].section_level == len(run) - len(run.lstrip("#")), heading
+
+
+def test_frontmatter_needs_to_look_like_frontmatter() -> None:
+    """A leading `---` is only frontmatter if what follows is frontmatter.
+
+    A note that opens with a thematic break and closes with another one is an
+    ordinary shape, and treating the pair as a frontmatter block dropped every
+    bullet between them without a word of complaint. Refusing to guess is the
+    point: the opener stays a rule, the body is read, and the diagnostic says
+    what was seen.
+    """
+    rules = _parse("---\n\n- a\n\n---\n- b\n")
+    assert _texts(rules) == ["- a", "- b"]
+    assert ne.DIAG_UNCLOSED_FRONTMATTER in rules.diagnostics
+    # Nothing was silently dropped, and coverage still adds up.
+    assert rules.entry_chars + rules.uncovered_chars == rules.total_chars
+
+    # Real frontmatter, closed either way, is still frontmatter.
+    for closer in ("---", "..."):
+        doc = _parse(f"---\ntype: person\nupdated: 2026-01-01\n{closer}\n- a fact\n")
+        assert _texts(doc) == ["- a fact"], closer
+        assert doc.diagnostics == (), closer
+    # An empty block is frontmatter too.
+    assert _texts(_parse("---\n---\n- a fact\n")) == ["- a fact"]
+
+    # Only `---` opens it. A leading `...` is a closing delimiter, and treating
+    # it as an opener swallowed the note.
+    leading_dots = _parse("...\n- a fact\n- another fact\n")
+    assert _texts(leading_dots) == ["- a fact", "- another fact"]
+
+    # A `key:`-shaped line is what makes it frontmatter; content where a key
+    # was expected leaves the opener as a rule.
+    for body in ("- a fact", "# Heading", "just prose", "> quoted"):
+        doc = _parse(f"---\n{body}\n---\n- a fact\n")
+        assert _texts(doc)[-1] == "- a fact", body
+        assert ne.DIAG_UNCLOSED_FRONTMATTER in doc.diagnostics, body
+
+    # An unterminated but key-shaped block is a diagnostic, never a reason to
+    # drop the body.
+    unclosed = _parse("---\ntype: person\n- a fact\n")
+    assert _texts(unclosed) == ["- a fact"]
+    assert unclosed.diagnostics == (ne.DIAG_UNCLOSED_FRONTMATTER,)
+
+    # Keys all the way to the end of the note is the same case with nowhere
+    # left to read, and the same answer.
+    keys_to_eof = _parse("---\ntype: person\n")
+    assert keys_to_eof.entries == ()
+    assert keys_to_eof.diagnostics == (ne.DIAG_UNCLOSED_FRONTMATTER,)
+    assert keys_to_eof.entry_chars + keys_to_eof.uncovered_chars == (
+        keys_to_eof.total_chars
+    )
 
 
 # ── The verification stamp ────────────────────────────────────────────────
@@ -187,7 +280,7 @@ def test_verified_stamp_parse_and_invalid_diagnostics() -> None:
         "- malformed [verified: 26-1-1]\n"
         "- missing value [verified: ]\n"
         "- future [verified: 2999-01-01]\n"
-        "- duplicated [verified: 2026-01-01] [verified: 2026-02-02]\n"
+        "- trailing and spare [verified: 2026-06-30]   \n"
         "- promoted today [2026-09-01]\n"
         "- snapshot [as-of: 2026-09-01]\n"
         "- evented on 2026-09-01 with no tag\n"
@@ -240,10 +333,13 @@ def test_verified_stamp_parse_and_invalid_diagnostics() -> None:
     assert future.verified is None
     assert ne.DIAG_STAMP_FUTURE in future.diagnostics
 
-    duplicated = entry_containing("duplicated")
-    assert duplicated.stamp is not None
-    assert duplicated.stamp.raw == "[verified: 2026-02-02]"
-    assert ne.DIAG_STAMP_DUPLICATE in duplicated.diagnostics
+    # Trailing whitespace after the stamp is still trailing, and the separator
+    # it introduced is part of what the fingerprint removes.
+    trailing = entry_containing("trailing and spare")
+    assert trailing.stamp is not None
+    assert trailing.stamp.valid is True
+    assert trailing.verified == datetime.date(2026, 6, 30)
+    assert ne.refresh_fingerprint("- trailing and spare") == trailing.fingerprint
 
     # A learned-at stamp and an as-of stamp are different claims and are never
     # reinterpreted as a verification.
@@ -279,6 +375,81 @@ def test_verified_stamp_parse_and_invalid_diagnostics() -> None:
     assert ne.DIAG_STAMP_FUTURE in yesterday.entries[0].diagnostics
 
 
+def test_stamp_must_be_trailing_to_count() -> None:
+    """A `[verified: …]` in the middle of a bullet is prose, not a claim.
+
+    The plan says *trailing inline stamp on the opening line*, and the
+    difference is not cosmetic: cutting a mid-line token out of the text for
+    the fingerprint would change an entry's identity because of a mention of a
+    date, and reading a link label as a verification would report a
+    verification nobody made.
+    """
+    mid_line = (
+        "- [verified: 2026-01-01] fact",
+        "- a [verified: 2026-01-01] then more",
+        "- fact [verified: 2026-01-01](http://x)",
+        "- fact [verified: 2026-01-01] and [as-of: 2026-01-01]",
+    )
+    for text in mid_line:
+        entry = _parse(f"{text}\n").entries[0]
+        assert entry.stamp is None, text
+        assert entry.verified is None, text
+        # No diagnostic either: a mention of the tag is not a typo in a stamp.
+        assert entry.diagnostics == (), text
+        # And the token stays in the fingerprint payload untouched.
+        assert ne.refresh_fingerprint(entry.text) == entry.fingerprint, text
+
+    # The trailing form is still read, so the distinction is the position and
+    # not the token.
+    trailing = _parse("- fact [verified: 2026-01-01]\n").entries[0]
+    assert trailing.stamp is not None
+    assert trailing.stamp.valid is True
+
+    # A CRLF line's carriage return is not what makes a stamp non-trailing.
+    crlf = _parse("- fact [verified: 2026-01-01]\r\n  continued\r\n").entries[0]
+    assert crlf.stamp is not None
+    assert crlf.stamp.valid is True
+
+
+def test_loose_stamp_pattern_ignores_ordinary_text() -> None:
+    """The malformed-stamp report must not fire on text that is not a stamp.
+
+    The loose pattern exists so a *typo in the real tag* gets reported. A
+    wikilink, an attribution and a bracketed word all contain the letters
+    "verified" and none of them is a broken verification, so a false positive
+    here trains the reader to skip the report.
+    """
+    for text in (
+        "- see [[verified plan]] now",
+        "- see [[verified plan]]",
+        "- [verified-by-bob] x",
+        "- [verified] x",
+        "- [verified plan] x",
+        "- the [verified] tag",
+    ):
+        entry = _parse(f"{text}\n").entries[0]
+        assert entry.stamp is None, text
+        assert entry.diagnostics == (), text
+
+    # A near-miss of the real tag is still reported, so a user who meant to
+    # write one is told.
+    for text in (
+        "- fact [verified 2026-01-01]",
+        "- fact [verified:26-1-1]",
+        "- fact [verified 26-1-1]",
+    ):
+        entry = _parse(f"{text}\n").entries[0]
+        assert entry.stamp is not None, text
+        assert entry.stamp.valid is False, text
+        assert entry.stamp.reason == ne.STAMP_REASON_MALFORMED, text
+        assert ne.DIAG_STAMP_MALFORMED in entry.diagnostics, text
+
+    # A link whose label is a near-miss is a link, not a broken stamp.
+    linked = _parse("- fact [verified 2026-01-01](http://x)\n").entries[0]
+    assert linked.stamp is None
+    assert linked.diagnostics == ()
+
+
 def test_restamp_does_not_change_fingerprint_but_prose_edit_does() -> None:
     first = _parse("- Mo leads the platform team [verified: 2026-01-01]\n").entries[0]
     restamped = _parse(
@@ -292,16 +463,37 @@ def test_restamp_does_not_change_fingerprint_but_prose_edit_does() -> None:
     # Editing the prose is editing the fact.
     assert first.fingerprint != edited.fingerprint
 
-    # `refresh_fingerprint` recomputes from the current text, which is what a
-    # caller needs after an edit made somewhere else.
-    assert ne.refresh_fingerprint(restamped) == restamped.fingerprint
-    assert ne.refresh_fingerprint(edited) == edited.fingerprint
-    assert ne.refresh_fingerprint(first) == first.fingerprint
+    # `refresh_fingerprint` answers for an entry's *text*, which is the only
+    # form in which the question is real: a frozen NoteEntry cannot be asked
+    # what its own id will be after an edit.
+    assert ne.refresh_fingerprint(restamped.text) == restamped.fingerprint
+    assert ne.refresh_fingerprint(edited.text) == edited.fingerprint
+    assert ne.refresh_fingerprint(first.text) == first.fingerprint
+    # So a caller can compute the id the note will have *after* a re-stamp: the
+    # new text fingerprints to the entry's existing identity.
+    restamped_text = "- Mo leads the platform team [verified: 2027-01-01]"
+    assert ne.refresh_fingerprint(restamped_text) == first.fingerprint
+    # And after a prose edit it will not be the same fact.
+    assert (
+        ne.refresh_fingerprint(
+            "- Mo leads the platform group [verified: 2027-01-01]"
+        )
+        != first.fingerprint
+    )
 
-    # A fact that is nothing but a stamp asserts nothing, and says so.
+    # A fact that is nothing but a stamp asserts nothing, and says so — but a
+    # fact whose words are on a continuation line is a fact.
     stamp_only = _parse("- [verified: 2026-01-01]\n").entries[0]
     assert stamp_only.supported is False
     assert ne.DIAG_STAMP_ONLY in stamp_only.diagnostics
+    for text in (
+        "- [verified: 2026-01-01]\n  actual fact",
+        "-\n  text [verified: 2026-01-01]",
+        "-\n  actual fact\n",
+    ):
+        entry = _parse(f"{text}\n").entries[0]
+        assert entry.supported is True, text
+        assert ne.DIAG_STAMP_ONLY not in entry.diagnostics, text
 
     # The stamp is only read on the opening line: a `[verified:]` mentioned in
     # a continuation line is prose.
@@ -458,17 +650,77 @@ def test_crlf_fence_and_inline_code_do_not_create_entries() -> None:
         "````markdown\n- not a fact\n```\n- also not a fact\n````\n- a fact\n"
     )
     assert _texts(long_fence) == ["- a fact"]
-    indented = _parse("- a fact\n  ```\n  code\n  ```\n- another fact\n")
-    assert _texts(indented) == ["- a fact", "- another fact"]
-    for entry in indented.entries:
-        assert "code" not in entry.text
+    # A fence indented two or three spaces is a document-level fence to
+    # CommonMark, so it ends the item and stays out of it.
+    for indent in ("  ", "   "):
+        indented = _parse(f"- a fact\n{indent}```\n{indent}code\n{indent}```\n- next\n")
+        assert _texts(indented) == ["- a fact", "- next"], indent
+        for entry in indented.entries:
+            assert "code" not in entry.text, indent
+
+    # Indented four or more it is nested *in* the item, which is past the three
+    # spaces a document-level fence may use — so the item owns it, and the
+    # bullets inside it are code within that fact rather than facts of their
+    # own.
+    nested = _parse("- Run:\n    ```\n    - not an entry\n    ```\n- next\n")
+    assert _texts(nested) == [
+        "- Run:\n    ```\n    - not an entry\n    ```",
+        "- next",
+    ]
+    assert nested.entry_count == 2
+    # The owner still reports itself: one fingerprint over a bullet with a code
+    # block in it is a fingerprint over a shape this model does not describe.
+    assert nested.entries[0].supported is False
+    assert ne.DIAG_NESTED_CONSTRUCT in nested.entries[0].diagnostics
+    assert nested.entries[1].supported is True
+
+    # The same inside a child item: the child owns the fence, the parent and
+    # the sibling are untouched, and nothing inside the fence is an entry.
+    child = _parse("- p\n  - child\n    ```\n    - inside\n    ```\n- z\n")
+    assert _texts(child) == [
+        "- p",
+        "  - child\n    ```\n    - inside\n    ```",
+        "- z",
+    ]
+    assert child.entry_count == 3
+
+    # A nested fence is closed by the item that owns it, not by a line at the
+    # parent's indentation.
+    deep = _parse(
+        "- a\n  - b\n    ```\n    - inside\n    ```\n  - c\n- d\n"
+    )
+    assert _texts(deep) == [
+        "- a",
+        "  - b\n    ```\n    - inside\n    ```",
+        "  - c",
+        "- d",
+    ]
+
+    # A tilde fence nested in an item behaves the same way.
+    tilde_nested = _parse(
+        "- Run:\n    ~~~\n    - not an entry\n    ~~~\n- next\n"
+    )
+    assert _texts(tilde_nested) == [
+        "- Run:\n    ~~~\n    - not an entry\n    ~~~",
+        "- next",
+    ]
+
+    # An unterminated nested fence runs to the end of the item's indented run,
+    # not to the end of the note: the lines after the item are the next block,
+    # not more of this one.
+    unterminated = _parse("- Run:\n    ```\n    - inside\n- next\n- another\n")
+    assert _texts(unterminated) == [
+        "- Run:\n    ```\n    - inside",
+        "- next",
+        "- another",
+    ]
 
     # A tilde fence does not close on backticks, and a backtick fence with an
     # info string carrying one is not a fence at all.
     mixed = _parse("```\n~~~\n- not a fact\n```\n- a fact\n")
     assert _texts(mixed) == ["- a fact"]
     not_a_fence = _parse("```a`b\n- a fact\n```\n")
-    assert "unterminated-fence" in not_a_fence.diagnostics
+    assert ne.DIAG_UNTERMINATED_FENCE in not_a_fence.diagnostics
 
     # A closing fence carries no info string, so a fence-looking line that has
     # one is content: the fence runs on, and the fact after it stays inside.

@@ -35,17 +35,25 @@ blockquotes, tables (any line whose first non-space character is `|`, plus a
 pipe-delimited delimiter row), YAML frontmatter, and fenced code blocks. A
 `- item` line inside a ``` or ~~~ fence is code, not a fact. Fence tracking
 covers both fence characters, an info string, up to three leading spaces of
-indentation, a closing fence with no info string, and CRLF.
+indentation, a closing fence with no info string, and CRLF — and a fence nested
+*inside* a list item, which is indented past those three spaces and so belongs
+to the fact that owns it. Its lines are absorbed whole: a bullet written inside
+someone's code sample is part of the fact, never a fact of its own.
 
-**The verification stamp.** `[verified: YYYY-MM-DD]`, trailing on the entry's
-*opening line*, is the only thing this module reads as a claim that someone
-re-checked the fact. It is deliberately distinct from `[as-of: YYYY-MM-DD]`
-(a snapshot of a changing world), from an event date in prose, and from the
-bounded regions' learned-at `[YYYY-MM-DD]`; a learned or as-of stamp is never
-reinterpreted as verification. The shape is strict — a real calendar date, or
-nothing. An impossible date (`2025-02-30`), a malformed one (`26-1-1`) and a
-future one each yield an `EntryStamp` with `valid=False`, a `reason`, and a
-diagnostic, never a guess and never a raised error.
+**The verification stamp.** `[verified: YYYY-MM-DD]`, *trailing* on the entry's
+opening line, is the only thing this module reads as a claim that someone
+re-checked the fact. Trailing is load-bearing: a token in the middle of a
+bullet is prose that mentions a date, and reading it would both invent a
+verification nobody made and change the entry's identity over a mention. It is
+deliberately distinct from `[as-of: YYYY-MM-DD]` (a snapshot of a changing
+world), from an event date in prose, and from the bounded regions' learned-at
+`[YYYY-MM-DD]`; a learned or as-of stamp is never reinterpreted as
+verification. The shape is strict — a real calendar date, or nothing. An
+impossible date (`2025-02-30`), a malformed one (`26-1-1`) and a future one
+each yield an `EntryStamp` with `valid=False`, a `reason`, and a diagnostic,
+never a guess and never a raised error. A *near-miss* of the tag — the tag
+spelling with a typo in its separator — is reported so a user who meant to
+write one is told; ordinary text that merely contains the word is not.
 
 **Fingerprint.** sha256 over the entry's exact source text with the
 verification stamp token removed, encoded as UTF-8 using the file's own
@@ -54,6 +62,8 @@ stay, and a byte-order mark stays. The stamp is metadata, so a pure re-stamp
 of a fact changes nothing about what the fact says; editing the prose does.
 The removed span is the stamp token plus the run of whitespace immediately
 before it, which is exactly the separator the stamp introduced.
+`refresh_fingerprint(text)` answers the same question for text the caller has
+just edited, which is the only form in which it is a real question.
 
 **Identity.** sha256 over the identity version, the workspace, the note path,
 the nearest preceding heading's text, the fingerprint, and a duplicate
@@ -68,9 +78,9 @@ what it did: `entry_chars + uncovered_chars == len(original)` always holds. A
 note whose facts live in prose paragraphs, a table, or a code block is not a
 note this module covered, and saying so is the point.
 
-**It never raises on ordinary markdown.** Unterminated fences, unclosed
-frontmatter, mixed markers, empty items and stray carriage returns are
-diagnostics over identical text.
+**It never raises on ordinary markdown.** Unterminated fences, a `---` that
+turned out not to be frontmatter, mixed markers, empty items and stray
+carriage returns are diagnostics over identical text.
 """
 
 from __future__ import annotations
@@ -117,7 +127,6 @@ DIAG_BARE_CR = "bare-cr-line-ending"
 DIAG_STAMP_MALFORMED = "verified-stamp-malformed"
 DIAG_STAMP_IMPOSSIBLE = "verified-stamp-impossible"
 DIAG_STAMP_FUTURE = "verified-stamp-future"
-DIAG_STAMP_DUPLICATE = "verified-stamp-duplicate"
 DIAG_NESTED_CONSTRUCT = "entry-nested-construct"
 DIAG_MULTI_BLOCK = "entry-multi-block"
 DIAG_STAMP_ONLY = "entry-stamp-only"
@@ -142,6 +151,11 @@ _STAMP_DIAGNOSTICS = {
 _FENCE_RE = re.compile(r"^(?P<indent>[ ]{0,3})(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 
 _ATX_HEADING_RE = re.compile(r"^[ ]{0,3}#{1,6}(?:[ \t]+|$)")
+
+# An ATX heading's optional closing sequence. CommonMark allows a trailing run
+# of `#` only when whitespace precedes it, which is the whole difference
+# between `## Title ##` (title) and `## C#` (C#).
+_ATX_CLOSING_RE = re.compile(r"[ \t]+#+[ \t]*$")
 
 # A setext underline. Only an underline under a plain paragraph line is a
 # heading; on its own, `---` is a thematic break and `-` is an empty item.
@@ -191,6 +205,11 @@ _NEW_BLOCK_KINDS = frozenset(
 )
 
 _FRONTMATTER_DELIMITERS = ("---", "...")
+
+# A frontmatter key line. What separates real frontmatter from a thematic break
+# that happens to open the note: frontmatter is `key: value` from its first
+# non-blank line.
+_FRONTMATTER_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+[ \t]*:")
 
 # Tabs advance to the next four-column stop rather than counting as one
 # character, so an item opened with a tab and continued with spaces compares
@@ -349,15 +368,24 @@ def parse_note_entries(
         # line under a stray rule would hide the note's actual facts.
         diagnostics.append(DIAG_UNCLOSED_FRONTMATTER)
 
+    # The line a setext underline would lift, if the current line turns out to
+    # be one. Tracked rather than re-read as `lines[index - 1]` because the
+    # line before a `---` is very often not a paragraph at all: it may have been
+    # consumed by an entry, and then the rule is a rule, not a heading that
+    # renames every later identity in the note under a wrapped bullet's last
+    # line.
+    base: str | None = None
+
     while index < len(lines):
         line = lines[index]
-        previous = lines[index - 1] if index else None
-        kind = _classify(line, previous)
+        kind = _classify_text(line.view, base) if not line.blank else _BLOCK_BLANK
         if kind == _BLOCK_BLANK:
+            base = None
             index += 1
             continue
         if kind == _BLOCK_FENCE:
             closed_at = _fence_close(lines, index)
+            base = None
             if closed_at is None:
                 # Everything after an unterminated fence is code, by the same
                 # rule that keeps a `- item` out of a closed fence.
@@ -367,15 +395,13 @@ def parse_note_entries(
                 index = closed_at + 1
             continue
         if kind == _BLOCK_HEADING:
-            # Only a top-level heading names a section: a `#` inside a list
-            # item is part of that item's text, not a heading the document's
-            # entries are filed under.
-            if line.indent == 0:
-                section = _heading_text(line, previous)
-                section_level = _heading_level(line)
-            index += 1
-            continue
-        if kind in (_BLOCK_RULE, _BLOCK_QUOTE, _BLOCK_TABLE):
+            # A heading up to three spaces in names a section. Deeper than
+            # that it is an indented code block, which the walk never reaches
+            # as a heading anyway, and a `#` inside a list item is that item's
+            # text and never reaches here at all.
+            section = _heading_text(line, base)
+            section_level = _heading_level(line)
+            base = None
             index += 1
             continue
         if kind == _BLOCK_ITEM:
@@ -392,9 +418,15 @@ def parse_note_entries(
                 today=current_day,
             )
             index = next_index
+            # The lines the entry consumed are not a paragraph a following
+            # rule could lift, whatever they look like on their own.
+            base = None
             if entry is not None:
                 entries.append(entry)
             continue
+        # A rule, a quote, a table or a paragraph line. Only the last of those
+        # can be a setext base; the others are cleared above by their branch.
+        base = line.view if kind == _BLOCK_PLAIN else None
         index += 1
 
     return EntryDocument(
@@ -432,16 +464,20 @@ def entry_identity(entry: NoteEntry) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def refresh_fingerprint(entry: NoteEntry) -> str:
-    """Recompute an entry's fingerprint from its current text.
+def refresh_fingerprint(text: str) -> str:
+    """The fingerprint an entry's current source text has.
 
-    Useful after an edit the caller made elsewhere: a re-stamp returns the same
-    value the entry already carries, a prose change returns a different one, and
-    the caller does not have to know which span the old stamp occupied. The
-    opening line is re-read from the text, so an entry whose offsets have gone
-    stale (because the note was edited) still fingerprints correctly.
+    Takes the *text*, not a parsed entry, because that is the only form in
+    which the question is real: a caller holding a fact that has just been
+    re-verified or re-worded needs the id the note will have after the edit,
+    and a frozen :class:`NoteEntry` cannot be asked that question about its own
+    new text. A re-stamp returns the same fingerprint the entry already carries,
+    a prose change returns a different one, and the caller does not have to
+    know which span the old stamp occupied — the opening line is re-read from
+    the text given, so an entry whose offsets went stale with the note still
+    fingerprints correctly.
     """
-    return _fingerprint(entry.text)
+    return _fingerprint(text)
 
 
 def parse_verification_stamp(
@@ -452,22 +488,46 @@ def parse_verification_stamp(
     ``None`` means the line carries no verification claim at all — which is the
     answer for a line carrying a learned-at `[YYYY-MM-DD]` or an
     `[as-of: YYYY-MM-DD]`, because those mean something else and are never
-    reinterpreted here. A token that is shaped like a stamp but unusable comes
-    back with ``valid=False`` and a ``reason`` instead of being dropped, so the
-    caller can tell the user which text to fix.
+    reinterpreted here, and for a stamp-shaped token that is not trailing, which
+    is prose about a date rather than a claim about the line. A token that is
+    trailing and shaped like a stamp but unusable comes back with
+    ``valid=False`` and a ``reason`` instead of being dropped, so the caller can
+    tell the user which text to fix.
     """
-    stamp, _count = _scan_stamp(text, today)
+    stamp, _span = _scan_stamp(text, today)
     return stamp
 
 
 # ── Fingerprinting ────────────────────────────────────────────────────────
 # The one shape this module treats as a verification claim: the exact tag
-# spelling, a value of `YYYY-MM-DD`, and nothing else. `_VERIFIED_LOOSE_RE`
-# only exists so a near-miss (`[verified 2026-01-01]`) is reported rather than
-# passed over in silence; it is consulted only when the strict pattern misses.
-_VERIFIED_STAMP_RE = re.compile(r"\[verified:[ \t]*(?P<value>[^\]\n]*)\]")
-_VERIFIED_LOOSE_RE = re.compile(r"\[verified[^\]\n]{0,64}\](?!\()")
+# spelling, a value of `YYYY-MM-DD`, and nothing else — and *trailing*, which
+# is the word doing the work. A stamp in the middle of a bullet is prose about
+# a date, not a claim about the bullet, so anchoring is what keeps
+# `- [verified: 2026-01-01] fact` and a Markdown link whose label happens to be
+# `[verified: 2026-01-01]` from being read as verifications.
+_VERIFIED_STAMP_RE = re.compile(r"\[verified:[ \t]*(?P<value>[^\]\n]*)\][ \t]*$")
+
+# A near-miss of the real tag, and only that: the tag spelling, then the
+# separator, then something that starts like a date. The `(?<!\[)` keeps a
+# wikilink (`[[verified plan]]`) out, the digit keeps ordinary prose out
+# (`[verified-by-bob]`, `[verified plan]`), and the same trailing anchor plus
+# the `(?![(\]])` guard keeps it from swallowing a link. Consulted only when
+# the strict pattern misses, so a real stamp is never reported as a typo.
+_VERIFIED_LOOSE_RE = re.compile(
+    r"(?<!\[)\[verified[ \t]*:?[ \t]*\d[^\]\n]{0,32}\](?![(\]])[ \t]*$"
+)
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _stamp_line(line: str) -> str:
+    """``line`` without a trailing ``\\r``, so a CRLF line still ends the stamp.
+
+    A real caller hands this module the file's own bytes, and a CRLF note's
+    opening line ends ``\\r`` before the newline. The carriage return is not
+    part of the stamp and must not stop the anchor from matching; it stays in
+    the text the fingerprint hashes.
+    """
+    return line[:-1] if line.endswith("\r") else line
 
 
 def _strict_stamp_span(line: str) -> tuple[int, int] | None:
@@ -476,33 +536,38 @@ def _strict_stamp_span(line: str) -> tuple[int, int] | None:
     The whitespace run immediately before the token is part of what the stamp
     added to the line, so removing it too is what makes `- fact  [verified:
     …]` and `- fact [verified: …]` the same fact. Nothing else on the line is
-    touched.
+    touched. ``None`` when the line makes no trailing verification claim.
     """
-    matches = list(_VERIFIED_STAMP_RE.finditer(line))
-    if not matches:
+    body = _stamp_line(line)
+    match = _VERIFIED_STAMP_RE.search(body)
+    if match is None:
         return None
-    match = matches[-1]
     start = match.start()
-    while start > 0 and line[start - 1] in " \t":
+    while start > 0 and body[start - 1] in " \t":
         start -= 1
     return start, match.end()
 
 
-def _fingerprint(text: str) -> str:
+def _fingerprint(text: str, span: tuple[int, int] | None = None) -> str:
     """sha256 of an entry's exact text with its verification stamp removed.
 
     The opening line is located by splitting, not by the entry's offsets, so
     this is the same function during parsing and from
-    :func:`refresh_fingerprint` after an edit. Newline bytes are whatever the
-    file used: a CRLF entry hashes CRLF, and the two spellings of one note
-    therefore do not collide.
+    :func:`refresh_fingerprint` after an edit. ``span`` is that line's stamp
+    span, passed in by a caller that already computed it, so the payload the
+    fingerprint hashes and the payload the support check reads are the same
+    slice and cannot drift apart. Newline bytes are whatever the file used: a
+    CRLF entry hashes CRLF, and the two spellings of one note therefore do not
+    collide. Cutting the span out of the raw line leaves its ``\\r`` in place.
     """
     opening, separator, rest = text.partition("\n")
-    span = _strict_stamp_span(opening)
+    shift = 1 if opening.startswith(_BOM) else 0
+    if span is None:
+        span = _strict_stamp_span(opening[shift:])
     if span is None:
         payload = text
     else:
-        start, end = span
+        start, end = span[0] + shift, span[1] + shift
         payload = opening[:start] + opening[end:] + separator + rest
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -514,41 +579,43 @@ def _rejected_stamp(raw: str, reason: str) -> EntryStamp:
 
 def _scan_stamp(
     line: str, today: datetime.date | None
-) -> tuple[EntryStamp | None, int]:
-    """The stamp on a line, plus how many strict stamps it carried.
+) -> tuple[EntryStamp | None, tuple[int, int] | None]:
+    """The trailing stamp on a line, and the span the fingerprint removes.
 
-    Returns ``(None, 0)`` when the line makes no verification claim at all,
-    which is the answer for a learned-at or ``[as-of:]`` tag. A claim it cannot
-    believe comes back with ``valid=False`` and the reason, never as a guess.
+    Returns ``(None, None)`` when the line makes no verification claim at all,
+    which is the answer for a learned-at or ``[as-of:]`` tag and for a
+    mid-line token — a bullet that merely mentions a date has not been
+    verified. A claim it cannot believe comes back with ``valid=False`` and the
+    reason, never as a guess.
+
+    The span is returned rather than recomputed by the caller so the payload
+    the fingerprint hashes and the payload the support check reads are the same
+    slice by construction.
     """
-    matches = list(_VERIFIED_STAMP_RE.finditer(line))
-    if not matches:
-        loose = _VERIFIED_LOOSE_RE.search(line)
+    body = _stamp_line(line)
+    match = _VERIFIED_STAMP_RE.search(body)
+    if match is None:
+        loose = _VERIFIED_LOOSE_RE.search(body)
         if loose is None:
-            return None, 0
-        return (
-            _rejected_stamp(loose.group(0), STAMP_REASON_MALFORMED),
-            0,
-        )
-    # The last stamp is the most recent claim, matching how the bounded-region
-    # learned stamp is read; an earlier one on the same line is a duplicate the
-    # caller is told about.
-    match = matches[-1]
-    raw = match.group(0)
-    count = len(matches)
+            return None, None
+        return _rejected_stamp(loose.group(0), STAMP_REASON_MALFORMED), None
+    span = _strict_stamp_span(body)
     value = match.group("value").strip()
     if not _ISO_DATE_RE.match(value):
-        return _rejected_stamp(raw, STAMP_REASON_MALFORMED), count
+        return _rejected_stamp(match.group(0), STAMP_REASON_MALFORMED), span
     try:
         parsed = datetime.date.fromisoformat(value)
     except ValueError:
         # Right shape, not a real day (2025-02-30). Reported, never rounded.
-        return _rejected_stamp(raw, STAMP_REASON_IMPOSSIBLE), count
+        return _rejected_stamp(match.group(0), STAMP_REASON_IMPOSSIBLE), span
     if parsed > (today or datetime.date.today()):
         # A real date, but one that has not happened: nobody verified a fact
         # on a day that has not come.
-        return EntryStamp(raw, parsed, False, STAMP_REASON_FUTURE), count
-    return EntryStamp(raw, parsed, True, ""), count
+        return (
+            EntryStamp(match.group(0), parsed, False, STAMP_REASON_FUTURE),
+            span,
+        )
+    return EntryStamp(match.group(0), parsed, True, ""), span
 
 
 # ── Line model ────────────────────────────────────────────────────────────
@@ -670,23 +737,18 @@ def _classify_text(view: str, previous: str | None) -> str:
 def _is_setext_base(previous: str | None) -> bool:
     """True when ``previous`` is the paragraph line a setext underline lifts.
 
-    Not a blank line, not indented as code, and not itself a block opener: a
-    rule under a bullet is a rule, not a heading that turns the bullet's
-    heading text into a section name. A line can only be a setext base if it
-    classified as plain, so this is the plain test written out.
+    Not a blank line, not indented, and not itself a block opener. The indent
+    test is what stops an underline from lifting a bullet's *continuation*:
+    `"## A" / "- one" / "  wrapped" / "---"` is a rule, and reading it as a
+    heading would file every later entry in the note under a section named
+    after a wrapped line. A line can only be a setext base if it classified as
+    plain, so this is the plain test written out.
     """
     if previous is None or not previous.strip():
         return False
-    if _indent_width(previous) > 3:
+    if _indent_width(previous) > 0:
         return False
     return _classify_text(previous, None) == _BLOCK_PLAIN
-
-
-def _classify(line: _Line, previous: _Line | None) -> str:
-    """What block this line opens. Blank first, so callers can skip cheaply."""
-    if line.blank:
-        return _BLOCK_BLANK
-    return _classify_text(line.view, previous.view if previous is not None else None)
 
 
 def _opens_new_block(line: _Line, previous: _Line | None) -> bool:
@@ -722,6 +784,30 @@ def _looks_like_construct(view: str) -> bool:
     return _classify_text(view.lstrip(), None) in _NEW_BLOCK_KINDS
 
 
+def _dedented_fence(line: _Line) -> re.Match[str] | None:
+    """A fence opener on ``line`` once its own indentation is dropped.
+
+    A fenced block nested in a list item is indented past the three spaces
+    CommonMark allows at the document level, so the document-level pattern
+    cannot see it. Dropping the indentation is what makes a ``- item`` inside
+    a code block under a bullet recognisable as code rather than as a fact.
+    """
+    return _fence_match(line.view.lstrip(" \t"))
+
+
+def _fence_closes(opening: re.Match[str], line: _Line) -> bool:
+    """True when ``line`` closes the fence ``opening`` started."""
+    match = _dedented_fence(line)
+    if match is None:
+        return False
+    fence = match.group("fence")
+    if fence[0] != opening.group("fence")[0]:
+        return False
+    if len(fence) < len(opening.group("fence")):
+        return False
+    return not match.group("info").strip()
+
+
 def _fence_close(lines: list[_Line], start: int) -> int | None:
     """Index of the line closing the fence opened at ``start``, or ``None``.
 
@@ -732,49 +818,77 @@ def _fence_close(lines: list[_Line], start: int) -> int | None:
     opening = _fence_match(lines[start].view)
     if opening is None:  # pragma: no cover - the caller classified this line
         return None
-    char = opening.group("fence")[0]
-    length = len(opening.group("fence"))
     for index in range(start + 1, len(lines)):
-        match = _fence_match(lines[index].view)
-        if match is None:
-            continue
-        fence = match.group("fence")
-        if fence[0] != char or len(fence) < length:
-            continue
-        if match.group("info").strip():
-            # A closing fence carries no info string.
-            continue
-        return index
+        if _fence_closes(opening, lines[index]):
+            return index
     return None
 
 
 def _is_frontmatter_opener(line: _Line) -> bool:
-    return line.index == 0 and line.view.rstrip() in _FRONTMATTER_DELIMITERS
+    """True for a note's opening ``---``.
+
+    Only ``---`` opens. A leading ``...`` is a closing delimiter, and treating
+    it as an opener swallowed every bullet in a note that happened to start
+    with one.
+    """
+    return line.index == 0 and line.view.rstrip() == "---"
 
 
 def _frontmatter_end(lines: list[_Line]) -> int | None:
-    """Index of the line closing a frontmatter block, or ``None``."""
+    """Index of the line closing a frontmatter block, or ``None``.
+
+    A leading ``---`` only opens frontmatter if what follows it looks like
+    frontmatter: the first non-blank line has to be a ``key:`` line, or the
+    block has to be empty. Without that check a note that opens with a thematic
+    break and closes with another one — an ordinary shape — had every bullet
+    between them read as frontmatter and silently dropped. Refusing to guess is
+    the whole point; ``None`` leaves the caller treating the opener as the rule
+    it almost certainly is and reading the body.
+    """
     if not lines or not _is_frontmatter_opener(lines[0]):
         return None
     for index in range(1, len(lines)):
         line = lines[index]
         if line.indent == 0 and line.view.rstrip() in _FRONTMATTER_DELIMITERS:
             return index
+        if line.blank:
+            continue
+        if not _FRONTMATTER_KEY_RE.match(line.view):
+            # Real content where a key was expected: this `---` was a rule.
+            return None
+    # An unterminated block is reported by the caller; the body is still read.
     return None
 
 
 def _heading_level(line: _Line) -> int:
-    marks = _ATX_HEADING_RE.match(line.view)
-    if marks is not None:
-        return len(line.view.lstrip()) - len(line.view.lstrip("#"))
+    """Level of a heading line: the number of `#`, or 1/2 for a setext pair."""
+    if _ATX_HEADING_RE.match(line.view):
+        # Measured on one string, so the count cannot be computed by comparing
+        # a stripped line against an unstripped one.
+        stripped = line.view.lstrip()
+        return len(stripped) - len(stripped.lstrip("#"))
     return 1 if line.view.lstrip().startswith("=") else 2
 
 
-def _heading_text(line: _Line, previous: _Line | None) -> str:
+def _heading_text(line: _Line, base: str | None) -> str:
+    """The heading's own words, which is the section entries are filed under.
+
+    CommonMark's rule, not a strip-everything rule: the leading `#` run and one
+    following space go, and then only a *trailing* run of `#` preceded by
+    whitespace is a closing sequence. `"## C#"` is about C#, `"# #tag"` is about
+    a `#tag`, and `"## Title ##"` is about the title. Over-stripping turned
+    both real subjects into different ones, and a section name is half an
+    entry's identity.
+
+    ``base`` is the paragraph line a setext underline lifts, and is ``None``
+    when the line is not a setext heading.
+    """
     if _ATX_HEADING_RE.match(line.view):
-        stripped = line.view.strip()
-        return stripped.lstrip("#").strip().strip("#").strip()
-    return previous.text.strip() if previous is not None else ""
+        stripped = line.view.strip().lstrip("#")
+        if stripped.startswith((" ", "\t")):
+            stripped = stripped[1:]
+        return _ATX_CLOSING_RE.sub("", stripped).strip()
+    return base.strip() if base is not None else ""
 
 
 # ── Entry construction ────────────────────────────────────────────────────
@@ -791,7 +905,15 @@ def _content_indent(line: _Line, marker: re.Match[str]) -> int:
 
 
 def _entry_last_line(lines: list[_Line], start: int) -> int:
-    """Index of the last line belonging to the item opened at ``start``."""
+    """Index of the last line belonging to the item opened at ``start``.
+
+    A fenced block nested in the item is part of the item, and every line of it
+    is absorbed whole: a ``- item`` inside a code block is code, and testing it
+    for a list marker or a new block would turn code into a fact. An
+    unterminated fence therefore runs to the end of the item's indented run
+    rather than to the end of the note — the lines after the item are the next
+    block, not more of this one.
+    """
     opening = lines[start]
     marker = _item_marker(opening)
     if marker is None:  # pragma: no cover - the caller classified this line
@@ -801,9 +923,20 @@ def _entry_last_line(lines: list[_Line], start: int) -> int:
     last = start
     pending_blank = False
     previous: _Line | None = opening
+    fence: re.Match[str] | None = None
     index = start + 1
     while index < len(lines):
         line = lines[index]
+        if fence is not None:
+            # Inside a nested fence: nothing here is a block opener, and only
+            # dedenting back to the marker column ends the item.
+            if _fence_closes(fence, line):
+                fence = None
+            elif not line.blank and line.indent <= marker_indent:
+                break
+            last = index
+            index += 1
+            continue
         if line.blank:
             # A blank line does not end the item yet: a following block
             # indented into it is a second paragraph of the same fact.
@@ -812,6 +945,14 @@ def _entry_last_line(lines: list[_Line], start: int) -> int:
             continue
         if _opens_new_block(line, previous):
             break
+        if line.indent > marker_indent:
+            nested = _dedented_fence(line)
+            if nested is not None:
+                fence = nested
+                last = index
+                previous = line
+                index += 1
+                continue
         if _item_marker(line) is not None:
             # A child item, or the next sibling. Either way it is its own
             # entry, and the parent must not swallow it.
@@ -833,11 +974,15 @@ def _entry_last_line(lines: list[_Line], start: int) -> int:
 def _entry_support(text: str, content: str) -> tuple[bool, tuple[str, ...]]:
     """Whether this entry is a plain single-block fact, and why not if not.
 
-    Reported instead of silently accepted: an entry that carries a nested code
-    block or a second block is text no consumer should read as one atomic
-    claim, and a caller has to be able to see that before it decides what to do
-    with the entry. Only the entry's own lines are examined — a nested child
-    item is a different entry and cannot make its parent unsupported.
+    ``content`` is everything the entry says with the marker and the stamp
+    removed — the opening line's words *and* its continuation lines — so a
+    bullet whose words sit on a continuation line is a fact, not an empty
+    stamp. Reported rather than silently accepted: an entry that carries a
+    nested code block or a second block is text no consumer should read as one
+    atomic claim, and a caller has to be able to see that before it decides
+    what to do with the entry. Only the entry's own lines are examined — a
+    nested child item is a different entry and cannot make its parent
+    unsupported.
     """
     found: list[str] = []
     body = text.split("\n")[1:]
@@ -900,27 +1045,27 @@ def _build_entry(
         return None, last + 1
 
     found: list[str] = []
-    stamp, count = _scan_stamp(opening.view, today)
-    if stamp is not None:
-        if not stamp.valid:
-            found.append(_STAMP_DIAGNOSTICS[stamp.reason])
-        if count > 1:
-            found.append(DIAG_STAMP_DUPLICATE)
+    stamp, span = _scan_stamp(opening.view, today)
+    if stamp is not None and not stamp.valid:
+        found.append(_STAMP_DIAGNOSTICS[stamp.reason])
 
     # The stamp is metadata: it is removed from the fingerprint along with the
-    # separator it introduced. When what remains of the opening line is empty,
-    # the bullet asserts nothing, which is a different fact from a claim whose
-    # verification has expired.
-    span = _strict_stamp_span(opening.view)
+    # separator it introduced. `span` is the one span both this slice and the
+    # fingerprint below are cut with, so what the support check calls the
+    # entry's content and what the hash covers can never disagree.
     bare = (
         opening.view
         if span is None
         else opening.view[: span[0]] + opening.view[span[1] :]
     )
-    supported, support_diagnostics = _entry_support(text, bare[content_start:])
+    content = "\n".join(
+        [bare[content_start:]]
+        + [lines[index].view for index in range(start + 1, last + 1)]
+    )
+    supported, support_diagnostics = _entry_support(text, content)
     found.extend(support_diagnostics)
 
-    fingerprint = _fingerprint(text)
+    fingerprint = _fingerprint(text, span)
     key = (section, fingerprint)
     ordinal = ordinals.get(key, 0)
     ordinals[key] = ordinal + 1
