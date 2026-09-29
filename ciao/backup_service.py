@@ -651,6 +651,10 @@ class BackupService:
             # covered.
             excluded = list(report.get("tracked_excluded") or [])
             gap = _coverage_gap(excluded)
+            # The count every return below reports, derived through the same
+            # helper ``status()`` uses rather than as a bare ``len`` at each
+            # site: one place that says how the coverage gap is counted.
+            gap_count = _gap_count(report)
             blocked = _hard_blockers(report)
             if blocked:
                 # A credential-shaped file inside the scope. Nothing is staged,
@@ -665,7 +669,7 @@ class BackupService:
                     remote=remote,
                     pending_changes=len(report.get("eligible") or []),
                     pending_commits=unpushed,
-                    coverage_gap=len(excluded),
+                    coverage_gap=gap_count,
                 )
 
             committed = False
@@ -687,7 +691,7 @@ class BackupService:
                         remote=remote,
                         pending_changes=len(eligible),
                         pending_commits=unpushed,
-                        coverage_gap=len(excluded),
+                        coverage_gap=gap_count,
                     )
             self._run_extra["committed"] = committed
 
@@ -708,7 +712,7 @@ class BackupService:
                     branch=branch,
                     remote=remote,
                     pending_commits=0,
-                    coverage_gap=len(excluded),
+                    coverage_gap=gap_count,
                 )
 
             ok, detail = await local_session.push_branch(root, branch=branch)
@@ -731,7 +735,7 @@ class BackupService:
                     branch=branch,
                     remote=remote,
                     pending_commits=unpushed,
-                    coverage_gap=len(excluded),
+                    coverage_gap=gap_count,
                 )
             if local_session.is_diverged_backup(detail):
                 # A real merge conflict with ``origin/<branch>``: the commit did
@@ -753,7 +757,7 @@ class BackupService:
                     reason=detail,
                     branch=branch,
                     remote=remote,
-                    coverage_gap=len(excluded),
+                    coverage_gap=gap_count,
                 )
             self._store.update(
                 {
@@ -768,7 +772,7 @@ class BackupService:
                 reason=_landed_reason(committed, gap),
                 branch=branch,
                 remote=remote,
-                coverage_gap=len(excluded),
+                coverage_gap=gap_count,
             )
 
     def _record(
@@ -815,15 +819,25 @@ class BackupService:
         The condition is permanent, so a line per run would be 288 a day at the
         five-minute cadence and would bury the failures it shares the log with.
         The first sighting and every later change are the two moments a reader
-        needs; a gap that goes away and comes back is a new sighting, so the
-        remembered count is only moved once the line has been written.
+        needs; a gap that goes away and comes back is a new sighting, so a run
+        that finds no gap clears what was remembered — otherwise a gap returning
+        at the number it had before would go unmentioned for the rest of the
+        process's life.
+
+        The line says what the gap is and nothing about the run around it. It
+        is written before the failure branch, so a run that also failed would
+        otherwise open with a claim about the backup being current that the
+        WARNING immediately below contradicts.
         """
-        if not status.coverage_gap or status.coverage_gap == self._logged_gap:
+        if not status.coverage_gap:
+            self._logged_gap = 0
+            return
+        if status.coverage_gap == self._logged_gap:
             return
         self._logged_gap = status.coverage_gap
         logger.info(
             "Memory backup coverage gap: %d tracked path(s) outside the backup scope "
-            "are not backed up online. The backup itself is up to date.",
+            "are not backed up online.",
             status.coverage_gap,
         )
 

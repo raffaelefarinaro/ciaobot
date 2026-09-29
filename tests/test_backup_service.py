@@ -476,6 +476,54 @@ async def test_a_gap_is_logged_once_and_again_only_when_the_count_moves(
     assert [r for r in caplog.records if r.levelname in {"WARNING", "ERROR"}] == []
 
 
+async def test_a_gap_that_closes_and_returns_at_the_same_count_is_logged_again(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Suppressing the repeat is only honest while the condition holds.
+
+    Remembering the count and nothing else means a gap that went away and came
+    back at the same number is a run that never mentions it again — and the run
+    that closed it never said so either, so the log claimed a gap was still
+    there through the whole stretch where it was not. The remembered count is
+    cleared by the run that finds no gap, and the returning one is a new
+    sighting.
+    """
+    world = _world(tmp_path)
+    _write(world.workspace / "app.py", "# app\n")
+    _git(world.workspace, "add", "app.py")
+    _git(world.workspace, "commit", "-q", "-m", "app source")
+    service = _service(world)
+
+    def gap_lines() -> list[LogRecord]:
+        return [r for r in caplog.records if "coverage gap" in r.getMessage()]
+
+    with caplog.at_level("INFO", logger="ciao.backup_service"):
+        first = await service.run_backup()
+        assert first.coverage_gap == 1
+        assert len(gap_lines()) == 1
+        # The out-of-scope file stops being tracked, so the gap closes.
+        _git(world.workspace, "rm", "-q", "--cached", "app.py")
+        closed = await service.run_backup()
+        assert closed.coverage_gap == 0
+        # A run with no gap says nothing — there is nothing to report.
+        assert len(gap_lines()) == 1
+        # And the same file is tracked again, which is a new sighting. It is
+        # edited as well as re-added, because re-tracking a file whose content
+        # is unchanged is no commit at all.
+        _write(world.workspace / "app.py", "# app, back again\n")
+        _git(world.workspace, "add", "app.py")
+        _git(world.workspace, "commit", "-q", "-m", "app source, again")
+        returned = await service.run_backup()
+        await service.run_backup()
+
+    assert returned.coverage_gap == first.coverage_gap
+    assert [r.levelname for r in gap_lines()] == ["INFO", "INFO"]
+    assert f"{returned.coverage_gap} tracked path(s)" in gap_lines()[-1].getMessage()
+    # ...and it is still not a line per run: the last run of the stretch is
+    # silent.
+    assert len(gap_lines()) == 2
+
+
 # ── clean runs create nothing ────────────────────────────────────────────────
 
 
