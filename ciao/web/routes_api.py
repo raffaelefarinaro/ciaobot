@@ -4917,12 +4917,8 @@ def _routines_payload(config, app_settings) -> dict:
     return {
         # Overrides as stored ("" = automatic default).
         "insights_model": s.insights_model,
-        # The HTTPS origin other devices should use, as stored ("" = none).
-        "trusted_url": s.trusted_url,
         "insights_enabled": config.insights_enabled,
         "trajectories_enabled": config.trajectories_enabled,
-        "push_all_devices": s.push_all_devices,
-
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
@@ -8440,46 +8436,25 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
     """
     from ciao.network_addresses import (
         is_loopback_url,
-        normalize_trusted_url,
         server_addresses,
         tailscale_serve_urls,
     )
 
     config = request.app.state.config
     port = int(getattr(config, "pwa_port", 8443) or 8443)
-    app_settings = getattr(request.app.state, "app_settings", None)
-    stored = getattr(getattr(app_settings, "settings", None), "trusted_url", "") or ""
-    # Re-validate what was stored: app_settings.json can be hand-edited, and a
-    # token smuggled into the stored value must never reach the QR code. A
-    # value the setter would have refused is treated as no trusted URL at all.
-    try:
-        trusted = normalize_trusted_url(stored)
-    except ValueError:
-        trusted = ""
     entries: list[dict[str, object]] = []
-    if trusted:
+    # Tailscale Serve's HTTPS name never appears on an interface, so it is
+    # asked for directly.
+    for url in await asyncio.to_thread(tailscale_serve_urls, port):
         entries.append(
             {
-                "url": trusted,
+                "url": url,
                 "kind": "trusted",
-                "source": "manual",
+                "source": "tailscale",
                 "secure": True,
                 "loopback": False,
             }
         )
-    # Tailscale Serve's HTTPS name never appears on an interface, so it is
-    # asked for directly. A typed address that matches it stays "manual".
-    for url in await asyncio.to_thread(tailscale_serve_urls, port):
-        if url != trusted:
-            entries.append(
-                {
-                    "url": url,
-                    "kind": "trusted",
-                    "source": "tailscale",
-                    "secure": True,
-                    "loopback": False,
-                }
-            )
     urls = await asyncio.to_thread(server_addresses, port)
     for url in urls:
         if is_loopback_url(url):
@@ -8488,4 +8463,4 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
     for url in urls:
         if is_loopback_url(url):
             entries.append({"url": url, "kind": "loopback", "secure": False, "loopback": True})
-    return JSONResponse({"port": port, "trusted_url": trusted or None, "addresses": entries})
+    return JSONResponse({"port": port, "addresses": entries})

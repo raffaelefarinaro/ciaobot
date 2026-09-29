@@ -471,7 +471,7 @@
              computer. The one place to set the trusted HTTPS address. -->
         <SettingsDevices />
 
-        <!-- Notifications. Same card as the Notifications tab. -->
+        <!-- Notifications. -->
         <SettingsNotifications />
 
         <!-- Keyboard shortcuts -->
@@ -570,12 +570,6 @@
         </div>
 
       </template>
-
-      <!-- NOTIFICATIONS TAB -->
-      <template v-if="currentTab === 'notifications'">
-        <SettingsNotifications />
-      </template>
-
 
       <!-- MODELS TAB: chat providers, then background models.
            The old providers tab folded in here; /settings/providers

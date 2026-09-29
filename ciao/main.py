@@ -815,11 +815,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service
         app.state.control_plane = control_plane
-    app.state.push_manager = PushManager(
-        config.state_path.parent,
-        subject=PUSH_SUBJECT,
-        push_all=lambda: app_settings.settings.push_all_devices,
-    )
+    app.state.push_manager = PushManager(config.state_path.parent, subject=PUSH_SUBJECT)
     app.state.focused_chats = {}
 
     # A read mutation is already broadcast to every connected PWA. Fan the

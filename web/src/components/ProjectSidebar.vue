@@ -988,7 +988,6 @@ const SETTINGS_NAV = [
   { to: '/settings/commands', label: 'Commands' },
   { to: '/settings/mcp', label: 'MCP servers' },
   { to: '/settings/automations', label: 'Automations' },
-  { to: '/settings/notifications', label: 'Notifications' },
 ] as const
 // The chord ChatLayout binds for New chat: Option/Alt+N, because the browser
 // keeps Cmd+T for its own new-tab.
