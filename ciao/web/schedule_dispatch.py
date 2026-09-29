@@ -137,8 +137,8 @@ class ScheduleDispatcher:
     ) -> tuple[bool, bool]:
         """Block until the schedule chat's background subagents finish.
 
-        A schedule turn can delegate to background subagents (e.g. memory
-        curation dispatches the memory agent) and return before they finish.
+        A schedule turn can delegate independent work to background subagents
+        and return before they finish.
         The archive decision must not run against that half-complete state, so
         we poll the parent session JSONL — the reliable running-count signal
         (see ciao/subagent_tracking.py) — until it drains.
@@ -630,8 +630,7 @@ class ScheduleDispatcher:
         if chat_state and chat_state.retry_status == "pending":
             outcome.retry_pending = True
 
-        # A clean parent turn may still have live background subagents (e.g.
-        # curation delegating to the memory agent). Wait for them to finish
+        # A clean parent turn may still have live background subagents. Wait for them to finish
         # before the archive decision so the classifier judges the completed
         # result — not an interim "dispatched, will report later" message. If
         # they don't settle in time, mark the run pending so it stays visible.

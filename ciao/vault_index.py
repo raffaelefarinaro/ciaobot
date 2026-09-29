@@ -1392,7 +1392,7 @@ def format_vocabulary(
 def entity_types_section(registry: EntityTypeRegistry) -> str:
     """The vault's categories, as a `## Categories` block for VOCABULARY.md.
 
-    The file the memory agent reads before it writes frontmatter, so it names
+    The file the memory-writing agent reads before it writes frontmatter, so it names
     the categories the vault is *configured* with — which is not the same list
     as the types its notes happen to use, and is the one a reader needs in order
     to know what a new category would be called. One line per enabled entry:
@@ -1427,7 +1427,7 @@ def write_vocabulary_file(
     """Write `VOCABULARY.md`.
 
     Deliberately carries no generated-at timestamp, unlike ``INDEX.md``: this
-    file is read by the memory agent before it writes frontmatter, and a
+    file is read before the agent writes frontmatter, and a
     timestamp would dirty it in git on every rebuild even when the vocabulary
     itself never moved.
 

@@ -7,12 +7,6 @@ from importlib import resources
 from pathlib import Path
 
 
-EXPECTED_AGENTS = {
-    "memory.md",
-    "researcher.md",
-    "secretary.md",
-}
-
 EXPECTED_COMMANDS = {
     "critique.md",
     "interrogation.md",
@@ -32,10 +26,11 @@ PRIVATE_MARKERS = {
 }
 
 
-def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
+def test_stock_package_contains_memory_skill_commands_and_schedules() -> None:
     stock = resources.files("ciao.stock")
 
-    assert {path.name for path in stock.joinpath("agents").iterdir() if path.name.endswith(".md")} == EXPECTED_AGENTS
+    assert not stock.joinpath("agents").is_dir() or not list(stock.joinpath("agents").glob("*.md"))
+    assert stock.joinpath("skills", "ciao-memory", "SKILL.md").is_file()
     assert {path.name for path in stock.joinpath("commands").iterdir() if path.name.endswith(".md")} == EXPECTED_COMMANDS
     assert stock.joinpath("skills").is_dir()
     assert not list(stock.joinpath("skills").glob("*.md"))
@@ -145,13 +140,9 @@ def test_stock_curation_skill_carries_the_new_passes() -> None:
     assert "Never delete it unattended" in skill
 
 
-def test_stock_memory_agent_role_matches_curator_contract() -> None:
-    """The spawned memory agent must allow the same guarded consolidation.
-
-    The curation schedule says \"Use the memory agent\", so if the role still
-    forbade region writes the two instructions would cancel out.
-    """
-    role = resources.files("ciao.stock").joinpath("agents/memory.md").read_text(
+def test_stock_memory_skill_matches_curator_contract() -> None:
+    """The skill and scheduled curation must agree on guarded consolidation."""
+    role = resources.files("ciao.stock").joinpath("skills/ciao-memory/SKILL.md").read_text(
         encoding="utf-8"
     )
 
@@ -161,7 +152,9 @@ def test_stock_memory_agent_role_matches_curator_contract() -> None:
     # New-fact promotion follows the pass/curation split even though
     # consolidation is allowed: the memory pass can promote a confident
     # state-shaped fact, but the unattended curator never promotes a new one.
-    assert "an unattended curation run never promotes a new region fact" in role
+    assert "An unattended curation run never promotes a new fact" in role
+    assert "Load the `ciao-memory` skill" in _curation_prompt()
+    assert "Use one memory agent" not in _curation_prompt()
 
 
 def test_stock_workspace_guide_carries_default_caps() -> None:

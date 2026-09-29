@@ -184,8 +184,8 @@ def test_vault_note_mutation_is_refused_on_an_unattended_turn(tmp_path: Path) ->
 # ── The stock assets and docs must not contradict the matrix ──────────────
 
 
-def test_stock_memory_agent_states_the_advisory_cap() -> None:
-    role = _stock("agents/memory.md")
+def test_stock_memory_skill_states_the_advisory_cap() -> None:
+    role = _stock("skills/ciao-memory/SKILL.md")
     assert "The cap is advisory on every path" in role
     assert "reports `over_cap`" in role
     assert "enforces the cap" not in role
@@ -208,7 +208,7 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
     owner instead of a coined `type:`.
     """
     for relative in (
-        "agents/memory.md",
+        "skills/ciao-memory/SKILL.md",
         "commands/remember.md",
         "commands/interrogation.md",
     ):
@@ -217,8 +217,8 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
         assert "new-category" in asset, relative
 
 
-def test_the_memory_agent_says_where_a_note_goes_and_who_adds_a_category() -> None:
-    role = _stock("agents/memory.md")
+def test_the_memory_skill_says_where_a_note_goes_and_who_adds_a_category() -> None:
+    role = _stock("skills/ciao-memory/SKILL.md")
     assert "Read it before writing a note and file the note in the folder its line names" in role
     assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
     # The list is read, never memorized: a category added in Settings must reach

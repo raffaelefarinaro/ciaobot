@@ -41,7 +41,7 @@
     <section>
       <p class="eyebrow">Under the hood</p>
       <h1>What's built in, and how to add more</h1>
-      <p class="lead">Ciaobot comes with its own helpers: subagents for focused jobs, skills that teach it how to do things, a few slash commands, and a command-line tool it uses to run the app. You can add as many of your own as you like.</p>
+      <p class="lead">Ciaobot includes skills that teach it how to do things, a few slash commands, and a command-line tool it uses to run the app. You can add your own subagents and skills too.</p>
       <ul class="toc" aria-label="On this page">
         <li><a href="#cli">The ciao tool</a></li>
         <li><a href="#subagents">Subagents</a></li>
@@ -56,25 +56,11 @@
       <p>Ciaobot includes a command-line tool, <code>ciao</code>, that the AI uses to act on the app itself: search memory, create a project, archive a chat, schedule a task. That's why <strong>anything you can click, you can also ask for</strong>. You never need to type it yourself.</p>
     </section>
 
-    <p class="note">Every subagent, skill and command below links to its file on GitHub, so you can read the exact prompt Ciaobot uses, or copy it as a starting point for your own.</p>
+    <p class="note">Every skill and command below links to its file on GitHub, so you can read the exact prompt Ciaobot uses, or copy it as a starting point for your own.</p>
 
     <section id="subagents">
-      <h2>Subagents <span class="tag">3 included</span></h2>
-      <p>A subagent is a helper the main chat hands a self-contained job to. It works in its own separate context and reports back a summary, so your chat stays short and on topic. While one works, it appears under its chat in the sidebar.</p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Subagent</th><th>What it's for</th></tr></thead>
-          <tbody>
-            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/agents/secretary.md"><code>secretary</code></a></td><td>Calendar, email, reminders, scheduling and light admin.</td></tr>
-            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/agents/researcher.md"><code>researcher</code></a></td><td>Looks up current information on the web and summarises it with sources.</td></tr>
-            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/agents/memory.md"><code>memory</code></a></td><td>Careful edits to your notes: updating a person or project note, working through memory suggestions.</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <figure>
-        <a href="assets/img/subagents.webp"><img src="assets/img/subagents.webp" alt="Settings, Subagents tab: a custom inbox-sweeper subagent above the built-in memory, researcher and secretary subagents" loading="lazy" width="1600" height="1000"></a>
-        <figcaption>Settings → Subagents. Your own (Custom) sit above the three that ship with Ciaobot (Built-in).</figcaption>
-      </figure>
+      <h2>Subagents <span class="tag">Add your own</span></h2>
+      <p>A subagent is a helper the main chat can hand a self-contained job to. It works in its own separate context and reports back a summary. Ciaobot ships no fixed subagent roles: its main agent follows skills for memory, research and connected services, and can delegate independent work when that helps. Create a custom subagent in Settings → Subagents when a recurring job needs its own context.</p>
     </section>
 
     <section id="skills">
@@ -90,6 +76,7 @@
           <tbody>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/SKILL.md"><code>ciao-capabilities</code></a></td><td>Knows every Ciaobot feature, answers "can you…?" and gives tours.</td></tr>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-cli/SKILL.md"><code>ciao-cli</code></a></td><td>How to use the <code>ciao</code> tool to change the app's state.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-memory/SKILL.md"><code>ciao-memory</code></a></td><td>Careful vault writes, memory proposals and sequential curation.</td></tr>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/web-research/SKILL.md"><code>web-research</code></a></td><td>Uses the app-managed <a href="https://github.com/kepano/defuddle">Defuddle</a> CLI to read clean page text, then checks the sources.</td></tr>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/html-artifact/SKILL.md"><code>html-artifact</code></a></td><td>Builds interactive pages (dashboards, charts, comparisons) shown beside the chat.</td></tr>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/visual-plan/SKILL.md"><code>visual-plan</code></a></td><td>Turns bigger work into a reviewable plan, with an optional visual companion.</td></tr>

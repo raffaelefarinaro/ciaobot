@@ -3,7 +3,7 @@
 The memory system has more than one way to write durable memory, and they do
 not all have the same approval rule. Before this module the copies drifted:
 the architecture said new memory needs review while archive-time extraction
-called ``auto_promote_memory=True``; the memory agent said the typed path
+called ``auto_promote_memory=True``; the retired memory agent said the typed path
 enforces the cap while ``update_region`` documents and implements an advisory
 one; and the unattended capsule said "do not ask" without saying what to do with
 work that *requires* approval.
@@ -15,7 +15,7 @@ promotes a new region fact with no reviewer present; the rows that write one
 live are attended turns a person can steer.
 
 This module is the single machine-readable statement of that policy. The prose
-lives in the stock assets (``ciao/stock/agents/memory.md``,
+lives in the stock assets (``ciao/stock/skills/ciao-memory/SKILL.md``,
 ``ciao/stock/commands/remember.md``, ``ciao/stock/schedules.json``) and
 in ``docs/ARCHITECTURE.md``; tests pin every copy here so they cannot drift
 apart again. It is deliberately behavior-free: the accept path in
