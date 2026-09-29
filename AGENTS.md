@@ -38,9 +38,11 @@ Verification:
      attribute (adding a field to the `/ws/events` snapshot broke
      `tests/test_ws_auth.py`, whose `SimpleNamespace` stub had no such
      attribute), so a green focused run proves nothing about the suite.
-  3. `cd web && npm test` — the full frontend suite. Needs Node >= 20.19;
+  3. `cd web && npm test` — the full frontend suite. Needs Node >= 22.22.2;
      `npx vitest` on an older Node silently skips component files while
-     printing green.
+     printing green. The floor is set by jsdom and lives in three places that
+     must agree: `web/package.json` `engines`, `SUPPORTED_RANGE` in
+     `web/scripts/check-node.mjs`, and `docs/DEVELOPMENT.md`.
   4. `cd web && npm run build` after frontend changes.
   PRs into `develop` only run these on Linux; the macOS job (browser tests and
   an engine cold-start) runs after merge, so a PR going green is not proof the
