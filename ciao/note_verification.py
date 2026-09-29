@@ -20,7 +20,9 @@ writes nothing, so the worklist pass and the proposal writer can both ask what
   checked" is not "still true".
 * ``update`` — applies the agent's exact replacement text, and only when every
   piece of evidence is a citation somebody could go and read (a ``source_ref``,
-  the ``quoted`` text seen there, and a ``supports`` clause). An uncited edit is
+  the ``quoted`` text seen there, a ``supports`` clause). One good row among
+  three uncited ones leaves two claims with nothing behind them, so the test is
+  on the whole set, not on whether one row qualifies. An uncited edit is
   returned for a human, never written quietly.
 * ``retire`` — **never** applied here. Retirement is a human decision, so it is
   returned as ``needs_review`` and nothing is written.
@@ -33,6 +35,12 @@ Two absences are load-bearing. A missing citation is *not* a failure, and a
 retire is *not* an update: an unattended pass must never turn "I could not
 verify this" into a deletion, and must never turn "I could not verify this" into
 a silent rewrite either.
+
+And one check runs *before* the rule, not after it: the revision the caller
+presents has to be the revision the note is in. Every outcome that records
+something records it against the note as it stands, so a verdict about text
+that has since been replaced would pin the *new* text for the length of the
+cooldown — the one thing a durable check state must never do.
 
 **Guardrails.** This service never deletes, trashes or archives — no primitive
 for it is imported, and a ``retire`` reaches the same ``needs_review`` a note
@@ -61,6 +69,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -334,14 +343,13 @@ class NoteCheck:
 def _note_tokens(relative_path: str) -> tuple[str, ...]:
     """The spellings that count as naming this note, case-folded.
 
-    A caller writes ``supports`` in its own words, so the match is a casefolded
-    containment of the note's relative path, of the same path without its
-    extension, or of its file stem. Deliberately loose: the question is "did the
-    caller say which note this is about", not "did the caller parse it", and a
-    stem is a short enough string that an unrelated file can share one. What the
-    rule does enforce is that a row naming nothing recognisable about this note
-    is not a citation *of this note*, so a verdict can never rest on evidence
-    about somebody else's file.
+    A caller writes ``supports`` in its own words, so the match is against the
+    note's relative path, the same path without its extension, and its file
+    stem. It is a *word* match, not a substring one: a stem is a short enough
+    string that containment would let ``al`` match the middle of ``calendar``,
+    and a verdict that rested on a clause about somebody else's calendar would
+    be a verdict about this note that nothing supports. ``-`` counts as part of a
+    word so ``verdi`` cannot match inside ``vi-verdi`` either.
     """
     path = Path(str(relative_path or ""))
     tokens = {path.as_posix().casefold()}
@@ -353,9 +361,17 @@ def _note_tokens(relative_path: str) -> tuple[str, ...]:
 
 
 def _names_note(evidence: Evidence, relative_path: str) -> bool:
-    """Whether one evidence row says which note's facts it supports."""
+    """Whether one evidence row says which note's facts it supports.
+
+    Each spelling has to appear as a whole word — bounded by anything that is
+    not a word character or a hyphen — so only a clause that actually names this
+    note, or one of its path segments, counts.
+    """
     supports = evidence.supports.casefold()
-    return any(token in supports for token in _note_tokens(relative_path))
+    return any(
+        re.search(rf"(?<![\w-]){re.escape(token)}(?![\w-])", supports)
+        for token in _note_tokens(relative_path)
+    )
 
 
 def _is_citation(evidence: Evidence) -> bool:
@@ -381,6 +397,20 @@ def _supporting_evidence(request: VerificationRequest) -> tuple[Evidence, ...]:
     )
 
 
+def _all_citations(request: VerificationRequest) -> bool:
+    """Whether *every* evidence row is a citation, and there is at least one.
+
+    Not "is there one". A note rewritten on the strength of evidence carries
+    every row it was rewritten with, so a single uncited row in the set is a
+    claim in the new text with nothing behind it — which is the outcome the
+    update rule exists to prevent, and which an "at least one citation" test
+    would wave through.
+    """
+    return bool(request.evidence) and all(
+        _is_citation(row) for row in request.evidence
+    )
+
+
 def _missing_evidence_reason(request: VerificationRequest) -> str:
     """Why this request could not be applied unattended, in one sentence.
 
@@ -401,6 +431,16 @@ def _missing_evidence_reason(request: VerificationRequest) -> str:
             "no evidence row names this note "
             f"({request.relative_path}), so nothing supports a re-stamp of it"
         )
+    uncited = sum(1 for row in request.evidence if not _is_citation(row))
+    if uncited:
+        # Named per row rather than as "insufficient evidence": one good row in
+        # the set does not make the uncited ones go away, and the caller's next
+        # action is to write the citation that row is missing.
+        return (
+            f"{uncited} of {len(request.evidence)} evidence rows are not citations: "
+            "each needs a source_ref, the quoted text seen there, and the "
+            "assertion it supports"
+        )
     return "the evidence cited does not cover the whole note"
 
 
@@ -411,6 +451,25 @@ _RETIRE_REASON = (
     "retirement is a human decision: this service never retires, deletes, "
     "trashes or archives a note, so the judgement is returned for review"
 )
+
+
+def _unknown_outcome(request: VerificationRequest) -> str:
+    """Why this request names an outcome this version does not know, else ``""``.
+
+    The one validation in :func:`plan_note_verification` that is not a rule but
+    a guard against a caller bug, so it is a named predicate rather than an
+    ``if`` buried in the middle: :func:`verify_note` asks it *before* it decides
+    whether the note is due, so a garbage outcome is reported as the bug it is
+    instead of coming back as "already checked" and hiding for a month behind a
+    cooldown.
+    """
+    outcome = str(request.outcome or "").strip()
+    if outcome in OUTCOMES:
+        return ""
+    return (
+        f"unknown verification outcome {outcome!r}; nothing was recorded, so this "
+        "is a caller bug rather than a verdict"
+    )
 
 
 def plan_note_verification(
@@ -430,16 +489,14 @@ def plan_note_verification(
     anything.
     """
     outcome = str(request.outcome or "").strip()
-    if outcome not in OUTCOMES:
+    unknown = _unknown_outcome(request)
+    if unknown:
         return VerificationPlan(
             action=RECORD_ONLY,
             status=FAILED,
             outcome=outcome,
             after_text="",
-            reason=(
-                f"unknown verification outcome {outcome!r}; nothing was recorded, "
-                "so this is a caller bug rather than a verdict"
-            ),
+            reason=unknown,
         )
     if outcome == RETIRE:
         return VerificationPlan(
@@ -530,14 +587,22 @@ def _plan_still_valid(
 def _plan_update(request: VerificationRequest, *, note_text: str) -> VerificationPlan:
     """An update: the agent's exact replacement, or a human's decision.
 
-    An update rewrites claims, so every one of them has to name a source
-    somebody can re-open. One evidence row missing its ``source_ref``, its
-    ``quoted`` text or its ``supports`` clause leaves a sentence in the note that
-    nobody can check, which is the outcome this rule exists to prevent: the edit
-    comes back as ``needs_review`` and nothing is written.
+    An update rewrites claims, so every claim it writes has to name a source
+    somebody can re-open, and every row it was rewritten *with* has to be such a
+    citation — one good row among three uncited ones leaves two claims in the
+    new text with nothing behind them, which is the outcome this rule exists to
+    prevent: the edit comes back as ``needs_review`` and nothing is written.
+
+    The replacement is the caller's, verbatim. In particular it is **not**
+    re-stamped here: the caller knows what it changed and what the note's
+    ``updated:`` should therefore say, and a service that rewrote the text it
+    was handed would stop writing the exact bytes the caller approved. A caller
+    must therefore carry the fresh ``updated:`` into its own replacement —
+    otherwise the note reads as stale the moment it is applied, and the next
+    audit lists it again.
     """
     edit = request.edit
-    if edit is None or not edit.after:
+    if edit is None or not edit.after.strip():
         return VerificationPlan(
             action=PROPOSE,
             status=NEEDS_REVIEW,
@@ -546,11 +611,11 @@ def _plan_update(request: VerificationRequest, *, note_text: str) -> Verificatio
             reason=(
                 "an update needs the note's exact replacement text"
                 if edit is None
-                else "an update that empties the note is a deletion, which this "
-                "service never performs"
+                else "an update that leaves the note with no content is a "
+                "deletion, which this service never performs"
             ),
         )
-    if not _supporting_evidence(request):
+    if not _supporting_evidence(request) or not _all_citations(request):
         return VerificationPlan(
             action=PROPOSE,
             status=NEEDS_REVIEW,
@@ -676,45 +741,37 @@ def _check_from_mapping(key: str, raw: Any) -> NoteCheck | None:
     )
 
 
-def read_note_checks(vault_root: Path | str) -> dict[str, NoteCheck]:
-    """Every recorded check in one vault, keyed by vault-relative note path.
+def _load_note_checks(path: Path) -> tuple[dict[str, NoteCheck], str]:
+    """Every check readable in *path*, and why the file was skipped if it was.
 
-    Never raises and never fails a caller: a missing file is an empty map, and a
-    file that is unreadable, truncated, from a newer schema or holding a row
-    this version cannot read is logged and skipped. Every one of those cases
-    means the same thing to a caller — no suppression — which is the safe
-    direction, because re-asking a note costs a pass while silently honouring a
-    check we could not read would claim a verification nobody made.
+    One reader, two policies. A *reader* wants an empty map from a file it cannot
+    understand — re-asking a note costs a pass, while honouring a check nobody can
+    read would be a verdict on trust. A *writer* wants the opposite, because it
+    rewrites the whole file from what it read: an empty map it then writes back
+    drops every other note's cooldown and ``proposal_id``, which is why the skip
+    reason is returned rather than only logged.
     """
-    path = note_check_state_path(vault_root)
     try:
         raw_text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return {}
+        return {}, ""
     except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("note checks: %s could not be read (%s)", path, exc)
-        return {}
+        return {}, f"{path} could not be read ({exc})"
     try:
         payload = json.loads(raw_text)
     except ValueError as exc:
-        logger.warning("note checks: %s is not valid JSON (%s)", path, exc)
-        return {}
+        return {}, f"{path} is not valid JSON ({exc})"
     if not isinstance(payload, dict):
-        logger.warning("note checks: %s is not an object", path)
-        return {}
+        return {}, f"{path} is not a JSON object"
     schema = payload.get("schema")
     if isinstance(schema, bool) or schema != CHECK_STATE_SCHEMA:
-        logger.warning(
-            "note checks: %s carries schema %r, not %s; no check is honoured",
-            path,
-            schema,
-            CHECK_STATE_SCHEMA,
+        return {}, (
+            f"{path} carries schema {schema!r}, not {CHECK_STATE_SCHEMA}, so its "
+            "checks cannot be read"
         )
-        return {}
     notes = payload.get("notes")
     if not isinstance(notes, dict):
-        logger.warning("note checks: %s holds no note map", path)
-        return {}
+        return {}, f"{path} holds no note map"
     checks: dict[str, NoteCheck] = {}
     for key, row in notes.items():
         if not isinstance(key, str):
@@ -727,6 +784,40 @@ def read_note_checks(vault_root: Path | str) -> dict[str, NoteCheck]:
         check = _check_from_mapping(stored_key, row)
         if check is not None:
             checks[stored_key] = check
+    return checks, ""
+
+
+def read_note_checks(vault_root: Path | str) -> dict[str, NoteCheck]:
+    """Every recorded check in one vault, keyed by vault-relative note path.
+
+    Never raises and never fails a caller: a missing file is an empty map, and a
+    file that is unreadable, truncated, from a newer schema or holding a row
+    this version cannot read is logged and skipped. Every one of those cases
+    means the same thing to a caller — no suppression — which is the safe
+    direction, because re-asking a note costs a pass while silently honouring a
+    check we could not read would claim a verification nobody made.
+    """
+    checks, skipped = _load_note_checks(note_check_state_path(vault_root))
+    if skipped:
+        logger.warning("note checks: %s", skipped)
+    return checks
+
+
+def _load_for_write(path: Path) -> dict[str, NoteCheck]:
+    """The checks :func:`record_note_check` is about to rewrite the file from.
+
+    Refuses anything but a missing file. This function's caller writes the whole
+    map back, so reading an unparseable or foreign-schema file as empty would
+    delete every check in it — including the ``proposal_id`` that is the only
+    thing standing between a note and a second proposal. Leaving the file exactly
+    as it is, and reporting why, keeps the state that is actually there.
+    """
+    checks, skipped = _load_note_checks(path)
+    if skipped:
+        raise NoteCheckRefused(
+            f"refusing to write a note check over state this version cannot read: "
+            f"{skipped}. Nothing was written, so no other note lost its check."
+        )
     return checks
 
 
@@ -739,11 +830,14 @@ def record_note_check(vault_root: Path | str, check: NoteCheck) -> None:
     read-modify-write without the lock would drop whichever check landed between
     this read and this write. A note keeps one check, not a history — what
     happened to it is in the receipts.
+
+    Raises :class:`NoteCheckRefused` rather than writing over a state file this
+    version cannot read (see :func:`_load_for_write`).
     """
     key = _stored_key(check.relative_path)
     path = note_check_state_path(vault_root)
     with mr.queue_lock(path):
-        checks = read_note_checks(vault_root)
+        checks = _load_for_write(path)
         notes: dict[str, Any] = {
             name: _check_payload(row) for name, row in checks.items()
         }
@@ -810,13 +904,17 @@ def _foreign_workspace_vault(config: Any, workspace: str, root: Path) -> str:
     one workspace's name with another workspace's vault would record its verdict
     in the wrong vault, and the workspace the caller meant would go on being
     asked about the same note forever. ``config`` is the install's own answer to
-    where a workspace's notes live; a caller with no config is trusted to have
-    passed the right root, which is all :mod:`ciao.note_receipts` confinement can
-    say about it either.
+    where a workspace's notes live, and there is no answer from it that counts as
+    permission: a config that cannot be asked is refused rather than waved
+    through, because the alternative is a check filed in a vault nobody claimed.
     """
     getter = getattr(config, "workspace_vault_root", None)
     if not callable(getter):
-        return ""
+        return (
+            f"this config does not answer where workspace {workspace!r} keeps its "
+            f"notes (workspace_vault_root is not callable), so {root} cannot be "
+            "confirmed as its vault"
+        )
     try:
         configured = Path(getter(workspace)).resolve()
     except (OSError, TypeError, ValueError) as exc:
@@ -857,7 +955,20 @@ def _new_check(
     receipt_id: str,
     today: date,
 ) -> NoteCheck:
-    """The check one outcome leaves behind, before it is stored."""
+    """The check one outcome leaves behind, before it is stored.
+
+    The reason is the caller's when the recorded outcome is the one it asked
+    for, and the rule's own when the rule downgraded it: a ``still_valid`` that
+    could not be cited is stored as ``unverified``, and "verified against the
+    March invoice" beside that outcome would be a claim this module cannot
+    support about a verdict it refused to make.
+    """
+    requested = str(request.outcome or "").strip()
+    reason = (
+        plan.reason
+        if plan.outcome != requested
+        else request.reason or plan.reason
+    )
     return NoteCheck(
         relative_path=key,
         content_revision=revision,
@@ -866,7 +977,7 @@ def _new_check(
         retry_after=today + timedelta(days=CHECK_COOLDOWN_DAYS),
         evidence=request.evidence,
         coverage=request.coverage,
-        reason=request.reason or plan.reason,
+        reason=reason,
         receipt_id=receipt_id,
     )
 
@@ -902,9 +1013,9 @@ def verify_note(
 
     The whole operation in order: refuse a vault that is not this workspace's,
     read the note's exact bytes, skip the work if a check for *this* revision
-    already answers it, ask :func:`plan_note_verification` what the rule says,
-    and then either write through
-    :func:`ciao.note_receipts.commit_note_change` — the only mutation this
+    already answers it, compare the revision the caller read, ask
+    :func:`plan_note_verification` what the rule says, and then either write
+    through :func:`ciao.note_receipts.commit_note_change` — the only mutation this
     service performs, so the edit is journaled and undoable — or record the
     verdict and change nothing else.
 
@@ -918,10 +1029,13 @@ def verify_note(
       Nothing written, recorded with a cooldown so the next pass does not ask
       again this month.
     * ``conflict`` — the note moved since the caller read it, or an update was
-      planned against text it no longer holds. Nothing written and **no check
-      recorded**, so the caller can re-read and decide again.
+      planned against text it no longer holds. The revision is compared before
+      the rule runs, so this is reached whether or not the verdict would have
+      written anything. Nothing written and **no check recorded**, so the caller
+      can re-read and decide again.
     * ``already_checked`` — a check for this exact revision is in its cooldown or
-      awaiting a proposal. A no-op: nothing read, nothing written, no receipt.
+      awaiting a proposal. A no-op: nothing written, no receipt, and the check
+      left exactly as it was.
     * ``failed`` — the note could not be used at all (unreadable, not a writable
       note in this vault, the journal could not record it, or the outcome was not
       one of the four). Distinct from ``unverified`` on purpose: an unavailable
@@ -953,14 +1067,53 @@ def verify_note(
         )
     current = mr.content_revision(note_text)
 
+    # A caller bug is reported before anything else, including before the
+    # cooldown: an outcome this version cannot interpret must say so, not hide
+    # behind "already checked" for the rest of the month.
+    unknown = _unknown_outcome(request)
+    if unknown:
+        return VerificationResult(status=FAILED, message=unknown)
+
     existing = read_note_checks(root).get(key)
     if existing is not None and _check_settles(existing, current, today=day):
+        # First, and deliberately ahead of the revision check below: this
+        # short-circuit writes and records nothing, so the note keeps the verdict
+        # it already has for the revision it is in. A caller re-sending the same
+        # request therefore learns it was settled, which is the answer it wanted.
         return VerificationResult(
             status=ALREADY_CHECKED,
             check=existing,
             message=(
                 f"{key} was already checked as {existing.outcome} on "
                 f"{existing.checked_at.isoformat()}; nothing was asked or written"
+            ),
+        )
+
+    # The revision is checked before the verdict is decided, not only before the
+    # write. A verdict reached about a revision the note is no longer in would
+    # otherwise be recorded against the text that is actually there and suppress
+    # it for the whole cooldown — and the outcomes that write nothing are exactly
+    # the ones that reach this check by recording.
+    expected = str(request.expected_revision or "").strip()
+    if not expected:
+        # Not a stale revision but a missing one: a caller that cannot say what
+        # it read is asking for a judgement on text it never saw, which is what
+        # `commit_note_change` refuses as a blind overwrite. Said here, in the
+        # protocol's own terms, rather than reported as a conflict it is not.
+        return VerificationResult(
+            status=FAILED,
+            message=(
+                "an expected revision is required; this service never judges a "
+                "note the caller has not read"
+            ),
+        )
+    if expected != current:
+        return VerificationResult(
+            status=CONFLICT,
+            message=(
+                "the note changed since this request was planned, so its verdict "
+                "is about text that is no longer there; nothing was written and no "
+                "check was recorded, and the caller must read the note again"
             ),
         )
 
@@ -998,7 +1151,11 @@ def verify_note(
         # nothing is recorded, so the caller can re-read it and judge the text
         # that is actually there.
         return VerificationResult(status=CONFLICT, message=str(exc))
-    except mr.MemoryReceiptError as exc:
+    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+        # A journal that would not record, a lock this thread could not take, a
+        # filesystem that said no. All three are reported rather than raised:
+        # this function's contract is one result per note, and a caller running
+        # a pass over a vault must not lose a whole run to one unwritable file.
         return VerificationResult(status=FAILED, message=str(exc))
     receipt_id = str(receipt.get("id", ""))
     # The check describes the revision this operation LEFT the note at, not the

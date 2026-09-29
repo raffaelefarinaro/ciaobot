@@ -294,6 +294,61 @@ def test_update_with_a_contradicting_source_applies_the_exact_text(
     assert result.check.content_revision == mr.content_revision(BOM_CRLF_AFTER)
 
 
+def test_an_update_with_one_uncited_row_among_the_citations_needs_review(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, BOM_CRLF)
+    before_bytes = note.read_bytes()
+
+    # One real citation and one assertion nobody can re-open. "At least one
+    # citation" would wave this through and write a note whose other claim came
+    # from nowhere; every row has to be a citation, because every row is a
+    # reason the note reads the way it will.
+    result = _verify(
+        vault,
+        _request(
+            note,
+            outcome=nv.UPDATE,
+            evidence=(CONTRADICTS, UNCITED),
+            edit=nv.NoteEdit(before=BOM_CRLF, after=BOM_CRLF_AFTER),
+        ),
+    )
+
+    assert result.status == nv.NEEDS_REVIEW, result.message
+    assert note.read_bytes() == before_bytes
+    assert _rows(vault) == []
+    assert result.check is not None
+    assert result.check.outcome == nv.UPDATE
+    assert "1 of 2 evidence rows are not citations" in result.message
+
+
+@pytest.mark.parametrize("replacement", ["", "\n", "   \n\t\n"])
+def test_an_update_that_leaves_no_content_is_refused(
+    tmp_path: Path, replacement: str
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, PLAIN)
+    before_bytes = note.read_bytes()
+
+    # Whitespace is not content. A replacement of "\n" empties the note exactly
+    # as an empty string does, and emptying a note is a deletion.
+    result = _verify(
+        vault,
+        _request(
+            note,
+            outcome=nv.UPDATE,
+            evidence=(CONTRADICTS,),
+            edit=nv.NoteEdit(before=PLAIN, after=replacement),
+        ),
+    )
+
+    assert result.status == nv.NEEDS_REVIEW, repr(replacement)
+    assert "deletion" in result.message
+    assert note.read_bytes() == before_bytes, repr(replacement)
+    assert _rows(vault) == []
+
+
 def test_update_without_a_cited_source_needs_review_and_writes_nothing(
     tmp_path: Path,
 ) -> None:
@@ -379,6 +434,279 @@ def test_stale_expected_revision_is_a_conflict_that_records_nothing(
     # there, and recording it would suppress the re-read that has to happen.
     assert result.check is None
     assert _checks(vault) == {}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "coverage", "evidence"),
+    [
+        (nv.UNVERIFIED, nv.COVERAGE_COMPLETE, ()),
+        (nv.RETIRE, nv.COVERAGE_COMPLETE, (CONTRADICTS,)),
+        (nv.STILL_VALID, nv.COVERAGE_PARTIAL, (CITATION,)),  # downgraded to unverified
+        (nv.UPDATE, nv.COVERAGE_COMPLETE, (UNCITED,)),  # needs_review
+    ],
+)
+def test_a_stale_revision_is_a_conflict_even_when_nothing_would_be_written(
+    tmp_path: Path, outcome: str, coverage: str, evidence: tuple[Any, ...]
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, PLAIN)
+    before_bytes = note.read_bytes()
+
+    # Every one of these verdicts writes nothing, and every one of them used to
+    # be recorded anyway — pinning the revision of a note whose text the caller
+    # never read, and then suppressing the text that is actually there for the
+    # length of the cooldown. The revision is checked before the verdict is even
+    # decided, because a verdict about the wrong revision is not a verdict.
+    result = _verify(
+        vault,
+        _request(
+            note,
+            outcome=outcome,
+            coverage=coverage,
+            evidence=evidence,
+            expected_revision="0" * 64,
+        ),
+    )
+
+    assert result.status == nv.CONFLICT, result.message
+    assert result.check is None
+    assert result.receipt_id == ""
+    assert _checks(vault) == {}
+    assert _rows(vault) == []
+    assert note.read_bytes() == before_bytes
+
+
+@pytest.mark.parametrize("error", [mr.QueueLockError("the queue lock is held"), OSError("disk went away")])
+def test_verify_note_reports_a_write_failure_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, PLAIN)
+    before_bytes = note.read_bytes()
+
+    # A lock this thread could not take, a journal that would not record, a
+    # filesystem that said no: none of them is allowed out of a function whose
+    # whole contract is one result per note, because one unwritable file would
+    # then end the whole pass over the vault.
+    def _refuse(**_kwargs: Any) -> dict[str, Any]:
+        raise error
+
+    monkeypatch.setattr(nv.nr, "commit_note_change", _refuse)
+
+    result = _verify(vault, _request(note, evidence=(CITATION,)))
+
+    assert result.status == nv.FAILED, result.message
+    assert str(error) in result.message
+    assert note.read_bytes() == before_bytes
+    assert _checks(vault) == {}
+
+
+def test_recording_over_a_state_file_this_version_cannot_read_is_refused(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, PLAIN)
+    state = nv.note_check_state_path(vault)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    written_by_a_later_version = json.dumps(
+        {
+            "schema": 2,
+            "notes": {
+                NOTE: {
+                    "relative_path": NOTE,
+                    "content_revision": "a" * 64,
+                    "outcome": nv.UPDATE,
+                    "checked_at": TODAY.isoformat(),
+                    "retry_after": (TODAY + timedelta(days=999)).isoformat(),
+                    "proposal_id": "note_edit_7",
+                }
+            },
+        }
+    )
+    state.write_text(written_by_a_later_version, encoding="utf-8")
+
+    # A reader tolerates it — an unaskable note costs a pass. A writer must not:
+    # writing back from an empty read would drop every other note's cooldown and
+    # the `proposal_id` that is the only thing holding off a second proposal.
+    assert _checks(vault) == {}, "the reader honours nothing it cannot read"
+    with pytest.raises(nv.NoteCheckRefused):
+        nv.record_note_check(
+            vault,
+            nv.NoteCheck(
+                relative_path=NOTE,
+                content_revision="b" * 64,
+                outcome=nv.STILL_VALID,
+                checked_at=TODAY,
+                retry_after=TODAY + timedelta(days=30),
+            ),
+        )
+    assert state.read_text(encoding="utf-8") == written_by_a_later_version, (
+        "the state file must be left exactly as it was found"
+    )
+
+    # And the same refusal reaches the caller as a result, with the note write
+    # it was following reported for what it is: done.
+    applied = _verify(vault, _request(note, evidence=(CITATION,)))
+    assert applied.status == nv.APPLIED, "the note really was re-stamped"
+    assert applied.check is not None
+    assert "refusing to write a note check" in applied.message
+    assert state.read_text(encoding="utf-8") == written_by_a_later_version
+
+
+def test_a_note_is_named_by_a_whole_word_only(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, "people/al.md", PLAIN)
+    # `al` is the whole of this note's stem, and it is in the middle of
+    # "calendar". Containment would call this a citation of Al's note; a word
+    # match does not, so the re-stamp is refused as uncited.
+    about_somebody_else = nv.Evidence(
+        source_type="calendar",
+        source_ref="cal-2026-03-02",
+        quoted="the calendar invite still has the old room",
+        supports="the calendar invite",
+    )
+
+    result = _verify(
+        vault,
+        nv.VerificationRequest(
+            workspace="personal",
+            relative_path="people/al.md",
+            expected_revision=_revision(note),
+            outcome=nv.STILL_VALID,
+            evidence=(about_somebody_else,),
+            coverage=nv.COVERAGE_COMPLETE,
+        ),
+    )
+
+    assert result.status == nv.UNVERIFIED, result.message
+    assert result.check is not None
+    assert result.check.outcome == nv.UNVERIFIED
+    assert "names this note" in result.message
+    assert note.read_bytes() == PLAIN.encode("utf-8")
+
+    # The same clause naming the note as a path segment does count — from a
+    # clean vault, because the refusal above is itself a recorded check.
+    named_vault = _vault(tmp_path, "named-vault")
+    named_note = _write(named_vault, "people/al.md", PLAIN)
+    named = nv.Evidence(
+        source_type="calendar",
+        source_ref="cal-2026-03-02",
+        quoted="the calendar invite still has the old room",
+        supports="people/al.md: which room the meeting is in",
+    )
+    stamped = _verify(
+        named_vault,
+        nv.VerificationRequest(
+            workspace="personal",
+            relative_path="people/al.md",
+            expected_revision=_revision(named_note),
+            outcome=nv.STILL_VALID,
+            evidence=(named,),
+            coverage=nv.COVERAGE_COMPLETE,
+        ),
+    )
+    assert stamped.status == nv.APPLIED, stamped.message
+
+
+def test_a_downgraded_verdict_records_the_rules_reason_not_the_callers(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, PLAIN)
+    before_bytes = note.read_bytes()
+
+    # The request says "still valid, checked against the calendar". The rule
+    # stored `unverified`, because the check only covered part of the note — so
+    # the caller's sentence is not a reason for the outcome that was recorded,
+    # and pairing the two would put a verification nobody made in the record.
+    downgraded = _verify(
+        vault,
+        _request(
+            note,
+            coverage=nv.COVERAGE_PARTIAL,
+            reason="verified against the calendar invite",
+        ),
+    )
+
+    assert downgraded.status == nv.UNVERIFIED
+    assert downgraded.check is not None
+    assert downgraded.check.outcome == nv.UNVERIFIED
+    assert downgraded.check.reason != "verified against the calendar invite"
+    assert "covered partial of it" in downgraded.check.reason
+    assert note.read_bytes() == before_bytes
+
+    # A verdict the rule did record keeps the caller's own reason, which is the
+    # one worth having.
+    assert _checks(vault)[NOTE].outcome == nv.UNVERIFIED
+    nv.record_note_check(
+        vault,
+        nv.NoteCheck(
+            relative_path=NOTE,
+            content_revision=_revision(note),
+            outcome=nv.STILL_VALID,
+            checked_at=TODAY,
+            retry_after=TODAY + timedelta(days=30),
+            reason="checked against the March invoice",
+        ),
+    )
+    assert _checks(vault)[NOTE].reason == "checked against the March invoice"
+
+
+def test_a_config_that_cannot_name_the_workspace_vault_is_refused(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, PLAIN)
+    before_bytes = note.read_bytes()
+
+    # No silent skip. A config that cannot be asked where a workspace keeps its
+    # notes cannot confirm that this is the right vault, and a check recorded
+    # under a workspace's name into somebody else's vault would suppress the
+    # wrong notes for a month.
+    result = _verify(vault, _request(note), config=SimpleNamespace())
+
+    assert result.status == nv.FAILED
+    assert "workspace_vault_root is not callable" in result.message
+    assert _checks(vault) == {}
+    assert note.read_bytes() == before_bytes
+
+
+def test_an_unknown_outcome_is_reported_even_inside_a_cooldown(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, PLAIN)
+
+    first = _verify(vault, _request(note, evidence=(CITATION,)))
+    assert first.status == nv.APPLIED, first.message
+    # The note is now inside a cooldown for its current revision, which is where
+    # a garbage outcome used to be answered "already checked" — a caller bug
+    # wearing a month's cooldown.
+    garbage = _verify(vault, _request(note, outcome="probably_fine"))
+
+    assert garbage.status == nv.FAILED, garbage.message
+    assert "unknown verification outcome" in garbage.message
+    assert _checks(vault)[NOTE].outcome == nv.STILL_VALID, "nothing was recorded"
+
+
+def test_a_missing_expected_revision_is_refused_not_called_a_conflict(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, PLAIN)
+    before_bytes = note.read_bytes()
+
+    # A caller that cannot say what it read is not a caller whose read went
+    # stale. Reported in its own terms, because `conflict` sends the caller off
+    # to re-read a note it never read, and nothing is recorded either way.
+    for missing in ("", "   "):
+        result = _verify(vault, _request(note, expected_revision=missing))
+
+        assert result.status == nv.FAILED, repr(missing)
+        assert "an expected revision is required" in result.message
+        assert _checks(vault) == {}
+        assert _rows(vault) == []
+        assert note.read_bytes() == before_bytes
 
 
 def test_an_edit_planned_against_other_text_is_a_conflict(tmp_path: Path) -> None:
