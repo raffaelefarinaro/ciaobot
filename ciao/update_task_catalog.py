@@ -84,10 +84,12 @@ DETECTORS: frozenset[str] = frozenset()
 COMPLETION_CHECKS: frozenset[str] = frozenset()
 
 #: The documented spelling of a version. A leading ``v`` is tolerated;
-#: prerelease/dev suffixes and build metadata are tolerated; anything else is
-#: not a version and gets a diagnostic rather than a silent ordering.
+#: prerelease/dev suffixes and build metadata are tolerated, and a suffix may
+#: repeat (``1.0.1.post1.dev0`` is an ordinary installed version); anything else
+#: is not a version and gets a diagnostic rather than a silent ordering.
 _VERSION_RE = re.compile(
-    r"^v?\d+(?:[._-]\d+)*(?:[._-]?(?:a|alpha|b|beta|rc|dev|post)[._-]?\d+)?"
+    r"^v?\d+(?:[._-]\d+)*"
+    r"(?:[._-]?(?:a|alpha|b|beta|rc|dev|post)[._-]?\d+)*"
     r"(?:\+[0-9A-Za-z._-]+)?$",
     re.IGNORECASE,
 )
@@ -103,10 +105,11 @@ _ERROR = "error"
 _WARNING = "warning"
 
 #: Diagnostics that make a row itself unusable, so ``load_catalog`` leaves that
-#: row out of the catalog. A duplicate is deliberately not one: it is a
-#: cross-row condition, and which copy stands is decided by file order rather
-#: than by the copy's own shape. A dependency problem is not one either, since
-#: whether a reference resolves must not depend on which other row failed.
+#: row out of the catalog. A task on a cycle or with an unresolvable dependency
+#: is one of them: a consumer resolving ``depends_on`` must not be handed a
+#: graph it can loop on or a prerequisite that is not in the catalog. A duplicate
+#: is deliberately not one: it is a cross-row condition, and which copy stands
+#: is decided by file order rather than by the copy's own shape.
 ROW_DEFECT_CODES: frozenset[str] = frozenset(
     {
         "invalid_row",
@@ -123,6 +126,8 @@ ROW_DEFECT_CODES: frozenset[str] = frozenset(
         "prompt_missing",
         "prompt_empty",
         "prompt_unreadable",
+        "dependency_cycle",
+        "unknown_dependency",
     }
 )
 
@@ -281,7 +286,6 @@ def validate_catalog(
                 )
             )
             continue
-        pairs.add(pair)
         if task.id in ids:
             out.append(
                 _diag(
@@ -291,7 +295,10 @@ def validate_catalog(
                     revision=task.revision,
                 )
             )
+            # Deliberately not added to `pairs`: the first definition of an id
+            # is the one that stands, so this copy is not a dependency target.
             continue
+        pairs.add(pair)
         ids.add(task.id)
         code = _prompt_defect(base, task.prompt_resource)
         if code:
@@ -406,7 +413,48 @@ def load_catalog(*, root: Path | None = None) -> TaskCatalog:
         if (task.id, task.revision) in defective:
             continue
         kept.append(task)
+    kept, dropped = _drop_unresolved_dependencies(kept)
+    diagnostics.extend(dropped)
     return TaskCatalog(tuple(kept), tuple(diagnostics))
+
+
+def _drop_unresolved_dependencies(
+    tasks: list[UpdateTask],
+) -> tuple[list[UpdateTask], list[Diagnostic]]:
+    """Drop tasks whose dependencies are not all in the surviving catalog.
+
+    Run to a fixed point, because dropping one task can strand the task that
+    depended on it. Every stranded reference is reported against the task that
+    carried it, so a caller sees why its prerequisite is missing rather than
+    finding a hole.
+    """
+    kept = list(tasks)
+    diagnostics: list[Diagnostic] = []
+    while True:
+        available = {(task.id, task.revision) for task in kept}
+        survivors: list[UpdateTask] = []
+        for task in kept:
+            missing = [
+                ref
+                for ref in task.depends_on
+                if (ref.id, ref.revision) not in available
+            ]
+            if not missing:
+                survivors.append(task)
+                continue
+            for ref in missing:
+                diagnostics.append(
+                    _diag(
+                        "unknown_dependency",
+                        f"{_label(task)} depends on {ref.id}@{ref.revision}, "
+                        "which was not loaded",
+                        task_id=task.id,
+                        revision=task.revision,
+                    )
+                )
+        if len(survivors) == len(kept):
+            return survivors, diagnostics
+        kept = survivors
 
 
 def read_prompt(task: UpdateTask, *, root: Path | None = None) -> str:
@@ -427,9 +475,17 @@ def read_prompt(task: UpdateTask, *, root: Path | None = None) -> str:
             f"{_label(task)}: prompt_resource {task.prompt_resource!r} is "
             f"{code.replace('_', ' ')}"
         )
-    return base.joinpath(*PurePosixPath(task.prompt_resource).parts).read_text(
-        encoding="utf-8"
-    )
+    # Re-checked rather than trusted: a validated resource can still be gone by
+    # the time a caller asks for it, and the caller gets one typed failure.
+    try:
+        return base.joinpath(*PurePosixPath(task.prompt_resource).parts).read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        raise UpdateTaskError(
+            f"{_label(task)}: cannot read prompt_resource "
+            f"{task.prompt_resource!r}: {exc}"
+        ) from exc
 
 
 def _diag(
@@ -459,33 +515,37 @@ def _prompt_defect(root: Path, resource: str) -> str:
     The resource is a path relative to the packaged ``update-tasks`` directory
     and nothing else: not absolute, no ``..``, no component that is a symlink
     (a symlinked prompt could be swapped for anything once validated), a
-    markdown file, present and non-empty.
+    markdown file, present and non-empty. Every filesystem probe below is
+    total: a name the OS cannot even stat is a diagnostic, never an exception
+    out of ``load_catalog``.
     """
     text = (resource or "").strip()
     if not text:
         return "invalid_field"
     relative = PurePosixPath(text)
-    if relative.is_absolute() or text.startswith("~"):
+    if "\0" in text or relative.is_absolute() or text.startswith("~"):
         return "prompt_not_confined"
     if any(part == ".." for part in relative.parts):
         return "prompt_not_confined"
     if relative.suffix != ".md":
         return "prompt_not_markdown"
 
-    walked = root
-    for part in relative.parts:
-        walked = walked / part
-        if walked.is_symlink():
-            return "prompt_not_confined"
     target = root.joinpath(*relative.parts)
-    if not target.resolve().is_relative_to(root.resolve()):
-        return "prompt_not_confined"
-    if not target.is_file():
-        return "prompt_missing"
     try:
+        walked = root
+        for part in relative.parts:
+            walked = walked / part
+            if walked.is_symlink():
+                return "prompt_not_confined"
+        if not target.resolve().is_relative_to(root.resolve()):
+            return "prompt_not_confined"
+        if not target.is_file():
+            return "prompt_missing"
         if not target.read_text(encoding="utf-8").strip():
             return "prompt_empty"
-    except (OSError, UnicodeDecodeError):
+    except (OSError, ValueError):
+        # ENAMETOOLONG, a symlink loop, an undecodable file, a permission
+        # refusal: none of them is a reason to raise on a startup path.
         return "prompt_unreadable"
     return ""
 
@@ -496,12 +556,17 @@ _BLACK = 2
 
 
 def _dependency_cycles(tasks: Sequence[UpdateTask]) -> list[Diagnostic]:
-    """One ``dependency_cycle`` diagnostic per cycle, naming the tasks on it."""
+    """A ``dependency_cycle`` diagnostic per task on each cycle.
+
+    Every member is named, not only the one that closed the cycle, so
+    ``load_catalog`` can drop the whole cycle rather than leave a consumer to
+    walk into it.
+    """
     by_pair = {(task.id, task.revision): task for task in tasks}
     colour: dict[tuple[str, int], int] = {}
     found: list[Diagnostic] = []
 
-    def walk(pair: tuple[str, int], path: list[str]) -> None:
+    def walk(pair: tuple[str, int], path: list[tuple[str, int]]) -> None:
         colour[pair] = _GREY
         task = by_pair[pair]
         for ref in task.depends_on:
@@ -511,26 +576,30 @@ def _dependency_cycles(tasks: Sequence[UpdateTask]) -> list[Diagnostic]:
             state = colour.get(target, _WHITE)
             if state == _GREY:
                 # `path` is the current stack and already ends at this task, so
-                # the cycle is the tail from the referenced task back to it.
-                start = path.index(ref.id) if ref.id in path else 0
-                names = [*path[start:], ref.id]
-                found.append(
-                    _diag(
-                        "dependency_cycle",
-                        f"dependency cycle: {' -> '.join(names)}",
-                        task_id=task.id,
-                        revision=task.revision,
+                # the cycle is the tail from the referenced task round to it. The
+                # trail keeps the closing hop; the diagnostic list is deduplicated
+                # so a self-dependence names its one task once.
+                start = path.index(target) if target in path else 0
+                closed = [*path[start:], target]
+                trail = " -> ".join(_label(by_pair[item]) for item in closed)
+                for member in dict.fromkeys(closed):
+                    found.append(
+                        _diag(
+                            "dependency_cycle",
+                            f"{_label(by_pair[member])} is on a dependency cycle: {trail}",
+                            task_id=by_pair[member].id,
+                            revision=by_pair[member].revision,
+                        )
                     )
-                )
                 continue
             if state == _WHITE:
-                walk(target, [*path, ref.id])
+                walk(target, [*path, target])
         colour[pair] = _BLACK
 
     for task in tasks:
         pair = (task.id, task.revision)
         if colour.get(pair, _WHITE) == _WHITE:
-            walk(pair, [task.id])
+            walk(pair, [pair])
     return found
 
 
@@ -667,7 +736,12 @@ def _text_field(
 def _parse_depends_on(
     value: Any, task_id: str, revision: int
 ) -> tuple[tuple[TaskRef, ...], list[Diagnostic]]:
-    """Parse ``depends_on`` as a list of ``{"id": ..., "revision": ...}`` objects."""
+    """Parse ``depends_on`` as a list of ``{"id": ..., "revision": ...}`` objects.
+
+    Held to the row's own rules: an id is a kebab string and a revision is a
+    positive integer, because a coerced reference would only fail later as an
+    unresolvable dependency and hide the row that was actually wrong.
+    """
     if value is None:
         return (), []
     label = f"{task_id}@{revision}" if task_id else "<unnamed task>"
@@ -694,18 +768,21 @@ def _parse_depends_on(
                 )
             )
             continue
-        ref_id = str(entry.get("id") or "").strip()
+        raw_id = entry.get("id")
         ref_revision = entry.get("revision")
+        ref_id = raw_id.strip() if isinstance(raw_id, str) else ""
         if (
             not ref_id
+            or not _ID_RE.fullmatch(ref_id)
             or isinstance(ref_revision, bool)
             or not isinstance(ref_revision, int)
+            or ref_revision < 1
         ):
             out.append(
                 _diag(
                     "invalid_depends_on",
-                    f"{label}: dependency {entry!r} needs a non-empty id and an "
-                    "integer revision",
+                    f"{label}: dependency {entry!r} needs a kebab-case id and a "
+                    "positive integer revision",
                     task_id=task_id,
                     revision=revision,
                 )

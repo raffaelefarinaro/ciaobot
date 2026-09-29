@@ -201,10 +201,14 @@ def test_prompt_resource_confinement(tmp_path: Path) -> None:
             "prompts/../../../etc/passwd.md",
             "prompts/linked.md",
             "prompts/dir-link/outside.md",
+            "prompts/embedded-null\0.md",
         ],
         "prompt_missing": ["prompts/absent.md"],
         "prompt_empty": ["prompts/empty.md"],
         "prompt_not_markdown": ["prompts/notes.txt"],
+        # A name the filesystem cannot even stat is a diagnostic, not a raise:
+        # `load_catalog` has to survive a catalog nobody wrote by hand.
+        "prompt_unreadable": [f"prompts/{'a' * 300}.md"],
     }
     _write_prompt(root, "prompts/sound.md")
     rows = [
@@ -227,6 +231,10 @@ def test_prompt_resource_confinement(tmp_path: Path) -> None:
     # A sound resource is not merely free of diagnostics: it reads, and the read
     # is the one that would hand a caller its instructions.
     assert read_prompt(catalog.tasks[0], root=root) == "Do the thing.\n"
+    # And a resource that went away after the load fails as a caller-visible
+    # error, not as an OSError escaping a definition that had validated.
+    with pytest.raises(ValueError):
+        read_prompt(replace(catalog.tasks[0], prompt_resource="prompts/gone.md"))
 
 
 def test_since_version_gating_covers_skipped_releases_and_prereleases(
@@ -276,6 +284,15 @@ def test_since_version_gating_covers_skipped_releases_and_prereleases(
     for spelling in ("", "latest", "1..0", "v", "one", "1.0.0+"):
         assert parse_version(spelling) is None
 
+    # A build of a release is an ordinary installed version: a chained suffix
+    # parses, and it still supports the release's own tasks. An installed version
+    # that silently fails to parse gates every task out.
+    for spelling in ("1.0.1rc1.dev0", "1.0.1.post1.dev0", "1.0.1.post1"):
+        assert parse_version(spelling) == _version_key(spelling)
+    assert parse_version("1.0.1") < parse_version("1.0.1rc1.dev0")
+    assert parse_version("1.0.1") < parse_version("1.0.1.post1.dev0")
+    assert [t.id for t in catalog.eligible("1.0.1.post1.dev0")] == ["from-1-0-0"]
+
 
 def test_dependency_cycle_and_unknown_reference_diagnosed(tmp_path: Path) -> None:
     catalog = _pack(
@@ -293,19 +310,73 @@ def test_dependency_cycle_and_unknown_reference_diagnosed(tmp_path: Path) -> Non
         ],
     )
 
+    # Every task on the cycle is named, not only the one that closed it, so all
+    # of them leave the catalog: a consumer resolving `depends_on` must not be
+    # able to loop forever.
     cycles = [d for d in catalog.diagnostics if d.code == "dependency_cycle"]
+    assert _keys(cycles) == {("first", 1), ("second", 1)}
+    assert all("first@1 -> second@1 -> first@1" in d.message for d in cycles)
+
     unknown = [d for d in catalog.diagnostics if d.code == "unknown_dependency"]
-    assert len(cycles) == 1
-    assert "first -> second -> first" in cycles[0].message
     assert _keys(unknown) == {("third", 1)}
     reported = " ".join(d.message for d in unknown)
     assert "second@9" in reported
     assert "absent@1" in reported
 
-    # A broken reference is a graph problem, not a malformed definition: whether
-    # a reference resolves must not depend on which other row failed to parse.
-    assert [task.id for task in catalog.tasks] == ["first", "second", "third"]
-    assert [t.id for t in catalog.eligible("1.0.0")] == ["first", "second", "third"]
+    # A task that cannot be ordered is not an eligible task, however well formed
+    # its own row is.
+    assert catalog.tasks == ()
+    assert catalog.eligible("1.0.0") == ()
+
+
+def test_kept_task_cannot_depend_on_a_task_that_was_dropped(tmp_path: Path) -> None:
+    # `broken` is dropped for an unregistered detector, so nothing may depend on
+    # it: a kept task with an unresolvable dependency is a lie about its own
+    # prerequisites. The strand is two deep on purpose, because dropping one
+    # task strands the task that depended on *it*.
+    dropped_dependency = _pack(
+        tmp_path / "dropped-dependency",
+        [
+            _row(id="broken", detector="not-registered"),
+            _row(id="dependent", depends_on=[{"id": "broken", "revision": 1}]),
+            _row(id="transitive", depends_on=[{"id": "dependent", "revision": 1}]),
+        ],
+    )
+
+    assert _error_codes(dropped_dependency) == {
+        "unknown_detector",
+        "unknown_dependency",
+    }
+    assert [task.id for task in dropped_dependency.tasks] == []
+    assert dropped_dependency.eligible("9.9.9") == ()
+    unresolved = [
+        d for d in dropped_dependency.diagnostics if d.code == "unknown_dependency"
+    ]
+    assert _keys(unresolved) == {("dependent", 1), ("transitive", 1)}
+    reported = {d.task_id: d.message for d in unresolved}
+    assert "broken@1" in reported["dependent"]
+    assert "dependent@1" in reported["transitive"]
+
+    # The same rule for a duplicate id: the second copy is not a dependency
+    # target, so nothing may be left depending on it — while a dependency on the
+    # copy that stands is kept.
+    duplicate_target = _pack(
+        tmp_path / "duplicate-target",
+        [
+            _row(id="duplicated"),
+            _row(
+                id="duplicated", revision=2, prompt_resource="prompts/duplicated-2.md"
+            ),
+            _row(id="stranded", depends_on=[{"id": "duplicated", "revision": 2}]),
+            _row(id="resolved", depends_on=[{"id": "duplicated", "revision": 1}]),
+        ],
+    )
+
+    assert _error_codes(duplicate_target) == {"duplicate_id", "unknown_dependency"}
+    assert sorted(task.id for task in duplicate_target.tasks) == [
+        "duplicated",
+        "resolved",
+    ]
 
 
 def test_read_prompt_works_from_packaged_resources(
@@ -378,7 +449,17 @@ def test_malformed_json_and_bad_types_are_diagnosed(tmp_path: Path) -> None:
             "detector": "has-legacy-rows",
             "completion_check": "no-legacy-rows",
             "prompt_resource": "prompts/bad-values-1.md",
-            "depends_on": ["second", {"id": "second"}, {"revision": 1}],
+            "depends_on": [
+                "second",
+                {"id": "second"},
+                {"revision": 1},
+                # A dependency is held to the same rule as the row itself: a
+                # reference is not a string to coerce into one.
+                {"id": 5, "revision": 1},
+                {"id": ["second"], "revision": 1},
+                {"id": "Second", "revision": 1},
+                {"id": "second", "revision": 0},
+            ],
         },
         _row(id="Not Kebab", prompt_resource="prompts/not-kebab-1.md"),
     ]
@@ -394,6 +475,10 @@ def test_malformed_json_and_bad_types_are_diagnosed(tmp_path: Path) -> None:
         "bad_since_version",
         "invalid_depends_on",
     }
+    # Every malformed dependency is reported on the row that carries it, rather
+    # than coerced into a reference that only fails later as unresolvable.
+    dependent = [d for d in catalog.diagnostics if d.code == "invalid_depends_on"]
+    assert len(dependent) == 8
     # One bad row reports all of its own problems rather than only the first,
     # and a bool is not an int where a revision is expected.
     named = " ".join(d.message for d in catalog.diagnostics)
