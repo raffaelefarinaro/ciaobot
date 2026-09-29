@@ -3778,7 +3778,7 @@ describe('deep-link chat navigation', () => {
       store.activeWorkspace = 'personal'
     })
 
-    test('openChatFromDeepLink selects an archived chat without going live', async () => {
+    test('openChatFromDeepLink selects an archived chat and loads its transcript without going live', async () => {
       await store.openChatFromDeepLink(ARCHIVED.chat_id)
 
       // Selected, and `activeChat` resolves — that is all ChatLayout's
@@ -3786,10 +3786,12 @@ describe('deep-link chat navigation', () => {
       expect(store.activeChatId).toBe(ARCHIVED.chat_id)
       expect(store.activeChat?.archived).toBe(true)
       expect(routerPush).toHaveBeenCalledWith('/chat/c-archived')
-      // Inert: no socket, no history, no subagents. The provider reclaimed the
-      // session, so every one of those is a request that cannot change anything.
+      // History once: /messages serves the archived vault transcript, and
+      // without it a browser that never cached the chat rendered it empty.
+      expect(fetchedPaths().filter(p => p.includes('/api/chats/c-archived/messages'))).toHaveLength(1)
+      // Otherwise inert: no socket, no subagents. The provider reclaimed the
+      // session, so either is a request that cannot change anything.
       expect(chatSockets()).toEqual([])
-      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
       expect(fetchedPaths().some(p => p.includes('/subagents'))).toBe(false)
       // Marking it read is the one request an open still makes.
       expect(apiPost.mock.calls.some(([path]) => path === '/api/chats/c-archived/read')).toBe(true)
@@ -3801,6 +3803,7 @@ describe('deep-link chat navigation', () => {
     // archived chat must not be re-attached from any of them.
     test('re-opening the already-active archived chat does not re-attach a socket', async () => {
       await store.openChatFromDeepLink(ARCHIVED.chat_id)
+      apiGet.mockClear()
       const before = chatSockets().length
 
       store.reconnectNow()
@@ -3833,7 +3836,7 @@ describe('deep-link chat navigation', () => {
       expect(store.chats.find(c => c.chat_id === LIVE.chat_id)?.archived).toBe(true)
     })
 
-    test('the boot URL restore selects an archived chat without going live', async () => {
+    test('the boot URL restore loads an archived chat transcript without going live', async () => {
       window.history.replaceState({}, '', '/chat/c-archived')
       Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
       apiGet.mockImplementation((path: string) => {
@@ -3853,7 +3856,9 @@ describe('deep-link chat navigation', () => {
 
       expect(store.activeChatId).toBe(ARCHIVED.chat_id)
       expect(store.activeChat?.archived).toBe(true)
-      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
+      await vi.waitFor(() => {
+        expect(fetchedPaths().filter(p => p.includes('/api/chats/c-archived/messages'))).toHaveLength(1)
+      })
       expect(chatSockets()).toEqual([])
       window.history.replaceState({}, '', '/')
     })

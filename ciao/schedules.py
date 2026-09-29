@@ -770,8 +770,19 @@ FAILED_RUN_STATUSES = frozenset({"error"})
 # The mirror image: a dispatch whose run reached one of these needs no replay.
 # "skipped" is here for the same reason it is absent above — the turn was not
 # abandoned, somebody is still expected to finish it — so the occurrence it
-# served counts as served.
-COMPLETED_RUN_STATUSES = frozenset({"ok", "skipped"})
+# served counts as served. "unfinished" is the subagent case split out of
+# "skipped" (see ``RUN_STATUS_UNFINISHED``) and counts the same way.
+COMPLETED_RUN_STATUSES = frozenset({"ok", "skipped", "unfinished"})
+
+# The row status for a run that ended with background subagents unsettled, or
+# on an interim message with no synthesis turn. Kept apart from "skipped"
+# because nothing in the chat is waiting on the operator: the PWA said "needs
+# you — check the chat" and the chat had no question or approval to answer.
+# The job-run log still records these as "skipped".
+RUN_STATUS_UNFINISHED = "unfinished"
+
+# Row statuses that point the operator at the run's chat.
+CHAT_ATTENTION_RUN_STATUSES = frozenset({"skipped", RUN_STATUS_UNFINISHED})
 
 # Separates the occurrence a dispatch was made for from the token that makes it
 # unique, inside ``last_dispatch_id``. Same shape as SYSTEM_ID_SEPARATOR: one
@@ -913,6 +924,31 @@ def stamp_run_outcome(
     return changed
 
 
+def settle_runs_for_archived_chat(store: "ScheduleStore", chat_id: str) -> bool:
+    """Clear the chat-attention flag on every entry whose run chat was archived.
+
+    "skipped" and "unfinished" tell the operator to check the run's chat: an
+    approval card, a question, unsettled subagents. Archiving that chat is the
+    operator's answer,
+    and the chat can no longer take one, so leaving the flag up pointed the
+    Automations page at an archived chat until the next run replaced it (a
+    weekly entry stayed flagged for a week). The occurrence already counts as
+    served (``COMPLETED_RUN_STATUSES``), so "ok" changes no catch-up decision.
+
+    True when any entry changed; the caller publishes the refetch nudge.
+    """
+    changed = False
+    for entry in store.list_entries():
+        if (
+            entry.last_run_chat_id == chat_id
+            and entry.last_status in CHAT_ATTENTION_RUN_STATUSES
+        ):
+            entry.last_status = "ok"
+            store.replace(entry)
+            changed = True
+    return changed
+
+
 @dataclass(slots=True)
 class ScheduleEntry:
     """One persisted schedule (wall-clock, one-off, manual, or interval)."""
@@ -950,8 +986,10 @@ class ScheduleEntry:
     last_run_chat_id: str = ""
     # Outcome of the most recent interval run, for entries whose cadence has no
     # expected wall-clock slot to compare against: "" (never ran), "running",
-    # "ok", "error", "busy" (skipped, the target chat had a turn in flight) or
-    # "missing-chat" (target gone and unrecoverable; the entry was disabled).
+    # "ok", "error", "busy" (skipped, the target chat had a turn in flight),
+    # "missing-chat" (target gone and unrecoverable; the entry was disabled),
+    # "skipped" (stopped on an approval, a question or a deferred retry) or
+    # "unfinished" (ended before its subagents' results were synthesized).
     # Wall-clock entries also carry it: "running" from their own dispatch, then
     # the run's outcome written back by the dispatch pipeline, which is what
     # tells an attended slot apart from one whose turn died mid-flight.

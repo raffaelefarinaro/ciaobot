@@ -715,7 +715,20 @@ class ScheduleDispatcher:
         # classification back. "skipped" (a permission prompt or a deferred
         # retry) is not an error, but it is not a completed run either -- report
         # it as such rather than flattening it to "ok".
-        result["status"] = "error" if _sched_status == "error" else _sched_status
+        #
+        # The row splits one case out of "skipped": a run whose subagents never
+        # settled has nothing in its chat for the operator to answer, so it
+        # must not read as "needs you". The job-run log keeps "skipped".
+        _row_status = _sched_status
+        if (
+            _sched_status == "skipped"
+            and outcome.subagents_pending
+            and not outcome.retry_pending
+            and not outcome.permission_requested
+            and not outcome.question_requested
+        ):
+            _row_status = schedule_support.RUN_STATUS_UNFINISHED
+        result["status"] = _row_status
         # A failed run is stamped on the stored row, not just in the job log:
         # without this a wall-clock entry failing every run (an archived target
         # resuming a dead provider session, say) produced an endless string of
@@ -733,7 +746,9 @@ class ScheduleDispatcher:
         # overlap: the health field belongs to the dispatch the row still names,
         # while a completed run credits the occurrence it was dispatched for
         # either way (issue #490).
-        if _sched_schedule_id and _sched_status in {"error", "ok", "skipped"}:
+        if _sched_schedule_id and _row_status in {
+            "error", "ok", "skipped", schedule_support.RUN_STATUS_UNFINISHED
+        }:
             store = cast(
                 ScheduleStore | None,
                 getattr(self._host, "schedule_store", None),
@@ -741,7 +756,7 @@ class ScheduleDispatcher:
             if store is not None:
                 latest = store.get(_sched_schedule_id)
                 if latest is not None and schedule_support.stamp_run_outcome(
-                    latest, _sched_dispatch_id, _sched_status
+                    latest, _sched_dispatch_id, _row_status
                 ):
                     store.replace(latest)
                     # An open sidebar or Automations page only refetches on the

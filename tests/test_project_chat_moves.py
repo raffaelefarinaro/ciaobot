@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ArchiveOutcome, ProjectChatManager
@@ -306,6 +307,41 @@ async def test_archive_chat_publishes_event(tmp_path: Path) -> None:
     assert len(archived) == 1
     assert archived[0]["chat_id"] == chat.chat_id
     assert archived[0]["project_id"] == project.project_id
+
+
+async def test_archiving_a_run_chat_clears_its_needs_you_flag(tmp_path: Path) -> None:
+    """A "skipped" run points the operator at its chat; archiving it answers that.
+
+    Left up, the Automations page kept saying "last run needs you — check the
+    chat" about a chat that was archived, until the next run (a week later for
+    a weekly entry). Only the entry whose last run was this chat is touched.
+    """
+    pcm = _make_manager(tmp_path)
+    store = ScheduleStore(tmp_path / ".runtime")
+    pcm.schedule_store = store
+    project = pcm.create_project("2026-q3-sched", workspace="work")
+    chat = pcm.create_chat(project.project_id)
+    other = pcm.create_chat(project.project_id)
+
+    def _entry(run_chat: str) -> str:
+        entry = store.create(
+            daily_time_utc="06:00", prompt="Brief.", model="", mode="auto", chat_id=0,
+            web_project_id=project.project_id, workspace="work",
+        )
+        entry.last_run_chat_id = run_chat
+        entry.last_status = "skipped"
+        store.replace(entry)
+        return entry.schedule_id
+
+    archived_run = _entry(chat.chat_id)
+    other_run = _entry(other.chat_id)
+
+    cap = _EventCapture(pcm)
+    await pcm.archive_chat(chat.chat_id)
+
+    assert store.get(archived_run).last_status == "ok"
+    assert store.get(other_run).last_status == "skipped"
+    assert any(e.get("type") == "schedules_changed" for e in cap.drain())
 
 
 async def test_archive_route_returns_the_postprocess_lifecycle(

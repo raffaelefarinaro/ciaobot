@@ -1696,12 +1696,13 @@ export const useProjectStore = defineStore('projects', () => {
         // fetch resolves would let an incoming message be clobbered by the
         // fetch result overwriting messages[chatId].
         //
-        // A deep link to an archived chat stops before this: the panel renders
-        // read-only from whatever transcript is held locally, exactly as
-        // `switchChat` leaves it, so booting must not dial a socket or fetch a
-        // history the archive is not served from.
+        // A deep link to an archived chat fetches its history once and stops,
+        // exactly as `switchChat` leaves it: /messages serves the archived
+        // vault transcript, but there is no session left to dial a socket to.
         const bootChatId = activeChatId.value
-        if (!isArchivedChat(bootChatId)) {
+        if (isArchivedChat(bootChatId)) {
+          void loadMessages(bootChatId)
+        } else {
           void (async () => {
             await loadMessages(bootChatId, { waitForSettledReply: true })
             connectWs(bootChatId)
@@ -3312,12 +3313,15 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     // Fire-and-forget: clears overlay + SW cache + hits /read for cross-device sync.
     void markRead(chatId)
-    // An archived chat stops here. ChatPanel renders it from the stored
-    // transcript with no composer, and the provider has already reclaimed the
-    // session, so the three calls below would buy nothing: a socket that can
-    // only stay silent, a `/messages` fetch the archive is not served from,
-    // and subagent rows for agents that are gone.
-    if (isArchivedChat(chatId)) return
+    // An archived chat stops after one history fetch. /messages serves the
+    // archived vault transcript (the provider already reclaimed the session),
+    // and ChatPanel renders it with no composer. Without the fetch a browser
+    // that had not cached the transcript showed an empty chat. The socket and
+    // subagent rows would buy nothing: nothing can stream, the agents are gone.
+    if (isArchivedChat(chatId)) {
+      if (!opts?.skipHistory) await loadMessages(chatId)
+      return
+    }
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)

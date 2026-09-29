@@ -98,7 +98,12 @@ from ciao.models import (
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
-from ciao.schedules import ScheduleEntry, ScheduleStore
+from ciao.schedules import (
+    ScheduleEntry,
+    ScheduleStore,
+    publish_automations_changed,
+    settle_runs_for_archived_chat,
+)
 from ciao.sessions import StateStore
 from ciao.subagent_tracking import SubagentInfo
 from ciao.transcripts import (
@@ -3408,6 +3413,12 @@ class ProjectChatManager:
             "project_id": chat.project_id,
             "archive_path": chat.archive_path,
         })
+        # Not keyed on `chat.schedule_id`: an interval entry bound to an
+        # existing chat records it as its run chat without stamping the chat.
+        if self.schedule_store is not None and settle_runs_for_archived_chat(
+            self.schedule_store, chat_id
+        ):
+            publish_automations_changed(self)
         if result is None:
             return None
         return ArchiveOutcome(path=result, turn_count=turn_count)
