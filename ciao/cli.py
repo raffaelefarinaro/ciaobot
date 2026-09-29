@@ -1770,6 +1770,148 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     return 1 if summary["failed"] else 0
 
 
+def _learnings_migrate_command(args: argparse.Namespace) -> int:
+    """Convert a workspace's legacy ``Learnings.md`` entries to canonical records.
+
+    Dry-run by default, like every other one-off migration here: this rewrites
+    lines the user wrote, so applying is opt-in and the preview *is* the apply
+    rather than a description of it. A receipt records an exact reverse map, and
+    ``--revert`` restores the original bytes from it — so the write is not a
+    one-way door even though the file is not under git.
+
+    The exit code reports findings rather than just failure: a file with a line
+    this code cannot read has been migrated as far as it safely can be, and the
+    operator needs to know that from the status alone. A clean run over clean
+    content exits 0.
+    """
+    from ciao.learnings_migrate import (
+        migrate_learnings_file,
+        new_receipt_path,
+        read_receipt,
+        unmigrate_learnings_file,
+        write_receipt,
+    )
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    if not vault_root.is_dir():
+        print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
+        return 1
+
+    if args.revert:
+        receipt = read_receipt(Path(args.revert))
+        if receipt is None:
+            print(
+                f"Not a readable learnings-migrate receipt: `{args.revert}`",
+                file=sys.stderr,
+            )
+            return 1
+        if receipt.get("vault_root") and str(receipt["vault_root"]) != str(vault_root):
+            # Refused rather than attempted: the receipt's spans are offsets into
+            # one specific file, so reversing from a different root reads the
+            # wrong bytes at those offsets and the offset check would then be
+            # checking the wrong document.
+            print(
+                f"Receipt records a migration of `{receipt['vault_root']}`, not "
+                f"`{vault_root}`. Re-run with `--vault-root "
+                f"{receipt['vault_root']}`.",
+                file=sys.stderr,
+            )
+            return 1
+        summary = unmigrate_learnings_file(vault_root, receipt, apply=args.apply)
+    else:
+        summary = migrate_learnings_file(
+            vault_root,
+            workspace=vault_root.name,
+            apply=args.apply,
+        )
+
+    # Recorded before anything is printed, and only for a run that actually
+    # wrote: a receipt for a dry run would reverse spans that are still in their
+    # original place, and `--revert` on it would corrupt the file rather than
+    # restore it.
+    receipt_path = ""
+    if args.apply and not args.revert and summary.get("entries_migrated"):
+        receipt_path = str(
+            write_receipt(
+                new_receipt_path(_resolve_runtime_root(args.runtime_root)), summary
+            )
+        )
+        summary["receipt_path"] = receipt_path
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return _learnings_migration_status(summary)
+
+    for problem in summary.get("diagnostics") or []:
+        # A line this code could not read is a line nothing downstream can count,
+        # so it is the one thing in an otherwise successful run the owner has to
+        # look at. Printed to stderr and reflected in the exit code, not folded
+        # into a summary that reads as finished.
+        print(f"  kept as written: {problem}", file=sys.stderr)
+    if summary.get("failed"):
+        print("\nFailed:", file=sys.stderr)
+        for item in summary["failed"]:
+            print(f"  {item['path']}: {item['error']}", file=sys.stderr)
+
+    if args.revert:
+        _print_learnings_revert(summary, apply=args.apply)
+    else:
+        _print_learnings_migration(summary, apply=args.apply)
+    if receipt_path:
+        print(f"\nReceipt: {receipt_path}")
+        print(
+            "Reverse it exactly with `ciao learnings-migrate "
+            f"--revert {receipt_path} --apply`."
+        )
+    return _learnings_migration_status(summary)
+
+
+def _print_learnings_migration(summary: dict[str, Any], *, apply: bool) -> None:
+    """What a migration run did, or would do, with every span it touched."""
+    count = summary.get("entries_migrated", 0)
+    if count:
+        verb = "Migrated" if apply else "Would migrate"
+        print(f"{verb} {count} learning entr(y/ies) in Workspace/Learnings.md:")
+        for change in summary.get("rewrites") or []:
+            print(f"  {change['from']}")
+            print(f"    -> {change['to']}")
+        if not apply:
+            print("\nRe-run with --apply to write these changes.")
+        return
+    if "skipped" in summary:
+        print(f"Nothing to migrate: {summary['skipped']}.")
+        return
+    scanned = summary.get("entries_scanned", 0)
+    print(f"Nothing to migrate: {scanned} entr(y/ies) already canonical.")
+
+
+def _print_learnings_revert(summary: dict[str, Any], *, apply: bool) -> None:
+    """What a revert did, or would do."""
+    if summary.get("entries_reverted"):
+        verb = "Reverted" if apply else "Would revert"
+        print(f"{verb} {summary['entries_reverted']} learning entr(y/ies):")
+        if not apply:
+            print("\nRe-run with --apply to write these changes.")
+        return
+    if "skipped" in summary:
+        print(f"Nothing to revert: {summary['skipped']}.")
+    else:
+        print("Nothing to revert.")
+
+
+def _learnings_migration_status(summary: dict[str, Any]) -> int:
+    """1 for anything the operator has to look at, 0 only for a fully clean run.
+
+    Not "1 for failure": a migration that rewrote what it could and reported a
+    line it could not read did not fail, and a status of 0 would tell a script it
+    needs no attention — which is precisely the condition that leaves the unreadable
+    line unreadable.
+    """
+    if summary.get("failed") or summary.get("diagnostics"):
+        return 1
+    return 0
+
+
 def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
     """Restore the wikilinks recorded in the migration receipt.
 
@@ -4718,6 +4860,57 @@ def build_parser() -> argparse.ArgumentParser:
                 ),
             )
         links_parser.set_defaults(func=handler)
+
+    learnings_parser = subparsers.add_parser(
+        "learnings-migrate",
+        help="Convert legacy Learnings.md entries to canonical records.",
+        description=(
+            "One-off migration for an existing workspace: rewrites the entries "
+            "under `## Active` in Workspace/Learnings.md into the canonical "
+            "record shape, preserving every other byte — frontmatter, format "
+            "notes, the `## Promoted / Resolved` section, the BOM and CRLF line "
+            "endings included. A line whose shape cannot be read is reported and "
+            "kept exactly as written, and no entry is ever dropped. Records an "
+            "exact reverse map under .runtime/migration/. Dry-run unless --apply "
+            "is passed."
+        ),
+    )
+    learnings_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+    )
+    learnings_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Runtime root holding the migration receipt. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime."
+        ),
+    )
+    learnings_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the changes. Without this, only report what would change.",
+    )
+    learnings_parser.add_argument(
+        "--revert",
+        type=Path,
+        default=None,
+        help=(
+            "Reverse a previous run from its receipt instead of migrating. The "
+            "spans are restored from the recorded bytes, and a file that changed "
+            "since is left entirely untouched."
+        ),
+    )
+    learnings_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the raw summary as JSON.",
+    )
+    learnings_parser.set_defaults(func=_learnings_migrate_command)
 
     os_audit_parser = subparsers.add_parser(
         "os-audit",

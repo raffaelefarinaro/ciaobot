@@ -424,6 +424,44 @@ Use `--vault-root` to choose a vault. Otherwise it uses `CIAO_VAULT_ROOT` or
 incomplete traversal exit 1. It never reports a clean vault when it could not
 inspect every path.
 
+### Learnings migration
+
+`ciao learnings-migrate` converts an existing workspace's
+`Workspace/Learnings.md` onto the canonical record model in
+`ciao/learning_records.py`, which is also what the writer (`append_learning`) and
+the curation worklist read. Run it once per install that predates #755 — the
+legacy shapes it converts are entries nothing downstream can attribute, so a
+sighting of one mints a *new* record instead of adding to the one already there,
+and the `xN` the care schedule promotes on quietly stops meaning anything.
+
+```bash
+ciao learnings-migrate --vault-root memory-vault/personal   # preview
+ciao learnings-migrate --vault-root memory-vault/personal --apply
+ciao learnings-migrate --vault-root memory-vault/personal \
+  --revert .runtime/migration/learnings-20260929-230309.json --apply
+```
+
+It is dry-run by default and the preview *is* the apply, not a description of it.
+Only the spans of recognized `## Active` entries are rewritten: frontmatter,
+format notes, the whole `## Promoted / Resolved` section, a BOM and CRLF line
+endings all survive byte for byte, and no entry is ever dropped. A line whose
+shape cannot be read is reported on stderr, kept exactly as written, and reflected
+in a non-zero exit — a shape nothing downstream can count must not be reported as
+a finished run.
+
+Each applied run writes one timestamped receipt under
+`<runtime>/migration/` holding the exact spans it replaced, so `--revert` restores
+the original bytes rather than re-deriving what the line probably said. Every span
+is re-checked before it is replaced, and a file edited since the migration is
+left entirely untouched rather than half-reverted. A receipt is only written for a
+run that actually wrote; reversing a dry run would corrupt the file instead of
+restoring it. The command is idempotent: a migrated line renders as itself, so a
+second `--apply` finds nothing to change and writes no second receipt.
+
+`Learnings.md` is bookkeeping rather than an entity note, so this is deliberately
+*not* a `commit_note_change` — see `ciao/learnings_migrate.py` for why, and for
+the lock it takes against a concurrent `[learnings]` accept.
+
 ### AI OS audit
 
 `ciao os-audit` checks required workspace roots, vault frontmatter, relative

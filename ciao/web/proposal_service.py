@@ -1811,7 +1811,10 @@ def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
         out["reason"] = f"could not read Workspace/Learnings.md: {exc}"
         return out
     after, operation = render_learning_append(
-        before, text, source=str(row.get("source") or "")
+        before,
+        text,
+        workspace=vault.name,
+        source=str(row.get("source") or ""),
     )
     before_clip, before_cut = _clip(before)
     after_clip, after_cut = _clip(after)
