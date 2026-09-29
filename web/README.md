@@ -191,8 +191,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   handlers, unread and attention counts, the send path with its queue, deferred
   and unacked sends, the streaming timeline, toasts and package status.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
-  way, one tab at a time, into `components/settings/`. The MCP tab is the first
-  one out. `composables/useMcpServers.ts` owns the MCP state and every
+  way, one tab at a time, into `components/settings/`. General begins with a
+  short capability-help section linking to the public feature guide and inviting
+  users to ask Ciaobot directly in any chat; it appears in the generated
+  "On this page" navigation. The MCP tab is the first one out.
+  `composables/useMcpServers.ts` owns the MCP state and every
   `/api/mcp/*` call — the status, the per-server edit drafts, the expansion
   map, the secret inputs, the tool probes and the add form. It imports no
   store, no router and no lifecycle hook: the API client, `notifySaved`,

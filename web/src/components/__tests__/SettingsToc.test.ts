@@ -39,7 +39,7 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
   try {
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
     // Built from the page itself, in page order, headings in sentence case.
-    expect(labels.slice(0, 2)).toEqual(['Appearance', 'This host'])
+    expect(labels.slice(0, 3)).toEqual(['What can Ciaobot do?', 'Appearance', 'This host'])
     expect(labels).toContain('Keyboard shortcuts')
     expect(labels).toContain('Open source')
     // The client/role callout is a notice, not a section to jump to.
@@ -48,6 +48,20 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
     for (const item of wrapper.findAll('.settings-toc-item')) {
       expect(item.attributes('type')).toBe('button')
     }
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('links to the feature guide and suggests asking in a chat', async () => {
+  const { wrapper } = await mountSettings()
+  try {
+    const section = wrapper.find('#settings-what-can-ciaobot-do')
+    expect(section.text()).toContain('Ask Ciaobot “What can you do?” in any chat')
+    const link = section.find('a')
+    expect(link.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/features.html')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toContain('noopener')
   } finally {
     wrapper.unmount()
   }

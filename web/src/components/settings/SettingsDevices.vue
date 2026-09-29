@@ -5,6 +5,12 @@
       <p class="hint">
         Open Ciaobot from a phone or another computer. Each device signs in with the Ciaobot
         password; these links never include it.
+        <a
+          class="set-link"
+          href="https://www.raffaelefarinaro.com/ciaobot/remote.html"
+          target="_blank"
+          rel="noopener noreferrer"
+        >How to connect from anywhere, free with Tailscale</a>
       </p>
     </div>
     <div v-if="loading" class="hint">Looking up addresses&hellip;</div>

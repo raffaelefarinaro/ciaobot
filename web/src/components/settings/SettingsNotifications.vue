@@ -4,6 +4,12 @@
       <p class="section-title">Notifications</p>
       <p class="hint">
         Ciaobot notifies you when a chat replies and the browser tab is in the background.
+        <a
+          class="set-link"
+          href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
+          target="_blank"
+          rel="noopener noreferrer"
+        >Notifications on other devices need HTTPS: how to set it up</a>
       </p>
     </div>
     <!-- Status as one key/value row: a dot plus words (never colour alone),

@@ -35,6 +35,16 @@
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">What can Ciaobot do?</p>
+            <p class="hint">
+              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
+            </p>
+            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
+          </div>
+        </div>
+
         <!-- Appearance -->
         <div class="card">
           <div class="settings-card-header">
@@ -413,6 +423,12 @@
               <p class="hint">
                 Ciaobot is always password-protected — this is the password you type to open it,
                 and the one another device needs to sign in.
+                <a
+                  class="set-link"
+                  href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Keeping it private</a>
               </p>
             </div>
             <span
@@ -596,6 +612,12 @@
                 <p class="hint">
                   Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
                   The defaults below apply to new chats; any chat can override them from the picker.
+                  <a
+                    class="set-link"
+                    href="https://www.raffaelefarinaro.com/ciaobot/models.html"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >How models and providers work</a>
                 </p>
               </div>
             </div>
@@ -4963,6 +4985,13 @@ onUnmounted(stopUpdatePoll)
 .settings-toc-item:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+.settings-guide-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch);
+  font-size: var(--text-sm);
 }
 
 .settings-toc-item.active {
