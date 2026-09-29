@@ -129,11 +129,11 @@ async function onDetailClick(event: MouseEvent): Promise<void> {
   }
 }
 
-// The backend names the tile's lead button. "chat" (the update tile) makes the
-// chat button the filled primary and demotes the link to a chip; anything else
+// The backend names the tile's lead button. "view" (the update tile) makes the
+// view button the filled primary and demotes the link to a chip; anything else
 // keeps the default order, where run/link/view buttons lead.
-function chatLeads(action: OperatorAction): boolean {
-  return action.primary === 'chat' && !!action.chat_prompt
+function viewLeads(action: OperatorAction): boolean {
+  return action.primary === 'view' && !!action.view_route
 }
 
 function chatButtonLabel(action: OperatorAction): string {
@@ -188,16 +188,15 @@ async function openChat(action: OperatorAction): Promise<void> {
         <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
       </div>
       <div class="housekeeping-actions">
-        <!-- A chat-led tile (the update tile) puts its chat button first and
+        <!-- A view-led tile (the update tile) puts its view button first and
              filled, in DOM order so focus and screen readers meet it first. -->
         <button
-          v-if="action.chat_prompt && chatLeads(action)"
+          v-if="viewLeads(action)"
           type="button"
           class="btn-small btn-primary"
-          :disabled="chatBusy"
-          @click="onChatButtonClick(action)"
+          @click="openView(action)"
         >
-          {{ chatButtonLabel(action) }}
+          {{ action.view_label || 'Open' }}
         </button>
         <button
           v-if="action.run_label"
@@ -211,14 +210,14 @@ async function openChat(action: OperatorAction): Promise<void> {
         <a
           v-if="action.link_url"
           class="btn-small housekeeping-link"
-          :class="chatLeads(action) ? 'btn-chip' : 'btn-primary'"
+          :class="viewLeads(action) ? 'btn-chip' : 'btn-primary'"
           :href="action.link_url"
           target="_blank"
           rel="noopener noreferrer"
           @click="onLinkClick(action)"
         >{{ action.link_label || 'Open' }}</a>
         <button
-          v-if="action.view_route"
+          v-if="action.view_route && !viewLeads(action)"
           type="button"
           class="btn-small btn-primary"
           @click="openView(action)"
@@ -226,7 +225,7 @@ async function openChat(action: OperatorAction): Promise<void> {
           {{ action.view_label || 'Open' }}
         </button>
         <button
-          v-if="action.chat_prompt && !chatLeads(action)"
+          v-if="action.chat_prompt"
           type="button"
           class="btn-small btn-chip"
           :disabled="chatBusy"

@@ -157,7 +157,7 @@ def test_package_update_fires_only_on_available(tmp_path: Path) -> None:
     assert "package-update" in ids
 
 
-def test_package_update_leads_with_the_chat_button(tmp_path: Path) -> None:
+def test_package_update_leads_with_the_settings_button(tmp_path: Path) -> None:
     """Updating is the forward action; release notes are supporting reading."""
     _starred(tmp_path)
     context = _context(
@@ -169,8 +169,10 @@ def test_package_update_leads_with_the_chat_button(tmp_path: Path) -> None:
         },
     )
     tile = next(a for a in detect_actions(context) if a.id == "package-update")
-    assert tile.primary == "chat"
-    assert tile.as_dict()["primary"] == "chat"
+    assert tile.primary == "view"
+    assert tile.as_dict()["primary"] == "view"
+    assert tile.view_route == "/settings"
+    assert not tile.chat_prompt
     assert tile.link_label == "Release notes"
 
 
