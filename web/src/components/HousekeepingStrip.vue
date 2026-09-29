@@ -251,8 +251,10 @@ async function openChat(action: OperatorAction): Promise<void> {
    and not an app-wide lock: the one realistic cause is an uncommitted vault, and
    locking the app would take away the assistant needed to fix it. */
 .housekeeping-tile--blocking {
-  border-color: var(--warning);
+  border-top-color: var(--warning);
   background: rgba(210, 153, 34, 0.08);
+  padding-inline: var(--space-3);
+  border-radius: var(--radius);
 }
 
 .housekeeping-group {
@@ -273,7 +275,7 @@ async function openChat(action: OperatorAction): Promise<void> {
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  margin-block: var(--space-3);
 }
 
 .housekeeping-tile {
@@ -285,10 +287,8 @@ async function openChat(action: OperatorAction): Promise<void> {
   column-gap: var(--space-2);
   row-gap: var(--space-2);
   align-items: start;
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
   min-width: 0;
 }
 

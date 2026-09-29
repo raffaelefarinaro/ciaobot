@@ -22,13 +22,6 @@
       </button>
     </div>
     <p v-else class="home-review-clear">Nothing to review.</p>
-
-    <button type="button" class="home-review-link" @click="openMemory">
-      Open Memory
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M5 12h13M13 6l6 6-6 6" />
-      </svg>
-    </button>
   </section>
 </template>
 
@@ -183,10 +176,6 @@ function formatRun(value: string): string {
   })
 }
 
-function openMemory() {
-  void router.push('/memory')
-}
-
 function openItem(key: ReviewItem['key']) {
   if (key === 'automations') {
     void router.push('/schedules')
@@ -274,26 +263,6 @@ function openItem(key: ReviewItem['key']) {
   border-bottom: 1px solid var(--border);
   color: var(--fg3);
   font-size: var(--text-sm);
-}
-
-.home-review-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: var(--touch);
-  margin-top: 4px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-sm);
-}
-
-.home-review-link:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
 }
 
 @media (prefers-reduced-motion: reduce) {
