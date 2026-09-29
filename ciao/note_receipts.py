@@ -12,9 +12,13 @@ The protocol is the receipt protocol, narrowed to a file:
 
 * **The caller names a vault-relative path, never a path.** Absolute paths,
   ``..`` components, symlinked files, symlinked ancestors and anything that is
-  not a regular ``.md`` file are refused before a byte is read. The vault root
-  is canonicalized once per operation; nothing below it is ever re-resolved, so
-  a symlink planted inside the vault cannot redirect the write out of it.
+  not a regular ``.md`` file are refused before a byte is read, as is the app's
+  own bookkeeping under ``Workspace/``. The vault root is canonicalized once per
+  operation; nothing below it is ever re-resolved, so a symlink planted inside
+  the vault cannot redirect the write out of it. Each component is spelled the
+  way the vault has it, so both spellings of a name on a case-insensitive
+  filesystem resolve to one file — one lock, one recorded path — instead of two
+  writers reaching one note without serializing against each other.
 * **Bytes, not text.** The note is read with ``read_bytes`` and decoded with
   strict UTF-8, and the replacement is written as bytes, so a BOM, a CRLF pair
   and a final line without a newline all survive verbatim. A revision is
@@ -70,7 +74,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao import memory_receipts as mr
-from ciao.vault_index import temp_prefix
+from ciao.vault_index import is_reserved_bookkeeping, temp_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +135,46 @@ def vault_for_journal(journal: Path) -> Path | None:
     return resolved if resolved.is_dir() else None
 
 
+def _on_disk_name(parent: Path, part: str) -> Path:
+    """The entry under *parent* that *part* names, spelled the way it is on disk.
+
+    A case-insensitive filesystem resolves ``Notes/A.md`` and ``notes/a.md`` to
+    one file while the two strings stay different, and everything keyed off the
+    string then splits in two: the per-file lock (keyed by the resolved path),
+    the ``relative_path`` a receipt records, the key a verification check is
+    filed under. A second writer reaching the same note through the other
+    spelling takes a different lock and both revisions compare equal, so one
+    write silently lands on top of the other. The directory listing is the only
+    place the real spelling exists, so the walk reads it and takes that.
+
+    An exact match wins, so this is a no-op on a case-sensitive filesystem
+    (where the caller already spelled the name correctly). Otherwise the single
+    entry matching case-insensitively is used, and a *tie* — two entries
+    differing only in case — is refused rather than guessed at: a name the
+    caller cannot pick unambiguously is not a name this protocol should write
+    through. A component that is not there at all is returned unchanged for the
+    walk's own "no such note" refusal below, so a missing path and an unreadable
+    directory are reported the same way they always were.
+    """
+    try:
+        with os.scandir(parent) as entries:
+            names = [entry.name for entry in entries]
+    except OSError:
+        return parent / part
+    if part in names:
+        return parent / part
+    folded = part.casefold()
+    matches = sorted({name for name in names if name.casefold() == folded})
+    if not matches:
+        return parent / part
+    if len(matches) > 1:
+        raise NoteTargetRefused(
+            f"{parent} holds more than one entry named {part} up to case "
+            f"({', '.join(matches)}); a note write must name one file"
+        )
+    return parent / matches[0]
+
+
 def resolve_note_path(vault_root: Path | str, relative_path: str) -> Path:
     """The canonical file one vault-relative path names, or a refusal.
 
@@ -138,6 +182,16 @@ def resolve_note_path(vault_root: Path | str, relative_path: str) -> Path:
     ``..``-bearing spellings are refused, as is any component that is a symlink
     (the file itself or any directory on the way to it), anything that is not a
     regular file, and anything that is not ``.md``.
+
+    The returned path is spelled the way the vault has it, so both spellings of
+    a case-insensitive name resolve to one file, one lock and one recorded
+    ``relative_path`` (see :func:`_on_disk_name`).
+
+    The app's own bookkeeping under ``Workspace/`` is refused as a target: the
+    proposal queue, the curation logs and their neighbours are managed by the
+    pipelines that own them, each with its own atomic write, and a note write
+    bypassing those would be an ordinary-looking undo of a file the user never
+    edited.
     """
     root = canonical_vault(vault_root)
     raw = str(relative_path or "").strip()
@@ -155,18 +209,24 @@ def resolve_note_path(vault_root: Path | str, relative_path: str) -> Path:
         )
     current = root
     for part in parts:
-        current = current / part
+        current = _on_disk_name(current, part)
         if current.is_symlink():
             raise NoteTargetRefused(
                 f"{current} is a symlink; a note write follows no link"
             )
-    target = root.joinpath(*parts)
+    target = current
     if not target.exists():
         raise NoteTargetRefused(f"no such note in this vault: {raw}")
     if not target.is_file():
         raise NoteTargetRefused(f"not a regular file: {raw}")
     if target.suffix.lower() != ".md":
         raise NoteTargetRefused(f"only Markdown notes are writable here: {raw}")
+    if is_reserved_bookkeeping(target.relative_to(root)):
+        raise NoteTargetRefused(
+            f"{target.name} is the app's own vault bookkeeping under "
+            f"{target.parent.name}/, not a note: it is written by the pipeline "
+            f"that owns it, not by a note edit"
+        )
     # Belt and braces: the component walk above already refuses every link, so
     # a resolved path that still left the vault would mean that walk was wrong.
     if not target.is_relative_to(root):
@@ -412,7 +472,16 @@ def _commit_note_change(
             base["undo_of"] = undo_of
 
         if before_text == after_text:
-            receipt = {**base, "status": mr.APPLIED, "changed": False}
+            # Nothing was replaced, so there is no change to reverse: the
+            # before image is the after image and restoring it would write the
+            # note's own bytes back over themselves. `undoable=False` is what
+            # keeps History from offering an undo that can only be a no-op.
+            receipt = {
+                **base,
+                "status": mr.APPLIED,
+                "changed": False,
+                "undoable": False,
+            }
             mr._append(journal, receipt)
             return receipt
 
@@ -616,7 +685,9 @@ def undo_note_receipt(
     receipt's after image. A note that moved since is a
     :class:`ciao.memory_receipts.RevisionConflict`, not an undo: restoring the
     before image would discard whatever landed in between, whether that was
-    another managed write or the user's own hand.
+    another managed write or the user's own hand. The before image must also
+    still hash to the revision the receipt records, so a journal row that was
+    edited or forged cannot install content the receipt never wrote.
 
     The reverse write goes through the same journaled protocol as a forward one
     — ``prepared``, replace, confirm — as a ``note_undo`` row carrying
@@ -635,7 +706,9 @@ def undo_note_receipt(
     exceptions, and an unhandled one is a 500 for an ordinary user action.
 
     Returns the original's ``undone`` row, which carries ``undo_receipt`` for
-    the reverse write.
+    the reverse write. If the reverse write landed but that final row could not
+    be appended, this raises :class:`ciao.memory_receipts.MemoryReceiptError`
+    saying so: the undo is done, and the caller must re-read rather than retry.
     """
     if str(receipt.get("kind", "")) != NOTE_APPLY:
         raise mr.UndoUnsupported("only a note apply can be undone")
@@ -643,6 +716,19 @@ def undo_note_receipt(
     after = receipt.get("after_text")
     if not isinstance(before, str) or not isinstance(after, str):
         raise mr.UndoUnsupported("this receipt carries no complete note image")
+    # The revision guard below proves the note still holds this operation's
+    # *after* image; it says nothing about the before image, which this then
+    # writes back as the replacement text. A row that was edited, truncated or
+    # forged in the journal would pass every other check and replace the note
+    # with content the receipt never recorded. Hashing the image against the
+    # revision the receipt itself carries is the only thing that binds them, so
+    # a mismatch is "this receipt has no usable before image" — the same
+    # refusal as a missing one, and the note is left exactly as it stands.
+    if mr.content_revision(before) != str(receipt.get("before_revision", "")):
+        raise mr.UndoUnsupported(
+            "this receipt's before image does not hash to the before revision "
+            "it records, so it cannot be restored; the note was not touched"
+        )
     journal_vault = vault_for_journal(journal)
     if vault_root is not None and journal_vault is not None:
         # The reverse write and the original's settlement must land in one
@@ -696,5 +782,19 @@ def undo_note_receipt(
             journal=journal,
         )
     undone = _undone_row(receipt, str(reverse.get("id", "")))
-    mr._append(journal, undone)
+    try:
+        mr._append(journal, undone)
+    except OSError as exc:
+        # The reverse write is already on disk and journaled as its own
+        # `note_undo` row; only the original's settlement is missing. A raw
+        # OSError here would read as "the undo failed" and invite a retry that
+        # cannot succeed — the note no longer matches the after image, so the
+        # retry is a revision conflict against a note that is already restored.
+        # Say what actually happened, so the caller reads the journal instead:
+        # one recovery pass settles the link from the reverse row.
+        raise mr.MemoryReceiptError(
+            "the undo landed: the note was restored to its before image, but "
+            f"the journal could not record that ({exc}); read the receipt "
+            "again rather than retrying the undo"
+        ) from exc
     return undone
