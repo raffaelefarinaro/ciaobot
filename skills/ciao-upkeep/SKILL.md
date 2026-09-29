@@ -57,7 +57,7 @@ The full inventory — what is pinned where, and what the checker misses:
 | Python deps (incl. `firecrawl-anydoc>=0.2.4,<0.3.0`) | `pyproject.toml` | yes — reported only |
 | Frontend deps | `web/package.json` | yes — reported only |
 | **Defuddle CLI** | `ciao/stock/defuddle/package.json` → `0.19.3` | **no** — separate manifest |
-| **`gws` CLI** | `metadata.version` in `ciao/stock/skills/gws-shared/SKILL.md` → `0.22.5` | **drift only, not updates** |
+| **`gws` CLI** | generated, not pinned by hand — see below | **drift reported, updates manual** |
 | AnyDoc | rides the `pyproject.toml` pin | yes |
 | GitHub Actions | `actions/*@v4`/`@v5`, `astral-sh/setup-uv@v6` | **no** |
 | Node floor | `.nvmrc` **and** `web/scripts/check-node.mjs` | **no** |
@@ -70,8 +70,9 @@ The three unchecked ones need their own check:
 npm view defuddle version
 grep -A3 '"dependencies"' ciao/stock/defuddle/package.json
 
-# gws: the pin lives in the stock skill's frontmatter, not in a manifest
+# gws: nothing to bump by hand — see the note below
 npm view @googleworkspace/cli version 2>/dev/null || echo "check github.com/googleworkspace/cli"
+gws --version
 grep -m1 'version:' ciao/stock/skills/gws-shared/SKILL.md
 
 # Actions
@@ -89,10 +90,66 @@ one commit and re-run `cd web && npm test` on the new version.
 run the gates (`mypy ciao`, `pytest -n auto tests/`, `npm test`, `npm run
 build`), and let the release carry it later. Never blanket-upgrade majors.
 
-For `gws`, the pin and the generated skills travel together: bump
-`metadata.version`, then regenerate with the installed CLI
-(`ciao.gws_skills.regenerate_stock_gws_skills`), and commit both. A pin moved
-without regeneration ships skills that document commands the CLI no longer has.
+### `gws`: never hand-edit the version
+
+The 22 `gws-*` skills are **generated**, and so is the version. `gws
+generate-skills` writes `metadata: version:` into `gws-shared/SKILL.md` itself,
+and `gws-shared` is one of the shipped skills, so regenerating advances the pin
+automatically. Upgrading the local `gws` CLI is the only input; there is
+nothing to hand-maintain.
+
+So the procedure is: upgrade the CLI, then regenerate. **Do not edit
+`metadata.version` by hand** — a hand-bumped pin is either overwritten by the
+next regeneration or, worse, records a version the skills were never generated
+from, which is the exact drift the pin exists to prevent.
+
+```bash
+# 1. the input: upgrade the CLI, then confirm it
+gws --version
+
+# 2. dry run — reports which skills would change, writes nothing
+env -u PYTHONPATH .venv/bin/python -c "
+from pathlib import Path
+from ciao.gws_skills import regenerate_stock_gws_skills
+r = regenerate_stock_gws_skills(Path('$(pwd)/ciao/stock/skills'), write=False)
+print('would update:', r.updated)
+print('missing:', r.missing)"
+
+# 3. then write
+env -u PYTHONPATH .venv/bin/python -c "
+from pathlib import Path
+from ciao.gws_skills import regenerate_stock_gws_skills
+r = regenerate_stock_gws_skills(Path('$(pwd)/ciao/stock/skills'), write=True)
+print('updated:', r.updated)
+print('missing:', r.missing)"
+```
+
+`missing` is the output that matters: a skill the CLI no longer generates is
+reported and **left untouched**, so the repo keeps shipping a skill for a
+command that may no longer exist. That is a decision, not a warning to wave
+through — either drop the skill in the same PR or record why it stays.
+
+**The invariant, and the check after regenerating:**
+
+```bash
+env -u PYTHONPATH .venv/bin/python -c "
+from pathlib import Path
+from ciao.gws_skills import installed_gws_version, pinned_gws_version
+d = Path('$(pwd)/ciao/stock/skills')
+i, p = installed_gws_version(), pinned_gws_version(d)
+print('installed', i, 'pinned', p, 'OK' if i == p else 'DRIFT')"
+```
+
+**This also happens at release time.** `ciao/release.py:600`
+(`_refresh_stock_gws_skills`) regenerates unconditionally during `--apply` and
+stages whatever changed, so a `gws` upgrade that lands before a cut is picked up
+and gated by the release instead. That is a legitimate path, and the safer one,
+because the full check suite runs over it. Do it as its own PR anyway when you
+want a small reviewable diff rather than a regeneration folded into a release
+commit.
+
+`ciao release` reports the drift as `Stock gws skills: gws CLI X != pinned Y`
+and treats a missing CLI as a skip, not a failure.
 
 ## 2. Stock skills ↔ capabilities ↔ the marketing site
 
@@ -210,9 +267,12 @@ coverage it does not have.
   `except Exception: pass`, and `release.py` prints "Dependency update check
   skipped" on any exception. A network failure reads exactly like "no updates
   available". Confirm you got a real report, not a skipped one.
-- **Regenerating `gws-*` skills is not the same as bumping the pin.** They are
-  two files and one is generated; bump `metadata.version` *and* regenerate, or
-  the two disagree and nothing checks it.
+- **The `gws` version is generated, never hand-edited.** `gws generate-skills`
+  emits `metadata: version:` into `gws-shared/SKILL.md`, and `gws-shared` is one
+  of the shipped skills, so regeneration advances the pin. Hand-bumping it is
+  the failure this pin prevents: it either gets overwritten, or it records a
+  version the skills were never generated from. Upgrade the CLI, regenerate,
+  and let the pin follow.
 - **Never `git add -A` in this checkout.** Another session may be editing it.
   Stage explicit paths and read `git diff --cached` before committing.
 - **Use `rtk proxy git …` for anything you are about to commit on.** The RTK
