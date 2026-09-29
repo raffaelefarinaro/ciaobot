@@ -1116,37 +1116,64 @@ def _newline(existing: str) -> str:
 
 
 _ACTIVE_HEADING_RE = re.compile(
-    rf"(?m)^#{{1,3}}[ \t]+{re.escape(SECTION_HEADINGS[SECTION_ACTIVE])}[ \t]*\r?$"
+    rf"(?m)^#{{1,3}}[ \t]+{re.escape(SECTION_HEADINGS[SECTION_ACTIVE])}[ \t]*"
+    r"(?P<eol>\r\n|\n|\Z)"
 )
-"""The ``## Active`` heading as a *line*.
+"""The ``## Active`` heading, *including* its line terminator.
 
-Not the literal ``\\n## Active\\n`` that preceded it: that never matches a CRLF
-file, so a new entry was filed under a second ``## Active`` heading at the end of
-the document — a section the parser and the owner both read as real, holding one
-entry. Matched at any level up to three because the model treats a deeper
-heading as a group inside the section, and a file that has only ever used
-``### Active`` still means the same thing. Trailing whitespace is tolerated
-because that is what a hand edit leaves behind. The heading text is the model's,
-so the section the writer opens is the section the parser recognizes.
+Three things this has to get right, each of which was got wrong before.
+
+**The terminator is part of the match.** Ending the pattern at ``\\r?$`` put
+``match.end()`` on the ``\\n`` of a CRLF line, so inserting "one newline past
+the heading" skipped the ``\\n`` *and* the first byte of the next line: the new
+entry began with the existing entry's ``-`` and the owner's line lost its own
+bullet. Consuming ``\\r\\n`` or ``\\n`` explicitly means ``match.end()`` is already
+the offset to insert at, with no arithmetic to get wrong.
+
+**The heading is matched whole.** The terminator alternation only matches where
+the line actually ends, so ``## Active extras and notes`` is not this section and
+does not get an entry filed into it. The ``[ \\t]*`` before it tolerates the
+trailing whitespace a hand edit leaves behind, which would otherwise be a second
+reason for the same heading not to be found.
+
+**``\\Z`` is the unterminated case.** A heading on the final line with no newline
+has nothing to insert after, and the entry has to be given a line of its own.
+The terminator is a named group so the caller can tell the two apart by asking
+the match, rather than by inspecting the two characters before its end — which
+is a test that reads one way on an LF file and another on a CRLF one.
+
+Not the literal ``\\n## Active\\n`` this replaced either: that never matched a
+CRLF file, so a new entry was filed under a second ``## Active`` heading at the
+end of the document. Matched at any level up to three because the model treats a
+deeper heading as a group inside the section, and a file that has only ever used
+``### Active`` still means the same thing. The heading text is the model's, so
+the section the writer opens is the section the parser recognizes.
 """
 
 
 def _file_new_entry(existing: str, filed: str) -> str:
     """*existing* with *filed* placed directly under its ``## Active`` section.
 
-    The heading line and its terminator when the file has one, so the entry
-    becomes the first thing in the list. A file that has no such heading gets the
-    section opened after its last line of content, which is where the writer has
-    always put one — a stub that has never been written to needs the heading
-    before the entry can be under it.
+    The heading's terminator is already consumed by the match, so the insertion
+    point is the end of the match and nothing has to be added to it. A heading
+    that consumed no terminator — it was the last line and the file does not end
+    in a newline — gets one supplied, or the entry would share its line and
+    ``## Active- [key] …`` would be neither a heading nor an entry.
+
+    A file with no such heading has the section opened after its last line of
+    content, which is where the writer has always put one — a stub that has
+    never been written to needs the heading before the entry can be under it.
     """
     newline = _newline(existing)
     heading = _ACTIVE_HEADING_RE.search(existing)
-    if heading is not None:
-        at = heading.end() + len(newline)
-        return f"{existing[:at]}{filed}{newline}{existing[at:]}"
-    title = SECTION_HEADINGS[SECTION_ACTIVE]
-    return f"{existing.rstrip()}{newline * 2}## {title}{newline * 2}{filed}{newline}"
+    if heading is None:
+        title = SECTION_HEADINGS[SECTION_ACTIVE]
+        return f"{existing.rstrip()}{newline * 2}## {title}{newline * 2}{filed}{newline}"
+    # `\Z` is zero-width, so an empty group means the heading consumed no
+    # terminator: it was the file's last line, and one has to be supplied.
+    consumed_eol = heading.group("eol") != ""
+    at = heading.end()
+    return f"{existing[:at]}{'' if consumed_eol else newline}{filed}{newline}{existing[at:]}"
 
 
 def read_learnings(vault_root: Path) -> str:

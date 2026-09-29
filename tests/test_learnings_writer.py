@@ -238,6 +238,170 @@ def test_a_crlf_file_keeps_its_line_endings_through_a_new_entry(
     assert "Pin the Node version.\r\n" in raw.decode("utf-8")
 
 
+def _filed_line(existing: str, statement: str, *, workspace: str) -> str:
+    """The one line :func:`render_learning_append` would add, and nothing else.
+
+    Shared by the placement tests so each of them states where the entry is
+    supposed to land rather than re-deriving the whole expected document.
+    """
+    after, operation = mp.render_learning_append(
+        existing, statement, workspace=workspace, source="chat-9"
+    )
+    assert operation == "add"
+    return next(
+        line
+        for line in after.replace("\r\n", "\n").split("\n")
+        if statement in line and line.startswith("- [")
+    )
+
+
+def test_a_new_entry_lands_on_its_own_line_and_touches_nothing_else() -> None:
+    """Whole-file equality, because a partial assertion cannot see this.
+
+    The insertion offset is the whole of the defect this covers: an off-by-one
+    on a CRLF file lands *inside* the next line, so the new entry starts with the
+    existing entry's bullet marker and the owner's line loses its own. Both files
+    still contain both statements and still end in a newline, so an assertion
+    about substrings, heading counts or "no bare LF" passes over it.
+    """
+    existing = CRLF_BODY
+    filed = _filed_line(existing, "A brand new learning.", workspace="personal")
+
+    after, operation = mp.render_learning_append(
+        existing, "A brand new learning.", workspace="personal", source="chat-9"
+    )
+
+    assert operation == "add"
+    assert after == existing.replace("## Active\r\n", f"## Active\r\n{filed}\r\n")
+    # The owner's line is not merely present but unmoved and unmodified.
+    assert "\r\n- [a-b] [2024-01-01 → 2024-01-01] (x1) A b.\r\n" in after
+    assert "## Promoted / Resolved\r\n" in after
+
+
+def test_a_new_entry_lands_after_a_blank_line_following_the_heading() -> None:
+    """A blank line after the heading is the shape the bug corrupted worst.
+
+    The off-by-one ate the `\\n` of the heading's terminator *and* the `\\r` of the
+    blank line, leaving a stray carriage return in the middle of the file and a
+    lone LF where the blank line was.
+    """
+    existing = CRLF_BODY.replace("## Active\r\n- [a-b]", "## Active\r\n\r\n- [a-b]")
+    filed = _filed_line(existing, "A brand new learning.", workspace="personal")
+
+    after, _ = mp.render_learning_append(
+        existing, "A brand new learning.", workspace="personal", source="chat-9"
+    )
+
+    assert after == existing.replace("## Active\r\n", f"## Active\r\n{filed}\r\n")
+    assert "\r" not in after.replace("\r\n", "")
+    assert "\r\n\r\n- [a-b]" in after
+
+
+def test_a_new_entry_lands_after_an_lf_terminated_heading() -> None:
+    """The one shape that already worked, pinned so it keeps working."""
+    existing = CRLF_BODY.replace("\r\n", "\n")
+    filed = _filed_line(existing, "A brand new learning.", workspace="personal")
+
+    after, _ = mp.render_learning_append(
+        existing, "A brand new learning.", workspace="personal", source="chat-9"
+    )
+
+    assert after == existing.replace("## Active\n", f"## Active\n{filed}\n")
+
+
+def test_a_new_entry_lands_after_a_heading_that_is_the_last_line() -> None:
+    """A heading with no terminator still needs the entry on a line of its own.
+
+    There is no newline to insert after, so the writer has to supply one. The
+    failure mode is silent and total: the heading and the entry end up on one
+    line, and `## Active- [key] …` is not a heading and not an entry — so the
+    entry is in the file and in no section at all.
+    """
+    # A heading that is the document's last line, with and without a terminator,
+    # in an LF document and a CRLF one.
+    for existing, newline in (
+        ("# Learnings\n\n## Active", "\n"),
+        ("# Learnings\n\n## Active\n", "\n"),
+        ("# Learnings\r\n\r\n## Active", "\r\n"),
+        ("# Learnings\r\n\r\n## Active\r\n", "\r\n"),
+    ):
+        filed = _filed_line(existing, "A brand new learning.", workspace="personal")
+
+        after, operation = mp.render_learning_append(
+            existing, "A brand new learning.", workspace="personal", source="chat-9"
+        )
+
+        assert operation == "add", existing
+        assert after == f"{existing.rstrip()}{newline}{filed}{newline}", existing
+        # The entry is a line of its own, so the parser can still read it.
+        assert [line for line in after.replace("\r\n", "\n").split("\n") if line.startswith("- [")] == [filed]
+
+
+def test_a_new_entry_lands_after_a_heading_with_trailing_whitespace() -> None:
+    """`## Active   ` is still the heading.
+
+    A hand edit leaves trailing spaces, and a pattern that requires the line to
+    end immediately after the word opens a *second* ``## Active`` under a heading
+    that was already there — two sections where the owner wrote one.
+    """
+    existing = "# Learnings\n\n## Active  \n- [a-b] [2024-01-01 → 2024-01-01] (x1) A b.\n"
+    filed = _filed_line(existing, "A brand new learning.", workspace="personal")
+
+    after, _ = mp.render_learning_append(
+        existing, "A brand new learning.", workspace="personal", source="chat-9"
+    )
+
+    assert after == existing.replace("## Active  \n", f"## Active  \n{filed}\n")
+    assert after.count("## Active") == 1
+
+
+def test_a_new_entry_does_not_concatenate_onto_a_longer_final_heading() -> None:
+    """The heading must be matched whole, not as a prefix of a longer title.
+
+    A regex that stops at `Active` without requiring the line to end there
+    matches `## Active extras and notes`, and the entry is then filed into a
+    section the parser does not recognize — so the file gains a second Active
+    list that only the writer can see.
+    """
+    existing = (
+        "# Learnings\n\n"
+        "## Active extras and notes\n"
+        "- [a-b] [2024-01-01 → 2024-01-01] (x1) A b.\n"
+    )
+
+    after, operation = mp.render_learning_append(
+        existing, "A brand new learning.", workspace="personal", source="chat-9"
+    )
+
+    assert operation == "add"
+    lines = after.split("\n")
+    # The heading the owner wrote is untouched, and a real one is opened for the
+    # entry rather than borrowed from theirs.
+    assert "## Active extras and notes" in lines
+    assert [line for line in lines if line.strip() == "## Active"] == ["## Active"]
+    opened = lines.index("## Active")
+    entry = next(
+        line for line in lines if "A brand new learning." in line and line.startswith("- [")
+    )
+    # Under the new heading, not under theirs, and on its own line.
+    assert lines.index(entry) == opened + 2
+
+
+def test_the_line_ending_comes_from_the_documents_first_terminator() -> None:
+    """`_newline`'s documented rule, pinned.
+
+    A file whose endings already disagree is not this writer's to normalize, and
+    rewriting one half of it would be a change the owner never asked for. So the
+    first terminator decides, and the rest of the document is left as it is.
+    """
+    assert mp._newline("a\r\nb\nc") == "\r\n"
+    assert mp._newline("a\nb\r\nc") == "\n"
+    # No terminator at all, and a lone carriage return, both fall back to `\n`.
+    assert mp._newline("") == "\n"
+    assert mp._newline("one line") == "\n"
+    assert mp._newline("a\rb") == "\n"
+
+
 def test_a_crlf_file_keeps_its_line_endings_through_a_recurrence(
     tmp_path: Path,
 ) -> None:
