@@ -54,32 +54,35 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert {entry["schedule_id"] for entry in schedules["schedules"]} == EXPECTED_SYSTEM_SCHEDULES
 
 
-def _curation_skill_text() -> str:
-    return (
-        resources.files("ciao.stock")
-        .joinpath("skills", "memory-curation", "SKILL.md")
-        .read_text(encoding="utf-8")
-    )
+def _curation_prompt() -> str:
+    schedules = json.loads(resources.files("ciao.stock").joinpath("schedules.json").read_text(encoding="utf-8"))
+    return next(entry["prompt"] for entry in schedules["schedules"] if entry["schedule_id"] == "system-memory-curation")
 
 
-def test_stock_curation_prompt_invokes_the_skill() -> None:
-    """The schedule prompt is a dispatcher; the procedure lives in the skill.
-
-    The old 5K-character single-paragraph prompt was brittle and duplicated
-    the memory agent's contract; the skill file is the one canonical copy.
-    """
-    stock = resources.files("ciao.stock")
-    schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
-    prompt = next(
-        entry["prompt"]
-        for entry in schedules["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
-
-    assert "memory-curation" in prompt
+def test_stock_curation_prompt_contains_the_procedure() -> None:
+    """The packaged schedule is the only copy of the nightly procedure."""
+    prompt = _curation_prompt()
     assert "one-line no-op" in prompt
-    # The procedure itself must not be inlined any more.
-    assert len(prompt) < 1200
+    assert "## 0. Start the run" in prompt
+    assert "## 10. Report" in prompt
+    assert not resources.files("ciao.stock").joinpath("skills/memory-curation/SKILL.md").is_file()
+
+
+def test_baseline_authoring_does_not_ship_as_optional_skills() -> None:
+    skills = resources.files("ciao.stock").joinpath("skills")
+    assert not skills.joinpath("workspace-authoring/SKILL.md").is_file()
+    assert not skills.joinpath("sop-authoring/SKILL.md").is_file()
+    visual_plan = skills.joinpath("visual-plan/SKILL.md").read_text(encoding="utf-8")
+    assert "the core prompt handles those" in visual_plan
+
+
+def test_support_checks_for_a_released_fix_before_new_issue() -> None:
+    support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
+    assert "https://github.com/raffaelefarinaro/ciaobot/releases" in support
+    assert "https://github.com/raffaelefarinaro/ciaobot/blob/main/CHANGELOG.md" in support
+    assert "https://github.com/raffaelefarinaro/ciaobot/issues" in support
+    assert "not merely\nmerged or closed" in support
+    assert "suggest updating and\nretesting first" in support
 
 
 def test_stock_curation_skill_consolidation_contract() -> None:
@@ -91,7 +94,7 @@ def test_stock_curation_skill_consolidation_contract() -> None:
     undo file, queue uncertain removals as [review] yes/no questions, never
     promote NEW facts unattended.
     """
-    skill = _curation_skill_text()
+    skill = _curation_prompt()
 
     # Consolidation is allowed, bounded by the undo log.
     assert "consolidate that region now" in skill
@@ -115,7 +118,7 @@ def test_stock_curation_skill_files_discovered_bounded_facts() -> None:
     travels by file, and the source label is a plain chat id — $(), backticks,
     and quotes interpolate even inside double quotes.
     """
-    skill = _curation_skill_text()
+    skill = _curation_prompt()
 
     assert "ciao memory-proposal-add --kind memory --source <chat id> --text-file" in skill
     assert "<chat title>" not in skill
@@ -126,8 +129,8 @@ def test_stock_curation_skill_files_discovered_bounded_facts() -> None:
 
 def test_stock_curation_skill_carries_the_new_passes() -> None:
     """Temporal re-verification, structured learnings, queue/log separation,
-    log rotation, and alias upkeep all live in the skill."""
-    skill = _curation_skill_text()
+    log rotation, and alias upkeep all live in the schedule."""
+    skill = _curation_prompt()
 
     assert "aging_state_entries" in skill
     assert "retrieved_recently" in skill

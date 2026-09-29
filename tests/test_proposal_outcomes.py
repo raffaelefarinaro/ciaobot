@@ -751,7 +751,7 @@ def test_dismiss_still_requires_some_text(tmp_path, monkeypatch, capsys):
 
 
 def test_add_then_dismiss_round_trips_a_multiline_fact_file(tmp_path, monkeypatch):
-    """The workflow the curation skill prescribes, end to end.
+    """The workflow the Workspace care schedule prompt prescribes, end to end.
 
     `memory-proposal-add` flattens whitespace because the queue is
     line-oriented Markdown; `remove_proposal_by_substring` then matches one
@@ -797,7 +797,7 @@ def test_add_then_dismiss_round_trips_a_multiline_fact_file(tmp_path, monkeypatc
 
 
 def test_dismiss_matches_a_row_written_with_repeated_whitespace(tmp_path, monkeypatch):
-    """The curation skill appends `[review]` questions to the queue directly.
+    """The Workspace care schedule prompt appends `[review]` questions to the queue directly.
 
     Those rows keep whatever whitespace the writer used, and
     `remove_proposal_by_substring` compares against the raw line — so

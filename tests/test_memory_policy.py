@@ -17,6 +17,7 @@ reintroduce a hard-cap claim or a different unattended rule.
 
 from __future__ import annotations
 
+import json
 from importlib import resources
 from pathlib import Path
 
@@ -240,8 +241,8 @@ def test_the_core_prompt_points_at_the_same_block() -> None:
     assert "a note that fits none is a new-category question" in core
 
 
-def test_curation_skill_defers_and_never_hard_caps() -> None:
-    skill = _stock("skills/memory-curation/SKILL.md")
+def test_curation_schedule_defers_and_never_hard_caps() -> None:
+    skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
     assert "You are an unattended run: defer, never ask, never route around" in skill
     assert "The region cap is advisory." in skill
     # The consolidation contract the architecture test also pins must survive.

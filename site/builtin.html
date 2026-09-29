@@ -78,7 +78,7 @@
     </section>
 
     <section id="skills">
-      <h2>Skills <span class="tag">10 + Google</span></h2>
+      <h2>Skills <span class="tag">Built-in + Google</span></h2>
       <p>A skill is a short instruction file that teaches the assistant how to do one kind of task well. Only its one-line description is always visible; the full instructions load when a task calls for them. Skills follow the open <a href="https://agentskills.io">Agent Skills</a> format, so they work in both Claude Code and opencode.</p>
       <figure>
         <a href="assets/img/skills.webp"><img src="assets/img/skills.webp" alt="Settings, Skills tab listing the stock skills that ship with Ciaobot, with Add via chat and Add skill buttons" loading="lazy" width="1600" height="1000"></a>
@@ -90,13 +90,10 @@
           <tbody>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-capabilities/SKILL.md"><code>ciao-capabilities</code></a></td><td>Knows every Ciaobot feature, answers "can you…?" and gives tours.</td></tr>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-cli/SKILL.md"><code>ciao-cli</code></a></td><td>How to use the <code>ciao</code> tool to change the app's state.</td></tr>
-            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/web-research/SKILL.md"><code>web-research</code></a></td><td>Reliable web lookups that check the sources.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/web-research/SKILL.md"><code>web-research</code></a></td><td>Uses <a href="https://github.com/kepano/defuddle">Defuddle</a> to read clean page text when its CLI is installed, then checks the sources.</td></tr>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/html-artifact/SKILL.md"><code>html-artifact</code></a></td><td>Builds interactive pages (dashboards, charts, comparisons) shown beside the chat.</td></tr>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/visual-plan/SKILL.md"><code>visual-plan</code></a></td><td>Turns bigger work into a reviewable plan, with an optional visual companion.</td></tr>
-            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/workspace-authoring/SKILL.md"><code>workspace-authoring</code></a></td><td>Writes and maintains longer working documents in your notes.</td></tr>
-            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/convert-documents-to-markdown/SKILL.md"><code>convert-documents-to-markdown</code></a></td><td>Reads Word, PowerPoint, Excel, PDF and more by converting them to text.</td></tr>
-            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/memory-curation/SKILL.md"><code>memory-curation</code></a></td><td>The nightly memory tidy-up procedure.</td></tr>
-            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/sop-authoring/SKILL.md"><code>sop-authoring</code></a></td><td>Helps you write clean skills and step-by-step procedures of your own.</td></tr>
+            <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/convert-documents-to-markdown/SKILL.md"><code>convert-documents-to-markdown</code></a></td><td>Uses bundled <a href="https://github.com/firecrawl/anydoc">AnyDoc</a> to convert Word, PowerPoint, Excel, PDF and more to Markdown.</td></tr>
             <tr><td><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/ciao/stock/skills/ciao-support/SKILL.md"><code>ciao-support</code></a></td><td>Diagnoses problems with Ciaobot and helps report them.</td></tr>
           </tbody>
         </table>

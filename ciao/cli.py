@@ -2891,7 +2891,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
     # Two needle forms, because rows reach the queue two ways:
-    # `memory-proposal-add` flattens what it writes, while the curation skill
+    # `memory-proposal-add` flattens what it writes, while the Workspace care schedule prompt
     # appends `[review]` questions directly and may keep repeated whitespace.
     # A needle read from the very file a fact was filed from needs the flattened
     # form; a directly written row needs the raw one.
