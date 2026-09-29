@@ -462,6 +462,14 @@ second `--apply` finds nothing to change and writes no second receipt.
 *not* a `commit_note_change` — see `ciao/learnings_migrate.py` for why, and for
 the lock it takes against a concurrent `[learnings]` accept.
 
+One consequence worth knowing when reading a vault mid-migration: a plain bullet,
+or a `[learnings]` accept that carried no source, renders `[unknown → date] (?)`
+and stays there. `curation_run` skips an entry whose count is unknown rather than
+treating it as `x1`, so it is not promotable until attributable evidence
+accumulates — a bullet nobody can attribute has no recurrence, and inventing one
+would be a decision nobody made. The migration is what gives those lines an
+identity to accumulate evidence against.
+
 ### AI OS audit
 
 `ciao os-audit` checks required workspace roots, vault frontmatter, relative

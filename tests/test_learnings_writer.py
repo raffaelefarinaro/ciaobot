@@ -15,6 +15,8 @@ real workspace.
 
 from __future__ import annotations
 
+import os
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from ciao import curation_run as cr
 from ciao import memory_proposals as mp
 from ciao.learning_records import (
     SECTION_ACTIVE,
+    SECTION_HEADINGS,
     SECTION_PROMOTED,
     LearningRecord,
     parse_learnings,
@@ -180,6 +183,176 @@ def test_an_owner_written_bullet_gains_no_invented_recurrence(tmp_path: Path) ->
     assert record.count is None
     assert record.first_seen is None
     assert "(?)" in _text(vault)
+
+
+# ---- the owner's bytes survive the write -----------------------------------
+
+
+CRLF_BODY = (
+    "﻿# Learnings\r\n"
+    "\r\n"
+    "## Format\r\n"
+    "Entries look like `- [key] [first -> last] (xN) text`.\r\n"
+    "\r\n"
+    "## Active\r\n"
+    "- [a-b] [2024-01-01 → 2024-01-01] (x1) A b.\r\n"
+    "\r\n"
+    "## Promoted / Resolved\r\n"
+    "- [pin-node] [2024-01-01 → 2024-02-01] (x4) Pin the Node version.\r\n"
+)
+
+
+def _crlf_vault(tmp_path: Path) -> Path:
+    """A vault whose ``Learnings.md`` is BOM + CRLF, written as bytes.
+
+    A learning file is the owner's prose, and a CRLF one is a file an editor on
+    another platform produced. Reading it through a newline-translating API and
+    writing it back changes bytes the writer never meant to touch — and silently
+    invalidates every ``learnings-*.json`` receipt, because the receipt's
+    recorded spans no longer address what is on disk.
+    """
+    vault = _vault(tmp_path)
+    (vault / "Workspace" / "Learnings.md").write_bytes(CRLF_BODY.encode("utf-8"))
+    return vault
+
+
+def _raw(vault: Path) -> bytes:
+    return (vault / "Workspace" / "Learnings.md").read_bytes()
+
+
+def test_a_crlf_file_keeps_its_line_endings_through_a_new_entry(
+    tmp_path: Path,
+) -> None:
+    vault = _crlf_vault(tmp_path)
+
+    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+
+    raw = _raw(vault)
+    # The byte-order mark and every CRLF pair survive, so the lines this write
+    # did not edit are byte-identical to what the owner had.
+    assert raw.startswith(b"\xef\xbb\xbf")
+    assert b"\n" not in raw.replace(b"\r\n", b"")
+    # The new entry is filed, and the surrounding prose is untouched.
+    assert "A brand new learning." in raw.decode("utf-8")
+    assert "## Format\r\nEntries look like" in raw.decode("utf-8")
+    assert "Pin the Node version.\r\n" in raw.decode("utf-8")
+
+
+def test_a_crlf_file_keeps_its_line_endings_through_a_recurrence(
+    tmp_path: Path,
+) -> None:
+    """The update path rewrites a line in place, not the whole file's endings."""
+    vault = _crlf_vault(tmp_path)
+
+    assert mp.append_learning(vault, "A b.", source="chat-9")
+
+    raw = _raw(vault)
+    assert raw.startswith(b"\xef\xbb\xbf")
+    assert b"\n" not in raw.replace(b"\r\n", b"")
+    assert b"x2" in raw
+
+
+def test_a_crlf_file_gains_no_second_active_section(tmp_path: Path) -> None:
+    """A heading the writer cannot find is a section it opens a second time.
+
+    The old marker was the literal `\\n## Active\\n`, which never matches
+    `## Active\\r\\n`. A new entry would then be filed under a second `## Active`
+    at the end of the file — invisible in the preview, and a document whose
+    sections no longer say what they say.
+    """
+    vault = _crlf_vault(tmp_path)
+
+    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+
+    text = _raw(vault).decode("utf-8")
+    assert text.count("## Active") == 1
+    assert text.count(f"## {SECTION_HEADINGS[SECTION_PROMOTED]}") == 1
+
+
+def test_a_new_entry_goes_under_active_not_at_the_end_of_the_file(
+    tmp_path: Path,
+) -> None:
+    """Where the entry lands is the observable difference above."""
+    vault = _crlf_vault(tmp_path)
+
+    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+
+    text = _raw(vault).decode("utf-8")
+    _, _, active = text.partition("## Active")
+    active, _, resolved = active.partition(
+        f"## {SECTION_HEADINGS[SECTION_PROMOTED]}"
+    )
+    assert "A brand new learning." in active
+    assert "A brand new learning." not in resolved
+
+
+def test_the_write_goes_through_the_atomic_helper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """In-place `write_text` truncates before it writes.
+
+    A crash or a full disk mid-write takes the whole file with it, and this file
+    is the only record of what the workspace learned. The atomic helper's temp
+    sibling must also be gone afterwards, or the vault grows a file nobody owns.
+    """
+    vault = _crlf_vault(tmp_path)
+    from ciao import memory_receipts
+
+    written: list[tuple[str, str]] = []
+    real = memory_receipts.write_queue_atomically
+
+    def _recording(path: Path, text: str) -> None:
+        written.append((Path(path).name, text))
+        real(path, text)
+
+    monkeypatch.setattr(memory_receipts, "write_queue_atomically", _recording)
+
+    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+
+    assert [name for name, _ in written] == ["Learnings.md"]
+    assert "A brand new learning." in written[0][1]
+    # And the helper's temp sibling is gone: the vault must not grow a file
+    # nobody owns.
+    assert [p.name for p in (vault / "Workspace").iterdir()] == ["Learnings.md"]
+
+
+def test_the_write_is_serialized_against_the_migration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Both writers of this file take the same lock.
+
+    The migration's whole safety argument is a revision check plus a rename; an
+    accept that lands between that check and the rename would be discarded by
+    the migration, or would discard the migration. They are serialized by
+    `queue_lock`, so the two cannot interleave — which is only true if the accept
+    takes it too.
+    """
+    import fcntl
+
+    vault = _crlf_vault(tmp_path)
+    from ciao import memory_receipts
+
+    taken: list[str] = []
+    real = memory_receipts.queue_lock
+
+    @contextmanager
+    def _recording(target, **kwargs):
+        taken.append(Path(target).name)
+        with real(target, **kwargs):
+            # The write must happen while the lock is held, not after it is
+            # released: a lock taken and dropped before the rename serializes
+            # nothing.
+            fd = os.open(target, os.O_RDONLY)
+            try:
+                assert fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB) is None
+            finally:
+                os.close(fd)
+            yield
+
+    monkeypatch.setattr(memory_receipts, "queue_lock", _recording)
+    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+
+    assert taken == ["Learnings.md"]
 
 
 # ---- preview and write agree -----------------------------------------------

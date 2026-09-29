@@ -1059,8 +1059,11 @@ def render_learning_append(
       to match against, and it is never rewritten. It is kept byte-exact, so a
       shape this code does not implement survives the write untouched rather than
       being guessed at.
-    * **Not found** — a new Active entry is appended under `## Active`, creating
-      the section when the file has none.
+    * **Not found** — a new Active entry is filed directly under the
+      ``## Active`` heading, creating the section when the file has none. The
+      heading is matched as a line and the inserted entry uses the file's own
+      line ending, so a CRLF document does not gain a second ``## Active`` at the
+      end of the file or a stray LF in a CRLF list.
 
     A legacy plain bullet *is* found: the model reads it as a record with no
     dates and no count, so a sighting of that statement with a source updates it
@@ -1095,11 +1098,55 @@ def render_learning_append(
             statement, workspace=workspace, stamp=stamp, observation=observation
         )
     )
-    marker = f"\n## {SECTION_HEADINGS[SECTION_ACTIVE]}\n"
-    if marker in existing:
-        head, _, tail = existing.partition(marker)
-        return f"{head}{marker}{filed}\n{tail}", "add"
-    return existing.rstrip() + f"\n\n## Active\n\n{filed}\n", "add"
+    return _file_new_entry(existing, filed), "add"
+
+
+def _newline(existing: str) -> str:
+    """The line ending the document already uses.
+
+    A CRLF file that gains ``\\n`` lines is a file this write has partially
+    rewritten, which is the same defect as translating the whole thing: mixed
+    endings render inconsistently, and every line ending after the insertion is
+    now a byte the owner did not write. Read off the document's *first* line
+    terminator, so a file whose endings already disagree keeps whatever its
+    first line says rather than acquiring a rule from here.
+    """
+    first = existing.find("\n")
+    return "\r\n" if first > 0 and existing[first - 1] == "\r" else "\n"
+
+
+_ACTIVE_HEADING_RE = re.compile(
+    rf"(?m)^#{{1,3}}[ \t]+{re.escape(SECTION_HEADINGS[SECTION_ACTIVE])}[ \t]*\r?$"
+)
+"""The ``## Active`` heading as a *line*.
+
+Not the literal ``\\n## Active\\n`` that preceded it: that never matches a CRLF
+file, so a new entry was filed under a second ``## Active`` heading at the end of
+the document — a section the parser and the owner both read as real, holding one
+entry. Matched at any level up to three because the model treats a deeper
+heading as a group inside the section, and a file that has only ever used
+``### Active`` still means the same thing. Trailing whitespace is tolerated
+because that is what a hand edit leaves behind. The heading text is the model's,
+so the section the writer opens is the section the parser recognizes.
+"""
+
+
+def _file_new_entry(existing: str, filed: str) -> str:
+    """*existing* with *filed* placed directly under its ``## Active`` section.
+
+    The heading line and its terminator when the file has one, so the entry
+    becomes the first thing in the list. A file that has no such heading gets the
+    section opened after its last line of content, which is where the writer has
+    always put one — a stub that has never been written to needs the heading
+    before the entry can be under it.
+    """
+    newline = _newline(existing)
+    heading = _ACTIVE_HEADING_RE.search(existing)
+    if heading is not None:
+        at = heading.end() + len(newline)
+        return f"{existing[:at]}{filed}{newline}{existing[at:]}"
+    title = SECTION_HEADINGS[SECTION_ACTIVE]
+    return f"{existing.rstrip()}{newline * 2}## {title}{newline * 2}{filed}{newline}"
 
 
 def read_learnings(vault_root: Path) -> str:
@@ -1108,10 +1155,16 @@ def read_learnings(vault_root: Path) -> str:
     Existence, not a swallowed read error, decides: a file that is there but
     unreadable must surface rather than be silently replaced by the stub,
     which a following write would then persist over the real content.
+
+    Decoded from bytes rather than with ``read_text``, which translates newlines:
+    a CRLF file would come back all-LF, and the preview the review card shows
+    would then be of a different document from the one
+    :func:`append_learning` writes. The preview is only worth showing if it is
+    what lands.
     """
     path = learnings_path(vault_root)
     if path.exists():
-        return path.read_text(encoding="utf-8")
+        return path.read_bytes().decode("utf-8")
     return LEARNINGS_STUB
 
 
@@ -1125,18 +1178,37 @@ def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
     Workspace care schedule prompt promotes on — a learning recurs because it was
     observed again, counted mechanically rather than judged from prose.
 
+    The read, the render and the write all happen under
+    :func:`ciao.memory_receipts.queue_lock`, and the write goes through
+    :func:`ciao.memory_receipts.write_queue_atomically`. Both are the same ones
+    ``ciao learnings-migrate`` takes on this file, and both are load-bearing: the
+    unattended care run, a ``[learnings]`` accept and the migration are three
+    writers of one queue-shaped file, and a read-check-write that is not
+    serialized is a read-check-write that races. The atomic rename is what makes
+    a crash mid-write leave the old file rather than a truncated one. And the
+    read is from bytes, because a CRLF file read through a translating API comes
+    back rewritten in every line the writer did not mean to touch — which also
+    invalidates the migration's ``--revert`` receipt, whose spans address exact
+    offsets.
+
     Public because accepting a ``[learnings]`` proposal from the review queue
     performs exactly this write.
     """
+    from ciao.memory_receipts import queue_lock, write_queue_atomically
+
     path = learnings_path(vault_root)
-    existing = read_learnings(vault_root)
-    updated, operation = render_learning_append(
-        existing, text, source=source, workspace=vault_root.name
-    )
-    if operation == "none":
-        return True
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(updated, encoding="utf-8")
+    with queue_lock(path):
+        # Read inside the lock, not before it: read-then-lock would leave a
+        # window in which the text being replaced is not the text on disk.
+        existing = (
+            path.read_bytes().decode("utf-8") if path.exists() else LEARNINGS_STUB
+        )
+        updated, operation = render_learning_append(
+            existing, text, source=source, workspace=vault_root.name
+        )
+        if operation == "none":
+            return True
+        write_queue_atomically(path, updated)
     return True
 
 
