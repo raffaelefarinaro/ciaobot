@@ -534,8 +534,20 @@ two moments. Three ordering rules are load-bearing if you touch it: the
 links are rewritten BEFORE the move, because resolving them needs the notes to
 still be on disk; the ledger append is inside the same transaction, so a
 failure anywhere puts the move and every rewritten note back together.
-`Retire` stays available for every type, projects included — completion is for
-one that finished, not one that is wrong.
+
+In the `Review` panel, a candidate the backend marked `completable` offers
+**Complete** in place of **Retire** — never both, since a project that finished
+and a project that is wrong are different findings and the user has to be able
+to tell them apart. `completable` is computed in the payload from the same two
+helpers the action gates on (`_is_project_candidate` and `_completed_path_for`),
+and the panel reads it: the UI has no alias table and no view of the `projects/`
+layouts, so a second definition of project-ness there would be free to disagree
+with the one that decides whether the click is honoured. `Retire` stays on every
+row for everything else, projects included — completion is for one that
+finished, not one that is wrong. Completing clears the row like any other
+disposition; `restore_completed` is not surfaced in the panel yet (a completed
+note is in neither the candidate list nor the trash, so there is no row to hang
+it on), and a surface for it is a follow-up.
 
 ## Skills, subagents, and slash commands
 

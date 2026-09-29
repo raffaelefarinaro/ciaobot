@@ -1514,6 +1514,63 @@ def test_a_flat_project_note_completes_into_the_completed_tree(tmp_path: Path) -
     assert metadata["new_path"] == "memory-vault/projects/completed/Faraman-Calendar.md"
 
 
+def _unqueued_candidate(path: str, declared_type: str = "project") -> review.ReviewCandidate:
+    """A candidate the queue would never return, to read the flag on its own.
+
+    `never_queued` keeps anything under `projects/completed/` out of the
+    generated list, so the "already completed" case cannot be produced by
+    `generate_candidates` — and the flag still has to be right for it, because
+    it is the flag that decides which button the panel draws.
+    """
+    return review.ReviewCandidate(
+        candidate_id=review.candidate_id("personal", path, "deadbeef"),
+        workspace="personal",
+        path=path,
+        content_hash="deadbeef",
+        signals=("unlinked",),
+        priority=1,
+        evidence={"type": declared_type},
+    )
+
+
+def test_the_payload_says_whether_a_candidate_can_be_completed(tmp_path: Path) -> None:
+    """The panel must not re-derive project-ness from `evidence.type`.
+
+    It has no alias table and no view of the `projects/` layouts, so a second
+    definition would be free to disagree with the one that gates the action —
+    and the disagreement is a Complete button the engine then refuses. The flag
+    is therefore computed from the same two helpers `complete_project_note`
+    checks, here, in the payload.
+    """
+    _project(tmp_path, "evaluate-sdk-docs-page")
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    (tmp_path / "projects" / "Person-note.md").write_text(
+        "---\ntype: person\nstatus: active\nupdated: 2026-05-19\n---\n# Person\n\nFiled oddly.\n",
+        encoding="utf-8",
+    )
+    queued = generate_candidates(tmp_path, workspace="personal", max_candidates=50, now=_SEPT)
+    by_path = {item.path: item.as_dict() for item in queued}
+
+    # A project the engine will complete: the flag is on.
+    project = by_path["memory-vault/projects/active/evaluate-sdk-docs-page/evaluate-sdk-docs-page.md"]
+    assert project["completable"] is True
+
+    # Not a project at all.
+    assert by_path["memory-vault/People/A.md"]["completable"] is False
+    # A declared type always wins over the folder it sits in, here and in the
+    # action, so the flag must not offer Complete for it.
+    assert by_path["memory-vault/projects/Person-note.md"]["completable"] is False
+
+    # A project that is already completed has nowhere to complete INTO, which
+    # `_completed_path_for` answers "" for. The queue never returns one — the
+    # completed tree is exempt — so the row is built by hand.
+    assert _unqueued_candidate("memory-vault/projects/completed/demo/demo.md").as_dict()["completable"] is False
+    # And a project outside `projects/` is not a project at all.
+    assert _unqueued_candidate("memory-vault/notes/demo.md").as_dict()["completable"] is False
+    # While the same note under `projects/` is.
+    assert _unqueued_candidate("memory-vault/projects/demo.md").as_dict()["completable"] is True
+
+
 def test_completion_repoints_every_inbound_reference_in_both_dialects(tmp_path: Path) -> None:
     """A move that leaves the links behind trades one broken vault for another.
 

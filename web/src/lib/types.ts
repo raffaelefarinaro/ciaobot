@@ -1407,6 +1407,15 @@ export interface VaultReviewCandidate {
   status: string
   disposition: string
   deferred_until: string
+  /**
+   * Whether the engine will accept `complete` for this row — it is a project
+   * that still has somewhere to complete into. The backend decides it from the
+   * same helpers the action gates on, so the panel offers Complete in place of
+   * Retire exactly when the click will be honoured. Re-deriving it here from
+   * `evidence.type` would put a second definition of project-ness in the
+   * client, and a button the engine refuses is worse than no button.
+   */
+  completable: boolean
 }
 
 /** One restorable note in `.vault-trash`, from `GET /api/vault/review?include=trashed`. */

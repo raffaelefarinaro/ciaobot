@@ -31,6 +31,7 @@ function candidate(overrides: Partial<VaultReviewCandidate> = {}): VaultReviewCa
     status: 'candidate',
     disposition: '',
     deferred_until: '',
+    completable: false,
     ...overrides,
   }
 }
@@ -183,6 +184,47 @@ describe('vaultReview store', () => {
       candidate_id: 'cid3',
       confirm: 'cid3',
     })
+  })
+
+  it('completes and restores a completed project through their own actions', async () => {
+    // Completion MOVES a project rather than removing it, so the way back is
+    // `restore_completed` and not the trash's `restore`: the notes rewritten
+    // to follow it out of `active/` are only put back by that one.
+    get.mockResolvedValue({ candidates: [], trashed: [] })
+    post.mockResolvedValue({ ok: true })
+    const store = useVaultReviewStore()
+
+    await store.complete('personal', 'cid1')
+    await store.restoreCompleted('personal', 'cid2')
+
+    expect(post).toHaveBeenNthCalledWith(1, '/api/vault/review?workspace=personal', {
+      action: 'complete',
+      candidate_id: 'cid1',
+    })
+    expect(post).toHaveBeenNthCalledWith(2, '/api/vault/review?workspace=personal', {
+      action: 'restore_completed',
+      candidate_id: 'cid2',
+    })
+    // Neither carries the trash's `restore`, and neither carries `confirm`:
+    // that field gates permanent deletion, and sending it here would ask for
+    // a confirmation nobody was ever shown.
+    for (const call of [1, 2]) {
+      expect(post).toHaveBeenNthCalledWith(
+        call, '/api/vault/review?workspace=personal',
+        expect.not.objectContaining({ confirm: expect.anything() }),
+      )
+    }
+  })
+
+  it('reports a refused completion without throwing', async () => {
+    // The engine refuses a candidate that changed under the click, and the
+    // panel's toast is the only place that refusal can surface.
+    post.mockRejectedValue(new Error('only a project can be completed'))
+    const store = useVaultReviewStore()
+
+    expect(await store.complete('personal', 'cid1')).toBe(false)
+    expect(store.error).toBe('only a project can be completed')
+    expect(store.isBusy('cid1')).toBe(false)
   })
 
   it('adopts the queue the POST returns instead of re-scanning the vault', async () => {

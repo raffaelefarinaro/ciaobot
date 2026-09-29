@@ -272,6 +272,28 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     return (await mutate(workspace, id, { action: 'trash', candidate_id: id })).ok
   }
 
+  /**
+   * Close a project out: the note moves to `projects/completed/` and every
+   * reference to it is repointed. Only offered on a candidate the backend
+   * marked `completable` — see `VaultReviewCandidate.completable` — so this
+   * posts an action the engine will accept rather than re-deciding here.
+   */
+  async function complete(workspace: string, id: string): Promise<boolean> {
+    return (await mutate(workspace, id, { action: 'complete', candidate_id: id })).ok
+  }
+
+  /**
+   * Undo a completion, putting the project and every rewritten link back.
+   *
+   * Not surfaced in the panel yet: a completed note leaves the candidate list
+   * and the trash, so there is no row to hang this on. It is here because the
+   * action and its ledger row already exist, and the next surface that needs
+   * the way back should not have to re-derive the payload.
+   */
+  async function restoreCompleted(workspace: string, id: string): Promise<boolean> {
+    return (await mutate(workspace, id, { action: 'restore_completed', candidate_id: id })).ok
+  }
+
   /** Bring a trashed note back to its original path. */
   async function restore(workspace: string, id: string): Promise<boolean> {
     return (await mutate(workspace, id, { action: 'restore', candidate_id: id })).ok
@@ -304,6 +326,8 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     ensureLoaded,
     decide,
     trash,
+    complete,
+    restoreCompleted,
     restore,
     remove,
   }

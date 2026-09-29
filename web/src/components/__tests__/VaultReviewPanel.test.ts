@@ -37,8 +37,22 @@ function candidate(overrides: Partial<VaultReviewCandidate> = {}): VaultReviewCa
     status: 'candidate',
     disposition: '',
     deferred_until: '',
+    completable: false,
     ...overrides,
   }
+}
+
+/** A project the backend marked completable: the panel offers Complete on it. */
+function projectCandidate(
+  overrides: Partial<VaultReviewCandidate> = {},
+): VaultReviewCandidate {
+  return candidate({
+    candidate_id: 'proj123proj123proj123proj1',
+    path: 'memory-vault/projects/active/faraman/Faraman-Calendar.md',
+    completable: true,
+    evidence: { ...candidate().evidence, type: 'project' },
+    ...overrides,
+  })
 }
 
 function generalProject(): ProjectInfo {
@@ -122,7 +136,14 @@ describe('VaultReviewPanel', () => {
     expect(wrapper.get('h2').text()).toBe('1 to revisit')
     const lede = wrapper.get('.vr-lede').text()
     expect(lede).toContain('Still true marks a note checked today')
-    expect(lede).toContain('Retire moves it to Retired, where it can be restored')
+    // A project is closed, not retired, and the lede has to say so before the
+    // row swaps the button out from under the reader.
+    expect(lede).toContain('A project offers Complete instead')
+    expect(lede).toContain('moves it to projects/completed/')
+    // Retire is still offered, and only for the note that is wrong: a finished
+    // project is not abandoned, so saying so keeps the two from reading alike.
+    expect(lede).toContain('Retire is for a note that is wrong or abandoned')
+    expect(lede).toContain('moves it to Retired, where it can be restored')
     expect(wrapper.find('.vr-how').exists()).toBe(false)
     expect(wrapper.findAll('button').some(b => b.text() === 'Refresh')).toBe(false)
     wrapper.unmount()
@@ -578,6 +599,118 @@ describe('VaultReviewPanel', () => {
 
     expect(projects.toasts.some(t => t.title === 'Nothing to stamp')).toBe(true)
     expect(store.notice).toBe('')
+    wrapper.unmount()
+  })
+
+  // ── Complete in place of Retire ───────────────────────────────────────
+
+  it('offers Complete instead of Retire on a project the backend marked completable', async () => {
+    apiGet.mockResolvedValue({ candidates: [projectCandidate()], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const actions = wrapper.findAll('.vr-row')[0].findAll('.vr-actions button').map(b => b.text())
+    expect(actions).toEqual(['Still true', 'Complete', 'Discuss'])
+    // Never both on one row: two ways out of the same decision, one of which
+    // the user has to know about.
+    expect(wrapper.findAll('button').some(b => b.text() === 'Retire')).toBe(false)
+    // Still the neutral row button, not a pink bar — every row is the same
+    // routine choice and the row's one emphasis is the terminal action.
+    expect(wrapper.findAll('.vr-row')[0].findAll('.btn-primary')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('keeps Retire, and no Complete, on a candidate the backend did not mark', async () => {
+    // A project the queue cannot complete into — already under
+    // `projects/completed/`, or filed outside `projects/` — keeps the trash.
+    // The panel reads the flag, it does not re-derive it.
+    apiGet.mockResolvedValue({
+      candidates: [candidate({
+        path: 'memory-vault/projects/completed/Faraman-Calendar.md',
+        evidence: { ...candidate().evidence, type: 'project' },
+        completable: false,
+      })],
+      trashed: [],
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const actions = wrapper.findAll('.vr-row')[0].findAll('.vr-actions button').map(b => b.text())
+    expect(actions).toEqual(['Still true', 'Retire', 'Discuss'])
+    expect(wrapper.findAll('button').some(b => b.text() === 'Complete')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('sends Complete through its own action and drops the row from the queue', async () => {
+    apiGet.mockResolvedValue({ candidates: [projectCandidate()], trashed: [] })
+    // The POST answers with the queue it had to rebuild: the completed project
+    // has left `active/`, so it is not in it.
+    apiPost.mockResolvedValue({ ok: true, candidates: [], trashed: [], cleared: [], result: {} })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    await buttonByText(wrapper, 'Complete').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/vault/review?workspace=personal', {
+      action: 'complete',
+      candidate_id: 'proj123proj123proj123proj1',
+    })
+    // Never the trash action as well — the two are alternatives.
+    expect(apiPost).not.toHaveBeenCalledWith(
+      '/api/vault/review?workspace=personal',
+      expect.objectContaining({ action: 'trash' }),
+    )
+    expect(wrapper.text()).toContain('Nothing to revisit')
+    wrapper.unmount()
+  })
+
+  it('names Complete in the Discuss seed and the chat title for a project', async () => {
+    apiGet.mockResolvedValue({
+      candidates: [projectCandidate({ signals: ['weak_provenance'] })],
+      trashed: [],
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const projects = useProjectStore()
+    projects.projects = [generalProject()]
+    const createChat = vi
+      .spyOn(projects, 'createChat')
+      .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
+    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+
+    await buttonByText(wrapper, 'Discuss').trigger('click')
+    await flushPromises()
+
+    const [, title, seed] = createChat.mock.calls[0]
+    // The chat is named after the question it opens, and the question is
+    // whether the project finished, not whether it should be thrown away.
+    expect(title).toBe('Complete Faraman-Calendar?')
+    expect(seed).toContain('whether this project has actually finished')
+    expect(seed).toContain('I will pick Still true, Complete, or Retire myself')
+    // And it is still a draft about a note the user has not moved.
+    expect(seed).toContain('Do not edit, move, or delete anything')
+    wrapper.unmount()
+  })
+
+  it('keeps the retire phrasing for a non-project Discuss seed', async () => {
+    apiGet.mockResolvedValue({ candidates: [candidate()], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const projects = useProjectStore()
+    projects.projects = [generalProject()]
+    const createChat = vi
+      .spyOn(projects, 'createChat')
+      .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
+    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+
+    await buttonByText(wrapper, 'Discuss').trigger('click')
+    await flushPromises()
+
+    const [, title, seed] = createChat.mock.calls[0]
+    expect(title).toBe('Link or retire Mo?')
+    expect(seed).toContain('I will pick Still true or Retire myself')
+    expect(seed).not.toContain('Complete')
     wrapper.unmount()
   })
 })

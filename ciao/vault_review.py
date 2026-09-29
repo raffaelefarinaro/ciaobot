@@ -180,7 +180,19 @@ class ReviewCandidate:
     deferred_until: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # Whether this row can be COMPLETED rather than only retired, decided
+        # here so the panel never has to. Re-deriving project-ness in the UI
+        # from `evidence.type` leaves two definitions of the same thing free to
+        # disagree, and the failure is a Complete button the engine then
+        # refuses — the worst kind, because the row still looks actionable.
+        #
+        # Both halves come from the helpers `complete_project_note` itself
+        # gates on, so the flag cannot drift from the action: the second is
+        # `_completed_path_for`, which answers "" for a note already under
+        # `projects/completed/` and for anything outside `projects/`.
+        payload["completable"] = _is_project_candidate(self) and bool(_completed_path_for(self.path))
+        return payload
 
 
 def _now() -> str:
