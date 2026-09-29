@@ -1,0 +1,1070 @@
+"""Durable per-scope state and cheap applicability for "After this update" tasks.
+
+What this is
+------------
+``ciao/update_task_catalog.py`` (issue #737) owns the *definitions*: a versioned,
+cumulative, packaged catalog of the tasks an update asks for, each row naming the
+detector that decides whether it applies, the check that decides whether it is
+done, and the packaged prompt that does it. That module is inert by design — no
+writes, no vault, no model. This is the half it was missing: where a task's
+progress is *remembered*, and whether the task *applies right now*.
+
+Two pieces, and no third
+------------------------
+1. A state store, scoped the way the catalog scopes a task. A
+   ``scope == "workspace"`` task is remembered in that vault's own
+   ``Workspace/Update-Tasks.json`` so a synced or backed-up vault carries the
+   decision with it; a ``scope == "install"`` task is remembered in
+   ``<runtime>/update-tasks.json``, beside the other per-install records. Both
+   files are the same versioned document, ``{"schema": 1, "tasks": {...}}``, keyed
+   by ``"<id>@<revision>"``.
+2. An applicability layer that resolves a row's registered name to a function
+   through ``DETECTOR_FUNCTIONS`` / ``COMPLETION_FUNCTIONS``, and a cached
+   evaluation of every eligible task that neither walks the vault on every call
+   nor ever claims more than it knows.
+
+Chat launch, the API and the UI are the later children of #729. This module
+never opens a chat: ``TaskState.chat_id`` is a field this child always leaves
+empty, and nothing else here needs it.
+
+Three rules everything else follows from
+----------------------------------------
+**Unknown is the answer when the answer is not known.** A detector name with no
+implementation, a detector that raises, a detector that returns something other
+than a :class:`Detection`, and a state file that exists but cannot be read all
+resolve to ``unknown`` — never ``applicable``. Offering follow-up work this
+engine cannot substantiate is the failure that wastes the operator's attention;
+withholding a task that did apply is recoverable, and a later chat re-asks.
+``not_applicable`` is a *positive* claim (the detector ran and the condition is
+absent), which is why it needs evidence and ``unknown`` does not.
+
+**Suppression is per revision.** A task dismissed or completed at revision 1
+stays dismissed at revision 1 and is offered again at revision 2, because the
+catalog's ``revision`` is how a maintainer says "the work behind this changed".
+Suppression is therefore read from the record for the *exact* ``(id, revision)``
+being evaluated, and a task this installed version cannot support is not offered
+at all — while its record stays on disk, so a downgrade hides the task and
+upgrading again brings it back with its history.
+
+**Cheap is a contract, not a hope.** A detector may walk the vault; the layer
+that calls it may not do that on every call. :func:`evaluate` runs the whole
+check on ``ciao.async_reads.run_read`` (bounded, coalesced by key) and reuses the
+previous result for ``APPLICABILITY_TTL_S``, or immediately when the caller
+supplies a different workspace-change token. The state file is re-read on every
+call — it is one small JSON document, and a dismissal the operator just made must
+not wait out a TTL — while the detectors, which are the part that can be
+expensive, run at most once per fresh window.
+
+Two consequences stated rather than hidden. The freshness window is a *named
+constant*, not a setting and not an env var: a per-install knob for "how stale may
+an answer be" is not a decision an operator has ever asked to make, and
+``AGENTS.md`` forbids a new env var where a constant does. And the shipped
+registries are empty — no task definition ships yet (the first real one needs
+#728's Learnings cleanup), so there is no name for which an implementation could
+be written honestly. The layer is proved end to end by a test-injected catalog;
+a task whose detector is ``not_implemented`` is not shipped.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import tempfile
+import threading
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
+
+from ciao.async_reads import keyed_lock, run_read
+from ciao.update_task_catalog import TaskCatalog, UpdateTask, load_catalog
+
+logger = logging.getLogger(__name__)
+
+# ── The state document ──────────────────────────────────────────────────────
+
+#: Schema version stamped into every state file. A document carrying any other
+#: value is a schema this code does not implement, and is read as unreadable
+#: rather than half-understood — the same rule ``update_task_catalog`` applies to
+#: a future catalog.
+STATE_SCHEMA = 1
+
+#: Where the pipeline writes its own bookkeeping inside a vault. Shared by name
+#: with ``vault_index``'s reserved-file rule, so a user's note called
+#: ``Update-Tasks.json`` somewhere else stays indexed.
+WORKSPACE_STATE_DIR = "Workspace"
+
+#: The workspace state file, relative to that directory. Matched casefolded, so
+#: the spelling here and the one on disk cannot drift into two documents.
+WORKSPACE_STATE_FILENAME = "Update-Tasks.json"
+
+#: The install state file, in the runtime directory beside ``state.json``.
+INSTALL_STATE_FILENAME = "update-tasks.json"
+
+#: The lifecycles a record may hold. ``offered`` and ``in_progress`` are what an
+#: undecided task is; ``waiting_review`` is a task whose chat is still open;
+#: ``failed`` is an attempt that did not complete; the last two are the operator's
+#: decision or the check's verdict.
+LIFECYCLES: frozenset[str] = frozenset(
+    {
+        "offered",
+        "in_progress",
+        "waiting_review",
+        "failed",
+        "completed",
+        "dismissed",
+    }
+)
+
+#: The lifecycles that suppress an offer at the *same* revision. A record in
+#: another lifecycle is an unfinished attempt, not a decision, and is offered
+#: again.
+SUPPRESSING_LIFECYCLES: frozenset[str] = frozenset({"completed", "dismissed"})
+
+# ── Applicability ───────────────────────────────────────────────────────────
+
+#: The task applies. A positive claim, so it is only ever produced by a detector
+#: that ran and returned evidence.
+APPLICABLE = "applicable"
+
+#: The task does not apply: the detector ran and the condition is absent. Also a
+#: positive claim, about the absence.
+NOT_APPLICABLE = "not_applicable"
+
+#: Nobody can say. An absent or failing detector, a detector that returned
+#: something else, a state file that exists but cannot be read.
+UNKNOWN = "unknown"
+
+#: The three answers, as a set a caller can test membership on.
+APPLICABILITY_STATUSES: frozenset[str] = frozenset(
+    {APPLICABLE, NOT_APPLICABLE, UNKNOWN}
+)
+
+#: How long a computed applicability may be reused, in seconds, before the
+#: detectors run again. Named, finite, and a constant rather than a setting: a
+#: Home render must not block on a detector, and five minutes of staleness on a
+#: condition the operator completes by hand is not worth another knob. A caller
+#: that knows the workspace changed passes a different ``change_token`` and
+#: invalidates immediately instead of waiting.
+APPLICABILITY_TTL_S = 300.0
+
+#: Hex characters kept from the digest behind ``attempted_fingerprint``. Enough
+#: to say "exactly the attempt we already made", short enough to read in a file.
+FINGERPRINT_CHARS = 16
+
+
+@dataclass(frozen=True, slots=True)
+class Detection:
+    """What one named, cheap function concluded, and what it saw to conclude it.
+
+    A completion check returns the same shape, where ``applicable`` means the
+    task's postcondition holds. One type for both keeps the dispatcher in
+    :func:`apply_detector` and the gate in :func:`record_completion` identical,
+    and keeps a check from inventing a second answer vocabulary.
+    """
+
+    applicable: bool
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
+#: A detector or a completion check. Called as keyword arguments only —
+#: ``config``, ``workspace`` and ``today`` — so a function cannot be silently
+#: handed a different context by a positional call, and so adding an argument
+#: later is a deliberate change every implementation sees.
+Probe = Callable[..., Detection]
+
+#: Registered detector implementations, by the name a catalog row carries. Empty
+#: on purpose: no task definition ships yet, and a name with no implementation
+#: would load as ``not_implemented`` in the catalog and resolve to ``unknown``
+#: here. A later child adds an entry when it adds a task.
+DETECTOR_FUNCTIONS: dict[str, Probe] = {}
+
+#: Registered completion checks, same contract. A name with no implementation
+#: means :func:`record_completion` records nothing, which is the point: a task is
+#: never marked done because nobody wrote the check that would prove it.
+COMPLETION_FUNCTIONS: dict[str, Probe] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicabilityResult:
+    """One task's answer, its evidence, and the fingerprint of both.
+
+    ``fingerprint`` is a digest over the task's identity, its detector name, the
+    status and the canonical evidence, so it changes when the *situation* changes
+    and not when the wording does. That is what makes it safe to store as
+    ``attempted_fingerprint``: it says "an attempt was made against exactly this
+    condition", not "an attempt was made once".
+    """
+
+    status: str
+    evidence: dict[str, Any]
+    fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskState:
+    """What is remembered about one task, in one scope, at one revision.
+
+    Everything here is portable: the file this is written to may be synced,
+    backed up, read by hand, and moved to another machine, so no field may hold
+    an absolute path. The record's own identity is ``(task_id, revision)`` and
+    nothing else — a scope holds many workspaces' worth of nothing but the
+    workspace's own file does.
+    """
+
+    task_id: str
+    revision: int
+    scope: str
+    lifecycle: str
+    updated_at: str
+    attempted_fingerprint: str = ""
+    evidence: dict[str, Any] = field(default_factory=dict)
+    # The chat a later child (#729-C) opened for this task. Always empty here:
+    # this module never launches a chat, and writing the field now keeps the
+    # document shape from changing when that child lands.
+    chat_id: str = ""
+    # The digest of the prompt the task was offered with, so a re-offer at a new
+    # revision can say whether the instructions changed.
+    prompt_digest: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TaskStatus:
+    """One eligible task with its answer and its state, for a caller to render.
+
+    ``suppressed`` and ``offered`` are derived, never stored, so the two answers
+    cannot disagree with the record they came from: ``offered`` is the one the
+    Housekeeping card will ask about, and it is ``applicable`` *and* not
+    suppressed at this exact revision.
+    """
+
+    task: UpdateTask
+    applicability: ApplicabilityResult
+    state: TaskState | None = None
+
+    @property
+    def suppressed(self) -> bool:
+        """True when a record at this exact revision decided the task is done."""
+        return self.state is not None and self.state.lifecycle in SUPPRESSING_LIFECYCLES
+
+    @property
+    def offered(self) -> bool:
+        """True when this task should be put in front of the operator now."""
+        return self.applicability.status == APPLICABLE and not self.suppressed
+
+
+class UpdateTaskStateError(ValueError):
+    """A state record cannot be stored as written.
+
+    Raised rather than repaired, because the property it protects — nothing
+    absolute in a file that travels — cannot be fixed by guessing which of two
+    spellings was meant.
+    """
+
+
+# ── Where the state lives ───────────────────────────────────────────────────
+
+
+def state_path_for(config: Any, scope: str, workspace: str = "") -> Path:
+    """The state file one scope reads and writes.
+
+    A workspace task's decisions live in that workspace's own vault, so a backup
+    or a sync of the vault carries the operator's dismissal with it and a second
+    install of the same vault agrees about what was declined. An install task's
+    decisions live in the runtime directory, beside the other records that
+    describe this install rather than a workspace.
+
+    Raises ``ValueError`` for a scope that is neither. That is a caller's bug
+    rather than a condition to absorb: the catalog validates ``scope`` at load,
+    so an unknown value here means a row reached this layer without the loader.
+    """
+    if scope == "install":
+        return Path(config.state_path).parent / INSTALL_STATE_FILENAME
+    if scope != "workspace":
+        raise ValueError(f"unknown update-task scope {scope!r}")
+    vault = Path(config.workspace_vault_root(workspace))
+    return vault / WORKSPACE_STATE_DIR / WORKSPACE_STATE_FILENAME
+
+
+def task_key(task_id: str, revision: int) -> str:
+    """The key one ``(id, revision)`` record is stored under."""
+    return f"{task_id}@{revision}"
+
+
+# ── Reading ─────────────────────────────────────────────────────────────────
+
+
+def _read_document(path: Path) -> tuple[dict[str, dict[str, Any]], bool]:
+    """Return ``(records, readable)`` for one state file.
+
+    A file that is not there is a fresh scope that has decided nothing, which is
+    readable and empty — the ordinary state of a new install. A file that is
+    there and cannot be understood (malformed JSON, not an object, a schema this
+    code does not implement, ``tasks`` not a mapping) is unreadable, and the
+    caller answers ``unknown`` rather than re-offering whatever the operator
+    decided. Every filesystem and decode error lands on the unreadable branch
+    too: this runs on a Home render, where raising is the worse outcome.
+
+    An entry under ``tasks`` that is not an object is dropped rather than kept:
+    it is not a record, and carrying it forward would mean guessing what it was
+    meant to be.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, True
+    except (OSError, ValueError):
+        return {}, False
+    if not isinstance(raw, dict) or raw.get("schema") != STATE_SCHEMA:
+        return {}, False
+    tasks = raw.get("tasks")
+    if not isinstance(tasks, dict):
+        return {}, False
+    return (
+        {
+            key: value
+            for key, value in tasks.items()
+            if isinstance(key, str) and isinstance(value, dict)
+        },
+        True,
+    )
+
+
+def _text(value: Any, fallback: str = "") -> str:
+    return value if isinstance(value, str) else fallback
+
+
+def _parse_state(
+    record: Mapping[str, Any] | None, task: UpdateTask
+) -> TaskState | None:
+    """Return the stored state for ``task``, or ``None`` when there is none.
+
+    A record whose lifecycle this code does not know, or whose own identity
+    disagrees with the key it was found under, is read as *absent* rather than
+    guessed at. Offering a task the operator believes is finished is an
+    annoyance; silently honouring an unfamiliar lifecycle is an unrequested
+    decision, and the write that produced it is somewhere else.
+    """
+    if record is None:
+        return None
+    lifecycle = _text(record.get("lifecycle"))
+    if lifecycle not in LIFECYCLES:
+        return None
+    if _text(record.get("task_id"), task.id) != task.id:
+        return None
+    revision = record.get("revision", task.revision)
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        return None
+    if revision != task.revision:
+        return None
+    evidence = record.get("evidence")
+    return TaskState(
+        task_id=task.id,
+        revision=task.revision,
+        scope=_text(record.get("scope"), task.scope),
+        lifecycle=lifecycle,
+        updated_at=_text(record.get("updated_at")),
+        attempted_fingerprint=_text(record.get("attempted_fingerprint")),
+        evidence=dict(evidence) if isinstance(evidence, dict) else {},
+        chat_id=_text(record.get("chat_id")),
+        prompt_digest=_text(record.get("prompt_digest")),
+    )
+
+
+def _load_states(
+    tasks: tuple[UpdateTask, ...] | list[UpdateTask], config: Any, workspace: str
+) -> tuple[dict[tuple[str, int], TaskState | None], set[str]]:
+    """Read each scope's document once and return the per-task state and bad scopes.
+
+    The unreadable scopes come back as a set of scope keys so the caller can
+    answer ``unknown`` for their tasks *before* running a detector, rather than
+    computing a claim it is not allowed to make.
+    """
+    documents: dict[str, dict[str, dict[str, Any]]] = {}
+    unreadable: set[str] = set()
+    out: dict[tuple[str, int], TaskState | None] = {}
+    for task in tasks:
+        key = _scope_key(config, task, workspace)
+        document = documents.get(key)
+        if document is None:
+            path = state_path_for(config, task.scope, workspace)
+            records, readable = _read_document(path)
+            document = records
+            documents[key] = records
+            if not readable:
+                unreadable.add(key)
+        out[(task.id, task.revision)] = (
+            None
+            if key in unreadable
+            else _parse_state(document.get(task_key(task.id, task.revision)), task)
+        )
+    return out, unreadable
+
+
+def read_task_state(
+    task: UpdateTask, *, config: Any, workspace: str = ""
+) -> TaskState | None:
+    """The state recorded for this exact ``(id, revision)``, or ``None``.
+
+    ``None`` covers both "nothing has been decided" and "what was decided cannot
+    be read"; :func:`evaluate` tells those apart, because only the second one
+    withholds an answer.
+    """
+    states, _ = _load_states((task,), config, workspace)
+    return states[(task.id, task.revision)]
+
+
+# ── Writing ─────────────────────────────────────────────────────────────────
+
+
+def _portable_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only the evidence entries a state file may hold.
+
+    Storable means a JSON scalar, or a list/dict of them, with every string
+    relative. An entry that is not storable is dropped rather than repaired: it
+    is one detector's private debug value, and the record's job is to say what
+    was decided, not to carry a path from this machine.
+    """
+    out: dict[str, Any] = {}
+    for key, value in evidence.items():
+        if not isinstance(key, str):
+            continue
+        if _portable(value):
+            out[key] = value
+    return out
+
+
+def _portable(value: Any, depth: int = 0) -> bool:
+    if depth > 4:
+        return False
+    if value is None or isinstance(value, (bool, int, float)):
+        return True
+    if isinstance(value, str):
+        return not _looks_absolute(value)
+    if isinstance(value, (list, tuple)):
+        return all(_portable(item, depth + 1) for item in value)
+    if isinstance(value, Mapping):
+        return all(
+            isinstance(key, str) and _portable(item, depth + 1)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _looks_absolute(value: str) -> bool:
+    """True for a spelling that names a location on this (or any) machine.
+
+    Checked against both the POSIX and the Windows rules, and against a leading
+    ``~``, because a vault synced to a Mac is opened on a Windows install and an
+    absolute path in the state file is a leak either way.
+    """
+    text = value.strip()
+    if not text:
+        return False  # an empty string names nothing, so it stores fine
+    if "\0" in text:
+        return True
+    if text.startswith("~"):
+        return True
+    if os.path.isabs(text):
+        return True
+    # A Windows drive, checked on a POSIX install: `os.path.isabs` does not
+    # recognise `C:\Users\...` and a synced vault is opened on both.
+    return bool(len(text) >= 2 and text[0].isalpha() and text[1] == ":")
+
+
+def _reject_nonportable(evidence: Mapping[str, Any]) -> None:
+    """Raise when evidence would put a machine-specific path in a portable file."""
+    for key, value in evidence.items():
+        if not isinstance(key, str) or not _portable(value):
+            raise UpdateTaskStateError(
+                f"update-task state evidence {key!r} is not storable: state files "
+                "travel between machines, so they hold no absolute paths, no "
+                "path-like values and nothing deeper than four levels"
+            )
+
+
+def _state_payload(state: TaskState) -> dict[str, Any]:
+    """The record as it is written, after the portability check."""
+    _reject_nonportable(state.evidence)
+    return {
+        "task_id": state.task_id,
+        "revision": state.revision,
+        "scope": state.scope,
+        "lifecycle": state.lifecycle,
+        "updated_at": state.updated_at,
+        "attempted_fingerprint": state.attempted_fingerprint,
+        "evidence": state.evidence,
+        "chat_id": state.chat_id,
+        "prompt_digest": state.prompt_digest,
+    }
+
+
+def _write_document(path: Path, document: Mapping[str, Any]) -> None:
+    """Write the whole state document atomically.
+
+    A unique temp name beside the target, then one ``os.replace``, and the temp
+    file is cleaned up on every path out. A reader therefore sees either the
+    previous document or the new one, never a half-written one — and the
+    half-written one would be *unreadable*, which this design answers ``unknown``
+    and which would hide every task in the scope until the next write. Keys are
+    sorted, so writing an unchanged document produces identical bytes.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    text = json.dumps(document, indent=2, sort_keys=True, default=str) + "\n"
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".update-tasks.", suffix=".tmp")
+    temporary = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        # Before the rename, so the file never appears carrying mkstemp's 0600
+        # instead of the mode a vault sync and a hand read expect.
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        # A no-op once the rename landed, a cleanup when it did not.
+        temporary.unlink(missing_ok=True)
+
+
+def write_task_state(state: TaskState, *, config: Any, workspace: str = "") -> Path:
+    """Store one record and return the file it landed in.
+
+    The whole document is read and rewritten under ``keyed_lock``, so a
+    concurrent record for a different task in the same scope is not lost — the
+    read-modify-write is the whole reason the lock is process-wide rather than a
+    lock on the file. Writing the same state twice is the same file, byte for
+    byte: the record is keyed by identity, the dump is sorted, and no field is
+    derived from the clock inside here.
+
+    Raises ``UpdateTaskStateError`` when the evidence is not storable, and
+    ``OSError`` when the write cannot land. Neither is swallowed: a dismissal
+    that did not happen must not be reported as one.
+    """
+    if state.lifecycle not in LIFECYCLES:
+        raise UpdateTaskStateError(
+            f"{state.lifecycle!r} is not an update-task lifecycle "
+            f"({', '.join(sorted(LIFECYCLES))})"
+        )
+    path = state_path_for(config, state.scope, workspace)
+    payload = _state_payload(state)
+    with keyed_lock(f"update-tasks:{path}"):
+        records, readable = _read_document(path)
+        if not readable and path.exists():
+            # Refuse to build a new document on top of one this code could not
+            # read: the records in it may be the operator's only copy of a
+            # decision, and this module has no way to carry them forward.
+            raise UpdateTaskStateError(
+                f"the update-task state at {path.name} is not a readable "
+                "schema-1 document; refusing to overwrite it"
+            )
+        records[task_key(state.task_id, state.revision)] = payload
+        _write_document(
+            path, {"schema": STATE_SCHEMA, "tasks": records}
+        )
+    return path
+
+
+def _stamp(now: datetime | None) -> str:
+    """The ISO-8601 UTC stamp a record carries.
+
+    Taken from the caller so a test (and a replay) can say when a decision was
+    made; the alternative, a clock read inside the writer, makes the record's
+    own bytes depend on when it was written.
+    """
+    moment = now if now is not None else datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
+
+
+def _carried(previous: TaskState | None) -> dict[str, Any]:
+    """The fields a new lifecycle keeps from the record it replaces.
+
+    A dismissal must not erase the chat the task was in, and a completion must
+    not erase the fingerprint of the attempt it follows, so the three identity
+    fields are always present and default to empty rather than being splatted
+    conditionally. ``evidence`` is deliberately *not* carried: it is the
+    reasoning behind the lifecycle being written, so a new lifecycle's evidence
+    replaces the old one instead of accumulating into a record nobody can read.
+    Only a *reopen* clears the fingerprint, because that is the one decision the
+    operator is explicitly reversing.
+    """
+    if previous is None:
+        return {"attempted_fingerprint": "", "chat_id": "", "prompt_digest": ""}
+    return {
+        "attempted_fingerprint": previous.attempted_fingerprint,
+        "chat_id": previous.chat_id,
+        "prompt_digest": previous.prompt_digest,
+    }
+
+
+def record_dismissal(
+    task: UpdateTask,
+    *,
+    config: Any,
+    workspace: str = "",
+    now: datetime | None = None,
+    reason: str = "",
+) -> TaskState:
+    """Record that the operator declined this task at this revision.
+
+    The one place a lifecycle is written without a proof behind it, because a
+    dismissal *is* the operator's decision and needs none. It suppresses the
+    offer at this revision only; :func:`reopen_task` reverses it. The record it
+    replaces keeps its identity fields (the chat the task was in, the attempt
+    fingerprint, the prompt digest) and loses its evidence, which belonged to
+    the lifecycle that is being replaced.
+    """
+    previous = read_task_state(task, config=config, workspace=workspace)
+    evidence: dict[str, Any] = {}
+    if reason.strip():
+        evidence["dismiss_reason"] = reason.strip()
+    state = TaskState(
+        task_id=task.id,
+        revision=task.revision,
+        scope=task.scope,
+        lifecycle="dismissed",
+        updated_at=_stamp(now),
+        evidence=evidence,
+        **_carried(previous),
+    )
+    write_task_state(state, config=config, workspace=workspace)
+    return state
+
+
+def reopen_task(
+    task: UpdateTask,
+    *,
+    config: Any,
+    workspace: str = "",
+    now: datetime | None = None,
+) -> TaskState:
+    """Put a dismissed task back on offer, and return the record that stands.
+
+    Only ``dismissed`` is reopened, and only at this revision: the other
+    lifecycles are an attempt in flight or a verdict already reached, and
+    overriding either would be a decision nobody asked this function to make. A
+    record that is not a dismissal comes back unchanged, so calling reopen on an
+    offered task is a no-op rather than a rewrite.
+
+    The attempt fingerprint is cleared, because that is what the dismissal was
+    about: "not against this attempt" is not a statement the operator made about
+    the next one.
+    """
+    previous = read_task_state(task, config=config, workspace=workspace)
+    if previous is not None and previous.lifecycle != "dismissed":
+        return previous
+    carried = _carried(previous)
+    carried["attempted_fingerprint"] = ""
+    state = TaskState(
+        task_id=task.id,
+        revision=task.revision,
+        scope=task.scope,
+        lifecycle="offered",
+        updated_at=_stamp(now),
+        evidence={},
+        **carried,
+    )
+    write_task_state(state, config=config, workspace=workspace)
+    return state
+
+
+def record_completion(
+    task: UpdateTask,
+    *,
+    config: Any,
+    workspace: str = "",
+    now: datetime | None = None,
+) -> TaskState | None:
+    """Record this task as done, if and only if its registered check proves it.
+
+    Returns the written record, or ``None`` when nothing was written: the check
+    name has no implementation, the check raised, it returned something other
+    than a :class:`Detection`, or it said the postcondition does not hold yet.
+    That is the whole reason this function exists rather than a caller writing
+    ``lifecycle="completed"``: a task is done when a *named, registered,
+    deterministic* check says so, evaluated apart from any chat the operator
+    started. Opening a chat is not completion, and neither is silence.
+    """
+    check = COMPLETION_FUNCTIONS.get(task.completion_check)
+    if check is None:
+        logger.info(
+            "update task %s@%s: no implementation for completion check %r, so "
+            "nothing is recorded",
+            task.id,
+            task.revision,
+            task.completion_check,
+        )
+        return None
+    try:
+        outcome = check(
+            config=config,
+            workspace=workspace,
+            today=date.today() if now is None else now.date(),
+        )
+    except Exception as exc:  # noqa: BLE001 — a broken check must not raise here
+        logger.warning(
+            "update task %s@%s: completion check %s failed: %s",
+            task.id,
+            task.revision,
+            task.completion_check,
+            exc,
+        )
+        return None
+    if not isinstance(outcome, Detection) or not outcome.applicable:
+        return None
+    previous = read_task_state(task, config=config, workspace=workspace)
+    state = TaskState(
+        task_id=task.id,
+        revision=task.revision,
+        scope=task.scope,
+        lifecycle="completed",
+        updated_at=_stamp(now),
+        evidence=_portable_evidence(outcome.evidence),
+        **_carried(previous),
+    )
+    write_task_state(state, config=config, workspace=workspace)
+    return state
+
+
+# ── Applicability ───────────────────────────────────────────────────────────
+
+
+def _canonical(value: Any) -> str:
+    """A stable string for anything, so a fingerprint can always be computed."""
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=True
+        )
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def fingerprint(task: UpdateTask, status: str, evidence: Mapping[str, Any]) -> str:
+    """The digest identifying one task's exact situation.
+
+    Over the task's identity, its detector name, the status and the canonical
+    evidence — the four things that decide the answer. Rewording the same
+    evidence does not change it; a different count does.
+    """
+    blob = _canonical(
+        {
+            "task": task_key(task.id, task.revision),
+            "detector": task.detector,
+            "status": status,
+            "evidence": evidence,
+        }
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:FINGERPRINT_CHARS]
+
+
+def _result(
+    task: UpdateTask, status: str, evidence: Mapping[str, Any]
+) -> ApplicabilityResult:
+    stored = dict(evidence)
+    return ApplicabilityResult(
+        status=status, evidence=stored, fingerprint=fingerprint(task, status, stored)
+    )
+
+
+def apply_detector(
+    task: UpdateTask,
+    *,
+    config: Any,
+    workspace: str = "",
+    today: date | None = None,
+) -> ApplicabilityResult:
+    """Decide whether ``task`` applies, by resolving its detector name.
+
+    Three ways this is not a claim, and all three answer ``unknown``:
+
+    * the name has no implementation in ``DETECTOR_FUNCTIONS`` (a row shipped
+      ahead of its code, or a name the catalog validated against a registry this
+      module does not implement);
+    * the implementation raised — a detector is code somebody will get wrong, and
+      a Home render must not go down with it;
+    * it returned something that is not a :class:`Detection`.
+
+    ``today`` is passed through rather than read here, so a detector's answer is
+    reproducible: a detector that depends on the date must be able to be asked
+    what it would have said on another day.
+
+    Total by construction, and never ``applicable`` by accident: only a detector
+    that ran and returned ``applicable=True`` produces that status.
+    """
+    name = task.detector
+    detector = DETECTOR_FUNCTIONS.get(name)
+    if detector is None:
+        return _result(
+            task, UNKNOWN, {"reason": "detector_not_implemented", "detector": name}
+        )
+    try:
+        outcome = detector(
+            config=config, workspace=workspace, today=today or date.today()
+        )
+    except Exception as exc:  # noqa: BLE001 — one bad detector must not crash a render
+        logger.warning(
+            "update task %s@%s: detector %s failed: %s",
+            task.id,
+            task.revision,
+            name,
+            exc,
+        )
+        return _result(
+            task,
+            UNKNOWN,
+            {
+                "reason": "detector_failed",
+                "detector": name,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+    if not isinstance(outcome, Detection):
+        return _result(
+            task,
+            UNKNOWN,
+            {
+                "reason": "detector_returned_no_detection",
+                "detector": name,
+                "returned": type(outcome).__name__,
+            },
+        )
+    status = APPLICABLE if outcome.applicable else NOT_APPLICABLE
+    return _result(task, status, {"detector": name, **outcome.evidence})
+
+
+# ── The cached check ────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class _CacheEntry:
+    """One scope's computed answers, and the window they were computed in.
+
+    ``results`` holds every task answered for this scope, including tasks a
+    downgrade has hidden: a task the installed version cannot support is not
+    evaluated, but its answer is kept so that upgrading back does not re-run a
+    detector the workspace has not changed since.
+    """
+
+    token: str
+    computed_at: float
+    results: dict[str, ApplicabilityResult]
+
+
+_CACHE: dict[str, _CacheEntry] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def clear_applicability_cache() -> None:
+    """Drop every cached applicability. Test isolation hook.
+
+    The cache is process-wide and keyed by scope, so a test that evaluates a
+    fixture workspace could otherwise be served the answer a previous test
+    computed for the same scope key. Named like
+    ``async_reads.reset_vault_read_executor`` because it is the same kind of
+    hook: a module-level cache with a lifetime the process does not own.
+    """
+    with _CACHE_LOCK:
+        _CACHE.clear()
+
+
+def _scope_key(config: Any, task: UpdateTask, workspace: str) -> str:
+    """The identity a cached answer belongs to: one scope of one install.
+
+    The state file's path, which is the workspace's own vault for a workspace
+    task and the runtime directory for an install task. Nothing is derived from
+    the task id, so a catalog that adds, reorders or drops a task does not
+    invalidate the answers of the others.
+    """
+    return f"{task.scope}:{state_path_for(config, task.scope, workspace)}"
+
+
+def _read_key(config: Any, task: UpdateTask, workspace: str) -> str:
+    return f"{_scope_key(config, task, workspace)}\0{task_key(task.id, task.revision)}"
+
+
+def _cached_results(
+    tasks: tuple[UpdateTask, ...],
+    config: Any,
+    workspace: str,
+    token: str,
+    instant: float,
+) -> dict[str, ApplicabilityResult]:
+    """The answers that are still inside their window, keyed by read key.
+
+    A cached answer is usable when it was computed for *this* token and inside
+    ``APPLICABILITY_TTL_S``. Token equality is strict in both directions: a
+    caller that supplies no token gets a purely time-based window, and a caller
+    that supplies one never reuses an answer computed for a different situation
+    (or for no situation at all). A negative age — an injected or stepped clock
+    — is treated as stale, because a window that has not happened yet is not a
+    window.
+    """
+    out: dict[str, ApplicabilityResult] = {}
+    with _CACHE_LOCK:
+        for task in tasks:
+            entry = _CACHE.get(_scope_key(config, task, workspace))
+            if entry is None or entry.token != token:
+                continue
+            age = instant - entry.computed_at
+            if not 0 <= age < APPLICABILITY_TTL_S:
+                continue
+            found = entry.results.get(task_key(task.id, task.revision))
+            if found is not None:
+                out[_read_key(config, task, workspace)] = found
+    return out
+
+
+def _store_results(
+    fresh: Mapping[str, Mapping[str, ApplicabilityResult]], token: str, instant: float
+) -> None:
+    """Publish freshly computed answers, keeping the ones still remembered.
+
+    Merged rather than replaced so that a task which is momentarily absent from
+    the eligible set (the downgrade case) keeps its answer instead of re-running
+    a detector on the way back up.
+    """
+    with _CACHE_LOCK:
+        for scope, results in fresh.items():
+            merged = dict(_CACHE[scope].results) if scope in _CACHE else {}
+            merged.update(results)
+            _CACHE[scope] = _CacheEntry(
+                token=token, computed_at=instant, results=merged
+            )
+
+
+def _evaluate_off_loop(
+    tasks: tuple[UpdateTask, ...],
+    *,
+    config: Any,
+    workspace: str,
+    cached: Mapping[str, ApplicabilityResult],
+    token: str,
+    today: date | None,
+    instant: float,
+) -> list[TaskStatus]:
+    """The whole check, off the event loop: state first, then what is missing.
+
+    State is read *first* so an unreadable document can stop the work instead of
+    qualifying it: a detector's answer is not one this install may report while
+    it cannot say what the operator already decided. The state read is one small
+    JSON document per scope and happens on every call — a dismissal the operator
+    just made must not wait out a TTL. The detectors, which are the part that can
+    be expensive, run only for tasks with no answer inside their window.
+    """
+    states, unreadable = _load_states(tasks, config, workspace)
+    computed: dict[str, dict[str, ApplicabilityResult]] = {}
+    results: dict[tuple[str, int], ApplicabilityResult] = {}
+    for task in tasks:
+        identity = (task.id, task.revision)
+        scope = _scope_key(config, task, workspace)
+        hit = cached.get(_read_key(config, task, workspace))
+        if hit is not None:
+            results[identity] = hit
+        elif scope in unreadable:
+            # The file's *name* only: a state file's own name is the one place
+            # a path-shaped string is safe to record, and it is what tells an
+            # operator which file to look at.
+            results[identity] = _result(
+                task,
+                UNKNOWN,
+                {
+                    "reason": "state_unreadable",
+                    "file": state_path_for(config, task.scope, workspace).name,
+                },
+            )
+        else:
+            answer = apply_detector(task, config=config, workspace=workspace, today=today)
+            results[identity] = answer
+            computed.setdefault(scope, {})[task_key(task.id, task.revision)] = answer
+    if computed:
+        _store_results(computed, token, instant)
+    return [
+        TaskStatus(
+            task=task,
+            applicability=results[(task.id, task.revision)],
+            state=states[(task.id, task.revision)],
+        )
+        for task in tasks
+    ]
+
+
+async def evaluate(
+    config: Any,
+    *,
+    workspace: str = "",
+    installed_version: str,
+    catalog: TaskCatalog | None = None,
+    change_token: str = "",
+    today: date | None = None,
+    now: float | None = None,
+) -> list[TaskStatus]:
+    """Every task this install supports, with its answer and its state.
+
+    Eligibility is the catalog's own ``eligible(installed_version)`` — a cumulative
+    catalog stays cumulative, and a version that does not parse supports nothing.
+    A task this version cannot support is simply not in the list; nothing here
+    deletes its record, so a downgrade hides the task and upgrading brings it
+    back with its history.
+
+    ``catalog`` defaults to the packaged one, which is what a caller with no
+    better answer wants; a caller that has already loaded it passes it in rather
+    than reading package data twice.
+
+    ``change_token`` is the caller's own answer to "has this workspace changed?".
+    A different token invalidates the cached answers immediately rather than
+    waiting out ``APPLICABILITY_TTL_S``; the same token inside that window reuses
+    them, which is the whole reason this does not walk the vault on every call.
+    The token is compared, never stored, and never interpreted.
+
+    ``now`` is the freshness clock (``time.monotonic`` by default) and ``today``
+    is the date handed to detectors. Both are injectable so a test can ask about a
+    window and a day without waiting for either.
+
+    The work runs through ``ciao.async_reads.run_read``, so it is bounded,
+    coalesced by scope/version/token, and never blocks the event loop: a detector
+    that walks a large vault must not stall the heartbeats behind it. The
+    coalescing key is deliberately the same for a cached and an uncached call —
+    two callers of one scope sharing a read share whichever shape of it is
+    running, and both are correct answers.
+    """
+    loaded = catalog if catalog is not None else load_catalog()
+    tasks = loaded.eligible(installed_version)
+    if not tasks:
+        return []
+    instant = time.monotonic() if now is None else now
+    cached = _cached_results(tasks, config, workspace, change_token, instant)
+    # The install's runtime directory is in the key because it is the one part
+    # of a scope's identity a workspace name and a version cannot supply: two
+    # installs in one process (a test, a dev checkout beside a real engine) must
+    # not share a read.
+    key = (
+        f"update-tasks:{config.state_path.parent}:"
+        f"{workspace or '-'}:{installed_version}:{change_token}"
+    )
+    return await run_read(
+        key,
+        lambda: _evaluate_off_loop(
+            tasks,
+            config=config,
+            workspace=workspace,
+            cached=cached,
+            token=change_token,
+            today=today,
+            instant=instant,
+        ),
+    )
+
+
+def offered_tasks(statuses: list[TaskStatus]) -> list[TaskStatus]:
+    """The subset a caller should put in front of the operator.
+
+    ``applicable`` and not suppressed at this revision. ``unknown`` and
+    ``not_applicable`` are both absent, which is the honest answer for a
+    condition this install cannot substantiate — see the module docstring.
+    """
+    return [status for status in statuses if status.offered]

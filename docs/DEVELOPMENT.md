@@ -686,6 +686,35 @@ Cover changes in `tests/test_async_vault_reads.py`, which pins the heartbeat,
 bounded-concurrency, no-cross-thread-SQLite, cancellation and recovery
 contracts and reports p50/p95 heartbeat latency before and after.
 
+### Update tasks: state, applicability and the freshness window
+
+`ciao/update_task_catalog.py` holds the task *definitions*; `ciao/update_tasks.py`
+(#756) holds where a task's progress is remembered and whether it applies. The
+state document is `{"schema": 1, "tasks": {"<id>@<revision>": {...}}}`, in
+`<vault>/Workspace/Update-Tasks.json` for a `scope: "workspace"` task and
+`<runtime>/update-tasks.json` for a `scope: "install"` one. `Workspace/Update-Tasks.json`
+is in `vault_index.RESERVED_UNINDEXED_FILES`, so it is never indexed, recalled or
+linted as a note.
+
+Adding a task means adding its detector name to
+`update_task_catalog.DETECTORS` **and** an implementation to
+`update_tasks.DETECTOR_FUNCTIONS`, plus the same pair for its
+`completion_check`. A name with no implementation resolves to `unknown` (and
+loads as a `not_implemented` warning), which is why no task ships without one:
+the three applicability states are `applicable` and `not_applicable` — both
+positive claims, each requiring a detector that ran and returned evidence — and
+`unknown` for an absent or failing detector, a detector returning something that
+is not a `Detection`, and a state file that exists but cannot be read. Never make
+a failure path return `applicable`.
+
+`APPLICABILITY_TTL_S` (300s) is a named constant, not an env var and not a
+Settings option: it is how long a detector answer may be reused, not a decision
+an operator has asked to make. `evaluate` reuses a previous answer inside that
+window (and the state file is still re-read every call, so a dismissal takes
+effect immediately); a caller that knows the workspace changed passes a different
+`change_token` to invalidate at once. Change the constant or the token contract
+and update the tests that pin them, and see `tests/test_update_tasks.py`.
+
 ## Change guidelines
 
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `AGENTS.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
