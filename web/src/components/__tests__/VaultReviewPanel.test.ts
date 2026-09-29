@@ -687,9 +687,45 @@ describe('VaultReviewPanel', () => {
     // whether the project finished, not whether it should be thrown away.
     expect(title).toBe('Complete Faraman-Calendar?')
     expect(seed).toContain('whether this project has actually finished')
-    expect(seed).toContain('I will pick Still true, Complete, or Retire myself')
+    // Only the buttons the row carries. This row has no Retire, so a seed
+    // naming one is weighing an option the user cannot pick.
+    expect(seed).toContain('I will pick Still true or Complete myself')
+    expect(seed).not.toContain('Retire')
     // And it is still a draft about a note the user has not moved.
     expect(seed).toContain('Do not edit, move, or delete anything')
+    wrapper.unmount()
+  })
+
+  it('keeps an unlinked project seed on Complete, in the link-hunting branch too', async () => {
+    // The unlinked branch is a different paragraph, and it is where the two
+    // findings landed: it named Retire in the closing line AND told the agent
+    // that nothing linking to a project was "an argument for retiring it" —
+    // aiming the answer at a verdict the row cannot deliver.
+    apiGet.mockResolvedValue({ candidates: [projectCandidate()], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const projects = useProjectStore()
+    projects.projects = [generalProject()]
+    const createChat = vi
+      .spyOn(projects, 'createChat')
+      .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
+    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+
+    await buttonByText(wrapper, 'Discuss').trigger('click')
+    await flushPromises()
+
+    const [, title, seed] = createChat.mock.calls[0]
+    expect(title).toBe('Link or complete Faraman-Calendar?')
+    expect(seed).toContain('search the vault for the notes that should link to it')
+    expect(seed).toContain('that is an argument for completing it')
+    expect(seed).toContain('I will pick Still true or Complete myself')
+    // The row has no Retire button, so the seed must not offer one — not in
+    // the closing line and not as the fallback verdict.
+    expect(seed).not.toContain('Retire')
+    // Still read-only about the note under review, and the approval gate
+    // still leads: neither may be lost to the reworded tail.
+    expect(seed).toContain('Do not edit, move, or delete the note itself')
+    expect((seed as string).split('\n\n').at(-1)).toMatch(/^Write nothing until I say so\./)
     wrapper.unmount()
   })
 
@@ -710,6 +746,7 @@ describe('VaultReviewPanel', () => {
     const [, title, seed] = createChat.mock.calls[0]
     expect(title).toBe('Link or retire Mo?')
     expect(seed).toContain('I will pick Still true or Retire myself')
+    expect(seed).toContain('that is an argument for retiring it')
     expect(seed).not.toContain('Complete')
     wrapper.unmount()
   })

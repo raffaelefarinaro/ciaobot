@@ -39,12 +39,15 @@ const showInitialError = computed(() => !store.loading && !hasCurrentSnapshot.va
 const showStaleError = computed(() => hasCurrentSnapshot.value && Boolean(store.loadError))
 
 // Failures go to the app's error toast, matching ProposalReviewPanel: an
-// inline banner would sit above the list with no way to dismiss it.
+// inline banner would sit above the list with no way to dismiss it. The title
+// names the panel, not one of its actions: a failed completion is not a failed
+// retirement, and the old wording told the user they had tried to do something
+// this row never offered.
 watch(
   () => store.error,
   (message) => {
     if (!message) return
-    projectStore.pushErrorToast('Retirement action failed', message)
+    projectStore.pushErrorToast('Review action failed', message)
     store.error = ''
   },
 )
@@ -249,6 +252,11 @@ function discussPrompt(candidate: VaultReviewCandidate): string {
  * read-only, and the unlinked branch narrows the permission rather than
  * dropping it: links into other notes, once approved, and no edit to the note
  * under review.
+ *
+ * Every branch ends by naming the buttons the row actually carries. A
+ * completable row has no Retire, and a seed that offers one sends the agent
+ * weighing an option the user cannot pick — the same small dishonesty as a
+ * title that names a question the draft does not ask.
  */
 function discussTask(candidate: VaultReviewCandidate): string {
   if (!candidate.signals.includes('unlinked')) {
@@ -256,7 +264,7 @@ function discussTask(candidate: VaultReviewCandidate): string {
       return (
         'Read the note and tell me whether this project has actually finished, ' +
         'and what would be lost by completing it. Do not edit, move, or delete ' +
-        'anything — I will pick Still true, Complete, or Retire myself.'
+        'anything — I will pick Still true or Complete myself.'
       )
     }
     return (
@@ -265,6 +273,16 @@ function discussTask(candidate: VaultReviewCandidate): string {
       'anything — I will pick Still true or Retire myself.'
     )
   }
+  // The closing half is where the row's terminal action has to be named, and
+  // the two differ in the argument as well as the choice: telling the agent
+  // that "nothing should link to it" is a reason to RETIRE a project it is
+  // about to be offered Complete for would aim the answer at the wrong verdict.
+  const verdict = isCompletable(candidate)
+    ? 'that is an argument for completing it.'
+    : 'that is an argument for retiring it.'
+  const closing = isCompletable(candidate)
+    ? 'I will pick Still true or Complete myself.'
+    : 'I will pick Still true or Retire myself.'
   return (
     // The approval gate leads, as the read-only branch's constraint does.
     // Buried mid-paragraph it was one clause among five, and the cost of a
@@ -276,9 +294,7 @@ function discussTask(candidate: VaultReviewCandidate): string {
     'sentence it would read, and wait for my go-ahead on each before writing ' +
     'it: a link is what actually clears this flag, since a note that gains a ' +
     'backlink stops being flagged for it. If nothing should link to it, say so ' +
-    'plainly — that is an argument for retiring it. Do not edit, move, or ' +
-    'delete the note itself; I will pick Still true' +
-    (isCompletable(candidate) ? ', Complete' : '') + ' or Retire myself.'
+    `plainly — ${verdict} Do not edit, move, or delete the note itself; ${closing}`
   )
 }
 
