@@ -1561,7 +1561,7 @@
             <div>
               <p class="section-title">Skills</p>
               <p class="hint">
-                These are Ciaobot-managed skills saved in workspace folders or included with the app. Ask for one in chat, or invoke it by name with <code>/name</code> when your provider supports skill commands. Each skill has a <code>SKILL.md</code>; workspace git sync carries your own skills to other machines.
+                These are the skills of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>skills/</code> folder or included with the app. Ask for one in chat, or invoke it by name with <code>/name</code> when your provider supports skill commands. Workspace git sync carries your own skills to other machines.
               </p>
               <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a></p>
             </div>
@@ -1696,7 +1696,7 @@
             <div>
               <p class="section-title">Subagents</p>
               <p class="hint">
-                Ciaobot-managed subagents are saved in the workspace repository’s <code>subagents/</code> folder and shared with Claude Code and opencode. Ask an agent in chat to delegate a task; subagents are not slash commands.
+                These are the subagents of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>subagents/</code> folder and shared with Claude Code and opencode. Ask an agent in chat to delegate a task; subagents are not slash commands.
               </p>
               <p class="hint">Subagents installed directly in a provider may also be available in its chats. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#extend" target="_blank" rel="noopener noreferrer">About extensions</a></p>
             </div>
@@ -1811,7 +1811,7 @@
             <div>
               <p class="section-title">Commands</p>
               <p class="hint">
-                Type <code>/name</code> in a chat to run a saved prompt, for example <code>/critique</code>. Ciaobot-managed commands live in the workspace repository’s <code>commands/</code> folder and are shared with Claude Code and opencode.
+                These are the slash commands of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>commands/</code> folder and shared with Claude Code and opencode. Type <code>/name</code> in a chat to run one, for example <code>/critique</code>.
               </p>
               <p class="hint">Commands installed directly in a provider can also work in its chats, even if they are not shown here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#commands" target="_blank" rel="noopener noreferrer">How commands work</a></p>
             </div>
@@ -2108,6 +2108,9 @@ const mcp = useMcpServers({
     confirmLabel: 'Delete server',
     destructive: true,
   }),
+  // A workspace's `.mcp.json` and `.env` live in its own agent root, so the
+  // tab reads and writes that one root rather than the install root.
+  workspace: () => projectStore.activeWorkspace,
 })
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
@@ -3214,9 +3217,23 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   }
 }
 
+// The skills, commands, subagents and MCP servers below belong to ONE
+// workspace: the one selected in the sidebar. Every request carries that name
+// so the list and the writes that edit it resolve the same agent root — without
+// it, an edit would land in a root the list is not showing.
+const assetScope = computed(() => {
+  const name = projectStore.activeWorkspace || ''
+  return name ? `?workspace=${encodeURIComponent(name)}` : ''
+})
+
+// Names the workspace these tabs describe, so the copy can say which one
+// rather than implying the list covers the whole install.
+const assetWorkspaceLabel = computed(() => projectStore.activeWorkspace || 'selected')
+
 async function fetchSkills() {
+  skillsError.value = ''
   try {
-    skillsInventory.value = await api.get<SkillInventory>('/api/admin/skills')
+    skillsInventory.value = await api.get<SkillInventory>(`/api/admin/skills${assetScope.value}`)
   } catch (e) {
     skillsError.value = `Failed to load skills: ${errorMessage(e)}`
   } finally {
@@ -3227,7 +3244,7 @@ async function fetchSkills() {
 async function fetchCommands() {
   commandsError.value = ''
   try {
-    const res = await api.get<CommandsResponse>('/api/commands')
+    const res = await api.get<CommandsResponse>(`/api/commands${assetScope.value}`)
     commands.value = Array.isArray(res.commands) ? res.commands : []
   } catch (e) {
     commandsError.value = `Failed to load commands: ${errorMessage(e)}`
@@ -3238,8 +3255,9 @@ async function fetchCommands() {
 
 async function fetchAgentAssets() {
   agentAssetsError.value = ''
+  agentAssetsLoaded.value = false
   try {
-    agentAssets.value = await api.get<AgentAssetsResponse>('/api/agent-assets')
+    agentAssets.value = await api.get<AgentAssetsResponse>(`/api/agent-assets${assetScope.value}`)
   } catch (e) {
     agentAssetsError.value = `Failed to load agent assets: ${errorMessage(e)}`
   } finally {
@@ -3399,6 +3417,7 @@ async function addSubagent() {
   addSubagentError.value = false
   try {
     const res = await api.post<CreatedAgentAssetResponse<SubagentAsset>>('/api/agent-assets/subagents', {
+      workspace: projectStore.activeWorkspace,
       name: newSubagentName.value.trim(),
       description: newSubagentDescription.value.trim(),
       prompt: newSubagentPrompt.value.trim(),
@@ -3423,6 +3442,7 @@ async function addCommand() {
   addCommandError.value = false
   try {
     const res = await api.post<CreatedAgentAssetResponse<CommandAsset>>('/api/agent-assets/commands', {
+      workspace: projectStore.activeWorkspace,
       name: newCommandName.value.trim(),
       description: newCommandDescription.value.trim(),
       argument_hint: newCommandArgumentHint.value.trim(),
@@ -3469,6 +3489,7 @@ async function saveSubagent(agent: SubagentAsset) {
   assetLifecycleError.value = false
   try {
     await api.patch<CreatedAgentAssetResponse<SubagentAsset>>(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}`, {
+      workspace: projectStore.activeWorkspace,
       description: editSubagentDescription.value.trim(),
       content: editSubagentContent.value.trim(),
     })
@@ -3495,7 +3516,7 @@ async function deleteSubagent(agent: SubagentAsset) {
   assetLifecycleResult.value = 'Deleting subagent...'
   assetLifecycleError.value = false
   try {
-    await api.del(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}`)
+    await api.del(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}${assetScope.value}`)
     assetLifecycleResult.value = ''
     notifySaved(`Deleted ${agent.name}. Restart or sync Claude Code sessions to pick it up.`, 'Subagent')
     if (editingSubagent.value === agent.name) cancelEditSubagent()
@@ -3537,6 +3558,7 @@ async function saveCommand(command: CommandAsset) {
   assetLifecycleError.value = false
   try {
     await api.patch<CreatedAgentAssetResponse<CommandAsset>>(`/api/agent-assets/commands/${encodeURIComponent(command.name)}`, {
+      workspace: projectStore.activeWorkspace,
       description: editCommandDescription.value.trim(),
       argument_hint: editCommandArgumentHint.value.trim(),
       content: editCommandContent.value.trim(),
@@ -3564,7 +3586,7 @@ async function deleteCommand(command: CommandAsset) {
   assetLifecycleResult.value = 'Deleting command...'
   assetLifecycleError.value = false
   try {
-    await api.del(`/api/agent-assets/commands/${encodeURIComponent(command.name)}`)
+    await api.del(`/api/agent-assets/commands/${encodeURIComponent(command.name)}${assetScope.value}`)
     assetLifecycleResult.value = ''
     notifySaved(`Deleted /${command.name}. Restart or sync Claude Code sessions to pick it up.`, 'Command')
     if (editingCommand.value === command.name) cancelEditCommand()
@@ -4077,6 +4099,17 @@ onMounted(async () => {
 watch(() => projectStore.workspaceRegistryRevision, () => {
   fetchWorkspacesList()
   fetchArchivedWorkspaces()
+})
+
+// Switching the sidebar's workspace switches which agent root these four tabs
+// describe, so their lists are refetched. Without this the page would keep
+// showing the previous workspace's skills, commands, subagents and MCP servers
+// while every write went to the new one.
+watch(() => projectStore.activeWorkspace, () => {
+  fetchSkills()
+  fetchCommands()
+  fetchAgentAssets()
+  mcp.fetchStatus()
 })
 
 

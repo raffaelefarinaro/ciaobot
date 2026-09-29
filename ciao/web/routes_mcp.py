@@ -117,11 +117,23 @@ def _probe_http_mcp_tools(
     return names, ""
 
 
+def _workspace_of(request: Request) -> str:
+    """The workspace an MCP request is about, or "" for the install root.
+
+    Every MCP read and write in this module resolves the same root, so a
+    server shown in Settings → MCP servers is the server an edit, a secret
+    save or a delete reaches. An unregistered name is treated as absent
+    rather than rejected: the route still answers, scoped to the install
+    root, which is what a client that sends no workspace means.
+    """
+    return str(request.query_params.get("workspace", "") or "").strip()
+
+
 async def mcp_status_endpoint(request: Request) -> JSONResponse:
     service = getattr(request.app.state, "mcp_service", None)
     if service is None:
         return JSONResponse({"enabled": False, "bound": False, "tool_count": 0, "project_servers": []})
-    return JSONResponse(service.status_for_api())
+    return JSONResponse(service.status_for_api(_workspace_of(request)))
 
 
 async def mcp_usage_endpoint(request: Request) -> JSONResponse:
@@ -176,6 +188,7 @@ async def mcp_env_keys_endpoint(request: Request) -> JSONResponse:
             updates,
             server=server,
             bind_missing=True,
+            workspace=_workspace_of(request),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -204,6 +217,7 @@ async def mcp_servers_collection_endpoint(request: Request) -> JSONResponse:
             command=str(body.get("command") or ""),
             args=args_list,
             env_keys={str(k): str(v) for k, v in env_keys.items()} if env_keys else None,
+            workspace=_workspace_of(request),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -218,9 +232,12 @@ async def mcp_server_item_endpoint(request: Request) -> JSONResponse:
     name = str(request.path_params.get("name") or "").strip()
     if not name:
         return JSONResponse({"error": "missing server name"}, status_code=400)
+    workspace = _workspace_of(request)
     if request.method == "DELETE":
         try:
-            payload = await asyncio.to_thread(service.delete_project_server, name)
+            payload = await asyncio.to_thread(
+                service.delete_project_server, name, workspace
+            )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
         return JSONResponse(payload)
@@ -235,7 +252,7 @@ async def mcp_server_item_endpoint(request: Request) -> JSONResponse:
     env_keys = body.get("env_keys") if isinstance(body.get("env_keys"), dict) else None
     # Preserve existing transport fields when omitted.
     current = None
-    for server in service.status_for_api().get("project_servers") or []:
+    for server in service.status_for_api(workspace).get("project_servers") or []:
         if isinstance(server, dict) and server.get("name") == name:
             current = server
             break
@@ -253,6 +270,7 @@ async def mcp_server_item_endpoint(request: Request) -> JSONResponse:
             command=str(command or ""),
             args=args_list,
             env_keys={str(k): str(v) for k, v in env_keys.items()} if env_keys else None,
+            workspace=workspace,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -267,7 +285,9 @@ async def mcp_server_tools_endpoint(request: Request) -> JSONResponse:
     name = str(request.path_params.get("name") or "").strip()
     if not name:
         return JSONResponse({"ok": False, "error": "missing server name", "tools": []}, status_code=400)
-    result = await asyncio.to_thread(service.probe_project_server_tools, name)
+    result = await asyncio.to_thread(
+        service.probe_project_server_tools, name, _workspace_of(request)
+    )
     if result.get("error") == f"unknown MCP server '{name}'":
         return JSONResponse(result, status_code=404)
     return JSONResponse(result)

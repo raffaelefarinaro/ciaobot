@@ -58,6 +58,7 @@ from ciao.config import (
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
+    agent_root_for,
     persist_workspaces,
     workspace_from_request,
     workspace_provider_options,
@@ -5985,18 +5986,29 @@ async def admin_deploy(request: Request) -> JSONResponse:
 async def admin_skills(request: Request) -> JSONResponse:
     """List skills known to Ciaobot, labelled as custom or GitHub/package.
 
-    Merged across every agent root. Reading `workspace_root` alone showed
-    `{custom: 0, github: 0, stock: 29}` on a migrated install — measured — while
-    19 custom and 7 upstream skills sat in the primary root's catalog. The page
-    looked empty.
+    With `?workspace=<name>`, only that workspace's own agent root. The PWA
+    Settings → Skills tab passes the active workspace, so the list is the
+    catalog the user can actually act on: editing or deleting a row writes
+    into the same root. Stock skills still appear, because `sync-skills`
+    installs them into every agent root.
+
+    Without the parameter the listing stays merged across every agent root,
+    which is what the audit and CLI callers want. Reading `workspace_root`
+    alone showed `{custom: 0, github: 0, stock: 29}` on a migrated install —
+    measured — while 19 custom and 7 upstream skills sat in the primary
+    root's catalog, so a bare install root is never the answer.
 
     A skill of the same name in two roots is reported once, with the workspaces
     that hold it, because the page is a catalog rather than a per-root listing
     and two rows for one name reads as a duplicate rather than as sharing.
     """
     config = request.app.state.config
-    targets = getattr(config, "agent_root_targets", None)
-    roots = list(targets()) if callable(targets) else [(config.workspace_root, "")]
+    requested = request.query_params.get("workspace", "").strip()
+    if requested and config.workspace(requested):
+        roots = [(agent_root_for(config, requested), requested)]
+    else:
+        targets = getattr(config, "agent_root_targets", None)
+        roots = list(targets()) if callable(targets) else [(config.workspace_root, "")]
 
     merged: dict[str, dict] = {}
     counts: dict[str, int] = {}

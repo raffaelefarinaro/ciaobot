@@ -2148,3 +2148,134 @@ def test_schedule_update_to_a_project_clears_a_legacy_chat_binding(
     stored = schedules.list_entries()[0]
     assert stored.web_project_id == "project-2"
     assert stored.web_chat_id is None
+
+
+def _rerooted_service(tmp_path: Path, names: tuple[str, ...]) -> CiaoMcpService:
+    """A service on a re-rooted install: one agent root per workspace.
+
+    ``agent_root`` returns a real per-workspace subdirectory, which is the
+    shape the re-rooting migration produces and the only shape where the
+    install root and a workspace root are different files.
+    """
+    install = tmp_path / "install"
+    install.mkdir()
+    runtime = install / ".runtime"
+    runtime.mkdir()
+    roots = {name: install / name for name in names}
+    for root in roots.values():
+        root.mkdir()
+    config = SimpleNamespace(
+        state_path=runtime / "state.json",
+        pwa_port=18443,
+        workspace_root=install,
+        agent_root=lambda name: roots[name],
+        workspace=lambda name: roots.get(str(name)),
+    )
+    return CiaoMcpService(config)
+
+
+def _write_mcp_json(path: Path, servers: dict) -> None:
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+def test_status_is_scoped_to_one_workspaces_own_mcp_json(tmp_path: Path) -> None:
+    """A workspace's panel shows that workspace's servers, not a shared file's.
+
+    A chat runs with its agent root as cwd, so this is the file that actually
+    grants servers to it. The panel used to read only the install-root file, so
+    it disagreed with the runtime about what a workspace could reach.
+    """
+    service = _rerooted_service(tmp_path, ("personal", "work"))
+    _write_mcp_json(
+        tmp_path / "install" / "personal" / ".mcp.json",
+        {"notion": {"command": "npx", "args": ["-y", "@notionhq/notion-mcp-server"]}},
+    )
+    _write_mcp_json(
+        tmp_path / "install" / "work" / ".mcp.json",
+        {"postgres": {"url": "https://db.example/mcp"}},
+    )
+
+    personal = {
+        row["name"] for row in service.status_for_api("personal")["project_servers"]
+    }
+    work = {row["name"] for row in service.status_for_api("work")["project_servers"]}
+
+    assert personal == {"notion"}
+    assert work == {"postgres"}
+
+
+def test_an_unknown_workspace_reads_the_install_root(tmp_path: Path) -> None:
+    """A name that resolves to no root degrades to the install root.
+
+    A read must not 400: a stale tab or a client that sends nothing both mean
+    "show me the shared configuration".
+    """
+    service = _rerooted_service(tmp_path, ("personal",))
+    _write_mcp_json(
+        tmp_path / "install" / ".mcp.json", {"shared": {"url": "https://shared/mcp"}}
+    )
+
+    names = {
+        row["name"] for row in service.status_for_api("ghost")["project_servers"]
+    }
+
+    assert names == {"shared"}
+
+
+def test_creating_a_server_writes_into_the_named_workspaces_root(tmp_path: Path) -> None:
+    """The write lands in the root whose panel listed the server.
+
+    A create that ignored the workspace would file the server where the list
+    is not looking, so the row would appear to vanish on the next load.
+    """
+    service = _rerooted_service(tmp_path, ("personal", "work"))
+
+    payload = service.upsert_project_server(
+        "notion", command="npx", args=["-y", "@notionhq/notion-mcp-server"],
+        workspace="work",
+    )
+
+    assert {row["name"] for row in payload["project_servers"]} == {"notion"}
+    assert (tmp_path / "install" / "work" / ".mcp.json").is_file()
+    assert not (tmp_path / "install" / "personal" / ".mcp.json").exists()
+    # The other workspace's panel must not show it.
+    assert service.status_for_api("personal")["project_servers"] == []
+
+
+def test_deleting_a_server_only_touches_that_workspaces_file(tmp_path: Path) -> None:
+    """Two workspaces can hold the same server name; a delete is scoped."""
+    service = _rerooted_service(tmp_path, ("personal", "work"))
+    _write_mcp_json(
+        tmp_path / "install" / "personal" / ".mcp.json", {"notion": {"url": "https://a/mcp"}}
+    )
+    _write_mcp_json(
+        tmp_path / "install" / "work" / ".mcp.json", {"notion": {"url": "https://b/mcp"}}
+    )
+
+    service.delete_project_server("notion", "work")
+
+    remaining = {row["name"] for row in service.status_for_api("work")["project_servers"]}
+    assert remaining == set()
+    # `personal`'s identically named server is untouched.
+    assert {
+        row["name"] for row in service.status_for_api("personal")["project_servers"]
+    } == {"notion"}
+
+
+def test_secrets_are_written_to_the_named_workspaces_env(tmp_path: Path) -> None:
+    """Secrets follow the workspace: its agent root owns the `.env` too."""
+    service = _rerooted_service(tmp_path, ("personal", "work"))
+    _write_mcp_json(
+        tmp_path / "install" / "work" / ".mcp.json",
+        {"notion": {"url": "https://b/mcp", "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"}}},
+    )
+
+    payload = service.save_project_server_env_keys(
+        {"NOTION_TOKEN": "secret-value"}, workspace="work",
+    )
+
+    assert payload["env_path"] == str(tmp_path / "install" / "work" / ".env")
+    assert "NOTION_TOKEN=secret-value" in (
+        tmp_path / "install" / "work" / ".env"
+    ).read_text(encoding="utf-8")
+    assert not (tmp_path / "install" / "personal" / ".env").exists()

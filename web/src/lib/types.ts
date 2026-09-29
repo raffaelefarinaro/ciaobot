@@ -124,6 +124,8 @@ export interface McpStatus {
   tool_count: number
   tools?: string[]
   env_path?: string
+  /** The workspace these servers belong to; '' is the install root. */
+  workspace?: string
   project_servers?: McpProjectServer[]
   active_sessions?: number
   providers?: string[]
@@ -563,8 +565,10 @@ export interface Schedule {
   // far too late to be actionable — see project_chats.dispatch_schedule.
   // 'skipped' is what the dispatcher records when a run reached the provider
   // but stopped short of a result (approval card, AskUserQuestion, deferred
-  // retry) — see project_chats._schedule_dispatch_status.
-  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped'
+  // retry) — see project_chats._schedule_dispatch_status. 'unfinished' is the
+  // case split out of it where background subagents never settled: nothing in
+  // the chat is waiting on the user (schedules.RUN_STATUS_UNFINISHED).
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'unfinished'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null

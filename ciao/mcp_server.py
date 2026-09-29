@@ -1066,8 +1066,8 @@ class CiaoMcpService:
         )
         return self.agent_url, token
 
-    def status(self) -> dict[str, Any]:
-        workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
+    def status(self, workspace: str = "") -> dict[str, Any]:
+        workspace_root = self._workspace_root(workspace)
         return {
             # Retained for the PWA status payload's shape. The control plane is
             # mandatory, so a live service is by definition enabled.
@@ -1078,27 +1078,30 @@ class CiaoMcpService:
             "tools": sorted(self._tool_names),
             "last_error": self._last_error,
             "env_path": str(_workspace_env_path(workspace_root)),
-            "project_servers": self._discover_project_mcp_servers(),
+            "workspace": workspace,
+            "project_servers": self._discover_project_mcp_servers(workspace),
             **self.registry.status(),
         }
 
-    def project_server_env_keys(self) -> set[str]:
+    def project_server_env_keys(self, workspace: str = "") -> set[str]:
         """Env var names referenced by discovered project MCP server configs."""
         keys: set[str] = set()
-        for server in self._discover_project_mcp_servers():
+        for server in self._discover_project_mcp_servers(workspace):
             for entry in server.get("env_keys") or []:
                 if isinstance(entry, dict) and entry.get("key"):
                     keys.add(str(entry["key"]))
         return keys
 
-    def probe_project_server_tools(self, name: str) -> dict[str, Any]:
+    def probe_project_server_tools(self, name: str, workspace: str = "") -> dict[str, Any]:
         """Lazy tools discovery for one project MCP server.
 
         HTTP/SSE servers are probed with ``tools/list``. Stdio servers return
         observed telemetry tools only (spawning the command from Settings is
         intentionally avoided).
         """
-        servers = {str(s.get("name")): s for s in self._discover_project_mcp_servers()}
+        servers = {
+            str(s.get("name")): s for s in self._discover_project_mcp_servers(workspace)
+        }
         server = servers.get(name)
         if server is None:
             return {"ok": False, "error": f"unknown MCP server '{name}'", "tools": []}
@@ -1154,15 +1157,18 @@ class CiaoMcpService:
             "tool_prefix": server.get("tool_prefix"),
         }
 
-    def _discover_project_mcp_servers(self) -> list[dict[str, Any]]:
+    def _discover_project_mcp_servers(self, workspace: str = "") -> list[dict[str, Any]]:
         servers: list[dict[str, Any]] = []
-        workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
+        workspace_root = self._workspace_root(workspace)
         env_path = _workspace_env_path(workspace_root)
         runtime_root = Path(getattr(self.config, "state_path", workspace_root / ".runtime" / "state.json")).parent
+        # The same candidate set the agent actually reads, so the panel cannot
+        # disagree with the runtime about which servers exist. A chat runs with
+        # its agent root as cwd, so a workspace's own ``.mcp.json`` comes first
+        # and a same-named server in the shared file does not shadow it.
         candidates: list[tuple[str, Path]] = [
-            ("project", workspace_root / ".mcp.json"),
-            ("project", workspace_root.parent / ".mcp.json"),
-            ("project", workspace_root.parent / "ciao" / ".mcp.json"),
+            (source, path)
+            for source, path in self._mcp_json_candidates(workspace)
         ]
 
         seen: set[str] = set()
@@ -1229,9 +1235,9 @@ class CiaoMcpService:
                 servers.append(payload)
         return servers
 
-    def status_for_api(self) -> dict[str, Any]:
+    def status_for_api(self, workspace: str = "") -> dict[str, Any]:
         """Public status payload without internal probe helpers."""
-        payload = self.status()
+        payload = self.status(workspace)
         servers = []
         for server in payload.get("project_servers") or []:
             if not isinstance(server, dict):
@@ -1243,21 +1249,55 @@ class CiaoMcpService:
         payload["project_servers"] = servers
         return payload
 
-    def _workspace_root(self) -> Path:
+    def _workspace_root(self, workspace: str = "") -> Path:
+        """The root whose ``.mcp.json``/``.env`` this call is about.
+
+        An empty or unknown `workspace` is the install root, which is what
+        every non-Settings caller (the control plane, the CLI) means.
+        """
+        name = str(workspace or "").strip()
+        if name:
+            resolver = getattr(self.config, "agent_root", None)
+            registered = getattr(self.config, "workspace", None)
+            if callable(resolver) and callable(registered) and registered(name):
+                try:
+                    return Path(resolver(name)).resolve()
+                except ValueError:
+                    pass
         return Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
 
-    def _project_mcp_json_candidates(self) -> list[Path]:
-        workspace_root = self._workspace_root()
-        return [
-            workspace_root / ".mcp.json",
-            workspace_root.parent / ".mcp.json",
-            # Sibling checkout used by some local monorepo layouts.
-            workspace_root.parent / "ciao" / ".mcp.json",
-        ]
+    def _mcp_json_candidates(self, workspace: str = "") -> list[tuple[str, Path]]:
+        """``(source, path)`` for every ``.mcp.json`` a workspace's agent reads.
 
-    def _preferred_mcp_json_path(self, *, create: bool = False) -> Path | None:
+        The workspace's own root first, then the shared install-root files that
+        predate the re-rooting. Order is precedence: discovery keeps the first
+        sighting of a name, and a write prefers the file that already holds it.
+        """
+        root = self._workspace_root(workspace)
+        install_root = Path(
+            getattr(self.config, "workspace_root", Path.cwd())
+        ).resolve()
+        paths: list[tuple[str, Path]] = []
+        if root != install_root:
+            paths.append(("workspace", root / ".mcp.json"))
+        paths.extend(
+            [
+                ("project", install_root / ".mcp.json"),
+                ("project", install_root.parent / ".mcp.json"),
+                # Sibling checkout used by some local monorepo layouts.
+                ("project", install_root.parent / "ciao" / ".mcp.json"),
+            ]
+        )
+        return paths
+
+    def _project_mcp_json_candidates(self, workspace: str = "") -> list[Path]:
+        return [path for _source, path in self._mcp_json_candidates(workspace)]
+
+    def _preferred_mcp_json_path(
+        self, *, create: bool = False, workspace: str = ""
+    ) -> Path | None:
         """Prefer an existing project ``.mcp.json`` that already has servers."""
-        for path in self._project_mcp_json_candidates():
+        for path in self._project_mcp_json_candidates(workspace):
             if not path.is_file():
                 continue
             try:
@@ -1267,11 +1307,11 @@ class CiaoMcpService:
                 continue
             if isinstance(servers, dict) and servers:
                 return path
-        for path in self._project_mcp_json_candidates():
+        for path in self._project_mcp_json_candidates(workspace):
             if path.is_file():
                 return path
         if create:
-            return self._workspace_root() / ".mcp.json"
+            return self._workspace_root(workspace) / ".mcp.json"
         return None
 
     def _read_mcp_json(self, path: Path) -> dict[str, Any]:
@@ -1305,8 +1345,10 @@ class CiaoMcpService:
             data.pop("mcp_servers", None)
         return raw
 
-    def _find_server_file(self, name: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
-        for path in self._project_mcp_json_candidates():
+    def _find_server_file(
+        self, name: str, workspace: str = ""
+    ) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
+        for path in self._project_mcp_json_candidates(workspace):
             if not path.is_file():
                 continue
             try:
@@ -1327,6 +1369,7 @@ class CiaoMcpService:
         args: list[str] | None = None,
         env_keys: dict[str, str] | None = None,
         bind_env_keys: list[str] | None = None,
+        workspace: str = "",
     ) -> dict[str, Any]:
         """Create or update a project MCP server in ``.mcp.json``."""
         server_name = str(name or "").strip()
@@ -1340,13 +1383,13 @@ class CiaoMcpService:
         if not url and not command:
             raise ValueError("url or command is required")
 
-        found = self._find_server_file(server_name)
+        found = self._find_server_file(server_name, workspace)
         if found:
             path, data, servers = found
             meta = servers.get(server_name)
             meta = dict(meta) if isinstance(meta, dict) else {}
         else:
-            preferred = self._preferred_mcp_json_path(create=True)
+            preferred = self._preferred_mcp_json_path(create=True, workspace=workspace)
             if preferred is None:
                 raise ValueError("no writable .mcp.json location is available")
             path = preferred
@@ -1398,22 +1441,22 @@ class CiaoMcpService:
                 if str(k).strip() and str(v).strip()
             }
             if updates:
-                env_path = _workspace_env_path(self._workspace_root())
+                env_path = _workspace_env_path(self._workspace_root(workspace))
                 _write_mcp_env_values(env_path, updates)
                 for key, value in updates.items():
                     os.environ[key] = value.strip()
 
-        return self.status_for_api()
+        return self.status_for_api(workspace)
 
-    def delete_project_server(self, name: str) -> dict[str, Any]:
-        found = self._find_server_file(name)
+    def delete_project_server(self, name: str, workspace: str = "") -> dict[str, Any]:
+        found = self._find_server_file(name, workspace)
         if found is None:
             raise ValueError(f"unknown MCP server '{name}'")
         path, data, servers = found
         servers.pop(name, None)
         data["mcpServers"] = servers
         self._write_mcp_json(path, data)
-        return self.status_for_api()
+        return self.status_for_api(workspace)
 
     def save_project_server_env_keys(
         self,
@@ -1421,6 +1464,7 @@ class CiaoMcpService:
         *,
         server: str | None = None,
         bind_missing: bool = True,
+        workspace: str = "",
     ) -> dict[str, Any]:
         """Write MCP secrets to ``.env`` and optionally bind new keys into ``.mcp.json``."""
         cleaned = {
@@ -1434,7 +1478,7 @@ class CiaoMcpService:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                 raise ValueError(f"invalid env key '{key}'")
 
-        allowed = self.project_server_env_keys()
+        allowed = self.project_server_env_keys(workspace)
         unknown = sorted(set(cleaned) - allowed)
         if unknown:
             if not server:
@@ -1444,7 +1488,7 @@ class CiaoMcpService:
                 )
             if not bind_missing:
                 raise ValueError(f"unsupported MCP env key(s): {', '.join(unknown)}")
-            found = self._find_server_file(server)
+            found = self._find_server_file(server, workspace)
             if found is None:
                 raise ValueError(f"unknown MCP server '{server}'")
             path, data, servers = found
@@ -1457,7 +1501,7 @@ class CiaoMcpService:
             data["mcpServers"] = servers
             self._write_mcp_json(path, data)
 
-        env_path = _workspace_env_path(self._workspace_root())
+        env_path = _workspace_env_path(self._workspace_root(workspace))
         _write_mcp_env_values(env_path, cleaned)
         for key, value in cleaned.items():
             value = value.strip()
@@ -1465,7 +1509,7 @@ class CiaoMcpService:
                 os.environ[key] = value
             else:
                 os.environ.pop(key, None)
-        return self.status_for_api()
+        return self.status_for_api(workspace)
 
     def usage(self, *, limit: int | None = None) -> dict[str, Any]:
         """Aggregate per-tool call counts from the telemetry log.

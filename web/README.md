@@ -209,6 +209,16 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   run from its `onMounted` for every tab. `/api/mcp/usage` is fetched even
   though no template renders it: the operator reads that endpoint by hand to
   decide which MCP tools to prune. Do not drop the call.
+  **Skills, Subagents, Commands and MCP servers are scoped to one workspace** —
+  the one selected in the sidebar, named `assetScope` in `SettingsView` and
+  passed to `useMcpServers` as its `workspace` option. The name rides every read
+  AND every write, because a workspace's agent assets and its `.mcp.json`/`.env`
+  live in that workspace's own agent root: an unscoped request resolves the
+  install root, which on a re-rooted install is a different directory from the
+  one the list just showed. `assetScope` is the single place to change if that
+  ever moves; a `watch` on `projectStore.activeWorkspace` refetches all four.
+  `useMcpServers` takes the workspace as an option rather than reading a store,
+  to stay composable and unit-testable without Pinia.
   Shared settings styling lives in `components/settings/settingsPanels.css`,
   loaded by both sides with `<style scoped src>` — a parent's scoped rules
   never reach a child, and the alternative is silently unstyled markup. New
