@@ -225,6 +225,92 @@ def test_migration_preserves_nonactive_bytes() -> None:
     assert migrate_learnings(resolved_only, workspace="work") == (resolved_only, [])
 
 
+def test_trailing_whitespace_after_metadata_keeps_identity() -> None:
+    clean, _ = migrate_learnings(document(f"{CURRENT}\n"), workspace="work")
+    (before,) = records(clean)
+    line = next(item for item in clean.splitlines() if item.startswith("- ["))
+
+    # An editor or a hand edit that pads the closing marker has not broken the
+    # comment. The stored identifier is still on the line and is still read from
+    # there, and the evidence it carries stays evidence rather than being
+    # folded back into the statement as prose.
+    for padding in (" ", "\t", " \t "):
+        edited = document(f"{line}{padding}\n")
+        (kept,) = records(edited)
+        assert kept.learning_id == before.learning_id
+        assert kept.observations == before.observations
+        assert kept.legacy == before.legacy
+
+        # The padding does not survive into the next write, no second comment is
+        # appended beside the old one, and the pass after that changes nothing.
+        once, diagnostics = migrate_learnings(edited, workspace="work")
+        assert not diagnostics
+        assert once == clean
+        assert once.count(METADATA_MARKER) == 1
+        assert migrate_learnings(once, workspace="work")[0] == once
+
+
+@pytest.mark.parametrize("cited", [False, True], ids=["bare", "cited"])
+def test_statement_containing_a_sources_clause_round_trips(cited: bool) -> None:
+    # A statement is free to use the words the writer uses for a citation; only
+    # the clause that runs to the end of the line is one. Reading the first
+    # match instead would shorten this sentence to "use foo — sources: x and"
+    # and turn "y" into a source, changing what the learning says with no
+    # diagnostic to say so.
+    statement = "use foo — sources: x and -- sources: y"
+    record = LearningRecord(learning_id=_UUID, key="k", text=statement)
+    if cited:
+        record = observe_learning(
+            record, LearningObservation(source="chat-a", turn=2), today=date(2024, 1, 1)
+        )
+
+    line = render_learning(record)
+    visible = line.split(" " + METADATA_MARKER, 1)[0]
+    if cited:
+        # The real citation clause is written after the sentence, so it is the
+        # last one on the line and the sentence in front of it is intact.
+        assert visible.endswith("-- sources: y — sources: chat-a#2")
+    assert statement in visible
+    (reloaded,) = records(document(line + "\n"))
+    assert reloaded.text == statement
+    assert reloaded.learning_id == _UUID
+    assert reloaded.observations == record.observations
+
+    # The same statement typed by hand in a legacy bullet is read whole.
+    (migrated,) = records(
+        migrate_learnings(document(f"- {statement}\n"), workspace="work")[0]
+    )
+    assert migrated.text == statement
+
+
+def test_subheading_under_active_keeps_its_bullets() -> None:
+    text = document("### Work\n- A grouped bullet still migrates.\n")
+
+    # A sub-heading groups inside the section it sits under. Treating it as the
+    # end of the section would skip every bullet beneath it: no entry, no
+    # record, and nothing to complain about, because nothing on those lines is
+    # wrong.
+    parsed = parse_learnings(text, workspace="work")
+    assert not parsed.diagnostics
+    assert [entry.section for entry in parsed.entries] == [SECTION_ACTIVE]
+    assert [entry.record.text for entry in parsed.entries if entry.record] == [
+        "A grouped bullet still migrates."
+    ]
+
+    migrated, diagnostics = migrate_learnings(text, workspace="work")
+    assert not diagnostics
+    assert migrated.startswith("# Learnings\n\n## Active\n### Work\n- [")
+    (migrated_record,) = records(migrated)
+    assert migrated_record.learning_id == records(text)[0].learning_id
+    assert migrate_learnings(migrated, workspace="work")[0] == migrated
+
+    # A deeper heading cannot move a bullet out of its section either, not even
+    # when it is titled with another recognized section's name.
+    nested = document("#### Promoted / Resolved\n- still active\n")
+    entries = parse_learnings(nested, workspace="work").entries
+    assert [entry.section for entry in entries] == [SECTION_ACTIVE]
+
+
 def test_migration_is_deterministic_and_idempotent() -> None:
     text = document(f"{CURRENT}\n{LEGACY}\n{PLAIN}\n")
 
@@ -372,6 +458,37 @@ def test_replayed_observation_does_not_inflate_count_or_date() -> None:
     assert (turn.count, turn.observed_count) == (5, 4)
     assert (request.count, request.observed_count) == (5, 4)
     assert turn.observations != request.observations
+
+
+def test_display_citations_map_back_to_observation_identity() -> None:
+    # `source#turn` and `req:<id>` are how the writer spells an observation on
+    # the visible line. Reading them back as plain source ids made the line and
+    # the machine record two different things, so replaying a source the
+    # baseline already counted became a second sighting.
+    text = document(
+        "- [k] [2024-01-01 → 2024-02-01] (x3) t — sources: chat-a#3, req:r1\n"
+    )
+    (record,) = records(text)
+    assert record.observations == (
+        LearningObservation(source="chat-a", turn=3),
+        LearningObservation(request="r1"),
+    )
+
+    # Both replays are the retry they are: nothing counted, no date moved.
+    for sighting in (
+        LearningObservation(source="chat-a", turn=3, excerpt="re-quoted"),
+        LearningObservation(request="r1", excerpt="re-quoted"),
+    ):
+        replayed = observe_learning(record, sighting, today=date(2025, 1, 1))
+        assert replayed == record
+        assert (replayed.count, replayed.last_seen) == (3, date(2024, 2, 1))
+        assert replayed.observed_count == 2
+
+    # And the round trip keeps both spellings intact rather than flattening
+    # them into one source with no turn.
+    line = render_learning(record)
+    assert " — sources: chat-a#3, req:r1 " in line
+    assert records(document(line + "\n"))[0].observations == record.observations
 
 
 def test_more_than_eight_observations_remain_deduplicated() -> None:
@@ -590,3 +707,24 @@ def test_metadata_comment_cannot_escape_or_corrupt_roundtrip() -> None:
     for bad in ("", "not-a-uuid", "k"):
         with pytest.raises(ValueError, match="is not a UUID"):
             render_learning(LearningRecord(learning_id=bad, key="k", text="t"))
+
+
+def test_render_flattens_the_key_and_refuses_brackets() -> None:
+    # A key is written between brackets on a line-oriented bullet, so it gets
+    # the same flattening the statement does: a newline would split the entry in
+    # two and the continuation would be read as its own learning.
+    record = LearningRecord(learning_id=_UUID, key="two\n  words  here", text="t")
+    line = render_learning(record)
+    assert line.startswith("- [two words here] ")
+    assert "\n" not in line
+    (reloaded,) = records(document(line + "\n"))
+    assert reloaded.key == "two words here"
+    assert reloaded.learning_id == _UUID
+
+    # A bracket cannot be flattened away, and a key carrying one is written to
+    # a line the canonical shape cannot match — so the key would be re-read as
+    # prose and the learning would lose its identity. Refuse it at the write,
+    # where the caller still knows which record it was.
+    for bad in ("br[ack]ets", "]nested[", "["):
+        with pytest.raises(ValueError, match="contains a bracket"):
+            render_learning(replace(record, key=bad))

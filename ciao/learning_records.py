@@ -311,7 +311,7 @@ class _MetadataError(ValueError):
 
 # ── Line scanning ──────────────────────────────────────────────────────────
 
-_HEADING_RE = re.compile(r"^ {0,3}#{1,6} +(.*?)(?: +#+)? *$")
+_HEADING_RE = re.compile(r"^ {0,3}(?P<hashes>#{1,6}) +(.*?)(?: +#+)? *$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
 _BULLET_RE = re.compile(r"^ {0,3}(?:[-*+]) +(?P<body>\S.*)$")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -328,8 +328,15 @@ _CANONICAL_RE = re.compile(
     r"\((?P<count>[^)]*)\) +"
     r"(?P<body>\S.*)$"
 )
-_SOURCES_RE = re.compile(r" *(?:—|–|--) +sources: *(?P<sources>.*)$")
+_SOURCES_RE = re.compile(r" *(?:—|–|--) +sources: *")
 _CONFIDENCE_RE = re.compile(r" *(?:—|–|--) +confidence: *(?P<confidence>.*)$")
+
+# A citation the writer emitted for a source that has a turn, and one it
+# emitted for a user request. Both are display spellings of an identity that is
+# stored explicitly, so reading them back has to land on the same observation
+# rather than on a source id that happens to contain the same characters.
+_TURN_CITATION_RE = re.compile(r"^(?P<source>.+)#(?P<turn>[1-9]\d*)$")
+_REQUEST_CITATION_RE = re.compile(r"^req:(?P<request>.+)$")
 
 _SECTION_LABELS = {SECTION_ACTIVE: "Active", SECTION_PROMOTED: "Promoted / Resolved"}
 
@@ -388,6 +395,12 @@ def _scan(text: str) -> list[_Line]:
     rest of the file as code is the interpretation that invents no entries. A
     frontmatter block that never closes swallows the remainder of the file,
     which is what an unterminated frontmatter means.
+
+    Only a heading at level two or above opens or closes a section; a deeper
+    heading keeps the section it sits in. ``### Work`` under ``## Active`` is
+    a group inside the active list, and treating it as the end of the section
+    would skip every bullet under it — no entry, no record, and no diagnostic,
+    because nothing about those lines is wrong.
     """
     lines: list[_Line] = []
     section = ""
@@ -430,7 +443,8 @@ def _scan(text: str) -> list[_Line]:
 
         heading = _HEADING_RE.match(content)
         if heading is not None:
-            section = _section_of(heading.group(1))
+            if len(heading.group("hashes")) <= 2:
+                section = _section_of(heading.group(2))
             lines.append(_Line(start, end, number, section, False))
             continue
         lines.append(_Line(start, end, number, section, True))
@@ -474,21 +488,53 @@ def _split_metadata(line: str) -> tuple[str, str | None]:
     comment is still found. A marker not closed at the end of the line is not a
     comment either, which is what lets a statement carrying the literal text of
     one round-trip as prose instead of being mistaken for machine data.
+
+    Whitespace after the closing ``-->`` is tolerated. Padding there is what an
+    editor or a hand edit leaves behind, and a line is still a line when it
+    ends in a space; reading it as prose would fold the comment into the
+    statement, mint a new identifier for a learning that already has one, and
+    demote its evidence on the very next write.
     """
-    index = line.rfind(METADATA_MARKER)
-    if index == -1 or not line.endswith(METADATA_SUFFIX):
+    stripped = line.rstrip()
+    index = stripped.rfind(METADATA_MARKER)
+    if index == -1 or not stripped.endswith(METADATA_SUFFIX):
         return line, None
-    return line[:index].rstrip(), line[
+    return stripped[:index].rstrip(), stripped[
         index + len(METADATA_MARKER) : -len(METADATA_SUFFIX)
     ]
 
 
 def _strip_sources(body: str) -> tuple[str, str]:
-    """Separate a trailing ``— sources: …`` clause from the statement before it."""
-    match = _SOURCES_RE.search(body)
-    if match is None:
+    """Separate the writer's trailing ``— sources: …`` clause from the statement.
+
+    Only the *last* clause opener counts. A statement is free to contain those
+    words — ``use foo — sources: bar, baz now`` is a sentence someone wrote —
+    and :func:`render_learning` always writes the citation clause last, so the
+    final opener is the one that belongs to the record. Splitting on the first
+    would silently shorten the statement and move the rest of the sentence into
+    the citations, which changes what the learning says without any diagnostic.
+    """
+    matches = list(_SOURCES_RE.finditer(body))
+    if not matches:
         return body, ""
-    return body[: match.start()], match.group("sources")
+    clause = matches[-1]
+    return body[: clause.start()], body[clause.end() :]
+
+
+def _split_citations(body: str, metadata: _Metadata | None) -> tuple[str, str]:
+    """The statement and its citation list, told apart by the stored record.
+
+    :func:`render_learning` writes a citation clause only when the record
+    carries observations, so a line whose comment lists none has no clause: the
+    ``— sources:`` phrases on it are part of what the owner wrote, and
+    splitting there would shorten the statement on every read. A line with no
+    comment is the pre-existing shape, where a trailing clause is the only
+    thing that can be a citation, and the last opener is the best reading of it.
+    """
+    body = body.rstrip()
+    if metadata is not None and not metadata.observations:
+        return body, ""
+    return _strip_sources(body)
 
 
 def _where(line: _Line) -> str:
@@ -590,15 +636,24 @@ def _observation_from_mapping(raw: Any, index: int) -> LearningObservation:
     return observation
 
 
-def _parse_metadata(
-    payload: str,
-) -> tuple[
-    str,
-    int | None,
-    tuple[LearningObservation, ...],
-    tuple[str, ...],
-    tuple[tuple[str, str], ...],
-]:
+@dataclass(frozen=True, slots=True)
+class _Metadata:
+    """One validated ``ciao:learning`` payload, ready to fold into a record.
+
+    Held apart from :class:`LearningRecord` because it is read before the
+    shape of the visible line is: the payload says whether the line carries a
+    citation clause, and that is a question about the machine record rather
+    than about the prose beside it.
+    """
+
+    learning_id: str
+    baseline: int | None
+    observations: tuple[LearningObservation, ...]
+    aliases: tuple[str, ...]
+    legacy: tuple[tuple[str, str], ...]
+
+
+def _parse_metadata(payload: str) -> _Metadata:
     """Validate one ``ciao:learning`` payload into the fields it stores.
 
     Every type is checked, and an unknown top-level key fails the payload
@@ -665,7 +720,13 @@ def _parse_metadata(
                 for name, value in legacy_raw.items()
             )
         )
-    return learning_id, baseline, observations, aliases, legacy
+    return _Metadata(
+        learning_id=learning_id,
+        baseline=baseline,
+        observations=observations,
+        aliases=aliases,
+        legacy=legacy,
+    )
 
 
 # ── Entry parsing ──────────────────────────────────────────────────────────
@@ -701,7 +762,14 @@ def _observations_from_citations(
 ) -> tuple[tuple[LearningObservation, ...], tuple[tuple[str, str], ...]]:
     """Read a ``— sources: …`` list into observations, keeping prose in legacy.
 
-    A cited token becomes an observation only when it *is* an identifier — no
+    The two display spellings :attr:`LearningObservation.citation` writes are
+    read back as what they are: ``chat-a#3`` is one source at one turn, and
+    ``req:r1`` is one user request. Both characters are legal in a source
+    identifier, so without this a replay of a migrated source was counted a
+    second time — the identity on the line and the identity in the record had
+    quietly stopped being the same thing.
+
+    Any other token becomes an observation only when it *is* an identifier — no
     spaces, nothing but identifier characters. A token like ``the migration
     thread`` is a citation the owner wrote, not a chat id, and promoting it to
     one would fabricate provenance out of English; it is retained verbatim under
@@ -712,6 +780,18 @@ def _observations_from_citations(
     for token in citations.split(","):
         candidate = token.strip()
         if not candidate:
+            continue
+        turn = _TURN_CITATION_RE.match(candidate)
+        if turn is not None:
+            observations.append(
+                LearningObservation(
+                    source=turn.group("source"), turn=int(turn.group("turn"))
+                )
+            )
+            continue
+        request = _REQUEST_CITATION_RE.match(candidate)
+        if request is not None:
+            observations.append(LearningObservation(request=request.group("request")))
             continue
         if _IDENTIFIER_RE.fullmatch(candidate):
             observations.append(LearningObservation(source=candidate))
@@ -735,7 +815,7 @@ def _malformed(source_text: str, line: _Line, problems: list[str]) -> LearningEn
 
 
 def _parse_canonical(
-    visible: str, line: _Line
+    visible: str, line: _Line, metadata: _Metadata | None
 ) -> tuple[LearningRecord | None, list[str]]:
     """Read a current ``- [key] [first → last] (xN) statement`` line."""
     match = _CANONICAL_RE.match(visible)
@@ -765,7 +845,7 @@ def _parse_canonical(
             f"{where}: recurrence {token!r} is neither xN nor {UNKNOWN_COUNT!r}"
         )
 
-    statement, citations = _strip_sources(match.group("body").rstrip())
+    statement, citations = _split_citations(match.group("body"), metadata)
     text = _flatten(statement)
     if not text:
         problems.append(f"{where}: canonical entry has an empty statement")
@@ -792,7 +872,9 @@ def _parse_canonical(
     )
 
 
-def _parse_legacy(visible: str, line: _Line) -> tuple[LearningRecord | None, list[str]]:
+def _parse_legacy(
+    visible: str, line: _Line, metadata: _Metadata | None
+) -> tuple[LearningRecord | None, list[str]]:
     """Read a historical ``- [date] category: statement — confidence: …`` line."""
     match = _LEGACY_RE.match(visible)
     if match is None or not _DATE_ATTEMPT_RE.search(match.group("date")):
@@ -807,8 +889,7 @@ def _parse_legacy(visible: str, line: _Line) -> tuple[LearningRecord | None, lis
             f"{where}: legacy entry date {match.group('date')!r} is not a real date"
         ]
 
-    remainder = match.group("body").strip()
-    remainder, citations = _strip_sources(remainder)
+    remainder, citations = _split_citations(match.group("body"), metadata)
     legacy: list[tuple[str, str]] = []
     confidence = _CONFIDENCE_RE.search(remainder)
     if confidence is not None:
@@ -843,8 +924,25 @@ def _parse_legacy(visible: str, line: _Line) -> tuple[LearningRecord | None, lis
     )
 
 
+def _read_metadata(
+    payload: str | None, line: _Line
+) -> tuple[_Metadata | None, list[str]]:
+    """Validate the comment on a line, or report why it could not be read.
+
+    Malformed metadata is not prose. Reading the line as an ordinary bullet
+    would drop the identity and the evidence it carries the moment anything
+    rewrote the file, so the entry is reported instead.
+    """
+    if payload is None:
+        return None, []
+    try:
+        return _parse_metadata(payload), []
+    except _MetadataError as exc:
+        return None, [f"{_where(line)}: ciao:learning metadata {exc}"]
+
+
 def _with_metadata(
-    record: LearningRecord, payload: str | None, line: _Line
+    record: LearningRecord, metadata: _Metadata | None, line: _Line
 ) -> tuple[LearningRecord | None, list[str]]:
     """Fold a ``ciao:learning`` comment into a freshly read record.
 
@@ -857,30 +955,26 @@ def _with_metadata(
     line still owns the key, the statement and the dates, so rewording a line
     is a visible edit and nothing else.
     """
-    if payload is None:
+    if metadata is None:
         return record, []
     where = _where(line)
-    try:
-        learning_id, baseline, observations, aliases, legacy = _parse_metadata(payload)
-    except _MetadataError as exc:
-        # Malformed metadata is not prose. Reading the line as an ordinary
-        # bullet would drop the identity and the evidence it carries the moment
-        # anything rewrote the file, so the entry is reported instead.
-        return None, [f"{where}: ciao:learning metadata {exc}"]
-
-    if record.count is not None and baseline is not None and record.count < baseline:
+    if (
+        record.count is not None
+        and metadata.baseline is not None
+        and record.count < metadata.baseline
+    ):
         return None, [
-            f"{where}: ciao:learning metadata baseline {baseline} exceeds the "
-            f"recurrence {record.count} shown on the line"
+            f"{where}: ciao:learning metadata baseline {metadata.baseline} exceeds "
+            f"the recurrence {record.count} shown on the line"
         ]
     return (
         replace(
             record,
-            learning_id=learning_id,
-            observations=observations,
-            baseline_count=baseline,
-            aliases=aliases,
-            legacy=legacy,
+            learning_id=metadata.learning_id,
+            observations=metadata.observations,
+            baseline_count=metadata.baseline,
+            aliases=metadata.aliases,
+            legacy=metadata.legacy,
         ),
         [],
     )
@@ -900,13 +994,20 @@ def _parse_bullet(line: _Line, source_text: str) -> _Read | None:
     ``source_text`` is the whole line, bullet marker included, because that is
     what the entry's offsets address. The metadata comment is peeled off that
     whole line first, then the shapes are matched against what remains, and the
-    statement comes from the text after the bullet marker.
+    statement comes from the text after the bullet marker. The comment is
+    validated before the shape is read: it says whether the visible line carries
+    a citation clause at all, and a comment that does not hold up leaves the
+    entry unreadable whatever the prose beside it looks like.
     """
     visible_line, payload = _split_metadata(source_text)
     bullet = _BULLET_RE.match(visible_line)
     if bullet is None:
         return None
     body = bullet.group("body")
+
+    metadata, metadata_problems = _read_metadata(payload, line)
+    if metadata_problems:
+        return _Read(_malformed(source_text, line, metadata_problems), None)
 
     canonical = _CANONICAL_RE.match(visible_line)
     legacy = _LEGACY_RE.match(visible_line) if canonical is None else None
@@ -916,10 +1017,10 @@ def _parse_bullet(line: _Line, source_text: str) -> _Read | None:
 
     if canonical is not None:
         shape = FORMAT_CANONICAL
-        record, problems = _parse_canonical(visible_line, line)
+        record, problems = _parse_canonical(visible_line, line, metadata)
     elif legacy_looking:
         shape = FORMAT_LEGACY
-        record, problems = _parse_legacy(visible_line, line)
+        record, problems = _parse_legacy(visible_line, line, metadata)
     else:
         shape = FORMAT_PLAIN
         text = _flatten(body)
@@ -932,7 +1033,7 @@ def _parse_bullet(line: _Line, source_text: str) -> _Read | None:
     if record is None or problems:
         return _Read(_malformed(source_text, line, problems), None)
 
-    record, metadata_problems = _with_metadata(record, payload, line)
+    record, metadata_problems = _with_metadata(record, metadata, line)
     if record is None or metadata_problems:
         return _Read(_malformed(source_text, line, metadata_problems), None)
     return _Read(
@@ -1046,10 +1147,16 @@ def render_learning(record: LearningRecord) -> str:
     :data:`MAX_DISPLAY_SOURCES` entries because it is read by people; the
     comment that follows carries every observation, however many there are.
 
+    ``key`` is flattened exactly as ``text`` is: a key carrying a newline would
+    otherwise split the bullet it lives on into a truncated line and a
+    continuation.
+
     Raises ``ValueError`` for a record whose ``learning_id`` is empty or is not
-    a UUID. A line carrying an unreadable identifier would be diagnosed as
-    broken the next time the file was parsed, long after the caller that wrote
-    it had moved on; refusing here keeps the write and the read agreeing.
+    a UUID, and for a key carrying a bracket. Both write a line this module
+    cannot read back — the identifier would be diagnosed as broken and the key
+    would be read as prose — and both would be found out long after the caller
+    that wrote the line had moved on. Refusing here keeps the write and the read
+    agreeing.
     """
     try:
         uuid.UUID(record.learning_id)
@@ -1058,10 +1165,16 @@ def render_learning(record: LearningRecord) -> str:
             f"learning_id {record.learning_id!r} is not a UUID; a learning is "
             "rendered only once it has a stable identity"
         ) from exc
+    key = _flatten(record.key)
+    if "[" in key or "]" in key:
+        raise ValueError(
+            f"key {record.key!r} contains a bracket; the key is written between "
+            "brackets on the line and would not be read back"
+        )
     first = record.first_seen.isoformat() if record.first_seen else UNKNOWN_DATE
     last = record.last_seen.isoformat() if record.last_seen else UNKNOWN_DATE
     count = f"x{record.count}" if record.count is not None else UNKNOWN_COUNT
-    line = f"- [{record.key}] [{first} → {last}] ({count}) {_flatten(record.text)}"
+    line = f"- [{key}] [{first} → {last}] ({count}) {_flatten(record.text)}"
     cited = [
         observation.citation
         for observation in record.observations
