@@ -226,7 +226,6 @@ def test_bypass_keeps_wildcard_allow_and_normal_asks():
     assert _actions("bypass")["*"] == "allow"
     assert _actions("normal")["*"] == "ask"
     assert "edit" not in _actions("normal")
-    # Search actions are the deliberate security exception to bypass.
 
 
 def test_auto_allows_everything_but_keeps_shell_gated():
@@ -240,7 +239,7 @@ def test_auto_allows_everything_but_keeps_shell_gated():
     assert shell["ask"] == {"*"}
 
 
-@pytest.mark.parametrize("mode", ["plan", "normal", "auto", "bypass"])
+@pytest.mark.parametrize("mode", ["plan", "normal", "auto"])
 def test_v2_search_actions_require_explicit_approval(mode: BridgeMode):
     rules = mode_settings(mode)[1]
     for action in {"glob", "grep"}:
@@ -249,6 +248,16 @@ def test_v2_search_actions_require_explicit_approval(mode: BridgeMode):
             if rule["action"] == action and rule["resource"] == "*"
         ]
         assert matching[-1]["effect"] == "ask"
+
+
+def test_bypass_lets_search_actions_run_without_a_card():
+    rules = mode_settings("bypass")[1]
+    for action in ("glob", "grep"):
+        matching = [
+            rule for rule in rules
+            if rule["action"] in (action, "*") and rule["resource"] == "*"
+        ]
+        assert matching[-1]["effect"] == "allow"
 
 
 def test_protected_glob_patterns_remain_hard_denied_after_search_approval():
