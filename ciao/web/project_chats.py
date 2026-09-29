@@ -1167,41 +1167,6 @@ class ProjectChatManager:
         except ValueError:
             return str(root)
 
-    def _entity_index_is_per_root(self, workspace: str = "") -> bool:
-        """Whether ``_entity_index_root`` resolved a per-root index.
-
-        A per-root index covers exactly one workspace, so its entries need no
-        prefix filtering; a shared one still does. Derived from the same
-        ``agent_root`` receipt the root itself comes from, so the two answers
-        cannot disagree.
-        """
-        if not workspace:
-            return False
-        try:
-            return Path(self._config.agent_root(workspace)) != Path(
-                self._config.workspace_root
-            )
-        except (AttributeError, ValueError):
-            return False
-
-    def _entity_index_root(self, workspace: str = "") -> Path:
-        """Return the root that owns the vault entity index.
-
-        Entity hints resolve against the INDEX.md that covers this chat, which
-        is ``agent_vault_root(workspace)``: the ONE shared index before the
-        re-rooting, and this root's own index after it. Deliberately not
-        ``_workspace_vault_root`` — before the migration that is a subtree of the
-        shared vault holding no index at all, which reads as "no entities" rather
-        than failing. Workspace scoping within a shared index is still applied
-        inside ``find_entities`` via its ``workspace`` argument.
-        """
-        if workspace:
-            try:
-                return self._config.agent_vault_root(workspace)
-            except (AttributeError, ValueError):
-                logger.debug("could not resolve the agent vault root for %r", workspace)
-        return Path(self._config.vault_root)
-
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.
 
@@ -3968,15 +3933,13 @@ class ProjectChatManager:
         self,
         chat: ChatInfo,
         *,
-        prompt: str = "",
         unattended: bool = False,
     ) -> str:
         """Build context prefix for a web chat message.
 
         One provider-neutral capsule is prepended before the user prompt.
         Stable routing facts are sent once per native provider session; the
-        date, entity hints, retrieval routing, and unattended marker remain
-        dynamic. The hidden envelope is retained so transcript renderers can
+        date and the unattended marker are sent on every turn. The hidden envelope is retained so transcript renderers can
         strip it without exposing routing metadata in the visible bubble.
         """
         project = self._projects.get(chat.project_id)
@@ -3992,18 +3955,13 @@ class ProjectChatManager:
             or chat.handover_context_pending
         )
         handover = self._format_handover_context(chat)
-        vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
-            prompt=prompt,
-            entity_index_owns_workspace=self._entity_index_is_per_root(workspace),
             workspace=workspace,
             gws_profile=gws_profile,
             project_name=project_name,
             project_context=project_context,
             canonical_doc=canonical_doc,
-            vault_root=vault_root,
             workspace_vault_root=self._workspace_vault_display(workspace),
-            legacy_entity_workspace=self._config.legacy_entity_workspace(),
             unattended=unattended,
             handover=handover,
             include_stable=include_stable,
@@ -4040,18 +3998,13 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
-            prompt="",
-            entity_index_owns_workspace=self._entity_index_is_per_root(workspace),
             workspace=workspace,
             gws_profile=gws_profile,
             project_name=project_name,
             project_context=project_context,
             canonical_doc=canonical_doc,
-            vault_root=vault_root,
             workspace_vault_root=self._workspace_vault_display(workspace),
-            legacy_entity_workspace=self._config.legacy_entity_workspace(),
             include_stable=True,
         )
         if not capsule:
@@ -4538,9 +4491,6 @@ class ProjectChatManager:
             logger.debug("could not resolve the agent vault root for %r", workspace)
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
-        env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
-            self._config.legacy_entity_workspace()
-        )
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
         env["CIAO_MODEL"] = chat.model
@@ -4675,7 +4625,7 @@ class ProjectChatManager:
         ``unattended`` marks an automation-driven turn, which changes
         the permission mode (see ``_effective_mode_for_chat``).
         """
-        prefix = self._build_prompt_prefix(chat, prompt=prompt, unattended=unattended)
+        prefix = self._build_prompt_prefix(chat, unattended=unattended)
         context_digest, context_session_id = self._stable_context_marker(chat)
         if not prefix:
             context_digest = ""

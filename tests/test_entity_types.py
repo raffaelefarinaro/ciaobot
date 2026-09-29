@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 
 from ciao import config, entity_types, memory_audit, vault_index, vault_lint, vault_rehome
-from ciao.context import entity_tagger
 
 
 @pytest.fixture(autouse=True)
@@ -63,9 +62,6 @@ def test_stock_registry_reproduces_the_hardcoded_constants(tmp_path: Path) -> No
     )
     assert len(registry.entity_folders()) == 5
 
-    # The tagger's INDEX.md wire format, case variants included.
-    assert registry.category_parts() == entity_tagger._CATEGORY_PARTS
-    assert len(registry.category_parts()) == 14
 
     # Every stock category carries a real one-liner: the description is the point
     # of the feature (it is what tells the agent when to use the category).
@@ -138,7 +134,6 @@ def test_a_vault_entry_overrides_a_stock_entry_by_id(tmp_path: Path) -> None:
     assert person.folder != stock_person.folder
     assert registry.canonical_types() == stock.canonical_types()
     assert registry.aliases() == stock.aliases()
-    assert registry.category_parts() == stock.category_parts()
     assert [entry.id for entry in registry.entries()] == [
         entry.id for entry in stock.entries()
     ]
@@ -227,16 +222,16 @@ def test_disabling_a_category_removes_it_from_the_effective_views(tmp_path: Path
     ], "disabling never removes a builtin; a user can switch it back on"
 
 
-def test_no_vault_file_is_identical_for_the_bootstrap_tagger_and_rehome(tmp_path: Path) -> None:
-    """No `<vault>/entity-types.yaml`: bootstrap, the tagger and re-home all read
-    the shipped list.
+def test_no_vault_file_is_identical_for_the_bootstrap_and_rehome(tmp_path: Path) -> None:
+    """No `<vault>/entity-types.yaml`: bootstrap and re-home both read the
+    shipped list.
 
-    These are the three consumers #635 put the registry in front of, and each is
-    checked against the constant it replaced. The two that CAN be handed a
-    registry are also checked against the same answer that way, because a caller
-    that passes one has to get what the consumer would have loaded for itself or
-    the two forms of the same call drift; that plumbing is pinned in
-    `tests/test_entity_tagger.py` and `tests/test_vault_rehome.py`.
+    These are the consumers #635 put the registry in front of (the entity
+    tagger was the third, removed in #723), and each is checked against the
+    constant it replaced. Re-home CAN be handed a registry and is also checked
+    against the same answer that way, because a caller that passes one has to
+    get what the consumer would have loaded for itself or the two forms of the
+    same call drift; that plumbing is pinned in `tests/test_vault_rehome.py`.
 
     The bootstrap is the exception, and cannot be handed a registry at all: it runs
     inside `CiaoConfig.__post_init__`, before any workspace is known, so its
@@ -258,12 +253,6 @@ def test_no_vault_file_is_identical_for_the_bootstrap_tagger_and_rehome(tmp_path
     (vault / "work" / "alpha.md").write_text(
         "---\ntype: project\n---\n# Alpha\n", encoding="utf-8"
     )
-    (vault / "INDEX.md").write_text(
-        "# Vault Index\n\n"
-        "- [personal/People/Alba](./personal/People/Alba.md) (tags: person; aliases: Alba)\n"
-        "- [work/alpha](./work/alpha.md) (tags: project; aliases: Alpha)\n",
-        encoding="utf-8",
-    )
 
     registry = entity_types.load_entity_types(vault)
 
@@ -279,13 +268,6 @@ def test_no_vault_file_is_identical_for_the_bootstrap_tagger_and_rehome(tmp_path
         "one workspace per vault directory holding an evidence folder"
     )
 
-    # The tagger: the folder -> category view is the shipped wire set, and the
-    # index resolves against it whether it was handed the registry or loaded it.
-    assert registry.category_parts() == entity_tagger._CATEGORY_PARTS
-    assert {e.category for e in entity_tagger.get_index(vault).find("Alba and Alpha")} == {
-        "People",
-        "work",
-    }
 
     # Re-home: the person folder, and the folder map whose keys are not workspace
     # names. Both are the shipped ones, and the misfiled note is still found.

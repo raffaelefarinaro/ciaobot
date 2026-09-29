@@ -120,7 +120,7 @@ def test_insights_extractor_and_capsule_share_one_marker() -> None:
 
 
 def test_capsule_renders_the_shared_guidance_verbatim() -> None:
-    capsule = build_context_capsule(prompt="hi", workspace="work", unattended=True)
+    capsule = build_context_capsule(workspace="work", unattended=True)
     assert mp.UNATTENDED_CAPSULE_GUIDANCE in capsule
 
 

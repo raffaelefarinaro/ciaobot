@@ -19,7 +19,6 @@ from claude_agent_sdk import (
     get_session_messages as _sdk_get_session_messages,
 )
 
-from ciao.context.entity_tagger import context_entities
 from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
@@ -509,9 +508,6 @@ class TranscriptStore:
                     "turn_index": index,
                     "sent_at": timestamp,
                 }
-                entities = context_entities(raw_prompt)
-                if entities:
-                    user_row["context_entities"] = entities
                 rows.append(user_row)
             if response:
                 row: dict[str, Any] = {

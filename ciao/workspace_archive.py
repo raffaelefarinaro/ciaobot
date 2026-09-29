@@ -391,8 +391,8 @@ def mark_rolled_back(config: Any, archived: dict[str, Any]) -> None:
 def refresh_shared_index(config: Any) -> bool:
     """Rebuild the shared ``INDEX.md`` on an install that has not re-rooted.
 
-    There one index lists every workspace's notes under a workspace prefix and
-    entity hints read it back, so an archived folder's entries must leave it
+    There one index lists every workspace's notes under a workspace prefix, so
+    an archived folder's entries must leave it
     now rather than at the next restart. A per-root install needs nothing: the
     archived root's own index moved with it.
     """
