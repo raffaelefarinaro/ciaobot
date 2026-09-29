@@ -256,6 +256,21 @@ findings land as inline comments.
 No manual tag, no `gh release create`, no tap push, no separate desktop release —
 one merge ships the engine.
 
+End users install it with the release URL, which does not change between
+releases — the same one-liner now installs the engine:
+
+```bash
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
+```
+
+`tests/test_ci_workflow.py::test_first_party_install_command_stays_install_sh`
+pins that exact command into this skill, `README.md`, `site/index.html`,
+`site/guide.html` and `docs/DEVELOPMENT.md`, and fails if any of them starts
+pointing a first-time user at `install-engine.sh` instead. The build attaches
+the installer under both names because the public one-liner kept `install.sh`
+while the hand-over path fetched `install-engine.sh` (#651) — but `install.sh` is
+the one a user runs.
+
 **Merging the release PR** is the one irreversible act in this skill. The
 auto-mode classifier blocks `gh pr merge` on the agent-authored release PR
 unless the user explicitly authorized merging. Attempt once; on denial, ask the
