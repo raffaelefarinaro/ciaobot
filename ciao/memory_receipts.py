@@ -433,7 +433,23 @@ def _trim_if_large(journal: Path) -> None:
     try:
         if not journal.exists() or journal.stat().st_size < MAX_BYTES:
             return
-        lines = journal.read_text(encoding="utf-8", errors="replace").splitlines()
+        # Split on "\n" only, never `splitlines()`: the rows are JSON Lines, and
+        # a receipt legitimately carries the note body it images, which may
+        # contain U+2028, U+2029 or U+0085 — all of which `str.splitlines`
+        # treats as line breaks even though `_append` writes them literally
+        # (`ensure_ascii=False`). Splitting there cut a row in half, so the
+        # journal stopped being readable: undo reported "unknown receipt" and
+        # a prepared note write could never be recovered.
+        #
+        # Blank entries are dropped because `KEEP_LINES` is a budget of real
+        # rows: `split("\n")` yields a trailing empty string for the newline
+        # `_append` writes, and keeping it would spend one slot of the budget
+        # on nothing and retain one row too few.
+        lines = [
+            line
+            for line in journal.read_text(encoding="utf-8", errors="replace").split("\n")
+            if line.strip()
+        ]
         # Keep the newest rows, but never drop a non-terminal receipt: an
         # interrupted operation must stay recoverable until it settles.
         #
@@ -496,7 +512,10 @@ def read_receipts(journal: Path) -> list[dict[str, Any]]:
         raw = journal.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    for line in raw.splitlines():
+    # `split("\n")`, not `splitlines()`: see `_trim_if_large`. A note body
+    # holding U+2028/U+2029/U+0085 must not split its own receipt row, or the
+    # folded journal loses the write entirely.
+    for line in raw.split("\n"):
         line = line.strip()
         if not line:
             continue
@@ -1187,9 +1206,11 @@ def recover_pending(
     A note write (``ciao/note_receipts.py``) is classified the same way, by the
     note's exact current revision: matching the after image → ``applied``,
     matching the before image → ``rolled_back``, anything else or a missing
-    note → ``conflict``. A forward note write is only ever classified here,
-    never replayed; an interrupted *undo* is finished, since restoring the
-    before image is the whole point of it.
+    note → ``conflict``. A note write is only ever classified here, never
+    replayed — including an interrupted *undo*, whose reverse write is settled
+    by that same comparison; what recovery additionally does is settle the
+    original receipt whose ``undone`` row the crash lost, never re-attempt the
+    reverse write itself.
 
     An ``applied`` receipt with a fact but no recorded outcome has its decision
     sidecar completed here, so a crash between the guide write and the decision

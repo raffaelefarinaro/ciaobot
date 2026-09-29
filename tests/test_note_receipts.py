@@ -733,3 +733,132 @@ def test_note_recovery_is_idempotent(tmp_path):
         assert path.read_bytes() == settled_bytes
         assert journal.read_text(encoding="utf-8") == settled_journal
         assert len(_rows(vault)) == 1
+
+
+# ── Review round 1: journal readers, receipt identity, mode, journal anchoring
+
+
+def test_note_with_unicode_line_separators_stays_in_the_journal(tmp_path):
+    """A note body holding U+2028/U+2029/U+0085 must not split its own row.
+
+    The journal is JSON Lines and `_append` writes those characters literally
+    (`ensure_ascii=False`), but `str.splitlines` treats all three as line
+    breaks. Reading the journal that way cut the row in half, so the receipt
+    was invisible: undo reported "unknown receipt" and a prepared note write
+    could never be recovered.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "before\n")
+    journal = _journal(vault)
+    separators = "line separator paragraph separator next lineend\n"
+    receipt = _apply(vault, after=separators)
+    assert path.read_bytes() == separators.encode("utf-8")
+
+    # One row, and it is the receipt: the images round-tripped intact.
+    found = mr.find_receipt(journal, receipt["id"])
+    assert found is not None
+    assert found["status"] == mr.APPLIED
+    assert found["after_text"] == separators
+    assert found["after_revision"] == mr.content_revision(separators)
+    assert len(_rows(vault)) == 1, "the row must not be split into unreadable halves"
+
+    # An interrupted row with the same characters is still recoverable.
+    mr._append(
+        journal,
+        {
+            "id": "mrcpt_note_separators_prepared",
+            "ts": mr._now(),
+            "actor": "agent",
+            "source": "cli",
+            "workspace": "personal",
+            "kind": "note_apply",
+            "relative_path": NOTE,
+            "before_revision": mr.content_revision("elsewhere\n"),
+            "after_revision": mr.content_revision(separators),
+            "before_text": "elsewhere\n",
+            "after_text": separators,
+            "status": mr.PREPARED,
+        },
+    )
+    result = mr.recover_pending(journal=journal)
+    assert [row["id"] for row in result.reconciled] == [
+        "mrcpt_note_separators_prepared"
+    ]
+    assert path.read_bytes() == separators.encode("utf-8")
+
+    # And the undo works, so the note is reversible to the byte.
+    mr.undo_receipt(receipt["id"], vault_root=vault)
+    assert path.read_bytes() == b"before\n"
+
+
+def test_note_receipt_id_covers_both_revisions(tmp_path):
+    """A note that returns to an earlier state still gets a distinct receipt.
+
+    The id basis carries the before revision and the path, so a note edited
+    back to R0 and then edited differently from R0 produced the *same* id —
+    and `read_receipts` folds by id, so the second row overwrote the first
+    one's images. Both writes must remain independently listed.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "R0\n")
+    journal = _journal(vault)
+
+    first = _apply(vault, after="R1\n")
+    # Something takes the note back to R0 — a hand edit, or the undo below.
+    path.write_bytes(b"R0\n")
+    second = _apply(vault, after="R2\n")
+
+    assert first["id"] != second["id"], "two edits must not collapse onto one id"
+    listed = {row["id"]: row for row in _rows(vault)}
+    assert set(listed) == {first["id"], second["id"]}
+    assert listed[first["id"]]["after_text"] == "R1\n"
+    assert listed[second["id"]]["after_text"] == "R2\n"
+    assert listed[first["id"]]["before_text"] == "R0\n"
+    assert listed[second["id"]]["before_text"] == "R0\n"
+    # Both are still undoable in their own right.
+    assert mr.is_undoable(listed[first["id"]])
+    assert mr.is_undoable(listed[second["id"]])
+
+
+def test_note_undo_refuses_a_journal_from_another_vault(tmp_path):
+    """The reverse write and the original's settlement must share a journal."""
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "first\n")
+    receipt = _apply(vault, after="second\n")
+    other = _vault(tmp_path, "other")
+
+    with pytest.raises(mr.UndoUnsupported):
+        mr.undo_receipt(receipt["id"], vault_root=other, journal=_journal(vault))
+
+    # Refused before anything was written, in either vault.
+    assert path.read_bytes() == b"second\n"
+    assert not list(_vault(tmp_path, "other").rglob("*.jsonl"))
+    assert (mr.find_receipt(_journal(vault), receipt["id"]) or {})["status"] == (
+        mr.APPLIED
+    )
+    # The agreeing pair still works.
+    mr.undo_receipt(receipt["id"], vault_root=vault, journal=_journal(vault))
+    assert path.read_bytes() == b"first\n"
+
+
+def test_note_undo_of_a_deleted_note_is_a_revision_conflict(tmp_path):
+    """A note that is gone is a moved destination, not an unhandled error.
+
+    `undo_receipt` callers handle the protocol's own exceptions; a bare
+    `NoteTargetRefused` escaping an ordinary user action (delete a note, then
+    press Undo) would surface as a 500 instead of a refusal.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "first\n")
+    receipt = _apply(vault, after="second\n")
+    path.unlink()
+
+    with pytest.raises(mr.RevisionConflict):
+        mr.undo_receipt(receipt["id"], vault_root=vault)
+
+    # A relinked note is refused the same way: a link is not the note.
+    outside = _write(tmp_path, "outside/other.md", "elsewhere\n")
+    (vault / NOTE).symlink_to(outside)
+    with pytest.raises(mr.RevisionConflict):
+        mr.undo_receipt(receipt["id"], vault_root=vault)
+    assert outside.read_bytes() == b"elsewhere\n"

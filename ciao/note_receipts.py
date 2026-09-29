@@ -53,7 +53,9 @@ a forged or moved row cannot write outside the vault it was found in.
 An undo settles the original receipt only after its own reverse write is
 journaled, which leaves a window an interrupted undo can fall into. One
 idempotent pass (:func:`settle_open_undo_links`) closes it on the next
-recovery. Undo is not offered for undo: ``note_undo`` is not in
+recovery — by *settling the original*, not by replaying the undo, which either
+already landed and is recorded in full or never did and is settled
+``rolled_back``. Undo is not offered for undo: ``note_undo`` is not in
 :data:`ciao.memory_receipts.UNDOABLE_KINDS` and its row carries ``undo_of``,
 so a reverse write is a settled record rather than a second lever.
 """
@@ -242,11 +244,13 @@ def _replace_note_bytes(
 
     A sibling temp file plus ``os.replace`` means a reader — or a crash — sees
     either the whole old note or the whole new one. The mode is carried across
-    explicitly because ``mkstemp`` creates the temp file 0600; without the
-    ``chmod`` every managed write would quietly make a note private. The
-    revision is rechecked immediately before the rename: the lock only
-    excludes other *managed* writers, and a direct edit that lands in the gap
-    would otherwise be silently overwritten.
+    with ``os.fchmod`` on the temp file's own descriptor, before the rename:
+    ``mkstemp`` creates it 0600, and restoring the mode *after* the replace
+    would leave the live note briefly 0600 — a private note for as long as the
+    process takes to chmod it — and would raise for a write that had already
+    landed. The revision is rechecked immediately before the rename: the lock
+    only excludes other *managed* writers, and a direct edit that lands in the
+    gap would otherwise be silently overwritten.
     """
     mode = stat.S_IMODE(target.stat().st_mode)
     fd, raw_name = tempfile.mkstemp(
@@ -255,6 +259,7 @@ def _replace_note_bytes(
     temporary = Path(raw_name)
     try:
         with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -264,7 +269,6 @@ def _replace_note_bytes(
                 "nothing was written"
             )
         os.replace(temporary, target)
-        os.chmod(target, mode)
         _fsync_dir(target.parent)
     finally:
         # The rename consumed the temp file; any other failure leaves it behind.
@@ -307,8 +311,9 @@ def commit_note_change(
     happen before any byte is written, so this primitive never produces a
     view-only write.
     """
+    root = canonical_vault(vault_root)
     return _commit_note_change(
-        root=canonical_vault(vault_root),
+        root=root,
         relative_path=relative_path,
         expected_revision=expected_revision,
         after_text=after_text,
@@ -318,6 +323,7 @@ def commit_note_change(
         provenance=provenance,
         kind=NOTE_APPLY,
         undo_of="",
+        journal=mr.journal_path(root, None),
     )
 
 
@@ -333,12 +339,19 @@ def _commit_note_change(
     provenance: dict[str, Any] | None,
     kind: str,
     undo_of: str,
+    journal: Path,
 ) -> dict[str, Any]:
     """The shared body of the forward and the reverse write.
 
     Split out so :func:`undo_note_receipt` can journal its reverse write through
     exactly the same prepare/write/confirm path under a lock it already holds,
     rather than a second, weaker implementation.
+
+    ``journal`` is a parameter rather than derived from ``root`` because the
+    caller already holds one. An undo appends its ``undone`` row to the journal
+    it was handed, so a reverse write that derived its own would leave the
+    reverse row and the original's settlement in two different journals — a
+    receipt no single recovery pass could ever finish.
     """
     target = resolve_note_path(root, relative_path)
     stored_path = target.relative_to(root).as_posix()
@@ -358,7 +371,6 @@ def _commit_note_change(
         ) from exc
     _refuse_oversize(after_text, "the proposed note body")
 
-    journal = mr.journal_path(root, None)
     with mr.queue_lock(target):
         before_text = _read_note_text(target)
         _refuse_oversize(before_text, "the note as it stands")
@@ -369,8 +381,15 @@ def _commit_note_change(
             )
         after_revision = mr.content_revision(after_text)
         base: dict[str, Any] = {
+            # The after revision is part of the identity, not just the record.
+            # With only the before revision, a note that returned to an earlier
+            # state (an undo, or a hand edit back) made the next, different
+            # edit from that state collide on one id — and `read_receipts`
+            # folds by id, so the new row silently overwrote the earlier
+            # one's images. Both endpoints of the write belong in its identity.
             "id": mr.new_receipt_id(
-                f"{stored_path}|{kind}|{before_revision}|{undo_of}", journal
+                f"{stored_path}|{kind}|{before_revision}|{after_revision}|{undo_of}",
+                journal,
             ),
             "ts": mr._now(),
             "actor": actor,
@@ -528,6 +547,23 @@ def _classify_note(target: Path, receipt: dict[str, Any]) -> tuple[str, str]:
     return mr.CONFLICT, "the note changed while the operation was interrupted"
 
 
+def _undone_row(original: dict[str, Any], undo_receipt_id: str) -> dict[str, Any]:
+    """The settlement row that retires one original receipt.
+
+    One builder, because two paths write it — the undo that completes normally
+    and the recovery pass that settles an interrupted one — and the journal
+    folds by id, so a receipt is only trustworthy if both paths agree on what
+    the same undo produced.
+    """
+    return {
+        **{k: v for k, v in original.items() if k != "v"},
+        "status": mr.UNDONE,
+        "undo_of": str(original.get("id", "")),
+        "undo_receipt": undo_receipt_id,
+        "settled_at": mr._now(),
+    }
+
+
 def settle_open_undo_links(journal: Path) -> list[dict[str, Any]]:
     """Settle originals whose undo landed but whose own settlement did not.
 
@@ -535,7 +571,8 @@ def settle_open_undo_links(journal: Path) -> list[dict[str, Any]]:
     crash in that window leaves a journaled, applied reverse write attached to
     an original that still reads as ``applied`` — and therefore still offers an
     undo that can only fail, against a note that is already restored. This pass
-    closes that window.
+    settles the original; it does **not** replay or re-attempt the reverse
+    write, which already landed and is recorded in full.
 
     Idempotent, and safe to run on a journal with no note receipts: an original
     that is already ``undone``, is not ``applied``, or is absent is left alone.
@@ -552,13 +589,7 @@ def settle_open_undo_links(journal: Path) -> list[dict[str, Any]]:
         original = originals.get(original_id)
         if original is None or str(original.get("status", "")) != mr.APPLIED:
             continue
-        undone = {
-            **{k: v for k, v in original.items() if k != "v"},
-            "status": mr.UNDONE,
-            "undo_of": original_id,
-            "undo_receipt": str(row.get("id", "")),
-            "settled_at": mr._now(),
-        }
+        undone = _undone_row(original, str(row.get("id", "")))
         try:
             mr._append(journal, undone)
         except Exception:  # noqa: BLE001 — the next pass retries
@@ -589,11 +620,19 @@ def undo_note_receipt(
 
     The reverse write goes through the same journaled protocol as a forward one
     — ``prepared``, replace, confirm — as a ``note_undo`` row carrying
-    ``undo_of``. That row is what makes an interrupted undo recoverable: if the
-    process dies before the replace, it settles ``rolled_back`` and the original
-    stays undoable; if it dies after, it settles ``applied`` and
-    :func:`settle_open_undo_links` finishes the original's settlement. Only once
-    the reverse write is journaled does the original become ``undone``.
+    ``undo_of``, journaled to the *same* journal this settlement is appended to.
+    That row is what makes an interrupted undo recoverable: if the process dies
+    before the replace, it settles ``rolled_back`` and the original stays
+    undoable; if it dies after, it settles ``applied`` and
+    :func:`settle_open_undo_links` settles the original — it does not replay
+    the undo, which already landed. Only once the reverse write is journaled
+    does the original become ``undone``.
+
+    A note that is gone, renamed or replaced by a link is a
+    :class:`ciao.memory_receipts.RevisionConflict` like any other moved
+    destination, never a bare :class:`NoteTargetRefused`: callers of
+    :func:`ciao.memory_receipts.undo_receipt` handle the protocol's own
+    exceptions, and an unhandled one is a 500 for an ordinary user action.
 
     Returns the original's ``undone`` row, which carries ``undo_receipt`` for
     the reverse write.
@@ -604,16 +643,29 @@ def undo_note_receipt(
     after = receipt.get("after_text")
     if not isinstance(before, str) or not isinstance(after, str):
         raise mr.UndoUnsupported("this receipt carries no complete note image")
-    root = (
-        canonical_vault(vault_root)
-        if vault_root is not None
-        else vault_for_journal(journal)
-    )
+    journal_vault = vault_for_journal(journal)
+    if vault_root is not None and journal_vault is not None:
+        # The reverse write and the original's settlement must land in one
+        # journal, or the linkage between them is a claim no recovery pass can
+        # check. A caller that passes a vault other than the one its journal
+        # belongs to has two incompatible anchors; refuse rather than pick one.
+        caller_vault = canonical_vault(vault_root)
+        if caller_vault != journal_vault:
+            raise mr.UndoUnsupported(
+                f"the receipt's journal belongs to {journal_vault}, not to the "
+                f"vault {caller_vault} given for the undo"
+            )
+    root = canonical_vault(vault_root) if vault_root is not None else journal_vault
     if root is None:
         raise mr.UndoUnsupported(
             "the vault this receipt belongs to could not be resolved"
         )
-    target = resolve_note_path(root, str(receipt.get("relative_path", "")))
+    try:
+        target = resolve_note_path(root, str(receipt.get("relative_path", "")))
+    except NoteTargetRefused as exc:
+        raise mr.RevisionConflict(
+            f"the note is no longer a writable note in this vault: {exc}"
+        ) from exc
     with mr.queue_lock(target):
         try:
             current = mr.content_revision(_read_note_text(target))
@@ -641,13 +693,8 @@ def undo_note_receipt(
             provenance={"undo_of": str(receipt.get("id", ""))},
             kind=NOTE_UNDO,
             undo_of=str(receipt.get("id", "")),
+            journal=journal,
         )
-    undone = {
-        **{k: v for k, v in receipt.items() if k != "v"},
-        "status": mr.UNDONE,
-        "undo_of": str(receipt.get("id", "")),
-        "undo_receipt": str(reverse.get("id", "")),
-        "settled_at": mr._now(),
-    }
+    undone = _undone_row(receipt, str(reverse.get("id", "")))
     mr._append(journal, undone)
     return undone
