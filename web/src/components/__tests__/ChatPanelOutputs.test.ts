@@ -248,7 +248,6 @@ describe('ChatPanel Outputs section', () => {
     const chat = store.chats[0]
     chat.archived = true
     chat.postprocess = {
-      state: 'done',
       steps: { memory_pass: { status: 'ok', extra: { chat_id: 'pass-1' } } },
     }
     await flushPromises()
@@ -266,13 +265,13 @@ describe('ChatPanel Outputs section', () => {
     const { wrapper, store } = await mountPanel()
     const chat = store.chats[0]
     chat.archived = true
-    chat.postprocess = { state: 'done', steps: { insights: { status: 'ok', extra: {} } } }
+    chat.postprocess = { steps: {} }
     await flushPromises()
 
     expect(wrapper.find('.archive-memory-pass-btn').exists()).toBe(false)
 
     // A record that is not even a chat id must not become a navigation target.
-    chat.postprocess = { state: 'done', steps: { memory_pass: { status: 'queued', extra: { chat_id: 7 } } } } as never
+    chat.postprocess = { steps: { memory_pass: { status: 'queued', extra: { chat_id: 7 } } } } as never
     await flushPromises()
     expect(wrapper.find('.archive-memory-pass-btn').exists()).toBe(false)
   })

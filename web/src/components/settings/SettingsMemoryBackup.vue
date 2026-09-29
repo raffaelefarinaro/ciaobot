@@ -3,10 +3,7 @@
     <div class="settings-card-header settings-card-header--split">
       <div>
         <p class="section-title">Memory backup</p>
-        <p class="hint">
-          A private copy of your memory, kept somewhere other than this computer. It runs by
-          itself &mdash; you do not have to remember to do it.
-        </p>
+        <p class="hint">{{ cadenceText }}</p>
       </div>
       <!-- The configured state's two controls. One primary (Back up now), one
            neutral: a routine, reversible switch never wears the accent. -->
@@ -60,7 +57,15 @@
           automatically.
         </p>
         <p class="hint hint--compact">
-          Ciao can do the setup for you here, or you can copy the same instructions to any agent.
+          Ciaobot keeps this folder as a Git repository, and creates one if it is not already. Once
+          it is connected to a private GitHub repository, it syncs on its own. Ciao can do the
+          connection for you here, or you can copy the same instructions to any agent.
+          <a
+            class="set-link"
+            href="https://www.raffaelefarinaro.com/ciaobot/memory.html#backup"
+            target="_blank"
+            rel="noopener noreferrer"
+          >How backup works</a>
         </p>
         <div class="action-row settings-actions">
           <button
@@ -76,9 +81,6 @@
             @click="copyPrompt"
           >{{ copyPending ? 'Copying...' : 'Copy setup prompt' }}</button>
         </div>
-        <p class="hint hint--compact">
-          <button type="button" class="set-link" @click="openGuide">How memory backup works</button>
-        </p>
         <p v-if="setupChatId" class="action-result" role="status">
           Ciao is setting this up in a chat. This page updates on its own once the repository is
           connected.
@@ -88,135 +90,45 @@
         <p v-if="error" class="action-result action-result--error" role="alert">{{ error }}</p>
       </div>
 
-      <!-- Set up: what is true about the two copies, which are not the same
-           thing, and what to do about the state the backup is in. -->
+      <!-- The online copy has its own status and timestamp; local saves are not
+           evidence that the online copy succeeded. -->
       <template v-else-if="status">
-        <div class="set-list">
-          <div class="set-subrow">
-            <span class="set-subrow-label">Online backup</span>
-            <div class="set-subrow-control backup-state">
-              <span class="backup-state-line">
-                <span class="backup-dot" :class="`backup-dot--${stateView.tone}`" aria-hidden="true" />
-                {{ stateView.label }}
-              </span>
-              <span class="backup-detail">{{ stateView.detail }}</span>
-              <span v-if="serverReason" class="backup-reason">{{ serverReason }}</span>
-              <!-- A status is only as old as the read behind it, and a state
-                   like Offline can clear on its own. Re-reading is a quiet
-                   text action, never a second button in the header. -->
-              <button
-                type="button"
-                class="set-link set-link--quiet backup-recheck"
-                :disabled="loading"
-                @click="load()"
-              >{{ loading ? 'Checking...' : 'Check again' }}</button>
-            </div>
-          </div>
-          <div class="set-subrow">
-            <span class="set-subrow-label">On this computer</span>
-            <div class="set-subrow-control">
-              <span class="backup-detail">
-                Saved here every time, independently of the online copy.
-              </span>
-            </div>
-          </div>
-          <div class="set-subrow">
-            <span class="set-subrow-label">Last online backup</span>
-            <div class="set-subrow-control">
-              <span class="backup-detail">{{ lastSuccessText }}</span>
-            </div>
-          </div>
-          <div class="set-subrow">
-            <span class="set-subrow-label">What is backed up</span>
-            <div class="set-subrow-control">
-              <span class="backup-detail">{{ status.scope }}</span>
-            </div>
-          </div>
-          <div class="set-subrow">
-            <span class="set-subrow-label">Repository</span>
-            <div class="set-subrow-control">
-              <span class="backup-detail">
-                <a
-                  v-if="repoHref"
-                  class="backup-repo-link"
-                  :href="repoHref"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >{{ repoText }}</a>
+        <div class="backup-status">
+          <p class="backup-state-line" role="status">
+            <span class="backup-dot" :class="`backup-dot--${stateView.tone}`" aria-hidden="true" />
+            {{ stateView.label }}
+          </p>
+          <p class="backup-detail">Last online backup: {{ lastSuccessText }}</p>
+          <p v-if="status.state === 'needs_attention' && scopeGap" class="backup-warning">
+            {{ scopeGap }} tracked files are outside the backup scope and will not be included online.
+          </p>
+          <p v-else-if="status.state !== 'ready' && status.state !== 'paused'" class="backup-detail">
+            {{ stateView.detail }}
+          </p>
+          <details class="backup-details">
+            <summary>{{ status.state === 'needs_attention' ? 'Review details' : 'Backup details' }}</summary>
+            <div class="backup-details-body">
+              <p v-if="serverReason" class="backup-reason">{{ serverReason }}</p>
+              <p><strong>Backed up:</strong> {{ status.scope }}</p>
+              <p><strong>Repository:</strong>
+                <a v-if="repoHref" :href="repoHref" target="_blank" rel="noopener noreferrer">{{ repoText }}</a>
                 <code v-else>{{ repoText }}</code>
                 <template v-if="status.branch"> &middot; {{ status.branch }}</template>
-              </span>
+              </p>
+              <button v-if="status.state === 'ready'" type="button" class="set-link set-link--quiet" :disabled="loading" @click="load()">
+                {{ loading ? 'Checking...' : 'Check again' }}
+              </button>
             </div>
-          </div>
-          <div class="set-subrow">
-            <span class="set-subrow-label">Automatic</span>
-            <div class="set-subrow-control">
-              <span class="backup-detail">{{ cadenceText }}</span>
-            </div>
-          </div>
+          </details>
+          <button v-if="status.state !== 'ready'" type="button" class="set-link set-link--quiet backup-recheck" :disabled="loading" @click="load()">
+            {{ loading ? 'Checking...' : 'Check again' }}
+          </button>
         </div>
         <p v-if="actionResult" class="action-result" role="status">{{ actionResult }}</p>
         <p v-if="error" class="action-result action-result--error" role="alert">{{ error }}</p>
       </template>
     </template>
 
-    <!-- The guide. A native disclosure, so it is keyboard-operable and
-         announced without a line of script; the link above opens it and moves
-         focus with it. -->
-    <details ref="guideEl" class="backup-guide">
-      <summary>How memory backup works</summary>
-      <div ref="guideBodyEl" class="backup-guide-body" tabindex="-1">
-        <h3>What gets backed up</h3>
-        <p>
-          Your memory vault &mdash; the notes Ciaobot remembers, the proposals waiting for you and
-          the receipts of what it did &mdash; plus the skills, subagents and commands you wrote, the
-          workspace guide, and workspaces you archived. Never your passwords, keys or other
-          secrets, and never the Ciaobot program itself.
-        </p>
-
-        <h3>Two ways to set it up</h3>
-        <p>
-          <strong>Set up in Ciaobot</strong> opens a chat here and starts the work for you. It is
-          the same prompt either way, so a chat you already started is re-entered rather than
-          duplicated.
-        </p>
-        <p>
-          <strong>Copy setup prompt</strong> puts those instructions on your clipboard, ready to
-          paste into any agent. Use it when the agent you trust runs on another machine.
-        </p>
-
-        <h3>Saved here, and backed up there</h3>
-        <p>
-          Two different things, on purpose. Ciaobot always saves to this computer first, and that
-          is what it reads from &mdash; nothing about your memory changes when you connect a
-          repository. The online copy is the second copy: it is what you have if this computer is
-          lost, replaced or reinstalled, and it is the one that can fall behind. When the two
-          disagree, the copy on this computer is the one Ciaobot uses.
-        </p>
-
-        <h3>It needs the computer Ciaobot runs on</h3>
-        <p>
-          Backups are pushed by the machine Ciaobot is running on. Open Ciaobot on your phone or
-          another computer and you will see the same status, but the backup happens on the host.
-        </p>
-
-        <h3>Pause it, or back up now</h3>
-        <p>
-          Pause stops the automatic backups and survives a restart; nothing is lost, the copy on
-          this computer is untouched. <strong>Back up now</strong> does one backup immediately
-          instead of waiting for the next automatic one. Never back up while a chat is mid-run:
-          wait for it to finish, or use pause.
-        </p>
-
-        <h3>Finding the repository and its history</h3>
-        <p>
-          The <strong>Repository</strong> row above is where copies are sent &mdash; open it to see
-          every backup as it lands, and the history of them. <strong>Last online backup</strong>
-          records the copy that is known to be there; a newer local change is not a failure, it
-          simply has not been uploaded yet.
-        </p>
-      </div>
-    </details>
   </div>
 </template>
 
@@ -307,8 +219,6 @@ const copyPending = ref(false)
 const runPending = ref(false)
 const flagPending = ref(false)
 const setupChatId = ref('')
-const guideEl = ref<HTMLDetailsElement | null>(null)
-const guideBodyEl = ref<HTMLElement | null>(null)
 
 let loadSeq = 0
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -344,6 +254,11 @@ const stateView = computed(() => {
 const serverReason = computed(() => {
   const reason = status.value?.reason?.trim() || ''
   return reason === 'up to date' ? '' : reason
+})
+
+const scopeGap = computed(() => {
+  const match = serverReason.value.match(/(\d+) tracked path\(s\) outside the backup scope/i)
+  return match?.[1] || ''
 })
 
 /** The live origin, falling back to where the last run actually pushed. */
@@ -429,15 +344,6 @@ function scheduleUnconfiguredRefresh(): void {
     refreshesLeft -= 1
     void load()
   }, UNCONFIGURED_REFRESH_MS)
-}
-
-function openGuide(): void {
-  const el = guideEl.value
-  if (!el) return
-  el.open = true
-  // Focus follows the reveal, or a keyboard user is left on a control whose
-  // effect happened somewhere below it.
-  guideBodyEl.value?.focus({ preventScroll: false })
 }
 
 function openChat(): void {
@@ -562,11 +468,15 @@ onUnmounted(() => {
   border-top: 1px solid var(--border);
   padding-top: var(--space-3);
 }
-.backup-state {
+.backup-status {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: flex-start;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
 }
+.backup-status p { margin: 0; }
 .backup-state-line {
   display: inline-flex;
   align-items: center;
@@ -594,11 +504,11 @@ onUnmounted(() => {
 }
 .backup-reason {
   color: var(--fg2);
-  font-family: var(--font-mono, monospace);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
+.backup-warning { color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
 /* A flex child stretches to the column's width, and a button centres its own
    label, so the re-read would float in the middle of the row. */
 .backup-recheck {
@@ -608,31 +518,27 @@ onUnmounted(() => {
 /* An inline link inside a row of prose is a text-sized target. The repository
    link is the one control on this card that opens something off-app, so it
    gets the same 44px as every other tap target on a coarse pointer. */
-.backup-repo-link {
+.backup-details a {
   display: inline-block;
   min-height: var(--touch);
   overflow-wrap: anywhere;
 }
 @media (pointer: fine) {
   /* Nothing to hit on a mouse; keep the row's line box as it was. */
-  .backup-repo-link { min-height: 0; }
+  .backup-details a { min-height: 0; }
 }
-.backup-guide {
-  border-top: 1px solid var(--border);
-  padding-top: var(--space-2);
-}
-.backup-guide > summary {
+.backup-details > summary {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 32px;
-  color: var(--accent);
+  min-height: var(--touch);
+  color: var(--fg2);
   font-size: var(--text-sm);
   cursor: pointer;
   list-style: none;
 }
-.backup-guide > summary::-webkit-details-marker { display: none; }
-.backup-guide > summary::before {
+.backup-details > summary::-webkit-details-marker { display: none; }
+.backup-details > summary::before {
   content: '';
   flex: 0 0 auto;
   width: 6px;
@@ -643,8 +549,8 @@ onUnmounted(() => {
   transform: rotate(-45deg);
   transition: transform 120ms var(--ease);
 }
-.backup-guide[open] > summary::before { transform: rotate(45deg); }
-.backup-guide-body {
+.backup-details[open] > summary::before { transform: rotate(45deg); }
+.backup-details-body {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -654,16 +560,8 @@ onUnmounted(() => {
   line-height: 1.6;
   max-width: 72ch;
 }
-.backup-guide-body:focus { outline: none; }
-.backup-guide-body h3 {
-  margin: var(--space-2) 0 0;
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-.backup-guide-body h3:first-child { margin-top: 0; }
-.backup-guide-body p { margin: 0; }
-@media (pointer: coarse) {
-  .backup-guide > summary { min-height: var(--touch); }
+.backup-details-body p { margin: 0; overflow-wrap: anywhere; }
+@media (pointer: coarse), (max-width: 600px) {
+  .settings-card-header-actions button { min-height: var(--touch); }
 }
 </style>

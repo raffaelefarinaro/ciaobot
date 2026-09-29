@@ -53,19 +53,6 @@
       title="Retry scheduled"
       aria-label="Retry scheduled"
     >↻</span>
-    <!-- Ranked last on purpose: post-archive work never needs the user, so it
-         must never outrank a signal that does. In practice it cannot collide —
-         an archived chat has no turn, no agents and no retry. -->
-    <span
-      v-else-if="primarySignal === 'tidying'"
-      class="chat-signal chat-signal--tidying"
-      :title="tidyingTitle"
-      :aria-label="tidyingTitle"
-    >
-      <span class="tidy-spinner" aria-hidden="true" />
-      <span v-if="density === 'card'" class="chat-signal-tidy-label">{{ tidyingLabel }}</span>
-    </span>
-
     <span
       v-if="intervalSummary"
       class="chat-signal chat-signal--interval"
@@ -87,7 +74,6 @@
 import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
-import { postprocessLabel } from '../lib/postprocessView'
 import type { WorkspaceColorId } from '../lib/workspaceColors'
 
 const props = withDefaults(defineProps<{
@@ -123,12 +109,6 @@ const runsTitle = computed(() =>
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
 const unread = computed(() => store.chatUnread(props.chatId) > 0)
 
-// Post-archive tidy-up: the session trajectory, written after the chat was
-// archived. Deliberately the quietest thing this component can draw.
-const tidying = computed(() => store.chatIsPostprocessing(props.chatId))
-const tidyingLabel = computed(() => postprocessLabel(store.chatPostprocess(props.chatId)))
-const tidyingTitle = computed(() => `Ciaobot is ${tidyingLabel.value || 'tidying up'}`)
-
 // A memory pass that ended unclean. Ranked below `needs` and above `working`:
 // it is the one background job whose unfinished state is the owner's problem,
 // so it must outrank the "still going" signals that are not asking anything.
@@ -136,14 +116,13 @@ const memoryAttention = computed(() => store.memoryPassNeedsAttention(props.chat
 
 // Unread is a separate static notification dot. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'memory' | 'working' | 'agents' | 'runs' | 'retry' | 'tidying' | null>(() => {
+const primarySignal = computed<'needs' | 'memory' | 'working' | 'agents' | 'runs' | 'retry' | null>(() => {
   if (needsInput.value) return 'needs'
   if (memoryAttention.value) return 'memory'
   if (working.value) return 'working'
   if (agentCount.value > 0) return 'agents'
   if (runCount.value > 0) return 'runs'
   if (props.density === 'row' && retryPending.value) return 'retry'
-  if (tidying.value) return 'tidying'
   return null
 })
 
@@ -285,52 +264,6 @@ const intervalTitle = computed(() => {
   line-height: 1;
 }
 
-/* Post-archive tidy-up. The accent pulse above means "your turn is live" or
-   "agents are working" — things that may want you. This never wants you, so it
-   gets the muted foreground instead of the accent, and breathes slower and
-   shallower than .activity-spinner (2.6s vs 1.1s). Keeping it in the accent
-   colour would have taught the eye to discount the accent. */
-.chat-signal--tidying { gap: var(--space-1); }
-
-.tidy-spinner {
-  position: relative;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--fg3);
-  animation: chat-signal-breathe 2.6s ease-in-out infinite;
-  flex-shrink: 0;
-}
-
-/* A hollow expanding ring, not a filled halo: less visual weight than the
-   accent version even at the same size. */
-.tidy-spinner::before {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border-radius: 50%;
-  border: 1px solid var(--fg3);
-  opacity: 0;
-  animation: chat-signal-ring-slow 2.6s ease-out infinite;
-  pointer-events: none;
-}
-
-.chat-signal-tidy-label {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  white-space: nowrap;
-}
-
-@keyframes chat-signal-breathe {
-  0%, 100% { opacity: 0.35; transform: scale(0.8); }
-  50%      { opacity: 0.9;  transform: scale(1); }
-}
-
-@keyframes chat-signal-ring-slow {
-  0%   { transform: scale(0.7); opacity: 0.5; }
-  100% { transform: scale(1.9); opacity: 0; }
-}
-
 .chat-signal--interval {
   color: var(--accent);
   font-size: var(--text-lg);
@@ -353,16 +286,11 @@ const intervalTitle = computed(() => {
 
 @media (prefers-reduced-motion: reduce) {
   .activity-spinner,
-  .activity-spinner::before,
-  .tidy-spinner,
-  .tidy-spinner::before {
+  .activity-spinner::before {
     animation: none;
   }
 
   .activity-spinner { opacity: 1; }
   .activity-spinner::before { opacity: 0.3; }
-  /* Still dimmer than the accent dot without motion to separate them. */
-  .tidy-spinner { opacity: 0.75; }
-  .tidy-spinner::before { opacity: 0; }
 }
 </style>

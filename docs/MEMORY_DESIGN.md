@@ -22,8 +22,8 @@ A personal assistant's memory must be, with **zero user configuration**:
    pollutes the store with its own paperwork.
 6. **Legible** — plain markdown the user can read, edit, and diff. User
    correction is the only reliable fix for extraction errors.
-7. **Private by choice** — the automatic memory pass and trajectory capture are
-   on by default, but Settings → Automations can stop each automatic process.
+7. **Private by choice** — the automatic memory pass is on by default, but the
+   Session insights switch in Settings → General stops it.
 
 ## Architecture: two layers, verbatim long tail
 
@@ -70,7 +70,7 @@ outperforms any pipeline that summarizes those sources away.
 | Scope by default, promote explicitly | Anthropic's project-scoped memory; wrong scoping is a production failure | Per-workspace vaults, regions, and curation; `[project]` facts go to the project doc, never a region; promoting a NEW region fact always takes an explicit act — a REVIEWER action, whether that is a user or agent accepting a queued proposal or the attended memory pass writing one itself — and the unattended curator never promotes a new region fact: it may only consolidate what is already there, under the undo-log rule |
 | The machinery must not remember itself | observed self-ingestion, 2026-08: the nightly curator's transcript re-extracted its own prompt rules into `ciao:memory` | A turn the transcript marks as unattended is not the user's, so the memory pass is told never to record one and the unattended run defers instead; bookkeeping files are `RESERVED_UNINDEXED_FILES` in FTS and `search: false` is a general opt-out |
 | Recall must survive paraphrase | LongMemEval ablations (arXiv:2410.10813): key expansion + query rewriting | AND→OR fallback for zero-hit multi-word queries; system prompt mandates 2–3 reformulations before "not found"; curation maintains `aliases:` frontmatter ("brother-in-law", "hourly rate") |
-| Procedures are contracts, not prose | prompt drift: three near-copies of the curation contract had diverged | The nightly procedure is one stock skill (`memory-curation`); the schedule prompt only dispatches; tests pin the contract to the skill file |
+| Procedures are contracts, not prose | prompt drift: three near-copies of the curation contract had diverged | The nightly procedure lives in the packaged Workspace care schedule prompt; tests pin its contract there, without a separate skill |
 | A managed mutation must be safe and reversible | one read-merge-write per region, plus a queue bullet and a decision record, is not one transaction in plain markdown | `ciao/memory_receipts.py`: every managed region write, queue resolution and prune records a stable-id receipt (`Workspace/Memory-Receipts.jsonl`) with actor/source, revisions and before/after images; the guide lock is required (unavailable = retryable failure, never an unlocked write), preview/apply/undo compare revisions so an external edit is a conflict, startup recovery reconciles an interrupted receipt from its images, and undo refuses a changed destination. External direct edits are conflicts, not audited writes |
 
 ## Failure modes this design answers

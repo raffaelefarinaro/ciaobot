@@ -12,8 +12,7 @@ This module owns both:
   row, built once in :func:`build_accept_result` for the single-row and batch
   routes alike;
 * :func:`record_decision` is the one place a decision is written, to the
-  dedupe sidecar (``memory_proposals``) and to the outcomes tally
-  (``proposal_outcomes``), in that order.
+  dedupe sidecar (``memory_proposals``).
 
 Nothing here touches Starlette: no ``Request``, no response objects, no app
 state. A caller passes the queue path, the row's fields and what the accept
@@ -194,26 +193,18 @@ def record_decision(
     text: str,
     kind: str,
     via: str,
-    workspace: str = "",
     source: str = "",
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
 ) -> None:
-    """Record one resolved proposal in both ledgers the queue depends on.
+    """Record one resolved proposal in the decision history.
 
-    Order matters and is fixed here: the decision history first, the outcomes
-    tally second. The history is what ``append_proposals`` dedupes against, so
-    a decision missing from it means the next curator pass re-files the fact
-    the operator just resolved; the tally only counts kinds and is trimmed.
-
-    ``action`` is ``"accept"`` or ``"dismiss"``; anything else is treated as a
-    dismissal by the history and refused by the tally, which is the behaviour
-    each caller already had. The tally is written only for the extraction
-    kinds — a ``skill`` row is filed by the memory pass but settled rather than
-    promoted and ``rehome`` rows are queued by vault hygiene, so neither
-    measures the memory pipeline.
+    The history is what ``append_proposals`` dedupes against, so a decision
+    missing from it means the next curator pass re-files the fact the operator
+    just resolved. ``action`` is ``"accept"`` or ``"dismiss"``; anything else is
+    treated as a dismissal.
 
     ``receipt_id`` is the memory-change receipt an accept's write handed back.
     The history keeps the ORIGINAL bullet as ``text`` because append-time
@@ -231,10 +222,9 @@ def record_decision(
     is not this function's to write: by the time a decision is recorded the row
     is already out of the queue, which is too late for it to matter.
 
-    Imports are deferred so a test that patches ``ciao.memory_proposals`` or
-    ``ciao.proposal_outcomes`` still sees its patch honoured here.
+    Imports are deferred so a test that patches ``ciao.memory_proposals`` still
+    sees its patch honoured here.
     """
-    from ciao import proposal_outcomes
     from ciao.memory_proposals import record_dismissal, record_promotion
 
     accepted = action == "accept"
@@ -249,12 +239,4 @@ def record_decision(
         outcome=outcome,
         proposal_id=proposal_id,
         receipt_id=receipt_id,
-    )
-    if not proposal_outcomes.is_extraction_kind(kind):
-        return
-    proposal_outcomes.record(
-        kind=kind,
-        action="promoted" if accepted else "dismissed",
-        workspace=workspace,
-        via=via,
     )

@@ -191,8 +191,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   handlers, unread and attention counts, the send path with its queue, deferred
   and unacked sends, the streaming timeline, toasts and package status.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
-  way, one tab at a time, into `components/settings/`. The MCP tab is the first
-  one out. `composables/useMcpServers.ts` owns the MCP state and every
+  way, one tab at a time, into `components/settings/`. General begins with a
+  short capability-help section linking to the public feature guide and inviting
+  users to ask Ciaobot directly in any chat; it appears in the generated
+  "On this page" navigation. The MCP tab is the first one out.
+  `composables/useMcpServers.ts` owns the MCP state and every
   `/api/mcp/*` call — the status, the per-server edit drafts, the expansion
   map, the secret inputs, the tool probes and the add form. It imports no
   store, no router and no lifecycle hook: the API client, `notifySaved`,
@@ -206,6 +209,16 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   run from its `onMounted` for every tab. `/api/mcp/usage` is fetched even
   though no template renders it: the operator reads that endpoint by hand to
   decide which MCP tools to prune. Do not drop the call.
+  **Skills, Subagents, Commands and MCP servers are scoped to one workspace** —
+  the one selected in the sidebar, named `assetScope` in `SettingsView` and
+  passed to `useMcpServers` as its `workspace` option. The name rides every read
+  AND every write, because a workspace's agent assets and its `.mcp.json`/`.env`
+  live in that workspace's own agent root: an unscoped request resolves the
+  install root, which on a re-rooted install is a different directory from the
+  one the list just showed. `assetScope` is the single place to change if that
+  ever moves; a `watch` on `projectStore.activeWorkspace` refetches all four.
+  `useMcpServers` takes the workspace as an option rather than reading a store,
+  to stay composable and unit-testable without Pinia.
   Shared settings styling lives in `components/settings/settingsPanels.css`,
   loaded by both sides with `<style scoped src>` — a parent's scoped rules
   never reach a child, and the alternative is silently unstyled markup. New
@@ -223,8 +236,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
 ### Browser suite (`npm run test:e2e`)
 
-`e2e/` holds a deliberately small Playwright suite — six spec files, eighteen
-tests, about three seconds — that covers only the things a jsdom mount **cannot**
+`e2e/` holds a deliberately small Playwright suite that covers only the things a jsdom mount **cannot**
 establish:
 
 | Spec | What only a real browser can decide |
@@ -235,6 +247,7 @@ establish:
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. |
 | `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, and that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap. |
+| `chat-loading-layout.spec.ts` | That the held history-loading skeleton has separated rows within the chat pane at desktop and phone widths. |
 
 The fixture serves an empty chat history by default. A spec that needs real
 turns to select opts in per session with `POST /__fixture__/transcript`, so the

@@ -19,7 +19,6 @@ from typing import Any
 
 import pytest
 
-from ciao import archive_jobs as aj
 from ciao.config import CiaoConfig
 from ciao.models import AgentRequest, ChatContext, ResultEvent, StreamEvent
 from ciao.sessions import StateStore
@@ -263,14 +262,6 @@ async def _await_detached(manager: ProjectChatManager) -> None:
             return
         await asyncio.gather(*pending, return_exceptions=True)
         await asyncio.sleep(0)
-
-
-def _no_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def no_pipeline(job: object, inputs: dict, **kwargs: object) -> object:
-        del inputs, kwargs
-        return job
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", no_pipeline)
 
 
 # ── The prompt ────────────────────────────────────────────────────────────
@@ -557,23 +548,13 @@ async def test_postprocess_enqueues_and_skips_one_shot_when_enabled(
     source = _source(manager)
     project = manager.get_project(source.project_id)
     archive = _archive_file(tmp_path)
-    _no_model_calls(monkeypatch)
 
     manager.run_archive_postprocess(
         source.chat_id,
-        ArchiveOutcome(archive, "sess-1", 1, '{"idx":1}'),
+        ArchiveOutcome(archive, 1),
         source,
         project,
     )
-
-    job = aj.load_job(
-        manager._runtime_root,
-        aj.new_job_id(source.chat_id, source.archive_path),
-    )
-    assert job is not None
-    # The trajectory is all the manifest plans; the vault work is the pass's.
-    assert list(job.stages) == ["trajectory"]
-    assert job.status_of("trajectory") == aj.PENDING
 
     memory_project = manager._memory_pass.ensure_project("work")
     passes = [
@@ -618,21 +599,14 @@ async def test_postprocess_unchanged_when_disabled(
     source = _source(manager)
     project = manager.get_project(source.project_id)
     archive = _archive_file(tmp_path)
-    _no_model_calls(monkeypatch)
 
     manager.run_archive_postprocess(
         source.chat_id,
-        ArchiveOutcome(archive, "sess-1", 1, '{"idx":1}'),
+        ArchiveOutcome(archive, 1),
         source,
         project,
     )
 
-    job = aj.load_job(
-        manager._runtime_root,
-        aj.new_job_id(source.chat_id, source.archive_path),
-    )
-    assert job is not None
-    assert job.status_of("trajectory") != aj.SKIPPED
     assert streams.calls == []
     assert all(p.kind == "" for p in manager._projects.values())
     assert (
@@ -653,13 +627,12 @@ async def test_memory_pass_chat_archive_does_not_recurse(
     archive = _archive_file(tmp_path)
     memory_id = manager.enqueue_memory_pass(source, project, archive, "")
     memory_chat = manager.get_chat(memory_id)
-    _no_model_calls(monkeypatch)
 
     # Archiving the pass itself must not queue a pass of the pass, and must not
     # run the one-shot stages over the pass's own bookkeeping.
     manager.run_archive_postprocess(
         memory_id,
-        ArchiveOutcome(archive, "sess-2", 1, '{"idx":1}'),
+        ArchiveOutcome(archive, 1),
         memory_chat,
         manager.get_project(memory_chat.project_id),
     )
@@ -670,12 +643,6 @@ async def test_memory_pass_chat_archive_does_not_recurse(
         for c in manager._chats.values()
         if c.project_id == memory_project.project_id
     ] == [memory_id]
-    job = aj.load_job(
-        manager._runtime_root,
-        aj.new_job_id(memory_id, memory_chat.archive_path),
-    )
-    assert job is not None
-    assert list(job.stages) == ["trajectory"]
 
 
 def test_dedupe_by_source_chat(

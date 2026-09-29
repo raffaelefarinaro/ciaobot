@@ -185,9 +185,6 @@ describe('HomeReviewSummary', () => {
     expect(rows[1].find('.home-review-detail').text()).toContain('personal briefing · next')
     expect(wrapper.find('.home-review-icon').exists()).toBe(false)
 
-    await wrapper.get('.home-review-link').trigger('click')
-    expect(router.push).toHaveBeenCalledWith('/memory')
-
     await rows[1].trigger('click')
     expect(router.push).toHaveBeenCalledWith('/schedules')
     wrapper.unmount()
@@ -211,7 +208,7 @@ describe('HomeReviewSummary', () => {
 
     const switchChat = vi.spyOn(projects, 'switchChat').mockResolvedValue(undefined)
     const wrapper = mount(HomeReviewSummary)
-    expect(wrapper.findAll('.home-review-link').map(l => l.text())).toEqual(['Open Memory'])
+    expect(wrapper.text()).not.toContain('Open Memory')
     expect(wrapper.text()).not.toContain('memory pass')
     expect(switchChat).not.toHaveBeenCalled()
     wrapper.unmount()

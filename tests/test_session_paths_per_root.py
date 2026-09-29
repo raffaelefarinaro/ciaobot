@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao import insights, subagent_tracking
+from ciao import subagent_tracking
 from ciao.transcripts import _claude_projects_dir
 from ciao.web import transcript_service
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
@@ -90,24 +90,6 @@ def test_slug_differs_per_agent_root(fake_home: Path) -> None:
     root_a = fake_home / "a"
     root_b = fake_home / "b"
     assert _projects_dir_for(root_a) != _projects_dir_for(root_b)
-
-
-def test_filter_session_jsonl_reads_own_root(fake_home: Path) -> None:
-    root_a = fake_home / "a"
-    root_b = fake_home / "b"
-    session = "11111111-1111-1111-1111-111111111111"
-    _write_session(_projects_dir_for(root_a), session)
-
-    assert insights.filter_session_jsonl(root_a, session) is not None
-    assert insights.filter_session_jsonl(root_b, session) is None
-
-
-def test_filter_session_jsonl_defaults_to_workspace_root(fake_home: Path) -> None:
-    root = fake_home / "a"
-    session = "22222222-2222-2222-2222-222222222222"
-    _write_session(_projects_dir_for(root), session)
-
-    assert insights.filter_session_jsonl(root, session) is not None
 
 
 def test_find_parent_session_file_reads_own_root(fake_home: Path) -> None:
@@ -244,17 +226,10 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
-# -- archiving reads and reclaims the chat's OWN root -------------------------
+# -- archiving reclaims the chat's OWN root -----------------------------------
 #
-# `_read_archive_inputs` resolved the Claude session blob against
-# `config.workspace_root`, but a workspace chat's blob is keyed by the agent
-# root it ran in. On a re-rooted install that lookup returned None for every
-# workspace-scoped chat, and a None there is indistinguishable from "nothing to
-# extract": `run_archive_postprocess` gates on `outcome.filtered_jsonl`, so
-# insights, the project-doc fold, the trajectory and memory proposals were all
-# skipped in silence — no job run, no log line. Observed live: 26 of 26 Claude
-# archives over two days had no insights section while every opencode archive
-# (which uses the provider-neutral transcript instead) had one.
+# A workspace chat's session blob is keyed by the agent root it ran in, not by
+# `config.workspace_root`, so reclaim has to target that root.
 
 
 def _rerooted_manager(tmp_path: Path, workspace: str) -> ProjectChatManager:
@@ -281,45 +256,6 @@ def _archived_chat(pcm: ProjectChatManager, workspace: str, session: str) -> Cha
     chat.session_id = session
     chat.provider = "claude"
     return chat
-
-
-def test_archive_inputs_read_the_chats_own_agent_root(
-    tmp_path: Path, fake_home: Path
-) -> None:
-    from ciao.models import ChatContext
-
-    pcm = _rerooted_manager(tmp_path, "work")
-    session = "33333333-3333-3333-3333-333333333333"
-    chat = _archived_chat(pcm, "work", session)
-    agent_root = pcm._agent_root_for_chat(chat.chat_id)
-    assert agent_root != pcm._config.workspace_root
-    _write_session(_projects_dir_for(agent_root), session)
-
-    _, filtered, _ = pcm._read_archive_inputs(
-        chat.chat_id, ChatContext.for_web(chat.chat_id), chat, agent_root
-    )
-    assert filtered, "the chat's own agent root holds the blob"
-
-
-def test_archive_inputs_miss_a_blob_under_the_install_root(
-    tmp_path: Path, fake_home: Path
-) -> None:
-    """The bug's shape: a blob written under the install root is not this
-    chat's, and must not be read as if it were."""
-    from ciao.models import ChatContext
-
-    pcm = _rerooted_manager(tmp_path, "work")
-    session = "44444444-4444-4444-4444-444444444444"
-    chat = _archived_chat(pcm, "work", session)
-    _write_session(_projects_dir_for(pcm._config.workspace_root), session)
-
-    _, filtered, _ = pcm._read_archive_inputs(
-        chat.chat_id,
-        ChatContext.for_web(chat.chat_id),
-        chat,
-        pcm._agent_root_for_chat(chat.chat_id),
-    )
-    assert not filtered
 
 
 def test_reclaim_targets_the_chats_agent_root(

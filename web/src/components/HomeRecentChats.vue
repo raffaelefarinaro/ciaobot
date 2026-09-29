@@ -117,8 +117,8 @@
 
           </template>
 
-          <!-- The memory work each archived conversation handed off: the archive
-               pipeline and the memory pass it queued, as ONE entry. The pass is
+          <!-- The memory work each archived conversation handed off: the memory
+               pass it queued, as ONE entry. The pass is
                a real chat, and it used to be listed twice — once in the tiers
                above under its own internal title, once here. The row now opens
                the pass (where the live turn, the question and the reply are),
@@ -164,17 +164,6 @@
                   {{ insight.question }}
                 </span>
               </button>
-              <!-- A partial pipeline is a recovery case, so the row offers the
-                   retry. It is a sibling of the open button, not a child: a
-                   button inside a button is not reachable markup. -->
-              <button
-                v-if="insight.retryable"
-                type="button"
-                class="home-chat-retry"
-                :disabled="retryingChats[insight.sourceChatId]"
-                :aria-label="`Retry unfinished post-archive steps for ${insight.title}`"
-                @click="retryInsightsFor(insight.sourceChatId)"
-              >{{ retryingChats[insight.sourceChatId] ? '…' : 'retry' }}</button>
             </div>
           </div>
         </div>
@@ -188,12 +177,7 @@ import { computed, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
-import {
-  activeInsightSummary,
-  unfinishedInsightSummary,
-  type MemoryInsight,
-} from '../lib/memoryInsights'
-import { errorMessage } from '../lib/errorMessage'
+import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -215,20 +199,6 @@ const hasHomeActivity = computed(() => (
 ))
 const lanesEl = ref<HTMLElement | null>(null)
 const laneElements = ref<Record<string, HTMLElement>>({})
-// Chats whose post-archive retry is in flight, so the button shows a busy state.
-const retryingChats = ref<Record<string, boolean>>({})
-
-async function retryInsightsFor(chatId: string): Promise<void> {
-  if (retryingChats.value[chatId]) return
-  retryingChats.value[chatId] = true
-  try {
-    await store.retryInsights(chatId)
-  } catch (e) {
-    store.pushErrorToast('Could not retry the post-archive step', errorMessage(e))
-  } finally {
-    retryingChats.value[chatId] = false
-  }
-}
 
 // The pass is the chat a person opens: it is where the live turn, the question
 // and the reply are. The transcript is the fallback for the window before a
@@ -417,11 +387,10 @@ function laneUnreadCount(lane: HomeLane): number {
  * would understate it, and dropping it would report "nothing needs your
  * attention" with a row on screen saying the opposite.
  */
-function laneInsightCounts(lane: HomeLane): { active: number; blocking: number; unfinished: number } {
+function laneInsightCounts(lane: HomeLane): { active: number; blocking: number } {
   return {
     active: lane.insights.filter(row => row.active).length,
     blocking: lane.insights.filter(row => row.blocking).length,
-    unfinished: lane.insights.filter(row => row.retryable).length,
   }
 }
 
@@ -444,16 +413,10 @@ function laneStatusText(lane: HomeLane): string {
   sentences.push(working
     ? `${working} agent${working === 1 ? '' : 's'} still working`
     : 'no agents working')
-  // A pass already waiting on the owner is not "still updating", so the two
-  // fragments count different rows: work in flight, and work that stopped with
-  // a stage left to run. The latter is neither — processing has stopped and the
-  // row offers a manual retry, so folding it into the in-flight count reported a
-  // stalled chat as busy, and dropping it hid the one signal on this line that
-  // the user can act on.
+  // A pass already waiting on the owner is not "still updating": it is counted
+  // in `needs` above instead.
   const active = activeInsightSummary(insights.active)
   if (active) sentences.push(active)
-  const unfinished = unfinishedInsightSummary(insights.unfinished)
-  if (unfinished) sentences.push(unfinished)
   return sentences.join('. ') + '.'
 }
 
@@ -1048,8 +1011,7 @@ defineExpose({ onArrow })
      rather than landing between the status and the time. */
   flex-wrap: wrap;
   row-gap: 0;
-  /* The hairline lives on the wrapper, so it spans the full width on the one
-     row that also holds a retry control. */
+  /* The hairline lives on the wrapper. */
   border-bottom: 0;
 }
 
@@ -1057,9 +1019,8 @@ defineExpose({ onArrow })
   flex: 1 0 100%;
 }
 
-/* The row wrapper exists for that retry control and for nothing else, so it has
-   no background and no radius of its own — only the rule every other row in
-   the section draws. */
+/* The row wrapper carries the workspace colour; it has no background and no
+   radius of its own — only the rule every other row in the section draws. */
 .home-insight-row {
   display: flex;
   align-items: center;
@@ -1221,8 +1182,8 @@ defineExpose({ onArrow })
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
 }
 
-/* A pass blocked on the owner takes the accent, and a pass or a stage that
-   stopped with work left takes the warn colour. Both are rows you are meant to
+/* A pass blocked on the owner takes the accent, and a pass that stopped with
+   work left takes the warn colour. Both are rows you are meant to
    act on, so neither reads as the muted background chatter an in-flight row is.
    One rule per phase, so nothing has to win a specificity fight to colour a
    row correctly. */
@@ -1230,39 +1191,8 @@ defineExpose({ onArrow })
   color: var(--accent);
 }
 
-.home-chat-item--insight-attention .home-chat-tidy-note,
-.home-chat-item--insight-unfinished .home-chat-tidy-note {
+.home-chat-item--insight-attention .home-chat-tidy-note {
   color: var(--warning);
-}
-
-/* The retry button on a failed row. Small bordered control in the
-   warn register: it is an action, but a secondary one for a routine recovery,
-   not the single most important thing on screen. */
-.home-chat-retry {
-  flex: 0 0 auto;
-  min-height: 44px;
-  min-width: 44px;
-  padding: 2px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 6px);
-  background: transparent;
-  color: var(--warning);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.home-chat-retry:hover,
-.home-chat-retry:focus-visible {
-  background: color-mix(in srgb, var(--warning) 10%, transparent);
-  border-color: var(--warning);
-}
-
-.home-chat-retry:disabled {
-  cursor: wait;
-  opacity: 0.6;
 }
 
 .remote-chip {

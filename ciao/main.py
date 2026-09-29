@@ -350,23 +350,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app_settings.migrate_legacy_insights_enabled(
         getattr(config, "legacy_insights_disabled", None)
     )
-    app_settings.migrate_legacy_trajectories_enabled(
-        getattr(config, "legacy_trajectories_disabled", None)
-    )
     app_settings.apply_to_config(config)
 
     # Pin the job-run recorder to the same .runtime the config uses, then
-    # route finished startup phases (sync, vault index, rebuild, ...) into it
-    # so the Automation page can show system-task status.
+    # route finished startup phases (vault index, skills update) into it.
     from ciao import job_runs
-    from ciao import proposal_outcomes
 
     job_runs.configure(config.state_path.parent)
-    proposal_outcomes.configure(config.state_path.parent)
     tracker = StartupTracker(on_finish=job_runs.record_startup_phase)
-    # Live job events reach the PWA through the chat manager's event bus, so a
-    # surface can show background work as it happens rather than only after it
-    # lands in the run log. Attached once the manager exists (see below).
 
     # Start provider checks in the background
     tracker.start("connect_claude_code")
@@ -615,10 +606,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         transcript_store=transcripts,
         path=config.state_path.parent / "web_projects.json",
     )
-    # Now that a manager exists, let tracked background jobs announce themselves
-    # through its event bus (see job_runs.set_publisher).
-    pcm.attach_job_runs_publisher()
-
     # Dispatch failures stamp last_status on the stored schedule row so the
     # Automations sidebar flags them for attention instead of leaving an
     # endless string of invisible `stream error` job records (issue #407).
@@ -815,11 +802,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service
         app.state.control_plane = control_plane
-    app.state.push_manager = PushManager(
-        config.state_path.parent,
-        subject=PUSH_SUBJECT,
-        push_all=lambda: app_settings.settings.push_all_devices,
-    )
+    app.state.push_manager = PushManager(config.state_path.parent, subject=PUSH_SUBJECT)
     app.state.focused_chats = {}
 
     # A read mutation is already broadcast to every connected PWA. Fan the
@@ -982,19 +965,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         swept = pcm.sweep_orphaned_cli_tasks()
         if swept:
             logger.warning("Woke %d chat(s) with CLI tasks orphaned by the restart", swept)
-
-        # Resume post-archive pipelines the previous process left incomplete.
-        # Stages still marked "running" at load were interrupted (the task died
-        # with the old process); they become retryable here and only the
-        # unfinished local work is re-run, never model extraction that already
-        # landed. Bounded concurrency so a large backlog cannot stampede the
-        # provider or the disk.
-        try:
-            resumed = await pcm.resume_interrupted_jobs(max_concurrency=2)
-            if resumed:
-                logger.info("Resuming %d interrupted archive job(s)", resumed)
-        except Exception:
-            logger.exception("Archive job resume failed")
 
         # The memory-pass queue is durable on the memory chats' helpers, so a
         # restart picks it back up: a pass that was running died with the old

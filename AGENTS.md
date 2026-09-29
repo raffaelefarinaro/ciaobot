@@ -61,6 +61,20 @@ Branching and releases:
 - All pull requests target `develop`.
 - Only the admin creates releases from `develop`.
 
+Upkeep between releases:
+- [`docs/UPKEEP.md`](docs/UPKEEP.md) is the watchlist: topics we keep an eye on,
+  with the last-checked date and the decision. **Edit it during ordinary work** —
+  add a row when you notice something worth watching, in whatever PR you are
+  already in. It is a working document, not a periodic report, and a stale date
+  on an unchecked row is worse than no date.
+- The checks themselves live in the `/ciao-upkeep` skill: every dependency and
+  pin we install (the `gws` CLI, the GitHub Actions pins and the paired Node
+  floor), the stock skill catalog against `ciao-capabilities` and
+  the marketing site, doc rot, and the advisory CI steps nobody reads.
+- `/ciao-release` deliberately does none of this. It cuts, verifies, installs,
+  walks the UI and ships; it does not fix. A defect found during a release
+  becomes an issue, and the fix happens on `develop` before the next cut.
+
 Use plain, factual engineering notes in commits and pull requests.
 
 ## Reporting Issues & Continuous Improvement

@@ -555,6 +555,17 @@
   max-width: 360px;
 }
 
+/* A section's "how this works" link. Layout only: colour and underline come
+   from the global `a` rule, so it stays self-describing. Unlike `.set-link`
+   it wraps (its label is a sentence, not a button) and keeps the same 44px
+   touch target every other settings control has. */
+.settings-help-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch);
+  font-size: var(--text-sm);
+}
+
 .set-link {
   min-height: 32px;
   padding: 0;

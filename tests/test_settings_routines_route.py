@@ -46,7 +46,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     # Automatic resolves to the workspace's default model.
     assert data["insights_model_effective"] == config.claude_default_model
     assert data["insights_enabled"] is True
-    assert data["trajectories_enabled"] is True
+    assert "trajectories_enabled" not in data
     # The Claude model list is the vocabulary the selectors offer.
     assert data["model_options"]["anthropic"] == ["opus", "sonnet", "haiku", "fable"]
     assert data["backends"] == {"anthropic": True}
@@ -131,66 +131,6 @@ def test_patch_rejects_non_boolean_insights_enabled(tmp_path):
         json={"insights_enabled": "false"},
     )
     assert resp.status_code == 400
-
-
-def test_patch_toggles_trajectories_enabled(tmp_path):
-    client, config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines",
-        json={"trajectories_enabled": False},
-    )
-
-    assert resp.status_code == 200
-    assert resp.json()["trajectories_enabled"] is False
-    assert config.trajectories_enabled is False
-    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.trajectories_enabled is False
-
-
-def test_patch_rejects_non_boolean_trajectories_enabled(tmp_path):
-    client, _config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines",
-        json={"trajectories_enabled": "false"},
-    )
-    assert resp.status_code == 400
-
-
-def test_patch_sets_trusted_url(tmp_path):
-    client, _config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines",
-        json={"trusted_url": "https://mini.ts.net"},
-    )
-
-    assert resp.status_code == 200
-    # The response carries the normalized origin, not what was typed.
-    assert resp.json()["trusted_url"] == "https://mini.ts.net/"
-    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.trusted_url == "https://mini.ts.net/"
-
-    # Only an HTTPS origin is a secure context, so a bad one is a 400 and
-    # nothing is persisted.
-    bad = client.patch(
-        "/api/settings/routines",
-        json={"trusted_url": "http://x"},
-    )
-    assert bad.status_code == 400
-
-
-def test_patch_toggles_push_all_devices(tmp_path):
-    client, _config = _make_client(tmp_path)
-    assert client.get("/api/settings/routines").json()["push_all_devices"] is False
-
-    resp = client.patch(
-        "/api/settings/routines",
-        json={"push_all_devices": True},
-    )
-
-    assert resp.status_code == 200
-    assert resp.json()["push_all_devices"] is True
-    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.push_all_devices is True
 
 
 def test_patch_applies_provider_default_models(tmp_path):

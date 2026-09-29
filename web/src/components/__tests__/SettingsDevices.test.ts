@@ -6,7 +6,7 @@
 //
 // The labels are the point of the card. A browser treats non-loopback plain
 // HTTP as an insecure context, so a LAN URL can never install the app or
-// deliver push notifications; only the configured HTTPS origin can. Claiming
+// deliver push notifications; only an HTTPS origin can. Claiming
 // otherwise would send someone to a URL that silently cannot do what they were
 // told.
 
@@ -17,7 +17,6 @@ import { api } from '../../lib/api'
 
 const ADDRESSES = {
   port: 9443,
-  trusted_url: 'https://mini.ts.net/',
   addresses: [
     { url: 'https://mini.ts.net/', kind: 'trusted' as const, secure: true, loopback: false },
     { url: 'http://192.168.1.20:9443/', kind: 'lan' as const, secure: false, loopback: false },
@@ -28,7 +27,6 @@ const ADDRESSES = {
 vi.mock('../../lib/api', () => ({
   api: {
     get: vi.fn(),
-    patch: vi.fn(),
   },
 }))
 
@@ -38,7 +36,6 @@ vi.mock('../../lib/codeCopy', () => ({
 
 beforeEach(() => {
   vi.mocked(api.get).mockReset().mockResolvedValue(ADDRESSES as never)
-  vi.mocked(api.patch).mockReset().mockResolvedValue({ trusted_url: 'https://x.ts.net/' } as never)
 })
 
 async function mountCard() {
@@ -70,102 +67,9 @@ describe('SettingsDevices', () => {
     expect(wrapper.find('.device-qr-code svg').exists()).toBe(true)
   })
 
-  it('saves the trusted URL', async () => {
-    const wrapper = await mountCard()
-    await wrapper.find('#trusted-url').setValue('https://x.ts.net')
-    await wrapper.find('form.device-trusted').trigger('submit')
-    await flushPromises()
-
-    expect(api.patch).toHaveBeenCalledWith('/api/settings/routines', {
-      trusted_url: 'https://x.ts.net',
-    })
-  })
-
-  it('shows the save error', async () => {
-    vi.mocked(api.patch).mockRejectedValue(
-      new Error('trusted_url must start with https://') as never,
-    )
-    const wrapper = await mountCard()
-    await wrapper.find('#trusted-url').setValue('http://x')
-    await wrapper.find('form.device-trusted').trigger('submit')
-    await flushPromises()
-
-    expect(wrapper.find('[role="alert"]').text()).toContain(
-      'trusted_url must start with https://',
-    )
-  })
-
-  it('keeps what the user typed while the first load is still in flight', async () => {
-    let resolveGet: (value: unknown) => void = () => {}
-    vi.mocked(api.get).mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveGet = resolve
-      }) as never,
-    )
-    const wrapper = mount(SettingsDevices)
-    await wrapper.find('#trusted-url').setValue('https://typing.ts.net')
-
-    resolveGet(ADDRESSES)
-    await flushPromises()
-
-    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe(
-      'https://typing.ts.net',
-    )
-  })
-
-  it('does not let a slow first load overwrite a finished save', async () => {
-    let resolveGet: (value: unknown) => void = () => {}
-    // The first load is still in flight when the user saves. It resolves later
-    // with the pre-save settings, which must not land in the field.
-    vi.mocked(api.get).mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveGet = resolve
-      }) as never,
-    )
-    vi.mocked(api.get).mockResolvedValue({
-      ...ADDRESSES,
-      trusted_url: 'https://x.ts.net/',
-    } as never)
-
-    const wrapper = mount(SettingsDevices)
-    await wrapper.find('#trusted-url').setValue('https://x.ts.net')
-    await wrapper.find('form.device-trusted').trigger('submit')
-    await flushPromises()
-    // The stored (normalized) value from the PATCH response.
-    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe(
-      'https://x.ts.net/',
-    )
-
-    resolveGet({ ...ADDRESSES, trusted_url: 'https://old.ts.net/' })
-    await flushPromises()
-
-    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe(
-      'https://x.ts.net/',
-    )
-  })
-
-  it('refreshes quietly after a save and shows the stored URL', async () => {
-    const wrapper = await mountCard()
-    await wrapper.findAll('.device-actions button')[1].trigger('click')
-    expect(wrapper.find('.device-qr').exists()).toBe(true)
-
-    await wrapper.find('#trusted-url').setValue('https://x.ts.net')
-    await wrapper.find('form.device-trusted').trigger('submit')
-    await flushPromises()
-
-    // The stored (normalized) value, not the raw typing.
-    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe(
-      'https://x.ts.net/',
-    )
-    // No "Looking up addresses…" flash, and the open QR code stays open.
-    expect(wrapper.text()).not.toContain('Looking up addresses')
-    expect(wrapper.find('.device-qr').exists()).toBe(true)
-  })
-
-  it('marks a Tailscale Serve address and stops asking to paste it', async () => {
+  it('marks a Tailscale Serve address and stops explaining how to set it up', async () => {
     vi.mocked(api.get).mockResolvedValue({
       port: 9443,
-      trusted_url: null,
       addresses: [
         {
           url: 'https://mini.tail1.ts.net/',
@@ -182,10 +86,8 @@ describe('SettingsDevices', () => {
     const first = wrapper.findAll('.device-row')[0]
     expect(first.text()).toContain('Full app')
     expect(first.text()).toContain('via Tailscale Serve')
-    expect(wrapper.text()).toContain('Tailscale Serve address found automatically')
     expect(wrapper.text()).not.toContain('tailscale serve --bg')
-    // The detected name is not a typed value, so the field stays empty.
-    expect((wrapper.find('#trusted-url').element as HTMLInputElement).value).toBe('')
+    expect(wrapper.find('#trusted-url').exists()).toBe(false)
   })
 
   it('tells how to get an automatic address when Tailscale Serve is not set up', async () => {

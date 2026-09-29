@@ -266,7 +266,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
-import { openNewChatPicker, pendingNewChat } from '../lib/newChat'
+import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
@@ -572,10 +572,9 @@ const currentProjectId = computed(() => {
 // "needs the user".
 //
 // A memory-insight row counts as activity: a workspace whose only thing
-// happening is a memory pass is not empty, and neither is one whose only
-// activity is a chat still saving its trajectory — post-archive work is not
-// part of `activeChatsAll`, but it is still something this surface reports
-// before the user starts a new chat.
+// happening is a memory pass is not empty — post-archive work is not part of
+// `activeChatsAll`, but it is still something this surface reports before the
+// user starts a new chat.
 const hasHomeActivity = computed(
   () => store.activeChatsAll.length > 0 || store.memoryInsightRows.length > 0,
 )
@@ -641,7 +640,9 @@ if (typeof document !== 'undefined') {
 }
 
 async function chooseNewChat(workspace = store.activeWorkspace, projectId?: string) {
-  const selectedProject = await openNewChatPicker({ workspace, projectId })
+  const selectedProject = projectId
+    || (workspace === store.activeWorkspace ? homeNewChatProjectId.value : '')
+    || await openNewChatPicker({ workspace })
   if (!selectedProject) return
   await store.newChatInProject(selectedProject)
 }

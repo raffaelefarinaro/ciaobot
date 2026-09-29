@@ -213,9 +213,9 @@ describe('the update tile', () => {
       workspace: '',
       link_label: 'Release notes',
       link_url: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest',
-      chat_label: 'How to install',
-      chat_prompt: 'A new Ciaobot version is available.',
-      primary: 'chat',
+      view_label: 'Update in Settings',
+      view_route: '/settings',
+      primary: 'view',
     })
   }
 
@@ -223,7 +223,7 @@ describe('the update tile', () => {
     return wrapper.findAll('.housekeeping-actions > *')
   }
 
-  it('leads with the filled chat button and demotes release notes', async () => {
+  it('leads with the filled settings button and demotes release notes', async () => {
     useHousekeepingStore().actions = [updateAction()]
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
@@ -231,7 +231,7 @@ describe('the update tile', () => {
     const [first, second] = controls(wrapper)
     expect(controls(wrapper)).toHaveLength(2)
     expect(first.element.tagName).toBe('BUTTON')
-    expect(first.text()).toBe('How to install')
+    expect(first.text()).toBe('Update in Settings')
     expect(first.classes()).toContain('btn-primary')
     expect(first.classes()).not.toContain('btn-chip')
     expect(second.element.tagName).toBe('A')
@@ -250,7 +250,7 @@ describe('the update tile', () => {
     expect(first.element.tagName).toBe('A')
     expect(first.classes()).toContain('btn-primary')
     expect(second.element.tagName).toBe('BUTTON')
-    expect(second.classes()).toContain('btn-chip')
+    expect(second.classes()).toContain('btn-primary')
     wrapper.unmount()
   })
 })

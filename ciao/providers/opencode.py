@@ -219,9 +219,11 @@ _MODE_AGENTS: dict[str, str] = {
 _READ_ONLY_TOOLS = ("read", "glob", "grep")
 # V2 sends the glob pattern/regex itself as the permission resource; it does
 # not send the search root or result paths. Require an explicit operator card
-# for both search actions in every mode, including bypass, so a broad search
-# cannot silently enumerate credential-bearing files. Path-shaped deny rules
-# below still hard-deny direct protected glob patterns after this ask rule.
+# for both search actions in every mode except bypass, so a broad search
+# cannot silently enumerate credential-bearing files. Bypass already allows
+# shell, which reaches the same files, so a card there only stalls the run.
+# Path-shaped deny rules below still hard-deny direct protected glob patterns
+# after this ask rule.
 _SEARCH_PERMISSION_RULES: tuple[dict[str, str], ...] = (
     {"action": "glob", "resource": "*", "effect": "ask"},
     {"action": "grep", "resource": "*", "effect": "ask"},
@@ -608,17 +610,18 @@ def mode_settings(
     any ``ciao …`` argv prefix: an allow rule is a prefix a shell suffix
     (``ciao help >/dev/null; <cmd>``) could ride past, so bash stays ``ask``
     and every shell command, including ``ciao …``, keeps a card. Users who want
-    no routine cards switch to ``bypass``; V2 glob/grep search actions still
-    require an explicit card because their resources are not paths.
+    no routine cards switch to ``bypass``; outside bypass, V2 glob/grep search
+    actions still require an explicit card because their resources are not paths.
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
     # Search resources in V2 are patterns/regexes rather than paths. Keep
-    # search operations behind an explicit card even in bypass mode; otherwise
-    # a broad glob/grep can enumerate secrets without any operator decision.
-    rules.extend(dict(rule) for rule in _SEARCH_PERMISSION_RULES)
+    # search operations behind an explicit card, except in bypass where the
+    # blanket allow (shell included) already covers them.
+    if key != "bypass":
+        rules.extend(dict(rule) for rule in _SEARCH_PERMISSION_RULES)
     # Last, and for every mode including `bypass`: resolution is
     # last-match-wins, and this is the one carve-out no mode may buy its way
     # out of. See `opencode_credential_deny_rules`.

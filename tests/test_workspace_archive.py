@@ -622,23 +622,6 @@ def test_a_failed_move_keeps_the_chats_and_schedules(tmp_path, monkeypatch):
     assert not root.exists() or not any(root.iterdir())
 
 
-def test_archive_waits_for_a_running_archive_job(tmp_path):
-    client, config, pcm, _store = _app(tmp_path, rerooted=True)
-    general = next(p for p in pcm.list_projects("work") if p.is_auto)
-    chat = pcm.create_chat(general.project_id, title="postprocessing")
-
-    class _Running:
-        def done(self) -> bool:
-            return False
-
-    pcm._archive_tasks[chat.chat_id] = _Running()  # type: ignore[assignment]
-    response = client.post("/api/workspaces/work/archive")
-
-    assert response.status_code == 409
-    assert "being archived" in response.json()["error"]
-    assert (tmp_path / "work").is_dir()
-
-
 def test_shared_layout_restores_a_custom_vault_folder_name(tmp_path):
     client, config, _pcm, _store = _app(tmp_path, rerooted=False)
     shared = Path(config.vault_root)

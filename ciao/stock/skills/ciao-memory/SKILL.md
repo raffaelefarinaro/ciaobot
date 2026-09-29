@@ -1,0 +1,25 @@
+---
+name: ciao-memory
+description: Use for writing or curating Ciaobot's durable vault memory: updating people or project notes, organizing learnings, processing memory or skill proposals, consolidating bounded memory, and the scheduled Workspace care run. Not for read-only recall or questions about what Ciaobot can do.
+---
+
+# Durable memory and vault care
+
+Use the configured vault root as the durable memory source. The `<ciao-context>` block names it as `vault=<path>` — write under **that** path and nowhere else. Do not infer the location from where existing notes happen to sit: an older single-workspace curator may have filed notes under a different workspace.
+
+Read-only recall is handled inline by the system prompt (`ciao vault search`, answer from vault evidence only). This skill covers writes and curation, not a special agent role. The nightly Workspace care schedule owns its own lease, worklist, budget, and unattended rules; follow that prompt for the run. Perform mutating vault passes sequentially, whether in the main chat or a delegated task.
+
+## Destinations and categories
+
+- Vault pages hold durable facts about projects, people, ideas, resources, and logs. `<vault>/Workspace/Memory-Proposals.md` is the review queue for uncertain facts and unresolved destinations, not a pass log. `<vault>/Workspace/Skill-Proposals/` holds skill-edit suggestions; settle one only after the decision is implemented and verified (`ciao skill-proposal-remove <name> --applied`), decided against (without the flag), or interrupted (`--interrupted --reason ...`).
+- Bounded memory regions live in this workspace's own `AGENTS.md`: `ciao:memory` holds cross-project preferences, environment, and lessons; `ciao:profile` holds identity and communication style. Project-specific facts never belong in these regions.
+- The **Categories** section of `<vault>/VOCABULARY.md` names each category, its folder, and its canonical `type:`; do not memorize this list. Read it before writing a note and file the note in the folder its line names. If no category fits, queue a new-category question in `Workspace/Memory-Proposals.md` instead of inventing a type or stretching a category. When editing a note whose type appears in "Types (drift)", fix it. Prefer existing tags; genuinely new tags use `namespace/value`. Give People and project notes `aliases:` with terms a person would search for, since recall is lexical.
+- **A person** → this workspace's configured person folder (usually `<vault>/People/`). Workspaces have no shared people folder; don't write into another workspace. **A specific project** → its canonical vault doc and log if present, not a bounded region. **Reusable how-to across projects** → `<vault>/Workspace/Learnings.md`; re-observation increments the structured entry's count rather than duplicating it. **Standing operating directives** → the `AGENTS.md` body outside the bounded regions and `CIAO_CUSTOMIZATION.md`, not remembered-fact regions. When unsure about moving a fact out of the guide body, propose the move.
+
+## Review and consolidation
+
+- The attended memory pass may file confident state-shaped facts directly. An unattended curation run never promotes a new fact into `ciao:memory` or `ciao:profile`; queue it for review instead. To queue a discovered fact, put the text in a scratch file and use `ciao memory-proposal-add --kind memory|profile --text-file <file> [--source <chat-id>]`. Never put untrusted fact text, names, or paths directly into a shell argument. The queue dedupes re-filed text.
+- Region caps (~3000 memory / ~1375 profile chars) are advisory. Check `ciao memory status`. At or above ~85%, consolidate existing entries before adding: merge duplicates, remove expired entries, and MOVE project-scoped facts into their canonical doc. Never drop a durable fact merely to meet the cap; report an over-cap region if everything is high-signal. The cap is advisory on every path: `ciao memory update` writes and reports `over_cap` with `used_chars`/`char_limit`.
+- For unattended consolidation, copy every removed or replaced entry verbatim first into `<vault>/Workspace/Memory-Consolidations.md` under a dated heading naming its region. If a drop requires judgment, queue a one-line `[review] Keep "<entry>" in ciao:<region>? Proposed action: drop because <reason>. (memory curation)` question instead; flatten multiline text and do not duplicate a pending question. Dismissing this question keeps the entry; removing it requires an attended edit.
+- List pending proposals with `ciao memory-proposals`. When promoting, write the fact to its destination **before** dismissing it with `ciao memory-proposal-dismiss --text-file <file> --promoted`; a plain dismissal means it was rejected. The proposal text belongs in a file, never a shell argument. Settled skill proposals likewise stay on disk as decision records.
+- Shape corrections as present-tense standing facts, not "User said X → assistant did Y" events. Search local memory before external sources, ask only when a missing detail blocks a correct attended write, and keep private data inside the user's workspace.

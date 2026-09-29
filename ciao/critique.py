@@ -4,9 +4,8 @@ Each model in the panel is called through
 :func:`ciao.providers.oneshot.run_oneshot`. A panel entry may name the provider
 that runs it -- ``opencode:fable`` routes to that provider's app-server -- and
 an unprefixed entry runs through Claude Code, so
-a bare tier alias means Anthropic. That is what makes the panel genuinely
-adversarial: the default lists one voice per signed-in vendor rather than three
-models from the same one.
+a bare tier alias means Anthropic. The automatic panel uses the distinct
+effective model defaults of configured workspaces.
 
 The artifact is inlined in the prompt (the one-shot call runs with no
 tools, ``max_turns=1``), so no file-read tool is needed.
@@ -93,28 +92,20 @@ def is_opencode_available() -> bool:
 
 
 def default_critique_panel(config: CiaoConfig) -> list[str]:
-    """Provider-aware default when Settings → Models has no critique override.
+    """Distinct effective workspace defaults, limited to available providers.
 
-    One voice per signed-in vendor, and that voice is the vendor's own default
-    model — the same one new chats use, so the panel needs no separate notion of
-    "which model". Breadth across vendors beats depth within one: an adversarial
-    panel of two Anthropic models would mostly agree with itself, which is why
-    this previously pairing ``opus`` with ``fable`` contradicted its own stated
-    rule. Every entry is gated on that vendor being usable — listing a
-    signed-out provider would only put a guaranteed failure in the panel.
-
-    So: Claude Code alone gives a one-model panel; adding opencode makes it two.
-    An opencode entry whose default is unset leaves the model id empty on
-    purpose, letting that provider's own account catalog choose.
+    A workspace chooses a provider; its effective model comes from that
+    provider's operator default (or the provider catalog when unset). The
+    opencode entry may end in a colon to let its account select a model.
     """
-    models = []
-
-    if is_anthropic_available():
-        models.append(config.default_model_for_workspace(None, "claude") or "opus")
-    # The prefixed entry routes through opencode's app-server. The model id is
-    # the operator's per-provider default; empty lets the provider pick its own.
-    if is_opencode_available():
-        models.append(f"{OPENCODE_PREFIX}{config.default_model_for_provider('opencode')}")
+    models: list[str] = []
+    available = {"claude": is_anthropic_available(), "opencode": is_opencode_available()}
+    for workspace in config.workspace_names():
+        provider = config.default_provider_for_workspace(workspace)
+        if not available.get(provider, False):
+            continue
+        model = config.default_model_for_workspace(workspace, provider)
+        models.append(f"{OPENCODE_PREFIX}{model}" if provider == "opencode" else model or "opus")
 
     if not models:
         # Nothing is signed in. Name a Claude tier anyway so the panel reports a
@@ -154,9 +145,6 @@ def apply_app_settings_overlay(config: CiaoConfig) -> None:
     store = AppSettingsStore(runtime_root / "app_settings.json")
     store.migrate_legacy_insights_enabled(
         getattr(config, "legacy_insights_disabled", None)
-    )
-    store.migrate_legacy_trajectories_enabled(
-        getattr(config, "legacy_trajectories_disabled", None)
     )
     store.apply_to_config(config)
 

@@ -145,13 +145,13 @@ test.describe('narrow viewport', () => {
     await boot(page, undefined, '.home-insights')
 
     const rows = page.locator('.home-insight-row')
-    await expect(rows).toHaveCount(3)
+    await expect(rows).toHaveCount(2)
     // Newest conversation first, and named for the conversation — never for the
     // pass's own internal title.
     await expect(rows.nth(0).locator('.home-chat-title'))
       .toHaveText('alpha conversation with a running memory pass')
-    await expect(rows.nth(2).locator('.home-chat-title'))
-      .toHaveText('alpha conversation with an unfinished step')
+    await expect(rows.nth(1).locator('.home-chat-title'))
+      .toHaveText('alpha conversation waiting on the pass')
     await expect(page.locator('.home-tier--working, .home-tier--unread')).toHaveCount(0)
     await expect(page.getByText('Memory pass · conversation with a running memory pass')).toHaveCount(0)
 
@@ -161,12 +161,6 @@ test.describe('narrow viewport', () => {
       expect(box!.height, 'an insight row is shorter than the touch minimum').toBeGreaterThanOrEqual(44)
     }
 
-    // The one row with a second control: a retry beside the open control, and
-    // the row must not grow past the pane when it appears.
-    const retry = rows.nth(2).getByRole('button', { name: /Retry unfinished post-archive steps/ })
-    await expect(retry).toHaveText('retry')
-    const retryBox = await retry.boundingBox()
-    expect(retryBox!.width, 'the retry control is narrower than the touch minimum').toBeGreaterThanOrEqual(44)
     const { overflow } = await horizontalOverflow(page)
     expect(overflow).toBeLessThanOrEqual(0)
 

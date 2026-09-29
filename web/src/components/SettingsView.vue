@@ -35,6 +35,16 @@
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">What can Ciaobot do?</p>
+            <p class="hint">
+              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
+            </p>
+            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
+          </div>
+        </div>
+
         <!-- Appearance -->
         <div class="card">
           <div class="settings-card-header">
@@ -142,6 +152,12 @@
              actions; the only thing it cannot do alone is navigate to a chat,
              so it emits the setup chat's id for this view to open. -->
         <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
+
+        <SettingsInsights
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
 
         <!-- Package update -->
         <div class="card">
@@ -413,6 +429,12 @@
               <p class="hint">
                 Ciaobot is always password-protected — this is the password you type to open it,
                 and the one another device needs to sign in.
+                <a
+                  class="set-link"
+                  href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Keeping it private</a>
               </p>
             </div>
             <span
@@ -471,7 +493,7 @@
              computer. The one place to set the trusted HTTPS address. -->
         <SettingsDevices />
 
-        <!-- Notifications. Same card as the Notifications tab. -->
+        <!-- Notifications. -->
         <SettingsNotifications />
 
         <!-- Keyboard shortcuts -->
@@ -571,12 +593,6 @@
 
       </template>
 
-      <!-- NOTIFICATIONS TAB -->
-      <template v-if="currentTab === 'notifications'">
-        <SettingsNotifications />
-      </template>
-
-
       <!-- MODELS TAB: chat providers, then background models.
            The old providers tab folded in here; /settings/providers
            redirects to /settings/models#chat-providers (router.ts). -->
@@ -602,6 +618,12 @@
                 <p class="hint">
                   Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
                   The defaults below apply to new chats; any chat can override them from the picker.
+                  <a
+                    class="set-link"
+                    href="https://www.raffaelefarinaro.com/ciaobot/models.html"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >How models and providers work</a>
                 </p>
               </div>
             </div>
@@ -812,7 +834,6 @@
               <p class="hint">
                 These background tasks use their own model setting, separate from the chat defaults above.
                 "Automatic" keeps the built-in default.
-                System automations without a model picker are tracked on the Automations page.
               </p>
             </div>
 
@@ -820,17 +841,6 @@
               <div class="routine-info">
                 <span class="routine-name">Session insights</span>
                 <span class="routine-detail">Runs the end-of-conversation memory pass when a chat is archived.</span>
-                <div v-if="getJobTelemetry('insights')" class="routine-telemetry">
-                  <span class="badge" :class="getJobBadgeClass('insights')">
-                    {{ getJobStatus('insights') }}
-                  </span>
-                  <span v-if="hasJobLastRun('insights')" class="telemetry-meta">
-                    Last run: {{ getJobLastRunLabel('insights') }} ({{ getJobDuration('insights') }})
-                  </span>
-                  <span v-if="getJobStatus('insights') === 'error' && getJobLastError('insights')" class="telemetry-error" :title="getJobLastError('insights')">
-                    &middot; {{ getJobLastError('insights') }}
-                  </span>
-                </div>
               </div>
               <div class="routine-model-controls">
                 <select
@@ -858,7 +868,9 @@
             <div class="routine-row">
               <div class="routine-info">
                 <span class="routine-name">Critique panel</span>
-                <span class="routine-detail">Models asked for an adversarial review.</span>
+                <span class="routine-detail">Ask Ciaobot to review a plan, answer or file with the <code>/critique</code> command or critique skill. Each panel model checks it independently; Ciaobot compares their findings and gives a recommendation.</span>
+                <span class="routine-detail">Automatic combines the distinct model defaults of your configured workspaces: each workspace uses its default provider’s model. Unavailable providers are skipped. Choose models here to use a different panel.</span>
+                <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/models.html#critique" target="_blank" rel="noopener noreferrer">How the critique panel works</a>
               </div>
               <div class="critique-model-picker">
                 <!-- One control: the multi-select picker. Picked models show as
@@ -900,22 +912,6 @@
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
         </template>
-      </template>
-
-      <!-- AUTOMATIONS TAB -->
-      <template v-if="currentTab === 'automations'">
-        <SettingsAutomation
-          :automation-items="automationItems"
-          :automation-loaded="automationLoaded"
-          :automation-error="automationError"
-          :fetch-automation="fetchAutomation"
-          :proposal-outcomes="proposalOutcomes"
-          :notify-saved="notifySaved"
-          :notify-failed="notifyFailed"
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
       </template>
 
       <!-- WORKSPACES TAB -->
@@ -1565,8 +1561,9 @@
             <div>
               <p class="section-title">Skills</p>
               <p class="hint">
-                Shared with Claude Code and opencode. Each skill is a folder with a <code>SKILL.md</code> in <code>skills/</code>; workspace git sync carries it to other machines.
+                These are the skills of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>skills/</code> folder or included with the app. Ask for one in chat, or invoke it by name with <code>/name</code> when your provider supports skill commands. Workspace git sync carries your own skills to other machines.
               </p>
+              <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a></p>
             </div>
             <div class="settings-card-header-actions">
               <button class="set-link set-link--quiet" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
@@ -1699,8 +1696,9 @@
             <div>
               <p class="section-title">Subagents</p>
               <p class="hint">
-                Shared with Claude Code and opencode. Saved in <code>subagents/</code> and kept in the vault.
+                These are the subagents of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>subagents/</code> folder and shared with Claude Code and opencode. Ask an agent in chat to delegate a task; subagents are not slash commands.
               </p>
+              <p class="hint">Subagents installed directly in a provider may also be available in its chats. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#extend" target="_blank" rel="noopener noreferrer">About extensions</a></p>
             </div>
             <div class="settings-card-header-actions">
               <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('subagent')">Ask Ciao to write one</button>
@@ -1813,8 +1811,9 @@
             <div>
               <p class="section-title">Commands</p>
               <p class="hint">
-                Slash commands shared with Claude Code and opencode. Saved in <code>commands/</code> and kept in the vault.
+                These are the slash commands of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>commands/</code> folder and shared with Claude Code and opencode. Type <code>/name</code> in a chat to run one, for example <code>/critique</code>.
               </p>
+              <p class="hint">Commands installed directly in a provider can also work in its chats, even if they are not shown here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#commands" target="_blank" rel="noopener noreferrer">How commands work</a></p>
             </div>
             <div class="settings-card-header-actions">
               <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('command')">Ask Ciao to write one</button>
@@ -2006,7 +2005,6 @@ import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
-import { formatTime, formatDuration } from '../lib/time'
 import { isApplePlatform } from '../lib/platform'
 import {
   DEFAULT_FONT_SCALE,
@@ -2019,8 +2017,6 @@ import { useModalFocus } from '../composables/useModalFocus'
 import type {
   AgentAssetsResponse,
   ArchivedWorkspace,
-  AutomationPayload,
-  AutomationProcess,
   CommandAsset,
   CommandsResponse,
   CreatedAgentAssetResponse,
@@ -2031,7 +2027,6 @@ import type {
   ModelsResponse,
   ProviderConfigSettings,
   ProviderConnection,
-  ProposalOutcomes,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
@@ -2069,7 +2064,7 @@ import {
 import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
-import SettingsAutomation from './settings/SettingsAutomation.vue'
+import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
@@ -2113,6 +2108,9 @@ const mcp = useMcpServers({
     confirmLabel: 'Delete server',
     destructive: true,
   }),
+  // A workspace's `.mcp.json` and `.env` live in its own agent root, so the
+  // tab reads and writes that one root rather than the install root.
+  workspace: () => projectStore.activeWorkspace,
 })
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
@@ -3219,9 +3217,23 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   }
 }
 
+// The skills, commands, subagents and MCP servers below belong to ONE
+// workspace: the one selected in the sidebar. Every request carries that name
+// so the list and the writes that edit it resolve the same agent root — without
+// it, an edit would land in a root the list is not showing.
+const assetScope = computed(() => {
+  const name = projectStore.activeWorkspace || ''
+  return name ? `?workspace=${encodeURIComponent(name)}` : ''
+})
+
+// Names the workspace these tabs describe, so the copy can say which one
+// rather than implying the list covers the whole install.
+const assetWorkspaceLabel = computed(() => projectStore.activeWorkspace || 'selected')
+
 async function fetchSkills() {
+  skillsError.value = ''
   try {
-    skillsInventory.value = await api.get<SkillInventory>('/api/admin/skills')
+    skillsInventory.value = await api.get<SkillInventory>(`/api/admin/skills${assetScope.value}`)
   } catch (e) {
     skillsError.value = `Failed to load skills: ${errorMessage(e)}`
   } finally {
@@ -3232,7 +3244,7 @@ async function fetchSkills() {
 async function fetchCommands() {
   commandsError.value = ''
   try {
-    const res = await api.get<CommandsResponse>('/api/commands')
+    const res = await api.get<CommandsResponse>(`/api/commands${assetScope.value}`)
     commands.value = Array.isArray(res.commands) ? res.commands : []
   } catch (e) {
     commandsError.value = `Failed to load commands: ${errorMessage(e)}`
@@ -3243,8 +3255,9 @@ async function fetchCommands() {
 
 async function fetchAgentAssets() {
   agentAssetsError.value = ''
+  agentAssetsLoaded.value = false
   try {
-    agentAssets.value = await api.get<AgentAssetsResponse>('/api/agent-assets')
+    agentAssets.value = await api.get<AgentAssetsResponse>(`/api/agent-assets${assetScope.value}`)
   } catch (e) {
     agentAssetsError.value = `Failed to load agent assets: ${errorMessage(e)}`
   } finally {
@@ -3404,6 +3417,7 @@ async function addSubagent() {
   addSubagentError.value = false
   try {
     const res = await api.post<CreatedAgentAssetResponse<SubagentAsset>>('/api/agent-assets/subagents', {
+      workspace: projectStore.activeWorkspace,
       name: newSubagentName.value.trim(),
       description: newSubagentDescription.value.trim(),
       prompt: newSubagentPrompt.value.trim(),
@@ -3428,6 +3442,7 @@ async function addCommand() {
   addCommandError.value = false
   try {
     const res = await api.post<CreatedAgentAssetResponse<CommandAsset>>('/api/agent-assets/commands', {
+      workspace: projectStore.activeWorkspace,
       name: newCommandName.value.trim(),
       description: newCommandDescription.value.trim(),
       argument_hint: newCommandArgumentHint.value.trim(),
@@ -3474,6 +3489,7 @@ async function saveSubagent(agent: SubagentAsset) {
   assetLifecycleError.value = false
   try {
     await api.patch<CreatedAgentAssetResponse<SubagentAsset>>(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}`, {
+      workspace: projectStore.activeWorkspace,
       description: editSubagentDescription.value.trim(),
       content: editSubagentContent.value.trim(),
     })
@@ -3500,7 +3516,7 @@ async function deleteSubagent(agent: SubagentAsset) {
   assetLifecycleResult.value = 'Deleting subagent...'
   assetLifecycleError.value = false
   try {
-    await api.del(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}`)
+    await api.del(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}${assetScope.value}`)
     assetLifecycleResult.value = ''
     notifySaved(`Deleted ${agent.name}. Restart or sync Claude Code sessions to pick it up.`, 'Subagent')
     if (editingSubagent.value === agent.name) cancelEditSubagent()
@@ -3542,6 +3558,7 @@ async function saveCommand(command: CommandAsset) {
   assetLifecycleError.value = false
   try {
     await api.patch<CreatedAgentAssetResponse<CommandAsset>>(`/api/agent-assets/commands/${encodeURIComponent(command.name)}`, {
+      workspace: projectStore.activeWorkspace,
       description: editCommandDescription.value.trim(),
       argument_hint: editCommandArgumentHint.value.trim(),
       content: editCommandContent.value.trim(),
@@ -3569,7 +3586,7 @@ async function deleteCommand(command: CommandAsset) {
   assetLifecycleResult.value = 'Deleting command...'
   assetLifecycleError.value = false
   try {
-    await api.del(`/api/agent-assets/commands/${encodeURIComponent(command.name)}`)
+    await api.del(`/api/agent-assets/commands/${encodeURIComponent(command.name)}${assetScope.value}`)
     assetLifecycleResult.value = ''
     notifySaved(`Deleted /${command.name}. Restart or sync Claude Code sessions to pick it up.`, 'Command')
     if (editingCommand.value === command.name) cancelEditCommand()
@@ -3684,72 +3701,6 @@ async function createAssetViaChat(kind: keyof typeof ASSET_CHAT_PROMPTS) {
   }
 }
 
-
-const automationItems = ref<AutomationProcess[]>([])
-const automationLoaded = ref(false)
-const automationError = ref('')
-const proposalOutcomes = ref<ProposalOutcomes | null>(null)
-
-function getJobTelemetry(job: string): AutomationProcess | undefined {
-  return automationItems.value.find((i) => i.job === job)
-}
-function getTelemetryBadgeClass(status: string | undefined): string {
-  if (status === 'ok') return 'badge--success'
-  if (status === 'error') return 'badge--error'
-  if (status === 'skipped') return 'badge--warn'
-  return 'badge--muted'
-}
-
-function getJobStatus(job: string): string {
-  const item = getJobTelemetry(job)
-  return item?.last_run ? item.last_run.status : 'never run'
-}
-function getJobBadgeClass(job: string): string {
-  const status = getJobTelemetry(job)?.last_run?.status
-  return getTelemetryBadgeClass(status)
-}
-function getJobDuration(job: string): string {
-  const dur = getJobTelemetry(job)?.last_run?.duration_ms
-  return formatDuration(dur) || 'unknown'
-}
-function getJobLastRunLabel(job: string): string {
-  const item = getJobTelemetry(job)
-  return item ? lastRunLabel(item) : ''
-}
-function getJobLastError(job: string): string {
-  const item = getJobTelemetry(job)
-  return item ? lastError(item) : ''
-}
-function hasJobLastRun(job: string): boolean {
-  return !!getJobTelemetry(job)?.last_run
-}
-
-function lastRunLabel(item: AutomationProcess): string {
-  if (!item.last_run) return ''
-  return formatTime(item.last_run.ended_at || item.last_run.started_at)
-}
-function lastError(item: AutomationProcess): string {
-  return item.stats.last_error?.error || ''
-}
-
-async function fetchAutomation() {
-  automationError.value = ''
-  try {
-    const data = await api.get<AutomationPayload | AutomationProcess[]>('/api/automation?include=outcomes')
-    if (Array.isArray(data)) {
-      // An older server ignores the include hint and answers with the bare
-      // job list; the outcomes line simply stays hidden.
-      automationItems.value = data
-    } else {
-      automationItems.value = data.jobs
-      proposalOutcomes.value = data.proposal_outcomes ?? null
-    }
-  } catch (e) {
-    automationError.value = `Failed to load automation: ${errorMessage(e)}`
-  } finally {
-    automationLoaded.value = true
-  }
-}
 
 // ── Workspaces settings (Workspaces tab) ───────────────────────────────────
 // Transient success feedback. Routes through the app-wide in-app toast (the
@@ -4130,7 +4081,6 @@ onMounted(async () => {
   })
   fetchAuthSettings()
   fetchRoutines()
-  fetchAutomation()
   fetchPackageStatus()
   fetchUpdateStatus()
   fetchProviderKeys().then(scrollToChatProvidersIfLinked)
@@ -4149,6 +4099,17 @@ onMounted(async () => {
 watch(() => projectStore.workspaceRegistryRevision, () => {
   fetchWorkspacesList()
   fetchArchivedWorkspaces()
+})
+
+// Switching the sidebar's workspace switches which agent root these four tabs
+// describe, so their lists are refetched. Without this the page would keep
+// showing the previous workspace's skills, commands, subagents and MCP servers
+// while every write went to the new one.
+watch(() => projectStore.activeWorkspace, () => {
+  fetchSkills()
+  fetchCommands()
+  fetchAgentAssets()
+  mcp.fetchStatus()
 })
 
 
@@ -4971,6 +4932,13 @@ onUnmounted(stopUpdatePoll)
   outline-offset: 1px;
 }
 
+.settings-guide-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch);
+  font-size: var(--text-sm);
+}
+
 .settings-toc-item.active {
   border-left-color: var(--accent);
   color: var(--fg);
@@ -5413,26 +5381,6 @@ a.btn-secondary {
   border-radius: 3px;
   background: var(--bg);
   color: var(--fg);
-}
-.routine-telemetry {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  flex-wrap: wrap;
-}
-.telemetry-meta {
-  color: var(--fg3, var(--fg2));
-}
-.telemetry-error {
-  color: var(--error);
-  font-weight: 500;
-  max-width: 250px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .workspace-root-path {
   display: block;
