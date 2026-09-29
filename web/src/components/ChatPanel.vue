@@ -6924,6 +6924,16 @@ details[open] > .activity-summary::before {
   .chat-archive-btn {
     color: var(--fg2);
   }
+  /* The label is hidden here, so the button is icon-only and must carry the
+     touch minimum itself. The base `.chat-archive-btn.btn-icon { height: 34px }`
+     outranks App.vue's `.btn-icon { min-height: var(--touch) }`, and the
+     `pointer: coarse` rule below never fires on a fine-pointer device at a
+     narrow viewport, so without this the button measures 46x34 and
+     narrow-viewport.spec.ts fails. min-height beats the fixed height. */
+  .chat-archive-btn.btn-icon {
+    min-width: var(--touch);
+    min-height: var(--touch);
+  }
   .chat-archive-btn:hover { color: var(--fg); }
   .chat-archive-label { display: none; }
   /* The scope/title stack is the base layout now, so this block only carries
