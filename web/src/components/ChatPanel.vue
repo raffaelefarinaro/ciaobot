@@ -93,42 +93,6 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
     </button>
     <div class="chat-column">
-    <!-- Context bar: what this chat is attached to — its automations. These
-         were sibling banner blocks, each a v-for, so a chat with all of them
-         opened with its first message below the fold. Collapsed it is one line
-         of counted chips; expanded it is the same detail rows with the same
-         actions. -->
-    <!-- Only when the Work details rail is hidden: with the rail shown, the
-         chat's automations live there instead of above the transcript. -->
-    <div v-if="contextRelations.length && !railShown && !inspectorOpen" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
-      <button
-        type="button"
-        class="ctx-summary"
-        :aria-expanded="contextExpanded"
-        @click="contextExpanded = !contextExpanded"
-      >
-        <span class="ctx-chevron" aria-hidden="true">{{ contextExpanded ? '▾' : '▸' }}</span>
-        <span>Automation controls</span>
-      </button>
-      <div v-if="contextExpanded" class="ctx-detail">
-        <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
-          <!-- Interval entries keep the cycle glyph loops used; everything else
-               keeps the clock, so the cadence reads before the text does. -->
-          <span v-if="s.frequency === 'interval'" class="loop-banner-ico" aria-hidden="true">&#10227;</span>
-          <AppIcon v-else class="loop-banner-ico" name="clock" :size="18" />
-          <span class="loop-banner-text">
-            <strong>{{ s.title || 'Automation' }}</strong>
-            · {{ scheduleCadence(s) }}
-            · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.last_status === 'busy'"> (waiting, chat busy)</template>
-            <template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
-          </span>
-          <button class="btn-small" @click="toggleScheduleEnabled(s)">{{ s.enabled ? 'Pause' : 'Resume' }}</button>
-          <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
-          <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
-        </div>
-      </div>
-    </div>
-
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads
          as a conversation that began mid-thought; this names the conversation
@@ -1363,7 +1327,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { useModalFocus } from '../composables/useModalFocus'
-import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1779,45 +1743,6 @@ const chatSchedules = computed(() => {
   )
 })
 
-// ── Context bar ─────────────────────────────────────────────────────
-// One counted chip per relation, so the v-for banner blocks can never again
-// push the transcript below the fold. Detail rows live behind the disclosure.
-const contextExpanded = ref(false)
-
-interface ContextRelation {
-  key: string
-  label: string
-  glyph?: string
-  live?: boolean
-}
-
-const contextRelations = computed<ContextRelation[]>(() => {
-  const rels: ContextRelation[] = []
-  // Interval entries get their own chip with the cycle glyph: "this chat
-  // re-runs itself" is a different fact from "something fires here at 09:00",
-  // and collapsing them into one count hid it.
-  const intervals = chatSchedules.value.filter(s => s.frequency === 'interval')
-  const timed = chatSchedules.value.filter(s => s.frequency !== 'interval')
-  if (intervals.length) {
-    const label = intervals.length === 1
-      ? `every ${intervals[0].interval_minutes}m`
-      : `${intervals.length} interval runs`
-    rels.push({
-      key: 'intervals',
-      label,
-      glyph: '↻',
-      live: intervals.some(s => s.enabled),
-    })
-  }
-  if (timed.length) {
-    const label = timed.length === 1
-      ? `scheduled ${scheduleCadence(timed[0])}`
-      : `${timed.length} schedules`
-    rels.push({ key: 'schedules', label })
-  }
-  return rels
-})
-
 // ── Action dock ─────────────────────────────────────────────────────
 // Six independent v-if blocks used to stack between the transcript and the
 // composer with nothing distinguishing blocking items from status. Now: exactly
@@ -1907,66 +1832,6 @@ onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
 })
 
-// Lightweight 30-second tick powering the "next in Xm" countdown in the
-// automation banner. Only runs while this chat has a live automation.
-const loopNow = ref(Date.now())
-let loopTick: ReturnType<typeof setInterval> | null = null
-watch(chatSchedules, (scheds) => {
-  const hasScheduled = scheds.some(s => s.enabled && s.next_run)
-  if (hasScheduled && !loopTick) {
-    loopNow.value = Date.now()
-    loopTick = setInterval(() => { loopNow.value = Date.now() }, 30_000)
-  } else if (!hasScheduled && loopTick) {
-    clearInterval(loopTick)
-    loopTick = null
-  }
-}, { immediate: true })
-onBeforeUnmount(() => { if (loopTick) clearInterval(loopTick) })
-
-// ── Automation banner helpers ──
-const scheduleRunningId = ref<string | null>(null)
-function scheduleCadence(s: Schedule): string {
-  const time = s.daily_time_utc ? s.daily_time_utc.slice(0, 5) : ''
-  switch (s.frequency) {
-    case 'daily': return time ? `daily ${time}` : 'daily'
-    case 'weekly': {
-      const days = s.days_of_week && s.days_of_week.length
-        ? s.days_of_week.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join('/')
-        : ''
-      return days ? `weekly ${days}${time ? ' ' + time : ''}` : 'weekly'
-    }
-    case 'monthly': return s.day_of_month ? `monthly on day ${s.day_of_month}` : 'monthly'
-    case 'once': return s.run_at_date ? `once ${s.run_at_date}` : 'once'
-    case 'interval': return `every ${s.interval_minutes}m`
-    case 'manual': return 'manual'
-    default: return s.frequency
-  }
-}
-function scheduleCountdown(s: Schedule): string {
-  if (!s.next_run) return ''
-  const diffMs = new Date(s.next_run).getTime() - loopNow.value
-  if (diffMs <= 0) return 'soon'
-  const mins = Math.ceil(diffMs / 60_000)
-  if (mins < 60) return `in ${mins}m`
-  const hrs = Math.floor(mins / 60)
-  const rm = mins % 60
-  return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
-}
-async function runScheduleNow(s: Schedule) {
-  scheduleRunningId.value = s.schedule_id
-  try {
-    await taskStore.runScheduleNow(s.schedule_id)
-  } catch {
-    // An interval run into a chat that is already streaming is refused rather
-    // than queued. Nothing to surface here beyond clearing the button.
-  } finally {
-    scheduleRunningId.value = null
-  }
-}
-
-async function toggleScheduleEnabled(s: Schedule) {
-  await taskStore.updateSchedule(s.schedule_id, { enabled: !s.enabled })
-}
 const project = computed(() => store.activeProject)
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
@@ -4125,10 +3990,9 @@ watch(
 // Force-scroll to bottom when switching to a different chat.
 watch(() => store.activeChatId, () => {
   isNearBottom.value = true
-  // Both disclosures are per-chat state; carrying them across a switch meant a
-  // chat you never expanded opened with its dock and context bar already open.
+  // The dock disclosure is per-chat state; carrying it across a switch meant a
+  // chat you never expanded opened with its dock already open.
   dockExpanded.value = false
-  contextExpanded.value = false
   nextTick(() => {
     if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
     // Hold the bottom while the incoming transcript's height settles, rather
@@ -7527,84 +7391,6 @@ details[open] > .activity-summary::before {
   :deep(.comment-highlight--pulse) { animation: none; }
 }
 
-/* ── Automation banner ── */
-/* ── Context bar ─────────────────────────────────────────────────────
-   Collapsed: one line of counted chips. Expanded: the detail rows, which
-   keep the original .loop-banner-row layout and actions. */
-.ctx-bar {
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--border);
-}
-.ctx-summary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  min-height: var(--touch);
-  padding: var(--space-2) 0;
-  border: 0;
-  background: none;
-  color: var(--fg2);
-  font-family: var(--font);
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-  flex-wrap: wrap;
-  min-height: var(--touch);
-}
-.ctx-summary:hover { background: var(--bg3); }
-.ctx-summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-.ctx-chevron { color: var(--fg3); flex-shrink: 0; }
-.ctx-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 2px var(--space-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  color: var(--fg2);
-  white-space: nowrap;
-}
-.ctx-chip-glyph {
-  color: var(--fg3);
-  font-weight: 700;
-  line-height: 1;
-}
-/* A live automation is the one thing here that is actively happening. */
-.ctx-chip-glyph.live { color: var(--accent); }
-.ctx-detail {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: 0 var(--space-4) var(--space-2);
-}
-.loop-banner-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-/* Explicit size: inheriting --text-sm left the glyph the same size as the
-   banner text, where the title and Start/Stop buttons overpowered it. Matches
-   the sidebar nav icons so the heartbeat reads at a glance. */
-.loop-banner-ico { color: var(--accent); font-weight: 700; font-size: 18px; line-height: 1; flex-shrink: 0; }
-.loop-banner-text {
-  flex: 1;
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.loop-banner-text strong { color: var(--fg); }
-
-/* Chat-level unread is title weight everywhere; chatUnread() is binary so a
-   digit could only ever read "1". */
-.loop-banner-manage { text-decoration: none; }
 </style>
 
 <style scoped src="./chatTrace.css"></style>
