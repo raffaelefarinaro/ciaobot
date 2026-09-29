@@ -344,6 +344,10 @@ covers the three routes. The five-minute interval is the named constant
 `BACKUP_INTERVAL_S` in `ciao/backup_service.py` and the job is registered in
 `job_runs.REGISTRY` under the id `branch_backup` with its five-minute trigger sentence —
 keep that id, or the Automation page loses the row its history belongs to.
+Settings → General shows a compact online backup state and last successful upload;
+the configured scope, repository, and raw diagnostic are in a native "Backup details"
+disclosure ("Review details" when attention is needed). The five-minute cadence is
+in the section description. There is no separate backup guide.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 

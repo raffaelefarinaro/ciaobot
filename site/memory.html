@@ -159,10 +159,15 @@
     </section>
 
 
-    <section>
+    <section id="backup">
       <h2>Back it up</h2>
-      <p>Your memory lives in one folder, so a private copy somewhere else protects it if the computer is lost. <strong>Settings → General → Memory backup</strong> connects that folder to a private Git repository and then backs it up by itself. If you have never used Git, <em>Copy setup prompt</em> gives you instructions to paste into any agent, or Ciaobot can walk you through it in a chat. <em>Back up now</em> runs a copy on demand.</p>
+      <p>Your memory lives in one folder, so a private copy somewhere else protects it if the computer is lost. Ciaobot turns that folder into a Git repository (unless it already is one), which gives it a full history of every change. Once the repository is connected to a private GitHub repository, Ciaobot pushes to it automatically, with nothing for you to run.</p>
+      <p><strong>Settings → General → Memory backup</strong> shows where things stand. <em>Back up now</em> runs a copy on demand.</p>
+      <h3>If it isn't connected yet</h3>
+      <p>Choose <em>Set up in Ciaobot</em> and Ciaobot walks you through it in a chat, or choose <em>Copy setup prompt</em> and paste it into any agent (Claude Code, Codex, opencode, and so on). The agent creates the private repository, connects the folder to it and checks that the first backup worked. You never need to know Git commands.</p>
+    </section>
 
+    <section>
       <h2>It's just text files</h2>
       <p>Everything above is ordinary Markdown in the folder you picked during setup:</p>
       <pre><code>personal/
