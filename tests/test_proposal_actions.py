@@ -10,19 +10,9 @@ request, which is the point of the extraction — the same functions serve
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 
-from ciao import proposal_actions, proposal_kinds, proposal_outcomes
-
-
-def _read_events(tmp_path: Path) -> list[dict]:
-    path = tmp_path / proposal_outcomes.PROPOSAL_OUTCOMES_NAME
-    if not path.exists():
-        return []
-    return [
-        json.loads(line) for line in path.read_text().splitlines() if line.strip()
-    ]
+from ciao import proposal_actions, proposal_kinds
 
 
 def _queue(tmp_path: Path) -> Path:
@@ -278,7 +268,7 @@ def test_review_row_has_no_destination_yet() -> None:
 # ── record_decision ───────────────────────────────────────────────────────
 
 
-def test_dismiss_records_history_and_tally(tmp_path: Path) -> None:
+def test_dismiss_records_history(tmp_path: Path) -> None:
     from ciao.memory_proposals import read_decisions
 
     queue = _queue(tmp_path)
@@ -288,7 +278,6 @@ def test_dismiss_records_history_and_tally(tmp_path: Path) -> None:
         text="Ada prefers plain text.",
         kind="memory",
         via="pwa",
-        workspace="personal",
         source="chat-1",
         proposal_id="abc",
     )
@@ -298,11 +287,6 @@ def test_dismiss_records_history_and_tally(tmp_path: Path) -> None:
     assert decisions[0]["text"] == "Ada prefers plain text."
     assert decisions[0]["action"] == "dismissed"
     assert decisions[0]["proposal_id"] == "abc"
-
-    events = _read_events(tmp_path)
-    assert [(e["kind"], e["action"], e["workspace"], e["via"]) for e in events] == [
-        ("memory", "dismissed", "personal", "pwa")
-    ]
 
 
 def test_accept_records_a_promotion_with_its_destination(tmp_path: Path) -> None:
@@ -315,7 +299,6 @@ def test_accept_records_a_promotion_with_its_destination(tmp_path: Path) -> None
         text="Ada prefers plain text.",
         kind="memory",
         via="agent",
-        workspace="personal",
         destination="ciao:memory",
         outcome="written",
         proposal_id="abc",
@@ -325,9 +308,6 @@ def test_accept_records_a_promotion_with_its_destination(tmp_path: Path) -> None
     assert decisions[0]["action"] == "accepted"
     assert decisions[0]["destination"] == "ciao:memory"
     assert decisions[0]["outcome"] == "written"
-
-    events = _read_events(tmp_path)
-    assert [(e["action"], e["via"]) for e in events] == [("promoted", "agent")]
 
 
 def test_an_edited_accept_records_its_receipt(tmp_path: Path) -> None:
@@ -347,7 +327,6 @@ def test_an_edited_accept_records_its_receipt(tmp_path: Path) -> None:
         text="Ada prefers plain text.",
         kind="memory",
         via="pwa",
-        workspace="personal",
         destination="ciao:memory",
         outcome="written",
         proposal_id="abc",
@@ -369,26 +348,6 @@ def test_a_dismissal_records_no_receipt(tmp_path: Path) -> None:
         text="Ada prefers plain text.",
         kind="memory",
         via="pwa",
-        workspace="personal",
     )
 
     assert read_decisions(queue)[0]["receipt_id"] == ""
-
-
-def test_non_extraction_kinds_stay_out_of_the_tally(tmp_path: Path) -> None:
-    """Skill and rehome rows are decisions, but not extraction outcomes."""
-    from ciao.memory_proposals import read_decisions
-
-    queue = _queue(tmp_path)
-    for kind in ("skill", "rehome"):
-        proposal_actions.record_decision(
-            queue,
-            action="dismiss",
-            text=f"a {kind} row",
-            kind=kind,
-            via="pwa",
-            workspace="personal",
-        )
-
-    assert len(read_decisions(queue)) == 2
-    assert _read_events(tmp_path) == []

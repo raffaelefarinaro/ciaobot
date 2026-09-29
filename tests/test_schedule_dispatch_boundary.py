@@ -267,9 +267,7 @@ async def test_auto_archive_stays_a_manager_lifecycle_seam(
     )
     archive = ArchiveOutcome(
         path=tmp_path / "archive.md",
-        session_id="session-1",
         turn_count=1,
-        filtered_jsonl="{}",
     )
 
     async def archive_chat(chat_id: str) -> ArchiveOutcome | None:

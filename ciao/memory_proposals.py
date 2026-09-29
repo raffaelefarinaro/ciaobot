@@ -950,7 +950,7 @@ def write_entity_note(
     return "written"
 
 
-# One structured learning line. The shape is a contract: the curation skill
+# One structured learning line. The shape is a contract: the Workspace care schedule prompt
 # reads the recurrence count to decide promotion (N ≥ 3) and the sources to
 # cite episodes, so recurrence bookkeeping is mechanical instead of prose.
 _LEARNING_LINE_RE = re.compile(
@@ -1086,7 +1086,7 @@ def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
     Structured entries carry a key, first-seen/last-seen dates, a recurrence
     count, and source chat ids. Re-observing a learning (same normalized
     statement) increments its count and refreshes last-seen instead of
-    appending a duplicate — recurrence is what the curation skill promotes on,
+    appending a duplicate — recurrence is what the Workspace care schedule prompt promotes on,
     so it must be counted mechanically, not judged from prose. Legacy plain
     bullets are left untouched; an exact legacy duplicate still short-circuits.
 

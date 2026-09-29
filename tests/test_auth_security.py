@@ -242,29 +242,6 @@ def test_menubar_chats_requires_loopback_or_session() -> None:
     assert remote.get("/api/menubar-chats").status_code == 401
 
 
-def test_menubar_notifications_requires_loopback_or_session() -> None:
-    """Notification bodies are message snippets, so the tray's feed is gated the
-    same way as the chat list: loopback without a session, session otherwise.
-    """
-
-    async def stub(request):
-        return JSONResponse({"notifications": [{"ts": 1.0, "body": "private"}]})
-
-    serializer = URLSafeTimedSerializer("test-secret")
-    app = Starlette(
-        routes=[Route("/api/menubar-notifications", stub, methods=["GET"])],
-        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
-    )
-    app.state.serializer = serializer
-    app.state.config = SimpleNamespace(pwa_auth_required=True, pwa_auth_token="x")
-
-    local = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 5555))
-    assert local.get("/api/menubar-notifications").status_code == 200
-
-    remote = TestClient(app, base_url="http://ciao.example", client=("10.0.0.9", 5555))
-    assert remote.get("/api/menubar-notifications").status_code == 401
-
-
 # What `tailscale serve` (1.98) actually adds, captured from a live request: it
 # connects from 127.0.0.1, so without these the tailnet caller looks local.
 _TAILSCALE_SERVE_HEADERS = {

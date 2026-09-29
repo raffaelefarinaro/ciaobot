@@ -1,6 +1,6 @@
 """Deterministic worklist, run budget and serialization for nightly curation.
 
-``ciao/stock/skills/memory-curation/SKILL.md`` asks an agent to walk nine
+The ``system-memory-curation`` schedule prompt asks an agent to walk its
 passes every night. Most of those passes answer a question no model is needed
 for — is the queue empty, is a region at 85%, is the weekly marker older than
 seven days, is the log over 64KB — and the agent was answering them by reading

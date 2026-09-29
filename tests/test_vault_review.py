@@ -1050,7 +1050,7 @@ def test_an_invalid_disposition_does_not_rewrite_the_queue(
     `record_decision` raises on a bad disposition, but the control plane
     regenerated the queue projection first — so a call that errored out had
     still rewritten `Workspace/Vault-Review.md`. An agent following a stale
-    instruction (the curation skill named `improve_link` for a release after
+    instruction (the Workspace care schedule prompt named `improve_link` for a release after
     it was retired) hit exactly that.
     """
     from types import SimpleNamespace

@@ -771,8 +771,6 @@ async def test_finished_runs_are_recorded_as_job_runs(tmp_path: Path) -> None:
     assert rows[0]["status"] == "error"
     assert rows[0]["extra"]["run_id"] == run.run_id
     assert rows[0]["extra"]["exit_code"] == 2
-    # The registry entry makes it visible on the Automation page.
-    assert any(spec.job == "background_run" for spec in job_runs.REGISTRY)
 
 
 # ── wake path ─────────────────────────────────────────────────────────────

@@ -4,6 +4,12 @@
       <p class="section-title">Notifications</p>
       <p class="hint">
         Ciaobot notifies you when a chat replies and the browser tab is in the background.
+        <a
+          class="set-link"
+          href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
+          target="_blank"
+          rel="noopener noreferrer"
+        >Notifications on other devices need HTTPS: how to set it up</a>
       </p>
     </div>
     <!-- Status as one key/value row: a dot plus words (never colour alone),
@@ -28,17 +34,6 @@
           </button>
         </span>
       </div>
-      <div class="notif-row">
-        <span class="notif-key">Delivery</span>
-        <span class="notif-value">
-          <span class="notif-detail">{{ pushAllDevices ? 'Every device, including this computer' : 'Other devices only; this computer is not notified' }}</span>
-        </span>
-        <span class="notif-end">
-          <button class="btn-secondary btn-small" @click="toggleDelivery" :disabled="deliveryPending">
-            {{ pushAllDevices ? 'Other devices only' : 'Push to every device' }}
-          </button>
-        </span>
-      </div>
     </div>
     <!-- Mac without web push: web push in an installed app is the only way a Mac
          gets a Ciaobot notification banner, so offer it as an optional upgrade. -->
@@ -58,7 +53,6 @@ import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../../lib/push'
 import { isIos, isMacDesktop, isStandalone } from '../../lib/pwaPlatform'
-import type { RoutineSettings } from '../../lib/types'
 
 const pushSupportedFlag = ref(false)
 const pushEnabledFlag = ref(false)
@@ -66,8 +60,6 @@ const pushPending = ref(false)
 const pushError = ref('')
 const permissionDenied = ref(false)
 const needsIosInstall = ref(false)
-const pushAllDevices = ref(false)
-const deliveryPending = ref(false)
 
 const showToggle = computed(
   () => !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
@@ -128,11 +120,6 @@ onMounted(async () => {
       } catch { /* best-effort */ }
     }
   }
-  // Delivery is an install-wide setting, not this browser's: read it once and
-  // never let an unavailable settings endpoint break the card.
-  try {
-    pushAllDevices.value = Boolean((await api.get<RoutineSettings>('/api/settings/routines')).push_all_devices)
-  } catch { /* settings unavailable: keep default */ }
 })
 
 async function togglePush() {
@@ -150,19 +137,6 @@ async function togglePush() {
     pushError.value = errorMessage(e)
   } finally {
     pushPending.value = false
-  }
-}
-
-async function toggleDelivery() {
-  deliveryPending.value = true
-  pushError.value = ''
-  try {
-    const res = await api.patch<RoutineSettings>('/api/settings/routines', { push_all_devices: !pushAllDevices.value })
-    pushAllDevices.value = Boolean(res.push_all_devices)
-  } catch (e) {
-    pushError.value = errorMessage(e)
-  } finally {
-    deliveryPending.value = false
   }
 }
 

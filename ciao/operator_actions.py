@@ -83,7 +83,7 @@ class OperatorAction:
     # via dismiss_action() instead of running a fix.
     dismiss_label: str = ""
     # Which button leads the tile. Empty keeps the default order (run, link and
-    # view buttons filled, chat as a chip below). "chat" puts the chat button
+    # view buttons filled, chat as a chip below). "view" puts the view button
     # first as the filled primary and demotes the link to a chip: on the update
     # tile the forward action is updating, and release notes are supporting
     # reading.
@@ -204,14 +204,9 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
             workspace="",
             link_label="Release notes",
             link_url=latest_release_redirect_url(),
-            chat_label="How to install",
-            primary="chat",
-            chat_prompt=(
-                f"A new Ciaobot version ({latest}) is available. The current "
-                "install is updated through Ciaobot.app or the one-line "
-                "installer; check Settings for the update, and explain how to "
-                "install it on this machine without losing data."
-            ),
+            view_label="Update in Settings",
+            view_route="/settings",
+            primary="view",
         )
     ]
 

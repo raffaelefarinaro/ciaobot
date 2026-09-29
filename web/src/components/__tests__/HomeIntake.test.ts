@@ -12,7 +12,8 @@ import type { ChatInfo } from '../../lib/types'
 const openPicker = vi.hoisted(() => vi.fn())
 const shared = vi.hoisted(() => ({ read: vi.fn(), remove: vi.fn() }))
 
-vi.mock('../../lib/newChat', () => ({
+vi.mock('../../lib/newChat', async () => ({
+  homeNewChatProjectId: (await import('vue')).ref(''),
   openNewChatPicker: openPicker,
 }))
 vi.mock('../../lib/sharedContent', async (importOriginal) => ({

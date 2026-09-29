@@ -2856,7 +2856,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     substring.
     """
     from ciao import proposal_actions
-    from ciao import proposal_outcomes
     from ciao.memory_proposals import (
         find_proposal_matches,
         remove_proposal_by_substring,
@@ -2891,7 +2890,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
     # Two needle forms, because rows reach the queue two ways:
-    # `memory-proposal-add` flattens what it writes, while the curation skill
+    # `memory-proposal-add` flattens what it writes, while the Workspace care schedule prompt
     # appends `[review]` questions directly and may keep repeated whitespace.
     # A needle read from the very file a fact was filed from needs the flattened
     # form; a directly written row needs the raw one.
@@ -2994,17 +2993,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         )
         return 1
     kind, removed_text = removed
-    # Pin the outcome log to the same .runtime the server uses before
-    # recording: a CLI run from an arbitrary cwd must not scatter events into
-    # a .runtime beside the shell. Precedence: explicit --runtime-root, then
-    # CIAO_RUNTIME_ROOT, then this workspace's own .runtime.
-    proposal_outcomes.configure(
-        _resolve_runtime_root(
-            args.runtime_root
-            or os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
-            or workspace / ".runtime"
-        )
-    )
     # One handler for both ledgers, shared with the PWA's accept/dismiss
     # routes (`ciao/proposal_actions.py`). Preserve what was decided, not just
     # that something was: append-time dedupe consults the decision history, so
@@ -3016,19 +3004,12 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # the agent filed itself, and hid it from the review page's History tab
     # as an accepted row. The curator files a fact first and dismisses second,
     # so that flow is a promotion; only a bare rejection is a dismissal.
-    #
-    # The logical workspace name rides in CIAO_ACTIVE_WORKSPACE on scheduled
-    # runs (same convention as os-audit --workspace-name); a manual run
-    # without it lands in the shared bucket rather than recording a filesystem
-    # path as a name. Rehome rows are vault-hygiene decisions, not extraction
-    # outcomes, and the handler keeps them out of the tally.
     proposal_actions.record_decision(
         path,
         action="accept" if args.promoted else "dismiss",
         text=removed_text,
         kind=kind,
         via="agent",
-        workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
     )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be
@@ -5022,12 +5003,6 @@ def build_parser() -> argparse.ArgumentParser:
             "promote-then-dismiss flow); record the outcome as promoted "
             "instead of dismissed."
         ),
-    )
-    memory_proposal_dismiss_parser.add_argument(
-        "--runtime-root",
-        type=Path,
-        default=None,
-        help="Runtime root for the outcome log. Defaults to CIAO_RUNTIME_ROOT or <workspace>/.runtime.",
     )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
 

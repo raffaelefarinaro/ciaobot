@@ -79,12 +79,6 @@ function button(view: VueWrapper, label: string) {
   return match
 }
 
-function row(view: VueWrapper, label: string) {
-  const match = view.findAll('.set-subrow').find((r) => r.text().startsWith(label))
-  if (!match) throw new Error(`no row labelled ${label}`)
-  return match
-}
-
 beforeEach(() => {
   apiGet.mockReset().mockResolvedValue(status())
   apiPost.mockReset().mockResolvedValue({ ok: true, chat_id: 'c-1', reused: false })
@@ -192,29 +186,29 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     apiGet.mockResolvedValue(CONFIGURED)
   })
 
-  it('shows the scope, the last verified online backup, and both controls', async () => {
+  it('shows the last verified online backup and cadence without a configuration table', async () => {
     const view = await mountPanel()
 
-    expect(row(view, 'What is backed up').text()).toContain('memory-vault, skills')
-    expect(row(view, 'Last online backup').text()).toMatch(/minute|second|just now/)
-    // The two copies named apart, not merged into one claim.
-    expect(row(view, 'On this computer').text()).toContain('Saved here every time')
+    expect(view.find('.backup-status').text()).toMatch(/Last online backup: (?:.*minute|.*second|just now)/)
     expect(button(view, 'Back up now').classes()).toContain('btn-primary')
     expect(button(view, 'Pause').classes()).toContain('btn-secondary')
-    expect(row(view, 'Automatic').text()).toContain('Automatic backup every 5 minutes')
+    expect(view.find('.settings-card-header .hint').text()).toContain('Automatic backup every 5 minutes')
+    expect(view.find('.backup-details').attributes('open')).toBeUndefined()
+    expect(view.find('.backup-details-body').text()).toContain('memory-vault, skills')
+    expect(view.text()).not.toContain('How memory backup works')
   })
 
   it('links a web repository and leaves anything else as text', async () => {
     const view = await mountPanel()
-    const link = row(view, 'Repository').find('a')
+    const link = view.find('.backup-details a')
     expect(link.attributes('href')).toBe('https://github.com/person/memory.git')
     expect(link.attributes('rel')).toContain('noopener')
 
     // An scp-style origin is not a URL a browser should be told to navigate to.
     apiGet.mockResolvedValue(status({ state: 'ready', remote: 'git@github.com:person/memory.git' }))
     const other = await mountPanel()
-    expect(row(other, 'Repository').find('a').exists()).toBe(false)
-    expect(row(other, 'Repository').find('code').text()).toBe('git@github.com:person/memory.git')
+    expect(other.find('.backup-details a').exists()).toBe(false)
+    expect(other.find('.backup-details code').text()).toBe('git@github.com:person/memory.git')
   })
 
   it('names where the last run pushed when the live remote is empty', async () => {
@@ -222,7 +216,7 @@ describe('SettingsMemoryBackup with a repository connected', () => {
       status({ state: 'paused', remote: '', last_remote: 'https://github.com/person/memory.git', reason: 'backup is paused' }),
     )
     const view = await mountPanel()
-    expect(row(view, 'Repository').text()).toContain('https://github.com/person/memory.git')
+    expect(view.find('.backup-details').text()).toContain('https://github.com/person/memory.git')
   })
 
   it('backs up now and adopts the state the run reports', async () => {
@@ -232,8 +226,8 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     await flushPromises()
 
     expect(apiPost).toHaveBeenCalledWith('/api/local/backup/run')
-    expect(view.find('.backup-state').text()).toContain('Waiting to upload')
-    expect(view.find('[role="status"]').text()).toContain('Backup finished')
+    expect(view.find('.backup-status').text()).toContain('Waiting to upload')
+    expect(view.find('.action-result[role="status"]').text()).toContain('Backup finished')
   })
 
   it('reads a run that could not do its job off the response, not off a guess', async () => {
@@ -247,8 +241,8 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     await button(view, 'Back up now').trigger('click')
     await flushPromises()
 
-    expect(view.find('.backup-state').text()).toContain('Offline')
-    expect(view.find('.backup-reason').text()).toContain('connection refused')
+    expect(view.find('.backup-status').text()).toContain('Offline')
+    expect(view.find('.backup-details .backup-reason').text()).toContain('connection refused')
     expect(view.find('[role="alert"]').text()).toContain('Your memory is still safe on this computer')
   })
 
@@ -257,7 +251,7 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     await button(view, 'Pause').trigger('click')
     await flushPromises()
     expect(apiPatch).toHaveBeenCalledWith('/api/local/backup', { paused: true })
-    expect(view.find('[role="status"]').text()).toContain(
+    expect(view.find('.action-result[role="status"]').text()).toContain(
       'Automatic backups are off. The copy on this computer is unaffected.',
     )
 
@@ -267,7 +261,7 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     await button(paused, 'Resume').trigger('click')
     await flushPromises()
     expect(apiPatch).toHaveBeenCalledWith('/api/local/backup', { paused: false })
-    expect(paused.find('[role="status"]').text()).toContain('Automatic backups are running again.')
+    expect(paused.find('.action-result[role="status"]').text()).toContain('Automatic backups are running again.')
   })
 
   it('turns a disabled backup back on', async () => {
@@ -278,7 +272,7 @@ describe('SettingsMemoryBackup with a repository connected', () => {
     expect(apiPatch).toHaveBeenCalledWith('/api/local/backup', { enabled: true })
     // Turning them on must not announce that they are off: this is the
     // recovery path, and the sentence is read out by a screen reader.
-    expect(view.find('[role="status"]').text()).toContain('Automatic backups are running again')
+    expect(view.find('.action-result[role="status"]').text()).toContain('Automatic backups are running again')
   })
 })
 
@@ -294,7 +288,7 @@ describe('SettingsMemoryBackup status states', () => {
       status({ state, remote: 'https://github.com/p/m.git', reason: `because ${state}` }),
     )
     const view = await mountPanel()
-    expect(view.find('.backup-state').text()).toContain(label)
+    expect(view.find('.backup-status').text()).toContain(label)
     // The service's own reason is kept: it names the specific thing that is wrong.
     expect(view.find('.backup-reason').text()).toBe(`because ${state}`)
   })
@@ -303,12 +297,12 @@ describe('SettingsMemoryBackup status states', () => {
     apiGet.mockResolvedValue(
       status({ state: 'pending', remote: 'https://github.com/p/m.git', pending_changes: 3, pending_commits: 0 }),
     )
-    expect((await mountPanel()).find('.backup-state').text()).toContain('Saving locally')
+    expect((await mountPanel()).find('.backup-status').text()).toContain('Saving locally')
 
     apiGet.mockResolvedValue(
       status({ state: 'pending', remote: 'https://github.com/p/m.git', pending_changes: 0, pending_commits: 1 }),
     )
-    expect((await mountPanel()).find('.backup-state').text()).toContain('Waiting to upload')
+    expect((await mountPanel()).find('.backup-status').text()).toContain('Waiting to upload')
   })
 
   it('drops the "up to date" echo under a label that already says it', async () => {
@@ -323,13 +317,13 @@ describe('SettingsMemoryBackup status states', () => {
       status({ state: 'ready', remote: 'https://github.com/p/m.git', reason: 'up to date' }),
     )
     const view = await mountPanel()
-    expect(row(view, 'Last online backup').text()).toContain('has not reached the repository yet')
+    expect(view.find('.backup-status').text()).toContain('has not reached the repository yet')
 
     apiGet.mockResolvedValue(status({ state: 'not_configured', reason: 'no origin' }))
     const unconfigured = await mountPanel()
     // No status rows at all: the sentence about a next run belongs to the
     // configured half, where there is one to wait for.
-    expect(unconfigured.findAll('.set-subrow')).toHaveLength(0)
+    expect(unconfigured.find('.backup-status').exists()).toBe(false)
   })
 })
 
@@ -367,13 +361,13 @@ describe('SettingsMemoryBackup load states', () => {
 
   it('keeps the rows it has when a refresh fails, and says they are stale', async () => {
     const view = await mountPanel()
-    expect(row(view, 'What is backed up').text()).toContain('memory-vault')
+    expect(view.find('.backup-details').text()).toContain('memory-vault')
 
     apiGet.mockRejectedValue(new Error('offline'))
     await button(view, 'Check again').trigger('click')
     await flushPromises()
 
-    expect(row(view, 'What is backed up').text()).toContain('memory-vault')
+    expect(view.find('.backup-details').text()).toContain('memory-vault')
     expect(view.text()).toContain('Showing the last known status')
     expect(view.find('[role="alert"]').text()).toContain('offline')
   })
@@ -392,7 +386,7 @@ describe('SettingsMemoryBackup load states', () => {
     await flushPromises()
 
     expect(view.text()).not.toContain('Showing the last known status')
-    expect(view.find('.backup-state').text()).toContain('Offline')
+    expect(view.find('.backup-status').text()).toContain('Offline')
   })
 
   it('keeps a failed action from being cleared by a later refresh', async () => {
@@ -402,7 +396,7 @@ describe('SettingsMemoryBackup load states', () => {
     await flushPromises()
 
     expect(view.find('[role="alert"]').text()).toContain('the switch did not move')
-    expect(row(view, 'What is backed up').text()).toContain('memory-vault')
+    expect(view.find('.backup-details').text()).toContain('memory-vault')
   })
 })
 
@@ -423,7 +417,7 @@ describe('SettingsMemoryBackup refresh', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     await flushPromises()
 
-    expect(view.find('.backup-state').text()).toContain('Backed up')
+    expect(view.find('.backup-status').text()).toContain('Backed up')
     // Configured means no further re-reading: this is a bounded refresh of an
     // unconfigured install, not a second polling loop over a live one.
     const reads = apiGet.mock.calls.length
@@ -478,41 +472,28 @@ describe('SettingsMemoryBackup refresh', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     await flushPromises()
 
-    expect(view.find('.backup-state').text()).toContain('Backed up')
+    expect(view.find('.backup-status').text()).toContain('Backed up')
     expect(view.text()).not.toContain('Setup prompt copied')
   })
 })
 
-describe('SettingsMemoryBackup guide', () => {
-  it('opens the short guide and moves focus into it', async () => {
+describe('SettingsMemoryBackup details', () => {
+  it('keeps a scope warning concise and reveals the full diagnostic on demand', async () => {
+    apiGet.mockResolvedValue(status({
+      state: 'needs_attention',
+      remote: 'https://github.com/p/m.git',
+      reason: '2447 tracked path(s) outside the backup scope would not be backed up: .claude/settings.local.json, .env.example (+2445 more)',
+    }))
     const view = mount(SettingsMemoryBackup, { attachTo: document.body })
     mounted.push(view)
     await flushPromises()
-    const guide = view.find('details.backup-guide')
-    expect(guide.attributes('open')).toBeUndefined()
-
-    const link = view.findAll('button').find((b) => b.text() === 'How memory backup works')!
-    await link.trigger('click')
-    await flushPromises()
-
-    expect(guide.attributes('open')).toBeDefined()
-    const body = view.find('.backup-guide-body')
-    expect(document.activeElement).toBe(body.element)
-  })
-
-  it('covers both setup actions, the two copies, and where the repository is', async () => {
-    const view = await mountPanel()
-    const text = view.find('.backup-guide-body').text()
-    for (const phrase of [
-      'Set up in Ciaobot',
-      'Copy setup prompt',
-      'Ciaobot always saves to this computer first',
-      'the machine Ciaobot is running on',
-      'Back up now',
-      'Repository',
-      'Last online backup',
-    ]) {
-      expect(text).toContain(phrase)
-    }
+    expect(view.find('.backup-warning').text()).toContain('2447 tracked files')
+    expect(view.find('.backup-warning').text()).not.toContain('.env.example')
+    const details = view.find('details.backup-details')
+    expect(details.attributes('open')).toBeUndefined()
+    expect(details.find('summary').text()).toBe('Review details')
+    await details.find('summary').trigger('click')
+    expect((details.element as HTMLDetailsElement).open).toBe(true)
+    expect(details.find('.backup-reason').text()).toContain('.env.example')
   })
 })
