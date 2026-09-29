@@ -106,6 +106,10 @@ EXCLUDED_PATH_PARTS: set[str] = {".vault-trash", ARCHIVED_WORKSPACES_DIR}
 # `Workspace/` directory — where the pipeline writes them — so a user's own
 # note that happens to share a name (`projects/team/Weekly-Review-Log.md`)
 # stays searchable. Shared with `fts_search` so the two cannot drift.
+#
+# `note-checks.json` is `ciao.note_verification`'s durable per-note verification
+# state: a verdict with its citations, not a memory, and indexed JSON would put
+# "checked on <date>" in the middle of an ordinary recall result.
 RESERVED_UNINDEXED_FILES = frozenset(
     {
         "memory-proposals.md",
@@ -114,6 +118,7 @@ RESERVED_UNINDEXED_FILES = frozenset(
         "curation-log.md",
         "weekly-review-log.md",
         "vault-review.md",
+        "note-checks.json",
     }
 )
 
