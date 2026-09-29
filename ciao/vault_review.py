@@ -106,15 +106,23 @@ _RECORD_TYPES = frozenset({"journal"})
 # means by that. `Retire` stays available for every type, including this one: a
 # project note that is wrong or abandoned is retired, not completed.
 PROJECT_TYPE = "project"
-# The one frontmatter line a completion rewrites, and the same substitution
-# `ProjectChatManager.complete_project` applies to the PWA's own completion, so
-# a project closed from the review panel and one closed from the Projects tab
-# leave byte-identical frontmatter. Deliberately the exact pair of regexes from
-# there: a looser match (`status: active-ish`, a `status:` inside a fenced
-# example) would rewrite a line the PWA's completion leaves alone, and then the
-# two paths could no longer be told apart.
+# The one frontmatter line a completion rewrites, with the anchor
+# `ProjectChatManager.complete_project` uses for the PWA's own completion, so a
+# project closed from the review panel and one closed from the Projects tab leave
+# the same frontmatter. The same anchors as there — a `status:` line of its own,
+# nothing looser, or the two paths could no longer be told apart.
+#
+# There is no reverse pattern. A completion records the note's whole original
+# text as an undo image, and a restore writes that back, which puts the original
+# `status: active` line back with it; a second substitution to undo a first one
+# would be a way to get two answers for the same question.
+#
+# Applied by `_set_status` to the FRONTMATTER BLOCK ONLY, which is a deliberate
+# narrowing of the PWA's whole-text substitution. A body line reading
+# `status: active` — inside a fenced example, a pasted transcript, a sentence
+# about a decision log — is prose, and rewriting it makes a note that was never
+# closed claim that it was.
 _STATUS_ACTIVE_RE = re.compile(r"(?m)^(status:\s*)active\s*$")
-_STATUS_COMPLETED_RE = re.compile(r"(?m)^(status:\s*)completed\s*$")
 # Enough of the note to recognise it without opening it; the panel shows the
 # first lines inline and keeps the disclosure for the rest.
 EXCERPT_CHARS = 280
@@ -1200,7 +1208,12 @@ def _write_texts(pairs: list[tuple[Path, str, str]]) -> None:
                 raise OSError(f"{target} changed while its references were being rewritten")
             os.replace(temp, path)
             swapped.append((target, current))
-    except OSError:
+    # The decode failure is caught with the rest on purpose. A caller that has
+    # already moved something unwinds on the files this swapped in, and it only
+    # does that if this raises the error it is listening for: a
+    # `UnicodeDecodeError` here skipped the unwind and left the vault with some
+    # of its notes repointed and the rest not.
+    except (OSError, UnicodeDecodeError):
         _unwrite_texts(swapped)
         for _path, temp in staged:
             _discard(temp)
@@ -1226,6 +1239,16 @@ def _unwrite_texts(swapped: list[tuple[Path, str]]) -> None:
 def _vault_ref(path: str) -> str:
     """A note's path as a vault-relative ref: no ``memory-vault/`` prefix, no extension."""
     return str(Path(path).relative_to("memory-vault").with_suffix(""))
+
+
+def _vault_path(root: Path, path: Path) -> str:
+    """An absolute vault path as the ``memory-vault/…`` id every candidate uses.
+
+    The ledger, the candidate evidence and the sweep all name notes in this
+    namespace, so anything read off disk has to be rendered into it before it can
+    be compared with a recorded key.
+    """
+    return str(Path("memory-vault") / path.relative_to(root))
 
 
 def _missing_ancestors(path: Path, stop: Path) -> list[Path]:
@@ -1256,12 +1279,30 @@ def _prune_created(dirs: list[Path]) -> None:
             pass
 
 
+def _set_status(text: str, pattern: re.Pattern[str], value: str) -> str:
+    """Set the note's own ``status:`` line, inside the frontmatter and nowhere else.
+
+    A note whose frontmatter never closed is a normal shape and is left exactly
+    as it is: the substitution reports nothing by returning *text* unchanged, and
+    the caller says so in the ledger row rather than claiming a line it did not
+    find.
+    """
+    frontmatter = _FRONTMATTER_RE.match(text)
+    if frontmatter is None:
+        return text
+    block = frontmatter.group(0)
+    rewritten = pattern.sub(rf"\g<1>{value}", block)
+    if rewritten == block:
+        return text
+    return rewritten + text[len(block):]
+
+
 def _rewrite_status(text: str) -> tuple[str, bool]:
     """Close a project out in its own frontmatter; return the text and whether it changed.
 
-    The same substitution ``ProjectChatManager.complete_project`` applies, so a
-    project closed from the review panel and one closed from the Projects tab
-    leave the same frontmatter and either can be restored by the other.
+    The same substitution ``ProjectChatManager.complete_project`` applies, scoped
+    to the frontmatter block rather than the whole document — see
+    ``_STATUS_ACTIVE_RE``.
 
     A note with no ``status: active`` line is a normal shape — the key is
     optional frontmatter — so it still completes, and the row records
@@ -1269,8 +1310,8 @@ def _rewrite_status(text: str) -> tuple[str, bool]:
     honestly is the difference between a closed project that says it is closed
     and a ledger row asserting a rewrite that never happened.
     """
-    rewritten = _STATUS_ACTIVE_RE.sub(r"\1completed", text)
-    return rewritten, rewritten != text
+    closed = _set_status(text, _STATUS_ACTIVE_RE, "completed")
+    return closed, closed != text
 
 
 class _Rewrite(NamedTuple):
@@ -1315,23 +1356,32 @@ def _ref_needles(moves: list[tuple[str, str]]) -> set[str]:
     }
 
 
-def _restored(root: Path, folder: str, recorded: Path) -> Path:
-    """Where a recorded undo image lives once the project has been moved back.
+def _moved_back_map(
+    root: Path, folder: str, previous_path: str, completed_path: str, recorded: list[Path]
+) -> dict[str, str]:
+    """``{completed path: original path}`` for the undo images a restore can read.
 
     A completion records each image under the path its note has while the project
-    is COMPLETED, and for a note inside the project folder that path stops
-    existing the moment the folder moves back under ``active/``. So the two paths
-    have to be translated, not just looked up. Anything outside the folder is
-    returned unchanged: a note that referred to the project never moved, and
-    ``shutil.move`` cannot have disturbed it.
+    is COMPLETED, and the move that precedes a restore takes those paths away
+    again: every note inside the project folder, and — in the flat layout, where
+    there is no folder at all — the project's own note, whose recorded path *is*
+    ``completed_path``. So the keys have to be translated before they can be
+    looked up.
+
+    Only the recorded keys are translated, and only when the translation is the
+    move's own mirror: a note that merely referred to the project never moved, and
+    its image is already at the path it will be read from.
     """
-    if not folder:
-        return recorded
-    rel = str(Path("memory-vault") / recorded.relative_to(root))
-    suffix = rel.removeprefix(f"{_completed_counterpart(folder)}/")
-    if suffix == rel:
-        return recorded
-    return (root / Path(f"{folder}/{suffix}").relative_to("memory-vault")).resolve()
+    moved_back: dict[str, str] = {}
+    if folder:
+        completed_folder = f"{_completed_counterpart(folder)}/"
+        for path in recorded:
+            key = _vault_path(root, path)
+            if key.startswith(completed_folder):
+                moved_back[key] = f"{folder}/{key[len(completed_folder):]}"
+    if previous_path != completed_path:
+        moved_back[completed_path] = previous_path
+    return moved_back
 
 
 def _repoint_project_references(
@@ -1367,6 +1417,14 @@ def _repoint_project_references(
     ``[[projects/active/x]]`` reads the same way from ``projects/completed/`` —
     so each reference is re-spelled relative to where the project now is, which
     is what the helper does for a relative markdown destination.
+
+    The project's own entry note is swept like every other note, and it used not
+    to be. It sits inside the moving folder and may link its siblings, so
+    ``[[projects/active/demo/plan]]`` in it became a dangling reference in
+    ``completed/demo/demo.md`` — the same broken link as one written anywhere
+    else, on the one note the sweep excluded. Excluding it bought nothing: the
+    caller folds its ``status:`` line into whatever comes back, so one write and
+    one undo image still cover both edits.
 
     Only notes that can name a moved note are read. A reference in any dialect is
     a path without its extension, so it always contains that note's stem, and a
@@ -1408,8 +1466,6 @@ def _repoint_project_references(
     rewrites: list[_Rewrite] = []
     for entry in entries:
         rel = str(entry.path)
-        if rel == previous_path:
-            continue  # the project's own entry note, handled by its caller
         try:
             note = (root / Path(rel).relative_to("memory-vault")).resolve()
         except ValueError:
@@ -1434,7 +1490,7 @@ def _repoint_project_references(
         if new_text == text:
             continue
         after = (root / Path(after_rel).relative_to("memory-vault")).resolve()
-        edited.append(str(Path("memory-vault") / after.relative_to(root)))
+        edited.append(_vault_path(root, after))
         rewrites.append(_Rewrite(note, after, text, new_text))
     return edited, rewrites
 
@@ -1527,29 +1583,36 @@ def complete_project_note(root: Path, candidate: ReviewCandidate, *, actor: str 
         raise ValueError(f"project note is not readable as utf-8: {exc}") from exc
     except OSError as exc:
         raise ValueError(f"project note could not be read: {exc}") from exc
-    closed_text, status_rewritten = _rewrite_status(original_text)
     # References resolve against the vault's real files, so the sweep runs while
     # the note is still at its old path. That ordering constraint is why this is
     # before the move and not after it, and it is the same reason
-    # `delete_permanently` refuses before it strips anything.
+    # `delete_permanently` refuses before it strips anything. It sweeps the
+    # project's own note too, so the note's references follow it out of `active/`.
     edited, rewrites = _repoint_project_references(
         root, candidate.path, completed_path, workspace=candidate.workspace, folder=folder
     )
-    # The entry note's own status rewrite joins the sweep's as one transaction.
-    # A failure on either side of the pair then leaves the note and the notes
-    # pointing at it consistent with each other, which is what makes the unwind
-    # below honest.
-    pending: list[tuple[Path, str, str]] = [(r.path_before, r.before, r.after) for r in rewrites]
-    rollback = [(r.path_before, r.before) for r in rewrites]
+    # The `status:` line is folded into whatever the sweep made of that note, so
+    # the note leaves `active/` saying it is closed AND with its references
+    # following it, in one write and one undo image. A note the sweep found
+    # nothing to change in still gets the status line, as its own rewrite.
+    closed_text, status_rewritten = _rewrite_status(
+        next((r.after for r in rewrites if r.path_before == source), original_text)
+    )
     if closed_text != original_text:
-        pending.insert(0, (source, original_text, closed_text))
-        rollback.insert(0, (source, original_text))
-    # The images recorded as `undo` are every rewritten note EXCEPT the entry
-    # one, which is not in them because `restore_completed` puts it back by
-    # moving it and flipping its one status line: an image keyed at a path the
-    # note no longer occupies would make every later restore fail. Each image is
-    # keyed at the path its note will have AFTER the move, which is where
-    # `restore_completed` looks for it and where it has to be to be writable.
+        entry = next((i for i, r in enumerate(rewrites) if r.path_before == source), None)
+        if entry is None:
+            rewrites.insert(0, _Rewrite(source, destination, original_text, closed_text))
+        elif closed_text != rewrites[entry].after:
+            rewrites[entry] = rewrites[entry]._replace(after=closed_text)
+    # Every rewritten note is written through the path it has NOW and recorded
+    # under the path it will have AFTER the move, which is the path
+    # `restore_completed` looks its image up by and the only one at which it can
+    # be written. The project's own note is in here like any other: keeping it out
+    # would have meant reversing its reference rewrite by hand, and a restore that
+    # undoes the status line but not the links leaves a project pointing at a tree
+    # that no longer has the notes it named.
+    pending = [(r.path_before, r.before, r.after) for r in rewrites]
+    rollback = [(r.path_before, r.before) for r in rewrites]
     undo = {str(r.path_after): {"before": r.before, "after": r.after} for r in rewrites}
     try:
         _write_texts(pending)
@@ -1638,14 +1701,19 @@ def restore_completed(
       completion recorded the text each file was left in as well as the text it
       had, and that is the only thing this can compare against.
 
-    The status line is flipped back rather than the note's whole text restored,
-    so a change made to the project while it sat in ``completed/`` survives:
-    only the one line completion is responsible for is undone. The recorded link
-    images are restored whole, because those rewrites were mechanical and
-    replaying them by hand is the repair nobody makes — and each one is looked up
-    where the completion left it, then written back through where the project has
-    just landed, since a note inside the folder has a different path in each of
-    those two moments.
+    Every note the completion rewrote is restored from its recorded image, the
+    project's own entry note among them — its ``status:`` line and its
+    references in one image, because a restore that undid the line but not the
+    links would hand back a project still pointing at a tree that no longer holds
+    the notes it named. The price of that consistency is that an edit made to any
+    of those notes while the project sat in ``completed/`` refuses the restore
+    rather than surviving it, which is the same answer the referring notes have
+    always given.
+
+    Each image is looked up where the completion left its note and written back
+    through where the project has just landed: for a note that moved with the
+    project those are two different paths, and ``_moved_back_map`` is the move
+    mirrored.
     """
     _validate_candidate_id(candidate_id_value)
     root = Path(root).resolve()
@@ -1735,30 +1803,36 @@ def restore_completed(
     # its old path the note is not there to read; `applied` is what puts the
     # whole restore back if the ledger append below fails.
     #
-    # The images are keyed where the COMPLETION left each note, which for a note
-    # inside the project folder is a path the move above has just taken away
-    # again. `_restored` maps those back under `active/`; an image for a note
-    # outside the folder is untouched, because that note never moved.
+    # The images are keyed where the COMPLETION left each note, which is a path
+    # the move above has just taken away again for every note that moved with the
+    # project — the project's own note included. `_moved_back_map` is that move
+    # mirrored, so the keys are translated rather than looked up; an image for a
+    # note that merely referred to the project is not in it, because that note
+    # never moved.
+    moved_back = _moved_back_map(
+        root, folder, previous_path, completed_path, [Path(key) for key in undo]
+    )
     writes: list[tuple[Path, str, str]] = []
     applied: list[tuple[Path, str]] = []
     try:
         for recorded, before in images:
-            target = _restored(root, folder, recorded)
+            old_path = moved_back.get(_vault_path(root, recorded))
+            target = (
+                (root / Path(old_path).relative_to("memory-vault")).resolve()
+                if old_path is not None
+                else recorded
+            )
             current = _read_exact(target)
             writes.append((target, current, before))
             applied.append((target, current))
-        if decision.get("status_rewritten") and destination.is_file():
-            current = _read_exact(destination)
-            reopened = _STATUS_COMPLETED_RE.sub(r"\1active", current)
-            if reopened != current:
-                writes.append((destination, current, reopened))
-                applied.append((destination, current))
         _write_texts(writes)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         # `_write_texts` restores every file it swapped in, and a read that
         # failed wrote nothing at all, so the only thing left to undo here is
         # the move: the project goes back to where it came from, linked the way
-        # it was linked.
+        # it was linked. A decode failure is caught with the rest, because the
+        # project has already been moved by this point and leaving it there
+        # would strand it with no ledger row saying where it went.
         if move_to.exists() and not move_from.exists():
             shutil.move(str(move_to), str(move_from))
         _prune_created(created)

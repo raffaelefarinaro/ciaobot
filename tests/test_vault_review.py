@@ -1959,3 +1959,97 @@ def test_a_note_edited_under_a_completion_is_not_overwritten(tmp_path: Path) -> 
     # The refusal is the whole outcome: the edit is intact.
     assert "edited by hand" in hub.read_text(encoding="utf-8")
     assert list(tmp_path.glob(".Hub.md.*")) == []
+
+
+def test_an_entry_note_that_links_its_siblings_completes_and_restores(tmp_path: Path) -> None:
+    """The entry note is inside the moving folder, so its own links move with it.
+
+    The sweep used to skip the one note it could not afford to skip: `demo.md`
+    linking `[[projects/active/demo/plan]]` ended up in `completed/demo/demo.md`
+    still naming `projects/active/demo/plan`, which the move had just taken away.
+    The same dangling link as one written in any other note, on the single note
+    the rewriter was told to ignore.
+    """
+    folder = _project(tmp_path, "demo")
+    (folder / "plan.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Plan\n\nSteps.\n", encoding="utf-8"
+    )
+    entry = folder / "demo.md"
+    entry.write_text(
+        "---\ntype: project\nstatus: active\ntags: [project]\nupdated: 2026-05-19\n"
+        "related: [projects/active/demo/plan]\n---\n"
+        "# demo\n\nSee [[projects/active/demo/plan]] and [the plan](plan.md).\n",
+        encoding="utf-8",
+    )
+    entry_before = entry.read_bytes()
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    moved = tmp_path / "projects" / "completed" / "demo" / "demo.md"
+    closed = moved.read_text(encoding="utf-8")
+    assert "projects/active/demo/plan" not in closed
+    assert "related: [projects/completed/demo/plan]" in closed
+    assert "[[projects/completed/demo/plan]]" in closed
+    assert "[the plan](plan.md)" in closed
+    assert "status: completed" in closed
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+    review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    # Byte-exact both ways: the status line and the references are one image.
+    assert entry.read_bytes() == entry_before
+    assert (tmp_path / "projects" / "active" / "demo" / "plan.md").is_file()
+    assert not moved.exists()
+
+
+def test_completion_leaves_a_status_line_in_the_body_alone(tmp_path: Path) -> None:
+    """The substitution is scoped to the frontmatter, where the key actually lives.
+
+    A body line reading `status: active` — a pasted transcript, a fenced example,
+    a sentence about a decision log — is prose. Rewriting it made a note that was
+    never closed claim that it was, and the reverse substitution then flipped every
+    such line back on restore, so a restore edited a note it had never touched.
+    """
+    folder = _project(tmp_path, "demo")
+    entry = folder / "demo.md"
+    entry.write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n"
+        "# demo\n\n```yaml\nstatus: active\n```\n\nThe log line above was `status: active`.\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    closed = (tmp_path / "projects" / "completed" / "demo" / "demo.md").read_text(encoding="utf-8")
+    assert closed.count("status: completed") == 1
+    assert closed.count("status: active") == 2
+    assert "```yaml\nstatus: active\n```" in closed
+    assert "was `status: active`." in closed
+
+
+def test_a_note_that_stopped_being_utf8_mid_completion_is_rolled_back(tmp_path: Path) -> None:
+    """A decode failure is the caller's signal to unwind, like any other write failure.
+
+    It is not an `OSError`, so it skipped the `except OSError` that restores the
+    already-swapped files and put the project back — leaving the vault with some
+    of its notes repointed and the rest not.
+    """
+    hub = tmp_path / "Hub.md"
+    hub.write_text("---\ntype: note\n---\n# Hub\n\nSee [[demo]].\n", encoding="utf-8")
+    stale = review._read_exact(hub)
+    hub.write_bytes(b"---\ntype: note\n---\n# Hub\n\nSee [[caf\xe9]].\n")
+    other = tmp_path / "Other.md"
+    other.write_text("---\ntype: note\n---\n# Other\n", encoding="utf-8")
+
+    with pytest.raises((OSError, UnicodeDecodeError)):
+        review._write_texts(
+            [(hub, stale, "rewritten"), (other, review._read_exact(other), "rewritten too")]
+        )
+
+    # The note that was already swapped in is back, and the unreadable one is
+    # exactly as it was found.
+    assert other.read_text(encoding="utf-8") == "---\ntype: note\n---\n# Other\n"
+    assert hub.read_bytes() == b"---\ntype: note\n---\n# Hub\n\nSee [[caf\xe9]].\n"
+    assert list(tmp_path.glob(".Hub.md.*")) == []
