@@ -14,6 +14,16 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _ignored(root: Path, path: str) -> bool:
+    """Whether git refuses to track ``path`` here.
+
+    Asked of git rather than read off the file: what these rules are *for* is
+    which lines git honours and in what order, and that is a question only git
+    answers correctly.
+    """
+    return _git(root, "check-ignore", "-q", path).returncode == 0
+
+
 def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     root.mkdir()
@@ -31,7 +41,14 @@ def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
     assert len(log.stdout.strip().splitlines()) == 1
 
     gitignore = (root / ".gitignore").read_text(encoding="utf-8")
-    for entry in (".env", ".runtime/", ".claude/", ".agents/", "*.log"):
+    for entry in (
+        ".env",
+        ".runtime/*",
+        "!.runtime/schedules.json",
+        ".claude/",
+        ".agents/",
+        "*.log",
+    ):
         assert entry in gitignore.splitlines()
 
     tracked = _git(root, "ls-files").stdout.splitlines()
@@ -40,6 +57,94 @@ def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
     assert "CLAUDE.md" in tracked
     assert ".gitignore" in tracked
     assert ".env" not in tracked
+
+
+def test_the_workspace_gitignore_re_includes_the_automation_store(
+    tmp_path: Path,
+) -> None:
+    """The template has to be in git's grammar, not just list the entry.
+
+    The backup scope commits `.runtime/schedules.json` and refuses every other
+    path under that root, so the ignore rules have to say the same thing — and
+    a `.runtime/` line cannot: git never descends into an ignored directory, so
+    a re-include written beside it is dead and the automations stay outside the
+    backup while the status page lists them inside it. Asserted against git
+    rather than against the text, because the text is the thing that was wrong
+    twice (#734).
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    runtime = root / ".runtime"
+    runtime.mkdir()
+    (runtime / "schedules.json").write_text('{"schedules": []}\n', encoding="utf-8")
+    (runtime / "custom_providers.json").write_text("{}\n", encoding="utf-8")
+
+    ensure_workspace_git(root)
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    # The re-include has to follow the glob it overrides; the reverse order is
+    # ignored like any other line.
+    assert lines.index(".runtime/*") < lines.index("!.runtime/schedules.json")
+    assert ".runtime/" not in lines
+
+    assert not _ignored(root, ".runtime/schedules.json"), "the store must be tracked"
+    assert _ignored(root, ".runtime/custom_providers.json"), "the rest must not be"
+
+    # ...and it is therefore actually committable, which is the whole point.
+    assert _git(root, "add", "-A").returncode == 0
+    tracked = _git(root, "ls-files").stdout.splitlines()
+    assert ".runtime/schedules.json" in tracked
+    assert ".runtime/custom_providers.json" not in tracked
+
+
+def test_a_bare_runtime_directory_rule_is_repaired_in_place(tmp_path: Path) -> None:
+    """An install scaffolded before #734 has `.runtime/` in its `.gitignore`,
+    and appending the pair beside it would not help: the directory rule wins
+    because git never looks inside. Only a rewrite makes the carve-out real, so
+    that is what happens — narrowly, in place, and without touching anything
+    else the operator wrote.
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    assert _git(root.parent, "init", "-b", "trunk", str(root)).returncode == 0
+    (root / ".gitignore").write_text(
+        "# mine\n.runtime/\nnode_modules/\n", encoding="utf-8"
+    )
+
+    ensure_workspace_git(root)
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".runtime/" not in lines
+    assert lines.count(".runtime/*") == 1
+    assert lines.count("!.runtime/schedules.json") == 1
+    assert lines.index(".runtime/*") < lines.index("!.runtime/schedules.json")
+    # The operator's own lines are untouched, in place and in order.
+    assert lines[:2] == ["# mine", ".runtime/*"]
+    assert "node_modules/" in lines
+    # The repair is idempotent, so a second setup rewrites nothing.
+    before = (root / ".gitignore").read_text(encoding="utf-8")
+    ensure_workspace_git(root)
+    assert (root / ".gitignore").read_text(encoding="utf-8") == before
+
+
+def test_a_nested_runtime_rule_is_not_the_workspace_rule(tmp_path: Path) -> None:
+    """Only Ciaobot's own root-level line is rewritten.
+
+    `client/.runtime/` is somebody else's directory, in somebody else's
+    project: replacing it with a re-include would put that project's runtime
+    state back into a snapshot, which is the opposite of what this repair is
+    for.
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    assert _git(root.parent, "init", "-b", "trunk", str(root)).returncode == 0
+    (root / ".gitignore").write_text("client/.runtime/\n", encoding="utf-8")
+
+    ensure_workspace_git(root)
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "client/.runtime/"
+    assert _ignored(root, "client/.runtime/state.json")
 
 
 def test_ensure_workspace_git_is_idempotent(tmp_path: Path) -> None:
@@ -68,7 +173,7 @@ def test_ensure_workspace_git_leaves_existing_repo_alone(tmp_path: Path) -> None
     lines = gitignore.splitlines()
     assert lines[:3] == ["# mine", "node_modules/", ".env"]
     assert lines.count(".env") == 1
-    for entry in (".runtime/", ".claude/", ".agents/", "*.log"):
+    for entry in (".runtime/*", "!.runtime/schedules.json", ".claude/", "*.log"):
         assert entry in lines
 
 
@@ -182,7 +287,13 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
 
     tracked = _git(ws, "ls-files").stdout.splitlines()
     assert ".env" not in tracked
-    assert not any(path.startswith(".runtime/") for path in tracked)
+    # The runtime root is ignored except for the automation store, so a fresh
+    # install's own initial commit carries that one file and nothing else under
+    # `.runtime/` (#734). The assertion used to be a flat "no `.runtime/` path":
+    # true while the whole directory was ignored, and the thing that made the
+    # backup scope's carve-out inert on exactly the installs this scaffolds.
+    runtime_tracked = [p for p in tracked if p.startswith(".runtime/")]
+    assert all(p == ".runtime/schedules.json" for p in runtime_tracked), runtime_tracked
     assert not any(path.startswith(".claude/") for path in tracked)
     assert not any(path.startswith(".agents/") for path in tracked)
     assert "personal/AGENTS.md" in tracked

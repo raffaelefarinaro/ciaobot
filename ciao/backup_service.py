@@ -1250,8 +1250,15 @@ Then:
 3. Configure the scope and the ignore rules. Everything under "backed up" is
    durable and belongs in the repository; everything under "never backed up"
    does not, and must not reach the remote. A glob such as `.runtime/*` under
-   "never backed up" means every file in that directory, including the one
-   named under "backed up" — the two lines are one rule read from either side.
+   "never backed up" covers every file in that directory except
+   `.runtime/schedules.json`, which is listed under "backed up": the two lines
+   are one rule read from either side, and that file belongs to exactly one of
+   them. To write it, do not ignore the directory itself — git cannot re-include
+   a file inside an ignored directory, so a `.runtime/` line would win over any
+   negation and the automations would be dropped. Ignore the directory's
+   contents and negate the one file back, in that order:
+     .runtime/*
+     !.runtime/schedules.json
    Check the already-tracked paths that fall outside the scope (`git ls-files`
    will list them) and tell the user which ones you would untrack rather than
    untracking them silently.

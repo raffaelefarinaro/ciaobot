@@ -455,12 +455,21 @@ from ciao.workspace_guide import guide_path
 # Paths a workspace snapshot must never pick up. No `.codex/` entry: codex is
 # retired (`sync_skills` only prunes what older versions left behind, it never
 # writes there), so ignoring it would be dead config.
+#
+# `.runtime/` is written as its contents plus one re-include rather than as the
+# directory, because the backup scope commits `.runtime/schedules.json` — the
+# durable automation store — and refuses every other path under that root
+# (#734). Git never descends into an ignored directory, so a `.runtime/` line
+# would make that carve-out inert no matter what followed it. Order matters:
+# the re-include has to come after the glob it overrides.
+_RUNTIME_IGNORE_DIR = ".runtime/"
+_RUNTIME_IGNORE_ENTRIES = (".runtime/*", "!.runtime/schedules.json")
 _WORKSPACE_GITIGNORE_ENTRIES = (
     ".env",
     ".envrc",
     ".direnv/",
     "secrets/",
-    ".runtime/",
+    *_RUNTIME_IGNORE_ENTRIES,
     ".claude/",
     ".agents/",
     ".opencode/",
@@ -470,18 +479,40 @@ _WORKSPACE_GITIGNORE_ENTRIES = (
 
 
 def _ensure_workspace_gitignore(root: Path) -> None:
-    """Make sure `git add -A` snapshots never pick up secrets or runtime state."""
+    """Make sure `git add -A` snapshots never pick up secrets or runtime state.
+
+    Also repairs the one entry whose meaning needs a rewrite rather than an
+    append. A ``.runtime/`` line ignores the *directory*, so a re-include
+    written beside it does nothing: git never descends into an ignored
+    directory, which is what left the backup scope's carve-out of
+    ``.runtime/schedules.json`` inert on every install scaffolded before #734
+    while the status page listed the file as backed up. Appending cannot fix
+    that, so a bare ``.runtime/`` line is rewritten in place as the pair.
+
+    Rewriting is safe whichever hand wrote the line, because the pair covers
+    everything the line covered: same directory, same contents, plus one file
+    re-included. A path-scoped rule such as ``client/.runtime/`` is somebody
+    else's and is left alone.
+    """
     gitignore = root / ".gitignore"
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    present = {line.strip() for line in existing.splitlines()}
+    lines: list[str] = []
+    for line in existing.splitlines():
+        if line.strip() == _RUNTIME_IGNORE_DIR:
+            lines.extend(_RUNTIME_IGNORE_ENTRIES)
+        else:
+            lines.append(line)
+    present = {line.strip() for line in lines}
     missing = [e for e in _WORKSPACE_GITIGNORE_ENTRIES if e not in present]
-    if not missing:
+    if not missing and lines == existing.splitlines():
         return
-    if existing:
-        text = existing if existing.endswith("\n") else existing + "\n"
+    if lines:
+        text = "\n".join(lines) + "\n"
     else:
         text = "# Ciaobot: keep secrets and runtime state out of git snapshots\n"
-    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8")
+    if missing:
+        text += "\n".join(missing) + "\n"
+    gitignore.write_text(text, encoding="utf-8")
 
 
 def ensure_workspace_git(root: Path) -> None:

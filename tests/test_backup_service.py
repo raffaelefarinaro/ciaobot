@@ -1375,6 +1375,33 @@ def test_the_setup_prompt_names_this_install(tmp_path: Path) -> None:
     assert ".runtime/," not in never
 
 
+def test_the_prompt_does_not_put_one_path_in_both_lists(tmp_path: Path) -> None:
+    """The prompt tells an agent to configure ignore rules, so its two lists
+    have to be able to be written down without contradiction.
+
+    It first says everything under "never backed up" must not reach the remote,
+    and then explains `.runtime/*` — which, read the way it was first written,
+    covered a file the same prompt lists under "backed up". An agent resolving
+    that by ignoring the directory wholesale would untrack the automations
+    (#734). The sentence now states the exception, and says why the rules have
+    to be written as a glob rather than as the directory.
+    """
+    world = _world_in(tmp_path / "ciao install")
+    prompt = backup_service.render_setup_prompt(world.config)
+
+    # Step 3 is where the agent is told to write the ignore rules, so it is the
+    # step whose two halves have to agree. Rejoined first: the prose is wrapped
+    # for a terminal, and a claim that only holds on one line break is not a
+    # claim the prompt makes.
+    step = " ".join(prompt.split("\n3. ", 1)[1].split("\n4. ", 1)[0].split())
+    assert "except `.runtime/schedules.json`" in step
+    assert "including" not in step
+    # The re-include has to come after the glob, and the prompt has to say so,
+    # or the agent writes a rule git ignores.
+    assert step.index(".runtime/*") < step.index("!.runtime/schedules.json")
+    assert "git cannot re-include a file inside an ignored directory" in step
+
+
 def test_a_folder_with_spaces_stays_one_path(tmp_path: Path) -> None:
     """A data folder with a space in it is the ordinary case on macOS, and a
     prompt that printed it bare would have the agent's first ``cd`` land

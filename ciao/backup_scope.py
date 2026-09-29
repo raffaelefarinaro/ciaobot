@@ -61,7 +61,11 @@ because the rule reads as an over-broad name match without it (#734):
 - **The transcript archive is refused where it is**, resolved for this install
   through the same ``logs_root`` the writers use, and refused even where it
   falls inside the vault — including the install whose vault *is* the archive,
-  where the provenance rule would otherwise admit every file in it.
+  where the provenance rule would otherwise admit every file in it. One place
+  a resolved location cannot follow is an archived agent root: it is a copy of
+  a workspace as it was, so one archived before the re-rooting carries its
+  vault's ``Logs`` too, and the transcript subtree is refused there by its
+  shape rather than by its name.
 
 Leaf module by design: it imports nothing from ``ciao`` except the read-only
 git helper and the guide's filename, and reaches ``local_session.sync_root``
@@ -116,7 +120,9 @@ ARCHIVED_WORKSPACES_DIR = ".archived-workspaces"
 #: rule was a name match for a location: it refused ``memory-vault/Logs/
 #: <note>.md`` — a note the operator wrote — along with the derived archive it
 #: exists to protect (#734). The archive is refused where it is resolved to
-#: instead; see :func:`_archive_rel`.
+#: instead (:func:`_archive_rel`), and under an archived root by its shape
+#: (:func:`_holds_archived_transcripts`) — the one copy the resolved location
+#: cannot point at.
 EXCLUDED_DIRS: frozenset[str] = frozenset(
     {
         ".runtime",
@@ -197,6 +203,16 @@ ALLOWED_FILES: tuple[str, ...] = (".runtime/schedules.json",)
 _CARVED_OUT_DIRS: frozenset[str] = frozenset(
     name.split("/", 1)[0] for name in ALLOWED_FILES
 )
+
+#: The two directory names the derived transcript archive is made of: the
+#: archive root, and the transcripts inside it. Spelled here rather than
+#: derived from ``config.logs_root``, because :func:`_holds_archived_transcripts`
+#: has to recognise the archive's *shape* in a copy of a workspace the
+#: re-rooting has since moved — the one place the resolved location cannot
+#: follow. The layout is the app's own (``main`` writes ``<logs_root>/Chats``),
+#: so it is a fact about the archive rather than about the operator.
+_LOGS_DIR = "Logs"
+_CHATS_DIR = "Chats"
 
 # What a scope base holds, and therefore what may live under it.
 _AGENT = "agent"
@@ -594,8 +610,33 @@ def _is_durable(remainder: str, kind: str) -> bool:
     if kind == _ARCHIVE:
         # One archived agent root per child, so the durable trees sit one
         # level below the container rather than directly inside it.
+        if _holds_archived_transcripts(parts, offset=1):
+            return False
         return _holds_durable_tree(parts, offset=1) or _holds_guide(parts, offset=1)
     return _holds_durable_tree(parts, offset=0) or _holds_guide(parts, offset=0)
+
+
+def _holds_archived_transcripts(parts: tuple[str, ...], *, offset: int) -> bool:
+    """Whether this is the transcript tree of an archived agent root.
+
+    The one place the archive anchor does not reach. :func:`_in_archive` refuses
+    the archive at the single location ``config.logs_root`` resolves to, but an
+    archived agent root is a *copy* of a workspace as it was, so one archived
+    before the re-rooting carries its vault's own ``Logs``: a duplicate of the
+    promoted archive rather than a folder the operator named. It is derived
+    output either way, and ``<logs_root>/Chats`` is where transcripts actually
+    live — so the transcript subtree is refused under an archived root while a
+    note file beside it stays in scope (#734).
+
+    Deliberately narrower than the rule it replaces. The old name rule refused
+    every ``Logs`` at every depth, which is also what stopped a user's own notes
+    folder of that name; this refuses the derived half of it and nothing else.
+    """
+    return (
+        len(parts) > offset + 2
+        and parts[offset + 1] == _LOGS_DIR
+        and parts[offset + 2] == _CHATS_DIR
+    )
 
 
 def _holds_guide(parts: tuple[str, ...], *, offset: int) -> bool:

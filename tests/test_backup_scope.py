@@ -315,26 +315,61 @@ def test_the_archive_denial_wins_where_the_vault_is_the_archive(tmp_path: Path) 
     assert "Logs/" in backup_scope.ineligible(config)
 
 
-def test_an_archived_workspaces_logs_folder_is_a_stale_copy_not_the_archive(
-    tmp_path: Path,
-) -> None:
-    """The case the location anchor deliberately lets through, pinned so it
-    cannot change unnoticed.
+def test_an_archived_workspaces_transcripts_stay_refused(tmp_path: Path) -> None:
+    """The one place the archive anchor does not reach, pinned on both sides.
 
     `config.logs_root` is the *one* archive this install writes, and the
     re-rooting promotes it to the install root, so an archived agent root
-    holding a `Logs` tree is a leftover duplicate rather than the archive. It is
-    durable-shaped data under an archived agent root, so it is in scope — the
-    same answer `memory-vault/Logs/x.md` gets, and the same reasoning: a name is
-    not what tells a derived archive from a folder of notes.
+    holding a `Logs` tree is a copy of a workspace as it was — derived output
+    the resolved location cannot point at. `<logs_root>/Chats` is where
+    transcripts actually live, so that subtree stays refused under an archived
+    root even though the archive itself is refused by location rather than by
+    name (#734).
+
+    The refusal stops at the transcript subtree on purpose. A markdown note
+    sitting beside it in the same `Logs` folder is the same shape as
+    `memory-vault/Logs/x.md` on a live root, and the old name rule — which
+    refused every `Logs` at every depth — is what a user's own notes folder of
+    that name kept running into.
     """
     _workspace, config = _install(tmp_path)
 
+    # Derived transcripts under an archived root: refused.
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Logs/Chats/2026-09-28/s.md", config
+    ) is False
     assert backup_scope.is_eligible(
         ".archived-workspaces/old/memory-vault/Logs/Chats/s.md", config
+    ) is False
+    # A note beside them, and the rest of the archived root, are not.
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Logs/notes.md", config
     ) is True
-    # The archive this install does write is still refused, name and all.
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Notes/day-9.md", config
+    ) is True
+    # The archive this install does write is still refused, whole.
     assert backup_scope.is_eligible("memory-vault/Logs/Chats/s.md", config) is False
+
+
+def test_a_live_root_is_not_an_archived_one(tmp_path: Path) -> None:
+    """Where the archived-root refusal stops, on the layout the shape exists on.
+
+    The re-rooted install is the one with both spellings side by side: an
+    archived agent root copied from before the migration, and a live root whose
+    vault is the operator's own. The transcript subtree of the live root is
+    treated like the rest of its vault — by provenance, not by name — which is
+    the answer #734 settled for a live root and the only reason the refusal
+    above is scoped to `.archived-workspaces/`.
+    """
+    _workspace, config = _rerooted_install(tmp_path)
+
+    assert backup_scope.is_eligible(
+        "personal/memory-vault/Logs/Chats/2026-09-28/s.md", config
+    ) is True
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Logs/Chats/2026-09-28/s.md", config
+    ) is False
 
 
 # ── layouts ──────────────────────────────────────────────────────────────────
