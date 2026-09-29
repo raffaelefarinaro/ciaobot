@@ -520,14 +520,19 @@ the vault by an ordinary file delete, so the ledger accounts for what left.
 because retiring a finished project was the wrong instrument: `trash` left
 `status: active` in a note that had left the active tree, and every note linking
 to it kept a reference to a file the queue had stopped listing. It accepts a
-`type: project` or any note under a `projects/` segment, moves it to
-`projects/completed/` — the whole folder for `projects/active/<slug>/`, the one
-file for a flat `projects/<name>.md` — rewrites `status: active` to
-`status: completed`, and repoints every inbound reference in both dialects
-through the pure `vault_rehome.rewrite_references` primitive. `restore_completed`
-reverses one such row. Two ordering rules are load-bearing if you touch it: the
-links are rewritten BEFORE the move, because resolving them needs the note to
-still be on disk, and the ledger append is inside the same transaction, so a
+`type: project`, or any note under `projects/` that declares no type at all (a
+declared type always wins, so a `type: person` note filed there is not a
+project), and moves it to `projects/completed/` — the whole folder for
+`projects/active/<slug>/`, the one file for a flat `projects/<name>.md`.
+Whatever the candidate was, a folder project moves as a folder, so **every** note
+under it moves and every reference to any of them is repointed, in both
+dialects, through the pure `vault_rehome.rewrite_references` primitive.
+`restore_completed` reverses one such row, and looks each recorded undo image up
+where the completion left the note but writes it back through where the project
+has just landed — a note inside the folder has a different path in each of those
+two moments. Three ordering rules are load-bearing if you touch it: the
+links are rewritten BEFORE the move, because resolving them needs the notes to
+still be on disk; the ledger append is inside the same transaction, so a
 failure anywhere puts the move and every rewritten note back together.
 `Retire` stays available for every type, projects included — completion is for
 one that finished, not one that is wrong.

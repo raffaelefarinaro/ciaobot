@@ -1694,3 +1694,268 @@ def test_a_completed_flat_project_is_not_recorded_as_vanished(tmp_path: Path) ->
     generate_candidates(tmp_path, workspace="personal", write_queue=True)
 
     assert not [r for r in read_ledger(tmp_path) if r["disposition"] == "vanished"]
+
+
+# --- round 1: a folder project is a whole folder, not one file -------------
+#
+# Every note under `projects/active/<x>/` is a candidate in its own right, and
+# `complete_project_note` moves the whole `<x>` folder whatever the candidate
+# was. The tests below pin the consequences of that one decision: where the
+# folder lands, what happens to links to the notes beside the entry markdown,
+# that such a project can still be put back, that nothing is restored on top of
+# a folder that is already there, and that a second restore refuses.
+
+
+def test_completing_a_nested_candidate_moves_the_project_folder(tmp_path: Path) -> None:
+    """`destination.parent` is the move's destination only for the entry markdown.
+
+    A candidate at `projects/active/x/meetings/2026-01.md` has a parent of
+    `completed/x/meetings`, and moving the `x` folder there split the project
+    across two trees and left `new_path` naming a file that does not exist.
+    """
+    _project(tmp_path, "x")
+    nested = tmp_path / "projects" / "active" / "x" / "meetings"
+    nested.mkdir(parents=True)
+    # No `type:`: a note inside `projects/active/` is a project by where it
+    # sits, which is the shape a project folder really has.
+    (nested / "2026-01.md").write_text(
+        "---\nupdated: 2026-05-19\n---\n# 2026-01\n\nKickoff.\n", encoding="utf-8"
+    )
+    candidate = _project_candidate(tmp_path, "meetings/2026-01.md")
+    assert candidate.evidence["type"] == "project"
+
+    metadata = review.complete_project_note(tmp_path, candidate)
+
+    # The folder, not the note's parent, is what moved.
+    assert metadata["new_path"] == "memory-vault/projects/completed/x/meetings/2026-01.md"
+    assert (tmp_path / "projects" / "completed" / "x" / "meetings" / "2026-01.md").is_file()
+    assert (tmp_path / "projects" / "completed" / "x" / "x.md").is_file()
+    assert not (tmp_path / "projects" / "completed" / "x" / "meetings" / "meetings").exists()
+    assert not (tmp_path / "projects" / "active" / "x").exists()
+
+
+def test_completing_a_folder_project_repoints_links_to_its_siblings(tmp_path: Path) -> None:
+    """The whole folder moves, so a link to a note in it dangles like one to the entry note.
+
+    A map holding only the entry markdown left `[[projects/active/demo/plan]]` and
+    a relative destination pointing at `plan.md` resolving to files that were no
+    longer there, and the linter — the reader the Memory Map and the index share —
+    reported the result as a broken link.
+    """
+    _project(tmp_path, "demo")
+    (tmp_path / "projects" / "active" / "demo" / "plan.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Plan\n\nSteps.\n", encoding="utf-8"
+    )
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "Hub.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\nrelated: [projects/active/demo/plan]\n---\n"
+        "# Hub\n\n[[projects/active/demo/plan]] and [the plan](../projects/active/demo/plan.md).\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    hub = (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8")
+    assert "projects/active/demo/plan" not in hub
+    assert "related: [projects/completed/demo/plan]" in hub
+    assert "[[projects/completed/demo/plan]]" in hub
+    assert "[the plan](../projects/completed/demo/plan.md)" in hub
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+
+def test_a_folder_project_with_a_rewritten_sibling_can_be_restored(tmp_path: Path) -> None:
+    """A sibling's undo image has to name where the note is AFTER the move.
+
+    Keyed at the pre-move path, every restore of a folder project with a rewritten
+    note inside it failed with "a note rewritten by the completion is gone" — the
+    completion was one-way, which is the opposite of what the ledger claims.
+    """
+    _project(tmp_path, "demo")
+    plan = tmp_path / "projects" / "active" / "demo" / "plan.md"
+    plan.write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Plan\n\nSee [[projects/active/demo]].\n",
+        encoding="utf-8",
+    )
+    plan_before = plan.read_bytes()
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    review.complete_project_note(tmp_path, candidate)
+
+    # The sibling moved and was rewritten; its image is keyed at the new path.
+    moved = tmp_path / "projects" / "completed" / "demo" / "plan.md"
+    assert "projects/completed/demo" in moved.read_text(encoding="utf-8")
+    review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    assert plan.read_bytes() == plan_before
+    assert (tmp_path / "projects" / "active" / "demo" / "demo.md").is_file()
+    assert not moved.exists()
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+
+def test_restore_refuses_when_the_original_project_folder_is_occupied(tmp_path: Path) -> None:
+    """`shutil.move(dir, existing_dir)` nests rather than refusing.
+
+    With `projects/active/demo/` holding something else the note's own path was
+    free, so the note-level check passed and the restore produced
+    `active/demo/demo/…` — the project's notes twice, one of them unreachable by
+    any ref.
+    """
+    _project(tmp_path, "demo")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    review.complete_project_note(tmp_path, candidate)
+    squatter = tmp_path / "projects" / "active" / "demo"
+    squatter.mkdir(parents=True)
+    (squatter / "other.md").write_text("---\ntype: note\n---\n# Other\n", encoding="utf-8")
+    completed = tmp_path / "projects" / "completed" / "demo" / "demo.md"
+    before = completed.read_bytes()
+
+    with pytest.raises(ValueError, match="the original folder is occupied"):
+        review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    # The refusal is the whole outcome: nothing moved, nothing overwritten.
+    assert completed.read_bytes() == before
+    assert (squatter / "other.md").is_file()
+    assert not (squatter / "demo").exists()
+    assert not [r for r in read_ledger(tmp_path) if r["disposition"] == "restore"]
+
+
+def test_a_second_restore_of_the_same_project_refuses(tmp_path: Path) -> None:
+    """The last row for an id is the answer, and a `restore` is not a `complete`."""
+    _project(tmp_path, "demo")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    review.complete_project_note(tmp_path, candidate)
+    review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+    restored = (tmp_path / "projects" / "active" / "demo" / "demo.md").read_bytes()
+
+    with pytest.raises(ValueError, match="completed candidate not found"):
+        review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    assert (tmp_path / "projects" / "active" / "demo" / "demo.md").read_bytes() == restored
+    assert len([r for r in read_ledger(tmp_path) if r["disposition"] == "restore"]) == 1
+
+
+def test_a_crlf_note_keeps_its_line_endings_through_a_completion(tmp_path: Path) -> None:
+    """One link changed, not every line ending in the vault.
+
+    `read_text`/`write_text` translate line endings, so completing a project
+    reflowed every CRLF note that linked to it into a whole-file diff — and the
+    recorded "original" was not the original, so nothing could be compared
+    against it afterwards.
+    """
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = tmp_path / "notes" / "Hub.md"
+    hub.write_bytes(
+        b"---\r\ntype: note\r\nupdated: 2026-05-19\r\n---\r\n"
+        b"# Hub\r\n\r\nSee [[projects/active/demo/demo]].\r\n"
+    )
+    before = hub.read_bytes()
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    after = hub.read_bytes()
+    assert b"\n" not in after.replace(b"\r\n", b"")
+    # Byte-identical apart from the one ref.
+    assert after == before.replace(
+        b"projects/active/demo/demo", b"projects/completed/demo/demo"
+    )
+
+
+def test_a_failed_completion_audit_restores_crlf_bytes_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rollback's promise is byte-exact, and a translated original breaks it."""
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = tmp_path / "notes" / "Hub.md"
+    hub.write_bytes(
+        b"---\r\ntype: note\r\nupdated: 2026-05-19\r\n---\r\n"
+        b"# Hub\r\n\r\nSee [[projects/active/demo/demo]].\r\n"
+    )
+    before = hub.read_bytes()
+    project = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    project_before = project.read_bytes()
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    def fail_audit(*args: object, **kwargs: object) -> None:
+        raise OSError("ledger is read-only")
+
+    monkeypatch.setattr("ciao.vault_review._append", fail_audit)
+    with pytest.raises(ValueError, match="audit failed"):
+        review.complete_project_note(tmp_path, candidate)
+
+    assert hub.read_bytes() == before
+    assert project.read_bytes() == project_before
+    assert read_ledger(tmp_path) == []
+
+
+def test_a_declared_type_beats_the_projects_folder(tmp_path: Path) -> None:
+    """A person note filed under `projects/` is a person note, not a project.
+
+    The path is a fallback for a note that declared no type at all; letting it
+    override a declaration offered to close someone's `type: person` record
+    because of the directory they put it in.
+    """
+    (tmp_path / "projects" / "active" / "x").mkdir(parents=True)
+    (tmp_path / "projects" / "active" / "x" / "Ada.md").write_text(
+        "---\ntype: person\nupdated: 2026-05-19\n---\n# Ada\n\nA collaborator.\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "active/x/Ada.md")
+    assert candidate.evidence["type"] == "person"
+
+    with pytest.raises(ValueError, match="only a project"):
+        review.complete_project_note(tmp_path, candidate)
+
+    assert (tmp_path / "projects" / "active" / "x" / "Ada.md").is_file()
+    assert not (tmp_path / "projects" / "completed").exists()
+    assert read_ledger(tmp_path) == []
+
+
+def test_a_percent_encoded_ref_to_a_spaced_project_is_repointed(tmp_path: Path) -> None:
+    """The stem prefilter has to see the spelling it is skipping past.
+
+    A destination with a space in it is written `My%20Project.md`, and the bare
+    stem is not a substring of that — so a prefilter comparing the two skipped
+    the one file that needed rewriting, and the link dangled after the move.
+    """
+    (tmp_path / "projects").mkdir(parents=True)
+    (tmp_path / "projects" / "My Project.md").write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n# My Project\n\nLive.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "projects" / "Hub.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Hub\n\n[the project](My%20Project.md).\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "My Project.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    hub = (tmp_path / "projects" / "Hub.md").read_text(encoding="utf-8")
+    assert "My%20Project.md" not in hub
+    # Angle-bracketed, because the filename has a space in it.
+    assert "[the project](<completed/My Project.md>)" in hub
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+
+def test_a_note_edited_under_a_completion_is_not_overwritten(tmp_path: Path) -> None:
+    """The rewrite was computed against text that no longer exists; refuse it.
+
+    The reads that produce these rewrites happen a full vault sweep earlier in
+    the same request, and a note edited in between would otherwise have a
+    mechanical link rewrite laid over the edit — with the ledger recording the
+    result as a successful completion.
+    """
+    hub = tmp_path / "Hub.md"
+    hub.write_text("---\ntype: note\n---\n# Hub\n\nSee [[demo]].\n", encoding="utf-8")
+    stale = review._read_exact(hub)
+    hub.write_text("---\ntype: note\n---\n# Hub\n\nSee [[demo]], edited by hand.\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="changed while"):
+        review._write_texts([(hub, stale, "rewritten")])
+
+    # The refusal is the whole outcome: the edit is intact.
+    assert "edited by hand" in hub.read_text(encoding="utf-8")
+    assert list(tmp_path.glob(".Hub.md.*")) == []
