@@ -529,32 +529,34 @@ def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
     assert result.upstream_pruned == 0
 
 
-def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:
+def test_sync_installs_memory_skill_without_stock_agents(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    memory = workspace / ".claude" / "agents" / "memory.md"
-    assert memory.is_file()
-    assert sync_skills._is_managed_stock_agent(memory)
-    content = memory.read_text(encoding="utf-8")
-    assert "ciao vault search" in content
-    assert "vault_search" not in content
-    assert result.stock_agents_installed == 3
+    assert (workspace / ".claude" / "skills" / "ciao-memory" / "SKILL.md").is_file()
+    assert result.stock_agents_installed == 0
+    assert not list((workspace / ".claude" / "agents").glob("*.md"))
 
 
-def test_sync_refreshes_managed_stock_agent(tmp_path: Path) -> None:
+def test_sync_prunes_retired_memory_agent_on_upgrade(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     memory = workspace / ".claude" / "agents" / "memory.md"
     _write(memory, "# Old memory agent\n")
     sync_skills._mark_stock_agent(memory)
 
+    _write(
+        workspace / ".opencode" / "agents" / "memory.md",
+        f"{sync_skills.OPENCODE_GENERATED_MARKER}\n# Old memory projection\n",
+    )
+
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    content = memory.read_text(encoding="utf-8")
-    assert "ciao vault search" in content
-    assert "vault_search" not in content
+    assert not memory.exists()
+    assert not sync_skills._stock_agent_marker(memory).exists()
+    assert not (workspace / ".opencode" / "agents" / "memory.md").exists()
+    assert (workspace / ".claude" / "skills" / "ciao-memory" / "SKILL.md").exists()
 
 
 def test_stale_stock_agent_copy_is_pruned(tmp_path: Path) -> None:
@@ -570,6 +572,32 @@ def test_stale_stock_agent_copy_is_pruned(tmp_path: Path) -> None:
     assert not stale.exists()
     assert hand_made.is_file()
     assert result.stock_agents_pruned == 1
+
+
+def test_sync_prunes_retired_stock_agents_but_preserves_custom_ones(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    for name in ("researcher", "secretary"):
+        stock = workspace / ".claude" / "agents" / f"{name}.md"
+        _write(stock, f"# Old {name} stock agent\n")
+        sync_skills._mark_stock_agent(stock)
+        _write(
+            workspace / ".opencode" / "agents" / f"{name}.md",
+            f"{sync_skills.OPENCODE_GENERATED_MARKER}\n# Old {name} projection\n",
+        )
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    for name in ("researcher", "secretary"):
+        assert not (workspace / ".claude" / "agents" / f"{name}.md").exists()
+        assert not (workspace / ".opencode" / "agents" / f"{name}.md").exists()
+
+    custom = workspace / "subagents" / "researcher.md"
+    _write(custom, "# My researcher\n")
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert result.stock_agents_installed == 0
+    assert (workspace / ".claude" / "agents" / "researcher.md").resolve() == custom.resolve()
+    assert custom.read_text(encoding="utf-8") == "# My researcher\n"
 
 
 def test_legacy_removed_stock_agent_is_pruned_without_marker(tmp_path: Path) -> None:

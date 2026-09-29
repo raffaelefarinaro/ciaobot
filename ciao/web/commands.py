@@ -24,6 +24,7 @@ from starlette.responses import JSONResponse
 from ciao import provider_registry
 
 from ciao.skills_inventory import build_skill_inventory
+from ciao.workspaces import agent_root_for
 
 logger = logging.getLogger(__name__)
 
@@ -221,9 +222,7 @@ def _workspace_root(request: Request) -> Path:
     """
     config = request.app.state.config
     workspace = request.query_params.get("workspace", "") or config.primary_workspace()
-    if workspace and config.workspace(workspace):
-        return Path(config.agent_root(workspace))
-    return Path(config.workspace_root)
+    return agent_root_for(config, workspace)
 
 
 async def list_commands_endpoint(request: Request) -> JSONResponse:

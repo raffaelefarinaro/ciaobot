@@ -6,8 +6,8 @@ import { boot, isolate, COMPOSER } from '../support/app'
  *
  * The failure in #619 was never the store or ChatPanel: both already handled an
  * archived chat. It was that `/chat/<archived-id>` resolved to no panel at all,
- * so the archived footer — the post-archive summary, the retry row and
- * "Continue in new chat" — was unreachable. Only a full navigation can show
+ * so the archived footer — the memory-pass link and "Continue in new chat" —
+ * was unreachable. Only a full navigation can show
  * that: the boot URL restore, ChatLayout's route watcher and its
  * `v-else-if="store.activeChat"` all had to agree. A vitest test drives one of
  * them with a stubbed router and a hand-seeded store, and a regression in any
@@ -58,8 +58,8 @@ test.describe('archived chat', () => {
     await expect(page.locator('.archived-notice')).toContainText('This chat is archived.')
     await expect(page.locator('.continue-chat-btn')).toBeVisible()
     // #618 added the memory-pass link to this same footer, so it was
-    // unreachable for the same reason; it renders off the settled post-archive
-    // record the chat carries, not off any live data.
+    // unreachable for the same reason; it renders off the memory-pass record the
+    // chat carries, not off any live data.
     await expect(page.locator('.archive-memory-pass-btn')).toHaveText('Open memory pass')
     // Inert, not merely hidden: there is no way to send anything to a session
     // the provider has already reclaimed.

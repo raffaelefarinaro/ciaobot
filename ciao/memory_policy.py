@@ -3,7 +3,7 @@
 The memory system has more than one way to write durable memory, and they do
 not all have the same approval rule. Before this module the copies drifted:
 the architecture said new memory needs review while archive-time extraction
-called ``auto_promote_memory=True``; the memory agent said the typed path
+called ``auto_promote_memory=True``; the retired memory agent said the typed path
 enforces the cap while ``update_region`` documents and implements an advisory
 one; and the unattended capsule said "do not ask" without saying what to do with
 work that *requires* approval.
@@ -15,12 +15,12 @@ promotes a new region fact with no reviewer present; the rows that write one
 live are attended turns a person can steer.
 
 This module is the single machine-readable statement of that policy. The prose
-lives in the stock assets (``ciao/stock/agents/memory.md``,
-``ciao/stock/commands/remember.md``, ``ciao/stock/skills/memory-curation``) and
+lives in the stock assets (``ciao/stock/skills/ciao-memory/SKILL.md``,
+``ciao/stock/commands/remember.md``, ``ciao/stock/schedules.json``) and
 in ``docs/ARCHITECTURE.md``; tests pin every copy here so they cannot drift
 apart again. It is deliberately behavior-free: the accept path in
 ``ciao/memory_proposals.py``, the memory-pass chat in
-``ciao/web/memory_pass.py`` and the curation skill remain the implementation.
+``ciao/web/memory_pass.py`` and the Workspace care schedule prompt remain the implementation.
 
 Two rules the matrix encodes and the whole surface must respect:
 
@@ -218,7 +218,7 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
 """Dangerous unattended examples, pinned across providers.
 
 The unattended capsule (``ciao/context/capsule.py``) tells the model not to ask
-and to defer; the curation skill encodes the memory-specific half. Tests assert
+and to defer; the Workspace care schedule prompt encodes the memory-specific half. Tests assert
 every one of these resolves to "defer" for both supported providers, so a new
 provider cannot introduce a different unattended rule.
 """

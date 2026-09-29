@@ -1,6 +1,6 @@
 ---
 name: visual-plan
-description: Turn important work into a local, reviewable Markdown plan with an optional self-contained HTML companion. Use when the user asks for a plan, design direction, architecture review, UI flow, implementation proposal, migration plan, or approval artifact and the work spans more than one file or subsystem, has meaningful product or UX ambiguity, benefits from seeing a UI state or workflow, involves a data/API/security/ownership decision that is expensive to undo, or must be reviewed by another person or model before implementation. Skip it for a typo, a one-line fix, a single obvious function, or a task explainable in one sentence. Also skip it for a routine working doc (notes, an analysis, a draft with no approval gate and no cross-session handoff) — that is the stock workspace-authoring skill's territory.
+description: Turn important work into a local, reviewable Markdown plan with an optional self-contained HTML companion. Use when the user asks for a plan, design direction, architecture review, UI flow, implementation proposal, migration plan, or approval artifact and the work spans more than one file or subsystem, has meaningful product or UX ambiguity, benefits from seeing a UI state or workflow, involves a data/API/security/ownership decision that is expensive to undo, or must be reviewed by another person or model before implementation. Skip it for a typo, a one-line fix, a single obvious function, or a task explainable in one sentence. Also skip routine working docs (notes, analyses, drafts without an approval gate or cross-session handoff); the core prompt handles those.
 ---
 
 # Visual plan
@@ -21,7 +21,7 @@ Use it when the user asks for a plan, design direction, architecture review, UI 
 
 Skip it for a typo, a one-line fix, a single obvious function, or a task whose complete change can be explained in one sentence.
 
-Also skip it for a routine working doc: notes, an analysis, a draft with no approval gate and no cross-session handoff. That is the stock `workspace-authoring` skill's territory. The dividing line is whether the document exists to get a decision approved and survive a provider switch. If not, it is a working doc.
+Also skip it for a routine working doc: notes, an analysis, a draft with no approval gate and no cross-session handoff. The core prompt routes those to the active vault or project document. The dividing line is whether the document exists to get a decision approved and survive a provider switch. If not, it is a working doc.
 
 ## Required workflow
 

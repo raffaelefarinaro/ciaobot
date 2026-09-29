@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ArchiveOutcome, ProjectChatManager
@@ -218,37 +219,6 @@ def test_delete_project_allows_manual_project_without_vault_folder(tmp_path: Pat
     assert p.project_id not in pcm._projects
 
 
-@pytest.mark.asyncio
-async def test_archive_postprocess_runs_insights_for_all_chats(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("insights-project", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="insights chat")
-    calls: list[dict] = []
-
-    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
-        calls.append(inputs)
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    pcm.run_archive_postprocess(
-        chat.chat_id,
-        ArchiveOutcome(
-            path=tmp_path / "archive.md",
-            session_id="session-1",
-            turn_count=1,
-            filtered_jsonl="filtered transcript",
-        ),
-        chat,
-        project,
-    )
-    await asyncio.sleep(0)
-
-    assert bool(calls) is True
-
-
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
@@ -337,6 +307,41 @@ async def test_archive_chat_publishes_event(tmp_path: Path) -> None:
     assert len(archived) == 1
     assert archived[0]["chat_id"] == chat.chat_id
     assert archived[0]["project_id"] == project.project_id
+
+
+async def test_archiving_a_run_chat_clears_its_needs_you_flag(tmp_path: Path) -> None:
+    """A "skipped" run points the operator at its chat; archiving it answers that.
+
+    Left up, the Automations page kept saying "last run needs you — check the
+    chat" about a chat that was archived, until the next run (a week later for
+    a weekly entry). Only the entry whose last run was this chat is touched.
+    """
+    pcm = _make_manager(tmp_path)
+    store = ScheduleStore(tmp_path / ".runtime")
+    pcm.schedule_store = store
+    project = pcm.create_project("2026-q3-sched", workspace="work")
+    chat = pcm.create_chat(project.project_id)
+    other = pcm.create_chat(project.project_id)
+
+    def _entry(run_chat: str) -> str:
+        entry = store.create(
+            daily_time_utc="06:00", prompt="Brief.", model="", mode="auto", chat_id=0,
+            web_project_id=project.project_id, workspace="work",
+        )
+        entry.last_run_chat_id = run_chat
+        entry.last_status = "skipped"
+        store.replace(entry)
+        return entry.schedule_id
+
+    archived_run = _entry(chat.chat_id)
+    other_run = _entry(other.chat_id)
+
+    cap = _EventCapture(pcm)
+    await pcm.archive_chat(chat.chat_id)
+
+    assert store.get(archived_run).last_status == "ok"
+    assert store.get(other_run).last_status == "skipped"
+    assert any(e.get("type") == "schedules_changed" for e in cap.drain())
 
 
 async def test_archive_route_returns_the_postprocess_lifecycle(
@@ -456,7 +461,6 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
 
     monkeypatch.setattr(async_reads, "keyed_lock", _recording_keyed_lock)
     monkeypatch.setattr(fts_search, "index_file", _recording_index_file)
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", _noop_pipeline)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
@@ -464,9 +468,7 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
         chat.chat_id,
         ArchiveOutcome(
             path=archive_path,
-            session_id="session-index",
             turn_count=1,
-            filtered_jsonl=None,
         ),
         chat,
         project,
@@ -501,7 +503,6 @@ def test_synchronous_archive_indexing_is_best_effort(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(fts_search, "index_file", _explode)
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", _noop_pipeline)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nbody\n", encoding="utf-8")
@@ -512,14 +513,8 @@ def test_synchronous_archive_indexing_is_best_effort(
         chat.chat_id,
         ArchiveOutcome(
             path=archive_path,
-            session_id="session-best-effort",
             turn_count=1,
-            filtered_jsonl=None,
         ),
         chat,
         project,
     )
-
-
-async def _noop_pipeline(**_kwargs: object) -> None:
-    return None

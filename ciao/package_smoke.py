@@ -59,7 +59,7 @@ if response.status_code != 200:
 
 if {require_stock!r}:
     stock_root = resources.files("ciao.stock")
-    required = ("agents", "commands", "workspace", "schedules.json")
+    required = ("commands", "workspace", "schedules.json")
     missing = [name for name in required if not stock_root.joinpath(name).is_file() and not stock_root.joinpath(name).is_dir()]
     if missing:
         raise SystemExit(f"missing stock package data: {{', '.join(missing)}}")

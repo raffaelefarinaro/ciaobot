@@ -1,6 +1,6 @@
 """The nightly curation worklist, run budget and lease.
 
-Issue #461: the curation skill asked a model to answer questions files already
+Issue #461: the Workspace care schedule prompt asked a model to answer questions files already
 answer (is the queue empty, is the region at 85%, is the weekly marker seven
 days old), and nothing stopped two runs — or a run and an archiving chat —
 from rewriting the same region from two stale reads.
@@ -957,9 +957,9 @@ def _stock(relative: str) -> str:
     return resources.files("ciao.stock").joinpath(relative).read_text(encoding="utf-8")
 
 
-def test_the_skill_starts_from_the_computed_worklist() -> None:
+def test_the_schedule_starts_from_the_computed_worklist() -> None:
     """The agent must not re-derive by hand what pass 0 already decided."""
-    skill = _stock("skills/memory-curation/SKILL.md")
+    skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
 
     assert "ciao curation-begin --json" in skill
     assert "ciao curation-progress" in skill
@@ -991,5 +991,4 @@ def test_the_schedule_prompt_points_at_the_worklist_first() -> None:
     assert "one-line no-op" in prompt
     # The lease only serializes anything if the follow-up commands carry it.
     assert "`lease.holder`" in prompt and "--holder" in prompt
-    # test_stock_package pins this ceiling; keep the dispatcher a dispatcher.
-    assert len(prompt) < 1200
+    assert "## 1. Process the proposals queue" in prompt

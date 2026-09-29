@@ -88,8 +88,8 @@ BACKUP_INTERVAL_S = 300
 #: conflict is picked up on the next tick at the latest.
 BACKOFF_MULTIPLIER = 12
 
-#: The job id the Automation page has carried this work under since the push
-#: loop was introduced. Kept so the row continues rather than resetting, and so
+#: The job id this work has been recorded under since the push loop was
+#: introduced. Kept so its run history continues rather than resetting, and so
 #: ``job_runs_latest.json`` never serves a duplicate.
 JOB_ID = "branch_backup"
 JOB_LABEL = "Memory backup"
@@ -736,8 +736,8 @@ class BackupService:
 
         An identical repeat is a ``skip`` rather than a second error: a remote
         that stayed unreachable for a day would otherwise write the same error
-        row every hour, and the Automation page would show a red failure that
-        has been true since yesterday rather than a count of how long.
+        row every hour, and the run log would report a failure that has been
+        true since yesterday rather than a count of how long.
         """
         run.extra.update(self._run_extra)
         run.extra["state"] = status.state

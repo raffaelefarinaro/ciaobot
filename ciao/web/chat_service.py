@@ -92,19 +92,19 @@ def _now_iso() -> str:
 
 
 def _restored_postprocess(raw: object) -> dict:
-    """Sanitize a persisted post-archive record on load.
+    """Keep only the memory-pass step of a persisted post-archive record.
 
-    The pipeline is an in-process ``asyncio`` task, so a record still marked
-    "running" is a record whose task died with the previous process. Downgrading
-    it to "done" keeps the chat reporting the steps that did land instead of
-    showing an activity indicator nothing is left alive to clear."""
-    if not isinstance(raw, dict) or not raw:
+    Records written while archiving still ran a trajectory stage also carry
+    that pipeline's run state, manifest view and step; nothing reads them."""
+    if not isinstance(raw, dict):
         return {}
-    state = dict(raw)
-    if state.get("state") == "running":
-        state["state"] = "done"
-        state["step"] = ""
-        state["interrupted"] = True
+    steps = raw.get("steps")
+    step = steps.get("memory_pass") if isinstance(steps, dict) else None
+    if not isinstance(step, dict):
+        return {}
+    state: dict = {"steps": {"memory_pass": dict(step)}}
+    if raw.get("updated_at"):
+        state["updated_at"] = raw["updated_at"]
     return state
 
 
