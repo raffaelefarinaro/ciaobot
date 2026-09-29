@@ -45,12 +45,26 @@ from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
+from ciao.learning_records import (
+    LEARNINGS_RELATIVE,
+    LEARNINGS_STUB,
+    SECTION_ACTIVE,
+    SECTION_HEADINGS,
+    LearningObservation,
+    LearningRecord,
+    allocate_learning_id,
+    learning_key,
+    normalized_statement,
+    observe_learning,
+    parse_learnings,
+    render_learning,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
 _PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
-_LEARNINGS_RELATIVE = "Workspace/Learnings.md"
 
 #: The category a ``[people]`` proposal's accept writes. ``people`` is the
 #: queue's label for a fact about a person; ``person`` is the id that category
@@ -950,121 +964,216 @@ def write_entity_note(
     return "written"
 
 
-# One structured learning line. The shape is a contract: the Workspace care schedule prompt
-# reads the recurrence count to decide promotion (N ≥ 3) and the sources to
-# cite episodes, so recurrence bookkeeping is mechanical instead of prose.
-_LEARNING_LINE_RE = re.compile(
-    r"^- \[(?P<key>[a-z0-9][a-z0-9-]*)\] "
-    r"\[(?P<first>\d{4}-\d{2}-\d{2}) → (?P<last>\d{4}-\d{2}-\d{2})\] "
-    r"\(x(?P<count>\d+)\) "
-    r"(?P<text>.*?)"
-    r"(?: — sources: (?P<sources>.*))?$"
-)
-
-_LEARNING_KEY_WORDS = 4
-_LEARNING_MAX_SOURCES = 8
-
-
-def _learning_key(text: str) -> str:
-    """A short kebab identifier from the statement's first distinctive words."""
-    words = re.findall(r"[a-z0-9]+", text.lower())
-    return "-".join(words[:_LEARNING_KEY_WORDS]) or "learning"
-
-
-def _normalized_learning(text: str) -> str:
-    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
-
-
-def format_learning_line(
-    text: str,
-    *,
-    first_seen: str,
-    last_seen: str,
-    count: int,
-    sources: list[str],
-) -> str:
-    line = (
-        f"- [{_learning_key(text)}] [{first_seen} → {last_seen}] "
-        f"(x{count}) {_one_line(text)}"
-    )
-    cited = [s for s in sources if s][:_LEARNING_MAX_SOURCES]
-    if cited:
-        line += f" — sources: {', '.join(cited)}"
-    return line
-
-
-_LEARNINGS_STUB = (
-    "---\n"
-    "tags: [ciao, learnings]\n"
-    "---\n"
-    "# Learnings\n\n"
-    "Reusable cross-project knowledge. Active entries are candidates "
-    "for promotion into canonical guidance once they recur (x3 or "
-    "more).\n"
-)
+# One structured learning line, and the only writer of one. The shape is a
+# contract: the Workspace care schedule prompt reads the recurrence count to
+# decide promotion (N ≥ 3) and the sources to cite episodes, so recurrence
+# bookkeeping is mechanical instead of prose.
+#
+# What the line *is* — the key, the `xN` baseline, the machine-readable
+# `<!-- ciao:learning {...} -->` comment carrying the identity and the
+# deduplicated observations — belongs to `ciao.learning_records`. The old private
+# regex, key, normalizer and line formatter that used to live here are deleted:
+# they minted a fresh identity from the prose on every read, so a reworded
+# statement became a different learning, a replay of the same source bumped the
+# count anyway, and the same fact under `## Promoted / Resolved` was reactivated
+# as if it were new. This module now decides *which* entry a sighting belongs to;
+# the model owns what the entry is and how it is written.
 
 
 def learnings_path(vault_root: Path) -> Path:
-    """Where a ``[learnings]`` accept writes."""
-    return vault_root / _LEARNINGS_RELATIVE
+    """Where a ``[learnings]`` accept writes.
+
+    The path and the stub a first write starts from both come from
+    :mod:`ciao.learning_records`: the parser, the writer and the migration
+    command all have to agree on them, and a stub defined twice is two answers
+    to "what does an empty ``Learnings.md`` say".
+    """
+    return vault_root / LEARNINGS_RELATIVE
+
+
+def _new_learning(
+    text: str, *, workspace: str, stamp: date, observation: LearningObservation
+) -> LearningRecord:
+    """The record for a learning filed for the first time.
+
+    ``count=1`` and today's date are facts about *this write*, not guesses: the
+    file is being created because something was observed now, and the writer
+    witnessed it. That is the one place an `x1` is honest — a record *read* off
+    an existing line never gets one, because nobody witnessed its history.
+
+    The only field that could be invented is the source, and a source-less
+    sighting is not recorded at all — `observe_learning` refuses one, so the line
+    renders ``(x1)`` with no citation rather than a chat id nobody supplied. The
+    identity is derived from the workspace and the statement, so a preview and
+    the accept it precedes mint the same one.
+    """
+    return LearningRecord(
+        learning_id=allocate_learning_id(workspace, text),
+        key=learning_key(text),
+        text=text,
+        first_seen=stamp,
+        last_seen=stamp,
+        count=1,
+        observations=(observation,) if observation.identity else (),
+    )
 
 
 def render_learning_append(
-    existing: str, text: str, *, source: str = "", today: str = ""
+    existing: str,
+    text: str,
+    *,
+    workspace: str,
+    source: str = "",
+    today: str = "",
 ) -> tuple[str, str]:
     """The file ``append_learning`` would write, and which operation that is.
 
     Returns ``(updated_text, operation)`` — ``"add"`` for a new Active entry,
-    ``"update"`` when an existing entry's recurrence count and last-seen date
-    are refreshed, and ``"none"`` when an exact legacy duplicate is already
-    there and nothing is written (``updated_text`` is then ``existing``).
+    ``"update"`` when an existing entry records a sighting it did not have, and
+    ``"none"`` when the observation is one the file already accounts for and
+    nothing is written (``updated_text`` is then ``existing``).
 
     Split out of :func:`append_learning` so the review queue can show the exact
     replacement *before* the accept performs it. The write path goes through
     this same function, so a preview and the accept it precedes cannot
     disagree about what lands.
+
+    Five cases, and the section an entry sits in decides the first two:
+
+    * **Active, sighting not already recorded** — the observation is folded in
+      and the entry is re-rendered in place, dates and count refreshed.
+    * **Promoted / Resolved, sighting not already recorded** — the observation is
+      recorded and the line re-rendered *where it already is*. The section does
+      not move and the entry is not reactivated: a lesson that was promoted or
+      resolved stays decided, and a later sighting of the same statement is
+      evidence about a decision, not a reason to reopen it.
+    * **Sighting that adds no evidence** — the file does not change, whatever
+      the entry looks like. `observe_learning` returns the record untouched for
+      two reasons: the source was already counted (a retry re-quoting an episode,
+      which is the whole recurrence contract — it cannot inflate a count), or
+      there was no source to count at all, which nothing can tell apart from a new
+      sighting and is refused. This is also what leaves a legacy plain bullet
+      alone: a line the owner wrote is not rewritten into a canonical one on the
+      strength of a write that recorded nothing.
+    * **Unreadable entry** — a line the parser could not read is not a learning
+      to match against, and it is never rewritten. It is kept byte-exact, so a
+      shape this code does not implement survives the write untouched rather than
+      being guessed at.
+    * **Not found** — a new Active entry is filed directly under the
+      ``## Active`` heading, creating the section when the file has none. The
+      heading is matched as a line and the inserted entry uses the file's own
+      line ending, so a CRLF document does not gain a second ``## Active`` at the
+      end of the file or a stray LF in a CRLF list.
+
+    A legacy plain bullet *is* found: the model reads it as a record with no
+    dates and no count, so a sighting of that statement with a source updates it
+    in place and renders it canonically. What it never gets is an invented
+    `x1` — a plain bullet has no recurrence history, and the count stays unknown
+    until evidence accumulates.
+
+    ``workspace`` scopes the identity a new entry is minted with, and is
+    required rather than derived: the caller that renders a preview and the
+    caller that performs the write both have the vault in hand, and a default
+    here would be a way for the two to mint different identifiers for the same
+    statement and disagree about what lands.
     """
-    if f"- {_one_line(text)}" in existing:
-        # Exact legacy duplicate: already recorded in the old plain shape.
-        return existing, "none"
+    observation = LearningObservation(source=source)
+    stamp = date.fromisoformat(today) if today else date.today()
+    statement = _one_line(text)
+    wanted = normalized_statement(statement)
+    document = parse_learnings(existing, workspace=workspace)
 
-    stamp = today or date.today().isoformat()
-    normalized = _normalized_learning(text)
-    lines = existing.split("\n")
-    for index, line in enumerate(lines):
-        match = _LEARNING_LINE_RE.match(line)
-        if match is None:
+    for entry in document.entries:
+        record = entry.record
+        if record is None or normalized_statement(record.text) != wanted:
             continue
-        if _normalized_learning(match.group("text")) != normalized:
-            continue
-        sources = [
-            item.strip()
-            for item in (match.group("sources") or "").split(",")
-            if item.strip()
-        ]
-        if source and source not in sources:
-            sources.append(source)
-        lines[index] = format_learning_line(
-            match.group("text"),
-            first_seen=match.group("first"),
-            last_seen=stamp,
-            count=int(match.group("count")) + 1,
-            sources=sources,
+        updated = observe_learning(record, observation, today=stamp)
+        if updated == record:
+            return existing, "none"
+        rendered = render_learning(updated)
+        return existing[: entry.start] + rendered + existing[entry.end :], "update"
+
+    filed = render_learning(
+        _new_learning(
+            statement, workspace=workspace, stamp=stamp, observation=observation
         )
-        return "\n".join(lines), "update"
-
-    entry = format_learning_line(
-        text,
-        first_seen=stamp,
-        last_seen=stamp,
-        count=1,
-        sources=[source] if source else [],
     )
-    marker = "\n## Active\n"
-    if marker in existing:
-        head, _, tail = existing.partition(marker)
-        return f"{head}{marker}{entry}\n{tail}", "add"
-    return existing.rstrip() + f"\n\n## Active\n\n{entry}\n", "add"
+    return _file_new_entry(existing, filed), "add"
+
+
+def _newline(existing: str) -> str:
+    """The line ending the document already uses.
+
+    A CRLF file that gains ``\\n`` lines is a file this write has partially
+    rewritten, which is the same defect as translating the whole thing: mixed
+    endings render inconsistently, and every line ending after the insertion is
+    now a byte the owner did not write. Read off the document's *first* line
+    terminator, so a file whose endings already disagree keeps whatever its
+    first line says rather than acquiring a rule from here.
+    """
+    first = existing.find("\n")
+    return "\r\n" if first > 0 and existing[first - 1] == "\r" else "\n"
+
+
+_ACTIVE_HEADING_RE = re.compile(
+    rf"(?m)^#{{1,3}}[ \t]+{re.escape(SECTION_HEADINGS[SECTION_ACTIVE])}[ \t]*"
+    r"(?P<eol>\r\n|\n|\Z)"
+)
+"""The ``## Active`` heading, *including* its line terminator.
+
+Three things this has to get right, each of which was got wrong before.
+
+**The terminator is part of the match.** Ending the pattern at ``\\r?$`` put
+``match.end()`` on the ``\\n`` of a CRLF line, so inserting "one newline past
+the heading" skipped the ``\\n`` *and* the first byte of the next line: the new
+entry began with the existing entry's ``-`` and the owner's line lost its own
+bullet. Consuming ``\\r\\n`` or ``\\n`` explicitly means ``match.end()`` is already
+the offset to insert at, with no arithmetic to get wrong.
+
+**The heading is matched whole.** The terminator alternation only matches where
+the line actually ends, so ``## Active extras and notes`` is not this section and
+does not get an entry filed into it. The ``[ \\t]*`` before it tolerates the
+trailing whitespace a hand edit leaves behind, which would otherwise be a second
+reason for the same heading not to be found.
+
+**``\\Z`` is the unterminated case.** A heading on the final line with no newline
+has nothing to insert after, and the entry has to be given a line of its own.
+The terminator is a named group so the caller can tell the two apart by asking
+the match, rather than by inspecting the two characters before its end — which
+is a test that reads one way on an LF file and another on a CRLF one.
+
+Not the literal ``\\n## Active\\n`` this replaced either: that never matched a
+CRLF file, so a new entry was filed under a second ``## Active`` heading at the
+end of the document. Matched at any level up to three because the model treats a
+deeper heading as a group inside the section, and a file that has only ever used
+``### Active`` still means the same thing. The heading text is the model's, so
+the section the writer opens is the section the parser recognizes.
+"""
+
+
+def _file_new_entry(existing: str, filed: str) -> str:
+    """*existing* with *filed* placed directly under its ``## Active`` section.
+
+    The heading's terminator is already consumed by the match, so the insertion
+    point is the end of the match and nothing has to be added to it. A heading
+    that consumed no terminator — it was the last line and the file does not end
+    in a newline — gets one supplied, or the entry would share its line and
+    ``## Active- [key] …`` would be neither a heading nor an entry.
+
+    A file with no such heading has the section opened after its last line of
+    content, which is where the writer has always put one — a stub that has
+    never been written to needs the heading before the entry can be under it.
+    """
+    newline = _newline(existing)
+    heading = _ACTIVE_HEADING_RE.search(existing)
+    if heading is None:
+        title = SECTION_HEADINGS[SECTION_ACTIVE]
+        return f"{existing.rstrip()}{newline * 2}## {title}{newline * 2}{filed}{newline}"
+    # `\Z` is zero-width, so an empty group means the heading consumed no
+    # terminator: it was the file's last line, and one has to be supplied.
+    consumed_eol = heading.group("eol") != ""
+    at = heading.end()
+    return f"{existing[:at]}{'' if consumed_eol else newline}{filed}{newline}{existing[at:]}"
 
 
 def read_learnings(vault_root: Path) -> str:
@@ -1073,33 +1182,60 @@ def read_learnings(vault_root: Path) -> str:
     Existence, not a swallowed read error, decides: a file that is there but
     unreadable must surface rather than be silently replaced by the stub,
     which a following write would then persist over the real content.
+
+    Decoded from bytes rather than with ``read_text``, which translates newlines:
+    a CRLF file would come back all-LF, and the preview the review card shows
+    would then be of a different document from the one
+    :func:`append_learning` writes. The preview is only worth showing if it is
+    what lands.
     """
     path = learnings_path(vault_root)
     if path.exists():
-        return path.read_text(encoding="utf-8")
-    return _LEARNINGS_STUB
+        return path.read_bytes().decode("utf-8")
+    return LEARNINGS_STUB
 
 
 def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
     """File one learning under the Active section of Workspace/Learnings.md.
 
-    Structured entries carry a key, first-seen/last-seen dates, a recurrence
-    count, and source chat ids. Re-observing a learning (same normalized
-    statement) increments its count and refreshes last-seen instead of
-    appending a duplicate — recurrence is what the Workspace care schedule prompt promotes on,
-    so it must be counted mechanically, not judged from prose. Legacy plain
-    bullets are left untouched; an exact legacy duplicate still short-circuits.
+    Writes through the canonical model: :mod:`ciao.learning_records` parses the
+    document, :func:`observe_learning` decides whether this sighting is new
+    evidence or a replay of one already counted, and :func:`render_learning`
+    writes the single line. The contract that follows from that is the one the
+    Workspace care schedule prompt promotes on — a learning recurs because it was
+    observed again, counted mechanically rather than judged from prose.
+
+    The read, the render and the write all happen under
+    :func:`ciao.memory_receipts.queue_lock`, and the write goes through
+    :func:`ciao.memory_receipts.write_queue_atomically`. Both are the same ones
+    ``ciao learnings-migrate`` takes on this file, and both are load-bearing: the
+    unattended care run, a ``[learnings]`` accept and the migration are three
+    writers of one queue-shaped file, and a read-check-write that is not
+    serialized is a read-check-write that races. The atomic rename is what makes
+    a crash mid-write leave the old file rather than a truncated one. And the
+    read is from bytes, because a CRLF file read through a translating API comes
+    back rewritten in every line the writer did not mean to touch — which also
+    invalidates the migration's ``--revert`` receipt, whose spans address exact
+    offsets.
 
     Public because accepting a ``[learnings]`` proposal from the review queue
     performs exactly this write.
     """
+    from ciao.memory_receipts import queue_lock, write_queue_atomically
+
     path = learnings_path(vault_root)
-    existing = read_learnings(vault_root)
-    updated, operation = render_learning_append(existing, text, source=source)
-    if operation == "none":
-        return True
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(updated, encoding="utf-8")
+    with queue_lock(path):
+        # Read inside the lock, not before it: read-then-lock would leave a
+        # window in which the text being replaced is not the text on disk.
+        existing = (
+            path.read_bytes().decode("utf-8") if path.exists() else LEARNINGS_STUB
+        )
+        updated, operation = render_learning_append(
+            existing, text, source=source, workspace=vault_root.name
+        )
+        if operation == "none":
+            return True
+        write_queue_atomically(path, updated)
     return True
 
 
