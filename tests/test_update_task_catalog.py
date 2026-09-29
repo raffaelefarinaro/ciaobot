@@ -185,6 +185,35 @@ def test_duplicate_ids_and_revisions_rejected(tmp_path: Path) -> None:
     assert catalog.by_id["review-legacy-rows"].revision == 1
 
 
+def test_a_discarded_duplicate_copy_cannot_condemn_the_standing_copy(
+    tmp_path: Path,
+) -> None:
+    # The second copy is thrown away, so its own defects are its own: a cycle or
+    # a missing dependency on a discarded copy must not reach the copy that
+    # stands, which is the one `load_catalog` keeps.
+    self_cycle = _pack(
+        tmp_path / "self-cycle-copy",
+        [
+            _row(id="a"),
+            _row(id="a", depends_on=[{"id": "a", "revision": 1}]),
+        ],
+    )
+    missing_dependency = _pack(
+        tmp_path / "missing-dep-copy",
+        [
+            _row(id="a"),
+            _row(id="a", depends_on=[{"id": "gone", "revision": 1}]),
+        ],
+    )
+
+    for catalog in (self_cycle, missing_dependency):
+        assert [task.id for task in catalog.tasks] == ["a"]
+        assert [task.revision for task in catalog.tasks] == [1]
+        assert _error_codes(catalog) == {"duplicate_revision"}
+        assert [t.id for t in catalog.eligible("1.0.0")] == ["a"]
+        assert "duplicate_revision" in {d.code for d in catalog.diagnostics}
+
+
 def test_prompt_resource_confinement(tmp_path: Path) -> None:
     root = tmp_path / "confined"
     outside = tmp_path / "outside.md"
@@ -462,6 +491,20 @@ def test_malformed_json_and_bad_types_are_diagnosed(tmp_path: Path) -> None:
             ],
         },
         _row(id="Not Kebab", prompt_resource="prompts/not-kebab-1.md"),
+        # A key the loader does not know is not a key it ignores: the field it
+        # was meant for would never arrive, so the row is refused.
+        {
+            "id": "typo",
+            "revision": 1,
+            "since_version": "1.0.0",
+            "scope": "workspace",
+            "title": "T",
+            "why": "W",
+            "detector": "has-legacy-rows",
+            "completion_check": "no-legacy-rows",
+            "prompt_resource": "prompts/typo-1.md",
+            "depends_onn": [{"id": "second", "revision": 1}],
+        },
     ]
     catalog = _pack(tmp_path / "bad-types", rows)
 
@@ -474,7 +517,11 @@ def test_malformed_json_and_bad_types_are_diagnosed(tmp_path: Path) -> None:
         "unknown_scope",
         "bad_since_version",
         "invalid_depends_on",
+        "unknown_field",
     }
+    typos = [d.message for d in catalog.diagnostics if d.code == "unknown_field"]
+    assert len(typos) == 1
+    assert "depends_onn" in typos[0]
     # Every malformed dependency is reported on the row that carries it, rather
     # than coerced into a reference that only fails later as unresolvable.
     dependent = [d for d in catalog.diagnostics if d.code == "invalid_depends_on"]

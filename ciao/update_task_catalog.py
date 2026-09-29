@@ -73,6 +73,24 @@ CATALOG_FILENAME = "catalog.json"
 #: A task's scope: one logical workspace, or the whole install (one instance).
 SCOPES: frozenset[str] = frozenset({"workspace", "install"})
 
+#: The whole of a catalog row's schema. A key outside it is a defect rather than
+#: something to ignore: a misspelled ``depends_on`` is a task that silently
+#: loaded with no prerequisites, which is the one answer a catalog must not give.
+TASK_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "revision",
+        "since_version",
+        "scope",
+        "title",
+        "why",
+        "detector",
+        "completion_check",
+        "prompt_resource",
+        "depends_on",
+    }
+)
+
 #: Registered detector names. A task row names one; the implementation is what
 #: a later child adds, so a name registered here without one is a
 #: ``not_implemented`` warning rather than a load failure.
@@ -119,6 +137,7 @@ ROW_DEFECT_CODES: frozenset[str] = frozenset(
         "unknown_scope",
         "bad_since_version",
         "invalid_depends_on",
+        "unknown_field",
         "unknown_detector",
         "unknown_completion_check",
         "prompt_not_confined",
@@ -215,12 +234,11 @@ class TaskCatalog:
         installed = parse_version(installed_version)
         if installed is None:
             return ()
-        out: list[UpdateTask] = []
-        for task in self.tasks:
-            since = parse_version(task.since_version)
-            if since is not None and since <= installed:
-                out.append(task)
-        return tuple(out)
+        return tuple(
+            task
+            for task in self.tasks
+            if (parse_version(task.since_version) or _UNREADABLE_VERSION) <= installed
+        )
 
 
 def parse_version(value: str) -> tuple[tuple[int, object], ...] | None:
@@ -238,6 +256,14 @@ def parse_version(value: str) -> tuple[tuple[int, object], ...] | None:
         (1, int(part)) if part.isdigit() else (0, part.lower())
         for part in _VERSION_PART_RE.findall(stripped)
     )
+
+
+#: The sort key of a version this rule cannot read. It sorts above every key
+#: ``parse_version`` produces, because those start with ``(0, …)`` or ``(1, …)``,
+#: so a task whose ``since_version`` is unreadable supports nothing — the same
+#: answer an unreadable installed version gets, and never a ``TypeError`` out of
+#: ``eligible`` on a hand-built catalog. ``load_catalog`` admits no such task.
+_UNREADABLE_VERSION: tuple[tuple[int, object], ...] = ((2, ""),)
 
 
 def packaged_root() -> Path:
@@ -272,6 +298,7 @@ def validate_catalog(
 
     pairs: set[tuple[str, int]] = set()
     ids: set[str] = set()
+    standing: list[UpdateTask] = []
     for task in tasks:
         pair = (task.id, task.revision)
         if pair in pairs:
@@ -300,6 +327,10 @@ def validate_catalog(
             continue
         pairs.add(pair)
         ids.add(task.id)
+        # The copy that stands, and the only one whose dependencies are read
+        # below: a discarded copy's own cycle or missing reference is that
+        # copy's defect, and it must not reach the row keyed the same way.
+        standing.append(task)
         code = _prompt_defect(base, task.prompt_resource)
         if code:
             out.append(
@@ -342,7 +373,7 @@ def validate_catalog(
                 )
 
     known = pairs  # every (id, revision) this catalog defines
-    for task in tasks:
+    for task in standing:
         for ref in task.depends_on:
             if (ref.id, ref.revision) not in known:
                 out.append(
@@ -354,7 +385,7 @@ def validate_catalog(
                         revision=task.revision,
                     )
                 )
-    out.extend(_dependency_cycles(tasks))
+    out.extend(_dependency_cycles(standing))
     return out
 
 
@@ -688,6 +719,17 @@ def _parse_row(raw: Any) -> tuple[UpdateTask | None, list[Diagnostic]]:
         raw.get("depends_on"), task_id, revision
     )
     out.extend(dependency_diagnostics)
+
+    for key in sorted(key for key in raw if key not in TASK_FIELDS):
+        out.append(
+            _diag(
+                "unknown_field",
+                f"{label}: {key!r} is not a field of a task definition; a task "
+                f"row carries exactly {', '.join(sorted(TASK_FIELDS))}",
+                task_id=task_id,
+                revision=revision,
+            )
+        )
 
     if any(d.severity == _ERROR for d in out):
         return None, out
