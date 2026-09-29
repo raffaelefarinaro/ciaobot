@@ -868,7 +868,9 @@
             <div class="routine-row">
               <div class="routine-info">
                 <span class="routine-name">Critique panel</span>
-                <span class="routine-detail">Models asked for an adversarial review.</span>
+                <span class="routine-detail">Ask Ciaobot to review a plan, answer or file with the <code>/critique</code> command or critique skill. Each panel model checks it independently; Ciaobot compares their findings and gives a recommendation.</span>
+                <span class="routine-detail">Automatic combines the distinct model defaults of your configured workspaces: each workspace uses its default provider’s model. Unavailable providers are skipped. Choose models here to use a different panel.</span>
+                <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/models.html#critique" target="_blank" rel="noopener noreferrer">How the critique panel works</a>
               </div>
               <div class="critique-model-picker">
                 <!-- One control: the multi-select picker. Picked models show as
@@ -1559,8 +1561,9 @@
             <div>
               <p class="section-title">Skills</p>
               <p class="hint">
-                Shared with Claude Code and opencode. Each skill is a folder with a <code>SKILL.md</code> in <code>skills/</code>; workspace git sync carries it to other machines.
+                These are Ciaobot-managed skills saved in workspace folders or included with the app. Ask for one in chat, or invoke it by name with <code>/name</code> when your provider supports skill commands. Each skill has a <code>SKILL.md</code>; workspace git sync carries your own skills to other machines.
               </p>
+              <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a></p>
             </div>
             <div class="settings-card-header-actions">
               <button class="set-link set-link--quiet" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
@@ -1693,8 +1696,9 @@
             <div>
               <p class="section-title">Subagents</p>
               <p class="hint">
-                Shared with Claude Code and opencode. Saved in <code>subagents/</code> and kept in the vault.
+                Ciaobot-managed subagents are saved in the workspace repository’s <code>subagents/</code> folder and shared with Claude Code and opencode. Ask an agent in chat to delegate a task; subagents are not slash commands.
               </p>
+              <p class="hint">Subagents installed directly in a provider may also be available in its chats. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#extend" target="_blank" rel="noopener noreferrer">About extensions</a></p>
             </div>
             <div class="settings-card-header-actions">
               <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('subagent')">Ask Ciao to write one</button>
@@ -1807,8 +1811,9 @@
             <div>
               <p class="section-title">Commands</p>
               <p class="hint">
-                Slash commands shared with Claude Code and opencode. Saved in <code>commands/</code> and kept in the vault.
+                Type <code>/name</code> in a chat to run a saved prompt, for example <code>/critique</code>. Ciaobot-managed commands live in the workspace repository’s <code>commands/</code> folder and are shared with Claude Code and opencode.
               </p>
+              <p class="hint">Commands installed directly in a provider can also work in its chats, even if they are not shown here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#commands" target="_blank" rel="noopener noreferrer">How commands work</a></p>
             </div>
             <div class="settings-card-header-actions">
               <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('command')">Ask Ciao to write one</button>

@@ -5,8 +5,9 @@
         <p class="section-title">MCP servers</p>
         <p class="hint">
           Servers give Ciaobot agents tools, such as your calendar or a database.
-          Custom servers are saved in <code>.mcp.json</code>; their secrets go to the workspace <code>.env</code>.
+          The list below shows servers managed in this Ciaobot repository: connections in <code>.mcp.json</code> and secrets in the workspace <code>.env</code>.
         </p>
+        <p class="hint">MCP servers installed directly in Claude Code or opencode may also be available in chats run by that provider. See their connection status under Models &amp; providers. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/models.html#inherit" target="_blank" rel="noopener noreferrer">How provider tools carry over</a></p>
       </div>
       <div class="settings-card-header-actions mcp-head-actions">
         <button class="mcp-quiet-link" type="button" @click="emit('create-via-chat')">Ask Ciao to add one</button>

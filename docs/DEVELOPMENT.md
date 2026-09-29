@@ -326,6 +326,11 @@ cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
+When the Critique panel picker is Automatic, `ciao/critique.py` collects the
+distinct effective default models of configured workspaces, skipping providers
+that are not signed in. The `/critique` command and critique skill use this same
+panel; `tests/test_critique.py` covers its resolution.
+
 When removing a background job, add its id to `job_runs.RETIRED_JOBS`:
 `job_runs_latest.json` keeps the last run of every job it ever saw, and the
 debug report would otherwise keep listing it with a stale last run.

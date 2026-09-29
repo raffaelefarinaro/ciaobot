@@ -65,7 +65,7 @@
 
     <section id="skills">
       <h2>Skills <span class="tag">Built-in + Google</span></h2>
-      <p>A skill is a short instruction file that teaches the assistant how to do one kind of task well. Only its one-line description is always visible; the full instructions load when a task calls for them. Skills follow the open <a href="https://agentskills.io">Agent Skills</a> format, so they work in both Claude Code and opencode.</p>
+      <p>A skill is a short instruction file that teaches the assistant how to do one kind of task well. Only its one-line description is always visible; the full instructions load when a task calls for them. Ask for the task in chat, or invoke a skill by name with <code>/name</code> where your provider supports skill commands. Skills follow the open <a href="https://agentskills.io">Agent Skills</a> format, so they work in both Claude Code and opencode.</p>
       <figure>
         <a href="assets/img/skills.webp"><img src="assets/img/skills.webp" alt="Settings, Skills tab listing the stock skills that ship with Ciaobot, with Add via chat and Add skill buttons" loading="lazy" width="1600" height="1000"></a>
         <figcaption>Settings → Skills. Your own skills are listed above the ones that ship with Ciaobot.</figcaption>
@@ -101,7 +101,7 @@
           </tbody>
         </table>
       </div>
-      <p>Your own commands work the same way: a name, a short description and the prompt they send. Handy for anything you type often, like <code>/weekly-status</code> or <code>/trip-brief Lisbon</code>.</p>
+      <p>Type a command in a chat to run it. Your own commands work the same way: a name, a short description and the prompt they send. Handy for anything you type often, like <code>/weekly-status</code> or <code>/trip-brief Lisbon</code>.</p>
       <figure>
         <a href="assets/img/commands.webp"><img src="assets/img/commands.webp" alt="Settings, Commands tab: built-in critique, interrogation and remember commands plus two custom commands" loading="lazy" width="1600" height="1000"></a>
         <figcaption>Settings → Commands, with two custom commands next to the built-in ones.</figcaption>
@@ -141,7 +141,7 @@
       <div class="prompt">Create a subagent that sweeps my inbox every morning and only reports what needs a reply.</div>
 
       <h3>Already set up in Claude Code or opencode?</h3>
-      <p>You keep it. Skills, plugins, subagents and MCP servers you've installed in Claude Code or opencode are also available when that tool runs a Ciaobot chat. <a href="models.html#inherit">More →</a></p>
+      <p>Settings lists Ciaobot-managed extensions from the workspace repository (and some discovered provider items); it is not a complete inventory of everything installed in your CLI. Skills, commands, plugins, subagents and MCP servers you've installed in Claude Code or opencode can also be available when that tool runs a Ciaobot chat. The Models &amp; providers page shows provider connection details. <a href="models.html#inherit">More →</a></p>
     </section>
 
 
