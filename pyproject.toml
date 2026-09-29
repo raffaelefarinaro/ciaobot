@@ -77,6 +77,7 @@ namespaces = false
   "skills/**/*",
   "schedules.json",
   "schedules/*.md",
+  "update-tasks/**/*",
 ]
 
 [tool.pytest.ini_options]
