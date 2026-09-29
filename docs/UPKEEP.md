@@ -1,0 +1,62 @@
+# Upkeep watchlist
+
+Topics Ciaobot keeps an eye on between releases. **This is a working document**,
+not a periodic report: add a row the moment you notice something worth watching,
+in whatever PR you are already in. `/ciao-upkeep` (§ 0) reads it before
+checking anything and updates `Last checked` for what it actually looked at.
+
+A stale date on a row nobody checked is worse than no date — delete the date
+rather than leave it implying coverage.
+
+**Decisions** are the point. A topic with a `rejected` row and a reason is
+worth more than one still in limbo, because it stops the same question being
+re-litigated every quarter.
+
+## Open topics
+
+| Topic | Why we care | Source | Last checked | Decision |
+|---|---|---|---|---|
+| OpenCode 2.x contract | The provider is **V2-only, 2.0.16+**. No V1 route or response-shape fallbacks exist and none may be restored. `AGENTS.md` requires replaying the V2 fixtures plus one real turn against the installed server before any provider change lands. | `opencode --version`, release notes | — | watching — pinned contract, not negotiable |
+| `gws` CLI | Pinned at `0.22.5` in `ciao/stock/skills/gws-shared/SKILL.md`. The pin and the ~30 generated `gws-*` skills travel together; one without the other ships skills documenting commands the CLI no longer has. | github.com/googleworkspace/cli releases | — | watching |
+| Defuddle | Pinned at `0.19.3` in `ciao/stock/defuddle/package.json`, installed privately by `ciao/defuddle_install.py`. Powers the `web-research` skill. Not covered by `check_available_updates`. | npm `defuddle` | — | watching |
+| Node floor | `.nvmrc` (22) and `SUPPORTED_RANGE` in `web/scripts/check-node.mjs` must move together. Below the range vitest prints `Test Files N passed` for only the files that ran — a green suite that skipped a third of itself. | nodejs.org/en/about/previous-releases, jsdom's `engines` | — | watching |
+| GitHub Actions pins | `actions/*@v4`/`@v5`, `astral-sh/setup-uv@v6`. No Renovate/Dependabot; nothing notices a deprecated action until the workflow starts warning. | github.com/actions/*, astral-sh/setup-uv | — | watching |
+| `claude-agent-sdk` | The only `AUTO_UPDATE_KEYS` entry, so the only dependency a release bumps without asking. Its churn is the reason the release gate exists at all. | PyPI, Anthropic changelog | — | auto (safe, same-major) |
+| Python floor | 3.12+ required (`tomllib` in `dependency_updates.py`, no 3.9 support). Raising it is a user-visible change, not a chore. | python.org devguide | — | watching |
+| Playwright | The 8 specs in `web/e2e/specs/` are the deterministic half of the browser check; the release's model tasks are the other half. A Playwright major can break the fixture server. | playwright.dev | — | watching |
+| Marketing site claims | `site/*.html` — 7 hand-written files, published by `pages.yml` on push to `main`. No test compares them to the code. A wrong claim goes live on merge. | in-repo | — | watching — see `/ciao-upkeep` § 3 |
+
+## Standing rules
+
+Things that are decided and should not be re-opened without new information.
+
+- **The release is the engine.** No Rust, no `cargo`, no app bundle (`#655`,
+  `#656`). A dependency or a gate that no longer exists should be deleted, not
+  kept as a fallback.
+- **One origin, one engine, one session.** No client/host split. `/api/*` stays
+  behind the signed session cookie, every `/ws/*` handshake stays
+  same-origin-gated, and the loopback-only set stays gated on the TCP peer
+  (`docs/REMOTE_BOUNDARY.md`).
+- **No new environment variables.** Hardcode a default; make it a Settings
+  option; add an env var only for secrets, install paths or test isolation, and
+  document it in `INTEGRATIONS.md`.
+- **No fallbacks or compatibility shims.** Delete superseded code outright. If
+  removing one would break an install people already have, stop and ask the
+  maintainer first.
+- **Screenshots rot slowest and are never noticed.** `site/assets/img/` shows
+  UIs that may no longer exist, with alt text still describing them. Check the
+  image when checking the claim beside it.
+- **Advisory is not invisible.** `pip-audit`, `npm audit` and `npm run lint`
+  are `|| true` in `ci.yml` so a transitive CVE cannot block a release. Someone
+  still has to read them — see `/ciao-upkeep` § 5.
+
+## Considered and rejected
+
+Kept so the question does not come back every quarter.
+
+| Topic | Decision | Why |
+|---|---|---|
+| Renovate / Dependabot | rejected | The update set is small and mostly needs judgement — the Node floor is a paired edit, the `gws` pin needs regeneration, and majors on `starlette`/`cryptography` want a human reading the changelog. A bot would either be noisy or need the same suppressions. Revisit if the dependency count grows. |
+| Auto-adopting safe npm/Python updates at release time | rejected | `--apply` already does this for `claude-agent-sdk` only, deliberately. Widening `AUTO_UPDATE_KEYS` makes a release carry unreviewed upgrades it never gated. Keep bumps on their own PRs. |
+| Windows parity (#696) | open, out of scope here | A real feature, tracked as an issue. Not an upkeep row — it does not fail if we stop watching it. |
+| Deterministic browser tests only | rejected | The specs pin routing, sockets and named regressions, but they cannot say "this layout collapsed" or "a toast fired for a quiet action". Both halves run at release; see `/ciao-release` `tasks/`. |
