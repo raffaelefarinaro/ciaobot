@@ -26,14 +26,16 @@ than about wall-clock time.
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from logging import LogRecord
 from pathlib import Path
 
 import pytest
 
-from ciao import backup_service, local_session
+from ciao import backup_service, job_runs, local_session
 from ciao.app_settings import AppSettingsStore
 from ciao.backup_service import (
     BACKOFF_MULTIPLIER,
@@ -302,8 +304,15 @@ async def test_a_change_outside_the_scope_is_neither_committed_nor_pushed(
     assert "memory-vault/Notes/day-2.md" in world.commit_paths()
     assert world.commit_paths() == ["memory-vault/Notes/day-2.md"]
     # And the gap is reported rather than swallowed: a repository holding
-    # application source is only ever partly covered by this service.
-    assert status.state == backup_service.STATE_NEEDS_ATTENTION
+    # application source is only ever partly covered by this service. It is
+    # reported on its own field, not as a state — a permanent property of the
+    # repository is not a failure of this run, and a `needs_attention` here
+    # wrote a permanently red Automation row for a backup that had just done
+    # its job (#733).
+    assert status.state == backup_service.STATE_READY, status.reason
+    assert status.coverage_gap == 1
+    # The human sentence still names the paths, under the ready state, for
+    # whoever opens the details.
     assert "outside the backup scope" in status.reason
     assert "app.py" in status.reason
 
@@ -325,6 +334,146 @@ async def test_a_credential_in_the_scope_stops_the_run_before_it_stages(
     assert world.remote_head() == before
     assert _git(world.workspace, "status", "--porcelain") != ""
     assert status.last_success_at == ""
+
+
+# ── the coverage gap ─────────────────────────────────────────────────────────
+#
+# Git already tracks paths the backup scope refuses to commit, so a repository
+# that is also a checkout is only ever partly covered. That is a permanent
+# property of the repository, not a fault of a run, and it is reported on its
+# own field beside the state. It used to be `needs_attention`, which made a
+# backup that had just committed and pushed write `status: "error"`, and then
+# had every repeat demoted to "same failure as the previous backup attempt" —
+# so the true state appeared in telemetry nowhere at all (#733).
+
+
+def _recorded_runs(tmp_path: Path) -> list[dict]:
+    """The job rows this test's runs wrote, oldest first.
+
+    The autouse fixture in ``conftest`` points ``job_runs`` at the test's own
+    temp dir, so this is the row an operator reads — and the point of the tests
+    below is what a run that succeeded wrote there.
+    """
+    path = tmp_path / job_runs.JOB_RUNS_NAME
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+async def test_a_gap_on_two_runs_in_a_row_writes_no_failure_row(tmp_path: Path) -> None:
+    """The shape this was reported from: a repository that is also a checkout,
+    backed up every five minutes, healthy every time.
+
+    The first run commits a note and pushes it; the second has nothing to do at
+    all — the "24 consecutive runs, every one with nothing pending" afternoon.
+    Both are successes, and both rows have to say so.
+    """
+    world = _world(tmp_path)
+    _write(world.workspace / "app.py", "# app\n")
+    _git(world.workspace, "add", "-A")
+    _git(world.workspace, "commit", "-q", "-m", "app source")
+    service = _service(world)
+    world.note("day-2.md", "day two\n")
+
+    first = await service.run_backup()
+    second = await service.run_backup()
+
+    assert [first.state, second.state] == [backup_service.STATE_READY] * 2
+    # The second run really is the empty one: nothing left to commit or push.
+    assert "nothing to back up" in second.reason
+    assert [first.coverage_gap, second.coverage_gap] == [1, 1]
+    assert world.head() == world.remote_head()
+
+    rows = _recorded_runs(tmp_path)
+    assert [row["status"] for row in rows] == ["ok", "ok"]
+    assert [row["error"] for row in rows] == [None, None]
+    assert [row["extra"]["state"] for row in rows] == [
+        backup_service.STATE_READY
+    ] * 2
+    # The gap is on the row, so a surface can show a partly covered repository
+    # without the row claiming anything broke.
+    assert [row["extra"]["coverage_gap"] for row in rows] == [1, 1]
+    # And no repeat bookkeeping at all: a gap must not open a "same failure as
+    # the previous backup attempt" episode that hides the runs after it.
+    assert all("repeat_count" not in row["extra"] for row in rows)
+    assert all("skip_reason" not in row["extra"] for row in rows)
+
+
+async def test_a_gap_on_an_empty_repository_is_still_reported(tmp_path: Path) -> None:
+    """Nothing to back up, nothing outstanding, and the backup is reported as
+    exactly that — the state the issue called out by its own log line."""
+    world = _world(tmp_path)
+    _write(world.workspace / "app.py", "# app\n")
+    _git(world.workspace, "add", "-A")
+    _git(world.workspace, "commit", "-q", "-m", "app source")
+    service = _service(world)
+
+    status = await service.run_backup()
+
+    assert status.state == backup_service.STATE_READY, status.reason
+    assert status.pending_changes == 0
+    assert status.pending_commits == 0
+    assert status.coverage_gap == 1
+
+
+async def test_a_gap_does_not_hide_pending_work_behind_it(tmp_path: Path) -> None:
+    """A gap used to outrank everything in a read, so a repository that was both
+    behind and partly covered reported the gap and said nothing about the work
+    waiting. Pending work leads now, and the gap still travels with it."""
+    world = _world(tmp_path)
+    _write(world.workspace / "app.py", "# app\n")
+    _git(world.workspace, "add", "-A")
+    _git(world.workspace, "commit", "-q", "-m", "app source")
+    service = _service(world)
+    world.note("day-2.md", "day two\n")
+
+    status = await service.status()
+
+    assert status.state == backup_service.STATE_PENDING
+    assert status.pending_changes == 1
+    assert status.coverage_gap == 1
+    assert status.reason.startswith("waiting:")
+    # ...and the gap is still said, with the paths, after it.
+    assert "outside the backup scope" in status.reason
+    assert "app.py" in status.reason
+
+
+async def test_a_gap_is_logged_once_and_again_only_when_the_count_moves(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The condition is permanent, so a line per run is 288 a day at the
+    five-minute cadence, all of it saying nothing new. The first sighting and a
+    changed count are the two moments worth a line — and neither is a failure,
+    or the failures that share the log with it stop being readable."""
+    world = _world(tmp_path)
+    _write(world.workspace / "app.py", "# app\n")
+    _git(world.workspace, "add", "-A")
+    _git(world.workspace, "commit", "-q", "-m", "app source")
+    service = _service(world)
+
+    def gap_lines() -> list[LogRecord]:
+        return [r for r in caplog.records if "coverage gap" in r.getMessage()]
+
+    with caplog.at_level("INFO", logger="ciao.backup_service"):
+        first = await service.run_backup()
+        await service.run_backup()
+        assert len(gap_lines()) == 1
+        assert f"{first.coverage_gap} tracked path(s)" in gap_lines()[0].getMessage()
+        # The repository gained more out-of-scope files, so the count moved.
+        _write(world.workspace / "main.py", "# main\n")
+        _git(world.workspace, "add", "-A")
+        _git(world.workspace, "commit", "-q", "-m", "app source, again")
+        moved = await service.run_backup()
+        await service.run_backup()
+
+    assert [r.levelname for r in gap_lines()] == ["INFO", "INFO"]
+    assert moved.coverage_gap > first.coverage_gap
+    assert f"{moved.coverage_gap} tracked path(s)" in gap_lines()[-1].getMessage()
+    assert [r for r in caplog.records if r.levelname in {"WARNING", "ERROR"}] == []
 
 
 # ── clean runs create nothing ────────────────────────────────────────────────

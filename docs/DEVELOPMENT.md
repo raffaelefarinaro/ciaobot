@@ -348,7 +348,11 @@ covers the three routes. The five-minute interval is the named constant
 `job_runs` under the id `branch_backup`.
 Settings → General shows a compact online backup state and last successful upload;
 the configured scope, repository, and raw diagnostic are in a native "Backup details"
-disclosure ("Review details" when attention is needed). The five-minute cadence is
+disclosure ("Review details" when attention is needed). A coverage gap — paths git
+already tracks that the scope refuses to commit, so a repository that is also a
+checkout is only partly covered — is a neutral note under whatever the state says,
+driven by the status's `coverage_gap` count rather than by parsing the `reason`
+sentence, and it never reddens a backed-up install (#733). The five-minute cadence is
 in the section description. There is no separate backup guide.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.

@@ -727,7 +727,12 @@ that landed, never by a local commit. A failed push keeps the local commit untou
 reset, no force-push — and the remote URL is always reported with any credential removed.
 `remote` is read fresh on every call and is empty whenever this boot is paused or the
 repository is unconfigured; `last_remote` is the record of where the last run pushed, so it
-is still the answer when `remote` is not. `POST /api/local/backup/run` is the manual trigger;
+is still the answer when `remote` is not. `coverage_gap` is the number of tracked paths git
+already has that the backup scope refuses to commit — the whole count, not a sample — so a
+repository that is also a checkout is reported as a coverage fact beside whatever `state` is.
+It is not a state: a run that committed and pushed through a gap is `ready` and is recorded
+as a success. `reason` is prose for a human and may be reworded; read `coverage_gap` for the
+number. `POST /api/local/backup/run` is the manual trigger;
 it takes the same lock as the scheduled tick, so the two can never interleave. 200 when the
 run left the repository in a state that needs nothing from you, 400 when it could not do its
 job (no repository, no remote, refused credentials, unreachable remote) — the body is the
@@ -736,7 +741,7 @@ same status object either way.
 ```bash
 # What the backup service knows: {state, scope, branch, remote, last_remote, enabled,
 # interval_s, last_attempt_at, last_success_at, last_success_commit, pending_changes,
-# pending_commits, reason}.
+# pending_commits, coverage_gap, reason}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup"
 
 # Pause backups, or turn them off entirely. Both survive a restart.
