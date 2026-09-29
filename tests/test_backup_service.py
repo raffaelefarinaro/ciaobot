@@ -1380,11 +1380,14 @@ def test_the_prompt_does_not_put_one_path_in_both_lists(tmp_path: Path) -> None:
     have to be able to be written down without contradiction.
 
     It first says everything under "never backed up" must not reach the remote,
-    and then explains `.runtime/*` — which, read the way it was first written,
-    covered a file the same prompt lists under "backed up". An agent resolving
-    that by ignoring the directory wholesale would untrack the automations
-    (#734). The sentence now states the exception, and says why the rules have
-    to be written as a glob rather than as the directory.
+    and then explains the runtime glob — which, read the way it was first
+    written, covered a file the same prompt lists under "backed up". An agent
+    resolving that by ignoring the directory wholesale would untrack the
+    automations (#734). The step now states the exception, gives the two rules
+    in the order git honours them, and says why the glob is `**`-prefixed: a
+    pattern with a slash is anchored to the repository root, so the
+    root-anchored spelling silently stopped ignoring `client/.runtime/` — a
+    directory holding credentials, which the manual sync path stages whole.
     """
     world = _world_in(tmp_path / "ciao install")
     prompt = backup_service.render_setup_prompt(world.config)
@@ -1396,10 +1399,12 @@ def test_the_prompt_does_not_put_one_path_in_both_lists(tmp_path: Path) -> None:
     step = " ".join(prompt.split("\n3. ", 1)[1].split("\n4. ", 1)[0].split())
     assert "except `.runtime/schedules.json`" in step
     assert "including" not in step
-    # The re-include has to come after the glob, and the prompt has to say so,
-    # or the agent writes a rule git ignores.
-    assert step.index(".runtime/*") < step.index("!.runtime/schedules.json")
+    # The re-include has to come after the glob it overrides, or git ignores
+    # both; and the glob has to be depth-spanning, or nested runtime
+    # directories stop being ignored.
+    assert step.index("**/.runtime/*") < step.index("!/.runtime/schedules.json")
     assert "git cannot re-include a file inside an ignored directory" in step
+    assert "anchored to the repository root" in step
 
 
 def test_a_folder_with_spaces_stays_one_path(tmp_path: Path) -> None:

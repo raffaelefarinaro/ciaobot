@@ -456,14 +456,35 @@ from ciao.workspace_guide import guide_path
 # retired (`sync_skills` only prunes what older versions left behind, it never
 # writes there), so ignoring it would be dead config.
 #
-# `.runtime/` is written as its contents plus one re-include rather than as the
-# directory, because the backup scope commits `.runtime/schedules.json` — the
-# durable automation store — and refuses every other path under that root
+# The runtime root is written as its contents plus one re-include rather than as
+# the directory, because the backup scope commits `.runtime/schedules.json` —
+# the durable automation store — and refuses every other path under that root
 # (#734). Git never descends into an ignored directory, so a `.runtime/` line
-# would make that carve-out inert no matter what followed it. Order matters:
-# the re-include has to come after the glob it overrides.
-_RUNTIME_IGNORE_DIR = ".runtime/"
-_RUNTIME_IGNORE_ENTRIES = (".runtime/*", "!.runtime/schedules.json")
+# would make that carve-out inert no matter what followed it.
+#
+# Both halves are spelled the way they have to be, and neither spelling is
+# obvious. The glob is `**/.runtime/*` rather than `.runtime/*` because a
+# pattern with an interior slash is anchored to the repository root: the
+# unanchored `.runtime/` matched a `.runtime` directory at *any* depth, and
+# `.runtime/*` would quietly stop matching `client/.runtime` and `a/b/.runtime`
+# — a real regression, since those hold state such as `bootstrap-auth-token`
+# and the manual sync path still stages the whole tree. The re-include is
+# `!/.runtime/schedules.json` for the mirror-image reason: it pins the
+# root-level file the scope commits, while a nested `sub/.runtime/
+# schedules.json` stays ignored with everything else in that directory.
+_RUNTIME_IGNORE_ENTRIES = ("**/.runtime/*", "!/.runtime/schedules.json")
+
+#: The hand-written spellings of that same rule, repaired in place rather than
+#: appended to. Each ignores the runtime root well enough that a re-include
+#: written beside it is dead — the failure the repair exists to undo — and these
+#: are the forms a person writes by hand, so they are what an existing install
+#: is most likely to carry.
+#:
+#: The limit, stated rather than engineered around: git cannot tell a file from
+#: a directory in one pattern except by the trailing slash, so after the repair
+#: a *plain file* named `.runtime` would no longer be ignored. The runtime root
+#: is always a directory (``state_path.parent``), so there is nothing to lose.
+_RUNTIME_IGNORE_DIRS = (".runtime/", ".runtime", "/.runtime/", "/.runtime")
 _WORKSPACE_GITIGNORE_ENTRIES = (
     ".env",
     ".envrc",
@@ -487,32 +508,53 @@ def _ensure_workspace_gitignore(root: Path) -> None:
     directory, which is what left the backup scope's carve-out of
     ``.runtime/schedules.json`` inert on every install scaffolded before #734
     while the status page listed the file as backed up. Appending cannot fix
-    that, so a bare ``.runtime/`` line is rewritten in place as the pair.
+    that, so the hand-written spellings in :data:`_RUNTIME_IGNORE_DIRS` are
+    rewritten in place as the pair.
 
     Rewriting is safe whichever hand wrote the line, because the pair covers
-    everything the line covered: same directory, same contents, plus one file
-    re-included. A path-scoped rule such as ``client/.runtime/`` is somebody
-    else's and is left alone.
+    everything each of them covered — every ``.runtime`` at any depth — and
+    re-includes one root-level file. A rule scoped to somebody else's path, such
+    as ``client/.runtime/``, is not one of those spellings and is left alone.
     """
     gitignore = root / ".gitignore"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    # `newline=""` on both ends: the default text mode would translate a CRLF
+    # file to LF on the way in, so the line ending would be gone before the
+    # check below could see it, and the rewrite would convert the whole file.
+    # `open` rather than `read_text` for the `newline` argument, which
+    # `read_text` only grew in 3.13 and the type stubs here predate.
+    existing = ""
+    if gitignore.exists():
+        with gitignore.open(encoding="utf-8", newline="") as handle:
+            existing = handle.read()
+    original = existing.splitlines()
     lines: list[str] = []
-    for line in existing.splitlines():
-        if line.strip() == _RUNTIME_IGNORE_DIR:
-            lines.extend(_RUNTIME_IGNORE_ENTRIES)
-        else:
-            lines.append(line)
+    repaired = False
+    for line in original:
+        if line.strip() in _RUNTIME_IGNORE_DIRS:
+            if not repaired:
+                lines.extend(_RUNTIME_IGNORE_ENTRIES)
+                repaired = True
+            # A second spelling of a rule the pair now covers: dropping it is
+            # what keeps the pair from being written twice.
+            continue
+        lines.append(line)
     present = {line.strip() for line in lines}
     missing = [e for e in _WORKSPACE_GITIGNORE_ENTRIES if e not in present]
-    if not missing and lines == existing.splitlines():
+    if not missing and lines == original:
         return
+    # Rebuild in whatever line ending the file already had: a CRLF `.gitignore`
+    # is a Windows editor's file, and rewriting it wholesale into LF is a
+    # gratuitous whole-file diff on a file this function only appended to.
+    newline = "\r\n" if "\r\n" in existing else "\n"
     if lines:
-        text = "\n".join(lines) + "\n"
+        text = newline.join(lines) + newline
     else:
-        text = "# Ciaobot: keep secrets and runtime state out of git snapshots\n"
+        header = "# Ciaobot: keep secrets and runtime state out of git snapshots"
+        text = header + newline
     if missing:
-        text += "\n".join(missing) + "\n"
-    gitignore.write_text(text, encoding="utf-8")
+        text += newline.join(missing) + newline
+    with gitignore.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
 
 
 def ensure_workspace_git(root: Path) -> None:

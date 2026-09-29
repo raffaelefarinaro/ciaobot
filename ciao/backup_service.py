@@ -1255,13 +1255,18 @@ Then:
    are one rule read from either side, and that file belongs to exactly one of
    them. To write it, do not ignore the directory itself — git cannot re-include
    a file inside an ignored directory, so a `.runtime/` line would win over any
-   negation and the automations would be dropped. Ignore the directory's
-   contents and negate the one file back, in that order:
-     .runtime/*
-     !.runtime/schedules.json
-   Check the already-tracked paths that fall outside the scope (`git ls-files`
-   will list them) and tell the user which ones you would untrack rather than
-   untracking them silently.
+   negation and the automations would be dropped. Ignore every runtime
+   directory's contents, at any depth, and negate the one root file back, in
+   that order:
+     **/.runtime/*
+     !/.runtime/schedules.json
+   The leading `**` matters: a pattern containing a slash is anchored to the
+   repository root, so `client/.runtime/` and `a/b/.runtime/` would stop being
+   ignored — and those hold credentials. The negation is pinned to the root
+   for the mirror-image reason, so a nested `sub/.runtime/schedules.json`
+   stays ignored. Check the already-tracked paths that fall outside the scope
+   (`git ls-files` will list them) and tell the user which ones you would
+   untrack rather than untracking them silently.
 4. Before you commit or push anything, check the two things that fail quietly
    on a machine nobody has set git up on: that this repository has a committer
    identity (`git config user.name` and `git config user.email` — set them if
