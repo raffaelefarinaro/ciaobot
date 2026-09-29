@@ -94,7 +94,7 @@ def test_workspace_local_source_and_revision(tmp_path: Path) -> None:
 
 def test_custom_shadow_is_eligible(tmp_path: Path) -> None:
     packaged = resources.files("ciao.stock").joinpath("skills")
-    shadow = "web-research"
+    shadow = "convert-documents-to-markdown"
     assert shadow in {e.name for e in packaged.iterdir() if e.is_dir()}, (
         "the shadow has to shadow a name that actually ships"
     )
