@@ -582,6 +582,17 @@ def _stage_locked(
             timeout=_UV_TIMEOUT,
         ).stdout.strip()
 
+        # The agent's Defuddle lives inside the staged tool environment, so
+        # the later atomic env swap carries it with the Python dependencies.
+        # A failed npm install must fail staging, not leave an update marked ready.
+        run(
+            [str(env_python), "-m", "ciao.defuddle_install"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_UV_TIMEOUT,
+        )
+
         from ciao import install_receipt
 
         receipt_path = install_receipt.default_receipt_path()

@@ -318,6 +318,11 @@ fi
 # different invocation is a different fault.
 case "\\$*" in
     "-m ciao.install_receipt write"*) [ -f "\\$HOME/fail-install-receipt" ] && exit 1 ;;
+    "-m ciao.defuddle_install")
+        printf 'defuddle install\n' >> "\\$HOME/trace.log"
+        [ -f "\\$HOME/fail-defuddle-install" ] && exit 1
+        exit 0
+        ;;
 esac
 PYTHONPATH="__REPO_ROOT__" exec "__PYTHON__" "\\$@"
 EOF
@@ -1992,6 +1997,21 @@ def test_migrate_host_rollback_restores_the_shim_as_a_regular_file(
     # The app's engine is the one the restored shim execs, so a rolled-back run
     # may not have taken the bundle it runs out of with it.
     assert _app_bundle(tmp_path).is_dir()
+
+
+@needs_local_tools
+def test_defuddle_failure_rolls_back_before_receipt(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    _knob(harness, "fail-defuddle-install")
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 1
+    assert "could not install the bundled Defuddle CLI" in result.stderr
+    assert "Ciaobot.app's engine was restored" in result.stderr
+    assert not _tool_env(harness).exists()
+    assert not (harness["home"] / ".local/state/ciaobot/install-receipt.json").exists()
 
 
 @needs_local_tools

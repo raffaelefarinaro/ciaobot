@@ -53,6 +53,16 @@ the installer says which one applies:
 Provider logins do not depend on the shim: the setup wizard hands out each
 provider's own login command (`claude auth login`, `opencode auth login`).
 
+### Defuddle web reader
+
+Node.js and npm must be available on the host during installation and updates.
+The installer installs [upstream Defuddle](https://github.com/kepano/defuddle)
+from the package lock into the engine's private Python environment; in-app
+updates stage the same CLI before replacing the engine. Agent subprocesses use
+that private executable ahead of any globally installed `defuddle`. Nothing is
+installed into global npm. For a source checkout, run
+`python -m ciao.defuddle_install` in the project's virtual environment.
+
 ## OpenCode
 
 Ciaobot requires **OpenCode 2.0.16 or newer in the 2.x line**. OpenCode 1 is

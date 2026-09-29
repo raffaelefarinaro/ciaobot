@@ -234,6 +234,7 @@ def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run)
     # that env rather than resolving anything, so this is the only place the
     # dependency set of an update is ever known.
     assert calls[2] == ["/fake/uv", "pip", "freeze", "--python", op.env_python]
+    assert calls[3] == [op.env_python, "-m", "ciao.defuddle_install"]
     assert op.env_freeze == f"{TOOL_NAME}=={TO_VERSION}"
 
     assert read_operation(tmp_path / "state") == op
@@ -242,6 +243,25 @@ def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run)
     assert stat.S_IMODE((tmp_path / "state").stat().st_mode) == 0o700
     # The staged env is really on disk, not just described by the record.
     assert (env_dir / "bin" / "python").exists()
+
+
+def test_stage_update_refuses_missing_defuddle(
+    tmp_path: Path, release: FakeRelease, fake_run
+) -> None:
+    run, _calls = fake_run
+
+    def without_node(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[-2:] == ["-m", "ciao.defuddle_install"]:
+            raise subprocess.CalledProcessError(1, argv, stderr="npm is required")
+        return run(argv, **kwargs)
+
+    with pytest.raises(UpdateError, match="npm is required"):
+        stage_update(
+            "1.2.3", current_version="1.2.2", state_dir=tmp_path / "state",
+            release_base=RELEASE_BASE, fetch=release.serve, run=without_node,
+            uv="/fake/uv", python_version="3.13",
+        )
+    assert read_operation(tmp_path / "state").phase == "failed"
 
 
 def test_read_operation_reads_a_record_written_before_env_freeze(

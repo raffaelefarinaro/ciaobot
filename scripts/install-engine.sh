@@ -1312,6 +1312,8 @@ tool_python="$tool_dir/ciaobot/bin/python"
 # step is the same failure one step later with the app's engine already gone.
 install_step "the installed engine is not importable" \
     "$tool_python" -c 'import ciao.install_receipt'
+install_step "could not install the bundled Defuddle CLI (Node.js/npm required)" \
+    "$tool_python" -m ciao.defuddle_install
 
 # Absolute paths only: the receipt is read by a process that has no idea which
 # directory the installer ran from. A client is recorded as owning no service,
