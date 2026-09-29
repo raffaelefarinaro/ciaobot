@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -739,9 +738,6 @@ async def update_subagent_endpoint(request: Request) -> JSONResponse:
         workspace = resolve_workspace_name(config, str(body.get("workspace", "")))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    except json.JSONDecodeError:
-        body = {}
-        workspace = resolve_workspace_name(config, request.query_params.get("workspace", ""))
     root = agent_root_for(config, workspace)
     target = root / "subagents" / f"{name}.md"
     if not target.exists():
@@ -782,9 +778,6 @@ async def update_command_endpoint(request: Request) -> JSONResponse:
         workspace = resolve_workspace_name(config, str(body.get("workspace", "")))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    except json.JSONDecodeError:
-        body = {}
-        workspace = resolve_workspace_name(config, request.query_params.get("workspace", ""))
     root = agent_root_for(config, workspace)
     target = root / "commands" / f"{name}.md"
     if not target.exists():

@@ -122,11 +122,23 @@ def _workspace_of(request: Request) -> str:
 
     Every MCP read and write in this module resolves the same root, so a
     server shown in Settings → MCP servers is the server an edit, a secret
-    save or a delete reaches. An unregistered name is treated as absent
-    rather than rejected: the route still answers, scoped to the install
-    root, which is what a client that sends no workspace means.
+    save or a delete reaches. For a read an unregistered name is treated as
+    absent, scoped to the install root, which is what a client that sends no
+    workspace means; writes use `_write_workspace_of` and refuse it.
     """
     return str(request.query_params.get("workspace", "") or "").strip()
+
+
+def _write_workspace_of(request: Request) -> str:
+    """Like `_workspace_of`, but a write refuses a name that is not registered.
+
+    Reads may fall back to the install root; a write with a typo'd name would
+    silently land in the shared `.mcp.json` and `.env`.
+    """
+    name = _workspace_of(request)
+    if name and request.app.state.config.workspace(name) is None:
+        raise ValueError(f"unknown workspace '{name}'")
+    return name
 
 
 async def mcp_status_endpoint(request: Request) -> JSONResponse:
@@ -188,7 +200,7 @@ async def mcp_env_keys_endpoint(request: Request) -> JSONResponse:
             updates,
             server=server,
             bind_missing=True,
-            workspace=_workspace_of(request),
+            workspace=_write_workspace_of(request),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -217,7 +229,7 @@ async def mcp_servers_collection_endpoint(request: Request) -> JSONResponse:
             command=str(body.get("command") or ""),
             args=args_list,
             env_keys={str(k): str(v) for k, v in env_keys.items()} if env_keys else None,
-            workspace=_workspace_of(request),
+            workspace=_write_workspace_of(request),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -232,7 +244,10 @@ async def mcp_server_item_endpoint(request: Request) -> JSONResponse:
     name = str(request.path_params.get("name") or "").strip()
     if not name:
         return JSONResponse({"error": "missing server name"}, status_code=400)
-    workspace = _workspace_of(request)
+    try:
+        workspace = _write_workspace_of(request)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     if request.method == "DELETE":
         try:
             payload = await asyncio.to_thread(

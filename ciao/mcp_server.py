@@ -1293,11 +1293,24 @@ class CiaoMcpService:
     def _project_mcp_json_candidates(self, workspace: str = "") -> list[Path]:
         return [path for _source, path in self._mcp_json_candidates(workspace)]
 
+    def _writable_mcp_json_candidates(self, workspace: str = "") -> list[Path]:
+        """The ``.mcp.json`` files a write for this workspace may touch.
+
+        A named workspace owns only its own file: the shared install-root files
+        are visible to it but belong to every workspace, so an add or a delete
+        there would leak across them.
+        """
+        root = self._workspace_root(workspace)
+        install_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
+        if root != install_root:
+            return [root / ".mcp.json"]
+        return self._project_mcp_json_candidates(workspace)
+
     def _preferred_mcp_json_path(
         self, *, create: bool = False, workspace: str = ""
     ) -> Path | None:
-        """Prefer an existing project ``.mcp.json`` that already has servers."""
-        for path in self._project_mcp_json_candidates(workspace):
+        """Prefer an existing writable ``.mcp.json`` that already has servers."""
+        for path in self._writable_mcp_json_candidates(workspace):
             if not path.is_file():
                 continue
             try:
@@ -1307,7 +1320,7 @@ class CiaoMcpService:
                 continue
             if isinstance(servers, dict) and servers:
                 return path
-        for path in self._project_mcp_json_candidates(workspace):
+        for path in self._writable_mcp_json_candidates(workspace):
             if path.is_file():
                 return path
         if create:
@@ -1348,7 +1361,7 @@ class CiaoMcpService:
     def _find_server_file(
         self, name: str, workspace: str = ""
     ) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
-        for path in self._project_mcp_json_candidates(workspace):
+        for path in self._writable_mcp_json_candidates(workspace):
             if not path.is_file():
                 continue
             try:

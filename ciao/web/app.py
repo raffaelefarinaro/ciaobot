@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -455,6 +456,11 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # warm the discovery cache at startup so the first Settings -> Models & providers
         # visit serves a populated list instead of blocking on the probe.
         warm_claude_discovery_cache(getattr(config, "workspace_root", None))
+        # The first login-shell probe can take seconds; every chat start reads
+        # this cached value, so pay for it here, off the event loop.
+        from ciao.tool_path import login_shell_path
+
+        await asyncio.to_thread(login_shell_path)
 
         try:
             yield

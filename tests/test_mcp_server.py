@@ -2262,6 +2262,22 @@ def test_deleting_a_server_only_touches_that_workspaces_file(tmp_path: Path) -> 
     } == {"notion"}
 
 
+def test_a_workspace_write_never_touches_the_shared_install_root_file(tmp_path: Path) -> None:
+    """The install-root file is visible to every workspace, so a write to one
+    workspace must neither add to it nor delete from it."""
+    service = _rerooted_service(tmp_path, ("personal", "work"))
+    shared = tmp_path / "install" / ".mcp.json"
+    _write_mcp_json(shared, {"shared": {"url": "https://shared/mcp"}})
+
+    service.upsert_project_server("notion", url="https://n/mcp", workspace="work")
+
+    assert (tmp_path / "install" / "work" / ".mcp.json").is_file()
+    assert set(json.loads(shared.read_text())["mcpServers"]) == {"shared"}
+    with pytest.raises(ValueError):
+        service.delete_project_server("shared", "work")
+    assert set(json.loads(shared.read_text())["mcpServers"]) == {"shared"}
+
+
 def test_secrets_are_written_to_the_named_workspaces_env(tmp_path: Path) -> None:
     """Secrets follow the workspace: its agent root owns the `.env` too."""
     service = _rerooted_service(tmp_path, ("personal", "work"))
