@@ -83,6 +83,10 @@ _TERMINAL = frozenset({APPLIED, FAILED, ROLLED_BACK, CONFLICT, UNDONE})
 # category apply is the first kind here that touches more than one destination
 # file: the registry and every note it retyped, which is why it carries its own
 # list rather than borrowing the region protocol's one before/after pair.
+#
+# A note apply (`ciao/note_receipts.py`) is one file, so it uses the ordinary
+# before/after pair like a region does. Its reverse write is *not* here: undo is
+# not offered for undo, so a `note_undo` row stays view-only.
 UNDOABLE_KINDS = frozenset(
     {
         "region_apply",
@@ -91,6 +95,7 @@ UNDOABLE_KINDS = frozenset(
         "queue_resolve",
         "prune_expired",
         "category_apply",
+        "note_apply",
     }
 )
 
@@ -1179,6 +1184,13 @@ def recover_pending(
     * queue resolution whose bullet is gone → ``applied``; still present →
       ``rolled_back``.
 
+    A note write (``ciao/note_receipts.py``) is classified the same way, by the
+    note's exact current revision: matching the after image → ``applied``,
+    matching the before image → ``rolled_back``, anything else or a missing
+    note → ``conflict``. A forward note write is only ever classified here,
+    never replayed; an interrupted *undo* is finished, since restoring the
+    before image is the whole point of it.
+
     An ``applied`` receipt with a fact but no recorded outcome has its decision
     sidecar completed here, so a crash between the guide write and the decision
     update still yields exactly one consistent operation.
@@ -1204,6 +1216,19 @@ def recover_pending(
             result.conflicts.append(settled)
         else:
             result.reconciled.append(settled)
+    # A note undo journals its reverse write before it marks the original
+    # `undone`, so a crash in between leaves an applied reverse write attached
+    # to an original that still reads as `applied` — and therefore still
+    # offering an undo that can only fail, against a note already restored.
+    # That is not an interrupted *row*, so the loop above cannot see it; one
+    # idempotent pass over the settled journal closes it. A journal with no note
+    # receipts is a no-op.
+    try:
+        from ciao import note_receipts as note_rx
+
+        result.reconciled.extend(note_rx.settle_open_undo_links(journal))
+    except Exception:  # noqa: BLE001 — recovery is best-effort per journal
+        logger.exception("memory receipts: could not settle note undo links")
     return result
 
 
@@ -1216,6 +1241,12 @@ def _reconcile(
     kind = str(receipt.get("kind", ""))
     if kind == "queue_resolve":
         return _reconcile_queue(receipt, journal, proposals_path=proposals_path)
+    # Local import: the note protocol builds on this module's journal, lock and
+    # receipt shape, so importing it at module scope would be a cycle.
+    from ciao import note_receipts as note_rx
+
+    if kind in note_rx.NOTE_KINDS:
+        return note_rx.reconcile_note_receipt(receipt, journal)
     return _reconcile_region(receipt, journal)
 
 
@@ -1616,6 +1647,11 @@ def undo_receipt(
     with the receipt's after revision. A mismatch means an unrelated fact was
     written after this operation, so replacing the region with the before image
     would delete it: that is a :class:`RevisionConflict`, not an undo.
+
+    A note receipt is routed to :func:`ciao.note_receipts.undo_note_receipt`,
+    which applies the same "the destination must still be what this operation
+    left behind" rule to a vault note — against the vault the journal belongs
+    to, or the caller's own when it passed one.
     """
     if journal is None:
         journal = journal_path(vault_root, None)
@@ -1632,6 +1668,13 @@ def undo_receipt(
         return _undo_queue(receipt, journal, vault_root, actor, source)
     if kind == "category_apply":
         return _undo_category(receipt, journal)
+    # Local import, for the same reason as in `_reconcile`.
+    from ciao import note_receipts as note_rx
+
+    if kind in note_rx.NOTE_KINDS:
+        return note_rx.undo_note_receipt(
+            receipt, journal, vault_root=vault_root, actor=actor, source=source
+        )
     return _undo_region(receipt, journal, vault_root, actor, source)
 
 
