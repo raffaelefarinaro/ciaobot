@@ -20,7 +20,6 @@ vi.mock('../../lib/api', () => {
   let routineSettings = {
     insights_model: '',
     insights_enabled: true,
-    trajectories_enabled: true,
 
     critique_models: '',
     insights_model_effective: 'haiku',
@@ -151,91 +150,6 @@ vi.mock('../../lib/api', () => {
         { value: 'opencode', label: 'opencode' },
       ],
     },
-    '/api/automation': [
-      {
-        job: 'insights',
-        label: 'Session insights',
-        category: 'content',
-        description: 'Extracts durable insights from an archived session transcript.',
-        uses_model: true,
-        produces_outcome: true,
-        trigger: 'When a chat is archived.',
-        schedule_id: '',
-        one_time: false,
-        last_run: {
-          job: 'insights',
-          label: 'Session insights',
-          category: 'content',
-          started_at: '2026-08-03T20:00:00+00:00',
-          ended_at: '2026-08-03T20:06:14+00:00',
-          duration_ms: 374000,
-          status: 'error',
-          model: 'deepseek-v4-flash:cloud',
-          provider: 'claude',
-          error: 'TimeoutError',
-          extra: {},
-        },
-        recent: [],
-        stats: {
-          total_runs: 4,
-          success_rate: 0.25,
-          avg_duration_ms: 300000,
-          last_error: { error: 'TimeoutError', ts: '2026-08-03T20:06:14+00:00' },
-        },
-      },
-      {
-        job: 'title',
-        label: 'Title generation',
-        category: 'content',
-        description: 'Names a chat from its first message.',
-        uses_model: true,
-        produces_outcome: true,
-        trigger: 'When a new chat gets its first message.',
-        schedule_id: '',
-        one_time: false,
-        last_run: {
-          job: 'title',
-          label: 'Title generation',
-          category: 'content',
-          started_at: '2026-08-04T09:38:40+00:00',
-          ended_at: '2026-08-04T09:38:45+00:00',
-          duration_ms: 5000,
-          status: 'ok',
-          model: 'haiku',
-          provider: 'claude',
-          error: null,
-          extra: {},
-        },
-        recent: [],
-        stats: { total_runs: 9, success_rate: 1, avg_duration_ms: 5000, last_error: null },
-      },
-      {
-        job: 'memory_migration',
-        label: 'Legacy memory migration',
-        category: 'system',
-        description: 'One-time move of legacy memory files into the CLAUDE.md memory regions.',
-        uses_model: false,
-        produces_outcome: true,
-        trigger: 'Once, on the first skills sync after upgrading.',
-        schedule_id: '',
-        one_time: true,
-        last_run: {
-          job: 'memory_migration',
-          label: 'Legacy memory migration',
-          category: 'system',
-          started_at: '2026-08-03T16:44:54+00:00',
-          ended_at: '2026-08-03T16:44:54+00:00',
-          duration_ms: 12,
-          status: 'ok',
-          model: '',
-          provider: '',
-          error: null,
-          extra: {},
-        },
-        recent: [],
-        stats: { total_runs: 1, success_rate: 1, avg_duration_ms: 12, last_error: null },
-      },
-    ],
     '/api/local/backup': {
       state: 'ready',
       scope: 'memory-vault, skills, subagents, commands',
@@ -489,21 +403,6 @@ describe('component mount smoke', () => {
     }
   })
 
-  it('SettingsView renders the notifications card on /settings/notifications', async () => {
-    const router = makeRouter()
-    await router.push('/settings/notifications')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    expect(wrapper.text()).toContain('Notifications')
-    expect(wrapper.text()).toContain('notifies you when a chat replies')
-    wrapper.unmount()
-  })
 
   it('SettingsView keeps subagents and commands on separate settings pages', async () => {
     const router = makeRouter()
@@ -543,9 +442,9 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView leads the automations tab with what is broken', async () => {
+  it('SettingsView shows the session insights switch on the General tab', async () => {
     const router = makeRouter()
-    await router.push('/settings/automations')
+    await router.push('/settings')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -554,17 +453,9 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // The headline answers "is anything broken?" without expanding a row.
-    expect(wrapper.text()).toContain('1 of 2 automations needs attention: Session insights.')
-    // Failing row explains itself: when it runs, and what went wrong.
-    const failing = wrapper.findAll('.automation-row--error')
-    expect(failing).toHaveLength(1)
-    expect(failing[0].text()).toContain('When a chat is archived.')
-    expect(failing[0].text()).toContain('TimeoutError')
-    // The insights row has no manual trigger, so it carries no run button.
-    expect(failing[0].find('.btn-run').exists()).toBe(false)
-    // A settled one-time migration is folded away, not presented as live work.
-    expect(wrapper.find('.automation-settled').text()).toContain('Legacy memory migration')
+    const toggle = wrapper.get('[aria-label="Automatic session insights"]')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    expect(wrapper.text()).not.toContain('Trajectory capture')
     wrapper.unmount()
   })
 

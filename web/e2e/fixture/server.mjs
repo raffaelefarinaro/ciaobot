@@ -125,7 +125,6 @@ const GET_ROUTES = {
   '/api/settings/routines': () => ({
     insights_model: '',
     insights_enabled: true,
-    trajectories_enabled: false,
     critique_models: '',
     provider_default_models: {},
     provider_default_modes: {},
@@ -138,7 +137,6 @@ const GET_ROUTES = {
     backends: { anthropic: true, opencode: false },
     workspace_context: { workspace_root: '/fixture/workspace', vault_root: '/fixture/workspace/memory-vault' },
   }),
-  '/api/automation': () => ({ jobs: [], proposal_outcomes: null }),
   '/api/settings/providers': () => ({
     connections: {
       claude: { name: 'claude', label: 'Claude Code', short_label: 'Claude', ok: true, auth: 'ok', command: 'claude', version: '2.0.0', account: 'fixture@example.com' },

@@ -360,10 +360,7 @@ def test_setup_workspace_rerun_supports_a_configured_vault_alias(
 def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
     tmp_path: Path,
 ) -> None:
-    """sync-skills turns a stock .claude/agents/<name>.md entry into a
-    symlink once a workspace promotes it to a custom copy under
-    subagents/<name>.md. A setup re-run must not write the packaged stock
-    bytes through that symlink and silently overwrite the custom content."""
+    """Setup mirrors a custom agent without overwriting its source on reruns."""
     ws = tmp_path / "workspace"
     setup_workspace(
         ws,
@@ -372,15 +369,12 @@ def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
     )
     # Per-root: the catalog and its generated mirror both live in the workspace.
     root = ws / "personal"
-    installed = sorted(p.name for p in (root / ".claude" / "agents").glob("*.md"))
-    assert installed, "setup_workspace should seed at least one stock agent"
-    name = installed[0]
+    name = "memory.md"
+    assert not (root / ".claude" / "agents" / name).exists()
 
     custom = root / "subagents" / name
     custom.write_text("# custom override\n", encoding="utf-8")
     link = root / ".claude" / "agents" / name
-    link.unlink()
-    link.symlink_to(custom)
 
     setup_workspace(
         ws,
@@ -389,6 +383,7 @@ def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
     )
 
     assert custom.read_text(encoding="utf-8") == "# custom override\n"
+    assert link.is_symlink() and link.resolve() == custom.resolve()
 
 
 def test_setup_workspace_existing_mode_adopts_folder_as_vault(

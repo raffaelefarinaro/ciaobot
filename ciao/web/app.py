@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -66,8 +67,6 @@ from ciao.web.routes_api import (
     chat_messages,
     chat_message_part,
     chat_retry,
-    chat_retry_insights,
-    chat_archive_job,
     chat_prompt,
     chat_stop,
     chat_new_session,
@@ -117,7 +116,6 @@ from ciao.web.routes_api import (
     setup_list_dirs_endpoint,
     setup_mkdir_endpoint,
     setup_status_endpoint,
-    list_automation,
     list_completed_projects,
     list_projects,
     list_proposals,
@@ -174,7 +172,6 @@ from ciao.web.routes_node import (
     update_status_endpoint,
 )
 from ciao.web.routes_push import (
-    push_notification_feed,
     push_public_key,
     push_status,
     push_subscribe,
@@ -270,8 +267,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/handover", chat_handover, methods=["POST"]),
         Route("/api/chats/{chat_id}/fork", chat_fork, methods=["POST"]),
         Route("/api/chats/{chat_id}/archive", chat_archive, methods=["POST"]),
-        Route("/api/chats/{chat_id}/retry-insights", chat_retry_insights, methods=["POST"]),
-        Route("/api/chats/{chat_id}/archive-job", chat_archive_job, methods=["GET"]),
         Route("/api/chats/{chat_id}/continue", chat_continue, methods=["POST"]),
         Route("/api/chats/{chat_id}/read", chat_mark_read, methods=["POST"]),
         Route("/api/chats/{chat_id}/unread", chat_mark_unread, methods=["POST"]),
@@ -310,8 +305,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
-        # Automation status (read-only) — Settings → Automation page
-        Route("/api/automation", list_automation, methods=["GET"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
@@ -402,7 +395,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
-        Route("/api/menubar-notifications", push_notification_feed, methods=["GET"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),
@@ -464,6 +456,11 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # warm the discovery cache at startup so the first Settings -> Models & providers
         # visit serves a populated list instead of blocking on the probe.
         warm_claude_discovery_cache(getattr(config, "workspace_root", None))
+        # The first login-shell probe can take seconds; every chat start reads
+        # this cached value, so pay for it here, off the event loop.
+        from ciao.tool_path import login_shell_path
+
+        await asyncio.to_thread(login_shell_path)
 
         try:
             yield

@@ -431,12 +431,7 @@ class MemoryPassCoordinator:
     def _set_source_step(
         self, source_chat_id: str, status: str, memory_chat_id: str
     ) -> None:
-        """Record the pass on the archived chat's own postprocess record.
-
-        Written directly rather than through ``_apply_job_event``: that folds
-        only into a chat currently inside ``_postprocessing``, and this step
-        outlives the archive job by as long as the pass takes.
-        """
+        """Record the pass on the archived chat's own postprocess record."""
         if not source_chat_id:
             return
         source = self._host._chats.get(source_chat_id)

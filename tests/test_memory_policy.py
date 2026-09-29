@@ -17,6 +17,7 @@ reintroduce a hard-cap claim or a different unattended rule.
 
 from __future__ import annotations
 
+import json
 from importlib import resources
 from pathlib import Path
 
@@ -112,13 +113,6 @@ def test_capsule_unattended_guidance_defers_approval_requiring_work() -> None:
     assert "Defer and report" in text
 
 
-def test_insights_extractor_and_capsule_share_one_marker() -> None:
-    """The marker cannot diverge between the capsule and the extractor again."""
-    from ciao import insights
-
-    assert insights._UNATTENDED_MARKER == mp.UNATTENDED_MARKER
-
-
 def test_capsule_renders_the_shared_guidance_verbatim() -> None:
     capsule = build_context_capsule(workspace="work", unattended=True)
     assert mp.UNATTENDED_CAPSULE_GUIDANCE in capsule
@@ -190,8 +184,8 @@ def test_vault_note_mutation_is_refused_on_an_unattended_turn(tmp_path: Path) ->
 # ── The stock assets and docs must not contradict the matrix ──────────────
 
 
-def test_stock_memory_agent_states_the_advisory_cap() -> None:
-    role = _stock("agents/memory.md")
+def test_stock_memory_skill_states_the_advisory_cap() -> None:
+    role = _stock("skills/ciao-memory/SKILL.md")
     assert "The cap is advisory on every path" in role
     assert "reports `over_cap`" in role
     assert "enforces the cap" not in role
@@ -214,7 +208,7 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
     owner instead of a coined `type:`.
     """
     for relative in (
-        "agents/memory.md",
+        "skills/ciao-memory/SKILL.md",
         "commands/remember.md",
         "commands/interrogation.md",
     ):
@@ -223,8 +217,8 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
         assert "new-category" in asset, relative
 
 
-def test_the_memory_agent_says_where_a_note_goes_and_who_adds_a_category() -> None:
-    role = _stock("agents/memory.md")
+def test_the_memory_skill_says_where_a_note_goes_and_who_adds_a_category() -> None:
+    role = _stock("skills/ciao-memory/SKILL.md")
     assert "Read it before writing a note and file the note in the folder its line names" in role
     assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
     # The list is read, never memorized: a category added in Settings must reach
@@ -240,8 +234,8 @@ def test_the_core_prompt_points_at_the_same_block() -> None:
     assert "a note that fits none is a new-category question" in core
 
 
-def test_curation_skill_defers_and_never_hard_caps() -> None:
-    skill = _stock("skills/memory-curation/SKILL.md")
+def test_curation_schedule_defers_and_never_hard_caps() -> None:
+    skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
     assert "You are an unattended run: defer, never ask, never route around" in skill
     assert "The region cap is advisory." in skill
     # The consolidation contract the architecture test also pins must survive.

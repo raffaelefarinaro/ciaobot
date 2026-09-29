@@ -25,8 +25,8 @@ from ciao.observability.hooks import (
 async def test_background_bash_is_rewritten_to_foreground() -> None:
     hook = build_foreground_bash_hook()
     original = {
-        "command": "python -m ciao.trajectory_builder --list",
-        "description": "List trajectories",
+        "command": "python -m ciao.cli vault-index --write",
+        "description": "Refresh the vault index",
         "run_in_background": True,
         "timeout": 600_000,
     }

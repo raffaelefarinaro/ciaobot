@@ -39,7 +39,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
-| GET | `/api/menubar-notifications` | Notification feed for the loopback-only local feed (`?after=<epoch>`, inclusive; includes read-clear controls) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -51,8 +50,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/unread` | Mark chat unread on purpose ("come back to this"); clears the read stamp and emits a cross-device `chat_unread` event |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
-| POST | `/api/chats/{chat_id}/retry-insights` | Retry the unfinished post-archive step for an archived chat: resumes whatever is still pending/failed on its archive-job manifest (the session trajectory). Returns `{status, chat_id, job}`; `status` is `started` / `running` / `complete` / `blocked` / `not_archived` / `no_archive` |
-| GET | `/api/chats/{chat_id}/archive-job` | The persisted post-archive manifest for an archived chat: per-stage statuses, `unfinished` list and any `blocked_reason` (or `{job:null}` when none exists) |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
@@ -81,17 +78,16 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
-| GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed. With `?include=outcomes` answers `{"jobs": [...], "proposal_outcomes": {"promoted": n, "dismissed": m, "by_workspace": {…}, "recent_30d": {…}}}` — the memory-proposal promoted-vs-dismissed tally shown beside the job stats; without it the response stays the bare list |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
-| GET | `/api/commands` | List slash commands |
-| GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings |
+| GET | `/api/commands` | List slash commands; `?workspace=<name>` scopes them to that workspace's agent root |
+| GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings; `?workspace=<name>` scopes the subagent and command lists to that workspace's agent root |
 | GET | `/api/agent-assets/audit` | Full AI OS audit report; `status` is `healthy`, `needs_attention`, or `error` |
 | GET | `/api/workspace-health` | Scan workspace/vault/discovery-file health |
 | POST | `/api/workspace-health/fix` | Apply the automatic remedies (create missing scaffold files, re-link skills); returns the fresh report |
-| POST | `/api/agent-assets/subagents` | Create a workspace-owned subagent and vault mirror |
-| PATCH, DELETE | `/api/agent-assets/subagents/{name}` | Update or delete a custom workspace-owned subagent |
-| POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |
-| PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command |
+| POST | `/api/agent-assets/subagents` | Create a workspace-owned subagent and vault mirror; the body must carry `workspace` |
+| PATCH, DELETE | `/api/agent-assets/subagents/{name}` | Update or delete a custom workspace-owned subagent; `workspace` in the PATCH body, `?workspace=` on the DELETE |
+| POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror; the body must carry `workspace` |
+| PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command; `workspace` in the PATCH body, `?workspace=` on the DELETE |
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
 | GET | `/api/housekeeping` | List the home-screen operator actions (detector pass; each carries `run_label`, `chat_label`, `chat_prompt`) |
 | POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
@@ -99,13 +95,13 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, stale_after_days, enabled, builtin, note_count}`. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, a negative `stale_after_days`, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
-| GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); Ciaobot's own surface is reported by `/api/agent/status` |
+| GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); `?workspace=<name>` scopes it to that workspace's own `.mcp.json`. Ciaobot's own surface is reported by `/api/agent/status` |
 | GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
 | POST | `/api/mcp/env-keys` | Save project-MCP env secrets into the workspace `.env` (optionally bind new keys into a server via `server`); values never returned |
-| POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json` |
-| PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys) |
-| DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json` |
-| GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio) |
+| POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json`; `?workspace=<name>` writes that workspace's own file |
+| PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys); `?workspace=<name>` scopes the file |
+| DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json`; `?workspace=<name>` scopes the file |
+| GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio); `?workspace=<name>` scopes the lookup |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); guards a drain before an engine restart |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
@@ -155,14 +151,14 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/local/backup/setup-prompt` | The canonical setup prompt plus the trusted `context` it was rendered from (read-only, entirely local) |
 | POST | `/api/local/backup/setup-chat` | Open (or re-enter) a setup chat and **send** the prompt into it; idempotent |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
-| GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
+| GET | `/api/addresses` | Where other devices can open this engine: the Tailscale Serve HTTPS URL first when one exists (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code (source checkout in dev mode only) |
 | POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |
 | POST | `/api/admin/drain` | Close admission for new turns ahead of an engine update; returns `{draining, active_chat_ids}` (loopback-only, no session; used by `ciao update apply`) |
 | POST | `/api/admin/drain/cancel` | Reopen admission after an update's drain timed out; returns `{draining: false}` (loopback-only, no session; used by `ciao update apply`) |
 | GET | `/api/admin/status` | Read admin/deploy status |
-| GET | `/api/admin/skills` | List skills labelled as custom or stock (merged across agent roots) |
+| GET | `/api/admin/skills` | List skills labelled as custom or stock; merged across every agent root, or one workspace's root with `?workspace=<name>` |
 | POST | `/api/admin/skills/add` | Deprecated: returns 410, replaced by `/api/skills/import` |
 | POST | `/api/skills/import` | Import a skill from a validated zip (multipart `file`; validates zip-slip, one SKILL.md, frontmatter). A SKILL.md over the 15KB context budget imports with a note on `warnings`/`message` |
 | WS | `/ws/chat/{chat_id}` | Per-chat streaming socket |
@@ -254,9 +250,15 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/
 
 **Agent assets**
 
+Subagents, commands and skills belong to ONE workspace, named by the `workspace`
+field (or `?workspace=` on a bodyless request). A write that omits it, or names a
+workspace that is not registered, is a 400 — it is never redirected to the
+install root, so an asset cannot land somewhere you did not ask for. A read with
+no workspace (or an unknown one) falls back to the whole install.
+
 ```bash
-# Inspect subagents, commands, and workspace health.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/agent-assets"
+# Inspect one workspace's subagents, commands, and the install-wide health block.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/agent-assets?workspace=personal"
 
 # Inspect workspace/vault health only.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspace-health"
@@ -266,26 +268,26 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspace-heal
 # then syncs the subagent into .claude/agents/.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents" \
   -H 'content-type: application/json' \
-  -d '{"name":"pr-reviewer","description":"Review pull-request diffs for regressions.","prompt":"Inspect the changed files, identify concrete risks, and report findings first."}'
+  -d '{"workspace":"personal","name":"pr-reviewer","description":"Review pull-request diffs for regressions.","prompt":"Inspect the changed files, identify concrete risks, and report findings first."}'
 
 # Update or delete a custom subagent. Installed/system subagents are read-only.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents/pr-reviewer" \
   -H 'content-type: application/json' \
-  -d '{"description":"Review pull-request diffs for regressions.","content":"# Pr Reviewer\n\nInspect changed files, identify concrete risks, and report findings first."}'
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents/pr-reviewer"
+  -d '{"workspace":"personal","description":"Review pull-request diffs for regressions.","content":"# Pr Reviewer\n\nInspect changed files, identify concrete risks, and report findings first."}'
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents/pr-reviewer?workspace=personal"
 
 # Create a workspace-owned slash command.
 # Writes commands/<name>.md, mirrors a vault note under memory-vault/Workspace/Commands/,
 # then syncs it into the provider-native command locations.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands" \
   -H 'content-type: application/json' \
-  -d '{"name":"decision-record","description":"Turn notes into a decision record.","argument_hint":"<notes>","prompt":"Convert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
+  -d '{"workspace":"personal","name":"decision-record","description":"Turn notes into a decision record.","argument_hint":"<notes>","prompt":"Convert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
 
 # Update or delete a custom slash command. Installed/system commands are read-only.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record" \
   -H 'content-type: application/json' \
-  -d '{"description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
+  -d '{"workspace":"personal","description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record?workspace=personal"
 ```
 
 **Housekeeping (operator-action strip)**
@@ -592,14 +594,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
   -H 'content-type: application/json' -d '{"profile":"personal"}'
 ```
 
-**Routine settings (Settings → Models / Automations)**
+**Routine settings (Settings → General / Models)**
 
 ```bash
-# Read internal-routine settings: the automatic-session-insights and trajectory
-# capture switches, insights and critique model overrides, the per-provider
-# default model / thinking / routine-model maps, and the effective models after
-# defaults. insights_enabled=false stops the memory pass; trajectories_enabled=false
-# stops trajectory records.
+# Read internal-routine settings: the automatic-session-insights switch,
+# insights and critique model overrides, the per-provider default model /
+# thinking / routine-model maps, and the effective models after defaults.
+# insights_enabled=false stops the memory pass.
 #
 # insights_model_effective is the PRIMARY workspace's answer only. With no
 # override the insights routine resolves from the chat's own workspace, so
@@ -614,11 +615,9 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # on-device option) reads as Automatic rather than reaching a provider as a
 # literal model id. Per-provider defaults use the nested maps:
 # provider_default_models, provider_default_thinking, provider_insights_models.
-# trusted_url is the HTTPS origin other devices should use (e.g. a Tailscale
-# Serve address); only a bare https origin is accepted and "" clears it.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_enabled":false,"trajectories_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**
@@ -638,7 +637,7 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/mcp/s
   -d '{"env_keys":{"LINEAR_API_KEY":"LINEAR_TOKEN"}}'
 
 # Delete one server. 404 when the name is not in .mcp.json.
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear"
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear?workspace=personal"
 
 # Discover a server's tools on demand (HTTP probe, or previously observed names).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear/tools"
@@ -1015,7 +1014,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_title`: auto-title finished.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
-- `chat_postprocess`: the post-archive pipeline reporting itself. Archiving a chat dispatches one task that writes the session trajectory (`ciao/insights.py:run_archive_pipeline`); the vault work moved to the memory pass, a chat of the app's own, in #627. This event fires when the pipeline starts, as the step finishes, and when it settles. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{state: "running"|"done", step, expected: [job_id], steps: {job_id: {status, extra}}, started_at, updated_at, interrupted?}`. The same object is persisted on the chat and returned as `ChatInfo.postprocess`, so an archived chat can still report what was taken from it after a reload — the PWA renders it as a muted activity signal while `state` is `running` and as a settled one-line summary afterwards. `interrupted` marks a pipeline a restart killed mid-flight. The connect `snapshot` carries `postprocessing: [chat_id]` for pipelines already in flight, so a client that joins between the start and finish events still shows them.
+- `chat_postprocess`: the memory pass queued by archiving a chat reporting on that chat. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{steps: {memory_pass: {status: "queued"|"running"|"ok"|"attention", extra: {chat_id}}}, updated_at}` and `extra.chat_id` is the pass's own chat. The same object is persisted on the archived chat and returned as `ChatInfo.postprocess`, so it can still link to its memory pass after a reload.
 - `workspaces_changed`: a workspace was archived or restored (any tab or device). No payload; clients refetch `GET /api/workspaces` and `GET /api/projects`, so the sidebar and pickers stop offering an archived workspace without a reload.
 - `schedules_changed`: an automation was created, edited, paused, resumed, or deleted (REST route, Automations page, or the `schedule_*` MCP tools mid-turn). No payload; the client refetches `GET /api/schedules`, which is where the computed `next_run` / `missed` / `context_available` fields are assembled. Without it an automation created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload. The deprecated `loops_changed` alias was removed with the loop MCP tools (#441); existing clients listen for `schedules_changed`.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { installInstructions, isIos, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
 import { canPromptInstall, installed, promptInstall } from '../lib/installPrompt'
@@ -38,8 +38,19 @@ const probed = ref(false)
 const installDone = computed(() => standalone.value || installed.value)
 const needsInstallFirst = computed(() => isIos() && !standalone.value)
 
+/** Both real steps are finished (or cannot be finished here). */
+const complete = computed(() => installDone.value && (pushOn.value || !pushAvailable.value || denied.value))
+/** The card lingers a moment after the user completes it so the confirmation
+ *  is readable, then goes away by itself. */
+const finished = ref(false)
+let finishTimer: ReturnType<typeof setTimeout> | undefined
+watch(() => touched.value && complete.value, done => {
+  if (done) finishTimer = setTimeout(() => { finished.value = true }, 2500)
+})
+onBeforeUnmount(() => clearTimeout(finishTimer))
+
 const visible = computed(() => {
-  if (dismissed.value) return false
+  if (dismissed.value || finished.value) return false
   // Neither install prompts nor push subscriptions exist without a secure
   // origin, so the steps would be instructions for something impossible.
   if (window.isSecureContext !== true) return false
@@ -48,7 +59,7 @@ const visible = computed(() => {
   // there is done, not stuck. Nor is an installed app whose notifications are
   // blocked: nothing in this card can unblock them, and the Settings
   // notifications card still explains how.
-  return touched.value || !(installDone.value && (pushOn.value || !pushAvailable.value || denied.value))
+  return touched.value || !complete.value
 })
 
 onMounted(async () => {

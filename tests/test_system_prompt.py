@@ -32,3 +32,12 @@ def test_notes_are_typed_from_the_vocabularys_categories_block() -> None:
     text = _system_instructions()
     assert "**Categories** section of `VOCABULARY.md`" in text
     assert "a note that fits none is a new-category question" in text
+
+
+def test_working_document_routing_is_always_loaded() -> None:
+    text = _system_instructions()
+    assert "persistent working document" in text
+    assert "active vault's `Workspace/`" in text
+    assert "Search for an existing related document first" in text
+    assert "relative Markdown links, not wikilinks" in text
+    assert "An in-chat answer does not need a file" in text

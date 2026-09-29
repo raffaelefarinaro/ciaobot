@@ -37,3 +37,9 @@ export function openNewChatPicker(options: NewChatPickerOptions = {}): Promise<s
     }
   })
 }
+
+/**
+ * The project Home's composer chip currently names, set only while Home is
+ * mounted. A global New chat from Home starts there instead of asking again.
+ */
+export const homeNewChatProjectId = ref('')

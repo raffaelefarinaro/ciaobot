@@ -162,41 +162,19 @@ function liveQuestion() {
   return [{ question: 'Which label?', options: [{ label: 'triage' }, { label: 'backlog' }] }]
 }
 
-describe('ChatPanel context bar', () => {
+describe('ChatPanel automation origin', () => {
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
   })
   afterEach(() => vi.restoreAllMocks())
 
-  it('is absent when the chat has no relations', async () => {
-    const { wrapper } = await mountPanel()
-    expect(wrapper.find('.ctx-bar').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  // The banner blocks were each a v-for, so a chat with all of them opened
-  // with its first message below the fold. Collapsed is now one line.
-  it('keeps schedule details behind a neutral controls disclosure', async () => {
-    const { wrapper } = await mountPanel(undefined, [
-      makeIntervalSchedule('schedule-1'),
-      makeIntervalSchedule('schedule-2'),
-    ])
-
-    expect(wrapper.find('.ctx-bar').exists()).toBe(true)
-    expect(wrapper.get('.ctx-summary').text()).toContain('Automation controls')
-    expect(wrapper.find('.ctx-chip').exists()).toBe(false)
-    // Detail rows stay behind the disclosure.
-    expect(wrapper.find('.ctx-detail').exists()).toBe(false)
-    expect(wrapper.findAll('.loop-banner-row')).toHaveLength(0)
-    wrapper.unmount()
-  })
-
-  it('expands to the detail rows on click', async () => {
+  // Automation controls used to sit above the transcript whenever the rail was
+  // hidden. They are gone: the rail names the automation, its page holds the
+  // controls.
+  it('has no automation controls bar when Work details is hidden', async () => {
     const { wrapper } = await mountPanel(undefined, [makeIntervalSchedule('schedule-1')])
-
-    await wrapper.get('.ctx-summary').trigger('click')
-    expect(wrapper.find('.ctx-detail').exists()).toBe(true)
-    expect(wrapper.find('.loop-banner-row').exists()).toBe(true)
+    expect(wrapper.find('.ctx-bar').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Automation controls')
     wrapper.unmount()
   })
 

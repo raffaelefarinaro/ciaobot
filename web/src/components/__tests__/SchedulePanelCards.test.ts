@@ -465,4 +465,21 @@ describe('SchedulePanel overview', () => {
     expect(rail.text()).toContain('Needs a look')
     expect(rail.text()).toContain('Flaky one')
   })
+
+  it('sends a "check the chat" row to the run chat, and other rows to the automation', async () => {
+    const wrapper = await mountOverview([
+      makeSchedule({ schedule_id: 'q', title: 'Asks first', last_status: 'skipped', last_run_chat_id: 'chat-q' }),
+      makeSchedule({ schedule_id: 'u', title: 'Subagent sweep', last_status: 'unfinished', last_run_chat_id: 'chat-u' }),
+      makeSchedule({ schedule_id: 'e', title: 'Flaky one', last_status: 'error', last_run_chat_id: 'chat-e' }),
+    ])
+    const rows = wrapper.get('.page-rail').findAll('a.rail-item')
+    const row = (title: string) => rows.find(r => r.text().includes(title))!
+    expect(row('Asks first').attributes('href')).toBe('/chat/chat-q')
+    expect(row('Asks first').text()).toContain('needs you — check the chat')
+    // Unsettled subagents leave nothing to answer, so the label must not say so.
+    expect(row('Subagent sweep').attributes('href')).toBe('/chat/chat-u')
+    expect(row('Subagent sweep').text()).toContain('subagent results never summarised')
+    expect(row('Subagent sweep').text()).not.toContain('needs you')
+    expect(row('Flaky one').attributes('href')).toBe('/schedules/e')
+  })
 })
