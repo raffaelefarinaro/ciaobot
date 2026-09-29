@@ -140,7 +140,13 @@ def write_receipt(path: Path, summary: dict[str, Any]) -> Path:
         "path": summary.get("path", ""),
         "entries_scanned": summary.get("entries_scanned", 0),
         "entries_migrated": summary.get("entries_migrated", 0),
-        "revision_before": summary.get("revision", ""),
+        # Two revisions, two questions. Collapsing them makes the receipt a
+        # record of the file the run left rather than the one it read, and a
+        # `revision_before` holding the post-migration hash names a file that no
+        # longer exists — which is the one thing a reverse map must be able to
+        # name.
+        "revision_before": summary.get("revision_before", ""),
+        "revision_after": summary.get("revision_after", ""),
         "rewrites": summary.get("rewrites", []),
         "diagnostics": summary.get("diagnostics", []),
     }
@@ -242,6 +248,14 @@ def migrate_learnings_file(
     A file this cannot read is reported rather than rewritten. A read error is
     not a licence to replace content with the stub — that is how a real file gets
     lost to a tool that believed the failure was the absence of a file.
+
+    A write that does not land migrates nothing. ``entries_migrated`` counts what
+    this run migrated, so it returns to zero on every failure path, and
+    ``revision_after`` is left unset: the CLI prints that count and gates the
+    receipt on it, and both would otherwise describe a file that was never
+    rewritten. The spans stay in the summary, because what this run *would* have
+    written is still worth knowing — they are a plan, and nothing reads them as
+    a record.
     """
     root = Path(vault_root)
     summary: dict[str, Any] = {
@@ -263,13 +277,17 @@ def migrate_learnings_file(
     except (OSError, UnicodeDecodeError) as exc:
         summary["failed"].append({"path": LEARNINGS_RELATIVE, "error": str(exc)})
         return summary
-    summary["revision"] = content_revision(text)
+    summary["revision_before"] = content_revision(text)
 
     document = parse_learnings(text, workspace=workspace)
     migrated, changes = _rewrite(text, document)
     summary["entries_scanned"] = len(document.entries)
     summary["diagnostics"] = list(document.diagnostics)
     summary["rewrites"] = changes
+    # The plan, for now: it is what this run *would* migrate, and it only
+    # becomes what it did migrate if the write below lands. Every failure return
+    # puts this back to zero, so no caller can read a count of migrations out of
+    # a file none were made in.
     summary["entries_migrated"] = len(changes)
     if not changes:
         return summary
@@ -280,8 +298,9 @@ def migrate_learnings_file(
         # file holds another is worse than no receipt, because `--revert` would
         # then restore bytes nobody ever wrote.
         try:
-            _write_locked(path, migrated, expect=summary["revision"])
+            _write_locked(path, migrated, expect=summary["revision_before"])
         except _RevisionMoved:
+            summary["entries_migrated"] = 0
             summary["failed"].append(
                 {
                     "path": LEARNINGS_RELATIVE,
@@ -290,9 +309,10 @@ def migrate_learnings_file(
             )
             return summary
         except OSError as exc:
+            summary["entries_migrated"] = 0
             summary["failed"].append({"path": LEARNINGS_RELATIVE, "error": str(exc)})
             return summary
-        summary["revision"] = content_revision(migrated)
+        summary["revision_after"] = content_revision(migrated)
     return summary
 
 

@@ -1828,7 +1828,9 @@ def _learnings_migrate_command(args: argparse.Namespace) -> int:
     # Recorded before anything is printed, and only for a run that actually
     # wrote: a receipt for a dry run would reverse spans that are still in their
     # original place, and `--revert` on it would corrupt the file rather than
-    # restore it.
+    # restore it. A run whose write failed is the same thing and is gated by the
+    # same count — `migrate_learnings_file` reports nothing migrated when the
+    # bytes did not land, so the two cannot disagree here.
     receipt_path = ""
     if args.apply and not args.revert and summary.get("entries_migrated"):
         receipt_path = str(
@@ -1877,6 +1879,16 @@ def _print_learnings_migration(summary: dict[str, Any], *, apply: bool) -> None:
             print(f"    -> {change['to']}")
         if not apply:
             print("\nRe-run with --apply to write these changes.")
+        return
+    if summary.get("failed"):
+        # The count is zero because nothing was written, and the spans are still
+        # a plan — so falling through to "already canonical" would be the one
+        # claim in the output nobody could check against the file, because the
+        # file is exactly as it was. Not the spans either: after a concurrent
+        # write they were computed against a revision that no longer holds, and
+        # a stale diff reads as a fresh one. The reason is on stderr, and a dry
+        # run prints the plan against whatever the file holds now.
+        print("Nothing was written: the file is as it was.")
         return
     if "skipped" in summary:
         print(f"Nothing to migrate: {summary['skipped']}.")

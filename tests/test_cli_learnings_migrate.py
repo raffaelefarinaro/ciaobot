@@ -18,6 +18,7 @@ from pathlib import Path
 from ciao import cli
 from ciao import learnings_migrate as lm
 from ciao.learning_records import METADATA_MARKER
+from ciao.memory_receipts import content_revision
 
 
 # A file with one entry of every shape the command has to cope with: a legacy
@@ -305,6 +306,94 @@ def test_a_second_run_over_migrated_content_is_a_clean_no_op(
     assert METADATA_MARKER not in out
 
 
+# ---- a run that did not write ----------------------------------------------
+#
+# The fourth property, and the one every receipt rests on: a receipt is the only
+# way back, so it may only exist for a run whose bytes are on disk. The refusal
+# to write is the case the summary has to survive — `failed` set, the count
+# zero, the file untouched — and every reader of it has to draw the same
+# conclusion. The concurrent-write refusal is the same shape and is covered at
+# the module level in `test_a_concurrent_write_is_refused_rather_than_overwritten`.
+
+
+def test_a_failed_apply_writes_no_receipt_and_claims_no_migration(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A receipt for a write that never happened reverses spans still in place.
+
+    `entries_migrated` counted the plan, so a run whose write raised still
+    reported three migrated entries, the CLI wrote a receipt off that count and
+    printed how to reverse it — over a file that had not changed. Following the
+    printed instruction would have restored spans against the very bytes they
+    came from.
+    """
+    vault, runtime = _vault(tmp_path)
+    before = _learnings(vault)
+
+    def _refuse(target: Path, text: str, *, expect: str = "") -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(lm, "_write_locked", _refuse)
+
+    code = _run(
+        "learnings-migrate",
+        "--vault-root",
+        str(vault),
+        "--runtime-root",
+        str(runtime),
+        "--apply",
+        "--json",
+    )
+    summary = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert summary["failed"] == [
+        {"path": "Workspace/Learnings.md", "error": "no space left on device"}
+    ]
+    # Zero, not three: the count is what the receipt is gated on, and a number
+    # that means "would have" cannot answer a question about what is on disk.
+    assert summary["entries_migrated"] == 0
+    # The spans stay — they are the plan, and the file is worth reading again
+    # once there is room for it — but nothing claims a receipt for them.
+    assert len(summary["rewrites"]) == 3
+    assert "revision_after" not in summary, "a write that did not land has no after"
+    assert "receipt_path" not in summary
+    assert _receipts(runtime) == []
+    assert _learnings(vault) == before
+
+
+def test_a_failed_apply_says_it_wrote_nothing(tmp_path: Path, capsys, monkeypatch) -> None:
+    """The human run must not read like a finished one either.
+
+    The failure is already on stderr, and the count is zero because nothing was
+    migrated — so the summary line falls through to the one that says the file is
+    already canonical. On an untouched file full of legacy lines that is the
+    opposite of true, and it is the only line a casual reader sees.
+    """
+    vault, runtime = _vault(tmp_path)
+
+    def _refuse(target: Path, text: str, *, expect: str = "") -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(lm, "_write_locked", _refuse)
+    _run(
+        "learnings-migrate",
+        "--vault-root",
+        str(vault),
+        "--runtime-root",
+        str(runtime),
+        "--apply",
+    )
+    captured = capsys.readouterr()
+
+    assert "Migrated" not in captured.out
+    assert "already canonical" not in captured.out
+    assert "Nothing was written: the file is as it was." in captured.out
+    assert "no space left on device" in captured.err
+    assert "Receipt:" not in captured.out
+    assert _receipts(runtime) == []
+
+
 # ---- reversible ------------------------------------------------------------
 
 
@@ -361,6 +450,33 @@ def test_the_receipt_names_the_spans_it_can_put_back(tmp_path: Path) -> None:
         # bytes that replaced them, and where in the file both were.
         assert change["from"] and change["to"]
         assert isinstance(change["offset"], int)
+
+
+def test_the_receipt_names_the_revisions_of_both_ends(tmp_path: Path) -> None:
+    """`revision_before` is the file the run read, not the one it left behind.
+
+    A receipt exists to put a file back, so the revision it names has to be the
+    one its spans were computed against. Overwriting that with the
+    post-migration hash recorded a revision of a file that no longer exists —
+    and `revision_before` is the field a reader checks before trusting a
+    receipt, so the one field that has to mean something was the one that
+    could not.
+    """
+    vault, runtime = _vault(tmp_path)
+
+    _run(
+        "learnings-migrate",
+        "--vault-root",
+        str(vault),
+        "--runtime-root",
+        str(runtime),
+        "--apply",
+    )
+    payload = json.loads(_receipts(runtime)[0].read_text(encoding="utf-8"))
+
+    assert payload["revision_before"] == content_revision(LEGACY_DOC)
+    assert payload["revision_after"] == content_revision(_learnings(vault))
+    assert payload["revision_before"] != payload["revision_after"]
 
 
 def test_a_revert_dry_run_writes_nothing(tmp_path: Path) -> None:
@@ -580,6 +696,9 @@ def test_a_concurrent_write_is_refused_rather_than_overwritten(
 
     assert summary["failed"]
     assert "changed while the migration was running" in summary["failed"][0]["error"]
+    # The spans were computed, and none of them landed: the count says so, or
+    # this run reports a migration over a file it refused to touch.
+    assert summary["entries_migrated"] == 0
     assert "- raced in" in path.read_text(encoding="utf-8")
 
 

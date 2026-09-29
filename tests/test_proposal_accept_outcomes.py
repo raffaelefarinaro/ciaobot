@@ -55,6 +55,7 @@ EXPECTED_KEYS: dict[str, list[str]] = {
     "people_no_changes": ["error", "ok"],
     "people_fold_raised": ["error", "ok"],
     "learnings_written": ["destination", "ok"],
+    "learnings_locked": ["error", "ok"],
     "project_no_target": ["error", "ok"],
     "project_missing_doc": ["error", "ok"],
     "project_folded": ["destination", "ok"],
@@ -280,6 +281,32 @@ def test_learnings_keys(tmp_path):
         proposal_service._accept_learnings_row(config, {**ROW, "kind": "learnings"}),
     )
     assert payload["destination"] == "Workspace/Learnings.md"
+
+
+def test_a_held_learnings_lock_is_a_failed_row_not_an_exception(tmp_path, monkeypatch):
+    """The care run and the migration take this file's lock; an accept waits, then gives up.
+
+    `append_learning` reads and writes `Learnings.md` under that lock and raises
+    `QueueLockError` — a `RuntimeError` — when it cannot take it. Catching only
+    `OSError` let that refusal out of the handler as an exception: a 500 on the
+    single accept, and every row after this one abandoned mid-loop on a batch,
+    with nothing in the response to say why.
+    """
+    from ciao.memory_receipts import QueueLockError
+
+    config = _config(tmp_path)
+
+    def locked(*args: Any, **kwargs: Any) -> bool:
+        raise QueueLockError("could not lock Workspace/Learnings.md")
+
+    monkeypatch.setattr(memory_proposals, "append_learning", locked)
+    payload = _assert_keys(
+        "learnings_locked",
+        proposal_service._accept_learnings_row(config, {**ROW, "kind": "learnings"}),
+    )
+
+    assert "could not append the learning" in payload["error"]
+    assert "could not lock" in payload["error"]
 
 
 def test_add_category_is_a_destination_not_a_rehome(tmp_path):

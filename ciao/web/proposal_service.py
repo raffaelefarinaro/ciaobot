@@ -1338,8 +1338,18 @@ async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
 
 
 def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
-    """Append an accepted `[learnings]` fact to Workspace/Learnings.md."""
+    """Append an accepted `[learnings]` fact to Workspace/Learnings.md.
+
+    A lock this write could not take is a row that did not happen, not a
+    request that blew up: `append_learning` serializes against the care run and
+    the migration on the same file, and while either of them holds it every
+    accept for that vault waits and then gives up. `QueueLockError` is a
+    `RuntimeError`, so catching only `OSError` turned a held lock into a 500 —
+    on the single accept and, worse, half way down the batch loop, where the
+    rows after it were abandoned with nothing to say why.
+    """
     from ciao.memory_proposals import append_learning
+    from ciao.memory_receipts import QueueLockError
 
     try:
         vault = config.workspace_vault_root(row["workspace"])
@@ -1353,7 +1363,7 @@ def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
         # left a review-accepted learning with no provenance at all, which the
         # archive path has always recorded.
         append_learning(Path(vault), row["text"], source=str(row.get("source") or ""))
-    except OSError as exc:
+    except (OSError, QueueLockError) as exc:
         return AcceptOutcome(ok=False, error=f"could not append the learning: {exc}")
     return AcceptOutcome(ok=True, destination="Workspace/Learnings.md")
 
