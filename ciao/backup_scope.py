@@ -35,11 +35,37 @@ Three properties are deliberate:
 The denial rules refine that; they are not its complement. They name the
 shapes that must not leave the machine at any depth: operator credentials,
 runtime state, the provider mirrors ``sync-skills`` regenerates, dependency
-trees and build output, and the derived transcript archive. ``Logs`` is in that
-set at any depth because the app writes it under the vault before the
-re-rooting and under the install root after, so there is no single location to
-pin it to — and a multi-gigabyte derived archive is the worst possible thing to
-hand an unattended ``git add``.
+trees and build output. The derived transcript archive is refused too, but by
+*location* rather than by name: ``config.logs_root`` is where this install
+actually writes it, and a multi-gigabyte derived archive is the worst possible
+thing to hand an unattended ``git add`` — while a notes folder the operator
+happened to call ``Logs`` inside their own vault is one markdown file, and a
+name match cannot tell the two apart.
+
+Three decisions that look like gaps are deliberate, and each is stated here
+because the rule reads as an over-broad name match without it (#734):
+
+- **A bare top-level durable root is not covered.** :data:`DURABLE_ROOTS` is
+  emitted under a scope *base* and nowhere else, and the bases are the
+  configured vault, the workspace agent roots and the archived workspaces. So
+  ``commands/critique.md`` is refused where ``work/commands/critique.md`` is
+  not, and that is the answer rather than an omission: making the data root a
+  base would put ``skills/``, ``subagents/`` and ``commands/`` at the top of
+  *every* repository in scope, including the developer checkout where a
+  top-level ``skills/`` is application source. An install whose catalog sits
+  at the data root wants a workspace subfolder, not a wider base.
+- **One file is carved out of ``.runtime``** — the automation catalog,
+  :data:`ALLOWED_FILES`. The directory refusal is about credentials and
+  runtime state; the schedules store is none of those, and a scope that refused
+  it would leave the automations outside the safety net the owner is relying on.
+- **The transcript archive is refused where it is**, resolved for this install
+  through the same ``logs_root`` the writers use, and refused even where it
+  falls inside the vault — including the install whose vault *is* the archive,
+  where the provenance rule would otherwise admit every file in it. One place
+  a resolved location cannot follow is an archived agent root: it is a copy of
+  a workspace as it was, so one archived before the re-rooting carries its
+  vault's ``Logs`` too, and the transcript subtree is refused there by its
+  shape rather than by its name.
 
 Leaf module by design: it imports nothing from ``ciao`` except the read-only
 git helper and the guide's filename, and reaches ``local_session.sync_root``
@@ -83,12 +109,20 @@ ARCHIVED_WORKSPACES_DIR = ".archived-workspaces"
 #: must not quietly delete it:
 #:
 #: - operator credentials and runtime state, which must not leave the machine
+#:   (``.runtime`` except for the one file :data:`ALLOWED_FILES` names)
 #: - the provider mirrors ``sync-skills`` regenerates from the canonical
 #:   catalog, so a backup copy is only what git can already rebuild
 #: - dependency trees, build output and caches: large, derived, useless
 #:   off this machine
-#: - ``Logs``, the derived transcript archive (see the module docstring)
 #: - ``.git`` itself, which is not workspace data by any reading
+#:
+#: ``Logs`` is deliberately *not* here. It used to be, at any depth, and the
+#: rule was a name match for a location: it refused ``memory-vault/Logs/
+#: <note>.md`` — a note the operator wrote — along with the derived archive it
+#: exists to protect (#734). The archive is refused where it is resolved to
+#: instead (:func:`_archive_rel`), and under an archived root by its shape
+#: (:func:`_holds_archived_transcripts`) — the one copy the resolved location
+#: cannot point at.
 EXCLUDED_DIRS: frozenset[str] = frozenset(
     {
         ".runtime",
@@ -109,7 +143,6 @@ EXCLUDED_DIRS: frozenset[str] = frozenset(
         "dist",
         "build",
         "target",
-        "Logs",
         ".git",
     }
 )
@@ -125,6 +158,62 @@ EXCLUDED_FILES: frozenset[str] = frozenset({".env", ".envrc", "opencode.json"})
 #: here means an excluded file is never even read.
 EXCLUDED_SUFFIX = ".env"
 
+#: One file inside a refused directory that is durable data after all, as
+#: data-root-relative POSIX paths. One file per entry and never a directory,
+#: because the point is to narrow a refusal rather than to reopen one: every
+#: other ``.runtime`` path — ``custom_providers.json``, ``node_state.json``,
+#: the settings the app rewrites — stays refused.
+#:
+#: ``.runtime/schedules.json`` is the store every automation is read from and
+#: written back to (``schedules.ScheduleStore._path``), prompts included, and
+#: the product already treats it as durable: ``local_session``'s conflict
+#: resolution unions schedule entries alongside ``memory-vault/**``, so a merge
+#: that touches it is a merge of real work. A file the product is built to
+#: restore from git was outside the one scope an operator would reasonably
+#: trust as the safety net for their memory (#734).
+#:
+#: What this does not reach: a repository whose own ``.gitignore`` denies the
+#: file, which is what ``ciao setup`` writes into a fresh workspace
+#: (``cli._WORKSPACE_GITIGNORE_ENTRIES``). Git does not report an ignored file
+#: in ``status --porcelain`` at all, so the preflight never sees it and no run
+#: can back it up. Negating the one file back out of ``.runtime/`` is the
+#: operator's own ignore rule to change, not the scope's — and it is a separate
+#: decision from here, because ``.gitignore`` also governs the manual sync
+#: path's blanket ``git add -A``. Pinned by a test rather than left to be
+#: discovered.
+#:
+#: Two properties make it safe to commit unattended, and both are tested rather
+#: than assumed:
+#:
+#: - the credential preflight applies to every eligible path, not to the
+#:   durable trees alone, so a token pasted into a schedule prompt blocks the
+#:   run before it stages anything — exactly as it does for a note;
+#: - the store is written as a temporary file and renamed over the original, so
+#:   a commit reads either the whole previous file or the whole next one.
+#:
+#: Matching is against the *resolved* data-root-relative path, so a
+#: ``.runtime`` symlinked out of the data root still resolves outside it and is
+#: refused like any other path, and a file of the same name anywhere else is
+#: not this one.
+ALLOWED_FILES: tuple[str, ...] = (".runtime/schedules.json",)
+
+#: The directories :data:`ALLOWED_FILES` carves a file out of. Only used for
+#: reporting: a denied directory with an exception reads as itself in prose
+#: but as a glob in a list of names (see :func:`ineligible`).
+_CARVED_OUT_DIRS: frozenset[str] = frozenset(
+    name.split("/", 1)[0] for name in ALLOWED_FILES
+)
+
+#: The two directory names the derived transcript archive is made of: the
+#: archive root, and the transcripts inside it. Spelled here rather than
+#: derived from ``config.logs_root``, because :func:`_holds_archived_transcripts`
+#: has to recognise the archive's *shape* in a copy of a workspace the
+#: re-rooting has since moved — the one place the resolved location cannot
+#: follow. The layout is the app's own (``main`` writes ``<logs_root>/Chats``),
+#: so it is a fact about the archive rather than about the operator.
+_LOGS_DIR = "Logs"
+_CHATS_DIR = "Chats"
+
 # What a scope base holds, and therefore what may live under it.
 _AGENT = "agent"
 _VAULT = "vault"
@@ -137,6 +226,21 @@ class _ScopeBase(NamedTuple):
     #: Data-root-relative, POSIX. Empty means the data root itself.
     rel: str
     kind: str
+
+
+class _Scope(NamedTuple):
+    """The scope resolved once for one data root.
+
+    ``bases`` is the allowlist's set of directories; ``archive`` is the one
+    denial that is a location rather than a name, resolved for this install.
+    They travel together because a caller walking thousands of paths
+    (:func:`tracked_excluded`) must resolve both once.
+    """
+
+    bases: tuple[_ScopeBase, ...]
+    #: Data-root-relative transcript archive, ``""`` when the archive *is* the
+    #: data root, and None when it lies outside the data root entirely.
+    archive: str | None
 
 
 def data_root(config) -> Path:
@@ -160,15 +264,16 @@ def data_root(config) -> Path:
 def eligible_relpaths(config) -> tuple[str, ...]:
     """Every data-root-relative path the scope may commit, as path prefixes.
 
-    The durable scope written out, once per scope base. Trailing slashes mark
-    directory prefixes, a ``*`` marks the one level an archived workspace adds,
-    and a vault base is rendered as the vault's own directory — its internal
-    structure is the app's layout, not a fixed list of names.
+    The durable scope written out, once per scope base, followed by the files
+    :data:`ALLOWED_FILES` carves out of a refused directory. Trailing slashes
+    mark directory prefixes, a ``*`` marks the one level an archived workspace
+    adds, and a vault base is rendered as the vault's own directory — its
+    internal structure is the app's layout, not a fixed list of names.
 
     These are the *allowlist* only. A path under one of them can still be
-    refused by the denial rules (``Logs``, a credential, a provider mirror),
-    which :func:`ineligible` names; :func:`is_eligible` is the single answer
-    to "may this be committed?".
+    refused by the denial rules (the transcript archive, a credential, a
+    provider mirror), which :func:`ineligible` names; :func:`is_eligible` is
+    the single answer to "may this be committed?".
     """
     prefixes: list[str] = []
     for base in _scope_bases(config, data_root(config)):
@@ -180,6 +285,7 @@ def eligible_relpaths(config) -> tuple[str, ...]:
         for name in DURABLE_ROOTS:
             prefixes.append(f"{head}{offset}{name}/")
         prefixes.append(f"{head}{offset}{GUIDE_NAME}")
+    prefixes.extend(ALLOWED_FILES)
     return tuple(prefixes)
 
 
@@ -191,9 +297,17 @@ def ineligible(config) -> tuple[str, ...]:
     see *why* a file is not backed up rather than discovering a gap after the
     fact. The names hold at any depth, so this is a vocabulary rather than a
     set of pathspecs.
+
+    A directory that :data:`ALLOWED_FILES` carves a file out of is named as a
+    glob rather than as itself: ``.runtime/*`` refuses everything in it and
+    reads that way in a list, where a bare ``.runtime/`` would claim a denial
+    the scope no longer makes. The exception itself is in the scope, not here.
     """
-    names = {f"{name}/" for name in EXCLUDED_DIRS} | set(EXCLUDED_FILES)
-    archive = _relative_to(Path(config.logs_root), data_root(config))
+    names = {
+        f"{name}/*" if name in _CARVED_OUT_DIRS else f"{name}/"
+        for name in EXCLUDED_DIRS
+    } | set(EXCLUDED_FILES)
+    archive = _archive_rel(config, data_root(config))
     if archive:
         names.add(f"{archive}/")
     return tuple(sorted(names))
@@ -211,7 +325,7 @@ def is_eligible(relpath: str | os.PathLike[str], config) -> bool:
     rel = _as_repo_relpath(relpath, root)
     if not rel:
         return False
-    return _eligible_within(rel, _scope_bases(config, root))
+    return _eligible_within(rel, _scope(config, root))
 
 
 def classify(
@@ -227,14 +341,14 @@ def classify(
     to normalize against.
     """
     root = data_root(config)
-    bases = _scope_bases(config, root)
+    scope = _scope(config, root)
     eligible: list[str] = []
     excluded: list[str] = []
     seen: set[str] = set()
     for raw in paths:
         rel = _as_repo_relpath(raw, root)
         if rel:
-            label, keep = rel, _eligible_within(rel, bases)
+            label, keep = rel, _eligible_within(rel, scope)
         else:
             label, keep = os.fspath(raw), False
         if label in seen:
@@ -263,13 +377,42 @@ def tracked_excluded(config) -> list[str]:
     if rc != 0:
         logger.info("Could not list tracked files in %s", root)
         return []
-    bases = _scope_bases(config, root)
+    scope = _scope(config, root)
     return sorted(
-        {rel for rel in out.split("\0") if rel and not _eligible_within(rel, bases)}
+        {rel for rel in out.split("\0") if rel and not _eligible_within(rel, scope)}
     )
 
 
 # ── the scope itself ─────────────────────────────────────────────────────────
+
+
+def _scope(config, root: Path) -> _Scope:
+    """Everything the scope needs from the configuration, resolved once.
+
+    ``root`` is the already-resolved data root: answering this costs a git
+    subprocess, so a caller walking thousands of paths resolves it once (see
+    :func:`classify`) and passes it in.
+    """
+    return _Scope(_scope_bases(config, root), _archive_rel(config, root))
+
+
+def _archive_rel(config, root: Path) -> str | None:
+    """Where this install's transcript archive is, data-root-relative.
+
+    The same ``config.logs_root`` the writers use, so the refusal follows the
+    archive through the re-rooting (``<vault>/Logs`` before it, ``<install>/Logs``
+    after) instead of one spelling of it. Three answers, because all three are
+    installs:
+
+    - a path under the data root: the archive to refuse, and nothing else is;
+    - ``""``: the archive *is* the data root, so the whole scope is derived
+      output and nothing in it may be committed — the degenerate install where
+      the vault was pointed at the archive, and the reason the check sits
+      below the allowlist rather than beside it;
+    - None: the archive lives outside the data root, where a commit here cannot
+      reach it and no anchor is needed.
+    """
+    return _relative_to(Path(config.logs_root), root)
 
 
 def _scope_bases(config, root: Path) -> tuple[_ScopeBase, ...]:
@@ -381,13 +524,46 @@ def _as_repo_relpath(raw: str | os.PathLike[str], root: Path) -> str | None:
     return _relative_to(candidate, root)
 
 
-def _eligible_within(rel: str, bases: tuple[_ScopeBase, ...]) -> bool:
-    """Whether ``rel`` is durable data under one of ``bases``."""
-    for base in bases:
+def _eligible_within(rel: str, scope: _Scope) -> bool:
+    """Whether ``rel`` is durable data under one of ``scope``'s bases.
+
+    The two checks that are not about a base come first, because they are
+    floors rather than rules about a directory's contents: the transcript
+    archive is refused wherever this install keeps it, and the files
+    :data:`ALLOWED_FILES` names are committable wherever a base would not
+    otherwise reach them.
+    """
+    if _in_archive(rel, scope.archive):
+        return False
+    if rel in ALLOWED_FILES:
+        return True
+    for base in scope.bases:
         remainder = _remainder(rel, base.rel)
         if remainder is not None and _is_durable(remainder, base.kind):
             return True
     return False
+
+
+def _in_archive(rel: str, archive: str | None) -> bool:
+    """Whether ``rel`` is this install's transcript archive or inside it.
+
+    Anchored to the resolved location rather than to the name ``Logs``:
+    a multi-gigabyte derived archive is the worst possible thing to hand an
+    unattended ``git add``, and a one-file notes folder the operator named
+    ``Logs`` inside their own vault is not that (#734). The name used to
+    refuse both, because a name is all a flat rule has to match on.
+
+    ``archive is None`` means the archive is outside the data root, so no path
+    a commit here can take is inside it. ``archive == ""`` means the archive
+    *is* the data root, and the answer is yes for everything: the install
+    pointed its vault at the derived transcript, and the archive rule has to win
+    there or it protects nothing.
+    """
+    if archive is None:
+        return False
+    if not archive:
+        return True
+    return rel == archive or rel.startswith(f"{archive}/")
 
 
 def _is_durable(remainder: str, kind: str) -> bool:
@@ -424,12 +600,43 @@ def _is_durable(remainder: str, kind: str) -> bool:
         # it through `tracked_excluded` as a blocker. The remedy for an
         # install that wants a narrow scope is a vault in a repository of its
         # own, which is the first shape.
+        #
+        # "By construction" is the *vault's* own layout, not whatever the app
+        # derives inside it: the transcript archive is refused first, by
+        # ``_in_archive``, and that refusal also covers the install whose vault
+        # *is* the archive. Provenance admits the user's folders; it does not
+        # re-admit the app's output.
         return True
     if kind == _ARCHIVE:
         # One archived agent root per child, so the durable trees sit one
         # level below the container rather than directly inside it.
+        if _holds_archived_transcripts(parts, offset=1):
+            return False
         return _holds_durable_tree(parts, offset=1) or _holds_guide(parts, offset=1)
     return _holds_durable_tree(parts, offset=0) or _holds_guide(parts, offset=0)
+
+
+def _holds_archived_transcripts(parts: tuple[str, ...], *, offset: int) -> bool:
+    """Whether this is the transcript tree of an archived agent root.
+
+    The one place the archive anchor does not reach. :func:`_in_archive` refuses
+    the archive at the single location ``config.logs_root`` resolves to, but an
+    archived agent root is a *copy* of a workspace as it was, so one archived
+    before the re-rooting carries its vault's own ``Logs``: a duplicate of the
+    promoted archive rather than a folder the operator named. It is derived
+    output either way, and ``<logs_root>/Chats`` is where transcripts actually
+    live — so the transcript subtree is refused under an archived root while a
+    note file beside it stays in scope (#734).
+
+    Deliberately narrower than the rule it replaces. The old name rule refused
+    every ``Logs`` at every depth, which is also what stopped a user's own notes
+    folder of that name; this refuses the derived half of it and nothing else.
+    """
+    return (
+        len(parts) > offset + 2
+        and parts[offset + 1] == _LOGS_DIR
+        and parts[offset + 2] == _CHATS_DIR
+    )
 
 
 def _holds_guide(parts: tuple[str, ...], *, offset: int) -> bool:

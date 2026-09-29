@@ -578,4 +578,23 @@ describe('SettingsMemoryBackup details', () => {
     expect(view.find('.backup-state-line').text()).toContain('Saving locally')
     expect(view.find('.backup-warning').text()).toContain('2447 tracked files')
   })
+
+  it('prints the scope the service computed, whole and unedited', async () => {
+    // One file is carved out of a refused directory (#734) and the scope line
+    // says so. The panel renders the server's string verbatim on purpose: the
+    // scope is decided by the preflight, and a panel that re-derived, shortened
+    // or filtered it would be a second answer to a question with one.
+    apiGet.mockResolvedValue(status({
+      state: 'ready',
+      remote: 'https://github.com/p/m.git',
+      scope: 'memory-vault, skills, subagents, commands, .archived-workspaces, AGENTS.md,'
+        + ' .runtime/schedules.json; not a top-level skills/ or subagents/ or commands/ folder',
+    }))
+    const view = await mountPanel()
+    const details = view.find('details.backup-details')
+    await details.find('summary').trigger('click')
+    const line = details.findAll('p').find((p) => p.text().startsWith('Backed up:'))
+    expect(line?.text()).toContain('.runtime/schedules.json')
+    expect(line?.text()).toContain('not a top-level')
+  })
 })
