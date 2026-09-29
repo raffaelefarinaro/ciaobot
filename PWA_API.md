@@ -72,7 +72,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
 | GET | `/api/vault/backlinks` | List notes whose wikilinks resolve to a given markdown path |
 | GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
-| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed,cleared` also lists the reversible trash inventory and the kept notes still in the vault) or record an explicit keep/restore decision; trash, permanent deletion and `reopen` are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation. `reopen` undoes a keep by appending to the ledger, putting the note back in the queue. A successful POST answers `{ok, result, candidates, trashed, cleared}` — the queue it had to rebuild anyway, so a client never needs a follow-up GET (candidate generation reads every note in the vault three times) |
+| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed,cleared` also lists the reversible trash inventory and the kept notes still in the vault) or record an explicit keep/restore decision; trash, permanent deletion, `complete` and `reopen` are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation. `reopen` undoes a keep by appending to the ledger, putting the note back in the queue. `complete` closes a **project** candidate out: it moves the note to `projects/completed/` — the whole folder for a `projects/active/<slug>/` project, whatever note in that folder was the candidate — rewrites `status: active` to `status: completed`, and repoints every `related:`/wikilink/markdown reference to any note in the moved project, in one transaction that rolls the move and every link back if the ledger append fails; `restore_completed` reverses one such row, and a project already restored cannot be restored again. Retire (`trash`) stays available for every type, including a project that is wrong or abandoned. A successful POST answers `{ok, result, candidates, trashed, cleared}` — the queue it had to rebuild anyway, so a client never needs a follow-up GET (candidate generation reads every note in the vault three times) |
 | DELETE | `/api/vault/note` | Permanently delete one vault note (`?path=`, the `Entry.path` string form); strips dangling `related:`/`relatedTo:` and `[[wikilink]]` references from every note that linked to it first |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
@@ -246,6 +246,18 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
   -H 'content-type: application/json' \
   -d '{"action":"reopen","candidate_id":"<candidate-id>"}'
+
+# Close a finished PROJECT out, then put it back. Only a `type: project` (or a
+# note under `projects/`) is accepted — anything else is a 409, and `trash` is
+# the action for it. The response `result` carries `previous_path`, `new_path`,
+# `status_rewritten` and `edited_backlinks`, so a client can say what moved and
+# which notes were repointed without re-reading the vault.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
+  -H 'content-type: application/json' \
+  -d '{"action":"complete","candidate_id":"<candidate-id>"}'
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
+  -H 'content-type: application/json' \
+  -d '{"action":"restore_completed","candidate_id":"<candidate-id>"}'
 ```
 
 **Agent assets**
