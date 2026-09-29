@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -218,13 +219,69 @@ def test_write_is_atomic_and_idempotent(
 
 
 def test_update_tasks_file_is_reserved_from_recall() -> None:
-    """`Workspace/Update-Tasks.json` is bookkeeping, in the index and in the lint."""
+    """`Workspace/Update-Tasks.json` is bookkeeping, in the index and in the lint.
+
+    A guard rather than the fix for a live leak: every consumer of the reserved
+    set reads markdown only today (`fts_search._index_directory`'s `.md`
+    default, `fts_search.index_file`'s archived transcripts, `vault_index`'s
+    `rglob("*.md")`, `vault_lint._markdown_source_paths`), so nothing can reach a
+    `.json` file. It is here because that is where a vault's own bookkeeping
+    belongs, and because the day a consumer widens to non-markdown files this
+    name must already be in the set rather than becoming an index row.
+    """
     assert "update-tasks.json" in vault_index.RESERVED_UNINDEXED_FILES
     assert fts_search.RESERVED_UNINDEXED_FILES is vault_index.RESERVED_UNINDEXED_FILES
     assert vault_index.is_reserved_bookkeeping(Path("Workspace/Update-Tasks.json"))
     # A user's own note that happens to share the name stays scannable.
     assert not vault_index.is_reserved_bookkeeping(Path("projects/acme/Update-Tasks.json"))
     assert not vault_index.is_reserved_bookkeeping(Path("Update-Tasks.json"))
+
+
+def test_ordinary_text_that_merely_looks_like_a_path_stores(tmp_path: Path) -> None:
+    """The portability rule must not swallow a reason the operator actually typed.
+
+    A dismissal reason is prose. `a: not relevant`, `~50 notes` and `x:y` are not
+    paths, and a rule that called them paths would raise out of
+    `record_dismissal` and lose the decision — the one write here that needs no
+    proof and no permission. What the rule refuses is the thing it is for: a
+    location that means nothing on the next machine.
+    """
+    config = _config(tmp_path)
+    task = _task()
+
+    for reason in ("a: not relevant", "~50 notes", "x:y", "line 3:4", "50% done"):
+        state = update_tasks.record_dismissal(
+            task, config=config, workspace="personal", reason=reason
+        )
+        assert state.evidence["dismiss_reason"] == reason
+
+    for text in ("a: b", "~50 notes", "x:y", "", "note.md", "Workspace/Learnings.md"):
+        assert not update_tasks._looks_absolute(text), text
+    for text in (
+        "/Users/someone/vault",
+        "\\Users\\someone",
+        "~/vault",
+        "~",
+        "C:\\vault",
+        "D:/vault",
+        "a\0b",
+    ):
+        assert update_tasks._looks_absolute(text), text
+
+    # And the refusal still stands for a real path, through the public writer.
+    with pytest.raises(UpdateTaskStateError, match="not storable"):
+        update_tasks.write_task_state(
+            update_tasks.TaskState(
+                task_id=task.id,
+                revision=task.revision,
+                scope="workspace",
+                lifecycle="offered",
+                updated_at="2026-01-01T00:00:00+00:00",
+                evidence={"path": "~/vault"},
+            ),
+            config=config,
+            workspace="personal",
+        )
 
 
 # ── Suppression, revision and reopening ─────────────────────────────────────
@@ -288,10 +345,92 @@ def test_reopen_clears_a_dismissal_and_leaves_others_alone(tmp_path: Path) -> No
 
     # Reopening something that is not dismissed changes nothing and rewrites
     # nothing: an in-flight attempt is not something to overwrite.
-    before = update_tasks.state_path_for(config, "workspace", "personal").read_bytes()
+    path = update_tasks.state_path_for(config, "workspace", "personal")
+    before = path.read_bytes()
     again = update_tasks.reopen_task(task, config=config, workspace="personal")
     assert again.lifecycle == "offered"
-    assert update_tasks.state_path_for(config, "workspace", "personal").read_bytes() == before
+    assert path.read_bytes() == before
+
+    # And a task with nothing recorded has no dismissal to reverse, so reopen
+    # writes nothing: an absent record already reads as "offered", and an empty
+    # `offered` record would be a document a reader has to treat specially.
+    unseen = _task(id="never-seen")
+    fresh = update_tasks.reopen_task(
+        unseen, config=config, workspace="personal", now=datetime(2026, 1, 3, tzinfo=UTC)
+    )
+    assert fresh.lifecycle == "offered"
+    assert (
+        update_tasks.read_task_state(unseen, config=config, workspace="personal") is None
+    )
+    assert path.read_bytes() == before, "no record was invented"
+
+
+def test_a_concurrent_writer_cannot_interleave_inside_a_dismissal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading the record a write replaces and writing it are one critical section.
+
+    A record is the whole document, so a read taken outside the lock and carried
+    into a later write drops whatever another writer added in between — a chat id
+    the launch path set, an attempt fingerprint the check path set — with no error
+    anywhere, because the second write simply wins. The observable is the lock
+    itself: while a dismissal is between its read and its write, another writer of
+    the same scope must be locked out.
+
+    The read is slowed on the worker thread (and only there) so the main thread
+    gets a deterministic window to probe, with a bounded wait so a regression
+    fails the assertion instead of hanging the suite.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    path = update_tasks.state_path_for(config, "workspace", "personal")
+    lock = async_reads.keyed_lock(f"update-tasks:{path}")
+    read_seen = threading.Event()
+    release = threading.Event()
+    failures: list[BaseException] = []
+    real_read = update_tasks._read_document
+
+    def _slow_read(target: Path) -> Any:
+        outcome = real_read(target)
+        if threading.current_thread() is not threading.main_thread():
+            read_seen.set()
+            release.wait(timeout=2.0)
+        return outcome
+
+    def _dismiss() -> None:
+        try:
+            update_tasks.record_dismissal(
+                task, config=config, workspace="personal", reason="not now"
+            )
+        except BaseException as error:  # noqa: BLE001 — reported by the assertions
+            failures.append(error)
+
+    monkeypatch.setattr(update_tasks, "_read_document", _slow_read)
+    # Daemon, and the probe lock is handed straight back: a regression here has
+    # the worker blocked on the lock this test just took, and a suite that hangs
+    # on a failed assertion reports less than a suite that fails.
+    worker = threading.Thread(target=_dismiss, name="dismissal", daemon=True)
+    worker.start()
+    try:
+        assert read_seen.wait(timeout=5.0), "the dismissal never read the record"
+        acquired = lock.acquire(timeout=0.2)
+        try:
+            assert not acquired, (
+                "another writer of this scope got in between the read of a "
+                "record and the write that replaces it, so its update would "
+                "be lost"
+            )
+        finally:
+            if acquired:
+                lock.release()
+    finally:
+        release.set()
+        worker.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert failures == []
+    state = update_tasks.read_task_state(task, config=config, workspace="personal")
+    assert state is not None and state.lifecycle == "dismissed"
 
 
 def test_completion_needs_a_registered_check(
@@ -506,7 +645,7 @@ async def test_an_unreadable_state_file_is_unknown_not_an_offer(
         config,
         workspace="personal",
         installed_version="1.2.0",
-        catalog=_catalog(task=_task()),
+        catalog=_catalog(_task()),
     )
 
     assert statuses[0].applicability.status == UNKNOWN
@@ -517,6 +656,59 @@ async def test_an_unreadable_state_file_is_unknown_not_an_offer(
     # And a write refuses to build a new document on top of the unreadable one.
     with pytest.raises(UpdateTaskStateError, match="readable"):
         update_tasks.record_dismissal(_task(), config=config, workspace="personal")
+
+
+async def test_a_state_file_that_becomes_unreadable_outranks_a_warm_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cache hit is not allowed to answer for a file the install cannot read.
+
+    A state file can become unreadable inside a window — a half-finished sync, a
+    hand edit, a filesystem that lost the file mid-read. The record is what says
+    whether the operator already declined the task, so a cached detector answer
+    must not stand in for it: that is a task coming back as offered on the
+    strength of an answer the install can no longer support.
+    """
+    config = _config(tmp_path)
+    calls: list[int] = []
+
+    def _counting(**_: Any) -> Detection:
+        calls.append(1)
+        return Detection(True, {"rows": 3})
+
+    monkeypatch.setattr(update_tasks, "DETECTOR_FUNCTIONS", {REGISTERED: _counting})
+    catalog = _catalog(_task())
+    path = update_tasks.state_path_for(config, "workspace", "personal")
+    kwargs = {
+        "workspace": "personal",
+        "installed_version": "1.2.0",
+        "catalog": catalog,
+        "change_token": "a",
+        "now": 1_000.0,
+    }
+
+    warm = await update_tasks.evaluate(config, **kwargs)
+    assert warm[0].offered, "the window has to be warm for this to be the bug"
+    assert calls == [1]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"schema": 1, "tasks": {"review-legacy-rows@1": ', encoding="utf-8")
+
+    cold = await update_tasks.evaluate(config, **kwargs)
+    assert cold[0].applicability.status == UNKNOWN
+    assert cold[0].applicability.evidence["reason"] == "state_unreadable"
+    assert not cold[0].offered
+    assert calls == [1], "an answer nobody may report is not worth recomputing"
+
+    # The withheld answer was not stored either: a repaired file is answered by
+    # the window that was already open, not by the `unknown` the broken file
+    # produced, and a stored `unknown` would have hidden the task for the rest of
+    # the window.
+    path.write_text('{"schema": 1, "tasks": {}}', encoding="utf-8")
+    healed = await update_tasks.evaluate(config, **kwargs)
+    assert healed[0].applicability.status == APPLICABLE
+    assert healed[0].offered
+    assert calls == [1], "the answer from before the corruption is still fresh"
 
 
 # ── The cached check ────────────────────────────────────────────────────────
@@ -534,7 +726,7 @@ async def test_evaluate_honours_the_ttl_and_the_change_token(
         return Detection(True, {"rows": len(calls)})
 
     monkeypatch.setattr(update_tasks, "DETECTOR_FUNCTIONS", {REGISTERED: _counting})
-    catalog = _catalog(task=_task())
+    catalog = _catalog(_task())
     start = 1_000.0
     keys: list[str] = []
     real_run_read = update_tasks.run_read
@@ -583,6 +775,107 @@ async def test_evaluate_honours_the_ttl_and_the_change_token(
     assert keys[4].endswith("personal:1.2.0:")
 
 
+async def test_the_freshness_window_is_per_task_not_per_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One task being recomputed must not extend the window of another.
+
+    The window is a claim about an answer, so it has to travel with that answer.
+    Held per scope instead, a catalog that grew a task would re-stamp every
+    answer in the scope: the task evaluated at ``t0`` would be served until
+    ``t0 + 299 + TTL`` rather than ``t0 + TTL``, and an answer computed for one
+    change token would be served under the next one. Both make the app report a
+    condition that has since changed, for as long as the app keeps being looked
+    at — the one thing a freshness window is for.
+    """
+    config = _config(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: (calls.append("x"), Detection(True))[1]},
+    )
+    early = _task(id="early")
+    late = _task(id="late")
+    start = 1_000.0
+
+    async def _evaluate(
+        catalog: update_task_catalog.TaskCatalog, token: str, instant: float
+    ) -> list[update_tasks.TaskStatus]:
+        return await update_tasks.evaluate(
+            config,
+            workspace="personal",
+            installed_version="1.2.0",
+            catalog=catalog,
+            change_token=token,
+            now=instant,
+        )
+
+    await _evaluate(_catalog(early), "a", start)
+    assert calls == ["x"]
+
+    # A catalog that gained a task one second before the first window closes.
+    await _evaluate(_catalog(early, late), "a", start + APPLICABILITY_TTL_S - 1)
+    assert calls == ["x", "x"], "the new task runs, the warm one does not"
+
+    # `early` must now be exactly at its own TTL, whatever `late` did.
+    await _evaluate(_catalog(early, late), "a", start + APPLICABILITY_TTL_S)
+    assert calls == ["x", "x", "x"], (
+        "the answer computed at t0 expires at t0 + TTL, not at the last "
+        "evaluation's TTL"
+    )
+
+    # And a different situation re-runs every task, including one whose answer
+    # was inside its window.
+    await _evaluate(_catalog(early, late), "b", start + APPLICABILITY_TTL_S + 1)
+    assert calls == ["x", "x", "x", "x", "x"], (
+        "no answer computed for another token is reused under this one"
+    )
+
+
+async def test_a_failing_detector_is_retried_inside_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A detector that raised is not cached: the fault may already be gone.
+
+    A probe that failed says nothing about the workspace, so holding it for the
+    whole window would keep reporting ``unknown`` for five minutes after the
+    volume came back — the operator's task stays hidden because of an error that
+    no longer exists.
+    """
+    config = _config(tmp_path)
+    attempts: list[int] = []
+
+    def _flaky(**_: Any) -> Detection:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("the vault is on a disconnected volume")
+        return Detection(True, {"rows": 1})
+
+    monkeypatch.setattr(update_tasks, "DETECTOR_FUNCTIONS", {REGISTERED: _flaky})
+    catalog = _catalog(_task())
+    kwargs = {"workspace": "personal", "installed_version": "1.2.0", "catalog": catalog}
+
+    first = await update_tasks.evaluate(
+        config, change_token="a", now=1_000.0, **kwargs
+    )
+    assert first[0].applicability.status == UNKNOWN
+    assert first[0].applicability.evidence["reason"] == "detector_failed"
+
+    second = await update_tasks.evaluate(
+        config, change_token="a", now=1_000.5, **kwargs
+    )
+    assert len(attempts) == 2, "a failed probe is retried rather than remembered"
+    assert second[0].applicability.status == APPLICABLE
+
+    # A real answer *is* remembered, so this is not the cache being disabled.
+    third = await update_tasks.evaluate(
+        config, change_token="a", now=1_000.6, **kwargs
+    )
+    assert len(attempts) == 2
+    assert third[0].applicability.status == APPLICABLE
+
+
 async def test_evaluate_reports_a_dismissed_task_as_not_offered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -593,7 +886,7 @@ async def test_evaluate_reports_a_dismissed_task_as_not_offered(
         "DETECTOR_FUNCTIONS",
         {REGISTERED: lambda **_: Detection(True, {"rows": 1})},
     )
-    catalog = _catalog(task=_task())
+    catalog = _catalog(_task())
     kwargs = {"workspace": "personal", "installed_version": "1.2.0", "catalog": catalog}
 
     before = await update_tasks.evaluate(config, **kwargs)
@@ -616,7 +909,7 @@ async def test_a_downgrade_hides_a_task_and_keeps_its_state(
     monkeypatch.setattr(
         update_tasks, "DETECTOR_FUNCTIONS", {REGISTERED: lambda **_: Detection(True)}
     )
-    catalog = _catalog(task=_task(since_version="2.0.0"))
+    catalog = _catalog(_task(since_version="2.0.0"))
     update_tasks.record_dismissal(
         _task(since_version="2.0.0"), config=config, workspace="personal"
     )
@@ -751,6 +1044,11 @@ def _row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
-def _catalog(*, task: UpdateTask) -> update_task_catalog.TaskCatalog:
-    """A loaded one-task catalog, built from the definition the test already has."""
-    return update_task_catalog.TaskCatalog(tasks=(task,))
+def _catalog(*tasks: UpdateTask) -> update_task_catalog.TaskCatalog:
+    """A loaded catalog of the definitions the test already has, in order.
+
+    Variadic because the freshness window is a per-task claim: a test that wants
+    to see one task's window close while another's stays open needs two tasks in
+    one catalog.
+    """
+    return update_task_catalog.TaskCatalog(tasks=tuple(tasks))

@@ -36,7 +36,10 @@ resolve to ``unknown`` — never ``applicable``. Offering follow-up work this
 engine cannot substantiate is the failure that wastes the operator's attention;
 withholding a task that did apply is recoverable, and a later chat re-asks.
 ``not_applicable`` is a *positive* claim (the detector ran and the condition is
-absent), which is why it needs evidence and ``unknown`` does not.
+absent), which is why it needs evidence and ``unknown`` does not. An unreadable
+state file outranks even a cached answer: the record is what says whether the
+operator already declined the task, so an answer the install can no longer stand
+behind must not stand in for it.
 
 **Suppression is per revision.** A task dismissed or completed at revision 1
 stays dismissed at revision 1 and is offered again at revision 2, because the
@@ -50,10 +53,13 @@ upgrading again brings it back with its history.
 that calls it may not do that on every call. :func:`evaluate` runs the whole
 check on ``ciao.async_reads.run_read`` (bounded, coalesced by key) and reuses the
 previous result for ``APPLICABILITY_TTL_S``, or immediately when the caller
-supplies a different workspace-change token. The state file is re-read on every
-call — it is one small JSON document, and a dismissal the operator just made must
-not wait out a TTL — while the detectors, which are the part that can be
-expensive, run at most once per fresh window.
+supplies a different workspace-change token. That window is **per task**: one
+answer's freshness says nothing about another's, so a catalog that gained a task
+does not extend the window of the tasks already there. The state file is re-read
+on every call — it is one small JSON document, and a dismissal the operator just
+made must not wait out a TTL — while the detectors, which are the part that can be
+expensive, run at most once per fresh window. An answer that exists only because a
+probe failed is not an answer about the workspace, so it is never cached.
 
 Two consequences stated rather than hidden. The freshness window is a *named
 constant*, not a setting and not an env var: a per-install knob for "how stale may
@@ -71,10 +77,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -98,8 +106,9 @@ STATE_SCHEMA = 1
 #: ``Update-Tasks.json`` somewhere else stays indexed.
 WORKSPACE_STATE_DIR = "Workspace"
 
-#: The workspace state file, relative to that directory. Matched casefolded, so
-#: the spelling here and the one on disk cannot drift into two documents.
+#: The workspace state file, relative to that directory. Opened at exactly this
+#: spelling, which is also the spelling ``vault_index`` matches casefolded in its
+#: reserved-file set: this module writes one name and the index recognizes it.
 WORKSPACE_STATE_FILENAME = "Update-Tasks.json"
 
 #: The install state file, in the runtime directory beside ``state.json``.
@@ -142,6 +151,20 @@ UNKNOWN = "unknown"
 #: The three answers, as a set a caller can test membership on.
 APPLICABILITY_STATUSES: frozenset[str] = frozenset(
     {APPLICABLE, NOT_APPLICABLE, UNKNOWN}
+)
+
+#: The ``reason`` values whose answers are never cached. A detector that raised,
+#: or one that returned something that is not a :class:`Detection`, says nothing
+#: about the workspace — it is a transient fault or a bug in the detector, and
+#: re-running it on the next call costs one probe. Caching one for
+#: ``APPLICABILITY_TTL_S`` would hide a condition the operator is waiting for
+#: behind an error that had already gone away.
+#:
+#: ``detector_not_implemented`` is deliberately *not* here: nothing about the
+#: workspace will change until an implementation ships, so the same answer for
+#: the whole window is the honest one.
+UNCACHEABLE_REASONS: frozenset[str] = frozenset(
+    {"detector_failed", "detector_returned_no_detection", "state_unreadable"}
 )
 
 #: How long a computed applicability may be reused, in seconds, before the
@@ -413,9 +436,21 @@ def read_task_state(
     ``None`` covers both "nothing has been decided" and "what was decided cannot
     be read"; :func:`evaluate` tells those apart, because only the second one
     withholds an answer.
+
+    Takes no lock: the document is replaced atomically, so a lock-free reader sees
+    a whole one, and a reader that needed the write lock would make every Home
+    render queue behind a write. A caller that is about to *write* this record
+    must read it through :func:`_record_lock` instead.
     """
-    states, _ = _load_states((task,), config, workspace)
-    return states[(task.id, task.revision)]
+    return _read_record(state_path_for(config, task.scope, workspace), task)
+
+
+def _read_record(path: Path, task: UpdateTask) -> TaskState | None:
+    """The one record for *task* in one state file, or ``None``."""
+    records, readable = _read_document(path)
+    if not readable:
+        return None
+    return _parse_state(records.get(task_key(task.id, task.revision)), task)
 
 
 # ── Writing ─────────────────────────────────────────────────────────────────
@@ -455,25 +490,33 @@ def _portable(value: Any, depth: int = 0) -> bool:
     return False
 
 
+#: A Windows drive letter followed by a separator, checked on a POSIX install:
+#: `os.path.isabs` does not recognise `C:\Users\...` and a synced vault is opened
+#: on both. The separator is part of the pattern on purpose — `a: not relevant`
+#: and `x:y` are ordinary text, and a rule that called them paths would refuse a
+#: dismissal reason the operator actually typed.
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
 def _looks_absolute(value: str) -> bool:
     """True for a spelling that names a location on this (or any) machine.
 
-    Checked against both the POSIX and the Windows rules, and against a leading
-    ``~``, because a vault synced to a Mac is opened on a Windows install and an
-    absolute path in the state file is a leak either way.
+    Deliberately a short list rather than ``os.path.isabs`` and a colon test: this
+    guards one property of a portable file, and a broader rule would reject
+    evidence nobody meant as a path. What counts is a rooted POSIX path, a
+    rooted Windows path (including a UNC ``\\\\server`` share), a home-relative
+    ``~`` path, a Windows drive with a separator, or a NUL — which is not text.
     """
+    if "\0" in value:
+        return True
     text = value.strip()
     if not text:
         return False  # an empty string names nothing, so it stores fine
-    if "\0" in text:
+    if text in ("~",) or text.startswith(("~/", "~\\")):
         return True
-    if text.startswith("~"):
+    if text.startswith(("/", "\\")):
         return True
-    if os.path.isabs(text):
-        return True
-    # A Windows drive, checked on a POSIX install: `os.path.isabs` does not
-    # recognise `C:\Users\...` and a synced vault is opened on both.
-    return bool(len(text) >= 2 and text[0].isalpha() and text[1] == ":")
+    return bool(_WINDOWS_DRIVE_RE.match(text))
 
 
 def _reject_nonportable(evidence: Mapping[str, Any]) -> None:
@@ -540,6 +583,13 @@ def write_task_state(state: TaskState, *, config: Any, workspace: str = "") -> P
     byte: the record is keyed by identity, the dump is sorted, and no field is
     derived from the clock inside here.
 
+    A caller that needs the *previous* record to build this one must not read it
+    first and then call this: the read belongs inside the same critical section,
+    which is what :func:`_record_lock` is for. This entry point deliberately
+    takes the lock itself rather than delegating, because ``keyed_lock`` is a
+    plain (non-reentrant) lock and a nested acquisition of the same key would
+    deadlock.
+
     Raises ``UpdateTaskStateError`` when the evidence is not storable, and
     ``OSError`` when the write cannot land. Neither is swallowed: a dismissal
     that did not happen must not be reported as one.
@@ -550,22 +600,55 @@ def write_task_state(state: TaskState, *, config: Any, workspace: str = "") -> P
             f"({', '.join(sorted(LIFECYCLES))})"
         )
     path = state_path_for(config, state.scope, workspace)
-    payload = _state_payload(state)
-    with keyed_lock(f"update-tasks:{path}"):
-        records, readable = _read_document(path)
-        if not readable and path.exists():
-            # Refuse to build a new document on top of one this code could not
-            # read: the records in it may be the operator's only copy of a
-            # decision, and this module has no way to carry them forward.
-            raise UpdateTaskStateError(
-                f"the update-task state at {path.name} is not a readable "
-                "schema-1 document; refusing to overwrite it"
-            )
-        records[task_key(state.task_id, state.revision)] = payload
-        _write_document(
-            path, {"schema": STATE_SCHEMA, "tasks": records}
-        )
+    with keyed_lock(_lock_key(path)):
+        _write_record(path, state)
     return path
+
+
+def _lock_key(path: Path) -> str:
+    """The ``keyed_lock`` name for one state file."""
+    return f"update-tasks:{path}"
+
+
+def _write_record(path: Path, state: TaskState) -> None:
+    """Merge one record into the document and write it. The caller holds the lock.
+
+    Refuses to build a new document on top of one this code could not read: the
+    records in it may be the operator's only copy of a decision, and this module
+    has no way to carry them forward.
+    """
+    payload = _state_payload(state)
+    records, readable = _read_document(path)
+    if not readable and path.exists():
+        raise UpdateTaskStateError(
+            f"the update-task state at {path.name} is not a readable "
+            "schema-1 document; refusing to overwrite it"
+        )
+    records[task_key(state.task_id, state.revision)] = payload
+    _write_document(path, {"schema": STATE_SCHEMA, "tasks": records})
+
+
+@contextmanager
+def _record_lock(
+    task: UpdateTask, config: Any, workspace: str
+) -> Iterator[tuple[Path, TaskState | None]]:
+    """Hold one scope's write lock while the caller reads and replaces a record.
+
+    Yields the state file and the record currently stored for *task*, and expects
+    the caller to write through :func:`_write_record` (or not write at all)
+    before the lock is released.
+
+    The read and the write have to be the same critical section. A record is the
+    whole document, so reading it outside the lock and carrying the result into a
+    later write loses whatever a concurrent writer added in between — the chat id
+    the launch path sets, the attempt fingerprint the check path sets — with no
+    error anywhere: the second write simply wins. That is the failure mode this
+    exists to close, which is why the three recorders below use it rather than
+    calling :func:`read_task_state` and then :func:`write_task_state`.
+    """
+    path = state_path_for(config, task.scope, workspace)
+    with keyed_lock(_lock_key(path)):
+        yield path, _read_record(path, task)
 
 
 def _stamp(now: datetime | None) -> str:
@@ -618,21 +701,25 @@ def record_dismissal(
     replaces keeps its identity fields (the chat the task was in, the attempt
     fingerprint, the prompt digest) and loses its evidence, which belonged to
     the lifecycle that is being replaced.
+
+    The read of what it replaces and the write that replaces it happen in one
+    critical section, so a chat id or attempt fingerprint recorded concurrently is
+    carried forward rather than overwritten.
     """
-    previous = read_task_state(task, config=config, workspace=workspace)
-    evidence: dict[str, Any] = {}
-    if reason.strip():
-        evidence["dismiss_reason"] = reason.strip()
-    state = TaskState(
-        task_id=task.id,
-        revision=task.revision,
-        scope=task.scope,
-        lifecycle="dismissed",
-        updated_at=_stamp(now),
-        evidence=evidence,
-        **_carried(previous),
-    )
-    write_task_state(state, config=config, workspace=workspace)
+    with _record_lock(task, config, workspace) as (path, previous):
+        evidence: dict[str, Any] = {}
+        if reason.strip():
+            evidence["dismiss_reason"] = reason.strip()
+        state = TaskState(
+            task_id=task.id,
+            revision=task.revision,
+            scope=task.scope,
+            lifecycle="dismissed",
+            updated_at=_stamp(now),
+            evidence=evidence,
+            **_carried(previous),
+        )
+        _write_record(path, state)
     return state
 
 
@@ -647,29 +734,47 @@ def reopen_task(
 
     Only ``dismissed`` is reopened, and only at this revision: the other
     lifecycles are an attempt in flight or a verdict already reached, and
-    overriding either would be a decision nobody asked this function to make. A
-    record that is not a dismissal comes back unchanged, so calling reopen on an
-    offered task is a no-op rather than a rewrite.
+    overriding either would be a decision nobody asked this function to make. So
+    there are two no-write cases, and both return the record that stands rather
+    than inventing one:
+
+    * **nothing recorded** — there is no dismissal to reverse, and an absent
+      record already means "offered" (``TaskStatus.state is None``). Writing an
+      empty ``offered`` record would add a file the reader has to treat
+      specially, for no information.
+    * **a lifecycle that is not a dismissal** — returned unchanged, so reopening
+      an offered task rewrites nothing.
 
     The attempt fingerprint is cleared, because that is what the dismissal was
     about: "not against this attempt" is not a statement the operator made about
     the next one.
+
+    The read and the write share one critical section, so a fingerprint recorded
+    concurrently is not silently dropped on the way out.
     """
-    previous = read_task_state(task, config=config, workspace=workspace)
-    if previous is not None and previous.lifecycle != "dismissed":
-        return previous
-    carried = _carried(previous)
-    carried["attempted_fingerprint"] = ""
-    state = TaskState(
-        task_id=task.id,
-        revision=task.revision,
-        scope=task.scope,
-        lifecycle="offered",
-        updated_at=_stamp(now),
-        evidence={},
-        **carried,
-    )
-    write_task_state(state, config=config, workspace=workspace)
+    with _record_lock(task, config, workspace) as (path, previous):
+        if previous is None:
+            return TaskState(
+                task_id=task.id,
+                revision=task.revision,
+                scope=task.scope,
+                lifecycle="offered",
+                updated_at=_stamp(now),
+            )
+        if previous.lifecycle != "dismissed":
+            return previous
+        carried = _carried(previous)
+        carried["attempted_fingerprint"] = ""
+        state = TaskState(
+            task_id=task.id,
+            revision=task.revision,
+            scope=task.scope,
+            lifecycle="offered",
+            updated_at=_stamp(now),
+            evidence={},
+            **carried,
+        )
+        _write_record(path, state)
     return state
 
 
@@ -717,17 +822,21 @@ def record_completion(
         return None
     if not isinstance(outcome, Detection) or not outcome.applicable:
         return None
-    previous = read_task_state(task, config=config, workspace=workspace)
-    state = TaskState(
-        task_id=task.id,
-        revision=task.revision,
-        scope=task.scope,
-        lifecycle="completed",
-        updated_at=_stamp(now),
-        evidence=_portable_evidence(outcome.evidence),
-        **_carried(previous),
-    )
-    write_task_state(state, config=config, workspace=workspace)
+    # The check itself ran outside the lock: it is somebody else's code and may
+    # be slow, and holding a scope's write lock across it would serialise every
+    # other writer in that scope behind a probe. The read of what it replaces and
+    # the write that replaces it are still one critical section.
+    with _record_lock(task, config, workspace) as (path, previous):
+        state = TaskState(
+            task_id=task.id,
+            revision=task.revision,
+            scope=task.scope,
+            lifecycle="completed",
+            updated_at=_stamp(now),
+            evidence=_portable_evidence(outcome.evidence),
+            **_carried(previous),
+        )
+        _write_record(path, state)
     return state
 
 
@@ -842,17 +951,19 @@ def apply_detector(
 
 @dataclass(frozen=True, slots=True)
 class _CacheEntry:
-    """One scope's computed answers, and the window they were computed in.
+    """One task's answer, and the situation and the moment it was computed in.
 
-    ``results`` holds every task answered for this scope, including tasks a
-    downgrade has hidden: a task the installed version cannot support is not
-    evaluated, but its answer is kept so that upgrading back does not re-run a
-    detector the workspace has not changed since.
+    One entry per ``(scope, "id@revision")``, not per scope. That is the whole
+    point: the freshness window is a claim about an *answer*, so it has to travel
+    with the answer it describes. An entry also outlives the eligible set that
+    produced it — a task a downgrade hides is not evaluated, so its entry is left
+    alone rather than replaced, and upgrading again reuses it while it is still
+    inside its own window.
     """
 
     token: str
     computed_at: float
-    results: dict[str, ApplicabilityResult]
+    result: ApplicabilityResult
 
 
 _CACHE: dict[str, _CacheEntry] = {}
@@ -862,14 +973,24 @@ _CACHE_LOCK = threading.Lock()
 def clear_applicability_cache() -> None:
     """Drop every cached applicability. Test isolation hook.
 
-    The cache is process-wide and keyed by scope, so a test that evaluates a
-    fixture workspace could otherwise be served the answer a previous test
-    computed for the same scope key. Named like
+    The cache is process-wide and keyed by scope and task, so a test that
+    evaluates a fixture workspace could otherwise be served the answer a
+    previous test computed for the same scope key. Named like
     ``async_reads.reset_vault_read_executor`` because it is the same kind of
     hook: a module-level cache with a lifetime the process does not own.
     """
     with _CACHE_LOCK:
         _CACHE.clear()
+
+
+def _is_cacheable(result: ApplicabilityResult) -> bool:
+    """True when this answer may be reused inside its window.
+
+    Judged on the reason the answer carries, because that is the only place the
+    distinction between "the workspace looks like this" and "I could not find out"
+    is written down.
+    """
+    return result.evidence.get("reason") not in UNCACHEABLE_REASONS
 
 
 def _scope_key(config: Any, task: UpdateTask, workspace: str) -> str:
@@ -884,6 +1005,7 @@ def _scope_key(config: Any, task: UpdateTask, workspace: str) -> str:
 
 
 def _read_key(config: Any, task: UpdateTask, workspace: str) -> str:
+    """The cache key for one task's answer: its scope, then its exact revision."""
     return f"{_scope_key(config, task, workspace)}\0{task_key(task.id, task.revision)}"
 
 
@@ -894,46 +1016,51 @@ def _cached_results(
     token: str,
     instant: float,
 ) -> dict[str, ApplicabilityResult]:
-    """The answers that are still inside their window, keyed by read key.
+    """The answers that are still inside their own window, keyed by read key.
 
-    A cached answer is usable when it was computed for *this* token and inside
-    ``APPLICABILITY_TTL_S``. Token equality is strict in both directions: a
-    caller that supplies no token gets a purely time-based window, and a caller
-    that supplies one never reuses an answer computed for a different situation
-    (or for no situation at all). A negative age — an injected or stepped clock
-    — is treated as stale, because a window that has not happened yet is not a
-    window.
+    Both halves of the window are checked per answer, not per scope: this used to
+    hold one ``(token, computed_at)`` for every task in a scope and re-stamp the
+    whole set whenever any task was recomputed, so a task evaluated early in a
+    window was served as fresh until the *last* evaluation's window closed — and a
+    task whose answer was never recomputed was served under a change token it was
+    not computed for. One entry per ``(scope, task)`` is the only arrangement in
+    which "this answer, for this situation, inside this age" is a statement about
+    the answer.
+
+    Token equality is strict in both directions: a caller that supplies no token
+    gets a purely time-based window, and a caller that supplies one never reuses
+    an answer computed for a different situation (or for no situation at all). A
+    negative age — an injected or stepped clock — is treated as stale, because a
+    window that has not happened yet is not a window.
     """
     out: dict[str, ApplicabilityResult] = {}
     with _CACHE_LOCK:
         for task in tasks:
-            entry = _CACHE.get(_scope_key(config, task, workspace))
+            entry = _CACHE.get(_read_key(config, task, workspace))
             if entry is None or entry.token != token:
                 continue
             age = instant - entry.computed_at
             if not 0 <= age < APPLICABILITY_TTL_S:
                 continue
-            found = entry.results.get(task_key(task.id, task.revision))
-            if found is not None:
-                out[_read_key(config, task, workspace)] = found
+            out[_read_key(config, task, workspace)] = entry.result
     return out
 
 
 def _store_results(
-    fresh: Mapping[str, Mapping[str, ApplicabilityResult]], token: str, instant: float
+    fresh: Mapping[str, ApplicabilityResult], token: str, instant: float
 ) -> None:
-    """Publish freshly computed answers, keeping the ones still remembered.
+    """Publish freshly computed answers, one entry per ``(scope, task)``.
 
-    Merged rather than replaced so that a task which is momentarily absent from
-    the eligible set (the downgrade case) keeps its answer instead of re-running
-    a detector on the way back up.
+    Nothing is merged and nothing is re-stamped: an entry written here describes
+    exactly the answers computed in this call, and an entry left alone keeps the
+    token and the age it was computed with. That is also what keeps a task that
+    has temporarily dropped out of the eligible set (the downgrade case) cached
+    for the rest of *its own* window rather than being re-run on the way back up.
     """
     with _CACHE_LOCK:
-        for scope, results in fresh.items():
-            merged = dict(_CACHE[scope].results) if scope in _CACHE else {}
-            merged.update(results)
-            _CACHE[scope] = _CacheEntry(
-                token=token, computed_at=instant, results=merged
+        for key, result in fresh.items():
+            _CACHE[key] = _CacheEntry(
+                token=token, computed_at=instant, result=result
             )
 
 
@@ -955,17 +1082,23 @@ def _evaluate_off_loop(
     JSON document per scope and happens on every call — a dismissal the operator
     just made must not wait out a TTL. The detectors, which are the part that can
     be expensive, run only for tasks with no answer inside their window.
+
+    The unreadable check is deliberately ahead of the cache lookup, and an answer
+    it produces is never stored. The other order reads as a harmless
+    short-circuit and is not one: a file that becomes unreadable inside a window
+    (a half-finished sync, a hand edit) would be answered from the cache with
+    ``state=None``, so a task the operator dismissed would come back as
+    ``offered`` on the strength of an answer the install can no longer stand
+    behind. Reading the record on every call means the record is what decides
+    whether an answer may be used at all.
     """
     states, unreadable = _load_states(tasks, config, workspace)
-    computed: dict[str, dict[str, ApplicabilityResult]] = {}
+    computed: dict[str, ApplicabilityResult] = {}
     results: dict[tuple[str, int], ApplicabilityResult] = {}
     for task in tasks:
         identity = (task.id, task.revision)
-        scope = _scope_key(config, task, workspace)
-        hit = cached.get(_read_key(config, task, workspace))
-        if hit is not None:
-            results[identity] = hit
-        elif scope in unreadable:
+        key = _read_key(config, task, workspace)
+        if _scope_key(config, task, workspace) in unreadable:
             # The file's *name* only: a state file's own name is the one place
             # a path-shaped string is safe to record, and it is what tells an
             # operator which file to look at.
@@ -977,10 +1110,15 @@ def _evaluate_off_loop(
                     "file": state_path_for(config, task.scope, workspace).name,
                 },
             )
-        else:
-            answer = apply_detector(task, config=config, workspace=workspace, today=today)
-            results[identity] = answer
-            computed.setdefault(scope, {})[task_key(task.id, task.revision)] = answer
+            continue
+        hit = cached.get(key)
+        if hit is not None:
+            results[identity] = hit
+            continue
+        answer = apply_detector(task, config=config, workspace=workspace, today=today)
+        results[identity] = answer
+        if _is_cacheable(answer):
+            computed[key] = answer
     if computed:
         _store_results(computed, token, instant)
     return [

@@ -117,9 +117,14 @@ RESERVED_UNINDEXED_FILES = frozenset(
         "vault-review.md",
         # The update-task state store (`ciao/update_tasks.py`): a per-workspace
         # record of which "After this update" tasks were offered, dismissed or
-        # completed. JSON bookkeeping, not a note — and a vault that answered an
-        # ordinary recall query with its own suppression receipts would be
-        # ranking its paperwork above the memories it manages.
+        # completed. A guard, not a fix for a live leak: every consumer of this
+        # set reads markdown only today (`fts_search._index_directory`'s `.md`
+        # default, `fts_search.index_file`, `vault_index`'s `rglob("*.md")`,
+        # `vault_lint._markdown_source_paths`), so nothing here can reach a
+        # `.json` file. It is listed because that is where the vault's own
+        # bookkeeping belongs, and because the day a consumer widens to
+        # non-markdown files this name has to be in the set already rather than
+        # becoming an index row and a recall hit.
         "update-tasks.json",
     }
 )
