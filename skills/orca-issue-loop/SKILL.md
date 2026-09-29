@@ -76,6 +76,17 @@ Rules:
 - The parent/child split, the round history, and any deferred finding go in the record, not only in scattered PR comments.
 - `plans/loop-state.md` carries the one-line cross-issue view (what is in flight, what merged); each `record.md` carries the depth for one issue.
 
+## 0.2 Finish the whole graph, not one wave
+
+**The default is to work every queued issue to completion in dependency order, not to merge a first wave and stop.** This is the failure mode to avoid: you split a parent into children, merge the independent foundations (the A children), and then report progress while the actual user-facing feature — the B/C/D children that depend on them — is still unbuilt. A foundation nothing consumes yet has delivered nothing to the user.
+
+- **Track the graph, not the batch.** Keep the child DAG in `plans/<batch>.md` with every child's status (`todo` / `in-flight` / `merged`). Work the *ready* set (children whose dependencies are merged) continuously: as one merges, start the next ready child without waiting to be asked. Never leave a parent open "for later" while its ready children sit unstarted.
+- **A parent closes only when all its children are merged** (or the user rules the rest out). Do not close a parent on its foundation alone, and do not silently stop with ready children outstanding. If you must stop (budget, a genuine blocker, a decision only the user can make), say exactly which children are unbuilt and why.
+- **Re-plan each child just-in-time.** A child that depended on an API another child added must be planned against *current* `develop` after that child merges; the parent body may predate the merged shape. File the child as its own issue (`Part of #N`) with an implementation-grade plan, then run it through the same loop.
+- **A blocker that is a decision, not code, asks the user once** (batch the questions), then continues with the rest of the graph while the answer is pending — do not stall the whole DAG on one question, and do not guess an irreversible answer.
+
+**Clear the loop's own follow-ups.** Any issue the loop opens along the way — a deferred review nit filed as `#NNN`, a split-out hardening item, a follow-up from a merged PR — is part of this workload. Track those ids in the same graph and close them the same way (plan → implement → review → merge → close) before declaring the batch done, unless the user explicitly wants to defer one.
+
 ## 1. Plan → GitHub issue (you, big model)
 
 **Starting from an existing issue `#N`:** `gh issue view N --comments`. If it already has a plan matching the template's level of detail, reuse it. Otherwise investigate and add the plan (edit the body, keeping the reporter's text under `## Report`).
