@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ciao.memory_audit import NoteVerification, note_verification
-from ciao.vault_index import canonical_type, scan_vault, temp_prefix
+from ciao.vault_index import build_filename_index, canonical_type, scan_vault, temp_prefix
 from ciao.vault_lint import is_template_stem, run_validation
 
 # No retention window. A `RETENTION_DAYS = 30` constant sat here unread while
@@ -61,7 +61,14 @@ REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "de
 # ``vanished`` is written by the system, not a person: a note that left the
 # vault by an ordinary file deletion simply stops being scanned, so the ledger —
 # which presents itself as the durable record of what left — recorded nothing.
-DISPOSITIONS = frozenset({"keep", "reopen", "trash", "restore", "delete", "vanished"})
+#
+# ``complete`` is the one disposition that moves a note instead of taking it out
+# of the vault: a project lands under `projects/completed/`, which `never_queued`
+# already refuses to list, so a completed project cannot reappear as a candidate.
+# It is terminal for the same reason `trash` is — the note is no longer where the
+# row says it is — and unlike `trash` the note is still in the vault, so the row
+# carries both paths and the inbound references that were rewritten to follow it.
+DISPOSITIONS = frozenset({"keep", "reopen", "trash", "restore", "delete", "complete", "vanished"})
 DECISION_DISPOSITIONS = frozenset({"keep"})
 _SUPERSEDED_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
 # Where a note is allowed to say it was superseded: its frontmatter and its
@@ -92,6 +99,21 @@ _LOOKUP_TYPES = frozenset({"person", "place", "resource", "reference"})
 # replaces 2026-07-24. Its prose is full of the vocabulary anyway — "all open
 # items moved to Monday" is about the items, not the entry.
 _RECORD_TYPES = frozenset({"journal"})
+# The one type with an END, and so the only one `complete_project_note` acts on.
+# A person, a place and a reference are not finished by anything; a project is,
+# and the completed layout under `projects/completed/` is what the vault already
+# means by that. `Retire` stays available for every type, including this one: a
+# project note that is wrong or abandoned is retired, not completed.
+PROJECT_TYPE = "project"
+# The one frontmatter line a completion rewrites, and the same substitution
+# `ProjectChatManager.complete_project` applies to the PWA's own completion, so
+# a project closed from the review panel and one closed from the Projects tab
+# leave byte-identical frontmatter. Deliberately the exact pair of regexes from
+# there: a looser match (`status: active-ish`, a `status:` inside a fenced
+# example) would rewrite a line the PWA's completion leaves alone, and then the
+# two paths could no longer be told apart.
+_STATUS_ACTIVE_RE = re.compile(r"(?m)^(status:\s*)active\s*$")
+_STATUS_COMPLETED_RE = re.compile(r"(?m)^(status:\s*)completed\s*$")
 # Enough of the note to recognise it without opening it; the panel shows the
 # first lines inline and keeps the disclosure for the rest.
 EXCERPT_CHARS = 280
@@ -198,7 +220,15 @@ def _suppressed(decision: dict[str, Any]) -> bool:
     # `reopen` and `vanished` are absent by design. `reopen` exists to undo a
     # `keep`, so it must not suppress; `vanished` records that a note left the
     # vault, and if the file comes back it deserves to be judged again.
-    return disposition in {"keep", "improve_link", "trash", "delete"}
+    #
+    # `complete` belongs here for the same reason `trash` does: the note left the
+    # path this row names. A completed project is already exempt from the queue
+    # on its own (it sits under `projects/completed/`, which `never_queued`
+    # refuses), so this is the second line of the same defence — a project that
+    # was moved back by hand, or whose completed note was edited, must not be
+    # judged against the decision that closed it. `restore_completed` supersedes
+    # the row when it does happen, and the note comes back to the queue.
+    return disposition in {"keep", "improve_link", "trash", "delete", "complete"}
 
 
 _SUPERSEDED_LINE_CHARS = 300
@@ -211,6 +241,26 @@ def _is_workspace_path(path: str) -> bool:
 def _is_completed_project(path: str) -> bool:
     parts = [part.casefold() for part in Path(path).parts]
     return any(a == "projects" and b == "completed" for a, b in zip(parts, parts[1:]))
+
+
+def _is_project_candidate(candidate: ReviewCandidate) -> bool:
+    """Whether this candidate is a project, and so has an end to be completed at.
+
+    Two questions, both answered from what the candidate already carries — the
+    evidence the queue built and the path it already read. Completion re-scans
+    the vault for the *references* to the note, which is a different job, but
+    deciding what a note IS is not something to pay a second scan for.
+
+    Declared type first, because it is the user's own statement and the
+    stronger one; the path catches the note that never declared it, which is the
+    common case for a project someone created by hand. The type is alias-resolved
+    through the same `canonical_type` the queue already used, so a capitalised
+    `type: Project` and a registered alias of it both count.
+    """
+    declared = str(candidate.evidence.get("type") or "").strip()
+    if (canonical_type(declared) or declared).casefold() == PROJECT_TYPE:
+        return True
+    return any(part.casefold() == "projects" for part in Path(candidate.path).parts)
 
 
 def never_queued(path: str) -> bool:
@@ -557,6 +607,62 @@ def _completed_counterpart(path: str) -> str:
     return ""
 
 
+def _completed_path_for(path: str) -> str:
+    """Where *path* lands when its project is completed, or ``""`` if it cannot be.
+
+    Two layouts are in real vaults and both are accepted here. The folder one,
+    ``projects/active/<x>/...``, is what ``_completed_counterpart`` has always
+    understood and what the PWA's own completion moves. The flat one,
+    ``projects/<name>.md``, is the reported case: a single-file project with no
+    folder of its own, whose counterpart function answers ``""`` for, so before
+    this it could only be retired and never completed.
+
+    Directory segments are compared case-folded, because ``Projects/`` and
+    ``projects/`` are the same directory on a case-insensitive filesystem and
+    the queue must not depend on which one a vault happens to use. Filenames
+    keep their original spelling: that is the user's, and rewriting it would
+    break every ref into the note for no reason.
+
+    ``""`` means refuse, in both directions. A note already under
+    ``projects/completed/`` is closed — completing it again would move it onto
+    itself — and a note outside ``projects/`` is not a project at all.
+    """
+    if _is_completed_project(path):
+        return ""
+    counterpart = _completed_counterpart(path)
+    if counterpart:
+        return counterpart
+    parts = list(Path(path).parts)
+    for index, part in enumerate(parts[:-1]):
+        if part.casefold() == "projects":
+            # A flat project: the note sits directly in `projects/`, so the
+            # destination is one segment deeper rather than a sibling rename.
+            return str(Path(*parts[: index + 1], "completed", *parts[index + 1:]))
+    return ""
+
+
+def _project_folder(path: str) -> str:
+    """The ``projects/active/<x>`` folder holding *path*, or ``""``.
+
+    A folder project is completed as a folder. Its main markdown is only the
+    entry point — the plan, the meeting notes and the attachments sit beside it
+    — and moving that one file would leave the rest of the project under
+    ``projects/active/`` describing a project the vault no longer has there.
+
+    ``""`` means the note is the whole project: it sits directly in
+    ``projects/active/`` (the single-file form) or in a flat ``projects/``. That
+    is decided by how many segments follow ``active`` — a folder project has at
+    least the folder and the note inside it, a single-file one has only the
+    note.
+    """
+    parts = list(Path(path).parts)
+    for index in range(len(parts) - 3):
+        if parts[index].casefold() != "projects" or parts[index + 1].casefold() != "active":
+            continue
+        return str(Path(*parts[: index + 3]))
+    return ""
+
+
 def _record_vanished(
     root: Path,
     workspace: str,
@@ -597,14 +703,18 @@ def _record_vanished(
     terminal_paths = {
         str(row.get("path") or "")
         for row in decisions.values()
-        if row.get("disposition") in {"trash", "delete", "vanished"}
+        if row.get("disposition") in {"trash", "delete", "complete", "vanished"}
     }
     for candidate_id_value, decision in decisions.items():
         if str(decision.get("workspace") or "") != workspace:
             continue
         path = str(decision.get("path") or "")
-        # `trash` and `delete` already say where the note went; `vanished` would
-        # be a second, vaguer answer to a question the ledger has answered.
+        # `trash`, `delete` and `complete` already say where the note went;
+        # `vanished` would be a second, vaguer answer to a question the ledger
+        # has answered. For `complete` this is the only guard there is in the
+        # flat layout: `_completed_counterpart` below knows `projects/active/<x>/`
+        # but not `projects/<name>.md`, and without it a flat project would be
+        # recorded as having vanished from the vault it is still sitting in.
         if path in terminal_paths:
             continue
         if path in present_paths:
@@ -614,7 +724,10 @@ def _record_vanished(
         if _completed_counterpart(path) in present_paths:
             # Completing a project moves it *and* rewrites its status line,
             # so neither the path nor the hash matches any more; the note is
-            # under projects/completed, not gone.
+            # under projects/completed, not gone. This covers a project closed
+            # from the PWA's Projects tab, which writes no ledger row of its
+            # own; a `complete` row never reaches here, because `terminal_paths`
+            # above already answered for its path.
             continue
         try:
             note = (root / Path(path).relative_to("memory-vault")).resolve()
@@ -979,6 +1092,501 @@ def restore_note(root: Path, candidate_id_value: str, *, actor: str = "user") ->
         if destination.is_file() and not source.exists():
             shutil.move(str(destination), str(source))
         raise ValueError(f"restore metadata cleanup failed; note remains trashed: {exc}") from exc
+    return metadata
+
+
+def _discard(path: Path) -> None:
+    """Delete a file that no longer records anything real.
+
+    Used for the leftover temps of a rolled-back rewrite and for the completion
+    recovery sidecar once the ledger row is durable. Neither is recoverable data
+    once its durable record exists, and a failed unlink is not worth failing a
+    completed action over — the worst case is one inert file where no scan, lint
+    pass or index will read it.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _write_texts(pairs: list[tuple[Path, str]]) -> None:
+    """Write each ``(path, text)`` as one transaction, rolling back on failure.
+
+    Every new text is staged to a temp file beside its target first — same
+    directory, so ``os.replace`` stays atomic and on the same filesystem — and
+    only then are the targets swapped in. A failure at any point restores every
+    already-swapped file from its recorded original in reverse order and removes
+    the leftover temps, then re-raises: a raised ``OSError`` means the vault is
+    exactly as it was.
+
+    The pattern ``_commit_staged_edits`` in ``vault_index`` and the per-root move
+    in ``vault_rehome`` already use, for the same reason. Writing each note the
+    moment its rewrite was computed can leave earlier notes pointing at a
+    destination that never arrived, and a half-applied link rewrite is the one
+    state a completion must not be able to leave behind.
+    """
+    staged: list[tuple[Path, Path]] = []
+    swapped: list[tuple[Path, str]] = []
+    try:
+        for path, text in pairs:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                delete=False,
+                dir=path.parent,
+                prefix=temp_prefix(path.name),
+                suffix=".tmp",
+            ) as handle:
+                handle.write(text)
+                temp = Path(handle.name)
+            # A fresh temp file lands at 0600 and os.replace would silently
+            # tighten the rewritten note's permissions; carry the old mode over,
+            # exactly as `_reverify` does for a stamped note.
+            try:
+                os.chmod(temp, path.stat().st_mode & 0o7777)
+            except OSError:
+                pass
+            staged.append((path, temp))
+        for (path, temp), (target, original) in zip(staged, pairs):
+            os.replace(temp, path)
+            swapped.append((target, original))
+    except OSError:
+        _unwrite_texts(swapped)
+        for _path, temp in staged:
+            _discard(temp)
+        raise
+
+
+def _unwrite_texts(swapped: list[tuple[Path, str]]) -> None:
+    """Put already-written files back from their recorded originals, best effort.
+
+    The inverse of :func:`_write_texts` for the failures that happen AFTER the
+    writes are on disk. Best effort by design: a rollback that itself cannot
+    write means the vault is already in a state no error message improves, and
+    raising from inside the recovery path would replace the error that explains
+    what went wrong with one that does not.
+    """
+    for path, original in reversed(swapped):
+        try:
+            path.write_text(original, encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _vault_ref(path: str) -> str:
+    """A note's path as a vault-relative ref: no ``memory-vault/`` prefix, no extension."""
+    return str(Path(path).relative_to("memory-vault").with_suffix(""))
+
+
+def _missing_ancestors(path: Path, stop: Path) -> list[Path]:
+    """The directories between *stop* and *path* that do not exist yet."""
+    missing: list[Path] = []
+    probe = path
+    while probe != stop and not probe.exists():
+        missing.append(probe)
+        probe = probe.parent
+    return missing
+
+
+def _prune_created(dirs: list[Path]) -> None:
+    """Remove directories this action created, innermost first, when they are empty.
+
+    A rolled-back completion has to leave the vault as it found it, and a
+    ``mkdir(parents=True)`` that nothing is then moved into leaves
+    ``projects/completed/<slug>/`` behind — which the PWA reads as a completed
+    project, because that tree is how it discovers them. ``rmdir`` only removes
+    an empty directory, so a directory something else has since put a note in is
+    never touched, and the outer ``projects/completed/`` survives if the vault
+    had it before.
+    """
+    for path in dirs:
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+
+def _rewrite_status(text: str) -> tuple[str, bool]:
+    """Close a project out in its own frontmatter; return the text and whether it changed.
+
+    The same substitution ``ProjectChatManager.complete_project`` applies, so a
+    project closed from the review panel and one closed from the Projects tab
+    leave the same frontmatter and either can be restored by the other.
+
+    A note with no ``status: active`` line is a normal shape — the key is
+    optional frontmatter — so it still completes, and the row records
+    ``status_rewritten: False`` rather than claiming a line was found. Saying so
+    honestly is the difference between a closed project that says it is closed
+    and a ledger row asserting a rewrite that never happened.
+    """
+    rewritten = _STATUS_ACTIVE_RE.sub(r"\1completed", text)
+    return rewritten, rewritten != text
+
+
+def _repoint_project_references(
+    root: Path, previous_path: str, completed_path: str, *, workspace: str
+) -> tuple[list[str], list[tuple[Path, str, str]]]:
+    """Every inbound reference to *previous_path*, repointed at *completed_path*.
+
+    Pure: returns the vault-relative paths that would change and, per absolute
+    path, the ``before``/``after`` images. Nothing is written, so a vault that
+    cannot be rewritten costs the caller nothing but the refusal.
+
+    Both dialects go through one primitive, ``rewrite_references``, because they
+    are the same edge written twice. Completion is the case it was extracted
+    for: the note STAYS in the vault, so unlike a deletion the links must be
+    repointed rather than stripped. The ref dialect does not change the way it
+    does for a move between workspaces — a note that said
+    ``[[projects/active/x]]`` reads the same way from ``projects/completed/`` —
+    so each reference is re-spelled relative to where the project now is, which
+    is what the helper does for a relative markdown destination.
+
+    Only notes that can name the project are read. A reference in any dialect is
+    a path without its extension, so it always contains the note's stem, and a
+    file without the stem cannot mention it: parsing every note in the vault to
+    discover that is the cost this skips.
+    """
+    # Imported here, not at module scope: `vault_rehome` pulls in the migration
+    # receipt and the git rail, and a read-only listing of this module's queue
+    # must not pay for them. The same reason `delete_permanently` imports
+    # `strip_references` at the point of use.
+    from ciao.vault_rehome import rewrite_references
+
+    root = Path(root).resolve()
+    entries = scan_vault(root, workspace=workspace)
+    filename_index = build_filename_index(entries)
+    # `rewrite_references` works in two value spaces, so the one move is spelled
+    # twice: a markdown destination is a path resolved against the note holding
+    # it, so both sides keep the `memory-vault/` prefix and drop the extension,
+    # while a frontmatter ref and a wikilink are vault-relative and drop both.
+    moved_by_ref = {
+        str(Path(previous_path).with_suffix("")): str(Path(completed_path).with_suffix(""))
+    }
+    moved_by_resolved = {previous_path: _vault_ref(completed_path)}
+    known = {str(Path(str(entry.path)).with_suffix("")) for entry in entries}
+    stem = Path(previous_path).stem
+    edited: list[str] = []
+    pairs: list[tuple[Path, str, str]] = []
+    for entry in entries:
+        rel = str(entry.path)
+        if rel == previous_path:
+            continue  # the note being completed, not one referring to it
+        try:
+            note = (root / Path(rel).relative_to("memory-vault")).resolve()
+        except ValueError:
+            continue
+        if not note.is_file() or not note.is_relative_to(root):
+            continue
+        try:
+            text = note.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Unreadable means unrewritable. A note the index already skipped is
+            # no reason to refuse closing a project, and there is nothing to
+            # record for `restore_completed` either.
+            continue
+        if stem not in text:
+            continue
+        new_text, _changes = rewrite_references(
+            text, rel, rel, moved_by_ref, filename_index,
+            moved_by_resolved=moved_by_resolved, known_notes=known,
+        )
+        if new_text == text:
+            continue
+        edited.append(rel)
+        pairs.append((note, text, new_text))
+    return edited, pairs
+
+
+def complete_project_note(root: Path, candidate: ReviewCandidate, *, actor: str = "user") -> dict[str, Any]:
+    """Close a project out: move it to ``projects/completed/`` and repoint what linked to it.
+
+    ``trash_note`` was the only way to retire a project candidate, and it is the
+    wrong instrument for one that simply finished. The project left the active
+    tree with ``status: active`` still in it, nothing in the vault recorded an
+    end, and every note that linked to it kept a reference to a file the queue
+    had stopped listing — so it left the index and the graph silently, which is
+    the complaint `trash_note` itself makes about search.
+
+    Completion moves the note where the vault already keeps closed projects,
+    rewrites the one frontmatter line that says otherwise, and repoints every
+    inbound reference in both dialects at the new path. This module already knew
+    that layout — ``_is_completed_project`` exempts it from candidates,
+    ``_completed_counterpart`` names it — and could not reach the one code path
+    that acted on it, which lived on the PWA's project chat manager and could
+    only close a project it already knew about.
+
+    Both layouts are real and both are handled: the folder project
+    ``projects/active/<x>/...``, which moves as a whole folder, and the flat
+    ``projects/<name>.md`` a hand-written project note usually is. A folder
+    project moves as a folder because its main markdown is only the entry point
+    — the plan, the notes and the attachments sit beside it, and moving the one
+    file would strand them under ``active/`` describing a project that is no
+    longer there.
+
+    The whole action is one transaction, in the ordering ``delete_permanently``
+    established and for the same reason: the links must be repointed BEFORE the
+    note moves, because resolving them needs the note to still be on disk, and
+    nothing may be left half-done. A failure at any point — a link rewrite, the
+    move itself, the ledger append — puts every file already written back and
+    leaves the project exactly where it was. A completion that landed for the
+    note and failed for its backlinks is the one outcome this workflow must not
+    produce: the ledger row would say the project was closed while notes across
+    the vault still point at the old path.
+
+    Refuses rather than repairs, in the three cases where the right answer is not
+    knowable from here: a candidate that is not a project (retiring one is what
+    the trash is for, and it stays available for projects too), a path with no
+    ``projects/`` layout to complete into, and a destination that is already
+    occupied — two projects landing on one name is a content decision, never a
+    move.
+    """
+    root = Path(root).resolve()
+    source = (root / Path(candidate.path).relative_to("memory-vault")).resolve()
+    if not source.is_relative_to(root):
+        raise ValueError("note is outside the vault")
+    if not source.is_file() or content_hash(source.read_bytes()) != candidate.content_hash:
+        raise ValueError("candidate changed or no longer exists; regenerate the review")
+    if not _is_project_candidate(candidate):
+        raise ValueError("only a project can be completed; retire this note instead")
+    completed_path = _completed_path_for(candidate.path)
+    if not completed_path:
+        raise ValueError("this note has no projects/ layout to complete into")
+    destination = (root / Path(completed_path).relative_to("memory-vault")).resolve()
+    if not destination.is_relative_to(root):
+        raise ValueError("completion destination is outside the vault")
+    folder = _project_folder(candidate.path)
+    if folder:
+        move_from = (root / Path(folder).relative_to("memory-vault")).resolve()
+        move_to = destination.parent
+    else:
+        move_from, move_to = source, destination
+    if not move_from.is_relative_to(root) or not move_to.is_relative_to(root):
+        raise ValueError("completion path is outside the vault")
+    # Checked before anything is written, so a refusal costs the vault nothing.
+    if move_to.exists():
+        raise ValueError(f"a note already exists at {completed_path}; refusing to complete into it")
+    try:
+        original_text = source.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # Decoding with errors="replace" and writing the result back would turn
+        # every undecodable byte into U+FFFD — a destructive edit to a note
+        # imported from a latin-1 source. Reading signals may be lossy; a
+        # rewrite may not. `_reverify` refuses the same note rather than
+        # stamping it, and completion rewrites more of it.
+        raise ValueError(f"project note is not readable as utf-8: {exc}") from exc
+    except OSError as exc:
+        raise ValueError(f"project note could not be read: {exc}") from exc
+    closed_text, status_rewritten = _rewrite_status(original_text)
+    # Inbound references resolve against the vault's real files, so the sweep
+    # runs while the note is still at its old path. That ordering constraint is
+    # why this is before the move and not after it, and it is the same reason
+    # `delete_permanently` refuses before it strips anything.
+    edited, pairs = _repoint_project_references(
+        root, candidate.path, completed_path, workspace=candidate.workspace
+    )
+    # The note's own rewrite joins the sweep's as one transaction. A failure on
+    # either side of the pair then leaves the note and the notes pointing at it
+    # consistent with each other, which is what makes the unwind below honest.
+    if closed_text != original_text:
+        pairs.insert(0, (source, original_text, closed_text))
+    # The images recorded as `undo` are the referring notes' only. The project's
+    # own text is not among them: `restore_completed` puts it back by moving it
+    # and flipping its one status line, and an image keyed at the old path would
+    # name a file that no longer exists by then.
+    undo = {str(path): {"before": before, "after": after} for path, before, after in pairs if path != source}
+    rollback = [(path, before) for path, before, _after in pairs]
+    try:
+        _write_texts([(path, after) for path, _before, after in pairs])
+    except OSError as exc:
+        raise ValueError(f"could not rewrite the references to the project: {exc}") from exc
+    metadata = {
+        "candidate_id": candidate.candidate_id,
+        "workspace": candidate.workspace,
+        # `path` is what every other row in this ledger names the note by, and
+        # what `_suppressed` and `_record_vanished` read. `previous_path` and
+        # `new_path` say where the completion actually put it.
+        "path": candidate.path,
+        "previous_path": candidate.path,
+        "new_path": completed_path,
+        "content_hash": candidate.content_hash,
+        "status_rewritten": status_rewritten,
+        "edited_backlinks": edited,
+        "undo": undo,
+        "completed_at": _now(),
+    }
+    # Durable recovery evidence BEFORE the terminal row, the way `trash_note`
+    # writes its sidecar before appending: if this process dies between the two,
+    # the sidecar is the only thing on disk that says where the note went and
+    # which files were rewritten, and with what to put back.
+    #
+    # Unlike `delete_permanently`, which KEEPS its metadata when the append
+    # fails, this one is discarded: there the note is still sitting in the trash
+    # and the metadata is the only way back to it, while here the whole
+    # transaction has just been undone. A file claiming a completed move for a
+    # project that is still active would be worse than no file at all.
+    recovery = destination.with_name(f"{destination.stem}.completion.json")
+    created = _missing_ancestors(move_to.parent, root)
+    try:
+        move_to.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(move_from), str(move_to))
+    except OSError as exc:
+        _discard(recovery)
+        _unwrite_texts(rollback)
+        _prune_created(created)
+        raise ValueError(f"could not complete the project; it was put back: {exc}") from exc
+    try:
+        recovery.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _append(root, {**metadata, "disposition": "complete", "status": "reviewed", "actor": actor})
+    except OSError as exc:
+        if move_to.exists() and not move_from.exists():
+            shutil.move(str(move_to), str(move_from))
+        _unwrite_texts(rollback)
+        # The sidecar first: it sits inside the tree `_prune_created` is about to
+        # remove, and an empty directory is the only thing `rmdir` will take.
+        _discard(recovery)
+        _prune_created(created)
+        raise ValueError(f"complete audit failed; the project was put back: {exc}") from exc
+    _discard(recovery)
+    return metadata
+
+
+def restore_completed(
+    root: Path, candidate_id_value: str, *, workspace: str, actor: str = "user"
+) -> dict[str, Any]:
+    """Undo one ``complete``: put the project back where it was.
+
+    The counterpart to :func:`complete_project_note`, and what keeps the
+    workflow's claim to be reversible true for completion the way `restore_note`
+    keeps it true for the trash. Appends rather than rewrites: the trail reads
+    "completed, then restored", which is the only order in which the
+    intermediate state stays visible to anyone reading it afterwards.
+
+    Scans the ledger for the latest ``complete`` row rather than looking the id
+    up in the decision index, because the note being restored is by definition
+    NOT a candidate any more — a completed project sits under
+    ``projects/completed/`` and never reaches the queue — and because
+    ``_latest_decisions`` would answer with the ``restore`` row a previous
+    restore already wrote, which is the "only a completed project can be
+    restored" case the scan handles by not matching it.
+
+    Three refusals, one judgement — a restore must never destroy work that
+    happened after the completion:
+
+    * the completed note is gone, so there is nothing to move back;
+    * the original path is occupied, so restoring would overwrite it;
+    * a note that was repointed at the completed path has been edited since, so
+      writing the recorded image back would throw those edits away. The
+      completion recorded the text each file was left in as well as the text it
+      had, and that is the only thing this can compare against.
+
+    The status line is flipped back rather than the note's whole text restored,
+    so a change made to the project while it sat in ``completed/`` survives:
+    only the one line completion is responsible for is undone. The recorded link
+    images are restored whole, because those rewrites were mechanical and
+    replaying them by hand is the repair nobody makes.
+    """
+    _validate_candidate_id(candidate_id_value)
+    root = Path(root).resolve()
+    decision: dict[str, Any] | None = None
+    for row in read_ledger(root):
+        if (
+            str(row.get("candidate_id") or "") == candidate_id_value
+            and str(row.get("workspace") or "") == workspace
+            and row.get("disposition") == "complete"
+        ):
+            decision = row
+    if not decision:
+        raise ValueError("completed candidate not found")
+    completed_path = str(decision.get("new_path") or "")
+    previous_path = str(decision.get("previous_path") or "")
+    if not completed_path or not previous_path:
+        raise ValueError("ledger row does not record where the project went")
+    source = (root / Path(completed_path).relative_to("memory-vault")).resolve()
+    destination = (root / Path(previous_path).relative_to("memory-vault")).resolve()
+    if not source.is_relative_to(root) or not destination.is_relative_to(root):
+        raise ValueError("restore path is outside the vault")
+    if not source.is_file():
+        raise ValueError("the completed project is no longer in the vault")
+    if destination.exists():
+        raise ValueError("refusing to restore: the original path is occupied")
+    folder = _project_folder(previous_path)
+    if folder:
+        # Mirror of the completion's move: a folder project comes back as a
+        # folder, so the plan and the attachments beside its main markdown
+        # travel with it instead of being left behind in `completed/`.
+        move_from = (root / Path(_completed_counterpart(folder)).relative_to("memory-vault")).resolve()
+        move_to = destination.parent
+        if not move_from.is_relative_to(root) or not move_from.is_dir():
+            raise ValueError("the completed project folder is no longer in the vault")
+    else:
+        move_from, move_to = source, destination
+    if not move_from.is_relative_to(root) or not move_to.is_relative_to(root):
+        raise ValueError("restore path is outside the vault")
+    undo = cast(dict[str, Any], decision.get("undo") or {})
+    images: list[tuple[Path, str]] = []
+    for path, image in undo.items():
+        target = Path(str(path))
+        # The recorded paths are the completion's own, but the ledger is a file
+        # on disk that a person can edit, and a restore is the one place this
+        # module writes to paths it did not choose.
+        if not target.is_file() or not target.resolve().is_relative_to(root):
+            raise ValueError(f"a note rewritten by the completion is gone: {path}")
+        if target.read_text(encoding="utf-8") != str(image.get("after") or ""):
+            raise ValueError(f"a note rewritten by the completion has changed since: {path}")
+        images.append((target, str(image.get("before") or "")))
+    metadata = {
+        "candidate_id": candidate_id_value,
+        "workspace": workspace,
+        "path": previous_path,
+        "previous_path": previous_path,
+        "new_path": completed_path,
+        "content_hash": str(decision.get("content_hash") or ""),
+        "edited_backlinks": list(decision.get("edited_backlinks") or []),
+        "restored_at": _now(),
+    }
+    created = _missing_ancestors(move_to.parent, root)
+    try:
+        move_to.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(move_from), str(move_to))
+    except OSError as exc:
+        _prune_created(created)
+        raise ValueError(f"could not restore the project: {exc}") from exc
+    # `writes` is what this restore puts on disk, `applied` is what it found
+    # there. Both are read after the move, because until the project lands at
+    # its old path the note is not there to read; `applied` is what puts the
+    # whole restore back if the ledger append below fails.
+    writes: list[tuple[Path, str]] = []
+    applied: list[tuple[Path, str]] = []
+    try:
+        for target, before in images:
+            current = target.read_text(encoding="utf-8")
+            writes.append((target, before))
+            applied.append((target, current))
+        if decision.get("status_rewritten") and destination.is_file():
+            current = destination.read_text(encoding="utf-8")
+            reopened = _STATUS_COMPLETED_RE.sub(r"\1active", current)
+            if reopened != current:
+                writes.append((destination, reopened))
+                applied.append((destination, current))
+        _write_texts(writes)
+    except OSError as exc:
+        # `_write_texts` restores every file it swapped in, and a read that
+        # failed wrote nothing at all, so the only thing left to undo here is
+        # the move: the project goes back to where it came from, linked the way
+        # it was linked.
+        if move_to.exists() and not move_from.exists():
+            shutil.move(str(move_to), str(move_from))
+        _prune_created(created)
+        raise ValueError(f"could not restore the project references: {exc}") from exc
+    try:
+        _append(root, {**metadata, "disposition": "restore", "status": "reviewed", "actor": actor})
+    except OSError as exc:
+        _unwrite_texts(applied)
+        if move_to.exists() and not move_from.exists():
+            shutil.move(str(move_to), str(move_from))
+        _prune_created(created)
+        raise ValueError(f"restore audit failed; the project stays completed: {exc}") from exc
     return metadata
 
 

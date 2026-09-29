@@ -3547,7 +3547,12 @@ async def vault_review(request: Request) -> JSONResponse:
     # `reopen` belongs here too: it looks its row up in the ledger, never in
     # `candidates`, so the pre-action scan was thrown away — and that scan
     # reads every note in the vault three times, twice per click.
-    if action in {"restore", "delete", "reopen"}:
+    # `restore_completed` is the same shape for a completed project: it moved out
+    # of the queue, so the pre-action scan could not find it either, and it
+    # repoints links on the way back, which a candidate lookup would not allow.
+    # `complete` is deliberately NOT here — it acts on a live candidate, and the
+    # regenerated list is how the item is found at all.
+    if action in {"restore", "delete", "reopen", "restore_completed"}:
         candidates = []
     else:
         candidates = await asyncio.to_thread(
@@ -3587,6 +3592,14 @@ async def vault_review(request: Request) -> JSONResponse:
         except (ValueError, OSError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse({"ok": True, "result": result, **await _vault_review_snapshot(root, workspace)})
+    if action == "restore_completed":
+        try:
+            result = await asyncio.to_thread(
+                functools.partial(review.restore_completed, root, candidate_id_value, workspace=workspace)
+            )
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"ok": True, "result": result, **await _vault_review_snapshot(root, workspace)})
     if action in {"restore", "delete"}:
         try:
             result = review.restore_note(root, candidate_id_value) if action == "restore" else review.delete_permanently(root, candidate_id_value, confirm=str(payload.get("confirm", "")))
@@ -3601,6 +3614,14 @@ async def vault_review(request: Request) -> JSONResponse:
             result = review.record_decision(root, item, str(payload.get("disposition", "")), actor="user")
         elif action == "trash":
             result = review.trash_note(root, item)
+        elif action == "complete":
+            # Through a thread, unlike `trash` and `decide` beside it: a
+            # completion moves the note, rewrites every note that links to it and
+            # scans the vault to find them. Run on the event loop that is several
+            # hundred file reads inside one request.
+            result = await asyncio.to_thread(
+                functools.partial(review.complete_project_note, root, item)
+            )
         else:
             return JSONResponse({"error": "unsupported action"}, status_code=400)
     except (ValueError, OSError) as exc:

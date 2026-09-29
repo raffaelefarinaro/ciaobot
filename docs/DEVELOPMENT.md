@@ -506,6 +506,32 @@ stamps `updated:` when the facts still hold.
 `--with-vault` adds the note-aging pass (still informational, never changes the
 exit code). Exit 0 clean, 1 findings, 2 a region could not be read.
 
+The vault-review queue (`ciao/vault_review.py`, the `Review` panel, and
+`POST /api/vault/review`) disposes of a candidate with one of six dispositions,
+and every one of them appends a row to the append-only
+`Workspace/Vault-Review.jsonl`: `keep` (stamps `updated:` and suppresses until
+the note's own bytes change), `reopen` (undoes a keep), `trash`/`restore` (the
+reversible workspace trash, which nothing purges on a timer), `delete` (attended
+permanent deletion, only from the trash and only with exact confirmation), and
+`complete`. A sixth, `vanished`, is written by the system for a note that left
+the vault by an ordinary file delete, so the ledger accounts for what left.
+
+`complete` is the one that MOVES a note rather than removing it, and it exists
+because retiring a finished project was the wrong instrument: `trash` left
+`status: active` in a note that had left the active tree, and every note linking
+to it kept a reference to a file the queue had stopped listing. It accepts a
+`type: project` or any note under a `projects/` segment, moves it to
+`projects/completed/` — the whole folder for `projects/active/<slug>/`, the one
+file for a flat `projects/<name>.md` — rewrites `status: active` to
+`status: completed`, and repoints every inbound reference in both dialects
+through the pure `vault_rehome.rewrite_references` primitive. `restore_completed`
+reverses one such row. Two ordering rules are load-bearing if you touch it: the
+links are rewritten BEFORE the move, because resolving them needs the note to
+still be on disk, and the ledger append is inside the same transaction, so a
+failure anywhere puts the move and every rewritten note back together.
+`Retire` stays available for every type, projects included — completion is for
+one that finished, not one that is wrong.
+
 ## Skills, subagents, and slash commands
 
 Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `visual-plan`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). The `gws-*` skills are gated on the workspace having a Google account linked: `sync_workspace_skills` resolves each agent root's effective profile (its `gws_profile`, else the operator default only when that account actually exists) and skips the GWS skills when the workspace has no profile connected — shipping wrappers that name a credential directory nobody created just produces auth errors. In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
