@@ -1,8 +1,0 @@
-{
-  "name": "ciaobot-defuddle",
-  "private": true,
-  "version": "1.0.0",
-  "dependencies": {
-    "defuddle": "0.19.3"
-  }
-}

@@ -1,6 +1,6 @@
 ---
 name: ciao-upkeep
-description: Keep Ciaobot current between releases — check every dependency and pin we install (Python, npm, Defuddle, gws, GitHub Actions, the Node floor, Playwright), keep the stock skill catalog, ciao-capabilities and the marketing site in sync with the code, sweep doc rot, and maintain the watchlist in docs/UPKEEP.md. Trigger on "keep ciao up to date", "check dependencies", "any updates", "check the site", "watchlist", "upkeep", or after a feature ships that adds a user-facing capability.
+description: Keep Ciaobot current between releases — check every dependency and pin we install (Python, npm, the gws CLI, GitHub Actions, the Node floor, Playwright), keep the stock skill catalog, ciao-capabilities and the marketing site in sync with the code, sweep doc rot, and maintain the watchlist in docs/UPKEEP.md. Trigger on "keep ciao up to date", "check dependencies", "any updates", "check the site", "watchlist", "upkeep", or after a feature ships that adds a user-facing capability.
 ---
 
 # Ciaobot upkeep
@@ -56,20 +56,15 @@ The full inventory — what is pinned where, and what the checker misses:
 |---|---|---|
 | Python deps (incl. `firecrawl-anydoc>=0.2.4,<0.3.0`) | `pyproject.toml` | yes — reported only |
 | Frontend deps | `web/package.json` | yes — reported only |
-| **Defuddle CLI** | `ciao/stock/defuddle/package.json` → `0.19.3` | **no** — separate manifest |
 | **`gws` CLI** | generated, not pinned by hand — see below | **drift reported, updates manual** |
 | AnyDoc | rides the `pyproject.toml` pin | yes |
 | GitHub Actions | `actions/*@v4`/`@v5`, `astral-sh/setup-uv@v6` | **no** |
 | Node floor | `.nvmrc` **and** `web/scripts/check-node.mjs` | **no** |
 | Playwright | `web/` | **no** |
 
-The three unchecked ones need their own check:
+The unchecked ones need their own check:
 
 ```bash
-# Defuddle: a separate manifest, installed privately by ciao/defuddle_install.py
-npm view defuddle version
-grep -A3 '"dependencies"' ciao/stock/defuddle/package.json
-
 # gws: nothing to bump by hand — see the note below
 npm view @googleworkspace/cli version 2>/dev/null || echo "check github.com/googleworkspace/cli"
 gws --version

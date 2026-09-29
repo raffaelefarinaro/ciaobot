@@ -66,8 +66,8 @@ Upkeep between releases:
   already in. It is a working document, not a periodic report, and a stale date
   on an unchecked row is worse than no date.
 - The checks themselves live in the `/ciao-upkeep` skill: every dependency and
-  pin we install (including Defuddle, `gws`, the GitHub Actions pins and the
-  paired Node floor), the stock skill catalog against `ciao-capabilities` and
+  pin we install (the `gws` CLI, the GitHub Actions pins and the paired Node
+  floor), the stock skill catalog against `ciao-capabilities` and
   the marketing site, doc rot, and the advisory CI steps nobody reads.
 - `/ciao-release` deliberately does none of this. It cuts, verifies, installs,
   walks the UI and ships; it does not fix. A defect found during a release

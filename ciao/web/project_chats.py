@@ -70,7 +70,6 @@ import yaml
 
 from ciao import job_runs, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
-from ciao.defuddle_install import agent_path
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -84,7 +83,6 @@ from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
 from ciao.model_tiers import is_tier
-from ciao.tool_path import login_shell_path
 from ciao.models import (
     THINKING_LEVELS,
     AgentRequest,
@@ -4284,7 +4282,6 @@ class ProjectChatManager:
         No upstream overrides: each provider authenticates itself.
         """
         env: dict[str, str] = {}
-        env["PATH"] = agent_path(login_shell_path())
         project = self._projects.get(chat.project_id)
         env["CIAO_WORKSPACE"] = str(self._config.workspace_root)
         workspace = project.workspace if project else ""

@@ -12,7 +12,6 @@ source checkout retains the source deploy workflow.
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[test]'
-python -m ciao.defuddle_install    # Node.js/npm required; local web-reader CLI
 ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
@@ -88,9 +87,7 @@ uninstall support remains for existing installations.
 `scripts/install-engine.sh` is the installer the release serves: it verifies the
 signed engine manifest with the release minisign key embedded in the script, and
 the wheel's digest and size, before anything is installed; installs the verified
-wheel with `uv tool install`; installs the pinned upstream Defuddle CLI privately
-inside that tool environment (requiring Node.js/npm); writes the install receipt
-with absolute paths;
+wheel with `uv tool install`; writes the install receipt with absolute paths;
 then runs `ciao setup` and `ciao service start` and prints the one-time login URL
 to the terminal. It refuses to take over an engine the retired app manages
 unless it is re-run with `--migrate`, and refuses to overwrite a `ciao` it did
