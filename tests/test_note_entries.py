@@ -234,11 +234,16 @@ def test_frontmatter_needs_to_look_like_frontmatter() -> None:
     # Nothing was silently dropped, and coverage still adds up.
     assert rules.entry_chars + rules.uncovered_chars == rules.total_chars
 
-    # Real frontmatter, closed either way, is still frontmatter.
+    # Real frontmatter, closed either way, is still frontmatter. `...` is a
+    # closer even though it never opens, which is the asymmetry that keeps a
+    # note beginning with one from being swallowed.
     for closer in ("---", "..."):
         doc = _parse(f"---\ntype: person\nupdated: 2026-01-01\n{closer}\n- a fact\n")
         assert _texts(doc) == ["- a fact"], closer
         assert doc.diagnostics == (), closer
+    # The frontmatter is uncovered, not read as entries.
+    fm = _parse("---\ntype: person\n...\n- a fact\n")
+    assert "type: person" in "".join(fm.original[s:e] for s, e in fm.uncovered)
     # An empty block is frontmatter too.
     assert _texts(_parse("---\n---\n- a fact\n")) == ["- a fact"]
 
@@ -280,6 +285,7 @@ def test_verified_stamp_parse_and_invalid_diagnostics() -> None:
         "- malformed [verified: 26-1-1]\n"
         "- missing value [verified: ]\n"
         "- future [verified: 2999-01-01]\n"
+        "- duplicated [verified: 2026-01-01] [verified: 2026-02-02]\n"
         "- trailing and spare [verified: 2026-06-30]   \n"
         "- promoted today [2026-09-01]\n"
         "- snapshot [as-of: 2026-09-01]\n"
@@ -287,7 +293,7 @@ def test_verified_stamp_parse_and_invalid_diagnostics() -> None:
         "- unverified altogether\n"
     )
     entries = {entry.text: entry for entry in doc.entries}
-    assert len(entries) == 10
+    assert len(entries) == 11
 
     def entry_containing(needle: str) -> ne.NoteEntry:
         """The one entry whose text names this case, so a rename cannot pass
@@ -332,6 +338,28 @@ def test_verified_stamp_parse_and_invalid_diagnostics() -> None:
     assert future.stamp.reason == ne.STAMP_REASON_FUTURE
     assert future.verified is None
     assert ne.DIAG_STAMP_FUTURE in future.diagnostics
+
+    # Two stamps on one line: the trailing one is this entry's claim, and the
+    # earlier one stays in the text. That is reported rather than resolved,
+    # because a tool that appends a stamp instead of replacing one changes the
+    # fingerprint — and a silent fingerprint change is how a fact gets a new
+    # identity without anyone deciding it should.
+    duplicated = entry_containing("duplicated")
+    assert duplicated.stamp is not None
+    assert duplicated.stamp.raw == "[verified: 2026-02-02]"
+    assert duplicated.verified == datetime.date(2026, 2, 2)
+    assert ne.DIAG_STAMP_DUPLICATE in duplicated.diagnostics
+    # The superseded token is still the fact's own text, so it still hashes.
+    assert "[verified: 2026-01-01]" in duplicated.text
+    assert ne.refresh_fingerprint(duplicated.text) == duplicated.fingerprint
+    # A single stamp on a line is not a duplicate.
+    assert ne.DIAG_STAMP_DUPLICATE not in entry_containing(
+        "trailing and spare"
+    ).diagnostics
+    # Nor is a mid-line token, which is prose rather than a second claim.
+    assert ne.DIAG_STAMP_DUPLICATE not in _parse(
+        "- [verified: 2026-01-01] a fact\n"
+    ).entries[0].diagnostics
 
     # Trailing whitespace after the stamp is still trailing, and the separator
     # it introduced is part of what the fingerprint removes.
@@ -650,29 +678,51 @@ def test_crlf_fence_and_inline_code_do_not_create_entries() -> None:
         "````markdown\n- not a fact\n```\n- also not a fact\n````\n- a fact\n"
     )
     assert _texts(long_fence) == ["- a fact"]
-    # A fence indented two or three spaces is a document-level fence to
-    # CommonMark, so it ends the item and stays out of it.
-    for indent in ("  ", "   "):
-        indented = _parse(f"- a fact\n{indent}```\n{indent}code\n{indent}```\n- next\n")
-        assert _texts(indented) == ["- a fact", "- next"], indent
-        for entry in indented.entries:
-            assert "code" not in entry.text, indent
+    # A fence indented to the item's content column is *inside* the item, and
+    # the content column of `- ` is 2 — which is how a command under a bullet is
+    # normally written. The bullets inside it are code within that fact, not
+    # facts of their own, and the code is part of what the fact says: dropping
+    # it would mean editing the command never changes the fact's identity.
+    for indent in ("  ", "   ", "    "):
+        nested = _parse(
+            f"- Run:\n{indent}```\n{indent}- not an entry\n{indent}```\n- next\n"
+        )
+        assert _texts(nested) == [
+            f"- Run:\n{indent}```\n{indent}- not an entry\n{indent}```",
+            "- next",
+        ], repr(indent)
+        assert nested.entry_count == 2, repr(indent)
+        # The owner reports itself: one fingerprint over a bullet with a code
+        # block in it is a fingerprint over a shape this model does not
+        # describe, and a caller has to see that before trusting the id.
+        assert nested.entries[0].supported is False, repr(indent)
+        assert ne.DIAG_NESTED_CONSTRUCT in nested.entries[0].diagnostics, repr(
+            indent
+        )
+        assert nested.entries[1].supported is True, repr(indent)
 
-    # Indented four or more it is nested *in* the item, which is past the three
-    # spaces a document-level fence may use — so the item owns it, and the
-    # bullets inside it are code within that fact rather than facts of their
-    # own.
-    nested = _parse("- Run:\n    ```\n    - not an entry\n    ```\n- next\n")
-    assert _texts(nested) == [
-        "- Run:\n    ```\n    - not an entry\n    ```",
+    # An ordered item's content column is 3, so the same code written there is
+    # still the item's code.
+    ordered_nested = _parse("1. a fact\n   ```\n   x\n   ```\n- b\n")
+    assert _texts(ordered_nested) == ["1. a fact\n   ```\n   x\n   ```", "- b"]
+    assert ordered_nested.entries[0].supported is False
+
+    # Shallower than the content column it really is a document-level fence, so
+    # it ends the item and stays out of it.
+    shallow = _parse("- a fact\n ```\n code\n ```\n- next\n")
+    assert _texts(shallow) == ["- a fact", "- next"]
+    for entry in shallow.entries:
+        assert "code" not in entry.text
+    assert shallow.entries[0].supported is True
+
+    # A tilde fence nested in an item behaves the same way.
+    tilde_nested = _parse(
+        "- Run:\n  ~~~\n  - not an entry\n  ~~~\n- next\n"
+    )
+    assert _texts(tilde_nested) == [
+        "- Run:\n  ~~~\n  - not an entry\n  ~~~",
         "- next",
     ]
-    assert nested.entry_count == 2
-    # The owner still reports itself: one fingerprint over a bullet with a code
-    # block in it is a fingerprint over a shape this model does not describe.
-    assert nested.entries[0].supported is False
-    assert ne.DIAG_NESTED_CONSTRUCT in nested.entries[0].diagnostics
-    assert nested.entries[1].supported is True
 
     # The same inside a child item: the child owns the fence, the parent and
     # the sibling are untouched, and nothing inside the fence is an entry.
@@ -696,15 +746,6 @@ def test_crlf_fence_and_inline_code_do_not_create_entries() -> None:
         "- d",
     ]
 
-    # A tilde fence nested in an item behaves the same way.
-    tilde_nested = _parse(
-        "- Run:\n    ~~~\n    - not an entry\n    ~~~\n- next\n"
-    )
-    assert _texts(tilde_nested) == [
-        "- Run:\n    ~~~\n    - not an entry\n    ~~~",
-        "- next",
-    ]
-
     # An unterminated nested fence runs to the end of the item's indented run,
     # not to the end of the note: the lines after the item are the next block,
     # not more of this one.
@@ -714,6 +755,18 @@ def test_crlf_fence_and_inline_code_do_not_create_entries() -> None:
         "- next",
         "- another",
     ]
+
+    # At the content column the same thing holds, and the siblings below an
+    # unclosed code block are facts in their own right rather than casualties:
+    # CommonMark ends a fence inside an item when the item ends.
+    shallow_unterminated = _parse("- a\n  ```\n  x\n- b\n- c\n")
+    assert _texts(shallow_unterminated) == ["- a\n  ```\n  x", "- b", "- c"]
+    assert ne.DIAG_UNTERMINATED_FENCE not in shallow_unterminated.diagnostics
+    # Coverage still accounts for every character, including the unclosed
+    # fence's, so nothing went missing quietly either.
+    assert shallow_unterminated.entry_chars + (
+        shallow_unterminated.uncovered_chars
+    ) == shallow_unterminated.total_chars
 
     # A tilde fence does not close on backticks, and a backtick fence with an
     # info string carrying one is not a fence at all.

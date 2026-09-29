@@ -36,9 +36,11 @@ pipe-delimited delimiter row), YAML frontmatter, and fenced code blocks. A
 `- item` line inside a ``` or ~~~ fence is code, not a fact. Fence tracking
 covers both fence characters, an info string, up to three leading spaces of
 indentation, a closing fence with no info string, and CRLF — and a fence nested
-*inside* a list item, which is indented past those three spaces and so belongs
-to the fact that owns it. Its lines are absorbed whole: a bullet written inside
-someone's code sample is part of the fact, never a fact of its own.
+*inside* a list item, at that item's content column, which is where a command
+written under a bullet belongs and which is only two spaces in for `- `. Its
+lines are absorbed whole: a bullet written inside someone's code sample is part
+of the fact, never a fact of its own, and an unclosed one ends with its item
+rather than swallowing the entries below it.
 
 **The verification stamp.** `[verified: YYYY-MM-DD]`, *trailing* on the entry's
 opening line, is the only thing this module reads as a claim that someone
@@ -53,7 +55,10 @@ impossible date (`2025-02-30`), a malformed one (`26-1-1`) and a future one
 each yield an `EntryStamp` with `valid=False`, a `reason`, and a diagnostic,
 never a guess and never a raised error. A *near-miss* of the tag — the tag
 spelling with a typo in its separator — is reported so a user who meant to
-write one is told; ordinary text that merely contains the word is not.
+write one is told; ordinary text that merely contains the word is not. Two
+stamps on one line are reported as a duplicate rather than resolved: the
+trailing one is the claim, the earlier one stays in the text, and a tool that
+appends rather than replaces changes the fingerprint with something to say so.
 
 **Fingerprint.** sha256 over the entry's exact source text with the
 verification stamp token removed, encoded as UTF-8 using the file's own
@@ -127,6 +132,7 @@ DIAG_BARE_CR = "bare-cr-line-ending"
 DIAG_STAMP_MALFORMED = "verified-stamp-malformed"
 DIAG_STAMP_IMPOSSIBLE = "verified-stamp-impossible"
 DIAG_STAMP_FUTURE = "verified-stamp-future"
+DIAG_STAMP_DUPLICATE = "verified-stamp-duplicate"
 DIAG_NESTED_CONSTRUCT = "entry-nested-construct"
 DIAG_MULTI_BLOCK = "entry-multi-block"
 DIAG_STAMP_ONLY = "entry-stamp-only"
@@ -518,6 +524,12 @@ _VERIFIED_LOOSE_RE = re.compile(
 )
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# Any stamp-shaped token, wherever on the line. Only ever used to ask whether a
+# *second* one exists before the trailing one this module reads — a looser
+# pattern than the strict one on purpose, since the question is "is there
+# another `[verified:` here at all", not "is it a usable stamp".
+_VERIFIED_ANY_RE = re.compile(r"\[verified:[^\]\n]*\]")
+
 
 def _stamp_line(line: str) -> str:
     """``line`` without a trailing ``\\r``, so a CRLF line still ends the stamp.
@@ -591,6 +603,12 @@ def _scan_stamp(
     The span is returned rather than recomputed by the caller so the payload
     the fingerprint hashes and the payload the support check reads are the same
     slice by construction.
+
+    A second stamp earlier on the line is *not* folded into this one: the
+    trailing token is the entry's claim, and the earlier one is left in the
+    text. :data:`DIAG_STAMP_DUPLICATE` is how a caller hears about it, because
+    the alternative is a tool that appends a stamp instead of replacing one
+    changing the fingerprint with nothing to say so.
     """
     body = _stamp_line(line)
     match = _VERIFIED_STAMP_RE.search(body)
@@ -909,10 +927,17 @@ def _entry_last_line(lines: list[_Line], start: int) -> int:
 
     A fenced block nested in the item is part of the item, and every line of it
     is absorbed whole: a ``- item`` inside a code block is code, and testing it
-    for a list marker or a new block would turn code into a fact. An
-    unterminated fence therefore runs to the end of the item's indented run
-    rather than to the end of the note — the lines after the item are the next
-    block, not more of this one.
+    for a list marker or a new block would turn code into a fact. "Nested"
+    means indented to the item's own *content column* — the column right after
+    ``- `` — which is where a fenced code block belongs under a bullet, and not
+    merely four or more spaces in: an item's content column is 2 for ``- x``
+    and 3 for ``1. x``, and code written one space in is still the item's code.
+    A fence shallower than that is a document-level block and ends the item.
+
+    An unterminated nested fence therefore runs to the end of the item's
+    indented run rather than to the end of the note — the lines after the item
+    are the next block, not more of this one, and a sibling entry below an
+    unclosed code block is a fact in its own right, not a casualty.
     """
     opening = lines[start]
     marker = _item_marker(opening)
@@ -943,9 +968,16 @@ def _entry_last_line(lines: list[_Line], start: int) -> int:
             pending_blank = True
             index += 1
             continue
-        if _opens_new_block(line, previous):
-            break
-        if line.indent > marker_indent:
+        # A fence at the item's content column is *inside* the item, and that
+        # is the normal way to write a command under a bullet: the content
+        # column of `- ` is 2, so the check has to run before
+        # `_opens_new_block`, which would otherwise claim a fence indented one
+        # to three spaces as a document-level block and end the item. Dropping
+        # the code from the entry there costs more than it looks: editing a
+        # command would not change the fact's identity, and an unterminated
+        # fence would swallow the sibling entries below it. Shallower than the
+        # content column it really is a document-level fence, and ends the item.
+        if line.indent >= content_indent:
             nested = _dedented_fence(line)
             if nested is not None:
                 fence = nested
@@ -953,6 +985,8 @@ def _entry_last_line(lines: list[_Line], start: int) -> int:
                 previous = line
                 index += 1
                 continue
+        if _opens_new_block(line, previous):
+            break
         if _item_marker(line) is not None:
             # A child item, or the next sibling. Either way it is its own
             # entry, and the parent must not swallow it.
@@ -1046,8 +1080,15 @@ def _build_entry(
 
     found: list[str] = []
     stamp, span = _scan_stamp(opening.view, today)
-    if stamp is not None and not stamp.valid:
-        found.append(_STAMP_DIAGNOSTICS[stamp.reason])
+    if stamp is not None:
+        if not stamp.valid:
+            found.append(_STAMP_DIAGNOSTICS[stamp.reason])
+        if span is not None and _VERIFIED_ANY_RE.search(opening.view[: span[0]]):
+            # An earlier stamp on the same line. Only the trailing one is this
+            # entry's claim; the other is left in the text, so a tool that
+            # appends rather than replaces changes the fingerprint — and this
+            # is the diagnostic saying so instead of letting it pass quietly.
+            found.append(DIAG_STAMP_DUPLICATE)
 
     # The stamp is metadata: it is removed from the fingerprint along with the
     # separator it introduced. `span` is the one span both this slice and the
