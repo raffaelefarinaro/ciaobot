@@ -178,9 +178,24 @@ class ReviewCandidate:
     status: str = "candidate"
     disposition: str = ""
     deferred_until: str = ""
+    # The vault this candidate was read from, so `as_dict` can ask the same
+    # "is the destination free" question `complete_project_note` asks without
+    # every one of its callers having to hand it a root. Never serialized: it
+    # is an absolute path on the operator's disk and means nothing to a client.
+    vault_root: Path | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # Dropped here rather than left for a caller to filter, so no route can
+        # leak an operator's absolute path by forgetting to.
+        payload.pop("vault_root", None)
+        # Whether this row can be COMPLETED rather than only retired, decided
+        # here so the panel never has to. Re-deriving project-ness in the UI
+        # from `evidence.type` leaves two definitions of the same thing free to
+        # disagree, and the failure is a Complete button the engine then
+        # refuses — the worst kind, because the row still looks actionable.
+        payload["completable"] = _is_completable(self)
+        return payload
 
 
 def _now() -> str:
@@ -590,7 +605,7 @@ def _generate_candidates(
         item = ReviewCandidate(
             candidate_id=candidate_id(workspace, path, digest), workspace=workspace,
             path=path, content_hash=digest, signals=tuple(sorted(signals)),
-            priority=priority, evidence=evidence,
+            priority=priority, evidence=evidence, vault_root=root,
         )
         candidates.append(item)
     def overdue(item: ReviewCandidate) -> int:
@@ -676,6 +691,65 @@ def _project_folder(path: str) -> str:
             continue
         return str(Path(*parts[: index + 3]))
     return ""
+
+
+def _inside_vault(root: Path, vault_relative: str) -> Path | None:
+    """Resolve a ``memory-vault/...`` id to a real path, or ``None`` if it escapes.
+
+    The inverse of `_vault_path`, and the one place the completion's path
+    arithmetic happens, because two questions must share an answer: "is this
+    note completable" and "may this note be completed". They are asked with the
+    same ``relative_to`` / ``is_relative_to`` pair on purpose — the second one
+    is what decides whether the vault gets written to, and a path that leaves
+    the vault is refused by both rather than rounded to something
+    harmless-looking.
+    """
+    root = Path(root).resolve()
+    try:
+        relative = Path(vault_relative).relative_to("memory-vault")
+    except ValueError:
+        return None
+    resolved = (root / relative).resolve()
+    return resolved if resolved.is_relative_to(root) else None
+
+
+def _completion_move_to(root: Path, path: str, completed_path: str) -> Path | None:
+    """Where completing *path* would put the thing it moves, or ``None`` if that escapes.
+
+    Not the note's own ``completed_path``: a folder project moves as a FOLDER
+    (``_project_folder``), so it is the folder's counterpart that has to be
+    free. A candidate whose own destination is clear while its folder's is
+    occupied is refused all the same, and a flag answering only the first
+    question would offer a button that comes back 409.
+    """
+    folder = _project_folder(path)
+    return _inside_vault(root, _completed_counterpart(folder) if folder else completed_path)
+
+
+def _is_completable(candidate: ReviewCandidate) -> bool:
+    """Whether the engine will accept ``complete`` for this candidate.
+
+    Three questions, and they are the ones ``complete_project_note`` asks
+    before it writes anything — the flag exists so the panel's button is a
+    promise the engine keeps:
+
+    * is it a project at all (``_is_project_candidate``);
+    * is there a ``projects/`` layout to complete into (``_completed_path_for``,
+      which answers ``""`` for a note already under ``projects/completed/``);
+    * is the destination free (``_completion_move_to``), because two projects
+      landing on one name is a content decision and the move refuses it.
+
+    The third cannot be answered from the candidate alone, so a candidate
+    carrying no vault is not completable: Retire always works, whereas a flag
+    that answered yes without looking would be a lie the panel repeats.
+    """
+    if not _is_project_candidate(candidate):
+        return False
+    completed_path = _completed_path_for(candidate.path)
+    if not completed_path or candidate.vault_root is None:
+        return False
+    move_to = _completion_move_to(candidate.vault_root, candidate.path, completed_path)
+    return move_to is not None and not move_to.exists()
 
 
 def _record_vanished(
@@ -1535,10 +1609,10 @@ def complete_project_note(root: Path, candidate: ReviewCandidate, *, actor: str 
 
     Refuses rather than repairs, in the three cases where the right answer is not
     knowable from here: a candidate that is not a project (retiring one is what
-    the trash is for, and it stays available for projects too), a path with no
-    ``projects/`` layout to complete into, and a destination that is already
-    occupied — two projects landing on one name is a content decision, never a
-    move.
+    the trash is for), a path with no ``projects/`` layout to complete into, and a
+    destination that is already occupied — two projects landing on one name is a
+    content decision, never a move. The last two are the ones `_is_completable`
+    reads, so the flag the panel draws from cannot promise what this refuses.
     """
     root = Path(root).resolve()
     source = (root / Path(candidate.path).relative_to("memory-vault")).resolve()
@@ -1551,8 +1625,8 @@ def complete_project_note(root: Path, candidate: ReviewCandidate, *, actor: str 
     completed_path = _completed_path_for(candidate.path)
     if not completed_path:
         raise ValueError("this note has no projects/ layout to complete into")
-    destination = (root / Path(completed_path).relative_to("memory-vault")).resolve()
-    if not destination.is_relative_to(root):
+    destination = _inside_vault(root, completed_path)
+    if destination is None:
         raise ValueError("completion destination is outside the vault")
     folder = _project_folder(candidate.path)
     if folder:
@@ -1563,10 +1637,12 @@ def complete_project_note(root: Path, candidate: ReviewCandidate, *, actor: str 
         # `completed/x/meetings`, and moving the whole `x` folder there would
         # leave `new_path` naming a file that does not exist and the project
         # split across two trees.
-        move_from = (root / Path(folder).relative_to("memory-vault")).resolve()
-        move_to = (root / Path(_completed_counterpart(folder)).relative_to("memory-vault")).resolve()
+        move_from = _inside_vault(root, folder)
+        move_to = _completion_move_to(root, candidate.path, completed_path)
     else:
         move_from, move_to = source, destination
+    if move_from is None or move_to is None:
+        raise ValueError("completion path is outside the vault")
     if not move_from.is_relative_to(root) or not move_to.is_relative_to(root):
         raise ValueError("completion path is outside the vault")
     # Checked before anything is written, so a refusal costs the vault nothing.

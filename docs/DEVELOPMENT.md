@@ -534,8 +534,37 @@ two moments. Three ordering rules are load-bearing if you touch it: the
 links are rewritten BEFORE the move, because resolving them needs the notes to
 still be on disk; the ledger append is inside the same transaction, so a
 failure anywhere puts the move and every rewritten note back together.
-`Retire` stays available for every type, projects included — completion is for
-one that finished, not one that is wrong.
+
+In the `Review` panel, a candidate the backend marked `completable` offers
+**Complete** in place of **Retire** — never both, since a project that finished
+and a project that is wrong are different findings and the user has to be able
+to tell them apart. `completable` is computed in the payload, and the panel
+reads it: the UI has no alias table and no view of the `projects/` layouts, so a
+second definition of project-ness there would be free to disagree with the one
+that decides whether the click is honoured. It answers the same three questions
+`complete_project_note` asks before it writes anything — is this a project
+(`_is_project_candidate`), is there a layout to complete into
+(`_completed_path_for`), and is the destination free (`_completion_move_to`) —
+so a row that offers Complete is a click the engine accepts. The third one is
+why a candidate carries its vault root: it is a question about the disk, it
+answers `false` when `projects/completed/<name>` is already occupied, and the
+row falls back to **Retire** instead of a button whose only possible answer is
+409. The flag is not a second verdict, and it is deliberately narrow: it never
+offers Complete on a row that Retire could have handled.
+
+**Retire is therefore unreachable on a completable project row**, which is a
+consequence of "in place of" and not an oversight: there is one terminal action
+per row, and a project row spends it on closing the project out. A project that
+is wrong rather than finished has no row-level trash today; a second action on
+those rows is a follow-up, not a bug. **Complete** asks for confirmation where
+**Retire** does not, for the same reason: `restore_completed` exists on the
+engine but no panel surface calls it, and a completed note is in neither the
+candidate list nor the trash, so a misclick has no in-app way back.
+
+Completing clears the row like any other disposition; `restore_completed` is not
+surfaced in the panel yet (a completed note is in neither the candidate list nor
+the trash, so there is no row to hang it on), and a surface for it is a
+follow-up.
 
 ## Skills, subagents, and slash commands
 

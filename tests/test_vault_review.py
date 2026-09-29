@@ -1514,6 +1514,148 @@ def test_a_flat_project_note_completes_into_the_completed_tree(tmp_path: Path) -
     assert metadata["new_path"] == "memory-vault/projects/completed/Faraman-Calendar.md"
 
 
+def _unqueued_candidate(
+    root: Path, path: str, declared_type: str = "project"
+) -> review.ReviewCandidate:
+    """A candidate the queue would never return, to read the flag on its own.
+
+    `never_queued` keeps anything under `projects/completed/` out of the
+    generated list, so the "already completed" case cannot be produced by
+    `generate_candidates` — and the flag still has to be right for it, because
+    it is the flag that decides which button the panel draws.
+
+    It carries `vault_root` the way a real one does, since the destination
+    check is a question about the disk and a candidate with no vault behind it
+    is never completable.
+    """
+    return review.ReviewCandidate(
+        candidate_id=review.candidate_id("personal", path, "deadbeef"),
+        workspace="personal",
+        path=path,
+        content_hash="deadbeef",
+        signals=("unlinked",),
+        priority=1,
+        evidence={"type": declared_type},
+        vault_root=root,
+    )
+
+
+def test_the_payload_says_whether_a_candidate_can_be_completed(tmp_path: Path) -> None:
+    """The panel must not re-derive project-ness from `evidence.type`.
+
+    It has no alias table and no view of the `projects/` layouts, so a second
+    definition would be free to disagree with the one that gates the action —
+    and the disagreement is a Complete button the engine then refuses. The flag
+    is therefore computed from the same helpers `complete_project_note` checks,
+    here, in the payload.
+    """
+    _project(tmp_path, "evaluate-sdk-docs-page")
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    (tmp_path / "projects" / "Person-note.md").write_text(
+        "---\ntype: person\nstatus: active\nupdated: 2026-05-19\n---\n# Person\n\nFiled oddly.\n",
+        encoding="utf-8",
+    )
+    queued = generate_candidates(tmp_path, workspace="personal", max_candidates=50, now=_SEPT)
+    by_path = {item.path: item.as_dict() for item in queued}
+
+    # A project the engine will complete: the flag is on.
+    project = by_path["memory-vault/projects/active/evaluate-sdk-docs-page/evaluate-sdk-docs-page.md"]
+    assert project["completable"] is True
+
+    # Not a project at all.
+    assert by_path["memory-vault/People/A.md"]["completable"] is False
+    # A declared type always wins over the folder it sits in, here and in the
+    # action, so the flag must not offer Complete for it.
+    assert by_path["memory-vault/projects/Person-note.md"]["completable"] is False
+
+    # A project that is already completed has nowhere to complete INTO, which
+    # `_completed_path_for` answers "" for. The queue never returns one — the
+    # completed tree is exempt — so the row is built by hand.
+    completed = _unqueued_candidate(tmp_path, "memory-vault/projects/completed/demo/demo.md")
+    assert completed.as_dict()["completable"] is False
+    # And a project outside `projects/` is not a project at all.
+    outside = _unqueued_candidate(tmp_path, "memory-vault/notes/demo.md")
+    assert outside.as_dict()["completable"] is False
+    # While the same note under `projects/` is.
+    flat = _unqueued_candidate(tmp_path, "memory-vault/projects/demo.md")
+    assert flat.as_dict()["completable"] is True
+
+    # A candidate with no vault behind it cannot be checked, so it is not
+    # offered: Retire always works, and answering yes without looking would be
+    # the one answer that cannot be kept.
+    homeless = review.ReviewCandidate(
+        candidate_id="h" * 24, workspace="personal",
+        path="memory-vault/projects/demo.md", content_hash="deadbeef",
+        signals=("unlinked",), priority=1, evidence={"type": "project"},
+    )
+    assert homeless.as_dict()["completable"] is False
+    # And the operator's absolute path never reaches the payload.
+    assert "vault_root" not in flat.as_dict()
+    assert str(tmp_path) not in json.dumps(flat.as_dict())
+
+
+def test_an_occupied_completion_destination_takes_complete_off_the_row(tmp_path: Path) -> None:
+    """Two projects landing on one name is a content decision, never a move.
+
+    The completion refuses it before writing anything, so a row that still
+    showed Complete was offering a button whose only possible answer was 409 —
+    and because the row has no Retire, Still true was left as the sole working
+    action on it. The flag has to read the destination off the disk, not just
+    the layout off the path.
+    """
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "A.md").write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n# A\n\nIn flight.\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "projects/A.md")
+    assert candidate.as_dict()["completable"] is True
+
+    (tmp_path / "projects" / "completed").mkdir()
+    (tmp_path / "projects" / "completed" / "A.md").write_text(
+        "---\ntype: project\n---\n# A\n", encoding="utf-8"
+    )
+
+    # The flag and the action agree, which is the whole point: the row falls
+    # back to Retire and the action refuses for the same reason.
+    assert _project_candidate(tmp_path, "projects/A.md").as_dict()["completable"] is False
+    with pytest.raises(ValueError, match="already exists"):
+        review.complete_project_note(tmp_path, _project_candidate(tmp_path, "projects/A.md"))
+
+
+def test_an_occupied_project_folder_takes_complete_off_the_row(tmp_path: Path) -> None:
+    """A folder project moves as a folder, so the folder is what must be free.
+
+    A candidate nested below the entry markdown has its OWN completed path
+    clear while `projects/completed/<slug>/` is occupied. Asking only about the
+    note's own path is what left a nested row offering a button the engine
+    refuses.
+    """
+    folder = _project(tmp_path, "demo")
+    nested = folder / "meetings" / "2026-01.md"
+    nested.parent.mkdir(parents=True)
+    # Untyped on purpose: a declared `type:` always wins, so a nested note is
+    # a project candidate because of where it sits, which is the shape a real
+    # project folder has. `updated:` is what queues it.
+    nested.write_text(
+        "---\nupdated: 2026-05-19\n---\n# 2026-01\n\nKickoff.\n", encoding="utf-8"
+    )
+    needle = "active/demo/meetings/2026-01.md"
+    assert _project_candidate(tmp_path, needle).as_dict()["completable"] is True
+
+    (tmp_path / "projects" / "completed" / "demo").mkdir(parents=True)
+    (tmp_path / "projects" / "completed" / "demo" / "other.md").write_text(
+        "---\ntype: note\n---\n# Other\n", encoding="utf-8"
+    )
+
+    # The note's own destination (`completed/demo/meetings/2026-01.md`) is
+    # free; the move target is not, and the move is what would clobber.
+    assert not (tmp_path / "projects" / "completed" / "demo" / "meetings" / "2026-01.md").exists()
+    assert _project_candidate(tmp_path, needle).as_dict()["completable"] is False
+    with pytest.raises(ValueError, match="already exists"):
+        review.complete_project_note(tmp_path, _project_candidate(tmp_path, needle))
+
+
 def test_completion_repoints_every_inbound_reference_in_both_dialects(tmp_path: Path) -> None:
     """A move that leaves the links behind trades one broken vault for another.
 

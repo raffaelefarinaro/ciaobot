@@ -139,7 +139,7 @@ describe('ProjectSidebar review section', () => {
     const vaultReview = useVaultReviewStore()
     vaultReview.loadedWorkspace = 'personal'
     vaultReview.candidates = [
-      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unverified'], priority: 0, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '' },
+      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unverified'], priority: 0, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '', completable: false },
     ]
     const wrapper = await mountSidebar()
 
@@ -209,8 +209,8 @@ describe('ProjectSidebar review section', () => {
     const vaultReview = useVaultReviewStore()
     vaultReview.loadedWorkspace = 'personal'
     vaultReview.candidates = [
-      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unlinked'], priority: 1, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '' },
-      { candidate_id: 'c2', workspace: 'personal', path: 'b.md', content_hash: 'h2', signals: ['unlinked'], priority: 1, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '' },
+      { candidate_id: 'c1', workspace: 'personal', path: 'a.md', content_hash: 'h1', signals: ['unlinked'], priority: 1, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '', completable: false },
+      { candidate_id: 'c2', workspace: 'personal', path: 'b.md', content_hash: 'h2', signals: ['unlinked'], priority: 1, evidence: EVIDENCE, status: 'candidate', disposition: '', deferred_until: '', completable: false },
     ]
 
     const wrapper = await mountSidebar()

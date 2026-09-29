@@ -39,12 +39,15 @@ const showInitialError = computed(() => !store.loading && !hasCurrentSnapshot.va
 const showStaleError = computed(() => hasCurrentSnapshot.value && Boolean(store.loadError))
 
 // Failures go to the app's error toast, matching ProposalReviewPanel: an
-// inline banner would sit above the list with no way to dismiss it.
+// inline banner would sit above the list with no way to dismiss it. The title
+// names the panel, not one of its actions: a failed completion is not a failed
+// retirement, and the old wording told the user they had tried to do something
+// this row never offered.
 watch(
   () => store.error,
   (message) => {
     if (!message) return
-    projectStore.pushErrorToast('Retirement action failed', message)
+    projectStore.pushErrorToast('Review action failed', message)
     store.error = ''
   },
 )
@@ -210,6 +213,11 @@ const chatBusy = ref(false)
  * The row already shows all of it; repeating it in the message means the chat
  * starts from the same evidence the decision is being made on, without the
  * agent having to re-derive why curation flagged the note.
+ *
+ * The question asked depends on the row's terminal action: a project is not
+ * being weighed for retirement, it is being offered a completion, and asking
+ * "what would be lost if it went" about a note that is about to move to
+ * `projects/completed/` invites the wrong answer.
  */
 function discussPrompt(candidate: VaultReviewCandidate): string {
   const reasons = signalReasons(candidate.signals)
@@ -220,7 +228,7 @@ function discussPrompt(candidate: VaultReviewCandidate): string {
   const duplicates = candidate.evidence.duplicate_group.filter(p => p !== candidate.path)
   if (duplicates.length) facts.push(`possible duplicates: ${duplicates.slice(0, 3).join(', ')}`)
   return (
-    `I am deciding whether to retire \`${candidate.path}\` from the ` +
+    `I am deciding what to do with \`${candidate.path}\` in the ` +
     `${candidate.workspace} vault.\n\n` +
     `Curation flagged it because ${reasons.join('; ') || 'it looked stale'}. ` +
     `It is ${facts.join(' · ')}.\n\n` +
@@ -244,15 +252,37 @@ function discussPrompt(candidate: VaultReviewCandidate): string {
  * read-only, and the unlinked branch narrows the permission rather than
  * dropping it: links into other notes, once approved, and no edit to the note
  * under review.
+ *
+ * Every branch ends by naming the buttons the row actually carries. A
+ * completable row has no Retire, and a seed that offers one sends the agent
+ * weighing an option the user cannot pick — the same small dishonesty as a
+ * title that names a question the draft does not ask.
  */
 function discussTask(candidate: VaultReviewCandidate): string {
   if (!candidate.signals.includes('unlinked')) {
+    if (isCompletable(candidate)) {
+      return (
+        'Read the note and tell me whether this project has actually finished, ' +
+        'and what would be lost by completing it. Do not edit, move, or delete ' +
+        'anything — I will pick Still true or Complete myself.'
+      )
+    }
     return (
       'Read the note and tell me what would be lost if it went, and whether ' +
       'anything in it belongs somewhere else first. Do not edit, move, or delete ' +
       'anything — I will pick Still true or Retire myself.'
     )
   }
+  // The closing half is where the row's terminal action has to be named, and
+  // the two differ in the argument as well as the choice: telling the agent
+  // that "nothing should link to it" is a reason to RETIRE a project it is
+  // about to be offered Complete for would aim the answer at the wrong verdict.
+  const verdict = isCompletable(candidate)
+    ? 'that is an argument for completing it.'
+    : 'that is an argument for retiring it.'
+  const closing = isCompletable(candidate)
+    ? 'I will pick Still true or Complete myself.'
+    : 'I will pick Still true or Retire myself.'
   return (
     // The approval gate leads, as the read-only branch's constraint does.
     // Buried mid-paragraph it was one clause among five, and the cost of a
@@ -264,9 +294,21 @@ function discussTask(candidate: VaultReviewCandidate): string {
     'sentence it would read, and wait for my go-ahead on each before writing ' +
     'it: a link is what actually clears this flag, since a note that gains a ' +
     'backlink stops being flagged for it. If nothing should link to it, say so ' +
-    'plainly — that is an argument for retiring it. Do not edit, move, or ' +
-    'delete the note itself; I will pick Still true or Retire myself.'
+    `plainly — ${verdict} Do not edit, move, or delete the note itself; ${closing}`
   )
+}
+
+/** The chat's name, following the question the seed actually opens with:
+ * "Retire Mo?" over a chat hunting for links to Mo is the same small
+ * dishonesty the `Link fixed` button was removed for. The second half of that
+ * question is the row's terminal action, so a project row says Complete where
+ * every other row says Retire. */
+function discussTitle(candidate: VaultReviewCandidate): string {
+  const leaf = candidateLeaf(candidate.path)
+  if (candidate.signals.includes('unlinked')) {
+    return isCompletable(candidate) ? `Link or complete ${leaf}?` : `Link or retire ${leaf}?`
+  }
+  return isCompletable(candidate) ? `Complete ${leaf}?` : `Retire ${leaf}?`
 }
 
 /** Open a chat about this candidate, with the note pinned beside it.
@@ -285,14 +327,26 @@ async function discussRow(candidate: VaultReviewCandidate) {
       // The chat's name follows the question the seed actually opens with:
       // "Retire Mo?" over a chat hunting for links to Mo is the same small
       // dishonesty the `Link fixed` button was removed for.
-      title: candidate.signals.includes('unlinked')
-        ? `Link or retire ${candidateLeaf(candidate.path)}?`
-        : `Retire ${candidateLeaf(candidate.path)}?`,
+      title: discussTitle(candidate),
       seed: discussPrompt(candidate),
     })
   } finally {
     chatBusy.value = false
   }
+}
+
+/**
+ * Whether this row offers **Complete** instead of **Retire**.
+ *
+ * The backend's answer, read straight off the payload: it decides from the
+ * same helpers `complete_project_note` gates on, so a button that renders is a
+ * click the engine will honour. Re-deriving project-ness here from
+ * `evidence.type` would be a second definition free to disagree with the
+ * first, and the disagreement shows up as a refusal on a row that still looks
+ * actionable.
+ */
+function isCompletable(candidate: VaultReviewCandidate): boolean {
+  return candidate.completable === true
 }
 
 async function keepRow(candidate: VaultReviewCandidate) {
@@ -303,6 +357,26 @@ async function trashRow(candidate: VaultReviewCandidate) {
   // No confirm here: trash is reversible and one click restores it. The
   // confirm budget is spent on permanent deletion instead.
   await store.trash(workspace.value, candidate.candidate_id)
+}
+
+/**
+ * Close a project out, in place of retiring it.
+ *
+ * Asks first, where `trashRow` does not. The reason trash needs no confirm is
+ * that one click restores it, and a completed project has no such route from
+ * here: `restore_completed` exists on the engine but nothing in the panel calls
+ * it, and a completed note is in neither the candidate list nor the trash to
+ * hang a Restore button on. So a misclick rewrites every note that links to the
+ * project and leaves no in-app way back — which is exactly what a confirm is
+ * for. The wording says so rather than implying the action is free.
+ */
+async function completeRow(candidate: VaultReviewCandidate) {
+  const title = candidateLeaf(candidate.path)
+  if (!await askConfirm(
+    `Complete "${title}"? It moves to projects/completed/ and every note that links to it is rewritten to follow. This cannot be undone from here.`,
+    { title: 'Complete project', confirmLabel: 'Complete', destructive: true },
+  )) return
+  await store.complete(workspace.value, candidate.candidate_id)
 }
 
 async function reopenRow(note: VaultClearedNote) {
@@ -354,10 +428,13 @@ function clearedDate(note: VaultClearedNote): string {
           {{ visibleCandidates.length }} to revisit
         </template>
       </h2>
-      <!-- One sentence says what the two buttons do; the rows repeat nothing. -->
+      <!-- One sentence says what the buttons do; the rows repeat nothing. -->
       <p v-if="props.section !== 'trash'" class="mr-lede vr-lede">
         Saved notes that may have gone out of date. <strong>Still true</strong> marks a note
-        checked today; <strong>Retire</strong> moves it to Retired, where it can be restored.
+        checked today. A project offers <strong>Complete</strong> in its place, which moves it
+        to <code>projects/completed/</code> and repoints what links to it;
+        <strong>Retire</strong> covers every other note, moving it to Retired, where it can be
+        restored.
       </p>
       <p v-else class="mr-lede vr-lede">
         Notes you retired. They stay here until you say otherwise — nothing is removed
@@ -522,7 +599,20 @@ function clearedDate(note: VaultClearedNote): string {
                 title="Clear the row, and stamp the note's updated date as today when it has frontmatter to stamp"
                 @click="keepRow(candidate)"
               >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Still true' }}</button>
+              <!-- Complete and Retire are the same slot, never both on one row.
+                   Retire is deliberately unreachable on a project row: it replaces
+                   the trash, and a project is closed out rather than hidden, so
+                   the confirm is where the weight sits instead. -->
               <button
+                v-if="isCompletable(candidate)"
+                type="button"
+                class="mr-btn"
+                :disabled="store.isBusy(candidate.candidate_id)"
+                title="Close this project out: move it to projects/completed/ and repoint every note that links to it"
+                @click="completeRow(candidate)"
+              >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Complete' }}</button>
+              <button
+                v-else
                 type="button"
                 class="mr-btn mr-btn--quiet"
                 :disabled="store.isBusy(candidate.candidate_id)"
