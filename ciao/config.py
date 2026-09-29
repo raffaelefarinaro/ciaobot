@@ -607,31 +607,6 @@ class CiaoConfig:
         names = self.workspace_names()
         return names[0] if names else ""
 
-    def legacy_entity_workspace(self) -> str:
-        """Workspace that owns unprefixed entries in the global vault index.
-
-        First-run setup historically pointed the user's chosen logical
-        workspace at ``CIAO_VAULT_ROOT`` itself. If a workspace literally named
-        ``personal`` is added later, it must not steal those legacy entities
-        merely because :meth:`primary_workspace` prefers that name.
-        """
-        owners: list[str] = []
-        for name in self.workspace_names():
-            try:
-                if self.workspace_vault_root(name) == self.vault_root:
-                    owners.append(name)
-            except ValueError:
-                continue
-        if len(owners) == 1:
-            return owners[0]
-        if len(owners) > 1:
-            logger.warning(
-                "Legacy entity ownership is ambiguous across workspaces: %s",
-                ", ".join(owners),
-            )
-            return ""
-        return self.primary_workspace()
-
     def workspace_vault_root(self, workspace: str | None) -> Path:
         """Absolute vault directory for one logical workspace.
 

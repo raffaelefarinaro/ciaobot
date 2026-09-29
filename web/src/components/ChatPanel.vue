@@ -617,7 +617,6 @@
       >
         <AgentContextSection
           :project="project"
-          :entities="lastUserEntities"
           :context-pct="contextPct"
           @open-file="openInspectorFile"
         />
@@ -1200,7 +1199,6 @@
       <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
         <AgentContextSection
           :project="project"
-          :entities="lastUserEntities"
           :context-pct="contextPct"
           @open-file="openInspectorFile"
         />
@@ -1868,16 +1866,6 @@ const contextPct = computed<number | null>(() => {
     return Number.isFinite(pct) && pct > 0 ? pct : null
   }
   return null
-})
-
-// The newest user message's entity matches: undefined before the first
-// message, [] when it matched nothing.
-const lastUserEntities = computed(() => {
-  const msgs = store.activeMessages
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role === 'user') return msgs[i].context_entities ?? []
-  }
-  return undefined
 })
 
 const runningSubagents = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))

@@ -56,45 +56,19 @@
       </div>
     </div>
   </section>
-  <section v-if="entities.length" class="rail-section" aria-labelledby="agent-context-notes-label">
-    <p id="agent-context-notes-label" class="rail-label">Notes matched in your last message</p>
-    <div class="rail-list">
-      <button
-        v-for="entity in entities"
-        :key="entity.path"
-        type="button"
-        class="rail-item agent-context-row"
-        :disabled="!resolved.get(entity.path)"
-        :title="resolved.get(entity.path) ? `Open ${resolved.get(entity.path)}` : entity.path"
-        @click="openEntity(entity)"
-      >
-        <span class="agent-context-row-top">
-          <span class="agent-context-name">{{ entity.name }}</span>
-          <span class="agent-context-meta">{{ entity.category }}</span>
-        </span>
-      </button>
-    </div>
-    <p class="rail-note">Sent as links only. The agent opens a note when it needs it.</p>
-  </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { ContextEntity, ProjectInfo } from '../lib/types'
+import type { ProjectInfo } from '../lib/types'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
-import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
-import { useFileViewerStore } from '../stores/fileViewer'
 
 const props = defineProps<{
   project: ProjectInfo | null | undefined
-  /** The latest user message's matches; undefined when there is no user message yet. */
-  entities: ContextEntity[] | undefined
   /** Percent of the context window used as of the last reply, when the provider reported it. */
   contextPct: number | null
 }>()
 const emit = defineEmits<{ 'open-file': [path: string] }>()
-
-const fileViewer = useFileViewerStore()
 
 const guide = ref<WorkspaceGuide>({ path: '', content: '', error: '' })
 let guideSeq = 0
@@ -134,31 +108,6 @@ const contextPctLabel = computed(() => {
   return `${pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct)}%`
 })
 
-const entities = computed(() => props.entities ?? [])
-
-// Hints are vault-root-relative; the viewer wants workspace-relative paths.
-// Resolve them against the vault's markdown path list, the same way an
-// in-note link resolves.
-const markdownPaths = ref<string[]>([])
-watch(() => entities.value.length > 0, async (any) => {
-  if (!any || markdownPaths.value.length) return
-  markdownPaths.value = fileViewer.markdownPaths.length ? fileViewer.markdownPaths : await fileViewer.loadMarkdownPaths()
-}, { immediate: true })
-const resolved = computed(() => {
-  const out = new Map<string, string>()
-  if (!markdownPaths.value.length) return out
-  const index = buildMarkdownIndex(markdownPaths.value)
-  const set = new Set(markdownPaths.value)
-  for (const entity of entities.value) {
-    const target = resolveVaultLinkTarget(entity.path, '', index, set)
-    if (target) out.set(entity.path, target)
-  }
-  return out
-})
-function openEntity(entity: ContextEntity): void {
-  const target = resolved.value.get(entity.path)
-  if (target) emit('open-file', target)
-}
 </script>
 
 <style scoped>
@@ -244,6 +193,4 @@ function openEntity(entity: ContextEntity): void {
   text-decoration-color: var(--border-strong);
   text-underline-offset: 3px;
 }
-.agent-context-row:disabled { cursor: default; color: var(--fg2); }
-.agent-context-row:disabled:hover { color: var(--fg2); }
 </style>

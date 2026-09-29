@@ -1082,9 +1082,8 @@ def _index_link(repo_rel: str) -> str:
     Still not a Ciaobot node: `scan_vault` skips generated files, so the
     god-node the backticks guarded against cannot come back.
 
-    The label keeps the full vault-relative path: `context/entity_tagger.py`
-    parses it back out of INDEX.md, and the path is what tells two notes with
-    the same stem apart. INDEX.md sits at the vault root, so the destination is
+    The label keeps the full vault-relative path: the path is what tells two
+    notes with the same stem apart. INDEX.md sits at the vault root, so the destination is
     simply "./" + that path.
     """
     inner = _vault_relative_ref(repo_rel)

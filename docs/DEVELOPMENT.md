@@ -562,8 +562,6 @@ No shipped producer runs a DAG today — the weekly skill-evolution pass was the
 
 The Work details *Subagents running* list (rail and drawer Activity tab; the left sidebar no longer lists them) is fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and the ChatPanel Work details tests.
 
-The *Notes matched in your last message* list comes from the context capsule's `mentioned_entities` block. Live, `stream_chat` emits a `context_entities` event (with the turn's `turn_index`) right after the capsule is built; on reload, the history builders (`transcript_service.py`, `TranscriptStore.current_messages`) read the same block back out of the stored prompt with `entity_tagger.context_entities` and attach it to the user row. No second record is kept, so the stored capsule is the audit trail for how matching behaved.
-
 ## Agent control plane (CLI-first since S6)
 
 `ciao/control_plane.py` is the provider-neutral application boundary;

@@ -9,28 +9,28 @@ from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 
 
-def test_capsule_contains_routing_and_entity_hints(tmp_path: Path) -> None:
-    (tmp_path / "INDEX.md").write_text(
-        "- [People/Alba](./People/Alba.md) (aliases: Alba)\n", encoding="utf-8"
-    )
+def test_capsule_contains_routing_facts_and_no_retrieval() -> None:
+    """Recall is the agent's job (`ciao vault search`), not a per-turn push.
+
+    The capsule used to prepend `mentioned_entities:` links for every INDEX.md
+    name the prompt mentioned. #723 measured it end to end on a synthetic and a
+    live vault, with Sonnet and a cheap opencode model: no accuracy or cost
+    difference, so it was removed.
+    """
     capsule = build_context_capsule(
-        prompt="What did we decide about Alba?",
         workspace="personal",
         project_name="Ciaobot",
         project_context="Improve provider context",
         canonical_doc="Projects/Ciaobot/README.md",
-        vault_root=tmp_path,
-        legacy_entity_workspace="personal",
     )
     assert "workspace=personal" in capsule
     assert 'project="Ciaobot"' in capsule
-    assert "[Alba](./People/Alba.md)" in capsule
+    assert "mentioned_entities" not in capsule
     assert "retrieval_hint" not in capsule
 
 
 def test_capsule_can_omit_stable_facts() -> None:
     capsule = build_context_capsule(
-        prompt="hello",
         workspace="personal",
         project_name="Ciaobot",
         include_stable=False,
@@ -75,35 +75,6 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
-def test_prompt_prefix_reads_the_top_level_entity_index(tmp_path: Path) -> None:
-    """Entity hints must resolve against `<vault>/INDEX.md`, not a subtree.
-
-    `vault-index --write` writes exactly one index, at the top-level vault
-    root. Passing the per-workspace vault root here made `find_entities` read
-    a non-existent (in practice, a stale empty stub) index, so every PWA turn
-    silently matched nothing while another provider path still worked.
-    """
-    vault = tmp_path / "memory-vault"
-    (vault / "personal").mkdir(parents=True)
-    (vault / "INDEX.md").write_text(
-        "- [personal/People/Alba](./personal/People/Alba.md) (aliases: Alba)\n", encoding="utf-8"
-    )
-    # The exact failure condition: a stale, entry-less per-workspace stub.
-    (vault / "personal" / "INDEX.md").write_text(
-        "# Vault Index\n", encoding="utf-8"
-    )
-
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("Ciaobot", workspace="personal")
-    chat = manager.create_chat(project.project_id)
-
-    prefix = manager._build_prompt_prefix(
-        chat, prompt="What did we decide about Alba?"
-    )
-
-    assert "[Alba](./personal/People/Alba.md)" in prefix
-
-
 def test_the_capsule_names_the_workspace_vault_path(tmp_path: Path) -> None:
     """The workspace *name* is not a location.
 
@@ -122,7 +93,7 @@ def test_the_capsule_names_the_workspace_vault_path(tmp_path: Path) -> None:
     project = manager.create_project("Ciaobot", workspace="work")
     chat = manager.create_chat(project.project_id)
 
-    prefix = manager._build_prompt_prefix(chat, prompt="file a contact")
+    prefix = manager._build_prompt_prefix(chat)
 
     assert "workspace=work" in prefix
     # Relative to the provider's cwd, so the model can use it verbatim.
@@ -134,6 +105,6 @@ def test_the_vault_fact_is_omitted_for_an_unknown_workspace(tmp_path: Path) -> N
     """Better to say nothing than to name a path that does not resolve."""
     from ciao.context.capsule import build_context_capsule
 
-    capsule = build_context_capsule(prompt="hi", workspace="work")
+    capsule = build_context_capsule(workspace="work")
 
     assert "vault=" not in capsule

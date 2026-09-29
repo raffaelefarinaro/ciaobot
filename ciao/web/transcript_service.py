@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ciao import cli_envelopes, subagent_tracking
-from ciao.context.entity_tagger import context_entities
 from ciao.models import ChatContext
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (
@@ -737,9 +736,6 @@ def _render_opencode_thread(
                 "content": content,
                 "turn_index": user_idx,
             }
-            entities = context_entities(raw_prompt)
-            if entities:
-                entry["context_entities"] = entities
             if metadata:
                 refs = chat.user_turn_images.get(str(user_idx))
                 if refs:
@@ -1371,9 +1367,6 @@ async def _assemble_chat_messages(
             # Surface the user-turn index so the client can dedup replayed
             # user_echo events against history it already loaded.
             entry["turn_index"] = user_idx
-            entities = context_entities(raw_prompt)
-            if entities:
-                entry["context_entities"] = entities
             # Attach the persisted send time so the UI footer can show it on
             # reload. Missing for pre-feature chats: the frontend treats an
             # empty string as "no timestamp".

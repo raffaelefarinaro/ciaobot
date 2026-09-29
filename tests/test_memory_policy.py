@@ -114,7 +114,7 @@ def test_capsule_unattended_guidance_defers_approval_requiring_work() -> None:
 
 
 def test_capsule_renders_the_shared_guidance_verbatim() -> None:
-    capsule = build_context_capsule(prompt="hi", workspace="work", unattended=True)
+    capsule = build_context_capsule(workspace="work", unattended=True)
     assert mp.UNATTENDED_CAPSULE_GUIDANCE in capsule
 
 

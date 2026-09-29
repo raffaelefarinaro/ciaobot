@@ -1,7 +1,7 @@
 """One small, provider-neutral context capsule for normal chat turns.
 
 The capsule is deliberately separate from provider system prompts. It carries
-only request-scoped routing facts and entity hints; native ``CLAUDE.md`` /
+only request-scoped routing facts; native ``CLAUDE.md`` /
 ``AGENTS.md`` loaders remain the source of instructions and memory.
 """
 
@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
-from pathlib import Path
 
-from ciao.context.entity_tagger import find_entities, format_entities
 from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE
 
 
@@ -22,16 +20,12 @@ def _field(value: str, *, limit: int = 1200) -> str:
 
 def build_context_capsule(
     *,
-    prompt: str,
     workspace: str = "",
     gws_profile: str = "",
     project_name: str = "",
     project_context: str = "",
     canonical_doc: str = "",
-    vault_root: Path | None = None,
     workspace_vault_root: str = "",
-    legacy_entity_workspace: str = "",
-    entity_index_owns_workspace: bool = False,
     unattended: bool = False,
     handover: str = "",
     include_stable: bool = True,
@@ -42,8 +36,8 @@ def build_context_capsule(
     provider's cwd, so a path the model writes is usable verbatim.
 
     Stable project facts can be omitted after the first turn of a provider
-    session. Date, entity hints, and handover data remain dynamic and are
-    intentionally calculated from the current prompt.
+    session. The date, the unattended marker and handover data are sent on
+    every turn.
     """
     stable: list[str] = []
     if workspace:
@@ -66,20 +60,6 @@ def build_context_capsule(
         stable.append(f"canonical_doc={_field(canonical_doc, limit=300)}")
 
     dynamic: list[str] = [f"today={datetime.now(UTC).date().isoformat()}"]
-    if vault_root is not None:
-        try:
-            entities = find_entities(
-                prompt,
-                vault_root,
-                workspace=workspace,
-                legacy_workspace=legacy_entity_workspace,
-                index_owns_workspace=entity_index_owns_workspace,
-            )
-        except Exception:  # noqa: BLE001 - context enrichment is fail-open
-            entities = []
-        formatted = format_entities(entities)
-        if formatted:
-            dynamic.append(formatted)
     if unattended:
         dynamic.append(UNATTENDED_CAPSULE_GUIDANCE)
 
