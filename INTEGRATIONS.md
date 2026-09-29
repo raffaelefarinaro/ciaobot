@@ -180,7 +180,7 @@ cp ~/.notebooklm/storage_state.json .notebooklm-auth.json
 
 ### `opencli`: Website CLI
 
-CLI with 50+ website adapters (YouTube, LinkedIn, GitHub, etc.). Optional manual install for workspace-specific workflows — not used by the stock `web-research` skill (that uses defuddle).
+CLI with 50+ website adapters (YouTube, LinkedIn, GitHub, etc.). Optional manual install for workspace-specific workflows. Not required: URL reading uses the provider's own web-fetch tool, and GitHub URLs go through `gh`.
 
 ```bash
 npm install -g @jackwener/opencli
