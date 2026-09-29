@@ -99,11 +99,15 @@
             {{ stateView.label }}
           </p>
           <p class="backup-detail">Last online backup: {{ lastSuccessText }}</p>
-          <p v-if="status.state === 'needs_attention' && scopeGap" class="backup-warning">
-            {{ scopeGap }} tracked files are outside the backup scope and will not be included online.
-          </p>
-          <p v-else-if="status.state !== 'ready' && status.state !== 'paused'" class="backup-detail">
+          <p v-if="status.state !== 'ready' && status.state !== 'paused'" class="backup-detail">
             {{ stateView.detail }}
+          </p>
+          <!-- A coverage gap is a permanent fact about a repository that also
+               holds something else (application source, say), not something
+               wrong with this run. It is a note under whatever the state says —
+               and the state only turns red for a failure the owner can fix. -->
+          <p v-if="scopeGap" class="backup-warning">
+            {{ scopeGapText }}
           </p>
           <details class="backup-details">
             <summary>{{ status.state === 'needs_attention' ? 'Review details' : 'Backup details' }}</summary>
@@ -153,6 +157,9 @@ interface BackupStatus {
   last_success_commit: string
   pending_changes: number
   pending_commits: number
+  /** Tracked paths the backup scope refuses to commit (#733). A count, so the
+   *  note below never depends on the wording of `reason`. */
+  coverage_gap: number
   reason: string
 }
 
@@ -256,10 +263,22 @@ const serverReason = computed(() => {
   return reason === 'up to date' ? '' : reason
 })
 
-const scopeGap = computed(() => {
-  const match = serverReason.value.match(/(\d+) tracked path\(s\) outside the backup scope/i)
-  return match?.[1] || ''
-})
+/**
+ * The scope gap, straight off the status.
+ *
+ * This used to be recovered by matching the count out of the service's own
+ * sentence in `reason`, so rewording that sentence silently dropped the note.
+ * The service reports the number itself and owns the wording here; a gap is a
+ * coverage fact about the repository, not a state, and it is shown under every
+ * state rather than replacing one (#733).
+ */
+const scopeGap = computed(() => status.value?.coverage_gap || 0)
+
+const scopeGapText = computed(() =>
+  scopeGap.value === 1
+    ? '1 tracked file is outside the backup scope and will not be included online.'
+    : `${scopeGap.value} tracked files are outside the backup scope and will not be included online.`,
+)
 
 /** The live origin, falling back to where the last run actually pushed. */
 const repoText = computed(() => status.value?.remote || status.value?.last_remote || 'Not recorded yet')
@@ -508,6 +527,9 @@ onUnmounted(() => {
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
+/* A coverage gap is a note, not an alarm: the backup itself did its work, so
+   this stays in the ordinary foreground and the state line above keeps whatever
+   tone that state earns. Only a real `needs_attention` is ever red. */
 .backup-warning { color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
 /* A flex child stretches to the column's width, and a button centres its own
    label, so the re-read would float in the middle of the row. */

@@ -46,6 +46,7 @@ function status(overrides: Record<string, unknown> = {}) {
     last_success_commit: '',
     pending_changes: 0,
     pending_commits: 0,
+    coverage_gap: 0,
     reason: "the data root has no 'origin' remote yet",
     ...overrides,
   }
@@ -479,10 +480,14 @@ describe('SettingsMemoryBackup refresh', () => {
 
 describe('SettingsMemoryBackup details', () => {
   it('keeps a scope warning concise and reveals the full diagnostic on demand', async () => {
+    // Driven by `coverage_gap`, the number the service reports: the warning
+    // used to be a regex over the service's own sentence, so rewording that
+    // sentence silently dropped it (#733).
     apiGet.mockResolvedValue(status({
-      state: 'needs_attention',
+      state: 'ready',
       remote: 'https://github.com/p/m.git',
-      reason: '2447 tracked path(s) outside the backup scope would not be backed up: .claude/settings.local.json, .env.example (+2445 more)',
+      coverage_gap: 2447,
+      reason: 'up to date; 2447 tracked path(s) outside the backup scope would not be backed up: .claude/settings.local.json, .env.example (+2445 more)',
     }))
     const view = mount(SettingsMemoryBackup, { attachTo: document.body })
     mounted.push(view)
@@ -491,9 +496,86 @@ describe('SettingsMemoryBackup details', () => {
     expect(view.find('.backup-warning').text()).not.toContain('.env.example')
     const details = view.find('details.backup-details')
     expect(details.attributes('open')).toBeUndefined()
-    expect(details.find('summary').text()).toBe('Review details')
+    expect(details.find('summary').text()).toBe('Backup details')
     await details.find('summary').trigger('click')
     expect((details.element as HTMLDetailsElement).open).toBe(true)
     expect(details.find('.backup-reason').text()).toContain('.env.example')
+  })
+
+  it('reads the warning from the count, not from the wording of the reason', async () => {
+    // The reason is prose and may be reworded at any time; the count is the
+    // contract. A note that only appears when the sentence matches is a note
+    // one edit away from vanishing.
+    apiGet.mockResolvedValue(status({
+      state: 'ready',
+      remote: 'https://github.com/p/m.git',
+      coverage_gap: 12,
+      reason: 'committed and pushed the backup scope',
+    }))
+    const view = await mountPanel()
+    expect(view.find('.backup-warning').text()).toContain('12 tracked files')
+  })
+
+  it('still shows a one-file gap in the singular', async () => {
+    // A single out-of-scope file is the common shape on a small checkout, and
+    // "1 tracked files" would be the first thing anyone noticed.
+    apiGet.mockResolvedValue(status({
+      state: 'ready',
+      remote: 'https://github.com/p/m.git',
+      coverage_gap: 1,
+      reason: 'committed and pushed the backup scope',
+    }))
+    const view = await mountPanel()
+    expect(view.find('.backup-warning').text()).toContain('1 tracked file is outside')
+  })
+
+  it('never reddens a backed-up install over a coverage gap', async () => {
+    // A repository that is also a checkout is only partly covered, and that is
+    // a fact about it rather than a failure of the backup. A red dot and
+    // "Review details" here would be the same impersonation the state itself
+    // used to make, one layer up.
+    apiGet.mockResolvedValue(status({
+      state: 'ready',
+      remote: 'https://github.com/p/m.git',
+      coverage_gap: 2447,
+      reason: 'committed and pushed the backup scope',
+    }))
+    const view = await mountPanel()
+    expect(view.find('.backup-state-line').text()).toContain('Backed up')
+    expect(view.find('.backup-dot--ok').exists()).toBe(true)
+    expect(view.find('.backup-dot--error').exists()).toBe(false)
+    expect(view.find('.backup-warning').text()).toContain('2447 tracked files')
+  })
+
+  it('keeps a real failure red and on top, with the gap beside it', async () => {
+    apiGet.mockResolvedValue(status({
+      state: 'needs_attention',
+      remote: 'https://github.com/p/m.git',
+      coverage_gap: 2447,
+      reason: 'Tracked but inside the backup scope and credential-shaped: memory-vault/.env',
+    }))
+    const view = await mountPanel()
+    expect(view.find('.backup-state-line').text()).toContain('Needs attention')
+    expect(view.find('.backup-dot--error').exists()).toBe(true)
+    expect(view.find('details.backup-details').find('summary').text()).toBe('Review details')
+    // Both facts are still told: the failure the owner can act on leads, and
+    // the coverage gap is not swallowed by it.
+    expect(view.findAll('.backup-detail').map((p) => p.text()).join(' ')).toContain(
+      'something is in the way',
+    )
+    expect(view.find('.backup-warning').text()).toContain('2447 tracked files')
+  })
+
+  it('shows the gap under a state that still has work to do', async () => {
+    apiGet.mockResolvedValue(status({
+      state: 'pending',
+      remote: 'https://github.com/p/m.git',
+      coverage_gap: 2447,
+      pending_changes: 2,
+      reason: 'waiting: 2 file(s) to commit',
+    }))
+    const view = await mountPanel()
+    expect(view.find('.backup-state-line').text()).toContain('Saving locally')
+    expect(view.find('.backup-warning').text()).toContain('2447 tracked files')
   })
 })
