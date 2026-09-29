@@ -4897,6 +4897,14 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* Geometry copied from .message.user / .message.assistant deliberately: the
    whole point is that the placeholder occupies the same box as the row that
    replaces it. */
+.history-skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  min-width: 0;
+}
+
 .skel-msg {
   display: flex;
   flex-direction: column;
@@ -4935,6 +4943,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   align-items: center;
   gap: 8px;
   width: 98%;
+  box-sizing: border-box;
   padding: 9px 12px;
   border: 1px dashed var(--border);
   border-left: 3px solid color-mix(in srgb, var(--accent2) 45%, transparent);
@@ -6921,12 +6930,21 @@ details[open] > .activity-summary::before {
   .thinking-chip { min-height: var(--touch); }
 }
 
-.chat-archive-btn {
+/* PaneHeader squares every header .btn-icon to 30px, which crushed this
+   labelled button: the icon shrank to nothing and the word spilled out. The
+   doubled class outranks that rule so the button sizes to icon + label. */
+.chat-archive-btn.btn-icon {
+  box-sizing: border-box;
   gap: var(--space-2);
+  width: auto;
   height: 34px;
+  min-width: 0;
+  margin: 0;
   padding: 0 14px;
   white-space: nowrap;
 }
+.chat-archive-btn.btn-icon::before { inset: 0; }
+.chat-archive-btn svg { flex-shrink: 0; }
 @media (pointer: coarse) { .chat-archive-btn { min-height: var(--touch); } }
 
 .model-picker-dropdown {

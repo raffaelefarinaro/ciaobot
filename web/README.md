@@ -223,8 +223,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
 ### Browser suite (`npm run test:e2e`)
 
-`e2e/` holds a deliberately small Playwright suite — six spec files, eighteen
-tests, about three seconds — that covers only the things a jsdom mount **cannot**
+`e2e/` holds a deliberately small Playwright suite that covers only the things a jsdom mount **cannot**
 establish:
 
 | Spec | What only a real browser can decide |
@@ -235,6 +234,7 @@ establish:
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. |
 | `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, and that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap. |
+| `chat-loading-layout.spec.ts` | That the held history-loading skeleton has separated rows within the chat pane at desktop and phone widths. |
 
 The fixture serves an empty chat history by default. A spec that needs real
 turns to select opts in per session with `POST /__fixture__/transcript`, so the
