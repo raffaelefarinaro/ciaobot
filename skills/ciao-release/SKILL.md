@@ -345,7 +345,7 @@ Release-cutting traps. Bugs in the code are not here — file them.
   `gh run view <id> --json conclusion`.
 - **Put Node 22 on PATH in the shell that runs the tool.** `_run_checks` shells
   out to `npm run test` in `web/`, where `scripts/check-node.mjs` hard-fails
-  below `^20.19 || ^22.13 || >=24`. The failure lands *after* the version files
+  below `^22.22.2 || ^24.15.0 || >=26`. The failure lands *after* the version files
   are bumped and looks unrelated (`ReleaseError: command failed (1): npm run
   test`). The fix is per-shell and not inherited from another terminal:
   `. "$NVM_DIR/nvm.sh" && nvm use 22` in the same command.

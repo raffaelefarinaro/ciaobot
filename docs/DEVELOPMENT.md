@@ -253,10 +253,15 @@ page provides the same toggle when the REST API is unavailable.
 ## Frontend build
 
 Node 22 is the supported version (`.nvmrc`, and what CI uses). The floor is
-`^20.19.0 || ^22.13.0 || >=24.0.0`, set by jsdom — below it every jsdom test file
-fails to start its worker, and vitest still reports a pass for the subset that
-ran. `npm test` preflights this and exits with an explanation rather than
+`^22.22.2 || ^24.15.0 || >=26.0.0`, set by jsdom 30 — below it every jsdom test
+file fails to start its worker, and vitest still reports a pass for the subset
+that ran. `npm test` preflights this and exits with an explanation rather than
 producing a misleading green summary.
+
+The floor was `^20.19.0 || ^22.13.0 || >=24.0.0` under jsdom 29, which is why
+Node 20 was supported. jsdom 30 raised all three lines and dropped the 20.x one,
+so Node 20 is no longer supported here — it is EOL, and following jsdom keeps
+the declared range and the real one identical.
 
 ```bash
 nvm use              # reads .nvmrc → Node 22

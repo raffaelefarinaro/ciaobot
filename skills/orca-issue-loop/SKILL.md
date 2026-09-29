@@ -189,7 +189,7 @@ Workers never push, never touch GitHub (except the reviewer's PR comments), neve
    ```bash
    cd <wt> && ~/repos/ciaobot/.venv/bin/mypy ciao
    cd <wt> && PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto tests/ -q
-   cd <wt>/web && npm test && npm run build     # only if web/ changed; Node ≥ 20.19
+   cd <wt>/web && npm test && npm run build     # only if web/ changed; Node >= 22.22.2
    ```
    `npm run build` rewrites tracked `static/index.html` — commit that output with the change. Red gates → do **not** push; write the failures into the next fix prompt (see §7).
 5. Push: `git -C <wt> push -u origin HEAD`, then confirm with `git ls-remote origin <branch>` (a quiet push can fail silently).
