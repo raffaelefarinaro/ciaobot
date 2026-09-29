@@ -340,7 +340,6 @@ import { askConfirm } from '../lib/confirm'
 import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
-import { openNewChatPicker } from '../lib/newChat'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
@@ -627,12 +626,7 @@ async function saveContext() {
 // ── Actions ────────────────────────────────────────────────────────────
 async function newChat() {
   if (!project.value) return
-  const projectId = await openNewChatPicker({
-    workspace: project.value.workspace,
-    projectId: project.value.project_id,
-  })
-  if (!projectId) return
-  const chat = await store.newChatInProject(projectId)
+  const chat = await store.newChatInProject(project.value.project_id)
   if (chat) router.push(`/chat/${chat.chat_id}`)
 }
 

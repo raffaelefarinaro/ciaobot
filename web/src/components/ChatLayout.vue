@@ -266,7 +266,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
-import { openNewChatPicker, pendingNewChat } from '../lib/newChat'
+import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
@@ -640,7 +640,9 @@ if (typeof document !== 'undefined') {
 }
 
 async function chooseNewChat(workspace = store.activeWorkspace, projectId?: string) {
-  const selectedProject = await openNewChatPicker({ workspace, projectId })
+  const selectedProject = projectId
+    || (workspace === store.activeWorkspace ? homeNewChatProjectId.value : '')
+    || await openNewChatPicker({ workspace })
   if (!selectedProject) return
   await store.newChatInProject(selectedProject)
 }

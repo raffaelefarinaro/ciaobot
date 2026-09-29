@@ -882,7 +882,7 @@ import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
-import { openNewChatPicker } from '../lib/newChat'
+import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1595,11 +1595,12 @@ async function confirmDeleteProject(id: string) {
   await store.deleteProject(id)
 }
 
-// One shared project picker for every visible New action. The project-local "+"
-// preselects its own project; the global New chat above the tree opens the same
-// dialog on the active workspace.
+// The project-local "+" already names its project, and Home's chip names one
+// too; only the global New chat elsewhere asks which project.
 async function chooseNewChat(workspace: string, preferredProjectId?: string) {
-  const projectId = await openNewChatPicker({ workspace, projectId: preferredProjectId })
+  const projectId = preferredProjectId
+    || homeNewChatProjectId.value
+    || await openNewChatPicker({ workspace })
   if (!projectId) return
   expandedProjects.add(projectId)
   await store.newChatInProject(projectId)
