@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1118,6 +1119,45 @@ def test_get_lists_tasks_with_their_state(tmp_path: Path, packaged: Any) -> None
 
     # A missing workspace is a bad request, not a guess at one.
     assert client.get("/api/update-tasks").status_code == 400
+
+
+def test_a_row_reports_when_its_answer_was_computed(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """``applicability_checked_at`` is a real clock, distinct from the record's.
+
+    The parent checkpoint asks a detector result to carry the checked time beside
+    the reason, the evidence and the input fingerprint, and a surface that shows
+    only one of the two clocks cannot tell "nobody has looked since" from "the
+    operator decided at lunchtime". The record's own ``updated_at`` says when a
+    *decision* was written, so a history that rendered the check time under that
+    label — or merged the two — would be making a claim about work that either
+    happened or did not.
+    """
+    client = _client(_config(tmp_path), _FakePCM())
+    first = client.get(f"/api/update-tasks?workspace={WORKSPACE}").json()["tasks"][0]
+    checked = first["applicability_checked_at"]
+    assert checked, "a computed answer must say when it was computed"
+    # ISO-8601 UTC, parseable, and on the same clock as a record stamp.
+    parsed = datetime.fromisoformat(checked)
+    assert parsed.tzinfo is not None
+    # There is no record yet, so the decision clock is empty and cannot be
+    # confused with the check clock.
+    assert first["updated_at"] == ""
+
+    # A second read inside the freshness window reuses the answer, and must not
+    # re-stamp it: "checked at" that moved on every read would date every task to
+    # the last listing rather than the last check.
+    second = client.get(f"/api/update-tasks?workspace={WORKSPACE}").json()["tasks"][0]
+    assert second["applicability_checked_at"] == checked
+
+    # After a decision the two clocks are both present and say different things.
+    client.post(f"/api/update-tasks/review-legacy-rows/start?workspace={WORKSPACE}")
+    after = client.get(f"/api/update-tasks?workspace={WORKSPACE}").json()["tasks"][0]
+    assert after["applicability_checked_at"] == checked, (
+        "a start writes a record; it does not re-run a detector"
+    )
+    assert after["updated_at"] > ""
 
 
 def test_start_route_answers_the_housekeeping_envelope(

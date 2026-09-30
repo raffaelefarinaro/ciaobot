@@ -221,11 +221,24 @@ class ApplicabilityResult:
     and not when the wording does. That is what makes it safe to store as
     ``attempted_fingerprint``: it says "an attempt was made against exactly this
     condition", not "an attempt was made once".
+
+    ``checked_at`` is the wall-clock moment *this answer was computed* — when the
+    detector ran, or when a failure stopped one from being able to run. It is
+    neither evidence nor part of the fingerprint, because a second list inside the
+    freshness window is the same answer and must not read as a new situation. A
+    cached hit keeps the stamp of the call that computed it, which is the only
+    honest reading: the answer was not re-derived, and re-stamping it on read
+    would date every task to the last listing rather than the last check. It is
+    the "when did anyone last look" half of a task's history, kept separate from
+    the record's ``updated_at``, which is the "when did the operator decide"
+    half — the two say different things and a surface that merges them is lying
+    about one of them.
     """
 
     status: str
     evidence: dict[str, Any]
     fingerprint: str
+    checked_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -876,7 +889,15 @@ def _result(
 ) -> ApplicabilityResult:
     stored = dict(evidence)
     return ApplicabilityResult(
-        status=status, evidence=stored, fingerprint=fingerprint(task, status, stored)
+        status=status,
+        evidence=stored,
+        fingerprint=fingerprint(task, status, stored),
+        # No injected clock: this is the moment the answer was computed, and the
+        # only caller that could supply one (``_evaluate_off_loop``) has a
+        # freshness clock rather than a wall clock to offer. Reading it here is
+        # the point — a stamp taken from the caller's clock would be the age of
+        # the window, which is not a date.
+        checked_at=_stamp(now=None),
     )
 
 
@@ -959,6 +980,13 @@ class _CacheEntry:
     produced it — a task a downgrade hides is not evaluated, so its entry is left
     alone rather than replaced, and upgrading again reuses it while it is still
     inside its own window.
+
+    ``computed_at`` is the freshness clock (``time.monotonic``) and the *only*
+    clock this module compares ages in: monotonic because the wall clock can jump,
+    and a window is an age rather than a date. The wall-clock moment the answer
+    was computed travels separately on the result (``ApplicabilityResult
+    .checked_at``) because that is a thing to *show* an operator, not a thing to
+    subtract.
     """
 
     token: str

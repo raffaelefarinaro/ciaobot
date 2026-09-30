@@ -1035,6 +1035,90 @@ export interface HousekeepingDismissResponse {
   actions: OperatorAction[]
 }
 
+// ── Update tasks: the "After this update" group ────────────────────────────
+
+/** The lifecycles `ciao/update_tasks.py::LIFECYCLES` defines. The `| string`
+ *  escape hatch is deliberate: a state file written by a newer engine can hold a
+ *  lifecycle this build does not know, and rendering it as "unknown state" beats
+ *  rendering it as a task nobody has started. */
+export type UpdateTaskLifecycle =
+  | 'offered'
+  | 'in_progress'
+  | 'waiting_review'
+  | 'failed'
+  | 'completed'
+  | 'dismissed'
+  | string
+
+/** The three answers `update_tasks.APPLICABILITY_STATUSES` defines. `unknown`
+ *  is the one that must never be drawn as "done": it means nobody could say. */
+export type UpdateTaskApplicability =
+  | 'applicable'
+  | 'not_applicable'
+  | 'unknown'
+  | string
+
+/** One row of `GET /api/update-tasks` — the Home group and the Settings
+ *  history both render these, from `ciao/web/routes_api.py::_update_task_row`. */
+export interface UpdateTaskRow {
+  id: string
+  revision: number
+  /** `install` (one record for the whole engine) or `workspace` (the record
+   *  lives in that workspace's own vault). The history groups by this. */
+  scope: string
+  title: string
+  /** The one-line reason the task exists, shipped with the catalog. */
+  why: string
+  /** The engine version that introduced this task revision. */
+  since_version: string
+  status: UpdateTaskLifecycle
+  applicability: UpdateTaskApplicability
+  /** When this row's applicability was last *computed*. Distinct from
+   *  `updated_at`, which is when the record was written: a dismissal is a
+   *  decision, not a re-check, and a history that merged the two would claim
+   *  somebody had looked again. Inside the server's freshness window this keeps
+   *  the stamp of the call that computed the answer. */
+  applicability_checked_at: string
+  offered: boolean
+  suppressed: boolean
+  /** The chat an earlier start created, so "Resume" never needs the browser to
+   *  have remembered it. Empty when no live attempt exists. */
+  chat_id: string
+  prompt_digest: string
+  attempted_fingerprint: string
+  /** When the *record* was last written — a decision or an attempt. */
+  updated_at: string
+}
+
+/** Why `GET /api/update-tasks` is offering nothing. Present only then, because
+ *  an absent key and an empty list are different statements and `[]` is the
+ *  one a card would read as "you are done". */
+export interface UpdateTaskCoverageGap {
+  reason: string
+  detail: string
+}
+
+export interface UpdateTasksResponse {
+  tasks: UpdateTaskRow[]
+  coverage_gap?: UpdateTaskCoverageGap
+}
+
+/** `POST /api/update-tasks/{id}/start|dismiss|reopen`. `tasks` is absent when
+ *  the route's own decision landed but the follow-up detector pass could not be
+ *  listed — a client must treat its absence as "unknown", never as "empty". */
+export interface UpdateTaskActionResponse {
+  ok: boolean
+  task_id: string
+  /** Start only: the chat the task is in. A 500 refusal still carries it, so a
+   *  retry sends into that same chat instead of minting a second one. */
+  chat_id?: string
+  /** Start only: false means this call created the chat, true means nothing was
+   *  created — the same press twice lands in the same chat. */
+  resumed?: boolean
+  error?: string
+  tasks?: UpdateTaskRow[]
+}
+
 // ── Proposal review (agent roots) ────────────────────────────────────────
 
 /** Live rehome signal for a `[rehome]` row, from `ciao/vault_rehome`. */

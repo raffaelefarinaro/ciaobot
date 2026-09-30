@@ -366,6 +366,13 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
+        <!-- Update task history. Sits directly under Updates on purpose: the
+             Home "After this update" group is where the work an update left
+             behind is offered, and this is the record of what became of it, so
+             the two are read together and never confused. It owns its own
+             fetch — Home may never have been opened in this session. -->
+        <SettingsUpdateTasks />
+
         <!-- Main workspace -->
         <div v-if="routines && routines.workspace_context" class="card">
           <div class="settings-card-header">
@@ -2069,6 +2076,7 @@ import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
+import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
 import { useMcpServers } from '../composables/useMcpServers'

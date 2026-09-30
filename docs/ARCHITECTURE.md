@@ -145,7 +145,7 @@ ciao/                          Python backend (Starlette).
     routes_push.py             Web Push notification routes.
     routes_helpers.py          Shared route helpers (api_error envelope, workspace path resolution, git sync).
     proposal_service.py        Proposal-queue domain logic behind the proposal routes: scanning the per-workspace `Workspace/Memory-Proposals.md` queue and `Workspace/Skill-Proposals/` folder, the locked single/batch queue rewrites, re-home signalling and moves, and the promotions an accept performs (region write, doc fold, people note, learnings append). routes_api.py imports it as a module and keeps request parsing, authorization, and response mapping. What the resolved row then *reports* and where its decision is *recorded* is not here: that is `ciao/proposal_actions.py`, one level up, because the CLI resolves rows too and must not import the web package to do it. What a promotion *did* is `AcceptOutcome`, a frozen dataclass owned here: every accept helper answers with one instead of a hand-built `dict[str, Any]`, and `as_dict()` emits exactly the keys that branch produced — absent, never null, since `build_accept_result` reads an outcome with no `ok` at all as "nothing was written here", which is a success. The routes read its fields; only the hand-off to `proposal_actions` goes through `as_dict()`, so `proposal_actions` stays a plain `Mapping` consumer and never has to import `ciao.web`.
-    update_task_launch.py       The launch half of the "After this update" pipeline (issue #761): `ciao/update_task_catalog.py` defines the tasks, `ciao/update_tasks.py` (#756) remembers their per-scope state and answers whether they apply, and this turns one eligible task into one chat — server-owned, and exactly once. **The prompt is server-owned**: it is read from the packaged resource by `read_prompt`, and no parameter accepts prompt text from a caller; what travels instead is `prompt_digest = sha256(prompt)[:16]`, so a later reader can tell whether the instructions changed without shipping them twice. **Start is idempotent per `(task id, revision)`**: the read of the record and the write that replaces it are one `update_tasks._record_lock` section (the same one the rest of #756 uses), so a double click, two tabs, a retry after a dropped response and a restart all get the SAME chat back — `resumed: true`, nothing created, nothing dispatched. A record naming a chat that is gone is the recoverable case: a fresh chat is created and the record re-stamped to it. Because records are keyed `"<id>@<revision>"`, a revised task cannot resume, or even see, the previous revision's chat, so an engine update can never substitute new instructions into a running chat. The record is written BEFORE the turn is dispatched, so a failed dispatch cannot orphan the chat: `UpdateTaskLaunchError` carries the id, the attempt is marked `failed`, and the next start sends the prompt into that same chat. The pre-dispatch write is `failed` and the flip to `in_progress` happens only once `start_stream` has returned, so a lifecycle in the file means what it says and a crash in that window is retried rather than reported as a resume that never ran; a write that *fails* in the same window is logged, not raised, because `UpdateTaskStateError` is a `ValueError` and a 409 would answer a running turn with no `chat_id` and invite the retry that dispatches it twice. A start on a `dismissed` record is a reopen: same chat, record written `in_progress`, nothing re-sent — which is only sound because `dismiss_task` drops the chat of a record that is `failed`, the one lifecycle that means the prompt never reached it, so a dismissal can never hand a later start an empty chat to call a running one. The chat is hosted in the workspace's own `General` project — the one `HousekeepingStrip.vue` finds by its `is_auto` flag, created if the install has none — and carries an `update_task` helper (`task_id`, `revision`, `scope`, `prompt_digest`) normalised fail-closed in `chat_service._normalize_chat_helper`, which is what makes the chat findable again after a restart. No model call, no detector, no completion check, no `eval`, no shell and no remote fetch: a start is a decision the operator has already made. `reopen_task` is a thin wrapper over `update_tasks.reopen_task` and `dismiss_task` is the same write plus the failed-chat rule, so a card and a direct call cannot produce two records for one decision; that rule stays on the launch side because `update_tasks` never opens a chat. A `dismissed` or reopened-`offered` record with a live chat is un-declined in place (`in_progress`, same chat, nothing re-sent) so `dismiss → start` and `dismiss → reopen → start` agree, and a `completed` record is refused outright with a `ValueError` before the chat is looked at — by a start *and* by a dismissal, so no stale tab pressing either one, and no archived or deleted chat, can turn a finished task back into a running one. Routes: `GET /api/update-tasks?workspace=`, and `POST /api/update-tasks/{task_id}/{start,dismiss,reopen}`; each state-changing one carries the fresh task rows, dropped rather than raised if the listing fails.
+    update_task_launch.py       The launch half of the "After this update" pipeline (issue #761): `ciao/update_task_catalog.py` defines the tasks, `ciao/update_tasks.py` (#756) remembers their per-scope state and answers whether they apply, and this turns one eligible task into one chat — server-owned, and exactly once. **The prompt is server-owned**: it is read from the packaged resource by `read_prompt`, and no parameter accepts prompt text from a caller; what travels instead is `prompt_digest = sha256(prompt)[:16]`, so a later reader can tell whether the instructions changed without shipping them twice. **Start is idempotent per `(task id, revision)`**: the read of the record and the write that replaces it are one `update_tasks._record_lock` section (the same one the rest of #756 uses), so a double click, two tabs, a retry after a dropped response and a restart all get the SAME chat back — `resumed: true`, nothing created, nothing dispatched. A record naming a chat that is gone is the recoverable case: a fresh chat is created and the record re-stamped to it. Because records are keyed `"<id>@<revision>"`, a revised task cannot resume, or even see, the previous revision's chat, so an engine update can never substitute new instructions into a running chat. The record is written BEFORE the turn is dispatched, so a failed dispatch cannot orphan the chat: `UpdateTaskLaunchError` carries the id, the attempt is marked `failed`, and the next start sends the prompt into that same chat. The pre-dispatch write is `failed` and the flip to `in_progress` happens only once `start_stream` has returned, so a lifecycle in the file means what it says and a crash in that window is retried rather than reported as a resume that never ran; a write that *fails* in the same window is logged, not raised, because `UpdateTaskStateError` is a `ValueError` and a 409 would answer a running turn with no `chat_id` and invite the retry that dispatches it twice. A start on a `dismissed` record is a reopen: same chat, record written `in_progress`, nothing re-sent — which is only sound because `dismiss_task` drops the chat of a record that is `failed`, the one lifecycle that means the prompt never reached it, so a dismissal can never hand a later start an empty chat to call a running one. The chat is hosted in the workspace's own `General` project — the one `HousekeepingStrip.vue` finds by its `is_auto` flag, created if the install has none — and carries an `update_task` helper (`task_id`, `revision`, `scope`, `prompt_digest`) normalised fail-closed in `chat_service._normalize_chat_helper`, which is what makes the chat findable again after a restart. No model call, no detector, no completion check, no `eval`, no shell and no remote fetch: a start is a decision the operator has already made. `reopen_task` is a thin wrapper over `update_tasks.reopen_task` and `dismiss_task` is the same write plus the failed-chat rule, so a card and a direct call cannot produce two records for one decision; that rule stays on the launch side because `update_tasks` never opens a chat. A `dismissed` or reopened-`offered` record with a live chat is un-declined in place (`in_progress`, same chat, nothing re-sent) so `dismiss → start` and `dismiss → reopen → start` agree, and a `completed` record is refused outright with a `ValueError` before the chat is looked at — by a start *and* by a dismissal, so no stale tab pressing either one, and no archived or deleted chat, can turn a finished task back into a running one. Routes: `GET /api/update-tasks?workspace=`, and `POST /api/update-tasks/{task_id}/{start,dismiss,reopen}`; each state-changing one carries the fresh task rows, dropped rather than raised if the listing fails. Each row reports **two clocks** and they are not merged: `applicability_checked_at` is when that row's answer was computed (`update_tasks.ApplicabilityResult.checked_at`, a wall-clock stamp taken where the detector ran) and `updated_at` is when the record was written. A dismissed task therefore has a decision time and a possibly-stale check time, and a client that showed one under the other's name would be claiming a re-check that never happened. Inside `APPLICABILITY_TTL_S` a row keeps the stamp of the call that computed the answer, so a repeated read does not re-date it; the state file is re-read every call regardless.
     agent_assets.py            Agent-facing instruction/subagent/command asset endpoints and OS audit.
     commands.py                Slash-command listing and rate-limit endpoints.
     connection_tracker.py      Tracks live WebSocket connections; `chat_client_count` answers how many browsers have a given chat open.
@@ -175,7 +175,72 @@ web/                           Vue 3 PWA frontend.
   src/App.vue                  Root component.
   src/main.ts                  App bootstrap.
   src/router.ts                Vue Router config.
-  src/components/              UI components (chat, projects, settings, etc.).
+  src/components/              UI components (chat, projects, settings, etc.). Two of them
+                               are the "After this update" surface and the rule between
+                               them is the point: `HousekeepingStrip.vue` renders the
+                               operator-action tiles and the update-task group as two
+                               separate `<section>`s, never one list. The tiles are a
+                               *view of the machine* — a blocking precondition among them
+                               is unmissable and non-dismissible, and it has to be read
+                               first — while an update task is a *decision* that persists
+                               until somebody reverses it and can be reopened from
+                               Settings. Merged into one list, an optional "start this
+                               task" card could sort above an unmissable blocker, and one
+                               "hide it" button would have to mean two different things.
+                               Each lifecycle gets the action it alone can use: `offered`
+                               Start in chat, `in_progress` Resume chat, `waiting_review`
+                               Review proposals (the queue that has per-row accept/dismiss
+                               and a destination picker, rather than re-deciding them in
+                               prose) plus Resume, `failed` Try again, and `unknown`
+                               applicability a quiet Check again and *no* start button at
+                               all — nobody can say the work applies, and offering the
+                               button would invite running instructions for a condition
+                               this install has not established exists. The gate is the
+                               lifecycle and not the detector: a *live* attempt
+                               (`in_progress`/`waiting_review`/`failed`) always keeps
+                               Resume or Try again, because `not_applicable` is the
+                               normal state once the chat has done the work but
+                               `record_completion` has not confirmed it, and gating on
+                               applicability there would strand an open chat behind a
+                               bare "Open its chat" link. A `not_applicable` offer with
+                               no attempt is not a card at all — every install ships
+                               the whole catalog, so drawing those would put a
+                               permanent "nothing to do" on the Home of installs that
+                               need none of it, and an install with no work has to have
+                               an empty Home. The group outlives its last card only long
+                               enough to announce what was pressed (a fixed 10s, ended
+                               early by a workspace switch, since the announcement
+                               describes a press in the workspace being left) and to
+                               take the focus that the removed button dropped.
+                               **Hiding is not
+                               completing**: it records "not this one" for this
+                               `(task, revision)` in this scope, the chat stays open and is
+                               not marked done, the confirmation says both, and Settings →
+                               Update task history can reopen it. Every transition surfaces
+                               a refusal in place (a 409 is mapped to plain recovery
+                               guidance) rather than clearing the card, because a cleared
+                               card reads as "handled". A transition that lost a
+                               workspace race reports its outcome but never adopts the
+                               reply's rows or re-lists, the same guard
+                               `refreshUpdateTasks` applies to its own answer. The group
+                               is fetched on the same
+                               cadence as the strip but as a *separate* request, so
+                               `/api/housekeeping` keeps being nothing but a cheap
+                               detector pass, and a failed list is silent rather than a red
+                               line on Home — Settings is where a failed check is reported.
+  src/components/settings/     The Settings panels (`SettingsView.vue` hosts them on the
+                               route's tab, each owning its own fetch). `SettingsUpdateTasks.vue`
+                               is the update-task history: grouped by scope (install first),
+                               listing the completed/dismissed/failed and genuinely
+                               uncertain rows — the ones still on offer or in flight are Home's
+                               job, and showing them twice would put one live card in two
+                               places with two button sets. Read-mostly: the only write is a
+                               Reopen, which re-evaluates applicability rather than replaying
+                               old instructions. It shows `Checked` (when a detector last
+                               produced this row's answer) beside `Decided` (when the record
+                               was written) as two separate times, because a dismissal is a
+                               decision and not a re-check, and a history that merged the two
+                               could not tell an unexamined condition from a settled one.
   src/stores/                  Pinia stores, plus store modules: a `create*` factory that owns one
                                slice of a store's state and is instantiated inside that store's setup
                                (chatAnnotations.ts, owned by projects.ts). A slice with its own
