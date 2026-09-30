@@ -89,6 +89,7 @@ from ciao.models import (
     StreamEvent,
     ToolUseEvent,
 )
+from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.claude import get_session_info
@@ -7180,7 +7181,7 @@ class ProjectChatManager:
         markdown = convert_document(source)
         while True:
             try:
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                fd = open_fd(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
             except FileExistsError:
                 target = vault_dir / f"{stem}-{n}.md"
                 n += 1
@@ -7302,7 +7303,7 @@ class ProjectChatManager:
                 n += 1
         while True:
             try:
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                fd = open_fd(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
             except FileExistsError:
                 target = vault_dir / f"{Path(base).stem}-{n}{ext}"
                 n += 1
