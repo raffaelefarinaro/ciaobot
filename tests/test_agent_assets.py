@@ -8,7 +8,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.os_support.links import is_link
+from ciao.os_support.links import is_link, link_source
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
     create_command_endpoint,
@@ -128,7 +128,7 @@ def test_create_subagent_writes_canonical_file_vault_mirror_and_claude_link(tmp_
     assert target.read_text(encoding="utf-8").startswith("---\nname: doc-helper\n")
     assert "canonical_path: subagents/doc-helper.md" in mirror.read_text(encoding="utf-8")
     assert is_link(link)
-    assert link.resolve() == target.resolve()
+    assert link_source(link) == target.resolve()
 
 
 def test_update_and_delete_custom_subagent(tmp_path: Path) -> None:
@@ -191,7 +191,7 @@ def test_create_command_writes_canonical_file_vault_mirror_and_claude_link(tmp_p
     assert "argument-hint: <decision notes>" in text
     assert "canonical_path: commands/summarize-decision.md" in mirror.read_text(encoding="utf-8")
     assert is_link(link)
-    assert link.resolve() == target.resolve()
+    assert link_source(link) == target.resolve()
 
 
 def test_update_and_delete_custom_command(tmp_path: Path) -> None:
