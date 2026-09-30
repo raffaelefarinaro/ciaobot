@@ -21,6 +21,7 @@ import pytest
 from ciao import memory_proposals as mp
 from ciao import memory_tool as mt
 from ciao import proposal_tracking
+from ciao.learning_records import SECTION_ACTIVE, LearningRecord, parse_learnings
 
 
 def write_guide(
@@ -888,50 +889,82 @@ def test_render_entity_note_is_exactly_what_the_write_lands(tmp_path: Path) -> N
 # ---- Structured learnings -------------------------------------------------
 
 
+def _learnings(vault: Path) -> str:
+    return (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+
+
+def _one_active_record(vault: Path) -> LearningRecord:
+    """The single record under ``## Active``, failing loudly on any other shape.
+
+    Read back through the canonical model rather than through a private regex
+    of this module's: the line the writer emits is a machine record, and a test
+    that asserted on it with a hand-rolled pattern would keep passing after the
+    writer had stopped writing anything.
+    """
+    document = parse_learnings(_learnings(vault), workspace=vault.name)
+    active = [
+        entry.record
+        for entry in document.entries
+        if entry.section == SECTION_ACTIVE
+    ]
+    assert len(active) == 1 and active[0] is not None, document.diagnostics
+    return active[0]
+
+
 def test_append_learning_writes_structured_entry(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     assert mp.append_learning(
         vault, "Airtable sort param returns 400; filter by field ID.", source="chat-a1"
     )
-    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
-    line = next(l for l in text.splitlines() if l.startswith("- ["))
-    match = mp._LEARNING_LINE_RE.match(line)
-    assert match is not None
-    assert match.group("count") == "1"
-    assert match.group("first") == match.group("last")
-    assert match.group("sources") == "chat-a1"
+    record = _one_active_record(vault)
+    assert record.text == "Airtable sort param returns 400; filter by field ID."
+    assert record.count == 1
+    assert record.first_seen == record.last_seen
+    # The observation is the evidence, and it is persisted rather than parsed
+    # back out of the human-readable citation list.
+    assert [o.source for o in record.observations] == ["chat-a1"]
 
 
-def test_append_learning_recurrence_increments_instead_of_duplicating(
+def test_append_learning_recurrence_counts_evidence_not_replays(
     tmp_path: Path,
 ) -> None:
+    """A second sighting counts; re-filing the first one does not.
+
+    The old writer incremented whenever the normalized statement matched, so a
+    retry that re-quoted the same episode from the same source — the common case
+    behind a duplicate accept — inflated recurrence and drifted a learning
+    towards the x3 promotion threshold on no new evidence at all.
+    """
     vault = tmp_path / "vault"
     fact = "Airtable sort param returns 400; filter by field ID."
     assert mp.append_learning(vault, fact, source="chat-a1")
     assert mp.append_learning(vault, fact, source="chat-b2")
-    # Whitespace/case variations still count as the same learning.
+    # Whitespace and case variations are still the same statement, and chat-b2
+    # is still the source already counted, so this changes nothing.
     assert mp.append_learning(vault, fact.upper(), source="chat-b2")
 
-    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
-    lines = [l for l in text.splitlines() if l.startswith("- [")]
-    assert len(lines) == 1
-    match = mp._LEARNING_LINE_RE.match(lines[0])
-    assert match is not None
-    assert match.group("count") == "3"
-    assert match.group("sources") == "chat-a1, chat-b2"  # dedup'd source
+    text = _learnings(vault)
+    assert text.count(fact) == 1
+    record = _one_active_record(vault)
+    assert record.count == 2
+    assert [o.source for o in record.observations] == ["chat-a1", "chat-b2"]
 
 
 def test_append_learning_leaves_legacy_bullets_alone(tmp_path: Path) -> None:
+    """An owner-written bullet survives a write that records no evidence.
+
+    A source-less sighting is refused by the model — nothing can tell it apart
+    from a new one — so there is nothing to converge the line towards, and
+    re-rendering it as a canonical entry would rewrite the owner's prose on the
+    strength of a no-op.
+    """
     vault = tmp_path / "vault"
     path = vault / "Workspace" / "Learnings.md"
+    original = "# Learnings\n\n## Active\n- legacy plain learning bullet\n"
     path.parent.mkdir(parents=True)
-    path.write_text(
-        "# Learnings\n\n## Active\n- legacy plain learning bullet\n",
-        encoding="utf-8",
-    )
+    path.write_text(original, encoding="utf-8")
     assert mp.append_learning(vault, "legacy plain learning bullet")
-    text = path.read_text(encoding="utf-8")
-    assert text.count("legacy plain learning bullet") == 1  # exact dup short-circuit
+    assert path.read_text(encoding="utf-8") == original
 
     assert mp.append_learning(vault, "A brand new structured learning.", source="chat-x")
     text = path.read_text(encoding="utf-8")
