@@ -203,6 +203,11 @@ not run `ciao desktop uninstall` yet.
   but not on a PR into `develop`. Nothing builds the app any more, so there is
   no diff for it to react to; a macOS-only regression in a `develop` PR shows up
   on the post-merge push run instead.
+  The `windows` job (`windows-latest`, every PR and push) is advisory while the
+  native Windows port (#696) lands: it imports every `ciao` module, runs
+  `mypy ciao` (natively win32) and `pytest -n auto tests/`, never fails, and
+  puts the three counts in the job summary. The full logs and the failing-test
+  list are in its `windows-results` artifact. It becomes blocking at #696's C9.
 - **Release prep:** from a clean checkout, run:
 
 ```bash
