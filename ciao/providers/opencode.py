@@ -26,6 +26,7 @@ as child sessions — is native.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -68,6 +69,7 @@ from ciao.providers.base import (
 from ciao.execution_modes import (
     opencode_credential_deny_rules,
 )
+from ciao.os_support.processes import ProcessTree, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
 
@@ -195,6 +197,60 @@ def _opencode_messages_signature(messages: list[Any]) -> str:
             )
     return "|".join(pieces)
 _SHUTDOWN_TIMEOUT = 5.0
+
+
+async def _stop_server(process: asyncio.subprocess.Process, tree: ProcessTree) -> None:
+    """Stop an ``opencode serve`` and everything it started, politely first.
+
+    The tree, not the one process: on Windows the process we spawned is the npm
+    shim's ``cmd.exe``, whose ``opencode.exe`` child is the actual server and
+    outlived a kill aimed at the shim alone. Same order as before: ask, wait
+    ``_SHUTDOWN_TIMEOUT``, then kill. A leader that already exited may have
+    left its tree behind, so that is still ended (``kill_descendants``).
+    """
+    try:
+        if process.returncode is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                tree.kill_descendants()
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            tree.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
+        except (TimeoutError, asyncio.TimeoutError):
+            try:
+                tree.kill()
+                await process.wait()
+            except (ProcessLookupError, FileNotFoundError, PermissionError, OSError):
+                # The tree already exited between the timeout and the kill;
+                # treat it as cleanly gone rather than surfacing a spurious
+                # task exception.
+                pass
+    finally:
+        tree.close()
+
+
+async def _spawn_server(
+    *argv: str, **kwargs: Any
+) -> tuple[asyncio.subprocess.Process, ProcessTree]:
+    """``create_subprocess_exec`` as a tree that dies with the engine.
+
+    ``dies_with_engine``: on POSIX the server stays in the engine's process
+    group, as it always has, so launchd's group kill on an engine crash still
+    reaches it; on Windows its Job Object ends the tree when the engine exits.
+    """
+    options: dict[str, Any] = {**tree_spawn_options(dies_with_engine=True), **kwargs}
+    process = await asyncio.create_subprocess_exec(*argv, **options)
+    try:
+        tree = ProcessTree(process.pid, dies_with_engine=True)
+    except OSError:
+        # A server that cannot be stopped as a tree would leak; do not run it.
+        process.kill()
+        await process.wait()
+        raise
+    return process, tree
+
+
 _SERVER_START_LOCKS: dict[str, asyncio.Lock] = {}
 _CATALOG_LOCKS: dict[str, asyncio.Lock] = {}
 # Lines of the server's stderr kept for error messages. The pipe must be read
@@ -1262,6 +1318,7 @@ class OpencodeProvider(BaseSDKProvider):
         # `mode_settings`.
         self._permission_rules = permission_rules
         self._process: asyncio.subprocess.Process | None = None
+        self._tree: ProcessTree | None = None
         # Reads the server's stderr for its whole life; see
         # `_start_stderr_reader` for why leaving the pipe unread is not an option.
         self._stderr_task: asyncio.Task[None] | None = None
@@ -1516,7 +1573,7 @@ class OpencodeProvider(BaseSDKProvider):
         for problem in workspace_config_placeholder_problems(self.workspace_root, env):
             logger.warning("opencode: %s", problem)
 
-        self._process = await asyncio.create_subprocess_exec(
+        self._process, self._tree = await _spawn_server(
             binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
             cwd=str(self.workspace_root),
             env=env,
@@ -1665,21 +1722,10 @@ class OpencodeProvider(BaseSDKProvider):
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-        process = self._process
-        self._process = None
-        if process is not None and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
-            except (TimeoutError, asyncio.TimeoutError):
-                try:
-                    process.kill()
-                    await process.wait()
-                except (ProcessLookupError, FileNotFoundError):
-                    # The process already exited between the timeout and the
-                    # kill; treat it as cleanly gone rather than surfacing a
-                    # spurious task exception.
-                    pass
+        process, tree = self._process, self._tree
+        self._process, self._tree = None, None
+        if process is not None and tree is not None:
+            await _stop_server(process, tree)
         # After the process is gone, so the tail still explains a crash above.
         reader = self._stderr_task
         self._stderr_task = None
@@ -3344,6 +3390,7 @@ class _EphemeralServer:
     def __init__(self, workspace_root: Path) -> None:
         self._workspace_root = workspace_root
         self._process: asyncio.subprocess.Process | None = None
+        self._tree: ProcessTree | None = None
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> httpx.AsyncClient | None:
@@ -3357,7 +3404,7 @@ class _EphemeralServer:
         port = _free_port()
         password = secrets.token_urlsafe(24)
         try:
-            self._process = await asyncio.create_subprocess_exec(
+            self._process, self._tree = await _spawn_server(
                 binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
                 cwd=str(self._workspace_root),
                 env={**os.environ, "OPENCODE_SERVER_PASSWORD": password},
@@ -3394,21 +3441,10 @@ class _EphemeralServer:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-        process = self._process
-        self._process = None
-        if process is not None and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
-            except (TimeoutError, asyncio.TimeoutError):
-                try:
-                    process.kill()
-                    await process.wait()
-                except (ProcessLookupError, FileNotFoundError):
-                    # The process already exited between the timeout and the
-                    # kill; treat it as cleanly gone rather than surfacing a
-                    # spurious task exception.
-                    pass
+        process, tree = self._process, self._tree
+        self._process, self._tree = None, None
+        if process is not None and tree is not None:
+            await _stop_server(process, tree)
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")

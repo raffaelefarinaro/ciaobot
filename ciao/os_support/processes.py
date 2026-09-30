@@ -21,6 +21,14 @@ shares this process's console; without one there is no graceful stop, and
 grace period is what ends the tree. The job does not kill on close: like a
 POSIX session, a tree outlives the ``ProcessTree`` that tracked it.
 
+``dies_with_engine=True`` is for helpers that exist only while the engine
+does (the OpenCode server). On POSIX such a child stays in the engine's own
+process group, as it always did, so launchd (which kills the job's group when
+the engine exits, ``AbandonProcessGroup`` unset) and a terminal's Ctrl-C still
+reach it; ``terminate``/``kill`` then signal that one pid. On Windows its Job
+Object is ``KILL_ON_JOB_CLOSE``: the job handle closes when the engine exits,
+crash included, and takes the whole tree with it.
+
 The assignment happens after the child exists, so a grandchild started in the
 microseconds between ``CreateProcess`` and ``AssignProcessToJobObject`` would
 escape the job. Neither git nor a shell starts children that fast. Closing the
@@ -61,23 +69,69 @@ if sys.platform == "win32":
         "TerminateJobObject", wintypes.BOOL, wintypes.HANDLE, wintypes.UINT
     )
     _CloseHandle = _declare("CloseHandle", wintypes.BOOL, wintypes.HANDLE)
+    _SetInformationJobObject = _declare(
+        "SetInformationJobObject", wintypes.BOOL,
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    )
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+        )]
+
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimits),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 
     _PROCESS_TERMINATE = 0x0001
     _PROCESS_SET_QUOTA = 0x0100
     _KILLED_EXIT_CODE = 1
 
-    def tree_spawn_options() -> dict[str, Any]:
+    def tree_spawn_options(*, dies_with_engine: bool = False) -> dict[str, Any]:
         """Keyword arguments for ``Popen``/``create_subprocess_exec``."""
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
 
     class ProcessTree:
         """A child spawned with ``tree_spawn_options()`` and all it starts."""
 
-        def __init__(self, pid: int) -> None:
+        def __init__(self, pid: int, *, dies_with_engine: bool = False) -> None:
             self.pid = pid
             job = _CreateJobObjectW(None, None)
             if not job:
                 raise ctypes.WinError(ctypes.get_last_error())
+            if dies_with_engine:
+                limits = _ExtendedLimits()
+                limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                if not _SetInformationJobObject(
+                    job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                    ctypes.byref(limits), ctypes.sizeof(limits),
+                ):
+                    error = ctypes.get_last_error()
+                    _CloseHandle(job)
+                    raise ctypes.WinError(error)
             process = _OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
             if not process:
                 error = ctypes.get_last_error()
@@ -106,6 +160,10 @@ if sys.platform == "win32":
             if not _TerminateJobObject(self._job, _KILLED_EXIT_CODE):
                 raise ctypes.WinError(ctypes.get_last_error())
 
+        def kill_descendants(self) -> None:
+            """After the leader has exited: end whatever it left in the tree."""
+            self.kill()
+
         def close(self) -> None:
             """Stop tracking the tree; the processes keep running."""
             if self._job is not None:
@@ -114,23 +172,41 @@ if sys.platform == "win32":
 
 else:
 
-    def tree_spawn_options() -> dict[str, Any]:
+    def tree_spawn_options(*, dies_with_engine: bool = False) -> dict[str, Any]:
         """Keyword arguments for ``Popen``/``create_subprocess_exec``."""
-        return {"start_new_session": True}
+        return {} if dies_with_engine else {"start_new_session": True}
 
     class ProcessTree:
         """A child spawned with ``tree_spawn_options()`` and all it starts."""
 
-        def __init__(self, pid: int) -> None:
+        def __init__(self, pid: int, *, dies_with_engine: bool = False) -> None:
             self.pid = pid
+            self._group = not dies_with_engine
 
         def terminate(self) -> None:
-            """Ask the tree to stop: ``SIGTERM`` to the process group."""
-            os.killpg(self.pid, signal.SIGTERM)
+            """Ask the tree to stop: ``SIGTERM`` to the group, or to the one child."""
+            if self._group:
+                os.killpg(self.pid, signal.SIGTERM)
+            else:
+                os.kill(self.pid, signal.SIGTERM)
 
         def kill(self) -> None:
-            """End every process in the tree: ``SIGKILL`` to the process group."""
-            os.killpg(self.pid, signal.SIGKILL)
+            """End the tree: ``SIGKILL`` to the group, or to the one child."""
+            if self._group:
+                os.killpg(self.pid, signal.SIGKILL)
+            else:
+                os.kill(self.pid, signal.SIGKILL)
+
+        def kill_descendants(self) -> None:
+            """After the leader has exited: end whatever it left in the tree.
+
+            The group outlives its leader, so ``killpg`` still reaches it. A
+            ``dies_with_engine`` child shares the engine's group instead, and its
+            pid may already belong to an unrelated process, so there is nothing
+            this can safely signal.
+            """
+            if self._group:
+                os.killpg(self.pid, signal.SIGKILL)
 
         def close(self) -> None:
             """Stop tracking the tree; nothing to release on POSIX."""
