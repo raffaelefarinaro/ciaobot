@@ -147,9 +147,9 @@ class ArchivePipeline:
             # `archive_chat` set it, but a caller can pass the outcome directly).
             if not chat.archive_path and outcome.path is not None:
                 try:
-                    chat.archive_path = str(
-                        outcome.path.relative_to(config.workspace_root)
-                    )
+                    chat.archive_path = outcome.path.relative_to(
+                        config.workspace_root
+                    ).as_posix()
                 except ValueError:
                     chat.archive_path = str(outcome.path)
             workspace = project_meta.workspace if project_meta else ""
