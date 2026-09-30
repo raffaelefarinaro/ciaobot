@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
 import { createPinia as newPinia, setActivePinia } from 'pinia'
-import type { ProjectInfo, ChatInfo } from '../lib/types'
+import type { ProjectInfo, ChatInfo, ChatMessage } from '../lib/types'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
@@ -5421,6 +5421,102 @@ describe('envelope history window', () => {
     const msgs = store.messages[chatId]
     expect(msgs[0].unattended).toBe(true)
     expect(msgs[1].unattended).toBeUndefined()
+  })
+
+  describe('a queued turn reconciled before the turn ahead of it', () => {
+    // Repro of chat-1215d5ae: a message queued behind a running turn starts
+    // seconds after that turn ends, which stops the first turn's post-result
+    // reconcile before it indexed anything. The second turn's reconcile then
+    // brings both turns at once. The old merge inserted every unmatched server
+    // row before the "follow-up" bubble, so the queued turn's activity and
+    // answer rendered under the previous turn and its own bubble sat empty.
+    const T = '2026-09-30T12:29:26Z'
+    const serverRows = [
+      { role: 'user', content: 'first ask', turn_index: 0, i: 0 },
+      { role: 'system', tool_name: '_activity', content: '$ Bash rename', i: 1 },
+      { role: 'system', tool_name: '_activity', content: '📖 Read a.png', i: 2 },
+      { role: 'assistant', content: 'renamed it', i: 3, sent_at: T },
+      { role: 'user', content: 'queued ask', turn_index: 1, i: 4 },
+      { role: 'system', tool_name: '_activity', content: '$ Bash move', i: 5 },
+      { role: 'system', tool_name: '_activity', content: '📖 Read b.png', i: 6 },
+      { role: 'assistant', content: 'moved it', i: 7, sent_at: T },
+    ]
+    const envelopeOf = (items: typeof serverRows) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({ items, total: items.length, offset: 0, limit: 50, hasMore: false, nextOffset: null })
+        : Promise.resolve([])
+    const liveTurn = (ask: string, turnIndex: number, trace: string, answer: string): ChatMessage[] => [
+      { role: 'user', content: ask, turn_index: turnIndex, timestamp: T },
+      // The live trace joins consecutive tool calls into one group, so it
+      // never equals the server's per-message rows.
+      { role: 'system', tool_name: '_activity', content: trace, timestamp: T },
+      { role: 'assistant', content: answer, timestamp: T, phase: 'final_answer' },
+    ]
+    const rendered = (chatId: string) => useProjectStore().messages[chatId].map(m => m.content)
+    const expected = serverRows.map(r => r.content)
+
+    for (const firstTurnIndexed of [false, true]) {
+      test(`each turn keeps its own rows (first turn ${firstTurnIndexed ? 'indexed' : 'still live'})`, async () => {
+        const store = useProjectStore()
+        const chatId = `c-queued-order-${firstTurnIndexed}`
+        store.messages[chatId] = [
+          { role: 'assistant', content: 'older', i: 0, timestamp: T },
+          ...(firstTurnIndexed
+            ? serverRows.slice(0, 4).map(r => ({ ...r, i: r.i + 1, timestamp: r.sent_at || '' } as ChatMessage))
+            : liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it')),
+          ...liveTurn('queued ask', 1, '$ Bash move\n📖 Read b.png', 'moved it'),
+        ]
+        const shifted = serverRows.map(r => ({ ...r, i: r.i + 1 }))
+        apiGet.mockImplementation(envelopeOf([
+          { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+          ...shifted,
+        ]))
+
+        await store.loadMessages(chatId)
+
+        expect(rendered(chatId)).toEqual(['older', ...expected])
+      })
+    }
+
+    test('an answer the live copy cannot pair with still lands under its own bubble', async () => {
+      // The live answer bubble merges streamed text the server stores as
+      // separate parts, so exact matching can miss it too.
+      const store = useProjectStore()
+      const chatId = 'c-queued-order-unpaired'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        ...liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it'),
+        ...liveTurn('queued ask', 1, '$ Bash move\n📖 Read b.png', 'moved it\n\nand checked'),
+      ]
+      apiGet.mockImplementation(envelopeOf([
+        { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+        ...serverRows.map(r => ({ ...r, i: r.i + 1 })),
+      ]))
+
+      await store.loadMessages(chatId)
+
+      expect(rendered(chatId)).toEqual(['older', ...expected])
+    })
+
+    test('a queued turn still streaming keeps its live trace below its bubble', async () => {
+      const store = useProjectStore()
+      const chatId = 'c-queued-order-streaming'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        ...liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it'),
+        { role: 'user', content: 'queued ask', turn_index: 1, timestamp: T },
+      ]
+      store.projectStreaming[chatId] = true
+      // The session already holds the queued turn's first tool call.
+      apiGet.mockImplementation(envelopeOf([
+        { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+        ...serverRows.slice(0, 6).map(r => ({ ...r, i: r.i + 1 })),
+      ]))
+
+      await store.loadMessages(chatId)
+
+      expect(rendered(chatId)).toEqual(['older', ...expected.slice(0, 5)])
+    })
   })
 })
 

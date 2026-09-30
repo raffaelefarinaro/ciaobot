@@ -289,9 +289,15 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
  * rendering the reply once whole and then again in pieces.
  *
  * The server's copy is authoritative once the turn has settled, which is what
- * an appended assistant row carrying a completion `timestamp` says (only the
- * turn-final row gets one, from `_overlay_assistant_timings`). Until then the
- * live tail is all the user has, so it stays.
+ * a window row for an assistant answer carrying a completion `timestamp` says
+ * (only the turn-final row gets one, from `_overlay_assistant_timings`). Until
+ * then the live tail is all the user has, so it stays.
+ *
+ * Settling is judged per turn: the tail is split at user bubbles, and only a
+ * turn whose own settled answer arrived in `windowRows` loses its live copies.
+ * A queued follow-up can finish before the turn ahead of it was ever
+ * reconciled, so one refresh may settle several turns at once, while a
+ * follow-up still streaming keeps its trace.
  *
  * Only trace rows go. An un-indexed plain system row is a client-side notice
  * — the failed-send warning `recoverUnackedSend` pushes — with no server
@@ -299,66 +305,61 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
  * optimistic-bubble pruning instead.
  */
 export function dropSupersededLiveTail(
-  merged: ChatMessage[], tailStart: number, firstAppendPos: number,
+  merged: ChatMessage[], tailStart: number, windowRows: ChatMessage[],
 ): ChatMessage[] {
-  if (firstAppendPos <= tailStart) return merged
-  const settled = merged.slice(firstAppendPos).some(
-    m => m.role === 'assistant' && !m.is_error && Boolean(m.timestamp),
-  )
-  if (!settled) return merged
-  // A fast follow-up can already be streaming after the settled turn. Keep
-  // that second turn's trace; only the live rows before its user bubble are
-  // superseded by the newly appended server rows.
-  const userPositions = merged
-    .map((row, pos) => row.role === 'user' && pos >= tailStart ? pos : -1)
-    .filter(pos => pos >= 0)
-  const supersededEnd = userPositions.length > 1
-    ? userPositions[1]
-    : userPositions.length === 1 && typeof merged[userPositions[0]].i === 'number'
-      ? userPositions[0]
-      : firstAppendPos
-  // A server row carries the turn's usage only once `record_turn` has run;
-  // for the turn that just streamed it may still be missing. Carry the live
-  // values (and the model that answered) onto the server row that closes the
-  // turn, or the footer would lose the turn's cost on that reconcile.
-  const carried: Partial<ChatMessage> = {}
-  const kept: ChatMessage[] = []
-  for (let p = 0; p < merged.length; p++) {
-    const row = merged[p]
-    const superseded = p >= tailStart
-      && p < supersededEnd
-      && typeof row.i !== 'number'
-      && isLiveTraceRow(row)
-    if (!superseded) {
-      kept.push(row)
+  const settledIndices = new Set<number>()
+  for (const row of windowRows) {
+    if (
+      typeof row.i === 'number'
+      && row.role === 'assistant'
+      && !row.is_error
+      && Boolean(row.timestamp)
+    ) settledIndices.add(row.i)
+  }
+  if (!settledIndices.size) return merged
+  const kept = merged.slice(0, tailStart)
+  let changed = false
+  let start = tailStart
+  while (start < merged.length) {
+    let end = start + 1
+    while (end < merged.length && merged[end].role !== 'user') end++
+    const turn = merged.slice(start, end)
+    const settledPos = turn.findIndex(
+      row => typeof row.i === 'number' && settledIndices.has(row.i),
+    )
+    if (settledPos < 0) {
+      kept.push(...turn)
+      start = end
       continue
     }
-    if (row.usage) carried.usage = row.usage
-    if (row.effective_model) carried.effective_model = row.effective_model
-    if (row.quota) carried.quota = row.quota
-  }
-  if (kept.length === merged.length) return merged
-  if (Object.keys(carried).length) {
-    const limit = supersededEnd === firstAppendPos ? merged.length : supersededEnd
-    let target: number | undefined
-    for (let p = limit - 1; p >= firstAppendPos; p--) {
-      const row = merged[p]
-      if (row.role === 'assistant' && typeof row.i === 'number') {
-        target = row.i
-        break
+    // A server row carries the turn's usage only once `record_turn` has run;
+    // for the turn that just streamed it may still be missing. Carry the live
+    // values (and the model that answered) onto the server row that closes the
+    // turn, or the footer would lose the turn's cost on that reconcile.
+    const carried: Partial<ChatMessage> = {}
+    const rows: ChatMessage[] = []
+    let target = -1
+    for (const row of turn) {
+      if (typeof row.i !== 'number' && isLiveTraceRow(row)) {
+        if (row.usage) carried.usage = row.usage
+        if (row.effective_model) carried.effective_model = row.effective_model
+        if (row.quota) carried.quota = row.quota
+        changed = true
+        continue
       }
+      if (row.role === 'assistant' && typeof row.i === 'number') target = rows.length
+      rows.push(row)
     }
-    for (let p = kept.length - 1; p >= 0; p--) {
-      const row = kept[p]
-      if (row.role !== 'assistant' || (target !== undefined && row.i !== target)) continue
+    if (target >= 0 && Object.keys(carried).length) {
       // Fill only the facts the row is actually missing. A plain spread let
       // an explicitly-undefined key on the server row shadow the carried
       // value and lose the turn's cost again.
-      kept[p] = mergeMessageFields(row, carried as ChatMessage)
-      break
+      rows[target] = mergeMessageFields(rows[target], carried as ChatMessage)
     }
+    kept.push(...rows)
+    start = end
   }
-  return kept
+  return changed ? kept : merged
 }
 
 /**

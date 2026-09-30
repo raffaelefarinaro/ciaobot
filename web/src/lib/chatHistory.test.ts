@@ -237,66 +237,84 @@ describe('isSettledHistoryRow', () => {
 })
 
 describe('dropSupersededLiveTail', () => {
-  test('keeps everything until the appended turn has settled', () => {
+  test('keeps everything until the window settles the turn', () => {
     const rows = [
       msg({ role: 'user', content: 'q', i: 0 }),
       msg({ role: 'assistant', content: 'live' }),
       msg({ role: 'assistant', content: 'server', i: 1 }),
     ]
-    expect(dropSupersededLiveTail(rows, 1, 2)).toBe(rows)
+    expect(dropSupersededLiveTail(rows, 1, [rows[2]])).toBe(rows)
   })
 
   test('drops the live trace once a settled server row replaces it', () => {
+    const server = msg({ role: 'assistant', content: 'server answer', i: 1, timestamp: 'T' })
     const rows = [
       msg({ role: 'user', content: 'q', i: 0 }),
       msg({ role: 'system', tool_name: '_activity', content: 'Read x' }),
       msg({ role: 'assistant', content: 'live answer' }),
-      msg({ role: 'assistant', content: 'server answer', i: 1, timestamp: 'T' }),
+      server,
     ]
-    const out = dropSupersededLiveTail(rows, 1, 3)
+    const out = dropSupersededLiveTail(rows, 1, [server])
     expect(out.map(m => m.content)).toEqual(['q', 'server answer'])
   })
 
   test('carries the live turn cost onto the server row that closes the turn', () => {
+    const server = msg({ role: 'assistant', content: 'server', i: 1, timestamp: 'T' })
     const rows = [
       msg({ role: 'user', content: 'q', i: 0 }),
       msg({ role: 'assistant', content: 'live', usage: { input: '11' }, effective_model: 'm' }),
-      msg({ role: 'assistant', content: 'server', i: 1, timestamp: 'T' }),
+      server,
     ]
-    const out = dropSupersededLiveTail(rows, 1, 2)
+    const out = dropSupersededLiveTail(rows, 1, [server])
     expect(out).toHaveLength(2)
     expect(out[1].usage).toEqual({ input: '11' })
     expect(out[1].effective_model).toBe('m')
   })
 
   test('a client-side notice with no server counterpart survives', () => {
+    const server = msg({ role: 'assistant', content: 'server', i: 1, timestamp: 'T' })
     const rows = [
       msg({ role: 'user', content: 'q', i: 0 }),
       msg({ role: 'system', content: "Error: a message didn't reach the engine" }),
-      msg({ role: 'assistant', content: 'server', i: 1, timestamp: 'T' }),
+      server,
     ]
-    const out = dropSupersededLiveTail(rows, 1, 2)
+    const out = dropSupersededLiveTail(rows, 1, [server])
     expect(out.map(m => m.role)).toEqual(['user', 'system', 'assistant'])
   })
 
   test('a follow-up turn already streaming keeps its own trace', () => {
-    // Two live user bubbles in the tail: only the rows before the second one
-    // are superseded by the appended server rows.
+    const server = msg({ role: 'assistant', content: 'server 1', i: 2, timestamp: 'T' })
     const rows = [
       msg({ role: 'assistant', content: 'older', i: 0 }),
-      msg({ role: 'user', content: 'q1' }),
+      msg({ role: 'user', content: 'q1', i: 1 }),
       msg({ role: 'assistant', content: 'live 1' }),
+      server,
       msg({ role: 'user', content: 'q2' }),
       msg({ role: 'assistant', content: 'live 2' }),
-      msg({ role: 'assistant', content: 'server 1', i: 1, timestamp: 'T' }),
     ]
-    const out = dropSupersededLiveTail(rows, 1, 5)
-    expect(out.map(m => m.content)).toEqual(['older', 'q1', 'q2', 'live 2', 'server 1'])
+    const out = dropSupersededLiveTail(rows, 1, [server])
+    expect(out.map(m => m.content)).toEqual(['older', 'q1', 'server 1', 'q2', 'live 2'])
   })
 
-  test('nothing to drop when the append starts at the tail', () => {
+  test('one refresh can settle a turn and the queued turn after it', () => {
+    const first = msg({ role: 'assistant', content: 'server 1', i: 2, timestamp: 'T' })
+    const second = msg({ role: 'assistant', content: 'server 2', i: 4, timestamp: 'T' })
+    const rows = [
+      msg({ role: 'assistant', content: 'older', i: 0 }),
+      msg({ role: 'user', content: 'q1', i: 1 }),
+      msg({ role: 'system', tool_name: '_activity', content: 'live tools 1' }),
+      first,
+      msg({ role: 'user', content: 'q2', i: 3 }),
+      msg({ role: 'system', tool_name: '_activity', content: 'live tools 2' }),
+      second,
+    ]
+    const out = dropSupersededLiveTail(rows, 1, [first, second])
+    expect(out.map(m => m.content)).toEqual(['older', 'q1', 'server 1', 'q2', 'server 2'])
+  })
+
+  test('nothing to drop when the window settles nothing', () => {
     const rows = [msg({ role: 'assistant', content: 'a', i: 0 })]
-    expect(dropSupersededLiveTail(rows, 1, 1)).toBe(rows)
+    expect(dropSupersededLiveTail(rows, 1, [])).toBe(rows)
   })
 })
 
