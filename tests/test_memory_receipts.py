@@ -8,13 +8,17 @@ These pin AI-05's acceptance criteria:
 * a crash between the receipt and the file update recovers to one consistent
   operation;
 * undo refuses a changed destination, cannot remove unrelated later facts, and
-  leaves unsupported legacy operations view-only.
+  leaves unsupported legacy operations view-only;
+* the journal, its lock and the trim temp are private files, the temp can only
+  ever be created rather than opened, and the trim is bounded in bytes as well
+  as in rows without dropping a pending receipt.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import stat
 import threading
 from pathlib import Path
 
@@ -234,7 +238,10 @@ def test_trim_keeps_a_pending_receipt_that_predates_the_cut(tmp_path, monkeypatc
 
 def test_trim_drops_only_terminal_receipts(tmp_path, monkeypatch):
     """With every dropped id terminal, trimming proceeds."""
-    monkeypatch.setattr(mr, "MAX_BYTES", 1)
+    # A cap the *retained* tail fits inside (two 64-byte rows), so this exercises
+    # the row-count budget on its own; `test_trim_bounds_a_byte_heavy_journal`
+    # is where the byte budget is pinned.
+    monkeypatch.setattr(mr, "MAX_BYTES", 150)
     monkeypatch.setattr(mr, "KEEP_LINES", 2)
     journal = _journal(tmp_path)
     for i in range(5):
@@ -347,6 +354,157 @@ def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monke
     ids = {r["id"] for r in mr.read_receipts(journal)}
     assert "mrcpt_concurrent" in ids, "the trim deleted a receipt appended while it ran"
     assert "mrcpt_trimmer" in ids
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "umask"), reason="no POSIX permissions on this platform"
+)
+def test_a_new_journal_and_its_lock_are_private(tmp_path):
+    """A receipt images whole note bodies, so the journal is not shared.
+
+    A note may be 0600 while the journal holding its before *and* after image
+    was created 0666 minus the umask, and the journal lives inside the vault
+    beside the queue — so on a multi-user machine every local account could read
+    what the note's own permissions forbid. The journal, its lock and the trim
+    temp are created 0600; a file that already exists keeps the mode its owner
+    chose, because a background append is not a reason to re-chmod anything.
+    """
+    journal = _journal(tmp_path)
+    # A permissive umask is the case that mattered: under the usual 022 the
+    # `Path.open("a")` this replaced produced 0644, and the 0666 it produces
+    # here is what a user with umask 000 got.
+    previous = os.umask(0o000)
+    try:
+        mr._append(journal, {"id": "mrcpt_private", "status": mr.APPLIED, "ts": "t"})
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(journal.stat().st_mode) == 0o600
+    lock = journal.with_name(journal.name + ".lock")
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+    # A journal the owner deliberately shared keeps the mode they set, and a
+    # second append does not quietly narrow it.
+    os.chmod(journal, 0o644)
+    mr._append(journal, {"id": "mrcpt_shared", "status": mr.APPLIED, "ts": "t2"})
+    assert stat.S_IMODE(journal.stat().st_mode) == 0o644
+    assert [row["id"] for row in mr.read_receipts(journal)] == [
+        "mrcpt_private",
+        "mrcpt_shared",
+    ]
+
+
+def test_trim_bounds_a_byte_heavy_journal_and_spares_a_pending_row(
+    tmp_path, monkeypatch
+):
+    """The cap is bytes, not rows, and a pending row outranks the cap.
+
+    `KEEP_LINES` is a budget of rows, but a receipt images a whole note, so a
+    journal of a few large rows stayed far above `MAX_BYTES` — the size the trim
+    exists to bound — and every later append re-ran the same read-and-rewrite
+    over the same over-long file. The trim now also drops whole rows from the
+    front until the remainder serializes within the cap, and an unresolved
+    receipt is still worth more than the cap: the byte cut stops at it rather
+    than dropping it, which is why the file can legitimately stay over.
+    """
+    cap = 2000
+    monkeypatch.setattr(mr, "MAX_BYTES", cap)
+    monkeypatch.setattr(mr, "KEEP_LINES", 50)  # the row budget never fires here
+    journal = _journal(tmp_path)
+    blob = "x" * 1500
+
+    # An unresolved receipt first, so the byte cut walks into it.
+    mr._append(
+        journal,
+        {"id": "mrcpt_pending_huge", "status": mr.PREPARED, "ts": "t0", "image": blob},
+    )
+    for i in range(2):
+        mr._append(
+            journal,
+            {
+                "id": f"mrcpt_done_{i}",
+                "status": mr.APPLIED,
+                "ts": f"t{i}",
+                "image": blob,
+            },
+        )
+
+    # Over the cap, and the trim cannot fix it without losing a `prepared` row.
+    assert journal.stat().st_size > cap
+    assert mr.find_receipt(journal, "mrcpt_pending_huge")["status"] == mr.PREPARED
+    assert {row["id"] for row in mr.read_receipts(journal)} == {
+        "mrcpt_pending_huge",
+        "mrcpt_done_0",
+        "mrcpt_done_1",
+    }
+
+    # It settles, and the next appends are what the byte cut is for.
+    mr._append(journal, {"id": "mrcpt_pending_huge", "status": mr.APPLIED, "ts": "t3"})
+    temp_modes: list[int] = []
+    real_replace = os.replace
+
+    def probe(src, dst):  # type: ignore[no-untyped-def]
+        if str(dst) == str(journal):
+            temp_modes.append(stat.S_IMODE(os.stat(src).st_mode))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", probe)
+    mr._append(
+        journal,
+        {"id": "mrcpt_done_2", "status": mr.APPLIED, "ts": "t4", "image": blob},
+    )
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    assert journal.stat().st_size <= cap
+    rows = mr.read_receipts(journal)
+    assert {row["id"] for row in rows} == {"mrcpt_pending_huge", "mrcpt_done_2"}
+    assert all(row["status"] == mr.APPLIED for row in rows)
+    # Whole rows only: the retained journal is still parseable line for line.
+    assert journal.read_text(encoding="utf-8").count("\n") == len(rows)
+    # The trim temp holds the same note bodies and is no wider than the journal
+    # it replaces, and leaves nothing behind.
+    assert temp_modes and set(temp_modes) == {0o600}
+    assert stat.S_IMODE(journal.stat().st_mode) == 0o600
+    assert not list(journal.parent.glob("*.trim.tmp"))
+
+
+def test_trim_temp_is_created_not_reused(tmp_path, monkeypatch):
+    """The trim temp can only ever be a file this trim created.
+
+    The whole retained journal — note bodies included — is written to the temp
+    before the `os.replace`, so an open that follows whatever sits at that name
+    hands the contents of an arbitrary file to anyone who can read it, and one
+    that truncates it destroys a file the vault did not lose. The stale temp is
+    therefore unlinked explicitly first, and the open that follows is
+    `O_EXCL | O_NOFOLLOW`: it can only create, never open what is already there
+    and never write through a link planted in the window between the two.
+    """
+    monkeypatch.setattr(mr, "MAX_BYTES", 1)  # every append trims
+    monkeypatch.setattr(mr, "KEEP_LINES", 50)  # ...but drops nothing
+    journal = _journal(tmp_path)
+    for i in range(3):
+        mr._append(
+            journal, {"id": f"mrcpt_flag_{i}", "status": mr.APPLIED, "ts": f"t{i}"}
+        )
+
+    opened: list[tuple[Path, int]] = []
+    real_open_private = mr._open_private
+
+    def record(path: Path, *, flags: int, mode: int = 0o600) -> int:
+        opened.append((path, flags))
+        return real_open_private(path, flags=flags, mode=mode)
+
+    monkeypatch.setattr(mr, "_open_private", record)
+    mr._append(journal, {"id": "mrcpt_flag_3", "status": mr.APPLIED, "ts": "t3"})
+
+    temps = [(path, flags) for path, flags in opened if path.name.endswith(".trim.tmp")]
+    assert temps, "the trim never opened its temp"
+    for _path, flags in temps:
+        assert flags & os.O_EXCL, "the temp open must fail on an existing name"
+        assert flags & os.O_NOFOLLOW, "the temp open must refuse a symlink"
+        assert not flags & os.O_TRUNC, "an existing file is unlinked, not truncated"
+    # The trim still did its job through those flags.
+    assert {r["id"] for r in mr.read_receipts(journal)} == {"mrcpt_flag_3"}
 
 
 def test_recovery_applied_when_crash_landed_after_the_write(tmp_path):

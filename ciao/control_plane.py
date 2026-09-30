@@ -826,6 +826,12 @@ class CiaoControlPlane:
 
         Destructive operations are intentionally separate from ``decide`` and
         require a candidate generated from the current content hash.
+
+        ``complete`` and ``restore_completed`` are the project-completion pair,
+        reachable here for the same reason they are reachable from the panel:
+        a candidate payload now advertises ``completable``, and an agent that
+        could see a note was a project with somewhere to go had no way to close
+        it out.
         """
         from ciao import vault_review as review
 
@@ -833,7 +839,15 @@ class CiaoControlPlane:
         resolver = getattr(self.config, "workspace_vault_root", None)
         root = Path(resolver(workspace) if callable(resolver) else self._vault_root(principal)).resolve()
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
-        if action in {"decide", "trash", "restore", "delete"} and chat is not None:
+        # Every mutating action, and nothing else: an unattended schedule may
+        # list and inspect, never dispose of a note. `complete` joins the set
+        # rather than sitting outside it — it is the destructive class (a
+        # folder move, a backlink rewrite across the vault, a terminal ledger
+        # row) and the panel already requires an attended, confirmed click —
+        # and `restore_completed` joins it because `restore` from the trash is
+        # guarded on the same grounds, an undo of a disposition being exactly
+        # as much of a decision as the disposition.
+        if action in {"decide", "trash", "restore", "delete", "complete", "restore_completed"} and chat is not None:
             # The CURRENT turn, not the most recent unattended one. Only
             # unattended turns get a key written, so `max(...)` answered "has
             # this chat ever run unattended" — one scheduled turn then refused
@@ -841,11 +855,20 @@ class CiaoControlPlane:
             current_turn = str(max(0, int(chat.user_turn_count) - 1))
             if chat.user_turn_unattended.get(current_turn):
                 raise ControlPlaneError("unattended_forbidden", "Vault review mutations require an attended turn.")
-        if action in {"restore", "delete"}:
+        # `restore_completed` belongs here rather than below for the same reason
+        # `restore` does: a completed project left the queue, so the candidate
+        # scan below cannot resolve its id, and the restore repoints links on the
+        # way back rather than disposing of a candidate.
+        if action in {"restore", "delete", "restore_completed"}:
             try:
-                result = review.restore_note(root, candidate_id) if action == "restore" else review.delete_permanently(root, candidate_id, confirm=confirm)
+                if action == "restore":
+                    result = review.restore_note(root, candidate_id)
+                elif action == "delete":
+                    result = review.delete_permanently(root, candidate_id, confirm=confirm)
+                else:
+                    result = review.restore_completed(root, candidate_id, workspace=workspace)
                 review.generate_candidates(root, workspace=workspace, write_queue=True)
-            except ValueError as exc:
+            except (ValueError, OSError) as exc:
                 raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
             return _ok(result)
         # Validated before the queue is regenerated below: `record_decision`
@@ -889,13 +912,20 @@ class CiaoControlPlane:
                 result = review.trash_note(root, item)
                 review.generate_candidates(root, workspace=workspace, write_queue=True)
                 return _ok(result)
-            if action == "restore":
-                return _ok(review.restore_note(root, item.candidate_id))
-            if action == "delete":
-                return _ok(review.delete_permanently(root, item.candidate_id, confirm=confirm))
-        except ValueError as exc:
+            if action == "complete":
+                # The candidate comes off `generate_candidates`, so it carries
+                # the `vault_root` the completion's destination check needs; the
+                # review module refuses when it does not rather than answering
+                # from the path alone.
+                result = review.complete_project_note(root, item)
+                review.generate_candidates(root, workspace=workspace, write_queue=True)
+                return _ok(result)
+        except (ValueError, OSError) as exc:
             raise ControlPlaneError("vault_review_invalid", str(exc)) from exc
-        raise ControlPlaneError("invalid_action", "action must be list, inspect, decide, trash, restore, or delete.")
+        raise ControlPlaneError(
+            "invalid_action",
+            "action must be list, inspect, decide, trash, restore, complete, restore_completed, or delete.",
+        )
 
     # ---- projects/chats ------------------------------------------------
 

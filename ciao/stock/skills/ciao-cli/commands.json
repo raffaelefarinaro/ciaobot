@@ -7,6 +7,8 @@
   "vault review keep": "vault_review",
   "vault review trash": "vault_review",
   "vault review restore": "vault_review",
+  "vault review complete": "vault_review",
+  "vault review restore-completed": "vault_review",
   "vault review delete": "vault_review",
   "file surface": "file_surface",
   "chat list": "chats_list",

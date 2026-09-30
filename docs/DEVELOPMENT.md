@@ -774,6 +774,137 @@ detector that returned the wrong shape, an unreadable state file) are not cached
 at all. Change the constant or the token contract and update the tests that pin
 them, and see `tests/test_update_tasks.py`.
 
+### Update tasks: the launch
+
+`ciao/web/update_task_launch.py` (#761) is the only thing that turns a task into
+a chat. Two rules, and both are the reason it is a server module rather than
+browser code:
+
+- **The prompt is server-owned.** It is read from the packaged
+  `prompt_resource` with `read_prompt`, and no parameter accepts prompt text from
+  a caller — a chat launched for "review the legacy rows" that is told to do
+  something else is worse than no chat, because the record says the task ran.
+  What travels instead is `prompt_digest = sha256(prompt)[:16]`, carried in the
+  record and in the chat's helper, so a reader can tell whether the instructions
+  changed without shipping them twice.
+- **Start is idempotent per `(task id, revision)`.** The whole launch runs inside
+  `update_tasks._record_lock` — the same read-and-replace section the recorders
+  use, and deliberately the same one, because a chat id written outside it is
+  lost with no error. Inside it: read the record, and if it already names a chat
+  that still exists, return it with `resumed: true` and create nothing. A record
+  naming a chat that is gone is the recoverable case, not a failure: a fresh chat
+  is created and the record re-stamped, so a deleted chat never leaves a task
+  permanently pointing at an id nobody can open. Records are keyed
+  `"<id>@<revision>"`, which is why a revised task cannot resume, or even see,
+  the previous revision's chat — an engine update never substitutes new
+  instructions into a running chat.
+
+A live chat is not the same as a dispatched prompt, so the record's lifecycle
+decides what a resume does with one (`_resumed`):
+
+- `failed` — the turn never reached the chat, so the prompt is sent into **that
+  same chat** under the lock and the record goes back to `in_progress`. Still one
+  chat, still `resumed: true`, and now a prompt that actually left. A retry that
+  fails again leaves the record `failed`, so the next start tries again.
+- `dismissed` or `offered` (`REOPENED_BY_START`) — an operator pressing Start on
+  a task that is not running: one they declined, or one `reopen_task` put back on
+  offer while carrying the chat that dismissal kept. Either way the chat is kept
+  and the record is written `in_progress`. Nothing is dispatched, because a chat
+  reached here has already run the task. (The 409 alternative — "reopen it first" —
+  was available and not taken; Reopen already exists and does strictly less.) The
+  second lifecycle belongs to the same branch because it is what the first becomes
+  a step later: `dismiss → reopen → start` must land exactly where `dismiss →
+  start` lands, and leaving the record `offered` there would report a resume while
+  the row still offers Start on a chat that has already run the task.
+- anything else — nothing created, nothing sent, and the digest reported is the
+  record's own rather than the one this call computed.
+
+`completed` never reaches `_resumed` at all: `launch_task` refuses it with a
+`ValueError` (a 409) *before* the chat lookup, because a `completed` record is a
+registered check's verdict rather than an operator's decision, and a launch is a
+new attempt. That ordering is the fix for the duplicate-prompt path an archived
+chat used to open: chats are archived and deleted routinely, so a stale tab or a
+retry against a finished task used to fall through the create-fresh recovery and
+replace `completed` with `in_progress`, re-running work that was already judged
+done. The create-fresh recovery itself is unchanged for `offered`, `in_progress`,
+`failed` and `waiting_review`, whose record is stale rather than final.
+
+`dismiss_task` refuses the same record the same way, and it has to: a dismissal
+writes `dismissed` over whatever it replaces, so accepting a `completed` record
+there was a way *around* the guard above rather than past it — the next start
+would no longer meet the `completed` refusal, and with a live chat it resumed
+(the verdict gone), while with an archived or deleted one it minted a fresh chat
+and ran the packaged prompt against finished work. So the refusal is asked of the
+record inside the same `_record_lock` section, as the same `ValueError` a start
+raises and therefore the same 409, and nothing is written: a start afterwards
+still meets the verdict and is still refused. Nothing about the chat is
+consulted, so it holds for a live chat and a gone one alike.
+
+The `dismissed` branch is only safe because `dismiss_task` keeps `failed` out of
+a dismissal. `failed` is the **only** thing in the file that says the prompt
+never went out, and a dismissal that carried that record's chat forward would
+throw it away: the empty chat is live, so the next start finds it, writes
+`in_progress` and sends nothing — a task reported as running that nothing was
+ever dispatched into, with no `failed` left to retry from. So `dismiss_task`
+takes the record lock itself (it cannot delegate: `keyed_lock` is not reentrant),
+refuses a `completed` record as `launch_task` does, and writes the `dismissed`
+record with `chat_id=""` when the record it replaces is `failed`. Every other
+lifecycle keeps its chat, which is how a reopen finds the work again. A reopen of
+such a dismissal inherits the empty chat, so the fail → dismiss → reopen → start
+history is safe as well.
+
+Two ordering rules fall out of that, and both are load-bearing. The record is
+written **before** the turn is dispatched, and it is written `failed` — the
+honest pre-dispatch value — with `in_progress` written only once `start_stream`
+has returned. So a process that dies between minting the chat and stamping the
+record cannot orphan it, and one that dies after the stamp leaves a record the
+next start can act on: a dispatch that raises, or a crash, raises
+`UpdateTaskLaunchError` (which carries the `chat_id`) and the next start sends
+the prompt into that same chat instead of reporting a resume that never ran. The
+window this cannot close is the one between `start_stream` returning and the
+`in_progress` write, where a dead process leaves `failed` for a turn that may
+already be running; an orphan chat is worse than a visible duplicate turn, and
+`proposal_service.accept_skill_proposal` makes the same trade.
+
+A write that *fails* in that window is the same state, and it is not raised:
+`UpdateTaskStateError` is a `ValueError`, so a route would answer it 409 with no
+`chat_id` — "not started" for a turn that is running, which is the answer that
+invites the duplicate prompt. `_write_after_dispatch` logs it and returns the
+record the launch built, so the reply names the chat and the file keeps saying
+`failed`. Keep 409 for pre-create and pre-dispatch refusals; nothing that happens
+after `start_stream` returns may become one. `start_stream` creates an asyncio
+task, so `launch_task` is called **on the event loop**, not through
+`asyncio.to_thread` like the vault-scanning routes — the same split
+`proposal_implement` documents for `accept_skill_proposal`.
+
+A launched chat carries `helper = {"kind": "update_task", "task_id", "revision",
+"scope", "prompt_digest"}`, validated fail-closed by
+`chat_service._normalize_chat_helper` next to the `memory_pass` and `proposal`
+kinds. That helper is the only record of which task a chat is for, so the
+launcher builds it and the store re-checks it; if you change one, change the
+other in the same commit — `tests/test_update_task_launch.py` pins them against
+each other, and `tests/test_memory_pass.py` pins the fail-closed cases.
+
+The launch path runs no detector, no completion check, no model, no `eval`, no
+shell and no remote fetch. Applicability is a separate, TTL-cached answer
+(`update_tasks.evaluate`) that `GET /api/update-tasks` reports and a start does
+not re-ask for: a start is a decision the operator already made.
+`reopen_task` is a thin wrapper over `update_tasks.reopen_task`, and
+`dismiss_task` is the same write with the failed-chat rule above, so the card and
+a direct API call cannot produce two records for one decision. The rule stays on
+the launch side on purpose: `update_tasks` never opens a chat, and "the chat
+behind a `failed` record is empty because the dispatch never reached it" is a fact
+about the launch path that the state layer cannot check. (`resume_task` and
+`record_check` lived here in round 1 and were deleted in round 3: no route, no
+CLI and no test called them, and the routes report an attempt's chat in their
+`result` anyway. `update_tasks.record_completion` stays — it is that module's
+recorder, with its own tests.) The three state-changing routes carry the fresh
+task rows in their reply, through `_with_update_task_rows`, which drops the key
+rather than raising if the listing cannot be built: a launch that landed must not
+become a bare 500.
+See `tests/test_update_task_launch.py` for the idempotency cases, each driven
+against a fake manager over a temp packaged root.
+
 ## Change guidelines
 
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `AGENTS.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
