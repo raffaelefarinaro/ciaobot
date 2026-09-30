@@ -3448,17 +3448,10 @@ def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any, 
     return workspace, vault, guide, budget, registry_root
 
 
-#: The prefix `scan_vault` renders a note's path under, restated here so the
-#: stale-note pass's mtime probe and the vault scan cannot disagree about it.
-#: A drifted prefix makes every `stat` miss silently, which reads as "no note is
-#: stale" rather than as an error — the same reason `memory-audit --with-vault`
-#: passes it explicitly instead of leaning on the default.
-_CURATION_RENDER_PREFIX = Path("memory-vault")
-
-
 def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     from ciao.curation_run import build_worklist, load_state, plan_run
     from ciao.entity_types import load_entity_types
+    from ciao.vault_index import VAULT_RENDER_PREFIX
 
     workspace, vault, guide, budget, registry_root = _curation_context(args)
     state = load_state(vault)
@@ -3468,7 +3461,10 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         workspace_dir=workspace,
         done_keys=frozenset(state.done_keys),
         category_registry=load_entity_types(registry_root),
-        path_prefix=_CURATION_RENDER_PREFIX,
+        # Named where `scan_vault` renders it rather than restated here: a
+        # drifted prefix makes every mtime `stat` miss silently, which reads as
+        # "no note is stale" rather than as an error.
+        path_prefix=VAULT_RENDER_PREFIX,
     )
     plan = plan_run(worklist, budget)
     payload: dict[str, Any] = {

@@ -57,7 +57,7 @@ Not for:
 
 | Command | Purpose | Guard |
 |---|---|---|
-| `note verify --payload-file FILE` | Record one stale note's verification verdict: `still_valid`, `update`, `retire` or `unverified`, with its evidence. | `FILE` is JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence[]`, `before`/`after`, `reason`. Every field is note prose or a citation, so it never travels as a shell argument — pass the path and let the server read it. The file must be inside this workspace and under the size cap. |
+| `note verify --payload-file FILE` | Record one stale note's verification verdict: `still_valid`, `update`, `retire` or `unverified`, with its evidence. | `FILE` is JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence[]`, `before`/`after`, `reason`. Every field is note prose or a citation, so it never travels as a shell argument — pass the path and let the server read it. The file must be inside this workspace and under the size cap. `expected_revision` is the lowercase hex SHA-256 of the note's full text as UTF-8, unmodified; the `stale_note` item you were given prints it as `revision <hex>`, so pass that rather than hashing it yourself. |
 
 The reply's `status` is the whole decision, and the words are not
 interchangeable: `applied` wrote the note through a durable receipt;

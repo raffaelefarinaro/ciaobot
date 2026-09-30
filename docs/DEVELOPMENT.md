@@ -580,16 +580,30 @@ and the daily `system-memory-curation` run.
 
 That last one stopped being prose. The selection is `PASS_STALE_NOTE` in
 `ciao/curation_run.py`: one `WorklistItem` per stale note, keyed by its
-**vault-relative** path, oldest first. It calls
-`memory_audit.find_stale_notes` rather than re-deriving the thresholds, so the
-nightly plan, `os-audit`, the Memory Map and the review queue cannot disagree
-about which notes count — and it applies the two filters the audit does not:
-`vault_review.never_queued` (a note the queue would never show a person is not
-tonight's question) and the run's own `done_keys`. The pass reads no note body
-and makes no judgement; deciding what a note's facts say is the next step's work.
+**vault-relative** path, oldest first, and capped at
+`STALE_NOTE_MAX_ITEMS` per run. It calls `memory_audit.find_stale_notes` rather
+than re-deriving the thresholds, so the nightly plan, `os-audit`, the Memory Map
+and the review queue cannot disagree about which notes count — and it applies the
+two filters the audit does not: `vault_review.never_queued` (a note the queue
+would never show a person is not tonight's question) and
+`note_verification.should_check` (a note whose check is still inside its 30-day
+cooldown or still waiting on the proposal that check pinned is a question already
+answered — without this the same cooled-down notes take the first slots every
+night, come back `already_checked`, and the rest of the backlog starves). The cap
+is applied **after** that filter, and both exist for the same reason: the pass
+sits ahead of the two required hygiene keys in `PASS_ORDER` and the budget is a
+whole-run allowance, so an uncapped backlog spends it and `last_full_pass` can
+never advance.
 
-`build_worklist` therefore takes `mtimes` and `path_prefix`, and
-`ciao/cli.py`'s `_curation_plan` threads them. `path_prefix` must be the prefix
+The pass reaches no judgement, and the only body it reads is the flagged note's
+own bytes: its `memory_receipts.content_revision` goes in the item's `reason`, and
+that is the `expected_revision` the managed operation insists on. Without it there,
+the only way to obtain one is to reimplement the hash, and a caller that guesses
+comes back `conflict` for every note forever.
+
+`build_worklist` therefore takes `path_prefix`, and `ciao/cli.py`'s `_curation_plan`
+threads it (`vault_index.VAULT_RENDER_PREFIX` — one constant, so the renderer and
+the reader cannot drift). `path_prefix` must be the prefix
 `vault_index.scan_vault` rendered under, and the same value has to reach
 `find_stale_notes` — a drifted prefix makes every mtime `stat` miss silently,
 which reads as "nothing is stale" rather than as an error.
@@ -607,15 +621,23 @@ have written itself, for three reasons worth preserving:
   because the check state and the note-edit sidecar are filed per workspace;
 - the whole operation runs as one bounded, coalesced off-loop read
   (`async_reads.run_read`, keyed by runtime dir + workspace + note + expected
-  revision, the same shape `update_tasks` uses), and the caps report an
-  oversized payload or note as `unverified` — the honest unknown — rather than
-  `applied`.
+  revision + a digest of the payload's outcome, coverage, evidence and edit, the
+  same shape `update_tasks` uses — keyed on the note alone, a second caller's
+  different verdict joined the in-flight read and was handed the first caller's
+  answer), and the caps report an oversized payload or note as `unverified` — the
+  honest unknown — rather than `applied`. The receipt's `source` follows the turn
+  (`curation` for an unattended schedule, `chat` for an attended one) rather than
+  being a fixed label.
 
 The wiring #726-C was written for and could not have is here: a
 `needs_review` verdict files **exactly one** `note_edit` proposal and pins the
 check to the queue row's id. Before #726-D that verdict recorded a check and
 asked nobody, which is why `docs/UPKEEP.md` carried a "nothing in production
-calls `file_note_edit`" row. Auto-applied verdicts file nothing, and a
+calls `file_note_edit`" row. Every way that filing can fail — a refusal, a journal
+that would not write, a lock it could not take, a filesystem that said no — is
+reported in the reply's `proposal_error`, because by then the check and its
+cooldown are already recorded and a failure that escaped instead would leave a
+verdict nobody was asked about. Auto-applied verdicts file nothing, and a
 retirement is never applied here at all — it comes back `needs_review` and
 reaches a person as a proposal. The plan-mode gate is the existing one:
 `mutating=True` on the operation. Tests: `tests/test_verify_note_op.py`,

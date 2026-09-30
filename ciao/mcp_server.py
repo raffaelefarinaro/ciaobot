@@ -476,9 +476,13 @@ async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> di
     The payload is one JSON object with:
 
     - `relative_path` — the note, vault-relative (`People/Sofia.md`).
-    - `expected_revision` — the revision of the text you read. Obtain it from
-      the note's own bytes; a note that has changed since is a `conflict` with
-      nothing written, which is the point: never overwrite text you did not see.
+    - `expected_revision` — the revision of the text you read. The `stale_note`
+      worklist item names it (`revision <hex>` in the item's `reason`), so use
+      the one you were given rather than computing it. If you must compute it, it
+      is the lowercase hex SHA-256 of the note's full text as UTF-8, with nothing
+      normalized, stripped or line-ending rewritten. A note that has changed
+      since is a `conflict` with nothing written, which is the point: never
+      overwrite text you did not see.
     - `outcome` — `still_valid` | `update` | `retire` | `unverified`.
     - `coverage` — `complete` | `partial`. A re-stamp claims the whole note is
       still true, so `still_valid` is only applied from `complete`.

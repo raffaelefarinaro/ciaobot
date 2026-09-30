@@ -17,12 +17,21 @@ once the two are joined:
 * **A `needs_review` verdict becomes exactly one `note_edit` proposal, and the
   check is pinned to its queue row.** This is the gap `docs/UPKEEP.md` carried:
   the kind was complete and nothing in production produced one, so a refused
-  verdict recorded a check and asked nobody. Auto-applied verdicts file nothing.
+  verdict recorded a check and asked nobody. Auto-applied verdicts file nothing,
+  and *every* way the filing can fail is reported rather than raised — a failure
+  after the check is recorded is the case where a verdict exists and nobody was
+  asked, which is the exact failure this child exists to remove.
 * **Retirement is never applied.** It reaches the same `needs_review` a note with
   no frontmatter reaches, and its proposal is a human click all the way down.
 * **An oversized input is `unverified`, not `applied`.** A note nobody could read
   in full has not been verified by anyone; reporting it as a completed
   verification would pin a verdict about text nobody showed the service.
+* **Coalescing is per question, not per note.** Two callers about the same
+  revision of the same note share the off-loop read only when they ask the same
+  question; a second caller's different verdict must be evaluated, not answered
+  with the first caller's.
+* **Provenance follows the turn.** An interactive verification is not journaled
+  as the nightly job.
 
 Everything here runs against a synthetic vault under `tmp_path` and a config
 that answers where its notes live. No real vault, engine, service or scheduler is
@@ -92,6 +101,13 @@ class _Chat:
     user_turn_count = 1
     user_turn_unattended: dict[str, bool] = {}
 
+    def __init__(self, *, unattended: bool = False) -> None:
+        if unattended:
+            # One turn, and the flag for the turn being asked right now — which
+            # is what makes it a scheduled turn rather than a chat that has ever
+            # been scheduled.
+            self.user_turn_unattended = {"0": True}
+
 
 class _Install:
     """The three answers `verify_note` asks this install for.
@@ -144,9 +160,9 @@ def _principal(workspace: str = "personal") -> cp.AgentPrincipal:
 class _Plane:
     """A control plane with the one chat `chat_mode` reads."""
 
-    def __init__(self, install: _Install, *, mode: str = "auto") -> None:
+    def __init__(self, install: _Install, *, mode: str = "auto", unattended: bool = False) -> None:
         self.config = install
-        self.pcm = SimpleNamespace(get_chat=lambda _chat_id: _Chat())
+        self.pcm = SimpleNamespace(get_chat=lambda _chat_id: _Chat(unattended=unattended))
         self._mode = mode
 
     def chat_mode(self, _principal: cp.AgentPrincipal) -> str:
@@ -180,11 +196,11 @@ class _Plane:
 
     verify_note = cp.CiaoControlPlane.verify_note
     _verification_payload = cp.CiaoControlPlane._verification_payload
-    _workspace_vault = cp.CiaoControlPlane._workspace_vault
+    _unattended_turn = cp.CiaoControlPlane._unattended_turn
 
 
-def _plane(install: _Install, *, mode: str = "auto") -> _Plane:
-    return _Plane(install, mode=mode)
+def _plane(install: _Install, *, mode: str = "auto", unattended: bool = False) -> _Plane:
+    return _Plane(install, mode=mode, unattended=unattended)
 
 
 def _payload(root: Path, fields: dict[str, Any], *, name: str = "verify.json") -> str:
@@ -657,3 +673,201 @@ def test_re_verifying_a_settled_revision_is_a_no_op(tmp_path: Path) -> None:
     assert second["status"] == nv.ALREADY_CHECKED
     assert second["auto_applied"] is False
     assert _sidecars(install._vault) == []
+
+
+# ── Two callers, one note: the read is coalesced per question ──────────────
+
+
+def test_a_different_verdict_about_the_same_revision_is_not_answered_by_the_first(
+    tmp_path: Path,
+) -> None:
+    """Coalescing exists so two agents cannot race each other to write the same
+    note. Keyed on the note alone it also threw away the *question*: a second
+    caller's `retire` joined an in-flight `still_valid`, was handed that reply,
+    and its own outcome, evidence and text were never evaluated by anything.
+
+    The reply is the dangerous half: a caller that asked to retire a note and was
+    told `applied` believes a decision was taken that no rule ever reached, and
+    the queue holds no row for it.
+
+    The first read is held open so the two really are in flight at once — the read
+    executor is bounded and does share work by key, so overlap is the only way
+    this property exists at all. That ordering is also what makes the assertions
+    below deterministic: the second call's read is admitted while the first
+    waits, so the retire verdict is recorded first and the re-stamp that unblocks
+    finds the revision already settled.
+    """
+    import asyncio
+    import threading
+
+    from ciao import note_verification as service
+
+    install, root, note = _install(tmp_path)
+    plane = _plane(install)
+    still = _payload(root, _verdict(install._vault, note))
+    retire = _payload(
+        root,
+        _verdict(install._vault, note, outcome=nv.RETIRE, evidence=[CITATION]),
+        name="retire.json",
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+    seen: list[str] = []
+    verify = service.verify_note
+
+    def hold_first_open(request: Any, **kwargs: Any) -> Any:
+        seen.append(str(request.outcome))
+        if len(seen) == 1:
+            entered.set()
+            # Bounded: a key that *is* coalesced makes the second caller wait for
+            # this one, and the test would rather take the wait than hang.
+            release.wait(2.0)
+        return verify(request, **kwargs)
+
+    service.verify_note = hold_first_open  # type: ignore[assignment]
+    try:
+
+        async def both() -> tuple[dict[str, Any], dict[str, Any]]:
+            first = asyncio.create_task(plane.verify_note(_principal(), payload_file=still))
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+            second = await plane.verify_note(_principal(), payload_file=retire)
+            release.set()
+            return await first, second
+
+        first, second = asyncio.run(both())
+    finally:
+        release.set()
+        service.verify_note = verify  # type: ignore[assignment]
+
+    # Both payloads reached the rule: the second was evaluated, not short-circuited.
+    assert sorted(seen) == sorted([nv.STILL_VALID, nv.RETIRE])
+    # The retire caller was told its own verdict, and there is a row for it.
+    assert second["data"]["status"] == nv.NEEDS_REVIEW
+    assert second["data"]["proposal"]["operation"] == nep.RETIRE
+    assert _queue(install._vault).count("- [note_edit ") == 1
+    # The re-stamp is told the revision was settled while it waited rather than
+    # being handed the retirement's answer, and writes nothing over it.
+    assert first["data"]["status"] == nv.ALREADY_CHECKED
+    assert note.read_text(encoding="utf-8").count("updated: 2024-01-05") == 1
+
+
+def test_an_identical_verdict_does_share_one_read(tmp_path: Path) -> None:
+    """The other half, so the fix is not "stop coalescing".
+
+    Two callers asking the same question about the same revision is exactly the
+    race coalescing exists for: one read, one write, one receipt, and both
+    callers told the same true thing.
+    """
+    import asyncio
+    import threading
+
+    from ciao import note_verification as service
+
+    install, root, note = _install(tmp_path)
+    plane = _plane(install)
+    name = _payload(root, _verdict(install._vault, note))
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    verify = service.verify_note
+
+    def count_calls(request: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        release.wait(2.0)
+        return verify(request, **kwargs)
+
+    service.verify_note = count_calls  # type: ignore[assignment]
+    try:
+
+        async def both() -> tuple[dict[str, Any], dict[str, Any]]:
+            first = asyncio.create_task(plane.verify_note(_principal(), payload_file=name))
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+            second = await plane.verify_note(_principal(), payload_file=name)
+            release.set()
+            return await first, second
+
+        first, second = asyncio.run(both())
+    finally:
+        release.set()
+        service.verify_note = verify  # type: ignore[assignment]
+
+    assert calls == 1
+    assert first["data"]["status"] == second["data"]["status"] == nv.APPLIED
+    assert first["data"]["receipt_id"] == second["data"]["receipt_id"]
+
+
+@pytest.mark.parametrize("failure", [mr.QueueLockError, OSError])
+def test_a_filing_failure_the_caller_could_not_see_is_still_reported(
+    tmp_path: Path, failure: type[BaseException]
+) -> None:
+    """`file_note_edit` can fail on more than a refusal.
+
+    A lock it cannot take and a filesystem that says no were not in the caught
+    set, so they escaped the operation as an `internal_error` — after
+    `note_verification` had already recorded the check and its cooldown. The
+    agent was told the call failed, the queue held no row, and nothing in the
+    reply said a verdict existed: the note was judged, the owner was never asked,
+    and the one state that said so was the one the caller could not read.
+    """
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    plane = _plane(install)
+    name = _payload(
+        root, _verdict(install._vault, note, outcome=nv.RETIRE, evidence=[CITATION])
+    )
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise failure("the queue lock is held by another process")
+
+    monkey = nep.file_note_edit
+    nep.file_note_edit = refuse  # type: ignore[assignment]
+    try:
+        data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+    finally:
+        nep.file_note_edit = monkey  # type: ignore[assignment]
+
+    assert data["status"] == nv.NEEDS_REVIEW
+    assert data["proposal"] is None
+    assert "could not be filed" in data["proposal_error"]
+    # The verdict is still on the record; only the asking failed.
+    assert nv.read_note_checks(install._vault)[NOTE].outcome == nv.RETIRE
+    assert _sidecars(install._vault) == []
+
+
+# ── Provenance: whose decision was this? ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("unattended", "source"),
+    [(False, "chat"), (True, "curation")],
+)
+def test_provenance_follows_the_turn_not_a_fixed_label(
+    tmp_path: Path, unattended: bool, source: str
+) -> None:
+    """A receipt says who decided.
+
+    `source="curation"` on every call filed an interactive verification as the
+    nightly job, so History showed the owner a decision the schedule made during
+    a conversation they were part of. The turn is the answer: an unattended
+    schedule's turn is the curation run, and an attended chat's is the chat.
+    """
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    plane = _plane(install, unattended=unattended)
+    name = _payload(root, _verdict(install._vault, note))
+
+    data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+
+    assert data["status"] == nv.APPLIED
+    journal = mr.journal_path(install._vault, None)
+    receipt = mr.find_receipt(journal, data["receipt_id"])
+    assert receipt is not None
+    assert receipt["source"] == source

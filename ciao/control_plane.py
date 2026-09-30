@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
 import json
 import logging
 import os
@@ -299,6 +300,36 @@ def _verification_request(raw: dict[str, Any], *, nv: Any, workspace: str) -> An
     )
 
 
+def _verification_digest(request: Any) -> str:
+    """A short, stable id for *the question this payload asks*.
+
+    The off-loop read is coalesced by key, so the key has to carry the whole
+    verdict and not only the note it is about. Keyed on the note and the expected
+    revision alone, two calls about the same text are the same key however
+    differently they are answered: a second caller's `retire` joins an in-flight
+    `still_valid`, is handed the first caller's reply, and its own outcome,
+    evidence and before/after are never evaluated by anything. That is a wrong
+    verdict reported as a correct one, which is worse than the duplicate write
+    coalescing exists to avoid.
+
+    Over the fields that decide the answer — outcome, coverage, evidence and the
+    edit's two images — and not over the request's identity (the note, the
+    revision, the workspace), which the key already spells out. Sorted keys, so
+    two payloads that differ only in field order are the same question.
+    """
+    edit = request.edit
+    body = {
+        "outcome": str(request.outcome or ""),
+        "coverage": str(request.coverage or ""),
+        "evidence": [row.as_dict() for row in request.evidence],
+        "before": "" if edit is None else edit.before,
+        "after": "" if edit is None else edit.after,
+    }
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
+
+
 def _oversized_note(vault_root: Path, request: Any, *, nr: Any, mr: Any) -> dict[str, Any] | None:
     """The ``unverified`` report for a note too large to judge, else ``None``.
 
@@ -392,7 +423,20 @@ def _file_review_proposal(
             reason=result.message or request.reason,
             today=today,
         )
-    except (nep.NoteEditError, nv.NoteCheckRefused, mr.MemoryReceiptError) as exc:
+    except (
+        nep.NoteEditError,
+        nv.NoteCheckRefused,
+        mr.MemoryReceiptError,
+        # A journal it would not write, a lock this thread could not take, and a
+        # filesystem that said no. `QueueLockError` is not a
+        # `MemoryReceiptError` and an `OSError` is neither, so both escaped the
+        # caller's report and reached the operation as an `internal_error` —
+        # after the check and its cooldown were already recorded. The note was
+        # judged and nobody was asked, and the agent was told the call failed
+        # rather than told a verdict exists with a filing error against it.
+        mr.QueueLockError,
+        OSError,
+    ) as exc:
         return None, (
             f"the note-edit proposal could not be filed: {exc}. The verdict is "
             f"recorded, but nobody has been asked about {request.relative_path}."
@@ -453,18 +497,6 @@ def _verification_reply(
         "proposal_error": proposal_error,
         "auto_applied": status == nv.APPLIED,
     }
-
-
-def _verification_payload_out(
-    result: Any, *, nv: Any
-) -> dict[str, Any]:
-    """One :class:`ciao.note_verification.VerificationResult` as the reply."""
-    return _verification_reply(
-        result.status,
-        result.message,
-        receipt_id=result.receipt_id,
-        check=result.check,
-    )
 
 
 class CiaoControlPlane:
@@ -758,6 +790,25 @@ class CiaoControlPlane:
             return Path(resolver(workspace)).resolve()
         return Path(self.config.vault_root).resolve()
 
+    def _unattended_turn(self, principal: AgentPrincipal) -> bool:
+        """Whether the turn asking right now was fired by a schedule, not a person.
+
+        The chat records the flag per turn, and only an unattended turn ever gets
+        a key written — so this reads the CURRENT turn, not the most recent
+        unattended one. ``max(...)`` answered "has this chat ever run
+        unattended", and one scheduled turn then refused every later attended
+        action in that chat, permanently.
+
+        A chat this process cannot see is attended: an unattributable turn is a
+        turn nobody fired automatically, and a caller's provenance label must not
+        claim a schedule wrote something a person asked for.
+        """
+        chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
+        if chat is None:
+            return False
+        current_turn = str(max(0, int(chat.user_turn_count) - 1))
+        return bool(chat.user_turn_unattended.get(current_turn))
+
     @staticmethod
     def _safe_relative(root: Path, relative_path: str, *, must_exist: bool = False) -> Path:
         raw = Path(relative_path)
@@ -966,10 +1017,18 @@ class CiaoControlPlane:
         a human click all the way down.
 
         The verification and the filing are one bounded off-loop read
-        (:func:`ciao.async_reads.run_read`), coalesced by workspace, note and
-        expected revision — two agents judging the same revision of the same
-        note in the same workspace share one read rather than racing each other
-        to write it.
+        (:func:`ciao.async_reads.run_read`), coalesced by workspace, note, expected
+        revision **and the payload's own content** — two agents judging the same
+        revision of the same note in the same workspace share one read rather than
+        racing each other to write it, but only when they are asking the same
+        question. Coalescing on the note alone let a second caller's `retire`
+        join an in-flight `still_valid` and be answered with the first caller's
+        verdict, so its own payload was never evaluated at all.
+
+        ``source`` is derived from the turn, not fixed. A receipt says who
+        decided, and an interactive verification journaled as the nightly job is a
+        false provenance line: the unattended schedule gets ``curation``, an
+        attended chat gets ``chat``.
 
         The caps are refusals shaped as ``unverified``, not as ``applied``: a
         payload or a note too large to be the thing the caller says it read is
@@ -984,8 +1043,13 @@ class CiaoControlPlane:
         workspace = self._workspace(principal)
         raw_payload = self._verification_payload(principal, payload_file, workspace=workspace)
         request = _verification_request(raw_payload, nv=nv, workspace=workspace)
-        vault_root = self._workspace_vault(principal, workspace)
+        # The same answer `note_verification` and `note_edit_proposals` resolve
+        # the vault through, so the service, the check state and the sidecar
+        # cannot end up describing three different vaults. `CiaoConfig` always
+        # answers it, so this is the call and nothing else.
+        vault_root = Path(self.config.workspace_vault_root(workspace))
         today = date.today()
+        source = "curation" if self._unattended_turn(principal) else "chat"
 
         def _run() -> dict[str, Any]:
             """Verify, then file the proposal a refused verdict becomes.
@@ -1003,7 +1067,7 @@ class CiaoControlPlane:
                 vault_root=vault_root,
                 config=self.config,
                 actor="agent",
-                source="curation",
+                source=source,
                 today=today,
             )
             if result.status != nv.NEEDS_REVIEW:
@@ -1044,10 +1108,14 @@ class CiaoControlPlane:
 
         # Same key shape as `update_tasks`: the install's runtime directory is
         # the one part of an identity a workspace, a note and a revision cannot
-        # supply, so two installs in one process never share a read.
+        # supply, so two installs in one process never share a read. The payload's
+        # own digest is the rest: the note and the revision say *which text* is
+        # being judged, and the digest says *what is being claimed about it*, so
+        # two callers only share a read when they are asking the same question.
         key = (
             f"verify-note:{self._search_runtime_dir()}:"
-            f"{workspace}:{request.relative_path}:{request.expected_revision}"
+            f"{workspace}:{request.relative_path}:{request.expected_revision}:"
+            f"{_verification_digest(request)}"
         )
         reported: dict[str, Any] = await run_read(key, _run, coalesce=True)
         return _ok(reported)
@@ -1100,28 +1168,6 @@ class CiaoControlPlane:
                 "payload_invalid", "The payload must be a JSON object."
             )
         return raw
-
-    def _workspace_vault(self, principal: AgentPrincipal, workspace: str) -> Path:
-        """The vault this principal's notes live in, resolved through the config.
-
-        The same answer :mod:`ciao.note_verification` and
-        :mod:`ciao.note_edit_proposals` resolve it through, so the service, the
-        check state and the sidecar cannot end up describing three different
-        vaults.
-        """
-        resolver = getattr(self.config, "workspace_vault_root", None)
-        if not callable(resolver):
-            raise ControlPlaneError(
-                "vault_unavailable",
-                "This install does not answer where a workspace keeps its notes, so "
-                "no verification can be confirmed as being about this workspace's vault.",
-            )
-        try:
-            return Path(resolver(workspace))
-        except (AttributeError, OSError, TypeError, ValueError) as exc:
-            raise ControlPlaneError(
-                "vault_unavailable", f"The vault for workspace '{workspace}' is unusable: {exc}"
-            ) from exc
 
     # ---- memory proposals ----------------------------------------------
 
@@ -1320,7 +1366,6 @@ class CiaoControlPlane:
         workspace = self._workspace(principal)
         resolver = getattr(self.config, "workspace_vault_root", None)
         root = Path(resolver(workspace) if callable(resolver) else self._vault_root(principal)).resolve()
-        chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
         # Every mutating action, and nothing else: an unattended schedule may
         # list and inspect, never dispose of a note. `complete` joins the set
         # rather than sitting outside it — it is the destructive class (a
@@ -1329,13 +1374,8 @@ class CiaoControlPlane:
         # and `restore_completed` joins it because `restore` from the trash is
         # guarded on the same grounds, an undo of a disposition being exactly
         # as much of a decision as the disposition.
-        if action in {"decide", "trash", "restore", "delete", "complete", "restore_completed"} and chat is not None:
-            # The CURRENT turn, not the most recent unattended one. Only
-            # unattended turns get a key written, so `max(...)` answered "has
-            # this chat ever run unattended" — one scheduled turn then refused
-            # every later attended trash in that chat, permanently.
-            current_turn = str(max(0, int(chat.user_turn_count) - 1))
-            if chat.user_turn_unattended.get(current_turn):
+        if action in {"decide", "trash", "restore", "delete", "complete", "restore_completed"}:
+            if self._unattended_turn(principal):
                 raise ControlPlaneError("unattended_forbidden", "Vault review mutations require an attended turn.")
         # `restore_completed` belongs here rather than below for the same reason
         # `restore` does: a completed project left the queue, so the candidate

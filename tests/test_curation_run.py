@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from ciao import curation_run as cr
+from ciao import memory_receipts as mr
 
 
 MEMORY_START = "<!-- ciao:memory:start -->"
@@ -517,7 +518,7 @@ def test_a_stale_note_is_work_keyed_by_its_vault_relative_path(tmp_path: Path) -
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
-    _note(vault, "People/Sofia.md", updated="2024-01-05")
+    note = _note(vault, "People/Sofia.md", updated="2024-01-05")
 
     items = _stale_items(vault, guide)
 
@@ -526,9 +527,16 @@ def test_a_stale_note_is_work_keyed_by_its_vault_relative_path(tmp_path: Path) -
     assert items[0].weekly is False
     assert items[0].label == "Sofia"
     # The reason names the age and the horizon it was measured against, so a
-    # reader can disagree with the verdict without losing the evidence.
+    # reader can disagree with the verdict without losing the evidence — and the
+    # note's own `content_revision`, which is the `expected_revision` the
+    # managed operation insists on. Without it here the only way to obtain one is
+    # to reimplement the hash, and a caller that guesses it gets `conflict` for
+    # every note forever.
     age = (date(2026, 9, 19) - date(2024, 1, 5)).days
-    assert items[0].reason == f"unverified for {age}d against a 90d horizon"
+    assert items[0].reason == (
+        f"unverified for {age}d against a 90d horizon; "
+        f"revision {mr.content_revision(note.read_text(encoding='utf-8'))}"
+    )
 
 
 def test_the_stale_pass_uses_the_shared_audit_predicate(tmp_path: Path) -> None:
@@ -678,6 +686,11 @@ def test_the_stale_pass_reads_no_note_body_and_makes_no_verdict(tmp_path: Path) 
     unverified, nothing about whether they still hold. The verdict belongs to
     the managed `verify_note` operation, which writes a receipt, a check and —
     when the rule refuses — a proposal.
+
+    The one thing it does read is the flagged notes' own bytes, to state the
+    `content_revision` the operation needs. It reads the *notes it already
+    selected* rather than the vault, so the selection itself stays as cheap as
+    the scan that produced it.
     """
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
@@ -691,6 +704,162 @@ def test_the_stale_pass_reads_no_note_body_and_makes_no_verdict(tmp_path: Path) 
     assert not (vault / "Workspace" / "Note-Checks.json").exists()
     assert not (vault / cr.PROPOSALS_RELATIVE).exists()
     assert not (vault / "Workspace" / "Memory-Note-Edit-Proposals").exists()
+
+
+def test_a_note_a_check_already_settles_is_not_planned_again(tmp_path: Path) -> None:
+    """The failure this fixes: a checked-but-still-stale note, asked every night.
+
+    The audit measures `updated:` against the horizon and has never heard of the
+    check state, so it lists a note whose verdict came back `unverified` (nothing
+    written, `updated:` exactly where it was) again tomorrow. With no cooldown
+    consulted the same cooled-down notes take the first slots every night, each
+    one comes back `already_checked`, and the rest of the backlog never gets
+    asked at all.
+
+    Two shapes of "already answered", both suppressing:
+
+    * a plain check in its 30-day cooldown — the note has not changed since, so
+      re-asking would only produce the same `unverified`;
+    * a check pinned to a pending `note_edit` proposal — a person is already
+      looking at that question, whatever the cooldown says.
+
+    And a note that *did* change is planned again regardless: the revision no
+    longer matches, so it carries new claims nobody verified.
+    """
+    from ciao import note_verification as nv
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    today = date(2026, 9, 19)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    cooled = _note(vault, "People/Cooled.md", updated="2024-01-05")
+    pinned = _note(vault, "People/Pinned.md", updated="2024-01-05")
+    _note(vault, "People/Fresh.md", updated="2024-01-05")
+
+    def _check(note: Path, **overrides) -> nv.NoteCheck:
+        fields = {
+            "relative_path": note.relative_to(vault).as_posix(),
+            "content_revision": mr.content_revision(note.read_text(encoding="utf-8")),
+            "outcome": nv.UNVERIFIED,
+            "checked_at": today,
+            "retry_after": today + timedelta(days=nv.CHECK_COOLDOWN_DAYS),
+            "reason": "no source this pass reached",
+        }
+        fields.update(overrides)
+        return nv.NoteCheck(**fields)
+
+    # Nothing recorded: both notes are planned, so the filter is what changes.
+    assert len(_stale_items(vault, guide, today=today)) == 3
+
+    nv.record_note_check(vault, _check(cooled))
+    planned = {item.label for item in _stale_items(vault, guide, today=today)}
+    assert planned == {"Pinned", "Fresh"}
+
+    nv.record_note_check(
+        vault,
+        _check(pinned, outcome=nv.RETIRE, proposal_id="prop-1", retry_after=today),
+    )
+    assert [item.label for item in _stale_items(vault, guide, today=today)] == ["Fresh"]
+
+    # A note that changed since its check carries new claims: planned again,
+    # because that is the only thing that makes the cooldown expire.
+    pinned.write_text(
+        pinned.read_text(encoding="utf-8").replace("Something durable", "Something newer"),
+        encoding="utf-8",
+    )
+    assert {item.label for item in _stale_items(vault, guide, today=today)} == {
+        "Fresh",
+        "Pinned",
+    }
+
+    # And a note the cooldown holds is reported as held, not as a queue of one:
+    # a nightly run that planned it anyway would look like the pass working.
+    nv.record_note_check(vault, _check(cooled))
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=today,
+    )
+    assert any("cooldown" in note for note in worklist.notes)
+
+
+def test_a_stale_backlog_cannot_starve_the_required_hygiene_keys(tmp_path: Path) -> None:
+    """A vault that has never been verified must still get its weekly care.
+
+    The pass sits ahead of the hygiene keys and the budget is a whole-run
+    allowance, so an uncapped backlog spends it: 25 stale notes planned, the two
+    required checks never reached, `last_full_pass` unable to advance, and the
+    backlog unchanged the next night. A workspace one large migration away from
+    being verified would never be verified at all.
+
+    So the pass is capped, oldest first, and the cap is applied *after* the
+    cooldown filter — capping first would be the same starvation with a smaller
+    constant, since the cooled-down note that is still the oldest would consume a
+    slot every night.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    today = date(2026, 9, 19)
+    # No marker, so the weekly pass is due and the hygiene keys are in play.
+    for index in range(cr.STALE_NOTE_MAX_ITEMS * 8):
+        _note(vault, f"People/Note{index:02d}.md", updated="2024-01-05")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=today,
+    )
+    plan = cr.plan_run(worklist)
+
+    planned = {key for item in plan.planned for key in item.keys}
+    assert cr.REQUIRED_HYGIENE_KEYS <= planned
+    assert sum(item.count for item in plan.planned if item.pass_id == cr.PASS_STALE_NOTE) == (
+        cr.STALE_NOTE_MAX_ITEMS
+    )
+    # Oldest first, so the note that has gone longest unanswered goes first; with
+    # identical `updated:` stamps that is the order the path breaks the tie.
+    stale = [item for item in plan.planned if item.pass_id == cr.PASS_STALE_NOTE]
+    assert [item.label for item in stale] == sorted(item.label for item in stale)
+    # And the run says what it left out rather than reporting a queue of five.
+    assert any("wait for the next run" in note for note in worklist.notes)
+
+
+def test_the_stale_cap_fills_with_notes_that_are_actually_due(tmp_path: Path) -> None:
+    """The cap counts work, not candidates.
+
+    Cooled-down notes are filtered before the cap, so a run against a vault where
+    the oldest notes were all checked last week still plans a full night's work
+    from the notes behind them. Capping first would leave the pass planning one
+    note a night and returning `already_checked` for it.
+    """
+    from ciao import note_verification as nv
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    today = date(2026, 9, 19)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for index in range(cr.STALE_NOTE_MAX_ITEMS):
+        note = _note(vault, f"People/Old{index:02d}.md", updated="2024-01-05")
+        nv.record_note_check(
+            vault,
+            nv.NoteCheck(
+                relative_path=note.relative_to(vault).as_posix(),
+                content_revision=mr.content_revision(note.read_text(encoding="utf-8")),
+                outcome=nv.UNVERIFIED,
+                checked_at=today,
+                retry_after=today + timedelta(days=nv.CHECK_COOLDOWN_DAYS),
+            ),
+        )
+    for index in range(cr.STALE_NOTE_MAX_ITEMS):
+        _note(vault, f"People/New{index:02d}.md", updated="2024-01-05")
+
+    items = _stale_items(vault, guide, today=today)
+
+    assert [item.label for item in items] == [f"New{index:02d}" for index in range(cr.STALE_NOTE_MAX_ITEMS)]
 
 
 def test_a_missing_vault_is_not_a_failed_plan(tmp_path: Path) -> None:
