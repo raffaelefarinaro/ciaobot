@@ -54,6 +54,7 @@ if sys.platform == "win32":
     from ctypes import wintypes
 
     from ciao.os_support.files import create_fd
+    from ciao.os_support.users import current_user_sid
 
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -72,8 +73,6 @@ if sys.platform == "win32":
     _OBJECT_INHERIT_ACE = 0x1
     _CONTAINER_INHERIT_ACE = 0x2
     _FILE_ALL_ACCESS = 0x1F01FF
-    _TOKEN_QUERY = 0x8
-    _TOKEN_USER = 1
     _WIN_LOCAL_SYSTEM_SID = 22
     _SECURITY_MAX_SID_SIZE = 68
 
@@ -109,23 +108,11 @@ if sys.platform == "win32":
         func.restype = restype
         return func
 
-    _GetCurrentProcess = _declare(_kernel32, "GetCurrentProcess", wintypes.HANDLE)
-    _CloseHandle = _declare(_kernel32, "CloseHandle", wintypes.BOOL, wintypes.HANDLE)
     _LocalFree = _declare(_kernel32, "LocalFree", ctypes.c_void_p, ctypes.c_void_p)
-    _OpenProcessToken = _declare(
-        _advapi32, "OpenProcessToken", wintypes.BOOL,
-        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
-    )
-    _GetTokenInformation = _declare(
-        _advapi32, "GetTokenInformation", wintypes.BOOL,
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD),
-    )
     _CreateWellKnownSid = _declare(
         _advapi32, "CreateWellKnownSid", wintypes.BOOL,
         ctypes.c_int, _PSID, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
     )
-    _GetLengthSid = _declare(_advapi32, "GetLengthSid", wintypes.DWORD, _PSID)
     _EqualSid = _declare(_advapi32, "EqualSid", wintypes.BOOL, _PSID, _PSID)
     _InitializeAcl = _declare(
         _advapi32, "InitializeAcl", wintypes.BOOL, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD
@@ -180,20 +167,6 @@ if sys.platform == "win32":
             raise OSError("Windows security API returned a null pointer")
         return pointer.value
 
-    def _current_user_sid() -> bytes:
-        token = wintypes.HANDLE()
-        _check(_OpenProcessToken(_GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token)))
-        try:
-            needed = wintypes.DWORD()
-            _GetTokenInformation(token, _TOKEN_USER, None, 0, ctypes.byref(needed))
-            buffer = ctypes.create_string_buffer(needed.value)
-            _check(_GetTokenInformation(token, _TOKEN_USER, buffer, needed, ctypes.byref(needed)))
-            # TOKEN_USER starts with SID_AND_ATTRIBUTES, whose first field is the PSID.
-            sid = _address(ctypes.c_void_p.from_buffer(buffer))
-            return ctypes.string_at(sid, _GetLengthSid(sid))
-        finally:
-            _CloseHandle(token)
-
     def _system_sid() -> bytes:
         buffer = ctypes.create_string_buffer(_SECURITY_MAX_SID_SIZE)
         size = wintypes.DWORD(_SECURITY_MAX_SID_SIZE)
@@ -205,7 +178,7 @@ if sys.platform == "win32":
     def _allowed_sids() -> tuple[bytes, bytes]:
         global _owner_sids
         if _owner_sids is None:
-            _owner_sids = (_current_user_sid(), _system_sid())
+            _owner_sids = (current_user_sid(), _system_sid())
         return _owner_sids
 
     def _private_acl(ace_flags: int) -> Any:
