@@ -383,8 +383,16 @@ own. The group and Settings → Update task history read the same
 `GET /api/update-tasks?workspace=` rows, so a change to one state has to be checked
 in both: `offered` starts, `in_progress` resumes, `waiting_review` offers Review
 proposals (the real queue at `/memory/review?show=suggested`) *and* Resume,
-`failed` retries into the same chat, and `unknown` applicability gets a Check again
-and never a start button. Hiding a task records "not this one" for that
+`failed` retries into the same chat, and `unknown` applicability on an *offer*
+gets a Check again and never a start button. The applicability gate applies to
+offers only: a live attempt keeps Resume or Try again whatever the detector says,
+because `not_applicable` is the normal state once a chat has done the work that
+`record_completion` has not confirmed, and a `not_applicable` offer with no
+attempt is not a card at all (otherwise every install that needs none of the
+catalog carries a permanent "nothing to do" and a zero-work Home is not empty).
+The group may outlive its last card only to say what was pressed and take the
+focus; that loan ends on a timer and on a workspace switch, so nothing stale
+survives a switch. Hiding a task records "not this one" for that
 `(id, revision)` in that scope — it does not cancel an open chat and does not
 complete anything, the confirmation says so, and the row stays reopenable in
 Settings. If you add a state, decide all four of those in the same change: what

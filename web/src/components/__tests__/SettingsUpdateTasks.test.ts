@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Settings → General → "Update task history", mounted on its own. No
+// Settings → Home → "Update task history", mounted on its own. No
 // SettingsView, no router, no fetch of anything but this card: the panel owns
 // its own list, and the only thing that must be true of it is that it is honest
 // about which clock it is showing.
@@ -14,11 +14,14 @@
 //    one under the other's name would claim a re-check that never happened, or
 //    hide a decision that did.
 //  - a `completed` row is labelled "Verified" against the record's own time, and
-//    a `dismissed` one says it was hidden — never "done".
+//    a `dismissed` one says it was hidden — never "done", and never the same
+//    timestamp printed twice under two names.
 //  - Reopen is the only write. A refused reopen leaves the row and says why
 //    rather than dropping it for having failed to change.
 //  - a failed read keeps the previous rows and shows the error, because an empty
 //    history would claim nothing ever happened.
+//  - the copy does not promise a fresh detector run: the engine reuses a cached
+//    answer inside its own freshness window, so a check time may not move.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -207,9 +210,16 @@ describe('the two clocks', () => {
     // `Checked` is when a detector last produced this row's answer; `Decided` is
     // when the record was written. A dismissal is a decision, not a re-check, and
     // a history that merged the two would claim somebody had looked again.
+    // Pinned on a failed attempt, the one lifecycle where both clocks are
+    // genuinely different moments: nobody has re-checked, and the record was
+    // written when the attempt gave up.
     const now = new Date('2026-09-30T12:00:00Z')
     vi.setSystemTime(now)
     apiGet.mockResolvedValue(listing([task({
+      status: 'failed',
+      applicability: 'applicable',
+      offered: true,
+      suppressed: false,
       applicability_checked_at: '2026-09-30T09:00:00Z',
       updated_at: '2026-09-30T11:30:00Z',
     })]))
@@ -254,6 +264,26 @@ describe('the two clocks', () => {
     expect(wrapper.text()).toContain('Hidden by you')
     expect(wrapper.text()).toContain('hidden 2 hours ago')
     expect(wrapper.text()).not.toContain('Done')
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('does not print a hidden row’s one decision twice', async () => {
+    // The dismissal *is* the record write, so "hidden X" and "Decided X" are the
+    // same moment under two names. Twice is worse than either alone: it reads as
+    // two separate events, and it puts a "Decided" clock on a row whose only
+    // decision was to stop being shown.
+    const now = new Date('2026-09-30T12:00:00Z')
+    vi.setSystemTime(now)
+    apiGet.mockResolvedValue(listing([task({
+      applicability_checked_at: '2026-09-30T09:00:00Z',
+      updated_at: '2026-09-30T10:00:00Z',
+    })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    expect(wrapper.text()).toContain('hidden 2 hours ago')
+    expect(wrapper.text()).toContain('Checked 3 hours ago')
+    expect(wrapper.text()).not.toContain('Decided')
     wrapper.unmount()
     vi.useRealTimers()
   })
@@ -337,6 +367,19 @@ describe('reopening', () => {
     // detector to re-run, and pretending otherwise would date the check wrongly.
     expect(apiPost).not.toHaveBeenCalled()
     expect(apiGet).toHaveBeenCalledWith('/api/update-tasks?workspace=personal')
+    wrapper.unmount()
+  })
+
+  it('says the re-check may not move the check time', async () => {
+    // The server reuses a cached answer inside its own freshness window
+    // (`update_tasks.APPLICABILITY_TTL_S`), so a "Recheck" whose time does not
+    // move is the honest outcome. Copy that promises a fresh run would leave an
+    // operator reading a clock that did not advance as a bug.
+    apiGet.mockResolvedValue(listing([task({ status: 'failed', applicability: 'applicable' })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    expect(wrapper.text()).toContain('freshness window')
+    expect(wrapper.text()).toContain('does not always move')
     wrapper.unmount()
   })
 

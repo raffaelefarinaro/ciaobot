@@ -15,7 +15,9 @@
 //    into that same chat; dropping it would strand a chat the engine already
 //    made and lose the task's only attempt.
 //  - a switch of workspace drops the previous workspace's rows rather than
-//    showing them under the new one.
+//    showing them under the new one, and a transition that lost the same race
+//    does not put the old workspace's rows back on its way out.
+//  - `tasks` absent from a reply is "unknown", never "empty".
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -370,6 +372,73 @@ describe('reopening a task', () => {
     const outcome = await store.reopenUpdateTask(task({ status: 'dismissed' }))
     expect(outcome.ok).toBe(false)
     expect(store.updateTasks).toHaveLength(1)
+  })
+})
+
+describe('a transition that lost a workspace race', () => {
+  it('does not write the old workspace’s rows into the new one', async () => {
+    // The reply lists the rows it computed, for the workspace it was asked
+    // about. Landing on screen after the reader has switched means the new
+    // workspace is showing the old one's answers — a card that is right about
+    // the wrong workspace, which is the one thing a per-workspace list must not
+    // do. Guarded exactly as `refreshUpdateTasks` guards its own answer.
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    // Typed rather than inferred: the assignment happens inside a callback, so
+    // control-flow analysis would otherwise narrow the `let` to `never`.
+    const pending: { release: (() => void) | null } = { release: null }
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve) => {
+      pending.release = () => resolve({
+        ok: true,
+        task_id: 'review-legacy-rows',
+        chat_id: 'chat-9',
+        // The reply's own listing: the old workspace's rows, in the old
+        // workspace's new state.
+        tasks: [task({ status: 'in_progress', chat_id: 'chat-9' })],
+      } as never)
+    }))
+    const slow = store.startUpdateTask(task())
+
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
+    await store.refreshUpdateTasks('work')
+    expect(store.updateTasks.map((row) => row.id)).toEqual(['other'])
+
+    pending.release?.()
+    const outcome = await slow
+    expect(store.updateTasks.map((row) => row.id)).toEqual(['other'])
+    // The outcome is still the server's: the chat really was opened, and
+    // throwing that away would strand it for nothing.
+    expect(outcome).toMatchObject({ ok: true, chatId: 'chat-9' })
+  })
+
+  it('does not re-list the workspace the reader just left', async () => {
+    // A reply without rows re-lists as its recovery, and that re-list is asked
+    // for by workspace name. Running it after a switch would set the store back
+    // to the old workspace and clear the new one's rows on the way — trading one
+    // wrong list for an empty one.
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    const pending: { release: (() => void) | null } = { release: null }
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve) => {
+      // `tasks` absent: the route's own decision landed, the listing did not.
+      pending.release = () => resolve({ ok: true, task_id: 'x', chat_id: 'chat-9' } as never)
+    }))
+    const slow = store.startUpdateTask(task())
+
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
+    await store.refreshUpdateTasks('work')
+    vi.mocked(api.get).mockClear()
+
+    pending.release?.()
+    await slow
+
+    expect(api.get).not.toHaveBeenCalled()
+    expect(store.updateTasksWorkspace).toBe('work')
+    expect(store.updateTasks.map((row) => row.id)).toEqual(['other'])
   })
 })
 

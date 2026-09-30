@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Settings → General → "Update task history".
+// Settings → Home → "Update task history".
 //
 // The Home group shows what an update left to do; this is the record of what
 // already happened to it, so it owns its own fetch rather than reading the
@@ -132,30 +132,26 @@ async function load(): Promise<void> {
   }
 }
 
-/** POST one transition, then re-list.
+/** POST one reopen, then re-list.
  *
- * Read-mostly by design: the only write this card offers is a reopen, and the
- * route answers 409 rather than doing anything when a reopen does not apply
- * (a task that is not dismissed has an attempt in flight or a verdict already
- * reached, and overriding either is a decision nobody asked for). A refusal is
- * reported in place; the row is never quietly dropped for having failed to
- * change. */
-async function transition(row: UpdateTaskRow, action: 'reopen' | 'dismiss'): Promise<void> {
+ * Read-mostly by design: a reopen is the only write this card offers, and the
+ * route answers 409 rather than doing anything when one does not apply (a task
+ * that is not dismissed has an attempt in flight or a verdict already reached,
+ * and overriding either is a decision nobody asked for). A refusal is reported
+ * in place; the row is never quietly dropped for having failed to change. */
+async function reopenTask(row: UpdateTaskRow): Promise<void> {
   if (!workspace.value) return
   const key = keyOf(row)
   pending.value = new Set(pending.value).add(key)
   actionError.value = ''
   try {
     await api.post<{ ok: boolean; error?: string }>(
-      `/api/update-tasks/${encodeURIComponent(row.id)}/${action}` +
+      `/api/update-tasks/${encodeURIComponent(row.id)}/reopen` +
         `?workspace=${encodeURIComponent(workspace.value)}`,
     )
     await load()
   } catch (e) {
-    actionError.value =
-      action === 'reopen'
-        ? 'Could not reopen it: ' + reason(e)
-        : 'Could not hide it: ' + reason(e)
+    actionError.value = 'Could not reopen it: ' + reason(e)
   } finally {
     const next = new Set(pending.value)
     next.delete(key)
@@ -211,7 +207,9 @@ watch(workspace, (next, previous) => {
           task on Home is a "not this one" for this workspace and this revision —
           it does not cancel a chat, and it does not mark anything done. Reopening
           re-reads whether the work still applies rather than rerunning old
-          instructions.
+          instructions. Checking again re-reads the record; the engine reuses a
+          detector's answer until its own freshness window allows a new one, so a
+          check time does not always move.
         </p>
       </div>
       <div class="settings-card-header-actions">
@@ -268,10 +266,13 @@ watch(workspace, (next, previous) => {
                    inside the server's freshness window; `Decided` is when the
                    record was written. Rendering one under the other's name would
                    claim a re-check that never happened, or hide a decision that
-                   did. -->
+                   did. A hidden row is the exception, and for one reason: its
+                   decision is already on the line above as "hidden X", and saying
+                   the same timestamp twice under two names is the one way this
+                   list could make a single act look like two. -->
               <p class="set-row-sub">
                 Checked {{ row.applicability_checked_at ? formatRelative(row.applicability_checked_at) : 'never' }}
-                <template v-if="row.updated_at && row.status !== 'completed'">
+                <template v-if="row.updated_at && row.status !== 'completed' && row.status !== 'dismissed'">
                   · Decided {{ formatRelative(row.updated_at) }}
                 </template>
               </p>
@@ -282,7 +283,7 @@ watch(workspace, (next, previous) => {
                 type="button"
                 class="btn-primary btn-small"
                 :disabled="isPending(row)"
-                @click="transition(row, 'reopen')"
+                @click="reopenTask(row)"
               >{{ isPending(row) ? 'Reopening…' : 'Reopen' }}</button>
               <button
                 v-else

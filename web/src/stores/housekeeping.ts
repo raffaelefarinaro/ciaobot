@@ -266,7 +266,15 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
         `/api/update-tasks/${encodeURIComponent(row.id)}/${action}${query(workspace)}`,
         action === 'dismiss' ? { reason: '' } : undefined,
       )
-      if (!adoptRows(data)) await refreshUpdateTasks(workspace)
+      // A switch may have landed while this was in flight: this reply — and any
+      // row it carried — is about a workspace the reader is no longer in, and
+      // re-listing would put that workspace back in front of them. Guarded
+      // exactly as `refreshUpdateTasks` guards its own answer. The outcome is
+      // still reported either way, because it happened: the chat really was
+      // opened, or the refusal really did land.
+      if (updateTasksWorkspace.value === workspace && !adoptRows(data)) {
+        await refreshUpdateTasks(workspace)
+      }
       if (!data.ok) {
         const error = data.error || `The engine declined to ${action} this task.`
         setTaskError(key, error)

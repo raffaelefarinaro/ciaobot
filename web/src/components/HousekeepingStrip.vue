@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
 import { askConfirm } from '../lib/confirm'
@@ -180,17 +180,36 @@ async function openChat(action: OperatorAction): Promise<void> {
 // reverses it, can be reopened from Settings, and must never be drawn as done
 // before a completion check has actually said so.
 
+/** The lifecycles where an attempt exists: a chat was opened, is waiting on the
+ *  operator, or did not get going. Every state question below turns on this one
+ *  list, because it is the difference between "nobody has started this" and
+ *  "somebody already did". */
+const LIVE_ATTEMPT_STATES: string[] = ['in_progress', 'waiting_review', 'failed']
+
 /** The rows Home puts in front of the operator.
  *
- * A task the operator already decided about is not news: `dismissed` is hidden
- * in this scope (and reopenable from Settings → Update task history), and
- * `completed` is a verdict a completion check reached rather than something to
- * re-offer. What is left is new work or an attempt still standing — the four
- * states this group has an action for. */
+ * Three kinds of thing survive, and everything else is somebody else's history:
+ *
+ *  - a task the operator already decided about is not news. `dismissed` is
+ *    hidden in this scope (and reopenable from Settings → Update task history),
+ *    and `completed` is a verdict a completion check reached rather than
+ *    something to re-offer.
+ *  - an offer that *applies* here is new work, and so is one nobody could rule
+ *    on yet (`unknown`): a detector that has not run has not established that
+ *    there is nothing to do.
+ *  - a live attempt (`in_progress`, `waiting_review`, `failed`) always stays.
+ *    Its chat is open or needs a decision, which is not a thing to hide.
+ *
+ * What is deliberately gone is an offer the detector says does *not* apply.
+ * Every install ships the whole catalog, so drawing those would put a permanent
+ * "nothing to do" card on the Home of everyone who does not need the task — and
+ * an install with no work would no longer have an empty Home. */
 const visibleUpdateTasks = computed(() =>
-  housekeeping.updateTasks.filter(
-    (task) => task.status !== 'completed' && task.status !== 'dismissed',
-  ),
+  housekeeping.updateTasks.filter((task) => {
+    if (task.status === 'completed' || task.status === 'dismissed') return false
+    if (LIVE_ATTEMPT_STATES.includes(task.status)) return true
+    return task.applicability !== 'not_applicable'
+  }),
 )
 
 /** Whether the group draws anything at all.
@@ -201,6 +220,12 @@ const visibleUpdateTasks = computed(() =>
  * the outcome could be said and the only place focus could land. An operator who
  * pressed "Hide it" and saw the page rearrange itself in silence has been told
  * nothing about whether it worked.
+ *
+ * The exception is a *loan*, not a state: `clearGroupStatus` ends it on a timer
+ * and on a workspace switch (see `GROUP_STATUS_TTL_MS`), because a heading, a
+ * lede and a stale "Hidden …" left standing on Home would outlive the thing they
+ * describe — and, across a workspace switch, be attributed to a workspace the
+ * operator never pressed anything in.
  *
  * Zero tasks and a *failed* list are otherwise drawn identically — as nothing —
  * because that is the strip's own best-effort contract (`refresh` swallows a
@@ -233,7 +258,14 @@ function taskError(task: UpdateTaskRow): string {
  *
  * `unknown` is worded as a question nobody could answer, never as an absence of
  * work: a detector that has not run, or could not, has not established that
- * there is nothing to do. */
+ * there is nothing to do. It is checked first, so a row whose detector is still
+ * silent says so even while an attempt is under way — the silence is the more
+ * recent fact, and the one an operator is waiting on.
+ *
+ * There is no "does not apply" line, because a row that does not apply and has
+ * no attempt is not drawn at all (see `visibleUpdateTasks`): a permanent card
+ * reading "nothing to do" on the Home of an install that never needed the task
+ * is the opposite of what a zero-task Home should look like. */
 function taskStateLine(task: UpdateTaskRow): string {
   if (task.applicability === 'unknown') {
     return 'Checking whether this applies here…'
@@ -247,10 +279,23 @@ function taskStateLine(task: UpdateTaskRow): string {
   if (task.status === 'in_progress') {
     return 'Started. Its chat is on the left.'
   }
-  if (task.applicability === 'not_applicable') {
-    return 'This no longer applies here. Nothing to do.'
-  }
   return 'New since this update.'
+}
+
+/** Whether this row's lead button starts — or resumes — its chat.
+ *
+ * The gate is the row's *state*, not the detector's answer, and the difference
+ * is not cosmetic. An offer is the only row that needs `applicable` first:
+ * nobody may be handed instructions for a condition this install has not
+ * established exists. A live attempt is a different question — the chat is
+ * already open and the work is already under way, and `not_applicable` is the
+ * *normal* state once the chat has done the job but the completion check has not
+ * said so yet. Gating Resume on it would strand a live chat behind a small "Open
+ * its chat" link, which is precisely the wrong thing to do to somebody whose
+ * work is running. */
+function canStart(task: UpdateTaskRow): boolean {
+  if (LIVE_ATTEMPT_STATES.includes(task.status)) return true
+  return task.applicability === 'applicable'
 }
 
 const groupEl = ref<HTMLElement | null>(null)
@@ -258,6 +303,30 @@ const groupEl = ref<HTMLElement | null>(null)
  *  handlers because `showUpdateGroup` reads it: a group that still owes the
  *  operator an announcement has to stay on screen to deliver it. */
 const groupStatus = ref('')
+
+/** How long the outcome of the last press keeps the group on screen.
+ *
+ * Long enough to be read aloud by a screen reader, and long enough for the eye
+ * to find the group focus just landed on; short enough that a Home left open
+ * does not sit there with yesterday's "Hidden …" under a heading that is no
+ * longer about anything. */
+const GROUP_STATUS_TTL_MS = 10_000
+let groupStatusTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Drop the announcement, and with it the group when it has no cards left.
+ *
+ *  Called on a timer and on a workspace switch. A workspace change is not
+ *  optional: the status describes a press in the workspace the operator just
+ *  left, and carrying it over would attribute it to the one they are now in. */
+function clearGroupStatus(): void {
+  if (groupStatusTimer !== null) {
+    clearTimeout(groupStatusTimer)
+    groupStatusTimer = null
+  }
+  groupStatus.value = ''
+}
+
+onBeforeUnmount(clearGroupStatus)
 
 /** Keep the keyboard where the operator left it when a card goes away.
  *
@@ -275,7 +344,9 @@ async function keepFocus(): Promise<void> {
 }
 
 async function report(text: string, after?: () => Promise<void>): Promise<void> {
+  clearGroupStatus()
   groupStatus.value = text
+  groupStatusTimer = setTimeout(clearGroupStatus, GROUP_STATUS_TTL_MS)
   if (after) await after()
   await keepFocus()
 }
@@ -360,11 +431,16 @@ async function recheckTasks(): Promise<void> {
 }
 
 // Applicability and state are per workspace, so a workspace switch re-asks the
-// question rather than leaving the previous workspace's answers on screen.
+// question rather than leaving the previous workspace's answers on screen — and
+// takes the last press's announcement with them, since that press was made in
+// the workspace being left, not in the one now on screen.
 watch(
   () => projectStore.activeWorkspace,
   (next, previous) => {
-    if (next && next !== previous) void housekeeping.refreshUpdateTasks(next)
+    if (next && next !== previous) {
+      clearGroupStatus()
+      void housekeeping.refreshUpdateTasks(next)
+    }
   },
 )
 </script>
@@ -503,9 +579,12 @@ watch(
 
         <!-- One start button for every state that can start. Idempotent on the
              server per (task, revision), so the label is the only thing that
-             differs between "begin" and "carry on". -->
+             differs between "begin" and "carry on". Gate is the lifecycle, not
+             the detector (see canStart): a live attempt gets Resume even when
+             the detector has already decided the work is not needed, because
+             the chat is open and stranding it is the worse outcome. -->
         <button
-          v-if="task.applicability === 'applicable'"
+          v-if="canStart(task)"
           type="button"
           class="btn-small"
           :class="task.status === 'offered' ? 'btn-primary' : 'btn-chip'"
@@ -519,11 +598,10 @@ watch(
           <template v-else>Start in chat</template>
         </button>
 
-        <!-- "unknown" and "not_applicable" get no start button at all. Nobody
-             can say the work applies, and offering a button would invite an
-             operator to run instructions for a condition this install has not
-             established exists. A quiet re-check is the honest action; neither
-             is ever drawn as "done". -->
+        <!-- The one row that reaches here is an offer nobody can say applies:
+             `visibleUpdateTasks` drops an offer the detector has ruled out, and
+             `canStart` gives every live attempt its Resume. So a quiet re-check
+             is the only honest action left — and it is never drawn as "done". -->
         <button
           v-else
           type="button"

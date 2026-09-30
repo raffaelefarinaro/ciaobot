@@ -11,7 +11,13 @@
 //  - `unknown` is never drawn as "done" and never offers a Start button. Nobody
 //    can say the work applies, and offering a button invites running instructions
 //    for a condition this install has not established exists.
-//  - a zero-task Home is empty — no group, no heading, no box.
+//  - a task the detector has ruled out is not a card at all. Every install ships
+//    the whole catalog, so drawing one puts "nothing to do" on the Home of
+//    everyone who never needed the task, and an install with no work would no
+//    longer have an empty Home.
+//  - a zero-task Home is empty — no group, no heading, no box. That includes
+//    after the last card is hidden: the group may outlive its cards just long
+//    enough to say what happened, and not a moment longer.
 //  - a refusal stays on the card with its reason. A cleared card reads as
 //    "handled", and a failed start is not handled.
 //  - Hiding a task while a chat is open says in the confirmation that the chat is
@@ -37,8 +43,9 @@ vi.mock('../../router', () => ({ router: { push: routerPush } }))
 // `api` is mocked so the tests that press a real button exercise the *real*
 // store transition — the one that populates `taskErrors` and `pending…` — instead
 // of a stubbed method that would leave the very state under test unset.
+const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
-vi.mock('../../lib/api', () => ({ api: { get: vi.fn(), post: apiPost } }))
+vi.mock('../../lib/api', () => ({ api: { get: apiGet, post: apiPost } }))
 
 function task(overrides: Partial<UpdateTaskRow> = {}): UpdateTaskRow {
   return {
@@ -64,6 +71,8 @@ function task(overrides: Partial<UpdateTaskRow> = {}): UpdateTaskRow {
 beforeEach(() => {
   setActivePinia(createPinia())
   routerPush.mockClear()
+  apiGet.mockReset()
+  apiPost.mockReset()
   useProjectStore().activeWorkspace = 'personal'
   const housekeeping = useHousekeepingStore()
   // Avoid the interval / focus listeners firing during tests.
@@ -122,6 +131,19 @@ describe('the group itself', () => {
       task({ id: 'other', status: 'completed', suppressed: true }),
     ])
     expect(wrapper.find('.update-tasks').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('is absent when every task is one this install does not need', async () => {
+    // The zero-work Home, and the reason it has to be zero: a catalog task the
+    // detector ruled out is not a card, so a fresh install and an install that
+    // needs none of the catalog look exactly the same — empty.
+    const { wrapper } = await mountGroup([
+      task({ applicability: 'not_applicable', offered: false, status: 'offered' }),
+      task({ id: 'other', applicability: 'not_applicable', offered: false, status: 'offered' }),
+    ])
+    expect(wrapper.find('.update-tasks').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('After this update')
     wrapper.unmount()
   })
 
@@ -260,12 +282,50 @@ describe('one card per lifecycle', () => {
     wrapper.unmount()
   })
 
-  it('says a task no longer applies without calling it done', async () => {
+  it('draws no card at all for an offer that does not apply here', async () => {
+    // Every install ships the whole catalog, so a task the detector has ruled
+    // out is not news. Drawn as a card it says "nothing to do" on the Home of
+    // every install that never needed it, and never goes away — which is also
+    // how an install with no work at all ends up with a non-empty Home.
     const { wrapper } = await mountGroup([
       task({ applicability: 'not_applicable', offered: false, status: 'offered' }),
     ])
-    expect(buttons(wrapper)).toEqual(['Check again', 'Hide it'])
-    expect(cards(wrapper)[0].text()).toContain('no longer applies here')
+    expect(cards(wrapper)).toHaveLength(0)
+    expect(wrapper.find('.update-tasks').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('no longer applies')
+    wrapper.unmount()
+  })
+
+  it('keeps Resume on a live attempt whose work the detector now says is done', async () => {
+    // This is the normal shape once a chat has done the job: the detector sees
+    // the condition is gone before the completion check has confirmed it. The
+    // chat is still open and the operator is still in it, so the button that
+    // gets them back has to be here — a "Check again" in its place would strand
+    // a running task with no way back into it.
+    const { wrapper } = await mountGroup([
+      task({
+        status: 'in_progress',
+        applicability: 'not_applicable',
+        offered: false,
+        chat_id: 'chat-9',
+      }),
+    ])
+    expect(buttons(wrapper)).toContain('Resume chat')
+    expect(buttons(wrapper)).toContain('Open its chat')
+    expect(buttons(wrapper)).not.toContain('Check again')
+    wrapper.unmount()
+  })
+
+  it('offers a retry on a failed attempt nobody can say applies', async () => {
+    // `unknown` means nobody could answer, which is a reason not to *offer* the
+    // work — not a reason to deny the retry of an attempt that already exists.
+    // The server's start is idempotent per (task, revision), so a retry here
+    // reuses that attempt's chat rather than starting a second one.
+    const { wrapper } = await mountGroup([
+      task({ status: 'failed', applicability: 'unknown', offered: false, chat_id: 'chat-9' }),
+    ])
+    expect(buttons(wrapper)).toContain('Try again')
+    expect(buttons(wrapper)).not.toContain('Check again')
     wrapper.unmount()
   })
 
@@ -499,6 +559,70 @@ describe('mobile and touch', () => {
   })
 })
 
+describe('the group after its last card goes', () => {
+  it('stays long enough to say what happened, then goes', async () => {
+    // The button that was pressed is the thing that disappears, so the outcome
+    // needs somewhere to be said and focus needs somewhere to land. But a
+    // heading, a lede and a stale "Hidden …" left standing on Home outlive the
+    // thing they describe — and they are exactly what stopped a zero-task Home
+    // from being empty again.
+    //
+    // Fake timers come first: the group status sets its own deadline, and one
+    // armed against the real clock is not one these can advance.
+    vi.useFakeTimers()
+    try {
+      const { wrapper } = await mountGroup([task()])
+      vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(true)
+      apiPost.mockResolvedValueOnce({
+        ok: true,
+        task_id: 'review-legacy-rows',
+        tasks: [task({ status: 'dismissed', suppressed: true })],
+      })
+
+      await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+      await vi.advanceTimersByTimeAsync(0)
+      await nextTick()
+
+      expect(cards(wrapper)).toHaveLength(0)
+      expect(wrapper.find('.update-tasks').text()).toContain('Hidden')
+
+      // Ten seconds later it is gone, and Home is empty again.
+      await vi.advanceTimersByTimeAsync(11_000)
+      await nextTick()
+      expect(wrapper.find('.update-tasks').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('Hidden')
+      expect(wrapper.text()).not.toContain('After this update')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never fires a timer after the strip is gone', async () => {
+    // The timer holds a reference to a component that no longer exists, and
+    // writing to it after unmount is a leak on a page the operator leaves and
+    // comes back to every few minutes.
+    const { wrapper, store } = await mountGroup([task()])
+    vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(true)
+    vi.spyOn(store, 'dismissUpdateTask').mockResolvedValue({
+      ok: true, chatId: '', resumed: false, error: '',
+    })
+    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.update-tasks').text()).toContain('Hidden')
+
+    wrapper.unmount()
+    vi.useFakeTimers()
+    try {
+      expect(vi.getTimerCount()).toBe(0)
+      // And nothing throws when the deadline that was pending passes.
+      await vi.advanceTimersByTimeAsync(11_000)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('the workspace switch', () => {
   it('re-asks rather than showing the previous workspace its answers', async () => {
     // The rows belong to the workspace they were computed for. Holding the
@@ -515,5 +639,30 @@ describe('the workspace switch', () => {
     projects.activeWorkspace = 'work'
     await nextTick()
     expect(refresh).toHaveBeenCalledWith('work')
+  })
+
+  it('takes the last announcement with it, so it cannot cross workspaces', async () => {
+    // "Hidden <task>" describes a press made in the workspace being left. Left
+    // on screen it becomes a sentence about the previous workspace sitting under
+    // the new one's name, which is worse than no sentence at all.
+    const { wrapper, store } = await mountGroup([task()])
+    vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(true)
+    vi.spyOn(store, 'dismissUpdateTask').mockResolvedValue({
+      ok: true, chatId: '', resumed: false, error: '',
+    })
+    apiGet.mockResolvedValue({ tasks: [] })
+
+    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.find('.update-tasks').text()).toContain('Hidden')
+
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('.update-tasks').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Hidden')
+    wrapper.unmount()
   })
 })

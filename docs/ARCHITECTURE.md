@@ -195,14 +195,35 @@ web/                           Vue 3 PWA frontend.
                                applicability a quiet Check again and *no* start button at
                                all — nobody can say the work applies, and offering the
                                button would invite running instructions for a condition
-                               this install has not established exists. **Hiding is not
+                               this install has not established exists. The gate is the
+                               lifecycle and not the detector: a *live* attempt
+                               (`in_progress`/`waiting_review`/`failed`) always keeps
+                               Resume or Try again, because `not_applicable` is the
+                               normal state once the chat has done the work but
+                               `record_completion` has not confirmed it, and gating on
+                               applicability there would strand an open chat behind a
+                               bare "Open its chat" link. A `not_applicable` offer with
+                               no attempt is not a card at all — every install ships
+                               the whole catalog, so drawing those would put a
+                               permanent "nothing to do" on the Home of installs that
+                               need none of it, and an install with no work has to have
+                               an empty Home. The group outlives its last card only long
+                               enough to announce what was pressed (a fixed 10s, ended
+                               early by a workspace switch, since the announcement
+                               describes a press in the workspace being left) and to
+                               take the focus that the removed button dropped.
+                               **Hiding is not
                                completing**: it records "not this one" for this
                                `(task, revision)` in this scope, the chat stays open and is
                                not marked done, the confirmation says both, and Settings →
                                Update task history can reopen it. Every transition surfaces
                                a refusal in place (a 409 is mapped to plain recovery
                                guidance) rather than clearing the card, because a cleared
-                               card reads as "handled". The group is fetched on the same
+                               card reads as "handled". A transition that lost a
+                               workspace race reports its outcome but never adopts the
+                               reply's rows or re-lists, the same guard
+                               `refreshUpdateTasks` applies to its own answer. The group
+                               is fetched on the same
                                cadence as the strip but as a *separate* request, so
                                `/api/housekeeping` keeps being nothing but a cheap
                                detector pass, and a failed list is silent rather than a red
