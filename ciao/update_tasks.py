@@ -77,11 +77,22 @@ about how quickly it looks at the world, and no faster claim is made anywhere.
 Two consequences stated rather than hidden. The freshness window is a *named
 constant*, not a setting and not an env var: a per-install knob for "how stale may
 an answer be" is not a decision an operator has ever asked to make, and
-``AGENTS.md`` forbids a new env var where a constant does. And the registries
-hold exactly one name each — #728-E's ``learnings-cleanup``, the first real task —
-so every name a catalog row may use is a name this engine can act on; the catalog
-loader refuses anything else, and a probe with no implementation behind it still
-answers ``unknown`` rather than ``applicable``.
+``AGENTS.md`` forbids a new env var where a constant does. And every name a
+catalog row may use is a name this engine can act on — #728-E's
+``learnings-cleanup`` and, since #833, the install-scoped ``unrehomed-people``
+re-home — so the loader refuses anything else, and a probe with no implementation
+behind it still answers ``unknown`` rather than ``applicable``.
+
+**A task may share its condition with a surface that cannot dismiss it.** #833's
+``unrehomed-people`` is the same condition the OS audit reports as
+``unrehomed_people``, and it is the first pair here where the two disagree about
+what happens next: the card can be dismissed or completed and disappear, the
+report cannot be silenced at all. So the probes call
+:mod:`ciao.migration_notices` rather than restating the rule, the audit reads the
+same two functions, and nothing in that module reads a task record. That is what
+keeps "the card is gone" and "the audit is quiet" from being the same sentence —
+they are two different claims about one install, and only one of them is ever
+allowed to be an operator's decision.
 """
 
 from __future__ import annotations
@@ -386,6 +397,101 @@ def _learnings_cleanup_review_recorded(
     )
 
 
+# ── The person re-home probes (#833) ─────────────────────────────────────────
+
+
+def _unrehomed_people_rehome_needed(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether this install has person notes that may still need re-homing.
+
+    The audit's ``unrehomed_people`` condition, called rather than restated:
+    more than one registered workspace, and no completed ``vault-rehome``
+    receipt. Two surfaces reporting one install are two implementations waiting
+    to disagree, and #833's card is dismissible where the audit's report is not
+    — so the copy that can drift is exactly the copy this engine must not make.
+
+    Install-scoped on purpose, and ``workspace`` is unused rather than consulted:
+    the receipt is per install (``<runtime>/migration/vault-rehome.json``) and the
+    remedy moves notes between that install's workspaces, so an answer scoped to
+    one workspace would be a claim about half a condition. The record lives in the
+    runtime directory with it.
+
+    Cheap by construction — one registry read and one receipt read, no vault walk
+    — because this runs on a Home listing and an audit alike. ``plan_rehome``
+    walks every person note, which is exactly what this task *asks a person to
+    run deliberately*, and never what a detector does to decide whether to ask.
+
+    The evidence is the workspace count rather than a bare boolean, so the
+    fingerprint moves when the registry does and the task comes back for a
+    second workspace that did not exist when it was last offered.
+
+    A raise is not a "no": an unreadable registry or a failing receipt read
+    propagates, and :func:`apply_detector` records ``unknown`` rather than
+    ``not_applicable``. Silence from an unreadable install would be a claim it
+    cannot make.
+    """
+    del workspace, today  # install-scoped: neither argument is about one workspace
+    from ciao.migration_notices import rehomed_people_finding
+
+    finding = rehomed_people_finding(config, _runtime_root(config))
+    if finding is None:
+        return Detection(False, {"reason": "no_rehome_needed"})
+    return Detection(True, {"workspaces": len(finding.workspaces)})
+
+
+def _unrehomed_people_rehome_recorded(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether a completed person re-homing has been recorded for this install.
+
+    The receipt and nothing else. Opening a chat is not completion, and neither
+    is silence, and neither is the notes looking right: this check is the
+    registered postcondition the remedy actually satisfies, and
+    :func:`~ciao.vault_rehome.rehome_people` writes it.
+
+    It goes through the same :func:`~ciao.migration_notices.completed_rehome` the
+    notice's absence half uses, so "the notice is silent" and "the task is done"
+    are one fact rather than two readers of one file. That reader is the canonical
+    completed-only accessor, which is what makes the cases honest:
+
+    * a ``partial`` receipt is **not** completion — a run that could not move
+      some note left the vault half re-homed, and every reference to the note it
+      never moved already points at a path it is not at.
+    * a receipt predating the ``status`` field **is** completion, because those
+      installs did the work.
+    * a missing, unparseable or unreadable receipt is **not** completion. Absence
+      of proof is not proof, and this is the direction where that matters: a
+      receipt this install cannot read must not certify work nobody can show.
+
+    **An honest no-op run completes this task.** A first ``--apply`` over a
+    vault with nothing to move writes ``status: migrated`` with an empty move
+    list — ``rehome_people.should_record`` includes ``recorded is None`` — which
+    is a real run that really did look, and it is the only route that settles the
+    condition on a re-rooted install where the notes are already per-workspace and
+    the plan legitimately finds nothing. That is a fact about the vault, not a
+    trick to satisfy a check.
+
+    Install-scoped, as above: the receipt is per install.
+    """
+    del workspace, today  # install-scoped: the receipt is not a workspace's
+    from ciao.migration_notices import completed_rehome
+
+    receipt = completed_rehome(_runtime_root(config))
+    if receipt is None:
+        return Detection(False, {"reason": "no_completed_rehome_receipt"})
+    return Detection(
+        True,
+        {
+            "receipt": str(receipt.get("rehomed_at") or ""),
+            "moved": len(receipt.get("moves") or []),
+            "rewritten": len(receipt.get("rewrites") or []),
+            # The receipt's own `vault_root` is deliberately not carried: it is
+            # an absolute path, and state files travel between machines.
+        },
+    )
+
+
 def _workspace_vault(config: Any, workspace: str) -> Path | None:
     """The vault root of one workspace, or ``None`` when nothing resolves it.
 
@@ -429,15 +535,15 @@ def _learnings_revision(vault_root: Path) -> str | None:
         return None
 
 
-#: The one detector this engine ships, and the one completion check. Both are
-#: #728-E's, both are read-only, and both are registered in
-#: :data:`ciao.update_task_catalog.DETECTORS` / ``COMPLETION_CHECKS``, so a
-#: catalog row cannot name anything this engine has no code for. The functions
-#: live here rather than in the module they are about, so the registry is
-#: readable in one place; their bodies import lazily, because a Home render that
-#: does not touch Learnings should not pay for the module.
+#: Every detector this engine ships. All are read-only, and all are registered in
+#: :data:`ciao.update_task_catalog.DETECTORS`, so a catalog row cannot name
+#: anything this engine has no code for. The functions live here rather than in
+#: the module they are about, so the registry is readable in one place; their
+#: bodies import lazily, because a Home render that does not touch Learnings or
+#: a vault should not pay for either module.
 DETECTOR_FUNCTIONS: dict[str, Probe] = {
     "learnings-cleanup-review-needed": _learnings_cleanup_review_needed,
+    "unrehomed-people-review-needed": _unrehomed_people_rehome_needed,
 }
 
 #: Registered completion checks, same contract. A name with no implementation
@@ -445,6 +551,7 @@ DETECTOR_FUNCTIONS: dict[str, Probe] = {
 #: never marked done because nobody wrote the check that would prove it.
 COMPLETION_FUNCTIONS: dict[str, Probe] = {
     "learnings-cleanup-review-recorded": _learnings_cleanup_review_recorded,
+    "unrehomed-people-rehome-recorded": _unrehomed_people_rehome_recorded,
 }
 
 

@@ -731,18 +731,21 @@ The daily `system-memory-curation` schedule is presented as **Workspace care**. 
 
 #### The migration notices, and why they are probed in one place
 
-Two surfaces answer "what did an upgrade leave for this install?": the Home
-strip (`ciao/operator_actions.py`, polled every 60s and on window focus) and the
+Three surfaces answer "what did an upgrade leave for this install?": the Home
+strip (`ciao/operator_actions.py`, polled every 60s and on window focus), the
 `upgrade_notices` section of the audit above (a diagnostic, `pending_action_count`,
-never red). Since #816 both read `ciao/migration_notices.py`, which owns the
-condition, the applicability rule and the wording for the two notices they share.
-They used to carry their own copies, and the copies had drifted in ways only one
-side could see: the vault-location predicate existed twice while the audit's
-remedy described moving the folder and hand-editing the registry — the path the
-engine refuses — and the wikilink notice had two *applicability* rules, so the two
-surfaces answered different questions about the same vault.
+never red), and — since #833 — the "After this update" catalog, whose card is an
+offer the operator may dismiss where the audit's report they may not silence.
+Since #816 the first two read `ciao/migration_notices.py`, which owns the
+condition, the applicability rule and the wording for the notices they share, and
+since #833 it owns a third notice shared with the catalog. They used to carry their
+own copies, and the copies had drifted in ways only one side could see: the
+vault-location predicate existed twice while the audit's remedy described moving
+the folder and hand-editing the registry — the path the engine refuses — and the
+wikilink notice had two *applicability* rules, so the two surfaces answered
+different questions about the same vault.
 
-Adding a third surface to a notice is a function call, not a copy. Adding a notice
+Adding a fourth surface to a notice is a function call, not a copy. Adding a notice
 means answering two questions in that module, and the answers are what a later
 maintainer is checking:
 
@@ -771,6 +774,17 @@ maintainer is checking:
   executor is closed (a test asserts that order — the scan is waiting on a worker,
   and closing the pool under a pending task is the leak being avoided).
 
+A notice whose condition is **a receipt and nothing else** has no second question
+to answer, and that is the shape `unrehomed_people` has since #833: one registry
+read, one receipt read, no walk, so the audit, the strip and the catalog's detector
+may all ask it on any surface they like. What such a notice must not do is
+**improve on its own hedge** — it cannot know whether notes are misfiled, because
+nothing in the condition looked, so its wording says "may be" and the remedy
+invites a preview. The one thing it may not be is split: two readers of
+`vault-rehome.json` with different ideas of what counts as done is how a notice and
+the task that offers it come to disagree, so `completed_rehome` is the only way
+either side reads it.
+
 A published answer is one of three states, and the third one is the easy mistake.
 `LINKS_FOUND` is a note a walk located and is the only state that is ever a
 finding; `LINKS_CLEAN` is a walk that finished and found nothing; `LINKS_FAILED`
@@ -795,8 +809,8 @@ means there is nothing to scan for, so a migrated install is not woken every 60s
 Because a finding exists only once a walk found a note, the card **names** it
 instead of hedging on a receipt's absence, and a clean vault reaches zero for a
 reason other than "a migration ran". No Home-side suppression is an input to any of
-these functions, so when #800's catalog step makes a notice optional and
-dismissible, the dismissal can reach Home and only Home.
+these functions, which is what lets one condition be shared by an *offer* and a
+*report*: the dismissal reaches the card and only the card.
 
 The `vault-relocate` remedy names the shapes `--apply` refuses, because both
 surfaces have to say them and only one of them opens a chat. It attributes a
@@ -816,14 +830,69 @@ The scan is proven to run on a worker thread and to go through `run_read`, and t
 cold path is asserted end to end — one poll starts one detached scan and reports no
 card, the scan lands, the next poll reports a card that names the note.
 
-Neither notice is an update-task catalog row, and the test says so. A catalog task
-needs a registered completion check that reads a real postcondition, and for
-these two the only "evidence" the work was done is the condition's absence
-recomputed each render, which makes the check a tautology. `vault-relocate` is the
-best candidate for a receipt (it has an apply/undo cycle and a registry update to
-hang one on); the link migration's receipt is per *install*, not per vault, so a
-per-workspace loop over its remedy is not available either. Do not add a row
-because a card looks like a task.
+Neither of those two notices is an update-task catalog row, and the test says so.
+A catalog task needs a registered completion check that reads a real
+postcondition, and for these two the only "evidence" the work was done is the
+condition's absence recomputed each render, which makes the check a tautology.
+`vault-relocate` is the best candidate for a receipt (it has an apply/undo cycle
+and a registry update to hang one on); the link migration's receipt is per
+*install*, not per vault, so a per-workspace loop over its remedy is not
+available either. Do not add a row because a card looks like a task.
+
+#### The notice classification table (#800)
+
+Every migration notice, what actually proves it is done, and whether it may become
+a catalog task. Read this before adding a row: the last column is the one that
+decides, and it is decided by the receipt, never by how useful the card would be.
+Taken from the merged tree, and every cell is pinned by a test.
+
+| Notice | Surfaces today | Scope | Applicability cost | Completion evidence | Mandatory? | Managed remedy | Catalog detector / check |
+|---|---|---|---|---|---|---|---|
+| `workspace-unmigrated` | operator-actions tile, **blocking** | install | 2 registry reads + one receipt peek, no vault walk | **None.** Renders until `workspace_reroot.read_receipt` returns a record; absence of a receipt is not proof the work was done | **Yes** | `ciao workspace-reroot [--rehearse\|--apply\|--undo\|--repair]`, retried at every start by `migrate_if_needed` | **never.** A dismissible, revision-suppressed task is precisely wrong for a blocker that must not go away until the migration runs |
+| `vault-location:{workspace}` | tile + audit `vault_outside_vault_root`, one `vault_location_findings` | workspace | 2 resolved paths + one `is_dir()` | **None.** The registry *is* the layout, so the condition is a comparison of two paths recomputed each render | No | `ciao vault-relocate {name} [--apply\|--undo]` | none today; it needs a receipt `vault-relocate` does not write |
+| `vault-vocabulary` | tile | install | one `vault_migration.read_receipt` | `unresolved` non-empty — a real postcondition for the **mechanical** renames only; nothing records the categorisation decision a person still owes | No | the tile's run button, `ciao sync-skills` | none yet: its chat half needs the receipt the mechanical half writes (#814) |
+| `vault-unmigrated-links` | tile + audit `unmigrated_vault_links`, one `resolve_links`/`cached_links` | install | receipt read **plus** a bounded off-loop walk — Home reads the published verdict, the audit walks itself | `vault_migrate_links.read_receipt` — per **install**, not per vault, so the first converted root marks the whole install converted | No | `ciao vault-migrate-links [--apply]`, `ciao vault-unmigrate-links --apply` | none: a per-workspace loop over its remedy is not available |
+| `unrehomed_people` | audit `unrehomed_people` + the `unrehomed-people` catalog card (#833), one `rehomed_people_finding` | install | registry read + one receipt read, **no vault walk** | `vault_rehome.read_receipt` — a **completed** receipt, including the truthful no-op one a first `--apply` with nothing to move writes | No | `ciao vault-rehome [--apply]`, `ciao vault-unrehome --apply` | `unrehomed-people-review-needed` / `unrehomed-people-rehome-recorded` |
+| `learnings-cleanup` | the `learnings-cleanup` catalog card (#728-E) | workspace | `plan_cleanup` per workspace, TTL-cached off-loop | an **attended** receipt (`reviewed`/`approvals`, `removed_by != system`) naming the revision the document has now | No | `ciao learnings-cleanup [--apply --approval-file FILE]`, `--revert` | `learnings-cleanup-review-needed` / `learnings-cleanup-review-recorded` |
+
+Three shapes, and they are not interchangeable. **Mandatory** is the first row
+alone. **A real receipt** is `unrehomed_people` and `vault-vocabulary`: a
+completion check can read it, and a first successful `--apply` writes one even
+when it moved nothing. **No receipt at all** is everything else, where
+"completion" is the condition's absence recomputed each render — a legitimate
+detector, and a tautological check.
+
+#### The one notice that is both a report and a card (#833)
+
+`unrehomed_people` is the first notice two surfaces share where one of them can
+be dismissed and the other cannot. The condition lives in
+`migration_notices.rehomed_people_finding` and its receipt half in
+`completed_rehome`, so `os_audit` and the task's detector ask one question
+through one accessor — `vault_rehome.read_receipt`, which counts `partial` as
+**not** completed and a receipt predating the `status` field as completed. The
+rule that keeps them honest is that **nothing in `migration_notices` reads an
+update-task record**, so a dismissed card silences the card and never the report.
+`tests/test_unrehomed_people_update_task.py` pins the parity across every
+receipt shape, and pins that a `completed` record with no receipt on disk still
+leaves the audit reporting.
+
+What `vault-rehome` can and cannot do is part of this task's honesty, not a
+detail: it plans `<vault>/<workspace>/People`, so a per-workspace root has no
+workspace segment and no candidate — **the moves are a shared-layout remedy**.
+Passing `--workspace-name` does not change that, and the re-rooting writes no
+re-home receipt, so on a re-rooted install the notice outlives the condition it
+was named for. What settles it there is the no-op run: a first `--apply` over a
+root with nothing to do still writes `status: migrated`, which is a real run
+that really looked. The packaged prompt says exactly that, tells the operator to
+pass `--vault-root` (the default is gone after a re-rooting, and the command
+exits 1 without writing anything when it is), and requires their approval before
+`--apply`.
+
+`since_version` on both shipped rows is `0.0.0`, which reads as "any engine
+supports this". That is not a claim: the catalog ships **with** the engine, the
+cut version is not known until `ciao release` sets it, and an older engine that
+loaded this catalog would drop both rows with `unknown_detector` — the loader's
+designed answer, not a silent offer.
 
 ### Bounded-memory rot audit
 

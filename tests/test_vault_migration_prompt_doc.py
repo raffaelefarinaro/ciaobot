@@ -23,11 +23,16 @@ Six things are pinned here, in the order a reader hits them.
 * **Each managed command's rail is named**: dry-run, refusal, receipt, revision
   gate, undo — including the one remedy with no undo at all, and the flags that
   are accepted and ignored.
-* **The two surfaces are told apart.** Home and `ciao os-audit` do not carry the
-  same set, and a document that merges them sends a reader to the wrong place for
-  the one notice that is mandatory.
-* **The notices are not claimed to be catalog tasks**, because the catalog ships
-  exactly one row and it is about Learnings.md.
+* **The two surfaces are told apart**, including where they overlap: Home and
+  `ciao os-audit` do not carry the same set, a document that merges them sends a
+  reader to the wrong place for the one notice that is mandatory, and since #833
+  the one notice on *both* has to be described as two different things — a
+  dismissible Home task and a report the operator cannot silence.
+* **Exactly one notice is claimed to be a catalog task**, and the document says
+  what completes it. `unrehomed-people` (#833) is it, because it is the only
+  migration remedy whose receipt a completion check can read; the rest are tiles,
+  and a document that offered them under "After this update" would send a reader
+  looking for cards that do not exist.
 
 The per-root path facts this document's ordering advice rests on are behavioural,
 so they are checked against synthetic fixtures in
@@ -346,18 +351,23 @@ def test_home_and_os_audit_are_not_described_as_the_same_set() -> None:
     """One of them carries the only mandatory notice; the other does not.
 
     `operator_actions._DETECTORS` raises `workspace-unmigrated` and
-    `vault-vocabulary`; `os_audit.audit_upgrade_notices` raises neither, and
-    raises `unrehomed_people`, which has no tile at all. A document that says
-    "Home and the audit report the same conditions" is wrong in both directions:
-    an audit-only clean run does not clear the blocker, and Home will never offer
-    the re-home notice.
+    `vault-vocabulary`; `os_audit.audit_upgrade_notices` raises neither. A
+    document that says "Home and the audit report the same conditions" is wrong
+    in both directions: an audit-only clean run does not clear the blocker.
+
+    `unrehomed_people` used to be the third case — audit-only, with no Home
+    surface at all — and since #833 it has both, which is why it now needs the
+    *asymmetry* stated instead: the card is dismissible and the report is not, so
+    a document that called the two interchangeable would send a reader who hid
+    the card to `ciao os-audit` and back out again for nothing.
     """
     doc = _flat()
 
     assert "they do **not** cover the same ones" in doc
     for fragment in (
         "only on Home, so an audit cannot tell you",
-        "exists only in the audit, so Home will never offer it",
+        "the two are **not** the same thing",
+        "dismissing the Home card leaves it exactly where it was",
     ):
         assert fragment in doc, (
             "docs/VAULT_MIGRATION_PROMPT.md no longer distinguishes the two "
@@ -591,19 +601,37 @@ def test_the_skill_triage_paths_are_not_described_as_meeting() -> None:
         )
 
 
-def test_the_notices_are_not_claimed_to_be_catalog_tasks() -> None:
-    """None of these notices is an "After this update" task, and none is done.
+def test_exactly_one_notice_is_claimed_to_be_a_catalog_task() -> None:
+    """One migration notice is an "After this update" task: `unrehomed_people`.
 
-    The catalog ships exactly one row, `learnings-cleanup`, which is about
-    `Workspace/Learnings.md`. A reader told to look for these under "After this
-    update" would find nothing; a reader told they are all finished would skip
-    the one card that is blocking.
+    `unrehomed-people` (#833) is the only one whose remedy writes a receipt a
+    completion check can read, so it is the only one that may be catalogued. The
+    rest are tiles: a *view of the machine*, recomputed on every render, whose
+    only "completion evidence" is the condition's absence — a tautology dressed
+    as a check. A reader told to look for those under "After this update" would
+    find nothing; a reader told they were all finished would skip the one card
+    that is blocking.
     """
     doc = _flat()
 
-    assert "**None of the migration notices in this document are catalog tasks today.**" in doc
+    assert (
+        "**Only one migration notice in this document is a catalog task, and it is "
+        "the one whose remedy writes a receipt.**" in doc
+    ), "the catalog claim must name the one row that is a task, and why"
+    for fragment in (
+        "`unrehomed-people`",
+        "prompts/unrehomed-people-1.md",
+        "install-scoped",
+        "not** a `partial` one",
+        "not a run that was refused",
+        "not a file nobody could read",
+    ):
+        assert fragment in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md no longer states what completes the "
+            f"catalogued notice: {fragment!r}"
+        )
     assert "learnings-cleanup" in doc, (
-        "name the one shipped catalog row so 'unrelated to layout' is checkable"
+        "name the other shipped catalog row so 'unrelated to layout' is checkable"
     )
     assert "unrelated to layout" in doc
     assert "do not assume any of these are offered there" in doc

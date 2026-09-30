@@ -54,16 +54,19 @@ empty Home does not mean the audit is.
 | `vault-vocabulary` — some notes use a retired `type:` vocabulary | Yes | **No** | No | Step 5 |
 | `vault-location:<workspace>` — "The `<name>` vault is not in its standard folder" | Yes | Yes, as `vault_outside_vault_root` | No | Step 2 |
 | "The vault may still use the retired wikilink dialect" | Yes | Yes, as `unmigrated_vault_links` | No | Step 3 |
-| `unrehomed_people` — no re-home has been recorded | **No** | Yes | No | Step 4 |
+| `unrehomed_people` — no re-home has been recorded | Yes, as an **After this update** task (`unrehomed-people`), dismissible | Yes | No | Step 4 |
 
 Two consequences worth stating outright. The one **mandatory** notice
 (`workspace-unmigrated`) exists only on Home, so an audit cannot tell you
 whether the install still needs separating — check Home. And `unrehomed_people`
-exists only in the audit, so Home will never offer it; run `ciao os-audit` to
-find out whether Step 4 applies to you.
+is the opposite: it is on both, but the two are **not** the same thing. Home
+offers it as a task you may dismiss, reopen from Settings → Update task history,
+and finish; `ciao os-audit` keeps reporting it as a pending action whatever that
+card says, because a dismissed card is a decision about a card. What stops the
+audit line is the receipt below — not the dismissal.
 
 **`unrehomed_people` is a receipt check, not a scan, and it can outlive Step 1.**
-The audit raises it when the install has **more than one registered workspace**
+It is raised when the install has **more than one registered workspace**
 and there is **no completed re-home receipt** — it does not walk the vault, so
 it cannot tell you whether anything is actually misfiled. That has two
 consequences. It stays silent on a single-workspace install, where every
@@ -82,9 +85,10 @@ ciao vault-rehome --vault-root <install>/<workspace>/memory-vault --apply
 
 That is a real run, not a trick: it refuses on a dirty tree, reports "No
 tag-obvious misfiled people", and writes `vault-rehome.json` with
-`status: migrated`, which is exactly what the audit reads. If you would rather
-not run it, the notice is a pending action and never turns the audit red — it is
-informational, not a defect.
+`status: migrated`, which is exactly what the audit reads and what settles the
+Home task. If you would rather not run it, the notice is a pending action and
+never turns the audit red — it is informational, not a defect, and dismissing
+the Home card leaves it exactly where it was.
 
 `workspace-unmigrated` is a precondition this install cannot get past on its
 own, which is why it is prominent, permanent and retryable rather than
@@ -421,13 +425,14 @@ identically.
 ## Step 4 — optional: re-home person notes
 
 Optional, for an `unrehomed_people` notice — and note from the table above that
-this notice exists **only** in `ciao os-audit`, never as a Home card, and that
-it reports the *absence of a receipt* rather than scanning for misfiled notes.
-Read the section above first: after Step 1 the notice can be there with nothing
-for this command to move, and the honest no-op run is what clears it. Before
-Step 1 it does its real work: person notes that a global memory-curation run
-filed into one workspace's `People/`. The routing bug is fixed; this moves the
-backlog.
+this notice reports the *absence of a receipt* rather than scanning for misfiled
+notes, and that it now has a Home card too: the dismissible
+`unrehomed-people` **After this update** task, which is finished by the same
+receipt and settles when you run this command. Read the section above first:
+after Step 1 the notice can be there with nothing for this command to move, and
+the honest no-op run is what clears it. Before Step 1 it does its real work:
+person notes that a global memory-curation run filed into one workspace's
+`People/`. The routing bug is fixed; this moves the backlog.
 
 ```bash
 ciao vault-rehome                                  # the plan; changes nothing
@@ -624,18 +629,23 @@ task there is a *decision that persists* until somebody reverses it, with a
 server-owned prompt, a per-`(id, revision)` record, dismissal, and a reopen in
 Settings → Update task history.
 
-**None of the migration notices in this document are catalog tasks today.**
-They are operator-action tiles — a *view of the machine*, recomputed on every
-render — and `ciao os-audit` reports the findings independently, so the audit
-may still name a finding whose card you hid. The tiles render even when the
-work has been done, because "completion evidence" for most of them is only the
-condition's absence; a catalog task needs a receipt a completion check can
-read, and only a managed remedy that writes one has it. The catalog's one
-shipped row, `learnings-cleanup` (with its packaged prompt at
-`prompts/learnings-cleanup-1.md`), is about `Workspace/Learnings.md` and is
-unrelated to layout. If a future release moves a migration notice into that
-catalog, it moves with a receipt behind it, and `docs/DEVELOPMENT.md` will say
-so — do not assume any of these are offered there.
+**Only one migration notice in this document is a catalog task, and it is the
+one whose remedy writes a receipt.** `unrehomed_people` ships as
+`unrehomed-people` (install-scoped, with its packaged prompt at
+`prompts/unrehomed-people-1.md`): it is finished when
+`<runtime>/migration/vault-rehome.json` records a **completed** run — including
+the honest no-op run above, and **not** a `partial` one, not a run that was
+refused, and not a file nobody could read. Every other notice here is an
+operator-action tile — a *view of the machine*, recomputed on every render — and
+`ciao os-audit` reports the findings independently, so the audit may still name a
+finding whose card you hid. Those tiles render even when the work has been done,
+because "completion evidence" for most of them is only the condition's absence; a
+catalog task needs a receipt a completion check can read, and only a managed
+remedy that writes one has it. The catalog's other shipped row,
+`learnings-cleanup`, is about `Workspace/Learnings.md` and unrelated to layout.
+`docs/DEVELOPMENT.md` has the classification table for all of them, including the
+ones that are deliberately not tasks — do not assume any of these are offered
+there.
 
 The `workspace-unmigrated` card is not a catalog task either, and must not
 become one: a task is dismissible and revision-suppressed, which is precisely

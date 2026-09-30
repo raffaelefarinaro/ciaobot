@@ -2,11 +2,13 @@
 
 Why this module exists
 ----------------------
-Two surfaces answer "what has an upgrade left for this install?": the Home strip
-(``operator_actions.detect_actions``, polled every 60s and on window focus) and
-the ``upgrade_notices`` section of the OS audit (a diagnostic report, never red).
-They used to hold their own copy of two conditions each, and the copies had
-drifted in ways only one of them could see:
+Three surfaces answer "what has an upgrade left for this install?": the Home strip
+(``operator_actions.detect_actions``, polled every 60s and on window focus), the
+``upgrade_notices`` section of the OS audit (a diagnostic report, never red), and
+since #833 the "After this update" catalog in ``ciao/update_tasks.py``, whose card
+is an *offer* the operator may dismiss where the audit is a report they may not
+silence. The first two of them used to hold their own copy of two conditions
+each, and the copies had drifted in ways only one of them could see:
 
 * **vault location.** One predicate, two implementations. The audit's remedy also
   taught the manual path — "identify which files are vault content, make a
@@ -80,9 +82,30 @@ Audit truth, Home honesty
 Sharing a probe must not turn the audit into a mirror of the Home strip, and
 sharing a cache must not turn the audit into a slower copy of Home. The audit
 resolves the verdict itself and reports it; Home reports the last established
-one. No Home-side suppression is an input to any function here, so a card that
-#800's catalog step later makes optional and dismissible still cannot silence the
-audit.
+one. No Home-side suppression is an input to any function here, so the notice
+#833 made an optional, dismissible catalog card still cannot silence the audit:
+``rehomed_people_finding`` reads the registry and the receipt and nothing else,
+and a lifecycle recorded in ``<runtime>/update-tasks.json`` is not one of its
+inputs. That is what lets one condition be shared by an *offer* and a *report*
+without the offer being able to erase the report.
+
+The one notice that is not about a walk
+---------------------------------------
+``unrehomed_people`` is a **receipt** check, not a scan: more than one registered
+workspace, and no completed ``vault-rehome`` receipt. Nothing here opens a file
+under a vault to decide it, which is why ``rehomed_people_finding`` costs one
+registry read and one receipt read and is safe for a poll, an audit and a
+catalog detector alike — the third of which (#833) is the first surface here that
+is allowed to be *dismissed*, so the shared rule is the only thing keeping the
+audit's finding and the task's offer saying the same thing.
+
+The receipt is read through :func:`completed_rehome` on both sides, deliberately.
+A detector that says "no completed receipt" and a completion check that says "a
+completed receipt" are the same question asked twice, and two readers of one file
+are two rules — the drift this module exists to remove. ``vault_rehome
+.read_receipt`` is the canonical completed-only reader (a ``partial`` receipt is
+incomplete, a receipt predating the ``status`` field counts as complete), and both
+halves go through it here rather than each reaching for the file.
 """
 
 from __future__ import annotations
@@ -104,6 +127,12 @@ VAULT_LOCATION_NOTICE = "vault_outside_vault_root"
 
 #: The audit's notice type for a vault still written in the retired wikilink dialect.
 UNMIGRATED_LINKS_NOTICE = "unmigrated_vault_links"
+
+#: The audit's notice type for person notes that may still need re-homing. The
+#: same condition #833's ``unrehomed-people`` update task offers on Home, so the
+#: string is the join between the report and the card; it is one spelling because
+#: two surfaces that have to agree on which notice this is cannot each invent it.
+UNREHOMED_PEOPLE_NOTICE = "unrehomed_people"
 
 #: How long an established wikilink verdict may be reused before it is recomputed.
 #:
@@ -551,3 +580,124 @@ def reset_links_cache() -> None:
     """Drop every stored verdict. Test-only isolation hook."""
     with _CACHE_LOCK:
         _CACHE.clear()
+
+
+# -- unrehomed person notes --------------------------------------------------
+
+
+def completed_rehome(runtime_dir: Path) -> dict[str, Any] | None:
+    """The receipt of a **completed** person re-homing, or ``None``.
+
+    One reader, deliberately, because this question is asked twice in opposite
+    directions — the notice asks "is there none?" and #833's completion check
+    asks "is there one?" — and two callers reaching for ``vault-rehome.json`` with
+    different ideas of what counts as done is how a notice and a task end up
+    disagreeing about the same install.
+
+    The accessor is :func:`ciao.vault_rehome.read_receipt`, which gates on
+    ``status`` rather than on the file existing. That is the honest reader for
+    both directions:
+
+    * ``partial`` counts as **not** completed. A run that could not write or
+      could not move some note left the vault half re-homed, and reading that as
+      done is exactly how a half-converted vault reports itself finished.
+    * a receipt written before ``status`` existed counts as **completed**. Those
+      installs did the work; gating on the field made the notice a permanent
+      false positive on precisely the vaults that had already run the migration.
+    * a receipt that cannot be parsed, or that is not an object, counts as
+      **not** completed. Absence of proof is not proof, in either direction.
+
+    Returns the receipt itself rather than a boolean, because the completion
+    check has to name it in its evidence and a bare ``True`` cannot say which
+    run it was looking at.
+    """
+    from ciao.vault_rehome import read_receipt
+
+    return read_receipt(Path(runtime_dir))
+
+
+@dataclass(frozen=True)
+class UnrehomedPeopleFinding:
+    """An install whose person notes may still need re-homing.
+
+    ``workspaces`` is the registered workspace count the condition was decided
+    on, and it is carried rather than discarded so a caller can say *why* the
+    answer is what it is: an install with one workspace has nowhere to misfile a
+    note to, so the count is not a detail.
+
+    The wording is the audit's, unchanged. It is deliberately hedged — "may be
+    filed in the wrong workspace", "none have been re-homed yet" — because the
+    condition is a receipt's absence and nothing here has walked the vault to
+    check. A notice that asserted that notes are misfiled would be asserting
+    something its own predicate never established, and #833's task prompt has to
+    inherit exactly that hedge rather than improve on it.
+    """
+
+    workspaces: tuple[str, ...]
+
+    @property
+    def title(self) -> str:
+        return "Person notes may be filed in the wrong workspace"
+
+    @property
+    def detail(self) -> str:
+        return (
+            "Person notes may be filed in the wrong workspace, and "
+            "none have been re-homed yet. A preview lists the "
+            "candidates without moving anything."
+        )
+
+    @property
+    def remedy(self) -> str:
+        return (
+            "Preview with `ciao vault-rehome` (dry-run by default), "
+            "then apply with `ciao vault-rehome --apply`. Every move "
+            "and link rewrite is recorded, so `ciao vault-unrehome "
+            "--apply` restores the notes and their references."
+        )
+
+
+def rehomed_people_finding(
+    config: Any, runtime_dir: Path | None
+) -> UnrehomedPeopleFinding | None:
+    """The re-home finding for this install, or ``None``.
+
+    Two terms, both cheap and read-only, and both of them the audit's own terms
+    rather than a stricter version of them:
+
+    * **more than one registered workspace.** With one workspace there is no
+      counterpart for a note to be misfiled *from*: ``detect_misfiled_people``
+      buckets an untagged note as needing judgement, but its destination comes
+      back empty, so there is no move to offer. Reporting it anyway is how a
+      fresh install learns to ignore the whole strip.
+    * **no completed re-home receipt.** See :func:`completed_rehome` for what
+      counts, including why a ``partial`` run keeps the finding and a receipt
+      without a ``status`` field does not.
+
+    ``runtime_dir is None`` cannot apply the notice at all, which is a different
+    answer from "there is no receipt": a caller with no runtime root has nowhere
+    to read the evidence from, so it cannot say the work was done. That is the
+    same distinction the wikilink scope draws with ``vault is None``.
+
+    Raises rather than swallowing: a config that will not name its workspaces,
+    or a receipt reader that fails, is an **unknown**, and the two callers answer
+    it differently on purpose — ``os_audit`` logs and stays silent rather than
+    failing a whole report, while ``update_tasks``' detector turns the raise into
+    ``unknown`` so no task is offered on a condition this install could not
+    establish. Neither one is allowed to call that ``not applicable``.
+    """
+    if runtime_dir is None:
+        return None
+    lister = getattr(config, "workspace_names", None)
+    if not callable(lister):
+        # A config without a workspace registry exposes none of the accessors
+        # this needs, and there is nothing for it to report. Same rule as
+        # `vault_location_findings`: a config that cannot answer is not an error
+        # on a notice path, it is a surface that has nothing to say.
+        return None
+    names = tuple(str(name) for name in lister())
+    if len(names) < 2:
+        return None
+    if completed_rehome(runtime_dir) is not None:
+        return None
+    return UnrehomedPeopleFinding(workspaces=names)
