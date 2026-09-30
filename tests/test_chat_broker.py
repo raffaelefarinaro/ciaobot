@@ -532,7 +532,8 @@ def test_events_hub_subscribe_emits_keepalive(monkeypatch) -> None:
 
     async def _run() -> None:
         hub = broker.EventsHub()
-        agen = hub.subscribe()
+        sub = hub.attach()
+        agen = sub.__aiter__()
         first = await asyncio.wait_for(agen.__anext__(), timeout=1.0)
         assert first == {"type": "keepalive"}
         hub.publish({"type": "chat_streaming_done", "chat_id": "c1"})
@@ -544,6 +545,7 @@ def test_events_hub_subscribe_emits_keepalive(monkeypatch) -> None:
         else:
             raise AssertionError("never received chat_streaming_done")
         await agen.aclose()
+        sub.close()
 
     asyncio.run(_run())
 

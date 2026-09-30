@@ -14,9 +14,13 @@ from ciao.web.auth import SESSION_COOKIE
 from ciao.web.routes_chat import ws_events
 
 
-async def _never_yield():
-    await asyncio.Event().wait()
-    yield  # pragma: no cover
+class _IdleSubscription:
+    def close(self) -> None:
+        pass
+
+    async def __aiter__(self):
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
 
 
 def _events_app(*, auth_required: bool) -> Starlette:
@@ -28,7 +32,7 @@ def _events_app(*, auth_required: bool) -> Starlette:
         get_chat=lambda _cid: None,
         background_agent_counts={},
         background_run_counts={},
-        events=SimpleNamespace(subscribe=_never_yield),
+        events=SimpleNamespace(attach=_IdleSubscription),
     )
     return app
 
@@ -63,3 +67,29 @@ def test_ws_rejects_cross_origin() -> None:
             "/ws/events", headers={"Origin": "http://evil.example"}
         ):
             pass
+
+
+def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> None:
+    # A `chat_streaming_done` in the gap between the snapshot and the
+    # subscription was lost, leaving the client's spinner on forever.
+    from ciao.web.chat_broker import EventsHub
+
+    hub = EventsHub()
+
+    def _ids() -> list[str]:
+        hub.publish({"type": "chat_streaming_done", "chat_id": "c1"})
+        return []
+
+    app = _events_app(auth_required=False)
+    app.state.project_chat_manager = SimpleNamespace(
+        active_stream_chat_ids=_ids,
+        get_chat=lambda _cid: None,
+        background_agent_counts={},
+        background_run_counts={},
+        events=hub,
+    )
+    with TestClient(app).websocket_connect(
+        "/ws/events", headers={"Origin": "http://testserver"}
+    ) as ws:
+        assert ws.receive_json()["type"] == "snapshot"
+        assert ws.receive_json() == {"type": "chat_streaming_done", "chat_id": "c1"}

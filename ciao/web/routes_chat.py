@@ -17,6 +17,7 @@ clients are connected.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 
@@ -403,6 +404,11 @@ async def ws_events(websocket: WebSocket) -> None:
     await websocket.accept()
     pcm = websocket.app.state.project_chat_manager
 
+    # Attach before the snapshot is built: an event published between the
+    # snapshot and the subscription would otherwise be lost, and a lost
+    # `chat_streaming_done` leaves the client believing the turn still runs.
+    subscription = pcm.events.attach()
+
     # Snapshot: tell the client which chats are currently streaming so the
     # sidebar dots render immediately on reload.
     try:
@@ -432,6 +438,7 @@ async def ws_events(websocket: WebSocket) -> None:
             "restarting": bool(getattr(pcm, "_restart_draining", False)),
         })
     except (WebSocketDisconnect, RuntimeError):
+        subscription.close()
         return
 
     tracker: ConnectionTracker | None = getattr(
@@ -442,11 +449,15 @@ async def ws_events(websocket: WebSocket) -> None:
     sub_task: asyncio.Task | None = None
 
     async def _pump_events() -> None:
-        async for payload in pcm.events.subscribe():
-            try:
+        try:
+            async for payload in subscription:
                 await websocket.send_json(payload)
-            except (WebSocketDisconnect, RuntimeError):
-                return
+        except (WebSocketDisconnect, RuntimeError):
+            return
+        # The hub ended the stream (queue overflow). Close the socket so the
+        # client reconnects and takes a fresh snapshot.
+        with contextlib.suppress(RuntimeError):
+            await websocket.close()
 
     sub_task = asyncio.create_task(_pump_events())
     try:
@@ -457,6 +468,7 @@ async def ws_events(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        subscription.close()
         if sub_task is not None and not sub_task.done():
             sub_task.cancel()
         if tracker and conn_id:

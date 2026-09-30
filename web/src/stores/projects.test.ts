@@ -1277,6 +1277,30 @@ describe('trace-only history tails', () => {
     }
   })
 
+  test('an older /messages response does not overwrite a newer one', async () => {
+    // A poll issued before the answer persisted can resolve after the fetch that
+    // already carries it. Adopting the smaller, older window dropped the answer.
+    const store = useProjectStore()
+    const chatId = 'c-out-of-order'
+    store.activeChatId = chatId
+    let releaseStale: (value: unknown) => void = () => {}
+    const stale = new Promise(resolve => { releaseStale = resolve })
+    let calls = 0
+    apiGet.mockImplementation((path: string) => {
+      if (!path.includes('/messages')) return Promise.resolve([])
+      calls += 1
+      return calls === 1 ? stale : Promise.resolve([USER, FINAL])
+    })
+
+    const older = store.loadMessages(chatId, { background: true })
+    await store.loadMessages(chatId, { background: true })
+    expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+
+    releaseStale([USER])
+    await older
+    expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+  })
+
   test('older result reconciliation does not clear a newer turn', async () => {
     // A new turn can start while the previous turn's reconcile is awaiting
     // /messages. Clearing on its stale "settled" read wiped the live turn's

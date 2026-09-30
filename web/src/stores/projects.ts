@@ -102,6 +102,11 @@ export const useProjectStore = defineStore('projects', () => {
   // authoritative session history is still on the way.
   const loadingMessages = ref<Record<string, boolean>>({})
   const messageLoadGenerations = new Map<string, number>()
+  // Per-chat request order for /messages. Responses can return out of order
+  // (a poll issued before the answer persisted, resolving after the reconcile
+  // fetch); an older one must not overwrite rows a newer one already applied.
+  const messageRequestsIssued = new Map<string, number>()
+  const messageRequestsApplied = new Map<string, number>()
   // Pagination state for envelope-mode history loads (see loadMessagesFromServer).
   const historyMeta = ref<Record<string, { total: number; hasMore: boolean; nextOffset: number | null; limit: number } | undefined>>({})
   const loadingOlder = ref<Record<string, boolean>>({})
@@ -2615,9 +2620,13 @@ export const useProjectStore = defineStore('projects', () => {
     // handles both transparently.
     type ServerEnvelope = { items: ServerRow[]; total: number; offset: number; limit: number; hasMore: boolean; nextOffset: number | null }
     try {
+      const requestSeq = (messageRequestsIssued.get(chatId) || 0) + 1
+      messageRequestsIssued.set(chatId, requestSeq)
       const serverMsgs = await api.get<ServerRow[] | ServerEnvelope>(
         `/api/chats/${chatId}/messages?limit=50`
       )
+      if (requestSeq < (messageRequestsApplied.get(chatId) || 0)) return
+      messageRequestsApplied.set(chatId, requestSeq)
       if (Array.isArray(serverMsgs) && !serverMsgs.length) {
         reconcileQueuedWithMessages(chatId)
         return
