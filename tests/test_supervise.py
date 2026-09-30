@@ -1,0 +1,230 @@
+"""ciao.supervise: a restart exit relaunches, anything else ends the supervisor.
+
+The children here are real processes: a script written to ``tmp_path`` that
+appends a line per launch to a counter file and exits with the code that launch
+number names. Time is injected (``sleep``/``clock``), so no test sleeps.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import textwrap
+import threading
+import time
+from pathlib import Path
+from typing import Callable
+
+import pytest
+
+from ciao.config import RESTART_EXIT_CODE
+from ciao.supervise import (
+    BACKOFF_INITIAL_S,
+    BACKOFF_MAX_S,
+    CRASH_LOOP_MAX_RESTARTS,
+    CRASH_LOOP_WINDOW_S,
+    backoff_delay,
+    default_child_argv,
+    supervise,
+)
+
+_COUNTER_SCRIPT = textwrap.dedent(
+    """
+    import pathlib, sys
+    counter, codes = pathlib.Path(sys.argv[1]), [int(c) for c in sys.argv[2:]]
+    launches = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(launches + 1))
+    sys.exit(codes[launches])
+    """
+)
+
+
+def _counter_child(tmp_path: Path, *codes: int) -> list[str]:
+    """argv for a child that exits ``codes[n]`` on its ``n``-th launch (0-based)."""
+    counter = tmp_path / "launches"
+    script = tmp_path / "counter.py"
+    script.write_text(_COUNTER_SCRIPT, encoding="utf-8")
+    return [sys.executable, str(script), str(counter), *(str(code) for code in codes)]
+
+
+def _launches(tmp_path: Path) -> int:
+    counter = tmp_path / "launches"
+    return int(counter.read_text()) if counter.exists() else 0
+
+
+def _recording_sleep() -> tuple[list[float], Callable[[float], None]]:
+    slept: list[float] = []
+
+    def _sleep(delay: float) -> None:
+        slept.append(delay)
+
+    return slept, _sleep
+
+
+def _await_file(path: Path, timeout: float = 10.0) -> None:
+    """Block until ``path`` exists, so a failed child cannot hang the suite."""
+    deadline = time.monotonic() + timeout
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not path.exists():
+        raise AssertionError(f"{path.name} never appeared")
+
+
+def test_restart_code_then_zero_launches_twice(tmp_path: Path) -> None:
+    slept, sleep = _recording_sleep()
+
+    code = supervise(child_argv=_counter_child(tmp_path, RESTART_EXIT_CODE, 0), sleep=sleep)
+
+    assert code == 0
+    assert _launches(tmp_path) == 2
+    assert slept == []
+
+
+def test_non_restart_nonzero_exit_is_returned_without_relaunch(tmp_path: Path) -> None:
+    slept, sleep = _recording_sleep()
+
+    code = supervise(child_argv=_counter_child(tmp_path, 3), sleep=sleep)
+
+    assert code == 3
+    assert _launches(tmp_path) == 1
+    assert slept == []
+
+
+def test_zero_exit_is_returned_without_relaunch(tmp_path: Path) -> None:
+    slept, sleep = _recording_sleep()
+
+    code = supervise(child_argv=_counter_child(tmp_path, 0), sleep=sleep)
+
+    assert code == 0
+    assert _launches(tmp_path) == 1
+    assert slept == []
+
+
+def test_crash_loop_backs_off(tmp_path: Path) -> None:
+    """Past CRASH_LOOP_MAX_RESTARTS restarts inside the window each wait, doubling."""
+    slept, sleep = _recording_sleep()
+
+    code = supervise(
+        child_argv=_counter_child(tmp_path, *([RESTART_EXIT_CODE] * 7), 0),
+        sleep=sleep,
+        clock=lambda: 1000.0,
+    )
+
+    assert code == 0
+    assert _launches(tmp_path) == 8
+    assert slept == [BACKOFF_INITIAL_S, BACKOFF_INITIAL_S * 2]
+
+
+def test_restarts_outside_the_window_do_not_back_off(tmp_path: Path) -> None:
+    """The window slides, so restarts spread further apart than it are never capped."""
+    slept, sleep = _recording_sleep()
+    ticks = iter(float(index) * (CRASH_LOOP_WINDOW_S + 1) for index in range(16))
+
+    code = supervise(
+        child_argv=_counter_child(tmp_path, *([RESTART_EXIT_CODE] * 8), 0),
+        sleep=sleep,
+        clock=lambda: next(ticks),
+    )
+
+    assert code == 0
+    assert _launches(tmp_path) == 9
+    assert slept == []
+
+
+def test_backoff_delay_is_capped() -> None:
+    assert backoff_delay(CRASH_LOOP_MAX_RESTARTS) == 0.0
+    assert backoff_delay(CRASH_LOOP_MAX_RESTARTS + 1) == BACKOFF_INITIAL_S
+    assert backoff_delay(10_000) == BACKOFF_MAX_S
+
+
+def test_default_child_argv_uses_module_path() -> None:
+    assert default_child_argv(["x"]) == [
+        sys.executable,
+        "-m",
+        "ciao.cli",
+        "run",
+        "--supervised",
+        "x",
+    ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_sigterm_is_forwarded_to_the_child(tmp_path: Path) -> None:
+    """The child shares the supervisor's process group, so a stop sent to the
+    supervisor never reaches it on its own: the supervisor has to forward it."""
+    ready, got_term = tmp_path / "ready", tmp_path / "got-term"
+    script = tmp_path / "child.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import pathlib, signal, sys, time
+            got_term = pathlib.Path({str(got_term)!r})
+            def _term(_signum, _frame):
+                got_term.write_text("term")
+                sys.exit(0)
+            signal.signal(signal.SIGTERM, _term)
+            pathlib.Path({str(ready)!r}).write_text("ready")
+            while True:
+                time.sleep(0.05)
+            """
+        ),
+        encoding="utf-8",
+    )
+    before = signal.getsignal(signal.SIGTERM)
+
+    def _stop_when_ready() -> None:
+        _await_file(ready)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    poller = threading.Thread(target=_stop_when_ready, daemon=True)
+    poller.start()
+    try:
+        code = supervise(child_argv=[sys.executable, str(script)])
+    finally:
+        poller.join(timeout=10)
+
+    assert code == 0
+    assert got_term.exists()
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_stop_during_restart_exit_does_not_relaunch(tmp_path: Path) -> None:
+    """A child that asks for a restart while the stop is being forwarded is not
+    relaunched: the supervisor is on its way out."""
+    counter, ready, got_term = tmp_path / "launches", tmp_path / "ready", tmp_path / "got-term"
+    script = tmp_path / "child.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import pathlib, signal, sys, time
+            counter = pathlib.Path({str(counter)!r})
+            launches = int(counter.read_text()) if counter.exists() else 0
+            counter.write_text(str(launches + 1))
+            def _term(_signum, _frame):
+                pathlib.Path({str(got_term)!r}).write_text("term")
+                sys.exit(75)
+            signal.signal(signal.SIGTERM, _term)
+            pathlib.Path({str(ready)!r}).write_text("ready")
+            while True:
+                time.sleep(0.05)
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    def _stop_when_ready() -> None:
+        _await_file(ready)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    poller = threading.Thread(target=_stop_when_ready, daemon=True)
+    poller.start()
+    try:
+        code = supervise(child_argv=[sys.executable, str(script)])
+    finally:
+        poller.join(timeout=10)
+
+    assert code == 75
+    assert got_term.exists()
+    assert _launches(tmp_path) == 1

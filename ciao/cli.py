@@ -49,7 +49,7 @@ def _relaunch_argv() -> list[str]:
     return [sys.executable, "-m", "ciao.cli", *sys.argv[1:]]
 
 
-def _run_server() -> int:
+def _run_server(*, supervised: bool = False) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
@@ -63,9 +63,13 @@ def _run_server() -> int:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
         # foreground `ciao run` would just die and leave the site unreachable.
-        # Re-exec (rather than loop) so the relaunch picks up new code.
+        # Re-exec (rather than loop) so the relaunch picks up new code. Under
+        # `ciao supervise` the supervisor owns the relaunch instead and only
+        # needs the code back.
         print("Restart requested — relaunching Ciaobot…", file=sys.stderr)
         sys.stderr.flush()
+        if supervised:
+            return code
         # The exec inherits os.environ, and load_dotenv never overrides a key
         # that is already set, so without this a value edited in the workspace
         # .env would be shadowed by the stale copy the old process exported.
@@ -75,6 +79,15 @@ def _run_server() -> int:
         reset_exported_dotenv()
         os.execv(sys.executable, _relaunch_argv())
     return code
+
+
+def _supervise_command(args: argparse.Namespace) -> int:
+    from ciao.supervise import supervise
+
+    extra = list(args.child_args)
+    if extra[:1] == ["--"]:
+        extra = extra[1:]
+    return supervise(extra)
 
 
 def _copy_tree(src, dest: Path) -> None:
@@ -5499,7 +5512,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run the Ciaobot server.")
-    run_parser.set_defaults(func=lambda _args: _run_server())
+    run_parser.add_argument(
+        "--supervised",
+        action="store_true",
+        help="Exit with the restart code instead of re-execing; for `ciao supervise`.",
+    )
+    run_parser.set_defaults(func=lambda args: _run_server(supervised=args.supervised))
+
+    supervise_parser = subparsers.add_parser(
+        "supervise",
+        help="Run the server as a child process and relaunch it when it asks to restart.",
+    )
+    supervise_parser.add_argument(
+        "child_args", nargs=argparse.REMAINDER, help="Extra arguments passed to `ciao run`."
+    )
+    supervise_parser.set_defaults(func=_supervise_command)
 
     def add_service_parser(
         name: str,
