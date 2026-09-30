@@ -2760,18 +2760,14 @@ export const useProjectStore = defineStore('projects', () => {
           // Position of the last row the window has placed so far. Server rows
           // are placed in window order, each after the one before it, and a
           // new row goes at the END of the cursor's turn (just above the next
-          // user bubble) so the turn keeps its own rows and anything the
-          // client appended after them (a failed-send notice) stays below.
-          // Inserting at one fixed boundary instead put a queued turn's
-          // activity and answer above its own user bubble whenever the turn
-          // before it was still un-indexed at reconcile time.
+          // user bubble), so each turn keeps its own rows. Inserting at one
+          // fixed boundary instead put a queued turn's activity and answer
+          // above its own user bubble whenever the turn before it was still
+          // un-indexed at reconcile time.
+          //
+          // Every splice below lands at or after tailStart, so the held rows'
+          // positions in posByIndex never shift.
           let cursor = tailStart - 1
-          const reindex = () => {
-            posByIndex.clear()
-            merged.forEach((row, pos) => {
-              if (typeof row.i === 'number') posByIndex.set(row.i, pos)
-            })
-          }
           const nextUserAfter = (pos: number) => {
             let p = pos + 1
             while (p < merged.length && merged[p].role !== 'user') p++
@@ -2779,7 +2775,7 @@ export const useProjectStore = defineStore('projects', () => {
           }
           const turnStartOf = (pos: number) => {
             let p = pos
-            while (p > tailStart && merged[p]?.role !== 'user') p--
+            while (p > tailStart && merged[p].role !== 'user') p--
             return Math.max(p, tailStart)
           }
           for (const item of windowRows) {
@@ -2808,14 +2804,32 @@ export const useProjectStore = defineStore('projects', () => {
             // post-result reconcile) otherwise appended the server copy of
             // the whole turn — the reported "double message", on the user
             // bubble first and then on the Activity group + answer. A server
-            // user row pairs only with the next user bubble; any other row only
-            // with a copy inside the cursor's own turn. Identical texts pair
+            // user row pairs with a later live bubble, by the server-assigned
+            // turn_index first and then by text; any other row only with a
+            // copy inside the cursor's own turn. Identical texts pair
             // one-to-one, so a genuine repeat send keeps both copies countable.
+            // A new row always lands after every held row.
+            cursor = Math.max(cursor, tailStart - 1)
             const end = nextUserAfter(cursor)
             let match = -1
             if (item.role === 'user') {
-              const row = merged[end]
-              if (row && typeof row.i !== 'number' && sameRow(row, item)) match = end
+              // The next bubble is normally this row's live copy, but an
+              // undelivered one (a failed send kept in the transcript) can sit
+              // ahead of it. Skipped bubbles stay above, in their own turn.
+              let byText = -1
+              for (let p = end; p < merged.length; p++) {
+                const row = merged[p]
+                if (row.role !== 'user' || typeof row.i === 'number') continue
+                if (item.turn_index != null && row.turn_index === item.turn_index) {
+                  match = p
+                  break
+                }
+                // A bubble the server already numbered as another turn is not
+                // this row's copy, however alike the text.
+                const otherTurn = item.turn_index != null && row.turn_index != null
+                if (byText < 0 && !otherTurn && sameRow(row, item)) byText = p
+              }
+              if (match < 0) match = byText
             } else {
               for (let p = turnStartOf(cursor); p < end; p++) {
                 const row = merged[p]
@@ -2828,7 +2842,6 @@ export const useProjectStore = defineStore('projects', () => {
             if (match < 0) {
               merged.splice(end, 0, item)
               cursor = end
-              reindex()
               continue
             }
             // The live copy is the richer one for streamed turns (usage,
@@ -2848,7 +2861,6 @@ export const useProjectStore = defineStore('projects', () => {
               merged[match] = placed
               cursor = match
             }
-            reindex()
           }
           messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, windowRows)
         }

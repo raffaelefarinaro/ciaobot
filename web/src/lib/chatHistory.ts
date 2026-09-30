@@ -324,10 +324,10 @@ export function dropSupersededLiveTail(
     let end = start + 1
     while (end < merged.length && merged[end].role !== 'user') end++
     const turn = merged.slice(start, end)
-    const settledPos = turn.findIndex(
+    const settled = turn.some(
       row => typeof row.i === 'number' && settledIndices.has(row.i),
     )
-    if (settledPos < 0) {
+    if (!settled) {
       kept.push(...turn)
       start = end
       continue

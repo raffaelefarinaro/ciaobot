@@ -5498,6 +5498,27 @@ describe('envelope history window', () => {
       expect(rendered(chatId)).toEqual(['older', ...expected])
     })
 
+    test('an undelivered bubble ahead of the turn does not orphan its live copy', async () => {
+      // A failed send stays in the transcript as an un-indexed bubble. The
+      // next delivered turn must still pair with its own live bubble (by
+      // turn_index), or its live trace and answer render a second time.
+      const store = useProjectStore()
+      const chatId = 'c-queued-order-undelivered'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        { role: 'user', content: 'lost ask', timestamp: T },
+        ...liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it'),
+      ]
+      apiGet.mockImplementation(envelopeOf([
+        { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+        ...serverRows.slice(0, 4).map(r => ({ ...r, i: r.i + 1 })),
+      ]))
+
+      await store.loadMessages(chatId)
+
+      expect(rendered(chatId)).toEqual(['older', 'lost ask', ...expected.slice(0, 4)])
+    })
+
     test('a queued turn still streaming keeps its live trace below its bubble', async () => {
       const store = useProjectStore()
       const chatId = 'c-queued-order-streaming'
