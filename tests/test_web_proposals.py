@@ -3014,6 +3014,7 @@ def test_an_accepted_category_is_not_offered_again(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=entity_types.load_entity_types(
             config.agent_vault_root("personal")

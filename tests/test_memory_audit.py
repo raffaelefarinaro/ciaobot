@@ -811,6 +811,7 @@ def test_the_curation_stale_pass_agrees_with_the_audit_on_aliased_exempt_types(
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=load_entity_types(vault),
         workspace_dir=tmp_path,

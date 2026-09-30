@@ -308,7 +308,7 @@ def entry_replacement(proposal: NoteEditProposal) -> str:
     # load-bearing rather than cosmetic — a *replace* is matched against the exact
     # bytes it kept, and only a *delete* falls through to the shortened tail, where
     # the recovered slice is empty by construction either way.
-    tails = (before[end:], nr._after_entry_line(before, end))
+    tails = (before[end:], nr.after_entry_line(before, end))
     for tail in tails:
         if after.startswith(before[:start]) and after.endswith(tail):
             return after[start : len(after) - len(tail)]
@@ -334,18 +334,21 @@ def note_edit_id(
     different one and is a new question. The revision is in the basis because a
     check — and this proposal — describes exactly one revision.
 
-    ``entry_identity`` is in the basis for an entry operation and empty for a
-    whole-note one, and the empty case is byte-identical to the id this function
-    produced before entry operations existed. It has to be: two entries of one
-    note at one revision are two different questions, and an id shared by both
-    would let the second filing find the first's record, call it the same
-    question and leave a reviewer deciding about one bullet while the other
+    ``entry_identity`` is in the basis for an entry operation and contributes
+    **nothing at all** to a whole-note one — not even an empty field — so a
+    whole-note proposal's id is byte-identical to the id this function produced
+    before entry operations existed. It has to be: a proposal already pending in
+    a sidecar at upgrade is found by ``read_sidecar(new_id)``, and a changed
+    basis would miss it and write a second, orphan record for a question already
+    in the queue. The two entries of one note at one revision are two different
+    questions, so an id shared by both would let the second filing find the
+    first's record and leave a reviewer deciding about one bullet while the other
     silently goes unasked.
     """
-    raw = (
-        f"{workspace}\x00{relative_path}\x00{expected_revision}\x00{entry_identity}"
-    ).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()[:16]
+    basis = f"{workspace}\x00{relative_path}\x00{expected_revision}"
+    if entry_identity:
+        basis = f"{basis}\x00{entry_identity}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 
 

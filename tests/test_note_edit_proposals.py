@@ -31,6 +31,7 @@ install's notes, and no engine, service or scheduler is started.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -216,6 +217,42 @@ def test_filing_writes_one_bullet_and_one_sidecar(tmp_path: Path) -> None:
     assert stored.after == FOURTH
     assert stored.settled == ""
     assert stored.accepted is False
+
+
+def test_a_whole_note_id_is_the_one_this_module_always_produced() -> None:
+    """Entry operations must not move the ids of the proposals already filed.
+
+    The basis is ``workspace\\0path\\0revision`` and an entry operation appends a
+    fourth field — so a whole-note proposal has to contribute *nothing at all*,
+    not even a trailing separator, or its id changes. That is not cosmetic: an
+    install upgrading with a proposal still pending has it in the sidecar under
+    the old id, and ``read_sidecar(new_id)`` misses it, so ``file_note_edit``
+    finds nothing to dedupe against and writes a second, orphan record for a
+    question already in the review queue. Two rows, one question, and a queue
+    the owner reads as two.
+
+    So the whole-note id is pinned here to the old formula, computed the long way
+    round rather than through the function under test.
+    """
+    revision = mr.content_revision(PLAIN)
+
+    assert nep.note_edit_id("personal", NOTE, revision) == hashlib.sha256(
+        f"personal\0{NOTE}\0{revision}".encode("utf-8")
+    ).hexdigest()[:16]
+    # The explicit empty identity is the same call, and it must not append a
+    # field either — a caller that passes "" for "whole note" is the ordinary
+    # shape, not an edge case.
+    assert nep.note_edit_id("personal", NOTE, revision, "") == nep.note_edit_id(
+        "personal", NOTE, revision
+    )
+    # Two entries of one note at one revision are two questions, so an id shared
+    # by both would let the second filing find the first's record.
+    assert nep.note_edit_id("personal", NOTE, revision, "a" * 64) != nep.note_edit_id(
+        "personal", NOTE, revision, "b" * 64
+    )
+    assert nep.note_edit_id("personal", NOTE, revision, "a" * 64) != nep.note_edit_id(
+        "personal", NOTE, revision
+    )
 
 
 def test_refiling_the_same_revision_writes_nothing(tmp_path: Path) -> None:

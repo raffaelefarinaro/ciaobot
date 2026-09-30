@@ -890,7 +890,7 @@ def test_an_impossible_stamp_date_is_refused_rather_than_written(tmp_path: Path)
 def test_a_stamp_replaces_a_token_the_parser_could_not_believe(
     tmp_path: Path,
 ) -> None:
-    """An unusable stamp is replaced, not appended beside.
+    """An unusable *trailing* stamp is replaced, not appended beside.
 
     The failure this pins is the entry's own diagnostic firing on this tool's
     write: a `[verified: 2026-13-01]` the parser reports as impossible, and a
@@ -901,20 +901,21 @@ def test_a_stamp_replaces_a_token_the_parser_could_not_believe(
     say "a tool did the wrong thing here" — and changed the fact's fingerprint
     for a reason nobody asked about.
 
-    Every shape is covered: a trailing token of any spelling, and a token the
-    parser does not even read as trailing because words follow it. The result is
-    one token, empty diagnostics, and a line whose words are exactly the words it
-    had with the claim taken out of it.
+    Every *trailing* spelling of the token is covered — including the
+    `[verified : 2026-01-01]` one, where the colon is separated by a space,
+    which the parser reads as a claim and refuses. The result is one token, empty
+    diagnostics, and a line whose words are exactly the words it had with the
+    claim taken out of it.
+
+    A token the parser does not read as trailing because words follow it is a
+    different case, and
+    :func:`test_a_stamp_leaves_a_mid_line_token_and_the_verdict_alone` owns it:
+    those are prose, and the writer is not entitled to decide they are not.
     """
     for broken, words in (
         ("- a fact [verified: 2026-13-01]", "- a fact"),
         ("- a fact [verified 2026-01-01]", "- a fact"),
         ("- a fact [verified : 2026-01-01]", "- a fact"),
-        ("- a fact [verified: 2026-13-01] and more words", "- a fact and more words"),
-        (
-            "- a fact [verified: 2026-01-01] and [verified: 2025-01-01] words",
-            "- a fact and words",
-        ),
     ):
         stamped = ev.stamp_entry(broken, "2026-09-19")
         parsed = ne.parse_note_entries(
@@ -932,6 +933,49 @@ def test_a_stamp_replaces_a_token_the_parser_could_not_believe(
         assert ne.refresh_fingerprint(stamped) == ne.refresh_fingerprint(
             f"{words} [verified: 2024-01-01]"
         )
+
+
+def test_a_stamp_leaves_a_mid_line_token_and_the_verdict_alone() -> None:
+    """A `[verified: …]` in the middle of a sentence is prose, and stays prose.
+
+    ``- Config [verified: 2020 spec] changed in v3`` states a fact *about* a 2020
+    spec, and :mod:`ciao.note_entries` reads the stamp of that line as the
+    trailing token only — a mid-line token is not a claim, is left in the entry's
+    text, and is part of the words the fingerprint hashes. So an unattended
+    `still_valid`, which is only asked to move a date, must not delete it: doing
+    so rewrites the fact, changes its fingerprint and its ``entry_identity``
+    (which digests the fingerprint) with nothing to say so, and the check it
+    files under the *new* identity cannot be found under the old one again.
+
+    Two things are pinned, and the second is the one that matters at the width an
+    operator sees: :func:`ciao.entry_verification.stamp_entry` keeps the words,
+    and the *verdict* is ``needs_review`` with nothing written — because a line
+    carrying a second claim is ambiguous, and who is right about it is a reader's
+    call, not a nightly pass's.
+    """
+    line = "- Config [verified: 2020 spec] changed in v3 [verified: 2024-01-01]"
+
+    stamped = ev.stamp_entry(line, "2026-09-19")
+
+    assert stamped == (
+        "- Config [verified: 2020 spec] changed in v3 [verified: 2026-09-19]"
+    )
+    # The prose is untouched and the entry is still the same fact: a re-stamp
+    # that rewrote the fact could not be invisible, which is the whole promise.
+    assert ne.refresh_fingerprint(stamped) == ne.refresh_fingerprint(line)
+
+    note = f"---\ntype: person\nupdated: 2024-01-01\n---\n\n# Config\n\n{line}\n"
+    entry = _entry(note)
+    plan = ev.plan_entry_verification(
+        _request(entry, expected_revision=mr.content_revision(note)),
+        entry=entry,
+        today=TODAY,
+    )
+
+    assert plan.status == ev.NEEDS_REVIEW, plan.reason
+    assert plan.action == ev.PROPOSE, "nothing may be written without a reader"
+    assert plan.replacement == "", "and the text is the caller's to write"
+    assert "[verified: 2020 spec]" in plan.reason, plan.reason
 
 
 def test_a_release_gives_the_entry_its_question_back(tmp_path: Path) -> None:

@@ -433,18 +433,27 @@ def stamp_entry(entry_text: str, stamp_date: str) -> str:
     :data:`ciao.note_entries.STAMP_REASON_IMPOSSIBLE` and read back as a fact
     nobody could have verified on a day that never happened.
 
-    An entry whose stamp is unusable — malformed, a bare `2026-13-01`, or a
-    `[verified]` tag with a typo in it — is *not* reported and refused here. The
-    entry is rewritten with a good stamp and its diagnostics become empty, which
-    is the honest outcome: the bad token was not a claim, and the one this writes
-    is. **Every** stamp-shaped token goes, not only a well-formed trailing one: a
-    token the parser rejected, a near-miss spelling and a second claim earlier on
-    the line are all removed by :func:`ciao.note_entries.strip_stamp_tokens`, so
-    the line this returns carries exactly one token. Leaving the unusable one
-    behind was the failure here: a good stamp was appended beside a
-    `[verified: 2026-13-01]`, and the next parse of that entry reported
-    :data:`ciao.note_entries.DIAG_STAMP_DUPLICATE` — the diagnostic that exists to
-    say a tool did the wrong thing, produced by this tool's own write.
+    **Exactly one** token is replaced: the trailing one, in either spelling the
+    parser reads as a claim, cut by
+    :func:`ciao.note_entries.strip_trailing_stamp`. An entry whose stamp is
+    unusable — malformed, a bare `2026-13-01`, or a `[verified]` tag with a typo
+    in it — is *not* refused here: the entry is rewritten with a good stamp and
+    its stamp diagnostics become empty, which is the honest outcome, because the
+    bad token was the claim and the one this writes is. Leaving that token behind
+    was the failure: a good stamp was appended beside a `[verified: 2026-13-01]`
+    and the next parse reported :data:`ciao.note_entries.DIAG_STAMP_DUPLICATE` —
+    the diagnostic that exists to say a tool did the wrong thing, produced by
+    this tool's own write.
+
+    A second token **further left** on the line is a different matter, and it
+    stays. ``- Config [verified: 2020 spec] changed in v3`` is a fact about a
+    2020 spec, and this module's reading of a mid-line token
+    (:mod:`ciao.note_entries`) is that it is prose, not a claim — so cutting it
+    would rewrite the entry an unattended ``still_valid`` was only asked to
+    re-date, changing its fingerprint and its :func:`ciao.note_entries.entry_identity`
+    with nothing to say so. A caller that would rewrite such a line must not call
+    this: :func:`plan_entry_verification` answers ``needs_review`` instead, via
+    :func:`ciao.note_entries.foreign_stamp_token`.
     """
     day = date.fromisoformat(str(stamp_date).strip())
     opening, separator, rest = str(entry_text).partition("\n")
@@ -456,7 +465,7 @@ def stamp_entry(entry_text: str, stamp_date: str) -> str:
     # byte-identical and a repaired one lands on the fingerprint the entry always
     # had.
     return (
-        f"{ne.strip_stamp_tokens(body)} {VERIFIED_STAMP.format(date=day.isoformat())}"
+        f"{ne.strip_trailing_stamp(body)} {VERIFIED_STAMP.format(date=day.isoformat())}"
         f"{carriage}{separator}{rest}"
     )
 
@@ -663,6 +672,28 @@ def _plan_still_valid(
             today.isoformat(),
             _NO_ENTRY_STAMP,
         )
+    # A second stamp-shaped token earlier on the opening line is prose about a
+    # date as far as this module reads it, and the writer leaves it alone — so
+    # the re-stamp cannot be invisible here without rewriting the fact, which is
+    # the one thing an unattended `still_valid` must not do. A person decides
+    # which token is the claim, and until they have, nothing is written. The
+    # opening line alone, because that is the slice the parser reads the claim
+    # from and the slice `stamp_entry` rewrites.
+    foreign = ne.foreign_stamp_token(entry.text.partition("\n")[0])
+    if foreign:
+        return EntryVerificationPlan(
+            PROPOSE,
+            NEEDS_REVIEW,
+            STILL_VALID,
+            "",
+            today.isoformat(),
+            (
+                f"this entry carries {foreign} in the middle of its own text, so a "
+                "re-stamp would have to decide whether that token is part of the "
+                "fact; nobody should settle that without a reader, and nothing was "
+                "written"
+            ),
+        )
     return EntryVerificationPlan(
         AUTO_APPLY, APPLIED, STILL_VALID, stamp_entry(entry.text, today.isoformat()),
         today.isoformat(), ""
@@ -758,13 +789,17 @@ def _new_check(
     """The check one outcome leaves behind, before it is stored.
 
     The reason is the caller's when the recorded outcome is the one it asked for,
-    and the rule's own when the rule downgraded it — 726-B's rule, applied at the
-    same place, for the same reason.
+    and the rule's own when the rule declined it — 726-B's rule, applied at the
+    same place, for the same reason. A *downgrade* is one spelling of that: a
+    ``still_valid`` on an entry with no stamp, or one whose line carries a
+    second stamp-shaped token, keeps the outcome the caller asked for and is
+    still not what the caller got, so what the row has to say is why the rule
+    would not do it. The agent's own summary of its re-check would read as the
+    rule's answer to a question it never gave.
     """
     requested = str(request.outcome or "").strip()
-    reason = (
-        plan.reason if plan.outcome != requested else request.reason or plan.reason
-    )
+    declined = plan.outcome != requested or plan.status == NEEDS_REVIEW
+    reason = plan.reason if declined else request.reason or plan.reason
     return EntryCheck(
         identity=key,
         note_path=note_path,

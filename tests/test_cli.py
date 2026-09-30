@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import plistlib
 import sqlite3
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -2942,3 +2944,168 @@ def test_cli_skill_draft_add_says_when_there_is_nothing_to_report_upstream(
     out = capsys.readouterr().out
     assert "no packaged copy to report upstream" in out
     assert '"new_skill"' in out
+
+
+# ---- The workspace name the entry pass is planned under -------------------
+#
+# `entry_identity` digests the workspace name, and every operation that consumes
+# one resolves the vault through the workspace registry and mints it under the
+# name the registry knows. So a `curation-begin` that planned the entry pass
+# under the vault DIRECTORY's name would mint identities nothing resolves: every
+# managed call comes back `conflict`, no verdict is ever filed, and the worklist
+# key never settles. The name is therefore resolved once, by the same registry
+# read that resolved the vault, and the only case where the directory's own name
+# stands in for the registry's is an explicit `--vault-root`.
+
+
+def _registered_install(tmp_path: Path) -> tuple[Path, Path]:
+    """An install whose registry names workspace `work` inside `memory-vault/client-a`.
+
+    The layout that makes the difference visible: a shared vault whose directory
+    is `client-a` and whose registered name is `work`, so a name taken from the
+    directory is provably the wrong one.
+    """
+    root = tmp_path / "workspace"
+    vault = root / "memory-vault" / "client-a"
+    (vault / "Workspace").mkdir(parents=True)
+    (vault / "People").mkdir()
+    (root / ".runtime").mkdir(parents=True)
+    (root / ".runtime" / "workspaces.json").write_text(
+        json.dumps({"work": {"name": "work", "vault_root": str(vault)}}),
+        encoding="utf-8",
+    )
+    return root, vault
+
+
+def _curation_args(**overrides: object) -> argparse.Namespace:
+    """The `argparse.Namespace` a curation subcommand is dispatched with."""
+    args = argparse.Namespace(
+        workspace=None, vault_root=None, guide=None, max_items=None, max_seconds=None
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def _stale_fact_note(vault: Path) -> Path:
+    """One person note whose single bullet is stamped well past its horizon."""
+    from ciao import curation_run as cr
+
+    note = vault / "People" / "Ada.md"
+    note.write_text(
+        "---\ntype: person\nupdated: 2024-01-05\n---\n\n# Ada\n\n"
+        "- Ada runs the release train [verified: 2024-01-05]\n",
+        encoding="utf-8",
+    )
+    (vault / cr.CURATION_LOG_RELATIVE).write_text(
+        "---\nlast_full_pass: 2026-09-18\n---\n\n# Curation log\n", encoding="utf-8"
+    )
+    return note
+
+
+def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name the entry pass mints identities under is the registered one.
+
+    `client-a` is a directory, `work` is the workspace: nothing else in the
+    install knows `client-a`, and the operations the plan exists to hand work to
+    resolve the vault through the registry. The whole point is that the plan and
+    the operation name the same workspace, so the name travels out of the one
+    resolution that read the registry — it is not asked for again here, and it is
+    not inferred from the directory.
+    """
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(root / "memory-vault"))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    _workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args()
+    )
+
+    assert name == "work"
+    assert resolved == vault.resolve()
+    assert name != resolved.name, "the directory's name is the guess this replaces"
+    # And the plan it produces is keyed on identities minted under that name —
+    # the one a managed `entry verify` call can actually resolve.
+    payload, _worklist = cli._curation_plan(_curation_args())
+    entries = [
+        item for item in payload["items"] if item["pass"] == "stale_entry"
+    ]
+    assert len(entries) == 1, payload["items"]
+    from ciao import note_entries as ne
+
+    identity = ne.parse_note_entries(
+        (vault / "People" / "Ada.md").read_text(encoding="utf-8"),
+        note_path="People/Ada.md",
+        workspace="work",
+    ).entries[0].identity
+    assert identity in entries[0]["reason"], entries[0]["reason"]
+
+
+def test_an_explicit_vault_root_is_planned_under_the_directory_it_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--vault-root` is the one case where the directory's own name is the name.
+
+    There is no registry to ask: the operator pointed at a directory in person,
+    with no workspace named anywhere. So the name is taken from the directory,
+    explicitly, rather than as a silent guess every caller inherits — and the
+    active workspace is not consulted, because an explicit argument outranks the
+    environment.
+    """
+    root, vault = _registered_install(tmp_path)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    _workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args(vault_root=str(vault))
+    )
+
+    assert (resolved, name) == (vault.resolve(), "client-a")
+
+
+def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No name to resolve means the pass is skipped *and reported*, not guessed.
+
+    Planning the entry pass under the directory's name is the failure this
+    replaces: every identity it mints names no entry, every managed call answers
+    `conflict`, and the worklist reports a backlog it can never drain. Skipping
+    it *silently* is the other half of the same problem, because a skipped pass
+    must never read as a pass that found nothing to do — so the worklist says
+    which pass was not planned and why, and the note it would otherwise have
+    planned is right there in the vault.
+    """
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "")
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(vault))
+
+    _workspace, _vault, _guide, _budget, _registry, name = cli._curation_context(
+        _curation_args()
+    )
+
+    assert name is None, "there is no registry to ask and no --vault-root to read"
+    payload, _worklist = cli._curation_plan(_curation_args())
+    assert [i for i in payload["items"] if i["pass"] == "stale_entry"] == []
+    assert any("stale-entry pass was not planned" in n for n in payload["notes"]), (
+        payload["notes"]
+    )
+    # And the fact it did not plan is one the pass *would* have found: the note is
+    # past its horizon and its bullet carries its own 2024 stamp.
+    from ciao import note_entries as ne
+
+    entry = ne.parse_note_entries(
+        (vault / "People" / "Ada.md").read_text(encoding="utf-8"),
+        note_path="People/Ada.md",
+        workspace="client-a",
+    ).entries[0]
+    assert entry.verified == date(2024, 1, 5)

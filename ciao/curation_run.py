@@ -775,6 +775,7 @@ def _due_entries(
         except (OSError, UnicodeError):
             logger.debug("curation: stale note %s is not readable UTF-8", note.relative)
             continue
+        revision = mr.content_revision(text)
         document = ne.parse_note_entries(
             text, note_path=note.relative, workspace=workspace, today=today
         )
@@ -792,7 +793,7 @@ def _due_entries(
                     entry=entry,
                     age=age,
                     horizon=note.threshold_days,
-                    revision=mr.content_revision(text),
+                    revision=revision,
                 )
             )
     due.sort(key=lambda item: (-item.age, item.relative, item.entry.start))
@@ -834,14 +835,20 @@ def _stale_entry_items(
     filter each left out are reported back rather than passing for a full night's
     work.
 
-    The reason carries the three values the operation needs and cannot rederive
-    without reimplementing a hash and guessing wrong, all of them **whole**: the
-    note's :func:`ciao.memory_receipts.content_revision` (the exact
+    The reason carries every value the operation needs and cannot rederive
+    without reimplementing a hash and guessing wrong, all of them **whole**:
+    the entry's :func:`ciao.note_entries.entry_identity` itself (the ``entry``
+    the schedule prompt and the ``ciao-memory`` skill tell the agent to add to
+    the payload file, and which :func:`ciao.entry_verification` refuses
+    anything but a full 64-hex digest of — so printing the twelve characters the
+    label shows would plan work the operation cannot be handed), the note's
+    :func:`ciao.memory_receipts.content_revision` (the exact
     ``expected_revision`` the managed operation refuses to proceed without), the
-    entry's fingerprint (``entry_fingerprint``, compared in full — a truncated one
-    is not a prefix match but a different string, so it comes back ``conflict``
-    for every entry, for ever), and the span the write lands at. Reads bytes only
-    to parse and state them; reaches no verdict and writes nothing.
+    entry's fingerprint (``entry_fingerprint``, compared in full — a truncated
+    one is not a prefix match but a different string, so it comes back
+    ``conflict`` for every entry, for ever), and the span the write lands at.
+    Reads bytes only to parse and state them; reaches no verdict and writes
+    nothing.
     """
     from ciao import entry_verification as ev
 
@@ -870,7 +877,8 @@ def _stale_entry_items(
                 reason=(
                     f"entry unverified for {candidate.age}d against a "
                     f"{candidate.horizon}d horizon; {candidate.relative} at "
-                    f"revision {candidate.revision}, entry fingerprint "
+                    f"revision {candidate.revision}, entry identity "
+                    f"{entry.identity}, entry fingerprint "
                     f"{entry.fingerprint} at characters "
                     f"{entry.start}-{entry.end}"
                 ),
@@ -1195,7 +1203,7 @@ def build_worklist(
     done_keys: frozenset[str] | set[str] | None = None,
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
-    workspace: str = "",
+    workspace: str | None,
 ) -> Worklist:
     """Compute tonight's work from files alone.
 
@@ -1206,14 +1214,20 @@ def build_worklist(
     through the config (the CLI does) so a category the owner accepted cannot be
     re-proposed as unlisted.
 
-    ``workspace`` is the registered workspace's name, and the entry pass cannot
-    plan anything without it: :func:`ciao.note_entries.entry_identity` digests
-    it, so an identity minted under the wrong name names no entry anywhere and
-    every worklist key it produces is unresolvable. It defaults to the vault
-    directory's own name, which is the name on the layout where a workspace's
-    vault is a directory of its own — a caller on a layout where the two differ
-    (a shared vault, an explicitly configured root) must pass the registry's name
-    or the pass is refused rather than guessing; see
+    ``workspace`` is the registered workspace's name, and it is required because
+    the entry pass cannot plan anything without it:
+    :func:`ciao.note_entries.entry_identity` digests it, so an identity minted
+    under the wrong name names no entry anywhere, every worklist key it produces
+    is unresolvable, and every managed call comes back ``conflict`` for work
+    this function planned itself. The vault directory's own name is that name on
+    the layout where a workspace's vault is a directory of its own and is not
+    otherwise — an install whose ``memory-vault/client-a`` holds workspace
+    ``work`` would mint identities nothing can resolve — so nothing here infers
+    it. A caller that has no registered name to pass says so with ``None``, and
+    the entry pass is then skipped *and reported* in the notes, the same way the
+    cleanup pass reports the registry it was not given: a skipped pass must never
+    read as a pass that found nothing to do. The CLI resolves the name once, from
+    the same registry read that resolved the vault; see
     :func:`_stale_entry_items`.
 
     ``config`` is the workspace registry, and it is optional only because two
@@ -1240,7 +1254,6 @@ def build_worklist(
     vault_root = Path(vault_root)
     guide_path = Path(guide_path)
     workspace_dir = Path(workspace_dir) if workspace_dir is not None else guide_path.parent
-    workspace = workspace or vault_root.name
     today = today or datetime.now(UTC).date()
     done = frozenset(done_keys or ())
     memory_limit = memory_char_limit if memory_char_limit is not None else DEFAULT_MEMORY_CHAR_LIMIT
@@ -1287,12 +1300,24 @@ def build_worklist(
     collected.extend(stale_items)
     if stale_note:
         notes.append(stale_note)
-    entry_items, stale_entry = _stale_entry_items(
-        vault_root=vault_root, workspace=workspace, scanned=scanned, today=today
-    )
-    collected.extend(entry_items)
-    if stale_entry:
-        notes.append(stale_entry)
+    if workspace is None:
+        # The one pass with nothing to fall back on: an entry identity digests
+        # the workspace name, so a name invented here would mint work nothing
+        # can act on. Skipped and said out loud, like the registry-less cleanup
+        # pass below.
+        notes.append(
+            "the stale-entry pass was not planned: no registered workspace name "
+            "was resolved for this vault, and an entry identity digests that "
+            "name, so a pass planned under a guessed one would mint work no "
+            "operation could be handed"
+        )
+    else:
+        entry_items, stale_entry = _stale_entry_items(
+            vault_root=vault_root, workspace=workspace, scanned=scanned, today=today
+        )
+        collected.extend(entry_items)
+        if stale_entry:
+            notes.append(stale_entry)
     collected.extend(_learning_items(vault_root, today=today))
     if config is None:
         notes.append(

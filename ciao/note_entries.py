@@ -570,49 +570,65 @@ def _token_span(body: str, match: "re.Match[str]") -> tuple[int, int]:
     return start, match.end()
 
 
-def strip_stamp_tokens(line: str) -> str:
-    """This line with every verification-stamp token removed, and nothing else.
+def _claim_stamp_span(line: str) -> tuple[int, int] | None:
+    """The span of the stamp token the trailing-stamp reading reads, or ``None``.
 
-    The writer's counterpart to :func:`_strict_stamp_span`, and deliberately
-    wider than it. That function answers "is this a claim?", which is a reading
-    question: a well-formed *trailing* stamp is the entry's metadata and a
-    ``[verified: …]`` token in the middle of a sentence is prose about a date,
-    so the fingerprint removes one and keeps the other. A writer is not asking
-    which token is the claim — it is replacing the claim, and anything else on
-    the line that still reads as one is what :data:`DIAG_STAMP_DUPLICATE`
-    reports, what changes the entry's fingerprint for a reason nobody asked
-    about, and what leaves a line carrying two claims after a re-stamp.
-
-    So every token the three patterns recognise is cut out, with the whitespace
-    run in front of it: the trailing stamp (strict or near-miss spelling) and
-    any ``[verified: …]`` token the line also carries further left. What is left
-    is the entry's own words, which is what the fingerprint was computed over in
-    the first place — so a re-stamp of a stamped entry and a stamp of an
-    unstamped one differ only in the date.
+    The strict pattern first, so a well-formed stamp is never reported as a
+    typo, and the near-miss pattern only where the strict one misses — which is
+    exactly the order :func:`_scan_stamp` reads a line in. Both are *trailing*:
+    a stamp-shaped token in the middle of a sentence is prose about a date, is
+    not this entry's claim, and is not this function's to remove.
     """
     body = _stamp_line(line)
-    spans: list[tuple[int, int]] = []
-    for pattern in (_VERIFIED_STAMP_RE, _VERIFIED_LOOSE_RE, _VERIFIED_ANY_RE):
-        for match in pattern.finditer(body):
-            start, end = _token_span(body, match)
-            overlaps = any(
-                start < other_end and other_start < end
-                for other_start, other_end in spans
-            )
-            if overlaps:
-                # The strict pattern and the any-token pattern both match a
-                # trailing stamp; cutting it twice would eat the words between.
-                continue
-            spans.append((start, end))
-    if not spans:
+    match = _VERIFIED_STAMP_RE.search(body) or _VERIFIED_LOOSE_RE.search(body)
+    if match is None:
+        return None
+    return _token_span(body, match)
+
+
+def strip_trailing_stamp(line: str) -> str:
+    """This line without the verification stamp the parser reads as its claim.
+
+    The writer's counterpart to :func:`_strict_stamp_span`, and exactly as wide:
+    the trailing token, in either spelling the parser accepts as a claim (see
+    :func:`_claim_stamp_span`), together with the whitespace run in front of it.
+    A near-miss token is included because the parser does read it as the
+    entry's claim — a claim it refuses to believe — and leaving it behind would
+    leave two tokens on the line after a repair.
+
+    **One** token, and never a second: a ``[verified: …]`` further left on the
+    line is part of the entry's own words, exactly as this module's reading
+    treats it. ``- Config [verified: 2020 spec] changed in v3`` describes a fact
+    *about* a 2020 spec, and cutting the words out of it rewrites the fact —
+    changing its fingerprint and its :func:`entry_identity` under an unattended
+    re-stamp that was only asked to move a date. A caller that finds one asks
+    :func:`foreign_stamp_token` before writing, rather than acting on a line it
+    cannot read as a single claim.
+    """
+    body = _stamp_line(line)
+    span = _claim_stamp_span(body)
+    if span is None:
         return body
-    kept: list[str] = []
-    cursor = 0
-    for start, end in sorted(spans):
-        kept.append(body[cursor:start])
-        cursor = end
-    kept.append(body[cursor:])
-    return "".join(kept)
+    return body[: span[0]] + body[span[1] :]
+
+
+def foreign_stamp_token(line: str) -> str:
+    """A stamp-shaped token on this line the trailing claim does not account for.
+
+    Empty when the line carries at most the one stamp the parser reads — the
+    answer for a clean line and for a line whose only token is its own trailing
+    stamp, in either spelling. Non-empty means a re-stamp would leave the line
+    carrying a claim the reader is told is not there: the token this returns is
+    the one :func:`strip_trailing_stamp` deliberately keeps.
+    """
+    body = _stamp_line(line)
+    found = _VERIFIED_ANY_RE.search(body)
+    if found is None:
+        return ""
+    span = _claim_stamp_span(body)
+    if span is None or not (span[0] <= found.start() and found.end() <= span[1]):
+        return found.group(0)
+    return ""
 
 
 def _fingerprint(text: str, span: tuple[int, int] | None = None) -> str:

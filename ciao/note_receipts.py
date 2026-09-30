@@ -653,7 +653,7 @@ def compose_entry_edit(
             "for, so nothing was composed"
         )
     if delete:
-        return text[: entry.start] + _after_entry_line(text, entry.end), ""
+        return text[: entry.start] + after_entry_line(text, entry.end), ""
     if replacement is None:
         return "", (
             "an entry edit needs the entry's exact replacement text, or delete=True "
@@ -702,7 +702,7 @@ def compose_entry_edit(
     return text[: entry.start] + str(replacement) + text[entry.end :], ""
 
 
-def _after_entry_line(text: str, end: int) -> str:
+def after_entry_line(text: str, end: int) -> str:
     """``text`` from *end* onwards, with the list item's own line ending removed.
 
     A list item is delimited by its line, so a delete has to take the terminator
@@ -809,11 +809,13 @@ def apply_entry_edit(
         raise mr.MemoryReceiptError(
             f"the entry edit was refused and nothing was written: {refusal}"
         )
-    # Outside the lock, which this thread still holds (it is re-entrant) but which
-    # `commit_note_change` re-takes around the rename and re-checks the revision
-    # against: the `after_text` above was composed from exactly the bytes whose
-    # revision is `expected`, so the two images in the receipt describe one
-    # operation even though the write is a second, journaled step.
+    # Outside the lock, which the `with` block above released: the composition is
+    # pure text, and holding the lock across a journaled write would be a second
+    # lock order to reason about for no gain. What makes this safe is the revision
+    # re-check `commit_note_change` does under its own lock — the `after_text`
+    # above was composed from exactly the bytes whose revision is `expected`, so
+    # either that check passes and the two images in the receipt describe one
+    # operation, or it refuses with nothing written.
     return commit_note_change(
         vault_root=root,
         relative_path=stored_path,
