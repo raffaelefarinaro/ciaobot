@@ -3902,6 +3902,74 @@ def test_an_entry_identity_the_note_no_longer_holds_is_a_conflict(
     assert entry.identity != "c" * 64
 
 
+def test_accepting_an_entry_edit_files_the_check_for_the_text_it_left(
+    tmp_path: Path,
+) -> None:
+    """The accept records the same post-check the unattended path does.
+
+    An entry identity digests the entry's own fingerprint, so a `replace_entry`
+    mints a new one: the row pinned to this proposal describes text the note no
+    longer holds, and the re-worded fact that a person just decided on has no
+    verdict at all. So the check is filed under the identity the *written* note
+    gives the entry, and the row for the entry as it was goes in the same locked
+    write — one row per fact, not one per version of it.
+    """
+    from ciao import entry_verification as ev
+    from ciao import note_entries as ne
+
+    config, _proposal, entry = _entry_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "note_edit")
+    replacement = "- The office is on Via Verdi 12, fourth floor"
+
+    result = client.post(f"/api/proposals/{row['id']}/accept").json()["result"]
+
+    assert result["promoted"] is True
+    written = ne.parse_note_entries(
+        (vault / _ENTRY_NOTE).read_text(encoding="utf-8"),
+        note_path=_ENTRY_NOTE,
+        workspace="personal",
+    ).entries[0]
+    assert written.text == replacement
+    assert written.identity != entry.identity
+    checks = ev.read_entry_checks(vault)
+    assert set(checks) == {written.identity}
+    assert checks[written.identity].content_fingerprint == written.fingerprint
+    assert checks[written.identity].proposal_id == "", "the decision is settled"
+    assert checks[written.identity].receipt_id
+    assert not ev.should_check_entry(
+        vault, written.identity, written.fingerprint, today=date.today()
+    )
+
+
+def test_retiring_an_entry_leaves_no_check_for_a_fact_that_is_gone(
+    tmp_path: Path,
+) -> None:
+    """A retired bullet has no identity left to key a check on, and must not keep one.
+
+    The entry is out of the note, so the row pinned to the proposal describes a
+    fact that is not in the vault: it suppresses nothing (no identity resolves to
+    it) and it is litter that grows one row per retirement. Dropping it is the
+    honest end state, and it is the same write the replace path uses.
+    """
+    from ciao import entry_verification as ev
+
+    config, _proposal, entry = _entry_edit_vault(
+        tmp_path, operation="retire_entry", outcome="retire"
+    )
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _accept_kind_row(client, "note_edit")
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+    assert "third floor" not in (vault / _ENTRY_NOTE).read_text(encoding="utf-8")
+    assert entry.identity not in ev.read_entry_checks(vault), (
+        "a check for a bullet the vault no longer holds suppresses nothing"
+    )
+
+
 def test_a_settled_entry_row_cannot_be_accepted_again(tmp_path: Path) -> None:
     """The one state where a row outlived its own decision, at this width too.
 

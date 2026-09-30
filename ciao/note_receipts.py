@@ -613,14 +613,28 @@ def compose_entry_edit(
     A delete takes the entry's terminating newline with it. A list item's line is
     what delimits it; leaving the newline behind would turn every removed bullet
     into a blank line, and a note that has been emptied of facts would read as
-    full of gaps.
+    full of gaps. Both newline spellings are taken whole, so a CRLF note loses its
+    ``\\r\\n`` pair rather than a lone ``\\n`` and keeps a blank line where the
+    bullet was.
 
-    A replacement must be *one* list item and must begin with it. A bullet
+    Deleting a *parent* bullet does not take its children. The parser is flat — a
+    nested bullet is an entry of its own (:func:`ciao.note_entries.parse_note_entries`
+    reports one entry per line, indentation and all) — so removing the parent leaves
+    its children in place as re-indented orphans rather than as a subtree the
+    deletion could have removed with it. That is the honest reading of "delete this
+    list item", and a caller who means the whole subtree retires the children first.
+
+    A replacement must be *one* list item and must be nothing else. A bullet
     carrying several assertions is one entry by
     :mod:`ciao.note_entries`'s contract, so an edit that splices prose in where a
     bullet was, or several bullets in where one was, is not a change to one fact
     and is refused rather than written. The check goes through the same parser the
-    entry came from, so the two cannot disagree about what a list item is.
+    entry came from, so the two cannot disagree about what a list item is, and it
+    requires that parsed item to cover the *whole* replacement: a trailing newline
+    (which splices a blank line in), a paragraph, or a heading after the bullet is
+    text the caller did not ask to write. The item's own indentation must match the
+    entry's, because a splice that re-indents a bullet silently re-parents it under
+    the bullet above it.
 
     A re-stamp is not a separate case here: it is a replacement whose
     :func:`ciao.note_entries.refresh_fingerprint` is unchanged, which is exactly
@@ -639,10 +653,7 @@ def compose_entry_edit(
             "for, so nothing was composed"
         )
     if delete:
-        end = entry.end
-        if text[end : end + 1] == "\n":
-            end += 1
-        return text[: entry.start] + text[end:], ""
+        return text[: entry.start] + _after_entry_line(text, entry.end), ""
     if replacement is None:
         return "", (
             "an entry edit needs the entry's exact replacement text, or delete=True "
@@ -671,7 +682,44 @@ def compose_entry_edit(
             f"the replacement text holds {len(document.entries)} list items rather "
             "than one, so it is not an edit to a single fact; nothing was composed"
         )
+    only = document.entries[0]
+    if only.end != len(replacement) or document.uncovered:
+        # The item parsed, and something beside it did not. A trailing newline
+        # splices a blank line into the note; a paragraph or a heading splices
+        # content the caller never named. Either way the replacement is not one
+        # list item, it is one list item *and* something else.
+        return "", (
+            f"the replacement text holds {len(replacement) - only.end} character(s) "
+            "beside its one list item — a trailing newline, a paragraph or a heading "
+            "is not part of the entry being replaced; nothing was composed"
+        )
+    if only.indent != entry.indent:
+        return "", (
+            f"the replacement is indented {only.indent} columns and the entry it "
+            f"replaces is indented {entry.indent}, so the splice would re-parent "
+            "the bullet under the one above it; nothing was composed"
+        )
     return text[: entry.start] + str(replacement) + text[entry.end :], ""
+
+
+def _after_entry_line(text: str, end: int) -> str:
+    """``text`` from *end* onwards, with the list item's own line ending removed.
+
+    A list item is delimited by its line, so a delete has to take the terminator
+    with it — both bytes of a CRLF pair, not the ``\\n`` alone. A note's last item
+    may have no terminator at all, and then there is nothing to consume and the
+    tail is returned unchanged.
+
+    Public because :func:`ciao.note_edit_proposals.entry_replacement` inverts the
+    same splice: it has to know which bytes the delete consumed to recognise the
+    after image this function produced, or the two disagree about a first-line
+    bullet in a note with no frontmatter.
+    """
+    if text[end : end + 2] == "\r\n":
+        return text[end + 2 :]
+    if text[end : end + 1] == "\n":
+        return text[end + 1 :]
+    return text[end:]
 
 
 def apply_entry_edit(

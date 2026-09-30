@@ -870,6 +870,18 @@ def update_check_state(
     is the opposite: it keeps the rest and skips the row, because a reader drops
     one row at a time while a writer rewrites the whole file.
 
+    Both maps go through here, so neither can drop the other's rows. That is worth
+    restating as the limitation it leaves, because a writer that predates the
+    ``entries`` map is the one shape that cannot be defended from inside this
+    module: a version of ``note_verification`` that rewrote the file from its
+    ``notes`` map alone would drop every entry check in the vault, silently and
+    irrecoverably, the first time somebody ran it. The file says ``schema: 1``
+    for both maps precisely so an older reader keeps reading the note half, and
+    the price of that is this one: a version old enough to have written the file
+    is old enough to lose the entry half. An accepted downgrade limitation, not
+    an oversight — but it is a real loss and the fix would be the schema bump the
+    other way round, which costs every note's cooldown in every vault to buy it.
+
     Raises :class:`NoteCheckRefused` for state this version cannot read, having
     written nothing, so a foreign schema is left exactly as it is instead of being
     replaced by a file that describes none of it. A callback that raises has

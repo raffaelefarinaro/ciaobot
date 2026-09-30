@@ -1986,20 +1986,27 @@ def test_an_entry_is_work_keyed_by_its_identity_not_its_line(
     ]
     assert items[0].weekly is False, "a fact goes stale on a clock of its own"
     assert "Sofia" in items[0].label
-    # The reason carries the fingerprint and the span, because those are the two
-    # values a caller cannot rederive without reimplementing a hash and guessing
-    # wrong — the accept would then come back `conflict` for every entry forever.
+    # The reason carries the note's revision, the fingerprint and the span,
+    # because those are the values a caller cannot rederive without
+    # reimplementing a hash and guessing wrong — the operation would then come
+    # back `conflict` for every entry, for ever. All three WHOLE: a truncated
+    # fingerprint is not a prefix match but a different string, and the expected
+    # revision is compared exactly.
+    from ciao import memory_receipts as mr
     from ciao import note_entries as ne
 
+    note_text = (vault / "People/Sofia.md").read_text(encoding="utf-8")
     entry = ne.parse_note_entries(
-        (vault / "People/Sofia.md").read_text(encoding="utf-8"),
+        note_text,
         note_path="People/Sofia.md",
         workspace=vault.name,
     ).entries[0]
     age = (TODAY_ENTRIES - date(2024, 1, 5)).days
     assert items[0].reason == (
         f"entry unverified for {age}d against a 90d horizon; "
-        f"fingerprint {entry.fingerprint[:12]} at characters {entry.start}-{entry.end}"
+        f"People/Sofia.md at revision {mr.content_revision(note_text)}, "
+        f"entry fingerprint {entry.fingerprint} at characters "
+        f"{entry.start}-{entry.end}"
     )
 
     # The note's own date says the note is current, so the note pass finds
@@ -2259,5 +2266,187 @@ def test_an_entry_the_pass_cannot_read_is_not_planned(tmp_path: Path) -> None:
     from ciao import curation_run
 
     assert curation_run._stale_entry_items(
-        vault_root=tmp_path / "not-a-vault", scanned=[], today=TODAY_ENTRIES
+        vault_root=tmp_path / "not-a-vault",
+        workspace="personal",
+        scanned=[],
+        today=TODAY_ENTRIES,
     ) == ([], "")
+
+
+def test_the_entry_items_reason_verifies_the_entry_it_planned(tmp_path: Path) -> None:
+    """The plan's reason has to be the payload the operation needs, whole.
+
+    This is the difference between a nightly pass that verifies facts and one
+    that plans work nobody can act on. The skills tell the agent to copy the
+    reason's revision and fingerprint into the payload file, and
+    :func:`ciao.entry_verification.verify_entry` compares both *exactly* — a
+    64-hex fingerprint compared as a string is not a prefix match but a different
+    value, and a missing `expected_revision` is a refusal. So the test parses the
+    reason the pass printed and hands it to the real service, which is the only
+    way to know the plan and the operation agree.
+    """
+    import re
+
+    from ciao import entry_verification as ev
+    from ciao import note_verification as nv
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        facts=(("Speaks Italian and Greek", "2024-01-05"),),
+    )
+    items = _entry_items(vault, guide)
+    reason = items[0].reason
+
+    parsed = re.search(
+        r"(?P<note>\S+) at revision (?P<revision>[0-9a-f]{64}), entry fingerprint "
+        r"(?P<fingerprint>[0-9a-f]{64}) at characters (?P<start>\d+)-(?P<end>\d+)",
+        reason,
+    )
+    assert parsed is not None, f"the reason does not carry a usable payload: {reason!r}"
+
+    result = ev.verify_entry(
+        ev.EntryVerificationRequest(
+            workspace=vault.name,
+            relative_path=parsed["note"],
+            identity=_identity_of(vault, parsed["note"], int(parsed["start"])),
+            entry_fingerprint=parsed["fingerprint"],
+            expected_revision=parsed["revision"],
+            # An `unverified` verdict: this test is about the plan handing the
+            # operation a request it can act on, not about a verdict's own rule.
+            outcome=ev.UNVERIFIED,
+            coverage=nv.COVERAGE_PARTIAL,
+            reason="planned by the stale-entry pass",
+        ),
+        vault_root=vault,
+        today=TODAY_ENTRIES,
+    )
+
+    assert result.status == ev.UNVERIFIED, result.message
+    # The span the reason printed is where the entry actually is, so a caller who
+    # uses it to read the note reads the fact and not its neighbour.
+    assert int(parsed["end"]) - int(parsed["start"]) == len(
+        _entry_text_at(vault, parsed["note"], int(parsed["start"]))
+    )
+
+
+def _identity_of(vault: Path, relative: str, start: int) -> str:
+    """The identity of the entry at *start* in *relative*, as an operation is given it."""
+    from ciao import note_entries as ne
+
+    document = ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace=vault.name,
+    )
+    return next(
+        entry.identity for entry in document.entries if entry.start == start
+    )
+
+
+def _entry_text_at(vault: Path, relative: str, start: int) -> str:
+    """The entry text at *start* in *relative*."""
+    from ciao import note_entries as ne
+
+    document = ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace=vault.name,
+    )
+    return next(entry.text for entry in document.entries if entry.start == start)
+
+
+def test_the_entry_pass_mints_identities_for_the_registered_workspace(
+    tmp_path: Path,
+) -> None:
+    """A vault directory's name is not the workspace's name on every layout.
+
+    :func:`ciao.note_entries.entry_identity` digests the workspace, and every
+    operation that resolves an identity — the managed verifier, the proposal's
+    accept — asks for it under the name the *registry* knows the workspace by.
+    An install whose ``memory-vault/client-a`` holds workspace ``work`` would
+    otherwise have the pass mint identities nothing can resolve: every entry
+    returns CONFLICT, no verdict is ever filed, and the worklist key never
+    settles. So the name is passed in, and the key the pass plans is the key the
+    operation answers to.
+    """
+    from ciao import note_entries as ne
+
+    vault = tmp_path / "memory-vault" / "client-a"
+    (vault / "Workspace").mkdir(parents=True)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        facts=(("Speaks Italian and Greek", "2024-01-05"),),
+    )
+    relative = "People/Sofia.md"
+
+    items = _entry_items(vault, guide, workspace="work")
+    document = ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace="work",
+    )
+    wrong = ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace=vault.name,
+    )
+    entry = document.entries[0]
+
+    assert vault.name == "client-a"
+    assert [item.keys for item in items] == [
+        (cr.item_key(cr.PASS_STALE_ENTRY, entry.identity),)
+    ]
+    assert "entry client-a" not in items[0].label, (
+        "the pass keyed the work on the directory's name, which resolves to nothing"
+    )
+    assert wrong.entries[0].identity != entry.identity
+    assert wrong.entries[0].identity not in {key for item in items for key in item.keys}
+
+
+def test_the_entry_pass_reads_the_check_state_once(tmp_path: Path) -> None:
+    """One read of the sidecar per plan, not one per due entry.
+
+    :func:`ciao.entry_verification.read_entry_checks` re-reads and re-parses the
+    whole document on every call, and the entry pass asks about *every* due entry
+    in the vault on every ``curation-begin`` — so the per-entry spelling is
+    O(entries × check-state size) for no reason, and it is the only caller that
+    does it. The batch form is the same predicate over a map read once, so this
+    pins the *count* rather than the outcome: a plan over many due entries must
+    not read the file once per entry.
+    """
+    from ciao import entry_verification as ev
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for index in range(cr.STALE_ENTRY_MAX_ITEMS + 3):
+        _entry_note(
+            vault,
+            f"People/Note{index:02d}.md",
+            updated="2026-09-18",
+            facts=((f"Lives at number {index}", "2024-01-05"),),
+        )
+    assert len(_entry_items(vault, guide)) == cr.STALE_ENTRY_MAX_ITEMS
+
+    reads: list[Path] = []
+    original = ev.read_entry_checks
+
+    def counted(root: Path | str) -> dict[str, ev.EntryCheck]:
+        reads.append(Path(root) / cr.CURATION_LOG_RELATIVE)
+        return original(root)
+
+    monkey = ev.read_entry_checks
+    ev.read_entry_checks = counted  # type: ignore[assignment]
+    try:
+        _entry_items(vault, guide)
+    finally:
+        ev.read_entry_checks = monkey  # type: ignore[assignment]
+
+    assert len(reads) == 1, f"the sidecar was read {len(reads)} times for one plan"

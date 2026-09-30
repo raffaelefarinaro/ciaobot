@@ -2251,6 +2251,7 @@ def _accept_note_edit_entry(
     itself is never trashed by an entry operation, and this module reaches no
     trash primitive on that path at all.
     """
+    from ciao import entry_verification as ev
     from ciao import memory_receipts as mr
     from ciao import note_edit_proposals as nep
     from ciao import note_receipts as nr
@@ -2295,6 +2296,30 @@ def _accept_note_edit_entry(
     except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
         return AcceptOutcome(ok=False, destination=destination, error=str(exc))
     receipt_id = str(receipt.get("id", ""))
+    # The same post-check the unattended path records, keyed by the identity of
+    # the text this accept left. An entry identity digests the entry's own
+    # fingerprint, so a `replace_entry` mints a new one and the row pinned to this
+    # proposal now describes text the note no longer holds; the check for the new
+    # text is what stops the re-worded fact being asked about again the moment its
+    # own horizon runs out. A `retire_entry` leaves no new text, so its old row is
+    # dropped and there is nothing to re-file.
+    _filed, filing_note = ev.record_applied_entry_check(
+        vault,
+        note_path=proposal.relative_path,
+        workspace=workspace,
+        previous_identity=proposal.entry_identity,
+        start=proposal.entry_span[0],
+        replacement="" if proposal.operation == nep.RETIRE_ENTRY else replacement,
+        outcome=proposal.outcome,
+        reason=proposal.reason,
+        evidence=proposal.evidence,
+        coverage=proposal.coverage,
+        receipt_id=receipt_id,
+    )
+    if filing_note:
+        logger.warning(
+            "note edit %s: the entry check was not filed: %s", proposal.id, filing_note
+        )
     refusal = _settle_note_edit(
         config, row, accepted=True, receipt_id=receipt_id
     )

@@ -554,10 +554,65 @@ def _strict_stamp_span(line: str) -> tuple[int, int] | None:
     match = _VERIFIED_STAMP_RE.search(body)
     if match is None:
         return None
+    return _token_span(body, match)
+
+
+def _token_span(body: str, match: "re.Match[str]") -> tuple[int, int]:
+    """``match``'s span extended left over the whitespace run before it.
+
+    The separator a stamp introduced belongs to the stamp, not to the words
+    before it, so cutting the two together is what leaves the entry's own text
+    identical whichever spelling the stamp had.
+    """
     start = match.start()
     while start > 0 and body[start - 1] in " \t":
         start -= 1
     return start, match.end()
+
+
+def strip_stamp_tokens(line: str) -> str:
+    """This line with every verification-stamp token removed, and nothing else.
+
+    The writer's counterpart to :func:`_strict_stamp_span`, and deliberately
+    wider than it. That function answers "is this a claim?", which is a reading
+    question: a well-formed *trailing* stamp is the entry's metadata and a
+    ``[verified: …]`` token in the middle of a sentence is prose about a date,
+    so the fingerprint removes one and keeps the other. A writer is not asking
+    which token is the claim — it is replacing the claim, and anything else on
+    the line that still reads as one is what :data:`DIAG_STAMP_DUPLICATE`
+    reports, what changes the entry's fingerprint for a reason nobody asked
+    about, and what leaves a line carrying two claims after a re-stamp.
+
+    So every token the three patterns recognise is cut out, with the whitespace
+    run in front of it: the trailing stamp (strict or near-miss spelling) and
+    any ``[verified: …]`` token the line also carries further left. What is left
+    is the entry's own words, which is what the fingerprint was computed over in
+    the first place — so a re-stamp of a stamped entry and a stamp of an
+    unstamped one differ only in the date.
+    """
+    body = _stamp_line(line)
+    spans: list[tuple[int, int]] = []
+    for pattern in (_VERIFIED_STAMP_RE, _VERIFIED_LOOSE_RE, _VERIFIED_ANY_RE):
+        for match in pattern.finditer(body):
+            start, end = _token_span(body, match)
+            overlaps = any(
+                start < other_end and other_start < end
+                for other_start, other_end in spans
+            )
+            if overlaps:
+                # The strict pattern and the any-token pattern both match a
+                # trailing stamp; cutting it twice would eat the words between.
+                continue
+            spans.append((start, end))
+    if not spans:
+        return body
+    kept: list[str] = []
+    cursor = 0
+    for start, end in sorted(spans):
+        kept.append(body[cursor:start])
+        cursor = end
+    kept.append(body[cursor:])
+    return "".join(kept)
 
 
 def _fingerprint(text: str, span: tuple[int, int] | None = None) -> str:

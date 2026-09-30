@@ -4005,6 +4005,47 @@ def _curation_config(workspace: Path, vault: Path) -> Any:
     )
 
 
+def _curation_workspace_name(vault: Path) -> str:
+    """The registered workspace name whose notes are this vault, for the worklist.
+
+    :func:`ciao.note_entries.entry_identity` digests the workspace name, so the
+    entry pass can only mint identities the operations that consume them will
+    resolve — and every one of those resolves the vault through the workspace
+    registry and names the workspace the way the registry knows it. A vault
+    directory's own name is that name on the layout where a workspace's vault is
+    a directory of its own, and is not otherwise: an install whose
+    ``memory-vault/client-a`` holds workspace ``work`` would plan entry work under
+    ``client-a``, get a CONFLICT from every call, and never file a verdict.
+
+    So the *same* authority ``_resolve_workspace_and_vaults`` resolved the vault
+    through is asked which name it resolved it under, and the answer is taken only
+    when it still points at this vault — an active workspace that names a
+    different vault is not this vault's name. Falls back to the directory name,
+    which is the explicit-``--vault-root`` case where the caller named a
+    directory and no registry was consulted.
+    """
+    active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if active:
+        try:
+            from ciao.config import CiaoConfig
+
+            # The same read-only resolution `_resolve_workspace_and_vaults` does:
+            # a CLI invocation outside the server env must not mint a session
+            # secret just to learn a workspace's name.
+            env_source = dict(os.environ)
+            env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
+            config = CiaoConfig.from_env(env_source)
+            if (
+                config.workspace(active) is not None
+                and Path(config.workspace_vault_root(active)).resolve()
+                == vault.resolve()
+            ):
+                return active
+        except Exception:  # noqa: BLE001 — fall back to the directory name
+            pass
+    return vault.name
+
+
 def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     from ciao.curation_run import build_worklist, load_state, plan_run
     from ciao.entity_types import load_entity_types
@@ -4026,6 +4067,10 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         # drifted prefix makes every mtime `stat` miss silently, which reads as
         # "no note is stale" rather than as an error.
         path_prefix=VAULT_RENDER_PREFIX,
+        # The registered name, not the directory's: the entry pass mints
+        # identities that digest it, and the operations that resolve them name
+        # the workspace the way the registry does.
+        workspace=_curation_workspace_name(vault),
     )
     plan = plan_run(worklist, budget)
     payload: dict[str, Any] = {

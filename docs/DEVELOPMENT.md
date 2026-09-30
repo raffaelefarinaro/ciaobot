@@ -883,9 +883,32 @@ its key when the note is reordered or a fact is inserted above it, and two
 identical bullets under one heading stay distinct. A key carrying an offset would
 go stale the moment anybody edited the file above it, and the pass holding it would
 re-ask a question it had already answered. The filter is
-`entry_verification.should_check_entry`, the **same** predicate `verify_entry`
+`entry_verification.check_settles_entry`, the **same** predicate `verify_entry`
 short-circuits on, and the cap is applied after it for the note pass's reason: the
 cooled-down entry that is still the oldest would otherwise take a slot every night.
+It is the *batch* form of that predicate, over a `read_entry_checks` map read once
+per plan: the per-entry `should_check_entry` re-reads and re-parses the whole
+sidecar on every call, and this is the one caller that asks once per due entry over
+every note in the vault, on every `curation-begin`.
+
+**The workspace name is an input, not a guess.** Because the identity digests the
+workspace, `build_worklist` takes `workspace` and the entry pass mints identities
+with it; `ciao/cli.py`'s `_curation_plan` threads
+`_curation_workspace_name(vault)`, which asks the same registry
+`_resolve_workspace_and_vaults` resolved the vault through and takes its answer
+only when it still points at that vault. A vault directory's own name is the
+workspace's name on the layout where a workspace's vault is a directory of its own,
+and is not otherwise — an install whose `memory-vault/client-a` holds workspace
+`work` would otherwise plan entry work under `client-a`, and every operation would
+come back `conflict` because the identity names nothing there.
+
+**The reason is the payload.** Like the note pass's, the item's `reason` carries
+the note's `content_revision` — the exact `expected_revision` the managed operation
+insists on — plus the entry's **whole** fingerprint and its span. All three whole:
+`find_entry` and `verify_entry` compare a 64-hex fingerprint as a string, so a
+truncated one is not a prefix match but a different value, and the nightly pass
+would return `conflict` for every entry, for ever. Reads bytes only to parse and
+state them; it reaches no verdict and writes nothing.
 
 **The judgement is the same managed operation with an entry selector.** One
 payload file, two requests, and the `entry` field is the only thing that says

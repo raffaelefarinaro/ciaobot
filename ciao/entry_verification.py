@@ -57,7 +57,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ciao import memory_receipts as mr
 from ciao import note_entries as ne
@@ -381,9 +381,33 @@ def should_check_entry(
     A predicate over the sidecar: it reads nothing from the vault, so a caller
     can ask about an entry it has not resolved yet.
     """
-    key = str(identity or "").strip()
-    check = read_entry_checks(vault_root).get(key)
-    return check is None or not _check_settles(
+    return not check_settles_entry(
+        read_entry_checks(vault_root), identity, current_fingerprint, today=today
+    )
+
+
+def check_settles_entry(
+    checks: Mapping[str, EntryCheck],
+    identity: str,
+    current_fingerprint: str,
+    *,
+    today: date,
+) -> bool:
+    """:func:`should_check_entry` over a map the caller has already read.
+
+    One read of the sidecar and N lookups, rather than N reads of the same file:
+    :func:`read_entry_checks` re-reads and re-parses the whole document on every
+    call, so a worklist asking about every due entry in a vault pays that parse
+    once per entry — the entry pass being the one caller that does exactly that,
+    on every ``curation-begin``, over every note in the vault. The predicate is
+    the *same* one :func:`verify_entry` short-circuits on, so a caller batching
+    the reads cannot end up with a second, drifting definition of "settled".
+
+    Absent a row the answer is False, which is the recoverable direction: an
+    entry with no check recorded is asked about.
+    """
+    check = checks.get(str(identity or "").strip())
+    return check is not None and _check_settles(
         check, current_fingerprint, today=today
     )
 
@@ -413,22 +437,27 @@ def stamp_entry(entry_text: str, stamp_date: str) -> str:
     `[verified]` tag with a typo in it — is *not* reported and refused here. The
     entry is rewritten with a good stamp and its diagnostics become empty, which
     is the honest outcome: the bad token was not a claim, and the one this writes
-    is.
+    is. **Every** stamp-shaped token goes, not only a well-formed trailing one: a
+    token the parser rejected, a near-miss spelling and a second claim earlier on
+    the line are all removed by :func:`ciao.note_entries.strip_stamp_tokens`, so
+    the line this returns carries exactly one token. Leaving the unusable one
+    behind was the failure here: a good stamp was appended beside a
+    `[verified: 2026-13-01]`, and the next parse of that entry reported
+    :data:`ciao.note_entries.DIAG_STAMP_DUPLICATE` — the diagnostic that exists to
+    say a tool did the wrong thing, produced by this tool's own write.
     """
     day = date.fromisoformat(str(stamp_date).strip())
     opening, separator, rest = str(entry_text).partition("\n")
     body = opening[:-1] if opening.endswith("\r") else opening
     carriage = "\r" if opening.endswith("\r") else ""
-    span = ne._strict_stamp_span(body)
-    if span is None:
-        # No well-formed trailing stamp, or no stamp at all: put one on after the
-        # entry's own words, which is the shape the parser reads. The
-        # separator is the stamp's own — a space — so a re-stamp of a re-stamped
-        # line is byte-identical, and the fingerprint is unchanged either way.
-        return f"{body} {VERIFIED_STAMP.format(date=day.isoformat())}{carriage}{separator}{rest}"
+    # Always one space between the entry's own words and the stamp, whichever
+    # token was there before: the fingerprint ignores the stamp *and* the run of
+    # whitespace in front of it, so a re-stamp of a re-stamped line comes back
+    # byte-identical and a repaired one lands on the fingerprint the entry always
+    # had.
     return (
-        f"{body[: span[0]]} {VERIFIED_STAMP.format(date=day.isoformat())}"
-        f"{body[span[1] :]}{carriage}{separator}{rest}"
+        f"{ne.strip_stamp_tokens(body)} {VERIFIED_STAMP.format(date=day.isoformat())}"
+        f"{carriage}{separator}{rest}"
     )
 
 
@@ -769,6 +798,187 @@ def _store(vault_root: Path, check: EntryCheck) -> tuple[EntryCheck, str]:
     return check, ""
 
 
+def record_applied_entry_check(
+    vault_root: Path | str,
+    *,
+    note_path: str,
+    workspace: str,
+    previous_identity: str,
+    start: int,
+    replacement: str,
+    outcome: str,
+    reason: str,
+    evidence: tuple[Evidence, ...] = (),
+    coverage: str = "",
+    receipt_id: str = "",
+    today: date | None = None,
+) -> tuple[EntryCheck | None, str]:
+    """The check an *applied* entry edit leaves behind, and why it could not be filed.
+
+    **Keyed by the identity of the text the write left, not the one it replaced.**
+    :func:`ciao.note_entries.entry_identity` digests the entry's own fingerprint,
+    so an ``update`` mints a different identity for the same bullet: filing the
+    new fingerprint under the old identity produces a row no reader can ever find
+    again (``should_check_entry(new_identity, new_fingerprint)`` looks up a key
+    that is not there) while the old row goes on describing text the note no
+    longer holds. So the written note is re-read and re-parsed here, the entry the
+    splice produced is located at the offset it was written to, and the check is
+    filed under *its* identity. The row for the entry as it was is dropped in the
+    same locked write, so the sidecar holds one row per fact rather than one per
+    version of it.
+
+    A re-stamp is the case where the two identities are equal — the fingerprint
+    ignores the stamp by construction — and it lands on the same row, which is
+    exactly what makes a verified fact stop being work.
+
+    An empty ``replacement`` is a *retirement*: the entry is gone, there is no new
+    text to key a check on, and the old row is dropped so the sidecar does not
+    keep a verdict about a fact that is not in the vault. ``(None, "")`` is that
+    answer, and it is a success — the note write is journaled under its own lock
+    and the receipt is its evidence.
+
+    Shared by :func:`verify_entry`'s auto-apply path and the attended accept of a
+    ``replace_entry``/``restamp_entry`` proposal, because those two write the same
+    bytes through the same helper and a check filed by only one of them is a check
+    the other leaves a hole under.
+
+    Never raises: a check state that cannot be written is a fact asked about
+    again, while a raised error would report a failure for a mutation that landed.
+    """
+    day = today or date.today()
+    try:
+        target = nr.resolve_note_path(Path(vault_root), note_path)
+        written = target.read_bytes().decode("utf-8")
+    except (mr.MemoryReceiptError, OSError, UnicodeDecodeError) as exc:
+        return None, f"the written note could not be read to key its check: {exc}"
+    document = ne.parse_note_entries(
+        written, note_path=note_path, workspace=workspace, today=day
+    )
+    settled: ne.NoteEntry | None = None
+    failure = ""
+    if replacement.strip():
+        # The splice put the new item at the offset the old one occupied, and
+        # `compose_entry_edit` has already proved the replacement is exactly one
+        # list item at the same indentation — so this is a check, not a guess.
+        # The fingerprint is compared anyway: it is the second half of the same
+        # binding, and a mismatch means the file is not what this operation wrote.
+        expected = ne.refresh_fingerprint(replacement)
+        settled = next(
+            (
+                entry
+                for entry in document.entries
+                if entry.start == start and entry.fingerprint == expected
+            ),
+            None,
+        )
+        if settled is None:
+            failure = (
+                f"{note_path} holds no entry at characters {start} with the text "
+                "this edit wrote, so the verdict could not be filed against the "
+                "entry the write left; the receipt is the record of the change"
+            )
+    stale = str(previous_identity or "").strip()
+    try:
+        stale_key = _stored_key(stale) if stale else ""
+    except EntryCheckRefused:
+        stale_key = ""
+    key = settled.identity if settled is not None else ""
+    if key == stale_key:
+        stale_key = ""
+    row = (
+        _entry_payload(
+            EntryCheck(
+                identity=key,
+                note_path=note_path,
+                workspace=workspace,
+                content_fingerprint=settled.fingerprint if settled is not None else "",
+                outcome=outcome,
+                checked_at=day,
+                retry_after=day + timedelta(days=CHECK_COOLDOWN_DAYS),
+                evidence=evidence,
+                coverage=coverage,
+                reason=reason,
+                receipt_id=receipt_id,
+            )
+        )
+        if settled is not None
+        else None
+    )
+
+    def _mutate(state: dict[str, Any]) -> None:
+        if stale_key:
+            state["entries"].pop(stale_key, None)
+        if row is not None:
+            state["entries"][key] = row
+
+    try:
+        nv.update_check_state(vault_root, _mutate)
+    except (
+        nv.NoteCheckRefused,
+        mr.MemoryReceiptError,
+        mr.QueueLockError,
+        OSError,
+    ) as exc:
+        logger.error("entry verification: could not record the check: %s", exc)
+        return None, f"{failure} {exc}".strip()
+    if settled is None:
+        return None, failure
+    return _entry_from_mapping(key, row), failure
+
+
+def release_entry_check(
+    vault_root: Path | str, identity: str, *, today: date | None = None
+) -> None:
+    """Give an entry its question back: keep the verdict, drop the cooldown.
+
+    A ``needs_review`` check is recorded by the service *before* the proposal that
+    asks a person about it is filed, and a filing that fails — a read-only vault, a
+    lock, a full disk — leaves that check sitting on its 30-day cooldown with
+    nothing in the queue waiting to settle it. The verdict is then lost for a
+    month: the entry is not planned again, and no proposal is filed for it, so
+    nobody is ever asked. The evidence and the reason stay on the row (this is a
+    log, not a scrap), but ``retry_after`` moves back to the day the check was
+    recorded on, which is what ``_check_settles`` compares against — so the next pass
+    asks again and files the proposal this time.
+
+    One locked read-modify-write, like every other writer of that file, so a check
+    recorded in between is not overwritten. A row this version cannot read, a key
+    that is not an identity and a missing row are all left exactly as they are.
+    """
+    day = today or date.today()
+    key = str(identity or "").strip()
+    try:
+        stored = _stored_key(key)
+    except EntryCheckRefused:
+        return
+
+    def _mutate(state: dict[str, Any]) -> None:
+        row = state["entries"].get(stored)
+        if not isinstance(row, dict):
+            return
+        recorded = nv._stored_date(row.get("checked_at"))
+        if recorded is None:
+            return
+        row["retry_after"] = min(recorded, day).isoformat()
+        row["proposal_id"] = ""
+
+    try:
+        nv.update_check_state(vault_root, _mutate)
+    except (
+        nv.NoteCheckRefused,
+        mr.MemoryReceiptError,
+        mr.QueueLockError,
+        OSError,
+    ) as exc:
+        # Reported, not raised: the caller is already reporting a failure it did
+        # not cause, and the row it could not release expires on its own.
+        logger.warning(
+            "entry verification: could not release the pending check for %s: %s",
+            stored[:12],
+            exc,
+        )
+
+
 def verify_entry(
     request: EntryVerificationRequest,
     *,
@@ -947,29 +1157,37 @@ def verify_entry(
         # over a vault must not lose a whole run to one unwritable file.
         return EntryVerificationResult(FAILED, message=str(exc))
     receipt_id = str(receipt.get("id", ""))
-    # The check describes the fingerprint this operation LEFT the entry at. A
-    # re-stamp's is the same one — the stamp is metadata and the fingerprint
-    # ignores it — so a re-stamped entry is checked against the fact it was, and
-    # an update's is the caller's new text, which only the next read can compute.
-    check, failure = _store(
+    # The check describes the entry this operation LEFT the note at, keyed by the
+    # identity of that new text rather than the identity of the text it replaced —
+    # see `record_applied_entry_check`. A re-stamp's identity is the same one it
+    # had (the stamp is metadata and the fingerprint ignores it), so a re-stamped
+    # entry is checked against the fact it was; an update's is a new one, and
+    # filing the new fingerprint under the old identity is a row nothing can find.
+    applied, filed = record_applied_entry_check(
         root,
-        _new_check(
-            request,
-            plan,
-            key=entry.identity,
-            note_path=key,
-            fingerprint=ne.refresh_fingerprint(plan.replacement)
-            if plan.outcome == UPDATE
-            else entry.fingerprint,
-            receipt_id=receipt_id,
-            today=day,
-        ),
+        note_path=key,
+        workspace=request.workspace,
+        previous_identity=entry.identity,
+        start=entry.start,
+        replacement=plan.replacement,
+        outcome=plan.outcome,
+        reason=plan.reason or request.reason,
+        evidence=request.evidence,
+        coverage=request.coverage,
+        receipt_id=receipt_id,
+        today=day,
     )
+    if filed and applied is None:
+        # The write landed and the receipt is its evidence, so this is not a
+        # failure — but say so, because the entry is now unchecked and will be
+        # asked about again.
+        return EntryVerificationResult(
+            APPLIED, receipt_id=receipt_id, message=filed
+        )
     return EntryVerificationResult(
         APPLIED,
         receipt_id=receipt_id,
-        check=check,
-        message=failure
-        or plan.reason
+        check=applied,
+        message=plan.reason
         or f"{plan.outcome} applied to entry {entry.identity[:12]} of {key}",
     )

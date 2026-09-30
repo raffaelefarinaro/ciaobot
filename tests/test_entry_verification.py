@@ -464,6 +464,58 @@ def test_a_still_valid_entry_restamps_only_its_own_stamp(tmp_path: Path) -> None
     assert receipt["provenance"]["outcome"] == ev.STILL_VALID
 
 
+def test_an_applied_update_is_checked_under_the_new_text_identity(
+    tmp_path: Path,
+) -> None:
+    """The check has to name the entry the write LEFT, or it names nothing.
+
+    :func:`ciao.note_entries.entry_identity` digests the entry's own fingerprint,
+    so an ``update`` mints a different identity for the same bullet. Filing the
+    new fingerprint under the old identity produced a row nothing can ever find
+    again — ``should_check_entry(new_identity, new_fingerprint)`` looks up a key
+    that is not in the map — while the old row went on describing text the note
+    no longer held, for the length of the cooldown. The check is therefore filed
+    against the identity the *written* note gives the entry, and the row for the
+    entry as it was is dropped in the same locked write.
+    """
+    vault = _vault(tmp_path)
+    note = _write(vault)
+    entry = _entry()
+    replacement = "- The office is on Via Verdi 12, fourth floor"
+
+    result = _verify(
+        vault,
+        _request(
+            entry,
+            outcome=ev.UPDATE,
+            edit=ev.EntryEdit(before=entry.text, after=replacement),
+        ),
+    )
+
+    assert result.status == ev.APPLIED
+    after = note.read_text(encoding="utf-8")
+    new_identity = ne.parse_note_entries(
+        after, note_path=NOTE, workspace=WORKSPACE
+    ).entries[0].identity
+    assert new_identity != entry.identity, "a re-worded fact is a different entry"
+    checks = _entry_checks(vault)
+    # Exactly one row, and it is the new identity's — findable by the very
+    # predicate the worklist uses to decide there is nothing to do.
+    assert set(checks) == {new_identity}
+    assert entry.identity not in checks, "the old row describes text that is gone"
+    assert checks[new_identity].content_fingerprint == ne.refresh_fingerprint(
+        replacement
+    )
+    assert not ev.should_check_entry(
+        vault, new_identity, ne.refresh_fingerprint(replacement), today=TODAY
+    )
+    # And the re-worded fact is checked, not suppressed: the check on the entry
+    # as it was must not carry over to text nobody judged.
+    assert result.check is not None
+    assert result.check.identity == new_identity
+    assert result.check.receipt_id == result.receipt_id
+
+
 def test_a_restamp_needs_complete_coverage_and_a_real_citation(
     tmp_path: Path,
 ) -> None:
@@ -833,3 +885,84 @@ def test_an_impossible_stamp_date_is_refused_rather_than_written(tmp_path: Path)
     the parser will report as impossible, so it is not worth writing."""
     with pytest.raises(ValueError):
         ev.stamp_entry("- A fact", "2026-13-01")
+
+
+def test_a_stamp_replaces_a_token_the_parser_could_not_believe(
+    tmp_path: Path,
+) -> None:
+    """An unusable stamp is replaced, not appended beside.
+
+    The failure this pins is the entry's own diagnostic firing on this tool's
+    write: a `[verified: 2026-13-01]` the parser reports as impossible, and a
+    near-miss `[verified 2026-01-01]` spelling it reports as malformed, are both
+    claims the line already makes. Appending a good stamp beside either left two
+    tokens, which the next parse reports as
+    :data:`ciao.note_entries.DIAG_STAMP_DUPLICATE` — the diagnostic that exists to
+    say "a tool did the wrong thing here" — and changed the fact's fingerprint
+    for a reason nobody asked about.
+
+    Every shape is covered: a trailing token of any spelling, and a token the
+    parser does not even read as trailing because words follow it. The result is
+    one token, empty diagnostics, and a line whose words are exactly the words it
+    had with the claim taken out of it.
+    """
+    for broken, words in (
+        ("- a fact [verified: 2026-13-01]", "- a fact"),
+        ("- a fact [verified 2026-01-01]", "- a fact"),
+        ("- a fact [verified : 2026-01-01]", "- a fact"),
+        ("- a fact [verified: 2026-13-01] and more words", "- a fact and more words"),
+        (
+            "- a fact [verified: 2026-01-01] and [verified: 2025-01-01] words",
+            "- a fact and words",
+        ),
+    ):
+        stamped = ev.stamp_entry(broken, "2026-09-19")
+        parsed = ne.parse_note_entries(
+            stamped, note_path=NOTE, workspace=WORKSPACE
+        ).entries[0]
+
+        assert stamped == f"{words} [verified: 2026-09-19]", f"{broken!r} kept a token"
+        assert stamped.count("[verified") == 1, f"{broken!r} kept a second token"
+        assert parsed.diagnostics == (), f"{broken!r} left a diagnostic behind"
+        assert ne.parse_verification_stamp(stamped) == ne.EntryStamp(
+            "[verified: 2026-09-19]", date(2026, 9, 19), True, ""
+        )
+        # The words are the entry's own, so the repaired line fingerprints as the
+        # same fact the entry always was — the claim was never part of it.
+        assert ne.refresh_fingerprint(stamped) == ne.refresh_fingerprint(
+            f"{words} [verified: 2024-01-01]"
+        )
+
+
+def test_a_release_gives_the_entry_its_question_back(tmp_path: Path) -> None:
+    """A verdict nobody was asked about must not sit on its cooldown for a month.
+
+    The check is recorded by the service *before* the proposal is filed, so a
+    filing that fails leaves it settled against a question that does not exist:
+    the entry is not planned again for 30 days and nothing re-files it. Releasing
+    keeps the verdict and its citations on the row — this is a log — and moves
+    the cooldown back to the day the check was recorded, which is exactly what
+    ``_check_settles`` compares against.
+    """
+    vault = _vault(tmp_path)
+    _write(vault)
+    entry = _entry()
+
+    result = _verify(vault, _request(entry, outcome=ev.RETIRE))
+
+    assert result.status == ev.NEEDS_REVIEW
+    assert not ev.should_check_entry(
+        vault, entry.identity, entry.fingerprint, today=TODAY
+    ), "a pending verdict holds the entry off"
+
+    ev.release_entry_check(vault, entry.identity, today=TODAY)
+
+    row = _entry_checks(vault)[entry.identity]
+    assert row.outcome == ev.RETIRE, "the verdict itself is kept"
+    assert row.retry_after == row.checked_at
+    assert ev.should_check_entry(vault, entry.identity, entry.fingerprint, today=TODAY)
+    # And a key that is not an entry identity, or a row that is not there, is
+    # left exactly as it is rather than raising out of a caller's error path.
+    ev.release_entry_check(vault, "not-an-identity", today=TODAY)
+    ev.release_entry_check(vault, "b" * 64, today=TODAY)
+    assert set(_entry_checks(vault)) == {entry.identity}

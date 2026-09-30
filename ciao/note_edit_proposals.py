@@ -267,6 +267,17 @@ def entry_replacement(proposal: NoteEditProposal) -> str:
     ``after`` between the same prefix and the same suffix, and the note's other
     bytes are the same bytes in both images by construction.
 
+    A *delete* consumes the entry's own line ending along with its text, so the
+    suffix it leaves is what follows the line ending rather than what follows the
+    span. Accounting for that is the difference between this being the inverse of
+    the delete and being a check the delete fails: the first bullet of a note with
+    no frontmatter starts at offset 0, its span ends at the ``\\n``, and the byte
+    immediately after the span is the newline the deletion removed — a suffix
+    comparison against the raw remainder of ``before`` can never match, so the
+    refusal would blame a record that is perfectly clean. The consumed line ending
+    is measured with the same helper the compose used, both newline spellings
+    included.
+
     This is what lets an accept go through
     :func:`ciao.note_receipts.apply_entry_edit` rather than writing the stored
     ``after`` verbatim: the managed helper takes the *entry's* new text, resolves
@@ -292,12 +303,19 @@ def entry_replacement(proposal: NoteEditProposal) -> str:
             f"the entry span ({start}, {end}) is outside the {len(before)}-character "
             "note this record was filed against, so its replacement cannot be recovered"
         )
-    if not after.startswith(before[:start]) or not after.endswith(before[end:]):
-        raise NoteEditError(
-            "the recorded after image does not keep the note's own text outside "
-            "the entry's span, so it is not the image this edit produced"
-        )
-    return after[start : len(after) - (len(before) - end)]
+    # What the note holds after the entry's span: the raw remainder first, and then
+    # that same remainder with the entry's own line ending taken off. The order is
+    # load-bearing rather than cosmetic — a *replace* is matched against the exact
+    # bytes it kept, and only a *delete* falls through to the shortened tail, where
+    # the recovered slice is empty by construction either way.
+    tails = (before[end:], nr._after_entry_line(before, end))
+    for tail in tails:
+        if after.startswith(before[:start]) and after.endswith(tail):
+            return after[start : len(after) - len(tail)]
+    raise NoteEditError(
+        "the recorded after image does not keep the note's own text outside "
+        "the entry's span, so it is not the image this edit produced"
+    )
 
 
 
@@ -1315,28 +1333,34 @@ def _clear_pending_check(root: Path, proposal: NoteEditProposal) -> None:
     entry's check, and this unit's own next check (which may already have been
     filed since) are left exactly as they are — a settlement is not allowed to
     unblock something it knows nothing about.
+
+    **The read and the write are one call.** The obvious spelling reads the row,
+    compares it and writes it back, and a check recorded between those two halves
+    is overwritten by the write — the settlement of one proposal erasing the
+    cooldown of the next, which is precisely the row this function exists to let
+    through. :func:`ciao.note_verification.update_check_state` is the one writer of
+    the file and re-reads and rewrites the whole document under its own lock, so
+    the comparison happens on the same snapshot the write is composed from. The
+    mutate gets the raw document rather than a parsed row, so the comparison is on
+    the stored ``proposal_id`` string: a row this version cannot parse is left
+    alone rather than half-cleared, which is the direction a reader is supposed to
+    fail in.
     """
     if not proposal.proposal_id:
         return
+    held = proposal.proposal_id
     if proposal.operation in ENTRY_OPERATIONS:
-        entry_check = ev.read_entry_checks(root).get(proposal.entry_identity)
-        if entry_check is None or entry_check.proposal_id != proposal.proposal_id:
-            return
-        try:
-            ev.record_entry_check(root, replace(entry_check, proposal_id=""))
-        except (ev.EntryCheckRefused, mr.MemoryReceiptError, mr.QueueLockError) as exc:
-            logger.warning(
-                "note edit %s: could not clear the pending entry check for %s: %s",
-                proposal.id,
-                proposal.relative_path,
-                exc,
-            )
-        return
-    check = nv.read_note_checks(root).get(proposal.relative_path)
-    if check is None or check.proposal_id != proposal.proposal_id:
-        return
+        map_name, key = "entries", proposal.entry_identity
+    else:
+        map_name, key = "notes", proposal.relative_path
+
+    def _mutate(document: dict[str, Any]) -> None:
+        row = document.get(map_name, {}).get(key)
+        if isinstance(row, dict) and str(row.get("proposal_id") or "") == held:
+            row["proposal_id"] = ""
+
     try:
-        nv.record_note_check(root, replace(check, proposal_id=""))
+        nv.update_check_state(root, _mutate)
     except (nv.NoteCheckRefused, mr.MemoryReceiptError, mr.QueueLockError) as exc:
         # Reported, not raised: the sidecar is already settled and the queue row
         # is about to go, and a raised error here would tell the owner their

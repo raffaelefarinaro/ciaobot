@@ -700,11 +700,13 @@ class _StaleEntry:
     entry: Any
     age: int
     horizon: int
+    revision: str
 
 
 def _due_entries(
     *,
     vault_root: Path,
+    workspace: str,
     scanned: list[_ScannedNote],
     today: date,
 ) -> list[_StaleEntry]:
@@ -736,11 +738,30 @@ def _due_entries(
     contributes nothing, for the audit's reason rather than a second copy of the
     exempt set.
 
+    ``workspace`` is the registered workspace's name, and it is passed in rather
+    than read off ``vault_root.name`` because the entry identity digests it: the
+    operations that consume these identities — the entry verification service,
+    the proposal's accept, the managed verifier — all resolve the vault through
+    the workspace registry and name the workspace the registry knows it by. A
+    vault directory is not that name on every registered layout (an install whose
+    ``memory-vault/client-a`` holds workspace ``work`` has a directory name of
+    ``client-a``), and an identity minted with the wrong coordinate names nothing
+    there, so the worklist key never resolves and the nightly pass returns
+    CONFLICT for work it planned itself. Guessing the name from the directory is
+    the one thing that cannot be right in general, so the caller supplies it.
+
+    The note's own :func:`ciao.memory_receipts.content_revision` is computed here
+    rather than in the caller, because this is the one place the note's bytes are
+    already in hand; the reason has to state it (see
+    :func:`_stale_entry_items`) and re-reading the file to get it would double
+    the pass's only body read.
+
     Order is by age descending, then the rendered path, then the entry's own
     position: the audit's order for notes with its tiebreak extended one level
     further, so the plan is reproducible and a short budget drops the youngest
     rather than an arbitrary one.
     """
+    from ciao import memory_receipts as mr
     from ciao import note_entries as ne
     from ciao.vault_review import never_queued
 
@@ -754,13 +775,8 @@ def _due_entries(
         except (OSError, UnicodeError):
             logger.debug("curation: stale note %s is not readable UTF-8", note.relative)
             continue
-        # The workspace is the entry identity's own coordinate, so the identities
-        # minted here have to be minted the way the operations that consume them
-        # will mint them. The vault's own directory name is what a workspace-rooted
-        # vault carries, and it is the value `note_verification` records a check
-        # beside.
         document = ne.parse_note_entries(
-            text, note_path=note.relative, workspace=root.name, today=today
+            text, note_path=note.relative, workspace=workspace, today=today
         )
         for entry in document.entries:
             dated = entry.verified if entry.verified is not None else note.last_verified
@@ -776,6 +792,7 @@ def _due_entries(
                     entry=entry,
                     age=age,
                     horizon=note.threshold_days,
+                    revision=mr.content_revision(text),
                 )
             )
     due.sort(key=lambda item: (-item.age, item.relative, item.entry.start))
@@ -785,6 +802,7 @@ def _due_entries(
 def _stale_entry_items(
     *,
     vault_root: Path,
+    workspace: str,
     scanned: list[_ScannedNote],
     today: date,
 ) -> tuple[list[WorklistItem], str]:
@@ -798,11 +816,17 @@ def _stale_entry_items(
     anybody edited the file above it.
 
     The filter is the entry pass's own twin of the note pass's cooldown filter:
-    :func:`ciao.entry_verification.should_check_entry` for entries whose
+    :func:`ciao.entry_verification.check_settles_entry` for entries whose
     :class:`ciao.entry_verification.EntryCheck` is still inside its cooldown or
     still waiting on the proposal it pinned. The predicate is the same one
     :func:`ciao.entry_verification.verify_entry` short-circuits on, so the plan
-    cannot list an entry the operation would refuse to judge.
+    cannot list an entry the operation would refuse to judge. It is asked over a
+    map read **once**, through the batch form of that predicate rather than
+    :func:`ciao.entry_verification.should_check_entry` per entry:
+    ``read_entry_checks`` re-reads and re-parses the whole sidecar on every call,
+    and this is the one caller that asks once per due entry on every
+    ``curation-begin`` over every note in the vault, so the per-entry spelling is
+    O(entries × check-state size) for no reason.
 
     The cap comes *after* the filter, for the note pass's reason: capping first
     would spend a slot every night on the cooled-down entry that is still the
@@ -810,25 +834,30 @@ def _stale_entry_items(
     filter each left out are reported back rather than passing for a full night's
     work.
 
-    The reason carries the entry's own fingerprint and span, because those are the
-    two values a caller cannot rederive without reimplementing a hash and guessing
-    wrong: the fingerprint is what ``expected_fingerprint`` has to be for the
-    accept to prove the entry is still the one that was judged, and the span is
-    where the write lands. Reads bytes only to parse and state them; reaches no
-    verdict and writes nothing.
+    The reason carries the three values the operation needs and cannot rederive
+    without reimplementing a hash and guessing wrong, all of them **whole**: the
+    note's :func:`ciao.memory_receipts.content_revision` (the exact
+    ``expected_revision`` the managed operation refuses to proceed without), the
+    entry's fingerprint (``entry_fingerprint``, compared in full — a truncated one
+    is not a prefix match but a different string, so it comes back ``conflict``
+    for every entry, for ever), and the span the write lands at. Reads bytes only
+    to parse and state them; reaches no verdict and writes nothing.
     """
     from ciao import entry_verification as ev
 
     root = Path(vault_root)
-    due = _due_entries(vault_root=root, scanned=scanned, today=today)
+    due = _due_entries(
+        vault_root=root, workspace=workspace, scanned=scanned, today=today
+    )
     if not due:
         return [], ""
     items: list[WorklistItem] = []
     settled = 0
+    checks = ev.read_entry_checks(root)
     for candidate in due:
         entry = candidate.entry
-        if not ev.should_check_entry(
-            root, entry.identity, entry.fingerprint, today=today
+        if ev.check_settles_entry(
+            checks, entry.identity, entry.fingerprint, today=today
         ):
             settled += 1
             continue
@@ -840,8 +869,9 @@ def _stale_entry_items(
                 label=f"{candidate.label} — entry {entry.identity[:12]}",
                 reason=(
                     f"entry unverified for {candidate.age}d against a "
-                    f"{candidate.horizon}d horizon; fingerprint "
-                    f"{entry.fingerprint[:12]} at characters "
+                    f"{candidate.horizon}d horizon; {candidate.relative} at "
+                    f"revision {candidate.revision}, entry fingerprint "
+                    f"{entry.fingerprint} at characters "
                     f"{entry.start}-{entry.end}"
                 ),
                 keys=(item_key(PASS_STALE_ENTRY, entry.identity),),
@@ -1165,6 +1195,7 @@ def build_worklist(
     done_keys: frozenset[str] | set[str] | None = None,
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
+    workspace: str = "",
 ) -> Worklist:
     """Compute tonight's work from files alone.
 
@@ -1174,6 +1205,16 @@ def build_worklist(
     agent vault root, the notes to this workspace's root. The caller resolves it
     through the config (the CLI does) so a category the owner accepted cannot be
     re-proposed as unlisted.
+
+    ``workspace`` is the registered workspace's name, and the entry pass cannot
+    plan anything without it: :func:`ciao.note_entries.entry_identity` digests
+    it, so an identity minted under the wrong name names no entry anywhere and
+    every worklist key it produces is unresolvable. It defaults to the vault
+    directory's own name, which is the name on the layout where a workspace's
+    vault is a directory of its own — a caller on a layout where the two differ
+    (a shared vault, an explicitly configured root) must pass the registry's name
+    or the pass is refused rather than guessing; see
+    :func:`_stale_entry_items`.
 
     ``config`` is the workspace registry, and it is optional only because two
     passes need it and one does not: the skill-proposal queue and the upstream
@@ -1199,6 +1240,7 @@ def build_worklist(
     vault_root = Path(vault_root)
     guide_path = Path(guide_path)
     workspace_dir = Path(workspace_dir) if workspace_dir is not None else guide_path.parent
+    workspace = workspace or vault_root.name
     today = today or datetime.now(UTC).date()
     done = frozenset(done_keys or ())
     memory_limit = memory_char_limit if memory_char_limit is not None else DEFAULT_MEMORY_CHAR_LIMIT
@@ -1246,7 +1288,7 @@ def build_worklist(
     if stale_note:
         notes.append(stale_note)
     entry_items, stale_entry = _stale_entry_items(
-        vault_root=vault_root, scanned=scanned, today=today
+        vault_root=vault_root, workspace=workspace, scanned=scanned, today=today
     )
     collected.extend(entry_items)
     if stale_entry:

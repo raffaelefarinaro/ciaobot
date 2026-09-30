@@ -1484,6 +1484,15 @@ class CiaoControlPlane:
                 nep=nep,
                 mr=mr,
             )
+            if filed is None or not filed.get("queued"):
+                # The verdict stands and its check is recorded, but nothing is
+                # waiting on it: a proposal that was not filed, or filed with no
+                # queue row, is a verdict nobody is ever asked about. A pending
+                # check's whole suppression is that pending proposal, so release
+                # the cooldown instead of leaving the entry settled against a
+                # question that does not exist — otherwise the fact is not planned
+                # again for a month and nothing re-files it.
+                ev.release_entry_check(vault_root, request.identity, today=today)
             # The check the reply carries is re-read, not the row `verify_entry`
             # returned: filing is what pins it, and reporting the pre-filing row
             # would tell the agent a verdict nobody is waiting on.

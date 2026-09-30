@@ -1001,6 +1001,7 @@ def _file_entry(
     today: date = TODAY,
     identity: str = "",
     fingerprint: str = "",
+    text: str = ENTRY_PLAIN,
 ) -> nep.NoteEditProposal:
     """File one entry operation, with its images composed the way a caller would.
 
@@ -1008,20 +1009,22 @@ def _file_entry(
     record stores, and :func:`ciao.note_receipts.compose_entry_edit` is what
     produces it. ``delete`` is separate from ``operation`` so a test can file the
     record an operation and a body that contradict each other, which is exactly
-    the case both the filing rules and the reader rules refuse.
+    the case both the filing rules and the reader rules refuse. ``text`` is the
+    note the record is filed against, for the notes whose first bullet starts at
+    offset 0.
     """
     from ciao import note_receipts as nr
 
     composed = nr.compose_entry_edit(
-        ENTRY_PLAIN, entry, replacement=after or None, delete=delete
+        text, entry, replacement=after or None, delete=delete
     )[0]
     return nep.file_note_edit(
         config,
         workspace="personal",
         relative_path=NOTE,
-        expected_revision=_revision(ENTRY_PLAIN),
+        expected_revision=_revision(text),
         operation=operation,
-        before=ENTRY_PLAIN,
+        before=text,
         after=composed,
         outcome=outcome,
         coverage=coverage,
@@ -1146,6 +1149,88 @@ def test_a_retire_entry_needs_an_empty_replacement_and_a_living_note(
             outcome=nv.RETIRE,
             after="- something else entirely",
         )
+
+
+def test_the_first_bullet_of_a_bare_note_can_be_retired(tmp_path: Path) -> None:
+    """A delete at offset 0 takes the line ending with it, and the inverse must agree.
+
+    The bug this pins is a *refusal of a clean record*. A first-line bullet in a
+    note with no frontmatter has a span ending immediately before its own ``\\n``,
+    and the delete consumes that newline — so the after image does not end with
+    the raw remainder of ``before`` after the span, it ends with that remainder
+    minus its first character. Comparing against the raw remainder can never
+    match, so the first bullet of a bare note could never be retired, and the
+    error blamed the record rather than the check.
+    """
+    for line_ending in ("\n", "\r\n"):
+        text = (
+            f"- The office is on Via Verdi 12{line_ending}"
+            f"- The landlord is Bianchi{line_ending}"
+        )
+        vault = _vault(tmp_path, f"bare-{len(line_ending)}")
+        _write(vault, NOTE, text)
+        entry = ne.parse_note_entries(
+            text, note_path=NOTE, workspace="personal"
+        ).entries[0]
+        assert entry.start == 0, "this test is only about offset 0"
+
+        proposal = _file_entry(
+            _config(vault),
+            entry,
+            operation=nep.RETIRE_ENTRY,
+            outcome=nv.RETIRE,
+            delete=True,
+            text=text,
+        )
+
+        assert proposal.after == text[entry.end + len(line_ending) :]
+        assert nep.entry_replacement(proposal) == ""
+        # And the recovered (empty) replacement composes back to the same bytes,
+        # which is what the accept goes on to apply.
+        from ciao import note_receipts as nr
+
+        composed, refusal = nr.compose_entry_edit(
+            text, entry, delete=True
+        )
+        assert not refusal
+        assert composed == proposal.after
+
+
+def test_a_forged_after_image_is_still_refused_by_the_inverse(tmp_path: Path) -> None:
+    """Widening the inverse to account for the consumed newline must not widen it past
+    the record it is checking.
+
+    Both tails are tried, so the guard that matters is that neither one matches an
+    ``after`` that kept text it should not have: a truncated image, one missing
+    the note's own suffix, and one missing its prefix all have to stay refused.
+    """
+    text = "- a\n- b\n"
+    entry = ne.parse_note_entries(text, note_path=NOTE, workspace="personal").entries[0]
+    base = {
+        "id": "x",
+        "workspace": "personal",
+        "relative_path": NOTE,
+        "operation": nep.RETIRE_ENTRY,
+        "expected_revision": _revision(text),
+        "before": text,
+        "outcome": nv.RETIRE,
+        "coverage": nv.COVERAGE_COMPLETE,
+        "evidence": (),
+        "reason": "",
+        "created_at": "2026-01-01T00:00:00Z",
+        "proposal_id": "row-1",
+        "receipt_id": "",
+        "settled": "",
+        "accepted": False,
+        "stamp_date": "",
+        "entry_identity": entry.identity,
+        "entry_fingerprint": entry.fingerprint,
+        "entry_span": (entry.start, entry.end),
+    }
+
+    for after in ("", "- a is still here\n", "- b\n- c\n", "- "):
+        with pytest.raises(nep.NoteEditError, match="not the image this edit produced"):
+            nep.entry_replacement(nep.NoteEditProposal(after=after, **base))
 
 
 def test_a_restamp_entry_may_not_change_the_words(tmp_path: Path) -> None:

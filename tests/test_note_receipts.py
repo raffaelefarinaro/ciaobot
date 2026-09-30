@@ -1398,6 +1398,75 @@ def test_deleting_an_entry_takes_its_line_and_leaves_no_gap(tmp_path: Path) -> N
     assert "Some prose about the office" in after
 
 
+def test_a_crlf_delete_takes_the_whole_line_ending(tmp_path: Path) -> None:
+    """A CRLF line ending is two characters; a delete that eats one leaves the other.
+
+    The failure this pins is a blank line, not a mangled note:
+    ``- a\\r\\n- b\\r\\n- c\\r\\n`` minus its middle bullet must be
+    ``- a\\r\\n- c\\r\\n``, and a splice that consumed only the ``\\n`` left
+    ``- a\\r\\n\\r\\n- c\\r\\n`` — a bullet removed and a gap left where it stood,
+    which reads as a note with a hole in it. Both positions are covered because a
+    *last* entry's line ending is at the very end of the file, where there is no
+    following line to absorb the stray ``\\r``.
+    """
+    vault = _vault(tmp_path)
+    text = "- a\r\n- b\r\n- c\r\n"
+    path = _write(vault, ENTRY_NOTE, text)
+
+    middle = _entries(vault, text)[1]
+    _apply_entry(vault, path, middle, delete=True)
+
+    after = path.read_bytes().decode("utf-8")
+    assert after == "- a\r\n- c\r\n", "the middle removal left a line behind"
+    assert "\r\n\r\n" not in after
+    assert b"\r" not in path.read_bytes() or "\r\n\r\n" not in after
+
+    last = _entries(vault, after)[1]
+    _apply_entry(vault, path, last, delete=True)
+
+    after_last = path.read_bytes().decode("utf-8")
+    assert after_last == "- a\r\n"
+    assert not after_last.endswith("\r"), (
+        "the last bullet's CRLF left its carriage return behind"
+    )
+
+
+def test_a_replacement_must_be_exactly_one_list_item(tmp_path: Path) -> None:
+    """A replacement that is one bullet *and something else* is refused.
+
+    The check is "the parsed item covers the whole replacement", not "the
+    replacement starts with a bullet". The difference is text the caller never
+    named: a trailing ``\\n`` splices a blank line into the note, a paragraph
+    splices prose under a bullet that asserted one thing, and a heading splices a
+    new section into the middle of somebody's note — each of which parses as one
+    list item followed by a gap, and each of which the old check accepted. A
+    replacement that re-indents the bullet is refused for the same reason: the
+    splice would re-parent it under the bullet above it, which is a different
+    fact in a different place.
+    """
+    vault = _vault(tmp_path)
+    text = "- old fact\n- another\n"
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+    before = path.read_bytes()
+
+    for replacement in (
+        "- A\n",  # a trailing newline: a blank line spliced in
+        "- A\n\nsome prose paragraph",  # a paragraph spliced in
+        "- A\n## Heading\n",  # a heading spliced in
+        "  - A",  # re-indented: the bullet becomes a child of the one above
+    ):
+        with pytest.raises(mr.MemoryReceiptError) as refusal:
+            _apply_entry(vault, path, entry, replacement=replacement)
+        assert "nothing was composed" in str(refusal.value)
+
+    assert path.read_bytes() == before, "a refused replacement wrote something"
+    assert _rows(vault) == []
+    # And the honest spelling of "one list item, the whole replacement" is taken.
+    _apply_entry(vault, path, entry, replacement="- A")
+    assert path.read_text(encoding="utf-8") == "- A\n- another\n"
+
+
 def test_a_fingerprint_mismatch_is_a_conflict_that_writes_nothing(
     tmp_path: Path,
 ) -> None:

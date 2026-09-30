@@ -51,6 +51,7 @@ import pytest
 from ciao import control_plane as cp
 from ciao import memory_receipts as mr
 from ciao import note_edit_proposals as nep
+from ciao import note_entries as ne
 from ciao import note_verification as nv
 
 NOTE = "People/Sofia.md"
@@ -993,6 +994,81 @@ def test_an_entry_verdict_that_needs_a_person_files_one_entry_proposal(
     assert note.read_text(encoding="utf-8") == ENTRY_PLAIN, "nothing was written"
     assert f"[{nep.KIND} " in _queue(vault)
     assert _sidecars(vault) == [f"{body['proposal']['id']}.json"]
+
+
+def test_an_entry_verdict_whose_filing_fails_gives_the_entry_its_question_back(
+    tmp_path: Path,
+) -> None:
+    """A verdict nobody was asked about must not sit on its cooldown for a month.
+
+    The check is recorded by the service *before* the proposal that asks a person
+    about it is filed, so a filing that fails leaves that check settled against a
+    question that does not exist: nothing is in the queue, the entry is not
+    planned again for thirty days, and nothing ever re-files it. The verdict is
+    kept — the entry genuinely was judged — but the cooldown is released, so the
+    next pass asks again and files the proposal this time.
+
+    Both ways of "not filed" are covered: a filing that raises, and a filing that
+    leaves a sidecar with no queue row (nothing is asking the owner either).
+    """
+    import asyncio
+
+    from ciao import entry_verification as ev
+
+    install, root, note, entry = _entry_install(tmp_path)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+    name = _payload(root, _entry_verdict(note, entry, outcome=nv.RETIRE))
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise nep.NoteEditRefused("the proposal queue is read-only")
+
+    monkey = nep.file_note_edit
+    nep.file_note_edit = refuse  # type: ignore[assignment]
+    try:
+        data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+    finally:
+        nep.file_note_edit = monkey  # type: ignore[assignment]
+
+    assert data["status"] == nv.NEEDS_REVIEW
+    assert data["proposal"] is None
+    assert "could not be filed" in data["proposal_error"]
+    assert _queue(vault).count(f"[{nep.KIND} ") == 0
+    row = ev.read_entry_checks(vault)[entry.identity]
+    assert row.outcome == nv.RETIRE, "the verdict stands"
+    assert row.retry_after == row.checked_at, "but it no longer holds the entry off"
+    assert ev.should_check_entry(
+        vault, entry.identity, entry.fingerprint, today=date.today()
+    ), "the next pass must ask again and re-file it"
+
+    # The other way of asking nobody: the record is on file but no queue row came
+    # back, so there is nothing in the queue for an owner to decide. Same release.
+    second_root = tmp_path / "ws-again"
+    other_install, other_root, other_note = _install(
+        second_root, text=ENTRY_PLAIN
+    )
+    other_vault = other_install.workspace_vault_root("personal")
+    other_entry = ne.parse_note_entries(
+        ENTRY_PLAIN, note_path=ENTRY_NOTE, workspace="personal"
+    ).entries[0]
+    queued = nep._queued_row_id
+    nep._queued_row_id = lambda *args, **kwargs: ""  # type: ignore[assignment]
+    try:
+        again = _verify(
+            _plane(other_install),
+            other_root,
+            _entry_verdict(other_note, other_entry, outcome=nv.RETIRE),
+        )
+    finally:
+        nep._queued_row_id = queued  # type: ignore[assignment]
+
+    assert again["proposal"]["queued"] is False
+    assert again["check"]["proposal_id"] == "", (
+        "no queue row means nothing is pinned to a decision nobody can see"
+    )
+    assert ev.should_check_entry(
+        other_vault, other_entry.identity, other_entry.fingerprint, today=date.today()
+    )
 
 
 def test_an_entry_update_files_a_replace_entry_proposal(tmp_path: Path) -> None:
