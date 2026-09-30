@@ -419,11 +419,11 @@ def apply(
         return payload
 
     try:
-        source_rel = str(source.relative_to(install_root))
+        source_rel = source.relative_to(install_root).as_posix()
     except ValueError:
         source_rel = None
     try:
-        dest_rel = str(destination.relative_to(install_root))
+        dest_rel = destination.relative_to(install_root).as_posix()
     except ValueError:
         dest_rel = None
 

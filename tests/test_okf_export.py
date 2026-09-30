@@ -129,7 +129,7 @@ def test_index_groups_by_type_with_relative_links(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     entries = [
         e for e in scan_vault(vault)
-        if str(e.path).startswith("memory-vault/work/")
+        if e.path_key.startswith("memory-vault/work/")
     ]
 
     text = format_bundle_index(entries, "work")

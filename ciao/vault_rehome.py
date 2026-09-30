@@ -1346,10 +1346,10 @@ def _per_root_index(
             continue
         workspace = parts[0]
         inside = Path(*parts[2:])                      # People/Mo.md
-        idx[str(full.with_suffix(""))].append(full)     # personal/memory-vault/People/Mo
-        idx[f"{workspace}/{inside.with_suffix('')}"].append(full)   # personal/People/Mo
+        idx[full.with_suffix("").as_posix()].append(full)     # personal/memory-vault/People/Mo
+        idx[f"{workspace}/{inside.with_suffix('').as_posix()}"].append(full)   # personal/People/Mo
         if workspace == referring_root:
-            idx[str(inside.with_suffix(""))].append(full)            # People/Mo
+            idx[inside.with_suffix("").as_posix()].append(full)            # People/Mo
             idx[full.stem].append(full)                              # Mo
     return idx
 

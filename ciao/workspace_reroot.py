@@ -610,7 +610,7 @@ def apply(
             stashed.append(
                 {
                     "source": relative,
-                    "backup": str(target.relative_to(runtime_root)),
+                    "backup": target.relative_to(runtime_root).as_posix(),
                     "tracked": tracked,
                 }
             )
@@ -951,7 +951,7 @@ def _walk_entries(base: Path) -> set[str]:
     for current, dirs, files in os.walk(base, followlinks=False):
         prefix = Path(current).relative_to(base)
         for name in [*dirs, *files]:
-            entries.add(str(prefix / name))
+            entries.add((prefix / name).as_posix())
     return entries
 
 
@@ -988,7 +988,7 @@ def _fingerprint_tree(base: Path) -> dict[str, dict[str, Any]]:
     for current, dirs, files in os.walk(base, followlinks=False):
         prefix = Path(current).relative_to(base)
         for name in [*dirs, *files]:
-            records[str(prefix / name)] = _entry_fingerprint(Path(current) / name)
+            records[(prefix / name).as_posix()] = _entry_fingerprint(Path(current) / name)
     return records
 
 
@@ -1443,7 +1443,7 @@ def write_guide_split(
             stashed.append(
                 {
                     "source": f"{destination}/{_QUEUE_RELATIVE}",
-                    "backup": str(target.relative_to(runtime_root)),
+                    "backup": target.relative_to(runtime_root).as_posix(),
                 }
             )
         written = append_proposals(

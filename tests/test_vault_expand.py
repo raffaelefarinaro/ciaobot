@@ -20,7 +20,7 @@ the full-note read the rule exists to prevent.
 
 from __future__ import annotations
 
-import os
+import posixpath
 import sqlite3
 from pathlib import Path
 
@@ -76,7 +76,7 @@ def _indexed(base: Path, *vaults: Path) -> sqlite3.Connection:
 
 
 def _key(workspace: str = "personal") -> str:
-    return os.path.join(workspace, "memory-vault", "projects", "Northwind.md")
+    return posixpath.join(workspace, "memory-vault", "projects", "Northwind.md")
 
 
 def _expand(conn: sqlite3.Connection, base: Path, vault: Path, key: str, **kw):
@@ -190,7 +190,7 @@ def test_expansion_under_the_title_does_not_swallow_a_later_section(
         encoding="utf-8",
     )
     conn = _indexed(base, vault)
-    key = os.path.join("personal", "memory-vault", "Lead.md")
+    key = posixpath.join("personal", "memory-vault", "Lead.md")
     result = _expand(conn, base, vault, key)
     assert result is not None
     body = _text(result)
@@ -268,7 +268,7 @@ def test_expansion_refuses_a_search_opted_out_note(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     conn = _indexed(base, vault)
-    key = os.path.join("personal", "memory-vault", "projects", "Private.md")
+    key = posixpath.join("personal", "memory-vault", "projects", "Private.md")
     assert _expand(conn, base, vault, key) is None
 
 
@@ -290,7 +290,7 @@ def test_expansion_refuses_a_transcript(tmp_path: Path) -> None:
     fts_search.index_vault(conn, vault, path_base=base)
     fts_search.index_logs(conn, vault, logs_root=logs, path_base=base)
     assert fts_search.search_logs(conn, QUERY), "the transcript must be indexed"
-    key = os.path.join("personal", "memory-vault", "Logs", "2026-06-01.md")
+    key = posixpath.join("personal", "memory-vault", "Logs", "2026-06-01.md")
     assert (vault.parent.parent / key).is_file(), "the transcript is inside the vault"
     assert _expand(conn, base, vault, key) is None
 
@@ -306,7 +306,7 @@ def test_expansion_refuses_a_symlink_out_of_the_vault(tmp_path: Path) -> None:
     link = vault / "projects" / "Linked.md"
     link.symlink_to(outside / "Secrets.md")
     conn = _indexed(base, vault)
-    key = os.path.join("personal", "memory-vault", "projects", "Linked.md")
+    key = posixpath.join("personal", "memory-vault", "projects", "Linked.md")
     assert _expand(conn, base, vault, key) is None
 
 
@@ -342,7 +342,7 @@ def test_expansion_is_bounded_in_windows_lines_and_characters(
     )
     (vault / "Big.md").write_text(f"# Big\n\n{blocks}\n", encoding="utf-8")
     conn = _indexed(base, vault)
-    key = os.path.join("personal", "memory-vault", "Big.md")
+    key = posixpath.join("personal", "memory-vault", "Big.md")
     result = _expand(conn, base, vault, key, query="retainer")
     assert result is not None
     assert 0 < len(result["sections"]) <= fts_search.EXPAND_MAX_WINDOWS
@@ -398,7 +398,7 @@ def _onboarding(tmp_path: Path) -> tuple[Path, Path, str]:
     vault = base / "personal" / "memory-vault"
     (vault / "projects").mkdir(parents=True, exist_ok=True)
     (vault / "projects" / "Onboarding.md").write_text(ONBOARDING, encoding="utf-8")
-    return base, vault, os.path.join(
+    return base, vault, posixpath.join(
         "personal", "memory-vault", "projects", "Onboarding.md"
     )
 

@@ -196,7 +196,7 @@ def _path_for(root: Path, name: str, *, prefer_custom: bool) -> str:
 
 def _relative_or_absolute(path: Path, root: Path) -> str:
     try:
-        return str(path.relative_to(root))
+        return path.relative_to(root).as_posix()
     except ValueError:
         return str(path)
 
