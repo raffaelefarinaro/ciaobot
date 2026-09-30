@@ -537,6 +537,56 @@ def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
     assert "PWA_AUTH_REQUIRED=true" not in env_lines
 
 
+def _setup_cli_args(tmp_path: Path) -> list[str]:
+    return [
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--auth-token",
+        "test-token",
+        "--no-auth",
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+    ]
+
+
+def test_setup_exits_nonzero_and_warns_when_memory_regions_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The memory step never blocks skill sync, but setup must say it failed
+    and exit non-zero instead of reporting success (#790)."""
+    workspace = tmp_path / "workspace"
+
+    def _boom(*a, **k):
+        raise RuntimeError("guide unwritable")
+
+    monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom)
+    rc = cli.main(_setup_cli_args(tmp_path))
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "memory regions not set up for" in err
+    assert "guide unwritable" in err
+    # Skills were still synced before the failure was reported. A fresh setup
+    # scaffolds assets per agent root, so that is `workspace/personal`.
+    skills = workspace / "personal" / ".claude" / "skills"
+    assert skills.is_dir()
+    assert any(skills.iterdir())
+
+
+def test_setup_exits_zero_without_warning_on_the_normal_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    rc = cli.main(_setup_cli_args(tmp_path))
+
+    assert rc == 0
+    assert "memory regions not set up" not in capsys.readouterr().err
+
+
 def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

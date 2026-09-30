@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from ciao import sync_skills
 
@@ -625,3 +628,67 @@ def test_subagent_shadows_stock_agent(tmp_path: Path) -> None:
     assert link.is_symlink()
     assert link.resolve() == custom.resolve()
     assert custom.read_text(encoding="utf-8") == "# Custom memory\n"
+
+
+def _boom_guide_unwritable(*a, **k):
+    raise RuntimeError("guide unwritable")
+
+
+def test_sync_reports_memory_region_failure_and_keeps_syncing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """A broken memory step must not raise, and must be reported on the
+    result instead of only in the log (#790)."""
+    monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom_guide_unwritable)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with caplog.at_level(logging.ERROR):
+        result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert result.memory_error == "RuntimeError: guide unwritable"
+    # Skill sync still ran to completion.
+    assert result.stock_installed > 0
+    assert (workspace / ".claude" / "skills").is_dir()
+    # Startup triage counts error-log content, so the record must stay.
+    assert "memory region ensure/migrate failed" in caplog.text
+
+
+def test_sync_memory_error_is_none_on_the_normal_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert result.memory_error is None
+
+
+def test_main_returns_nonzero_and_warns_when_memory_step_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom_guide_unwritable)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    rc = sync_skills.main(["--workspace", str(workspace)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "memory regions not set up" in err
+    assert "guide unwritable" in err
+
+
+def test_main_returns_zero_on_the_normal_path(
+    capsys: pytest.CaptureFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    rc = sync_skills.main(["--workspace", str(workspace)])
+
+    assert rc == 0
+    assert "Warning" not in capsys.readouterr().err

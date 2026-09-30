@@ -774,6 +774,7 @@ def setup_workspace(
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
     confirm_repoint: bool = False,
+    sync_failures: list[str] | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1010,13 +1011,19 @@ def setup_workspace(
         # wrong — it just had not synced yet. Local only: no upstream refresh, so
         # setup still does not touch the network.
         try:
-            sync_workspace_skills(
+            sync_result = sync_workspace_skills(
                 asset_root,
                 refresh_upstream=False,
                 workspace_name=_name or None,
             )
         except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
             print(f"skill sync failed for {asset_root}: {exc}", file=sys.stderr)
+        else:
+            if sync_result.memory_error and sync_failures is not None:
+                sync_failures.append(
+                    f"memory regions not set up for {asset_root}: "
+                    f"{sync_result.memory_error}"
+                )
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(
@@ -1275,6 +1282,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
     except OSError:
         had_token = False
+    sync_failures: list[str] = []
     try:
         written = setup_workspace(
             args.workspace,
@@ -1286,12 +1294,20 @@ def _setup_command(args: argparse.Namespace) -> int:
             launch_agents_dir=args.launch_agents_dir,
             app_dir=args.app_dir,
             confirm_repoint=args.yes,
+            sync_failures=sync_failures,
         )
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     for path in written:
         print(path)
+    for failure in sync_failures:
+        print(
+            f"Warning: {failure}. Skills were synced; fix the error and "
+            "re-run `ciao setup`.",
+            file=sys.stderr,
+        )
+    setup_rc = 1 if sync_failures else 0
     if auth_required and not args.auth_token and not had_token:
         print(
             "\nPassword protection is on. No --auth-token was given, so a random "
@@ -1307,7 +1323,7 @@ def _setup_command(args: argparse.Namespace) -> int:
     )
     plists = [server_plist] if server_plist is not None and server_plist.is_file() else []
     if args.load_launchd:
-        rc = 0
+        rc = setup_rc
         for plist in plists:
             # The unload is a probe: during an install the agent is normally
             # not loaded, and launchctl says so on stderr ("Unload failed: 5:
@@ -1336,7 +1352,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             "`ciao linux-service` to render a systemd unit."
         )
     _print_setup_summary(root, _pwa_port_from_env(root, args.port))
-    return 0
+    return setup_rc
 
 
 def _setup_url_command(args: argparse.Namespace) -> int:

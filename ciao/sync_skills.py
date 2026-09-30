@@ -46,6 +46,10 @@ class SyncSkillsResult:
     stock_commands_refreshed: int = 0
     stock_commands_customised: int = 0
     stock_commands_pruned: int = 0
+    # Set when the memory-region ensure/migrate step raised. Skill sync
+    # still ran to completion; `ciao setup` and `ciao sync-skills` report
+    # it and exit non-zero.
+    memory_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1209,6 +1213,7 @@ def sync_workspace_skills(
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
     _ensure_workspace_guide(root)
+    memory_error: str | None = None
     try:
         from ciao import job_runs
         from ciao.memory_tool import (
@@ -1242,7 +1247,8 @@ def sync_workspace_skills(
                 guide,
                 ", ".join(restamped),
             )
-    except Exception:  # noqa: BLE001 — never block skill sync on memory regions
+    except Exception as exc:  # noqa: BLE001 — never block skill sync on memory regions
+        memory_error = f"{type(exc).__name__}: {exc}"
         logger.exception(
             "memory region ensure/migrate failed for %s; continuing skill sync",
             root,
@@ -1398,6 +1404,7 @@ def sync_workspace_skills(
         opencode_commands_pruned=opencode_commands_pruned,
         opencode_mcps_installed=opencode_mcps_installed,
         opencode_mcps_pruned=opencode_mcps_pruned,
+        memory_error=memory_error,
     )
 
 
@@ -1416,7 +1423,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--verbose", action="store_true", help="Accepted for script compatibility.")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    sync_workspace_skills(args.workspace)
+    result = sync_workspace_skills(args.workspace)
+    if result.memory_error:
+        print(
+            f"Warning: memory regions not set up for "
+            f"{Path(args.workspace).expanduser().resolve()}: {result.memory_error}. "
+            "Skills were synced; fix the error and re-run `ciao sync-skills`.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
