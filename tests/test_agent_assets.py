@@ -8,6 +8,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao.os_support.links import is_link
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
     create_command_endpoint,
@@ -21,6 +22,7 @@ from ciao.web.agent_assets import (
     workspace_health_endpoint,
     workspace_health_fix_endpoint,
 )
+from tests.test_sync_skills import _dangling_dir_link
 
 
 TEST_WORKSPACE = "personal"
@@ -125,7 +127,7 @@ def test_create_subagent_writes_canonical_file_vault_mirror_and_claude_link(tmp_
     link = tmp_path / ".claude" / "agents" / "doc-helper.md"
     assert target.read_text(encoding="utf-8").startswith("---\nname: doc-helper\n")
     assert "canonical_path: subagents/doc-helper.md" in mirror.read_text(encoding="utf-8")
-    assert link.is_symlink()
+    assert is_link(link)
     assert link.resolve() == target.resolve()
 
 
@@ -188,7 +190,7 @@ def test_create_command_writes_canonical_file_vault_mirror_and_claude_link(tmp_p
     assert "description: Summarize a decision into the vault." in text
     assert "argument-hint: <decision notes>" in text
     assert "canonical_path: commands/summarize-decision.md" in mirror.read_text(encoding="utf-8")
-    assert link.is_symlink()
+    assert is_link(link)
     assert link.resolve() == target.resolve()
 
 
@@ -367,7 +369,7 @@ def test_workspace_health_fix_applies_the_suggested_remedies(tmp_path: Path) -> 
     # The remedies were applied...
     assert (tmp_path / "AGENTS.md").is_file()
     assert (tmp_path / "memory-vault" / "MEMORY.md").is_file()
-    assert (tmp_path / ".claude" / "agents" / "orphan.md").is_symlink()
+    assert is_link(tmp_path / ".claude" / "agents" / "orphan.md")
     # ...and the endpoint returns the fresh (now clean) report.
     assert after["status"] == "ok"
     assert not any(c["status"] != "ok" for c in after["checks"])
@@ -379,7 +381,7 @@ def test_workspace_health_ignores_broken_agents_skills_links(tmp_path: Path) -> 
     error with a "Run sync-skills" remedy sync cannot honor."""
     agents_skills = tmp_path / ".agents" / "skills"
     agents_skills.mkdir(parents=True)
-    (agents_skills / "stale").symlink_to("../../skills/gone")
+    _dangling_dir_link(tmp_path / "skills" / "gone", agents_skills / "stale", relative_to=agents_skills)
 
     data = workspace_health(_config(tmp_path))
 
@@ -391,7 +393,7 @@ def test_workspace_health_ignores_broken_agents_skills_links(tmp_path: Path) -> 
 def test_workspace_health_still_reports_broken_claude_skill_links(tmp_path: Path) -> None:
     claude_skills = tmp_path / ".claude" / "skills"
     claude_skills.mkdir(parents=True)
-    (claude_skills / "stale").symlink_to("../../skills/gone")
+    _dangling_dir_link(tmp_path / "skills" / "gone", claude_skills / "stale", relative_to=claude_skills)
 
     data = workspace_health(_config(tmp_path))
 

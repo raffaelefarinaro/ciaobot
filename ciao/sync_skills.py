@@ -14,7 +14,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
-from ciao.os_support.links import is_link, link_dir, link_file, link_target, remove_link
+from ciao.os_support.links import (
+    is_link,
+    link_dir,
+    link_file,
+    link_source,
+    link_target,
+    points_to,
+    remove_link,
+)
 from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
@@ -159,12 +167,8 @@ def _is_custom_skill_link(path: Path, workspace: Path) -> bool:
 
 def _ensure_symlink(source: Path, link: Path, *, relative_to: Path | None = None) -> bool:
     source = source.resolve()
-    if link.exists():
-        try:
-            if link.resolve() == source:
-                return True
-        except OSError:
-            pass
+    if link.exists() and points_to(link, source):
+        return True
     if is_link(link):
         remove_link(link)
     elif link.exists():
@@ -992,7 +996,7 @@ def _canonical_agent_sources(workspace: Path) -> list[Path]:
         canonical = False
         if is_link(source):
             try:
-                source.resolve().relative_to((workspace / "subagents").resolve())
+                link_source(source).relative_to((workspace / "subagents").resolve())
                 canonical = True
             except (OSError, ValueError):
                 pass
