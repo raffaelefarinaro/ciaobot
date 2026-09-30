@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from ciao.os_support import private
+from ciao.os_support.files import open_fd
 from ciao.os_support.private import (
     carry_mode,
     is_private,
@@ -25,6 +26,47 @@ from ciao.os_support.private import (
     mkstemp_private,
     open_private,
 )
+
+
+def _open_private_new(folder: Path) -> tuple[int, Path]:
+    path = folder / "created"
+    return open_private(path, os.O_WRONLY | os.O_TRUNC), path
+
+
+def _open_fd_no_follow(folder: Path) -> tuple[int, Path]:
+    path = folder / "created"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    return open_fd(path, flags, 0o600, follow_symlinks=False), path
+
+
+def _mkstemp(folder: Path) -> tuple[int, Path]:
+    fd, name = mkstemp_private(dir=folder, prefix=".t.", suffix=".tmp")
+    return fd, Path(name)
+
+
+_CREATORS = [_open_private_new, _mkstemp, _open_fd_no_follow]
+
+
+@pytest.mark.parametrize("create", _CREATORS)
+def test_every_creator_stores_bytes_exactly(tmp_path: Path, create) -> None:  # type: ignore[no-untyped-def]
+    """No descriptor these return may be in text mode, which rewrites `\\n` as `\\r\\n`."""
+    fd, path = create(tmp_path)
+    with os.fdopen(fd, "wb") as out:
+        out.write(b"a\nb")
+    with open(path, "rb") as check:
+        assert check.read() == b"a\nb"
+
+
+@pytest.mark.parametrize("create", _CREATORS)
+def test_every_creator_stores_text_exactly_with_newline_unset(
+    tmp_path: Path, create
+) -> None:  # type: ignore[no-untyped-def]
+    """The call sites wrap the descriptor as text; `newline=""` must mean no rewriting."""
+    fd, path = create(tmp_path)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as out:
+        out.write("a\nb\r\nc")
+    with open(path, "rb") as check:
+        assert check.read() == b"a\nb\r\nc"
 
 
 def test_a_fresh_file_is_not_private_until_it_is_made_so(tmp_path: Path) -> None:

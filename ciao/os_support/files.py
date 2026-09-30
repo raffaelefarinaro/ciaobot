@@ -159,7 +159,11 @@ if sys.platform == "win32":
                     raise IsADirectoryError(errno.EISDIR, "is a directory", name)
                 if truncate_after_check and not _SetEndOfFile(handle):
                     raise _error(ctypes.get_last_error(), name)
-            return msvcrt.open_osfhandle(handle, flags & (os.O_APPEND | os.O_RDONLY))
+            # Binary said explicitly, not left to the CRT's default mode: a
+            # text-mode descriptor rewrites `\n` as `\r\n` (see the docstring).
+            return msvcrt.open_osfhandle(
+                handle, (flags & (os.O_APPEND | os.O_RDONLY)) | os.O_BINARY
+            )
         except BaseException:
             _CloseHandle(handle)
             raise
