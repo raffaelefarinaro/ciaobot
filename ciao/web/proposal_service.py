@@ -713,6 +713,22 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     }
                     for item in proposal.sources
                 ],
+                # Which learnings this finding was derived from, one entry per
+                # finding, and the state of each. Read-only here: the settlement
+                # that moves them is the accept path and the resolution, never
+                # the review surface.
+                "origins": [
+                    {
+                        "workspace": item.workspace,
+                        "learning_id": item.learning_id,
+                        "source_revision": item.source_revision,
+                        "finding": item.finding,
+                        "summary": item.summary,
+                        "state": item.state,
+                        "verification": item.verification,
+                    }
+                    for item in proposal.origins
+                ],
                 "lifecycle": proposal.lifecycle,
                 # The server's own record of which chat is implementing this, and
                 # the only source of truth for it. The browser used to keep the
