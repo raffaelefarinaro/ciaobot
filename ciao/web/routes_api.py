@@ -8501,13 +8501,22 @@ async def start_update_task(request: Request) -> JSONResponse:
     """Start this task's chat, or hand back the one its last start created.
 
     Idempotent per ``(task, revision)``, and the reply says which happened:
-    ``resumed`` true means a chat already existed and nothing was sent into it,
-    so a double click, a second tab, a retry after a dropped response and a
-    restart all land in the same chat. A refused task — unknown id, one this
-    engine version cannot support, no host workspace, no chat manager — is 409,
-    never 500; a chat that exists but whose turn could not be dispatched is 500
-    *with* the ``chat_id``, because that is the one case a retry must not turn
-    into a second chat.
+    ``resumed`` false means this call created the chat, and true means a live one
+    already existed and nothing was created — so a double click, a second tab, a
+    retry after a dropped response and a restart all land in the same chat. A
+    live chat is not the same as a dispatched prompt, and the record is what says
+    which one this is: a ``failed`` attempt is retried by sending the packaged
+    prompt into that same chat (still ``resumed``, because nothing was minted),
+    and a ``dismissed`` one is reopened in place — the chat is kept, the record
+    is written ``in_progress``, and nothing is re-sent, because an operator
+    pressing Start on a task they declined is a decision to un-decline it, not
+    to run the task a second time.
+
+    A refused task — unknown id, one this engine version cannot support, no host
+    workspace, no chat manager — is 409, never 500; a chat that exists but whose
+    turn could not be dispatched is 500 *with* the ``chat_id``, because that is
+    the one case a retry must not turn into a second chat, and the retry sends
+    the prompt into it.
 
     The prompt is the packaged one for this revision, read on the server. There
     is no request field for prompt text and there will not be one.

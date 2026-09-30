@@ -34,6 +34,17 @@ chat creates anything, which is also what makes a deleted chat recoverable —
 the record still names it, the chat is gone, so a fresh one is created and the
 record is re-stamped.
 
+A live chat is not the same as a *dispatched* prompt, so the record's lifecycle
+decides what a resume does with it. A ``failed`` attempt names a chat the turn
+never reached: the next start sends the prompt into that same chat, under the
+same lock, and puts the record back to ``in_progress`` — no second chat, and
+``resumed: true`` only ever paired with a prompt that actually went out. A
+``dismissed`` record is an operator decision that a start explicitly reverses:
+the same chat is kept and the record is written ``in_progress``, but nothing is
+re-sent, because the chat a dismissal kept is a chat the prompt has usually
+already been sent to and running twice is the outcome this module exists to
+prevent. Every other lifecycle resumes as it is: nothing created, nothing sent.
+
 Why a revision change cannot resume
 ----------------------------------
 A record is keyed by ``"<id>@<revision>"`` and read at the revision the catalog
@@ -47,13 +58,23 @@ a revision 1 chat.
 
 Ordering, and why it is that way
 --------------------------------
-The record is written *before* the turn is dispatched, and the dispatch happens
+The record is written *before* the turn is dispatched — as ``failed``, which is
+the honest pre-dispatch value, not as ``in_progress`` — and the dispatch happens
 while the lock is still held. So a process that dies between minting the chat
-and writing the record cannot orphan it (there is no such window), and a
-dispatch that fails leaves a record naming a chat a retry gets back instead of a
-second chat — the same order ``proposal_service.accept_skill_proposal`` uses for
-the same reason. ``start_stream`` creates an asyncio task, so this function is
-called from the event loop (see the route) rather than from a worker thread.
+and writing the record cannot orphan it (there is no such window), and the one
+that dies after the write leaves a record that says the prompt was never sent,
+which the next start can act on. ``in_progress`` is written only once
+``start_stream`` has returned, so a lifecycle in the file means what it says.
+
+That leaves one window it cannot close: a process that dies between
+``start_stream`` returning and the ``in_progress`` write leaves a ``failed``
+record for a turn that may already be running, and the next start sends the
+prompt again. The trade is deliberate — a chat with no record at all is an
+orphan nothing points at, whereas a duplicate dispatch is a second turn an
+operator can see and close — and it is the same one
+``proposal_service.accept_skill_proposal`` makes for the same reason.
+``start_stream`` creates an asyncio task, so this function is called from the
+event loop (see the route) rather than from a worker thread.
 
 What this path does not do
 --------------------------
@@ -71,6 +92,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from ciao import update_tasks
@@ -112,9 +134,10 @@ class UpdateTaskLaunchError(RuntimeError):
 
     Distinct from the ``ValueError`` a refusal raises because this one is
     *recoverable and already half-done*: the chat exists and the record names
-    it, so the caller answers 500 with ``chat_id`` in the body and the operator
-    can open that chat, and the next start resumes it. Only the dispatch failed
-    (the model turn was never started), never the chat.
+    it as ``failed``, so the caller answers 500 with ``chat_id`` in the body and
+    the operator can open that chat, and the next start re-sends the prompt into
+    it. Only the dispatch failed (the model turn was never started), never the
+    chat, and never the record.
     """
 
     def __init__(self, message: str, *, chat_id: str) -> None:
@@ -192,10 +215,11 @@ def launch_task(
     """Start (or resume) the chat for one task, and return what it decided.
 
     ``resumed`` is the whole contract in one flag: false means this call created
-    the chat and dispatched the packaged prompt into it, true means the record
-    already named a live chat and this call only handed it back. Both are
-    successes, and a client that gets ``resumed: true`` must not claim to have
-    started anything.
+    the chat, and true means the record already named a live chat, so this call
+    created nothing — whether it dispatched the prompt into that chat (a
+    ``failed`` attempt being retried) or only handed the chat back (any other
+    resume). Both are successes, and a client that gets ``resumed: true`` must
+    not claim to have created anything; ``created`` is the same fact.
 
     Raises ``ValueError`` when the task is refused (unknown, unsupported by this
     engine, no host workspace, no chat manager) and
@@ -217,18 +241,19 @@ def launch_task(
     with update_tasks._record_lock(task, config, workspace) as (path, previous):
         live = _live_chat(pcm, previous)
         if previous is not None and live is not None:
-            # The resume path. Nothing is created, nothing is dispatched: the
-            # turn belongs to the attempt this record already describes, and
-            # sending the prompt twice would run the same task in one chat
-            # twice. The digest reported is the record's own, not the one this
-            # call just computed — a record that carries none says so rather
-            # than borrowing the current prompt's answer.
-            return _outcome(
+            # The record already names this chat, so nothing is created — but
+            # "a live chat" and "a dispatched prompt" are different facts, and
+            # only the second one is what the task asked for.
+            return _resumed(
                 task,
+                path,
+                previous,
                 live,
-                digest=previous.prompt_digest,
-                resumed=True,
-                state=previous,
+                pcm=pcm,
+                prompt=prompt,
+                digest=digest,
+                actor=actor,
+                now=now,
             )
         project_id = _general_project_id(pcm, workspace)
         chat = pcm.create_chat(
@@ -236,43 +261,31 @@ def launch_task(
             title=task.title,
             helper=update_task_helper(task, digest),
         )
-        in_progress = _attempt(
-            task,
-            chat.chat_id,
-            digest=digest,
-            actor=actor,
-            now=now,
-        )
         # Written before the dispatch, and inside the same lock: a crash
         # between here and the dispatch leaves a record naming this chat, so the
-        # next start resumes it rather than minting a second one.
-        update_tasks._write_record(path, in_progress)
-        try:
-            pcm.start_stream(chat.chat_id, prompt)
-        except Exception as exc:  # noqa: BLE001 — one failed dispatch is not a crash
-            logger.exception(
-                "Failed to start the update-task turn for %s@%s", task.id, task.revision
-            )
-            update_tasks._write_record(
-                path,
-                _attempt(
-                    task,
-                    chat.chat_id,
-                    digest=digest,
-                    actor=actor,
-                    now=now,
-                    lifecycle="failed",
-                ),
-            )
-            raise UpdateTaskLaunchError(
-                f"could not start the update-task chat: {exc}", chat_id=chat.chat_id
-            ) from exc
+        # next start sends the prompt into it rather than minting a second one —
+        # and it is written ``failed`` rather than ``in_progress`` because that
+        # is what it can honestly claim until ``start_stream`` comes back.
+        update_tasks._write_record(
+            path,
+            _attempt(
+                task,
+                chat.chat_id,
+                digest=digest,
+                actor=actor,
+                now=now,
+                lifecycle="failed",
+            ),
+        )
+        _dispatch(pcm, task, chat.chat_id, prompt)
+        started = _attempt(task, chat.chat_id, digest=digest, actor=actor, now=now)
+        update_tasks._write_record(path, started)
     return _outcome(
         task,
         chat,
         digest=digest,
         resumed=False,
-        state=in_progress,
+        state=started,
         project_id=project_id,
     )
 
@@ -449,6 +462,81 @@ def _live_chat(pcm: Any, state: TaskState | None) -> Any | None:
     return chat
 
 
+def _resumed(
+    task: UpdateTask,
+    path: Path,
+    previous: TaskState,
+    chat: Any,
+    *,
+    pcm: Any,
+    prompt: str,
+    digest: str,
+    actor: str,
+    now: datetime | None,
+) -> dict[str, Any]:
+    """The record already names a live chat: hand it back, and keep it honest.
+
+    Three answers, because a live chat says nothing on its own about whether the
+    prompt ever reached it, and the record is the only thing here that does:
+
+    * **``failed``** — the attempt never dispatched, so the prompt goes into this
+      same chat now, under the lock, and the record becomes ``in_progress``. No
+      second chat, and the reply's ``resumed: true`` is backed by a prompt that
+      actually left. A retry that fails again is the same recoverable answer as
+      the first attempt, so the record stays ``failed`` and
+      :class:`UpdateTaskLaunchError` names the same chat.
+    * **``dismissed``** — an operator pressed Start on a task they had declined,
+      which is a reopen, so the record is written ``in_progress`` and the chat
+      kept. Nothing is dispatched: a dismissal carries the chat forward but not
+      whether the turn is still in there, and a chat that may already have run
+      the task must not be told to run it again. The rejected
+      ``ValueError`` alternative was available and was not taken — a 409 that
+      tells the operator to press Reopen, when Reopen already exists and does
+      less, turns an explicit decision into a detour.
+    * **anything else** — nothing is created and nothing is sent: the turn
+      belongs to the attempt this record already describes, and sending the
+      prompt twice would run the same task in one chat twice. The digest
+      reported is the record's own, not the one this call just computed, so a
+      record that carries none says so rather than borrowing the current
+      prompt's answer.
+
+    Both writes are of a record whose lifecycle this call has just changed, so
+    both report the digest that was written rather than the one that was found.
+    """
+    if previous.lifecycle == "failed":
+        _dispatch(pcm, task, chat.chat_id, prompt)
+        retried = _attempt(task, previous.chat_id, digest=digest, actor=actor, now=now)
+        update_tasks._write_record(path, retried)
+        return _outcome(task, chat, digest=digest, resumed=True, state=retried)
+    if previous.lifecycle == "dismissed":
+        reopened = _attempt(task, previous.chat_id, digest=digest, actor=actor, now=now)
+        update_tasks._write_record(path, reopened)
+        return _outcome(task, chat, digest=digest, resumed=True, state=reopened)
+    return _outcome(
+        task, chat, digest=previous.prompt_digest, resumed=True, state=previous
+    )
+
+
+def _dispatch(pcm: Any, task: UpdateTask, chat_id: str, prompt: str) -> None:
+    """Send the packaged prompt into a chat, and turn a failure into an answer.
+
+    The record is left as the caller wrote it — ``failed``, in both the create
+    path and the retry path — so a dispatch that raises leaves a record the next
+    start can act on, and the operator gets a chat id they can open and send into
+    by hand. One failed dispatch is not a crash: it is the recoverable half this
+    function exists to keep recoverable.
+    """
+    try:
+        pcm.start_stream(chat_id, prompt)
+    except Exception as exc:  # noqa: BLE001 — one failed dispatch is not a crash
+        logger.exception(
+            "Failed to start the update-task turn for %s@%s", task.id, task.revision
+        )
+        raise UpdateTaskLaunchError(
+            f"could not start the update-task chat: {exc}", chat_id=chat_id
+        ) from exc
+
+
 def _attempt(
     task: UpdateTask,
     chat_id: str,
@@ -471,7 +559,13 @@ def _attempt(
     Nothing is carried from the record this replaces. A dismissal keeps the chat
     it was in and a completion keeps the fingerprint of the attempt before it,
     but a *launch* is a new attempt: its fingerprint is this one's, its chat is
-    the one it just created, and its evidence says who started it.
+    the one it just created — or the one an earlier attempt created and a retry
+    is now sending the prompt into — and its evidence says who started it.
+
+    ``lifecycle`` is passed rather than inferred so the pre-dispatch write can
+    say ``failed``: the moment between minting a chat and its turn starting is a
+    moment the record has to have an honest word for, and ``failed`` is the word
+    that means "no prompt in this chat yet".
     """
     return TaskState(
         task_id=task.id,

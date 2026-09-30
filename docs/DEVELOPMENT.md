@@ -799,15 +799,36 @@ browser code:
   the previous revision's chat — an engine update never substitutes new
   instructions into a running chat.
 
+A live chat is not the same as a dispatched prompt, so the record's lifecycle
+decides what a resume does with one (`_resumed`):
+
+- `failed` — the turn never reached the chat, so the prompt is sent into **that
+  same chat** under the lock and the record goes back to `in_progress`. Still one
+  chat, still `resumed: true`, and now a prompt that actually left. A retry that
+  fails again leaves the record `failed`, so the next start tries again.
+- `dismissed` — an operator pressing Start on a task they declined is a reopen,
+  so the chat is kept and the record is written `in_progress`. Nothing is
+  dispatched: a dismissal carries the chat forward but not whether the turn is
+  still in there. (The 409 alternative — "reopen it first" — was available and
+  not taken; Reopen already exists and does strictly less.)
+- anything else — nothing created, nothing sent, and the digest reported is the
+  record's own rather than the one this call computed.
+
 Two ordering rules fall out of that, and both are load-bearing. The record is
-written **before** the turn is dispatched, so a process that dies between minting
-the chat and stamping the record cannot orphan it; a dispatch that raises raises
-`UpdateTaskLaunchError` (which carries the `chat_id`), marks the attempt
-`failed`, and the next start resumes that same chat instead of doing the work
-twice. And `start_stream` creates an asyncio task, so `launch_task` is called
-**on the event loop**, not through `asyncio.to_thread` like the vault-scanning
-routes — the same split `proposal_implement` documents for
-`accept_skill_proposal`.
+written **before** the turn is dispatched, and it is written `failed` — the
+honest pre-dispatch value — with `in_progress` written only once `start_stream`
+has returned. So a process that dies between minting the chat and stamping the
+record cannot orphan it, and one that dies after the stamp leaves a record the
+next start can act on: a dispatch that raises, or a crash, raises
+`UpdateTaskLaunchError` (which carries the `chat_id`) and the next start sends
+the prompt into that same chat instead of reporting a resume that never ran. The
+window this cannot close is the one between `start_stream` returning and the
+`in_progress` write, where a dead process leaves `failed` for a turn that may
+already be running; an orphan chat is worse than a visible duplicate turn, and
+`proposal_service.accept_skill_proposal` makes the same trade. And `start_stream`
+creates an asyncio task, so `launch_task` is called **on the event loop**, not
+through `asyncio.to_thread` like the vault-scanning routes — the same split
+`proposal_implement` documents for `accept_skill_proposal`.
 
 A launched chat carries `helper = {"kind": "update_task", "task_id", "revision",
 "scope", "prompt_digest"}`, validated fail-closed by
