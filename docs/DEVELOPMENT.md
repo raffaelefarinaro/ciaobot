@@ -210,6 +210,18 @@ not run `ciao desktop uninstall` yet.
   `mypy ciao` (natively win32), `pytest -n auto tests/` and `npm test`, never
   fails, and puts the four counts in the job summary. The full logs and the failing-test
   list are in its `windows-results` artifact. It becomes blocking at #696's C9.
+  The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
+  plus weekly, never on a PR) records where Claude Code and OpenCode keep their
+  files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
+  tools, runs one tiny real turn each in three workspaces whose paths contain a
+  space, a dot and an underscore, and uploads `agent-discovery-macos` and
+  `agent-discovery-windows` (new-file list, Claude project folder to workspace
+  map, tool locations, turn logs). The Claude turns need the `ANTHROPIC_API_KEY`
+  repository secret and are skipped without it; OpenCode uses the free
+  `opencode/big-pickle` model. Run it with `gh workflow run discover-agents.yml`
+  and fetch the result with `gh run download <run-id>`. Dispatch and the weekly
+  schedule only work once a release has put the file on `main`; before that, run
+  it from a throwaway branch with a temporary `push` trigger.
 - **Release prep:** from a clean checkout, run:
 
 ```bash
