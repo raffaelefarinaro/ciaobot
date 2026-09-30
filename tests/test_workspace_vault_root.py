@@ -227,9 +227,13 @@ def test_upgrade_notice_reports_a_vault_left_outside_the_vault_root(tmp_path: Pa
     notice = result["notices"][0]
     assert notice["type"] == "vault_outside_vault_root"
     assert notice["workspace"] == "research"
-    assert "Open a Ciaobot chat" in notice["remedy"]
-    assert str(legacy) in notice["remedy"]
-    assert str(tmp_path / "memory-vault" / "research") in notice["remedy"]
+    # The remedy is the managed command and nothing else. It used to describe
+    # moving the folder, backing it up and hand-editing the registry, which is
+    # the path the engine refuses; the paths themselves are the detail.
+    assert "ciao vault-relocate research --apply" in notice["remedy"]
+    assert "ciao vault-relocate research --undo" in notice["remedy"]
+    assert str(legacy) in notice["detail"]
+    assert str(tmp_path / "memory-vault" / "research") in notice["detail"]
 
 
 def test_upgrade_notices_stay_quiet_for_a_correctly_placed_vault(tmp_path: Path) -> None:
@@ -261,11 +265,21 @@ def test_upgrade_notice_includes_a_setup_created_whole_vault_root(
     result = audit_upgrade_notices(config)
 
     assert result["notices_found"] == 1
-    assert str(tmp_path) in result["notices"][0]["remedy"]
-    assert str(tmp_path / "research") in result["notices"][0]["remedy"]
-    assert "atomically update the active workspace registry" in (
-        result["notices"][0]["remedy"]
-    )
+    assert str(tmp_path) in result["notices"][0]["detail"]
+    assert str(tmp_path / "research") in result["notices"][0]["detail"]
+    # The remedy names the managed command, and it does NOT claim the command will
+    # move this one: `vault_relocate.plan` refuses when the vault root IS the
+    # install root, because nothing can tell vault content from install control
+    # files there, and its refusal says to relocate by hand. So the notice points
+    # at the command and warns that `--apply` refuses, and the preview is where the
+    # operator finds out which shape they are in. (The old remedy described the
+    # whole hand migration, including the hand edit of the registry, for exactly
+    # this shape.)
+    remedy = result["notices"][0]["remedy"]
+    assert "ciao vault-relocate research --apply" in remedy
+    assert "refuses rather" in remedy
+    assert "install root" in remedy
+    assert "hand-edit" not in remedy
 
 
 def test_upgrade_notice_includes_an_external_setup_vault(tmp_path: Path) -> None:
@@ -290,10 +304,11 @@ def test_upgrade_notice_includes_an_external_setup_vault(tmp_path: Path) -> None
     result = audit_upgrade_notices(config)
 
     assert result["notices_found"] == 1
-    assert str(external) in result["notices"][0]["remedy"]
+    assert str(external) in result["notices"][0]["detail"]
     assert str(workspace / "memory-vault" / "research") in (
-        result["notices"][0]["remedy"]
+        result["notices"][0]["detail"]
     )
+    assert "ciao vault-relocate research" in result["notices"][0]["remedy"]
 
 
 def test_upgrade_notices_tolerate_a_config_without_a_registry() -> None:

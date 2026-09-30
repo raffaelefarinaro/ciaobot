@@ -10,17 +10,28 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
+from ciao.migration_notices import reset_links_cache, resolve_links
 from ciao.web.routes_api import (
     dismiss_housekeeping_action,
     list_housekeeping,
     run_housekeeping_action,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_link_verdicts():
+    """The wikilink cache is process-wide, so a verdict must not leak between tests."""
+    reset_links_cache()
+    yield
+    reset_links_cache()
 
 
 class _Config(CiaoConfig):
@@ -253,3 +264,63 @@ def test_real_app_registers_housekeeping_routes() -> None:
         'Route("/api/housekeeping/{action_id}/dismiss", dismiss_housekeeping_action, methods=["POST"])'
         in app_source
     )
+
+
+def test_the_listing_starts_one_detached_link_scan_and_never_waits_on_it(
+    tmp_path: Path,
+) -> None:
+    """The wikilink verdict is established off the request path, or not at all.
+
+    The one notice this strip carries that needs a vault walk cannot run inside the
+    detector pass, so the route starts the scan and answers from whatever the last
+    one stored. The response therefore carries no card on a cold engine — the same
+    trade `_cached_update_hint` makes for the release lookup — and the scan is
+    tracked on app state so the next poll can pick the verdict up.
+    """
+    config = _config(tmp_path)
+    vault = config.vault_root / "personal"
+    vault.mkdir(parents=True)
+    (vault / "linked.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
+    _runtime(tmp_path)
+    _starred(tmp_path)
+    client = _client(config)
+    client.app.state.links_scan_task = None
+    started: list[str] = []
+
+    async def _record_scan(cfg: object, runtime: object, **kwargs: object) -> None:
+        started.append(str(runtime))
+
+    with patch("ciao.migration_notices.refresh_links", side_effect=_record_scan):
+        resp = client.get("/api/housekeeping")
+
+    assert resp.status_code == 200
+    ids = [a["id"] for a in resp.json()["actions"]]
+    assert "vault-unmigrated-links" not in ids, "no scan has run, so no card yet"
+    assert client.app.state.links_scan_task is not None
+    assert started == [str(_runtime(tmp_path))]
+
+    # Once a verdict exists the card is real, and it names the note the scan found.
+    resolve_links(config, _runtime(tmp_path))
+    resp = client.get("/api/housekeeping")
+    card = next(
+        a for a in resp.json()["actions"] if a["id"] == "vault-unmigrated-links"
+    )
+    assert "linked.md" in card["detail"]
+
+
+def test_a_poll_inside_the_window_starts_no_second_scan(tmp_path: Path) -> None:
+    """The strip is polled every 60s; the window is what stops that costing a walk."""
+    config = _config(tmp_path)
+    vault = config.vault_root / "personal"
+    vault.mkdir(parents=True)
+    (vault / "linked.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
+    _runtime(tmp_path)
+    _starred(tmp_path)
+    client = _client(config)
+    resolve_links(config, _runtime(tmp_path))
+
+    with patch("ciao.migration_notices.refresh_links") as scan:
+        for _ in range(3):
+            client.get("/api/housekeeping")
+
+    scan.assert_not_called()
