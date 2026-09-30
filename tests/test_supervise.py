@@ -13,11 +13,13 @@ import sys
 import textwrap
 import threading
 import time
+from itertools import count
 from pathlib import Path
 from typing import Callable
 
 import pytest
 
+import ciao.supervise as supervise_module
 from ciao.config import RESTART_EXIT_CODE
 from ciao.supervise import (
     BACKOFF_INITIAL_S,
@@ -102,7 +104,7 @@ def test_zero_exit_is_returned_without_relaunch(tmp_path: Path) -> None:
 
 
 def test_crash_loop_backs_off(tmp_path: Path) -> None:
-    """Past CRASH_LOOP_MAX_RESTARTS restarts inside the window each wait, doubling."""
+    """Past CRASH_LOOP_MAX_RESTARTS consecutive restart exits each wait, doubling."""
     slept, sleep = _recording_sleep()
 
     code = supervise(
@@ -117,9 +119,10 @@ def test_crash_loop_backs_off(tmp_path: Path) -> None:
 
 
 def test_restarts_outside_the_window_do_not_back_off(tmp_path: Path) -> None:
-    """The window slides, so restarts spread further apart than it are never capped."""
+    """A child that ran longer than the window did real work before asking to
+    restart, so its exit is not one link in a crash loop and the count starts over."""
     slept, sleep = _recording_sleep()
-    ticks = iter(float(index) * (CRASH_LOOP_WINDOW_S + 1) for index in range(16))
+    ticks = count(0.0, CRASH_LOOP_WINDOW_S + 1.0)
 
     code = supervise(
         child_argv=_counter_child(tmp_path, *([RESTART_EXIT_CODE] * 8), 0),
@@ -130,6 +133,31 @@ def test_restarts_outside_the_window_do_not_back_off(tmp_path: Path) -> None:
     assert code == 0
     assert _launches(tmp_path) == 9
     assert slept == []
+
+
+def test_backoff_keeps_growing_across_a_long_crash_loop(tmp_path: Path) -> None:
+    """The backoff counts consecutive restarts, not the ones inside a window, so
+    a loop that outlives the window still climbs to the cap instead of falling
+    back to no wait at all."""
+    now = [0.0]
+    slept: list[float] = []
+
+    def _clock() -> float:
+        return now[0]
+
+    def _sleep(delay: float) -> None:
+        slept.append(delay)
+        now[0] += delay
+
+    code = supervise(
+        child_argv=_counter_child(tmp_path, *([RESTART_EXIT_CODE] * 12), 0),
+        sleep=_sleep,
+        clock=_clock,
+    )
+
+    assert code == 0
+    assert _launches(tmp_path) == 13
+    assert slept == [2.0, 4.0, 8.0, 16.0, 32.0, BACKOFF_MAX_S, BACKOFF_MAX_S]
 
 
 def test_backoff_delay_is_capped() -> None:
@@ -190,9 +218,10 @@ def test_sigterm_is_forwarded_to_the_child(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
-def test_stop_during_restart_exit_does_not_relaunch(tmp_path: Path) -> None:
+def test_restart_code_after_stop_returns_zero(tmp_path: Path) -> None:
     """A child that asks for a restart while the stop is being forwarded is not
-    relaunched: the supervisor is on its way out."""
+    relaunched, and the stop wins over the restart code: a service manager
+    reading 75 would take the stop for a failed run."""
     counter, ready, got_term = tmp_path / "launches", tmp_path / "ready", tmp_path / "got-term"
     script = tmp_path / "child.py"
     script.write_text(
@@ -225,6 +254,38 @@ def test_stop_during_restart_exit_does_not_relaunch(tmp_path: Path) -> None:
     finally:
         poller.join(timeout=10)
 
-    assert code == 75
+    assert code == 0
     assert got_term.exists()
     assert _launches(tmp_path) == 1
+
+
+def test_a_child_is_killed_when_the_process_tree_cannot_be_tracked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job object can fail to open after the child is spawned, and a live but
+    untracked engine must not outlive the supervisor that failed to claim it."""
+    killed: list[bool] = []
+
+    class _UntrackedChild:
+        pid = 4321
+
+        def __init__(self, argv: list[str], **options: object) -> None:
+            self.argv = argv
+
+        def kill(self) -> None:
+            killed.append(True)
+
+        def wait(self) -> int:
+            return -9
+
+    class _UnclaimableTree:
+        def __init__(self, pid: int, *, dies_with_engine: bool = False) -> None:
+            raise OSError("no job object")
+
+    monkeypatch.setattr(supervise_module.subprocess, "Popen", _UntrackedChild)
+    monkeypatch.setattr(supervise_module, "ProcessTree", _UnclaimableTree)
+
+    with pytest.raises(OSError):
+        supervise(child_argv=["engine"])
+
+    assert killed == [True]
