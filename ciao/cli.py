@@ -3284,9 +3284,9 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             # workspace_root is a required config field, populated above from
             # the same value injected into config_source — no fallback.
             key_prefix = vault_key_prefix(vault, Path(config.workspace_root))
+            # Keys, prefix and rendered paths are all `/`-spelled on every OS
+            # (fts_search.KEY_SEPARATOR, Entry.path_key), so they compare as is.
             if hit_paths is not None and key_prefix != NO_MATCH_KEY_PREFIX:
-                normalized_hits = {hit.replace(os.sep, "/") for hit in hit_paths}
-                normalized_prefix = key_prefix.replace(os.sep, "/")
                 # A prefix that no hit carries means the log's keys were
                 # written against a different base (the audit invoked with
                 # another workspace root than the server's). That is missing
@@ -3295,15 +3295,10 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
                 # prefix (vault == workspace root) takes the same rule: every
                 # hit trivially carries it, so marking is skipped only when
                 # the log has no usable hits at all.
-                if any(
-                    hit.startswith(normalized_prefix) for hit in normalized_hits
-                ):
+                if any(hit.startswith(key_prefix) for hit in hit_paths):
                     for finding in report["stale_notes"]["stale_notes"]:
-                        rendered = str(finding["path"]).replace(os.sep, "/")
-                        rel = rendered.removeprefix(render_prefix + "/")
-                        finding["retrieved_recently"] = (
-                            normalized_prefix + rel
-                        ) in normalized_hits
+                        rel = str(finding["path"]).removeprefix(render_prefix + "/")
+                        finding["retrieved_recently"] = (key_prefix + rel) in hit_paths
         except Exception as exc:  # noqa: BLE001 — advisory section
             report["stale_notes"] = {
                 "stale_notes": [],
