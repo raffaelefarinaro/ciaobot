@@ -59,7 +59,7 @@ def test_no_alias_shadows_a_canonical_type() -> None:
 def test_canonical_type_maps_canonical_alias_and_unknown() -> None:
     assert canonical_type("project") == "project"
     assert canonical_type("  project  ") == "project"
-    assert canonical_type("doc") == "document"
+    assert canonical_type("discussion-prep") == "note"
     assert canonical_type("frobnicate") == ""
     assert canonical_type("") == ""
     assert canonical_type(None) == ""  # type: ignore[arg-type]
@@ -73,11 +73,11 @@ def test_canonical_type_passes_the_linter() -> None:
 
 
 def test_aliased_type_is_reported_with_its_target() -> None:
-    error = _lint("work/x.md", "---\ntype: doc\n---\n# X\n")
+    error = _lint("work/x.md", "---\ntype: discussion-prep\n---\n# X\n")
     assert error is not None
     assert error["kind"] == "unknown_type"
     # The target is named so the hygiene routine can apply it as a safe fix.
-    assert "document" in error["message"]
+    assert "note" in error["message"]
 
 
 def test_unknown_type_with_no_alias_is_reported_without_a_suggestion() -> None:
@@ -106,7 +106,7 @@ def test_reserved_filenames_stay_exempt_from_the_vocabulary() -> None:
 def _vault(tmp_path: Path) -> Path:
     vault = tmp_path / "memory-vault"
     _note(vault, "personal/People/Alba.md", "---\ntype: person\ntags: [family]\n---\n# Alba\n")
-    _note(vault, "personal/notes/a.md", "---\ntype: doc\ntags: [family, once]\n---\n# A\n")
+    _note(vault, "personal/notes/a.md", "---\ntype: discussion-prep\ntags: [family, once]\n---\n# A\n")
     _note(vault, "work/People/Aymen.md", "---\ntype: person\ntags: [customer]\n---\n# Aymen\n")
     _note(vault, "work/x.md", "---\ntype: frobnicate\n---\n# X\n")
     return vault
@@ -116,12 +116,12 @@ def test_report_separates_canonical_counts_from_drift(tmp_path: Path) -> None:
     report = vocabulary_report(scan_vault(_vault(tmp_path)))
 
     assert report["types"]["person"] == 2
-    assert "doc" not in report["types"]
+    assert "discussion-prep" not in report["types"]
 
-    assert report["type_drift"]["doc"]["suggested"] == "document"
+    assert report["type_drift"]["discussion-prep"]["suggested"] == "note"
     # Paths keep the vault-dir prefix `Entry.path` carries, so a reported path
     # is one the user can open directly from the repo root.
-    assert report["type_drift"]["doc"]["paths"] == ["memory-vault/personal/notes/a.md"]
+    assert report["type_drift"]["discussion-prep"]["paths"] == ["memory-vault/personal/notes/a.md"]
     # No canonical equivalent: reported, but with nothing to apply.
     assert report["type_drift"]["frobnicate"]["suggested"] == ""
 
@@ -139,7 +139,7 @@ def test_vocabulary_stratifies_tags_and_never_rejects_one(tmp_path: Path) -> Non
 
     assert "## Types (canonical" in body
     assert "## Types (drift" in body
-    assert "`doc` → `document`" in body
+    assert "`discussion-prep` → `note`" in body
     # A one-off tag is surfaced as a candidate, not an error.
     assert "Tags (candidates)" in body
     assert "`once`" in body
