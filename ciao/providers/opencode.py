@@ -101,8 +101,10 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
 })
 
 OPENCODE_V2_REQUIRED = (
-    "Ciaobot requires OpenCode 2.0.16 or newer 2.x. "
-    "Update OpenCode, then retry this chat."
+    "Ciaobot requires OpenCode 2.0.16 or newer 2.x. OpenCode 1 cannot be "
+    "upgraded in place: install OpenCode 2 (npm install -g @opencode/cli, "
+    "brew install anomalyco/tap/opencode-v2, or "
+    "curl -fsSL https://opencode.ai/v2/install | bash), then retry this chat."
 )
 
 # The catalog needs a throwaway `opencode serve` (~1-2s), and /api/models is
@@ -1526,8 +1528,8 @@ class OpencodeProvider(BaseSDKProvider):
         binary = resolve_opencode_binary(request.extra_env)
         if not binary:
             raise FileNotFoundError(
-                "opencode CLI not found. Install it, make sure it is on your login shell PATH, "
-                "or set CIAO_OPENCODE_BIN."
+                "opencode CLI not found. Install OpenCode 2 (npm install -g @opencode/cli), "
+                "make sure it is on your login shell PATH, or set CIAO_OPENCODE_BIN."
             )
 
         lock = _server_start_lock(self.workspace_root)

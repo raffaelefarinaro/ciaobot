@@ -61,9 +61,13 @@ or unidentifiable installs with an explicit upgrade message, and chat startup
 fails closed rather than probing retired V1 routes.
 
 ```bash
-npm install -g opencode-ai@latest   # or: brew install sst/tap/opencode
+npm install -g @opencode/cli        # works on Windows too
+# or: brew install anomalyco/tap/opencode-v2
+# or: curl -fsSL https://opencode.ai/v2/install | bash
 ciao auth opencode                  # opens `opencode auth login`
 ```
+
+The npm package `opencode-ai` and the `sst/tap` Homebrew tap are OpenCode 1 and do not work with Ciaobot, and `opencode upgrade` does not move a 1.x install to 2.x. If you installed OpenCode 1 that way, run `npm uninstall -g opencode-ai` first, because it also provides an `opencode` command.
 
 OpenCode is bring-your-own-provider: it authenticates against whichever model
 backends you connect, and Ciaobot lists enabled models from active providers
