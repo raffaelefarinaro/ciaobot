@@ -313,6 +313,15 @@ class MemoryProposal:
     # ``[idx=N]`` tag. Empty means the model cited nothing — which for a
     # region-bound fact is itself a reason to queue rather than auto-save.
     citations: tuple[int, ...] = ()
+    # The user-request identifier a ``/remember`` of a lesson carries when the
+    # sighting has no archived turn behind it. Rendered as its own
+    # ``_(request: …)_`` tail rather than folded into ``source_section``, because
+    # the two are different facts: one says where a transcript can be re-read,
+    # the other says a person asked for this while typing. Folding them would
+    # make a request id look like a chat id, which is the invented-citation
+    # failure this field exists to remove. Only the ``[learnings]`` accept reads
+    # it, and only to hand it to ``append_learning``.
+    request: str = ""
 
     def as_bullet(self) -> str:
         # Deliberately total: an unknown target is written through rather than
@@ -322,11 +331,16 @@ class MemoryProposal:
         # that closes its own slot: a `]` inside the payload would end the
         # destination head early, and a `)` inside the source would break the
         # `_(from: ...)_` tail so the whole bullet stops parsing — invisible
-        # to the review UI and to dedupe alike.
+        # to the review UI and to dedupe alike. The request tail has the same
+        # `)` hazard, so it is cleared the same way.
         payload = _one_line(self.payload).replace("]", "")
         source = _one_line(self.source_section).replace(")", "")
         head = f"[{target} {payload}]" if payload else f"[{target}]"
-        return f"- {head} {_one_line(self.text)}  _(from: {source})_"
+        bullet = f"- {head} {_one_line(self.text)}  _(from: {source})_"
+        if self.request.strip():
+            request = _one_line(self.request).replace(")", "")
+            bullet += f"  _(request: {request})_"
+        return bullet
 
 
 # ── Parsing ───────────────────────────────────────────────────────────────
@@ -1024,6 +1038,7 @@ def render_learning_append(
     *,
     workspace: str,
     source: str = "",
+    request: str = "",
     today: str = "",
 ) -> tuple[str, str]:
     """The file ``append_learning`` would write, and which operation that is.
@@ -1037,6 +1052,17 @@ def render_learning_append(
     replacement *before* the accept performs it. The write path goes through
     this same function, so a preview and the accept it precedes cannot
     disagree about what lands.
+
+    ``source`` and ``request`` are the two ways a sighting identifies where it
+    was seen, and they are not interchangeable. ``source`` is a chat or archive:
+    a stored transcript somebody can re-read. ``request`` is a user-request
+    identifier, for the ``/remember`` that has no archived turn behind it —
+    a lesson the user asked to be kept while they were typing it. The second
+    exists because the alternative was manufacturing an archive, and a
+    manufactured turn is a citation to a conversation that never happened.
+    A ``/remember`` inside an archived chat may carry both; the citation shows
+    the archive and the dedupe keys on the request, which is the narrower
+    identity.
 
     Five cases, and the section an entry sits in decides the first two:
 
@@ -1077,7 +1103,7 @@ def render_learning_append(
     here would be a way for the two to mint different identifiers for the same
     statement and disagree about what lands.
     """
-    observation = LearningObservation(source=source)
+    observation = LearningObservation(source=source, request=request)
     stamp = date.fromisoformat(today) if today else date.today()
     statement = _one_line(text)
     wanted = normalized_statement(statement)
@@ -1195,7 +1221,13 @@ def read_learnings(vault_root: Path) -> str:
     return LEARNINGS_STUB
 
 
-def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
+def append_learning(
+    vault_root: Path,
+    text: str,
+    *,
+    source: str = "",
+    request: str = "",
+) -> bool:
     """File one learning under the Active section of Workspace/Learnings.md.
 
     Writes through the canonical model: :mod:`ciao.learning_records` parses the
@@ -1220,6 +1252,12 @@ def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
 
     Public because accepting a ``[learnings]`` proposal from the review queue
     performs exactly this write.
+
+    ``request`` is the ``/remember`` provenance (see
+    :func:`render_learning_append`): a user-request identifier for a sighting
+    that has no archived turn behind it. It is passed straight into the
+    :class:`~ciao.learning_records.LearningObservation`, so the line renders a
+    ``req:`` citation rather than an invented chat id.
     """
     from ciao.memory_receipts import queue_lock, write_queue_atomically
 
@@ -1231,7 +1269,11 @@ def append_learning(vault_root: Path, text: str, *, source: str = "") -> bool:
             path.read_bytes().decode("utf-8") if path.exists() else LEARNINGS_STUB
         )
         updated, operation = render_learning_append(
-            existing, text, source=source, workspace=vault_root.name
+            existing,
+            text,
+            source=source,
+            request=request,
+            workspace=vault_root.name,
         )
         if operation == "none":
             return True
@@ -2073,8 +2115,9 @@ def list_proposals(
 
     Reuses the shared proposal-kind grammar so the CLI, the web layer, and the
     audit always agree on what a bullet is. Each row carries the raw ``kind``,
-    the bullet ``text``, the optional ``source`` tag, and the optional
-    ``target`` payload (a person name or doc path).
+    the bullet ``text``, the optional ``source`` tag, the optional ``target``
+    payload (a person name or doc path) and the optional ``request`` id a
+    ``/remember`` of a lesson carries.
     """
     from ciao.proposal_kinds import parse_bullet
 
@@ -2090,6 +2133,7 @@ def list_proposals(
                     "text": bullet.text,
                     "source": bullet.source,
                     "target": bullet.target,
+                    "request": bullet.request,
                 }
             )
     return rows

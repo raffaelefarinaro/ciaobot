@@ -70,11 +70,20 @@ _KIND_ALT = "|".join(re.escape(k) for k in KINDS)
 # a dash, whitespace, the bracketed kind, whitespace, then non-empty content.
 # An optional payload sits inside the brackets after the kind word and is
 # captured verbatim (paths and names are written by producers, never free
-# user prose). The trailing `_(from: …)_` source tag, when present, is
-# captured separately.
+# user prose). The trailing `_(from: …)_` source tag, when present, is captured
+# separately, and a `_(request: …)_` tag after it names the user request a
+# ``/remember`` of a lesson belongs to.
+#
+# The request group is second and optional, so a bullet written before it
+# existed parses unchanged and the source tag keeps its group number. It is a
+# separate field rather than more text in the source because the two are
+# different facts — one is a transcript somebody can re-read, the other is a
+# request identifier — and a request id folded into the source would read back
+# as a chat id.
 BULLET_RE = re.compile(
     rf"^\s*-\s*\[({_KIND_ALT})(?:[ \t]+([^\]]*))?\]\s+(.+?)"
-    rf"(?:\s+_\(from:\s*(.+?)\)_)?\s*$",
+    rf"(?:\s+_\(from:\s*(.+?)\)_)?"
+    rf"(?:\s+_\(request:\s*(.+?)\)_)?\s*$",
     re.IGNORECASE,
 )
 """Public shared bullet pattern. Consumers import this, never a private copy:
@@ -97,6 +106,7 @@ class ProposalBullet:
     text: str
     source: str = ""
     target: str = ""
+    request: str = ""
 
 
 def parse_bullet(line: str) -> ProposalBullet | None:
@@ -125,6 +135,7 @@ def parse_bullet(line: str) -> ProposalBullet | None:
         text=match.group(3).strip(),
         source=(match.group(4) or "").strip(),
         target=(match.group(2) or "").strip(),
+        request=(match.group(5) or "").strip(),
     )
 
 

@@ -972,6 +972,193 @@ def test_append_learning_leaves_legacy_bullets_alone(tmp_path: Path) -> None:
     assert "(x1) A brand new structured learning." in text
 
 
+# ── `/remember` provenance (request) ───────────────────────────────────────
+
+
+def test_a_remember_sighting_with_no_turn_records_the_request(
+    tmp_path: Path,
+) -> None:
+    """The `/remember` case, and the reason `request` exists at all.
+
+    A lesson is usually remembered in a chat that is never archived, so there
+    is no transcript turn to cite. The two ways out are not equivalent: citing a
+    manufactured turn is a reference to a conversation that never happened,
+    while the request id is the sighting's real, re-readable origin.
+    """
+    vault = tmp_path / "vault"
+    fact = "Pin the Node version before running the suite."
+    assert mp.append_learning(vault, fact, request="req-7")
+
+    record = _one_active_record(vault)
+    assert record.count == 1
+    assert [(o.request, o.source, o.turn) for o in record.observations] == [
+        ("req-7", "", None)
+    ]
+    # And it reads back off the file, cited as a request rather than a chat.
+    line = next(
+        line
+        for line in _learnings(vault).splitlines()
+        if "Pin the Node version" in line
+    )
+    assert "— sources: req:req-7" in line
+    # The identity is the request alone, which is what makes a retry a no-op.
+    document = parse_learnings(_learnings(vault), workspace=vault.name)
+    reparsed = [e.record for e in document.entries if e.record is not None][0]
+    assert reparsed.observations[0].identity == ("request", "req-7")
+    assert reparsed.observations[0].citation == "req:req-7"
+
+
+def test_a_remember_retry_does_not_inflate_recurrence(tmp_path: Path) -> None:
+    """The dedupe the request id buys, and the reason it is carried at all.
+
+    A `/remember` filed twice is one sighting. Without a stable identity the
+    second accept would count as new evidence and push a lesson towards a
+    promotion threshold nobody earned.
+    """
+    vault = tmp_path / "vault"
+    fact = "Pin the Node version before running the suite."
+    assert mp.append_learning(vault, fact, request="req-7")
+    assert mp.append_learning(vault, fact, request="req-7")
+
+    record = _one_active_record(vault)
+    assert record.count == 1
+    assert len(record.observations) == 1
+    # A *different* request is a different sighting, and does count.
+    assert mp.append_learning(vault, fact, request="req-8")
+    assert _one_active_record(vault).count == 2
+
+
+def test_a_remember_may_carry_both_a_source_and_a_request(tmp_path: Path) -> None:
+    """An archived `/remember` has a real chat id, and it may keep it.
+
+    The two are different facts, so both are kept: the citation shows the
+    archive because that is the re-readable provenance, and the identity keys on
+    the request because it is the narrower one.
+    """
+    vault = tmp_path / "vault"
+    fact = "Pin the Node version before running the suite."
+    assert mp.append_learning(vault, fact, source="chat-9", request="req-7")
+
+    record = _one_active_record(vault)
+    assert [(o.source, o.request) for o in record.observations] == [("chat-9", "req-7")]
+    assert record.observations[0].identity == ("request", "req-7")
+    assert record.observations[0].citation == "chat-9"
+
+
+def test_a_request_is_not_a_source_and_does_not_manufacture_a_turn(
+    tmp_path: Path,
+) -> None:
+    """No chat id, no turn number, no archive path — the line says `req:`.
+
+    Every one of those would be an invented citation, and the request field is
+    the honest alternative; a test that only checked the count would pass even
+    if the writer had quietly rendered a `chat-*` source.
+    """
+    vault = tmp_path / "vault"
+    assert mp.append_learning(vault, "A lesson with no transcript behind it.", request="r1")
+    text = _learnings(vault)
+    assert "chat-" not in text
+    assert "#1" not in text
+    assert "req:r1" in text
+
+
+def test_the_preview_renders_the_same_provenance_the_accept_writes(
+    tmp_path: Path,
+) -> None:
+    """The card and the write cannot disagree about where the sighting came from.
+
+    This is the same argument the `source` field was fixed for: a preview that
+    drops the citation shows a shorter sources list than the line the accept is
+    about to produce, and the person reviewing it never saw the real one.
+    """
+    vault = tmp_path / "vault"
+    before = mp.LEARNINGS_STUB
+    rendered, operation = mp.render_learning_append(
+        before, "A lesson.", workspace=vault.name, request="req-3"
+    )
+    assert operation == "add"
+    assert "req:req-3" in rendered
+
+
+# ── The bullet grammar's `request` tail ────────────────────────────────────
+
+
+def test_a_bullet_round_trips_its_request_through_the_queue(tmp_path: Path) -> None:
+    """The `_(request: …)_` tail is a field, not more text in the source.
+
+    Folding it into the source would make a request id read back as a chat id,
+    which is the invented-citation failure this field exists to remove — so the
+    two are parsed apart and both survive the round trip.
+    """
+    from ciao.proposal_kinds import parse_bullet
+
+    bullet = mp.MemoryProposal(
+        target="learnings",
+        text="Pin the Node version before running the suite.",
+        source_section="/remember",
+        request="req-7",
+    ).as_bullet()
+    parsed = parse_bullet(bullet)
+    assert parsed is not None
+    assert parsed.kind == "learnings"
+    assert parsed.text == "Pin the Node version before running the suite."
+    assert parsed.source == "/remember"
+    assert parsed.request == "req-7"
+
+    vault = tmp_path / "vault"
+    mp.append_proposals([mp.MemoryProposal(
+        target="learnings",
+        text="Pin the Node version before running the suite.",
+        source_section="/remember",
+        request="req-7",
+    )], vault)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    row = next(
+        row
+        for row in mp.list_proposals(queue)
+        if row["kind"] == "learnings"
+    )
+    assert row["source"] == "/remember"
+    assert row["request"] == "req-7"
+
+
+def test_a_bullet_written_before_the_request_field_parses_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Every bullet already in an installed vault has no request tail."""
+    from ciao.proposal_kinds import parse_bullet
+
+    for line in (
+        "- [memory] Prefers short answers.  _(from: curation)_",
+        "- [project ./projects/x/doc.md] Ships on Friday.  _(from: chat-1)_",
+        "- [learnings] No tail at all",
+        "- [note_edit abc123] Retire this.  _(from: /remember)_",
+    ):
+        parsed = parse_bullet(line)
+        assert parsed is not None, line
+        assert parsed.request == "", line
+
+
+def test_a_closing_paren_in_a_request_cannot_end_the_tail_early() -> None:
+    """The bullet is one line with its own delimiters, so a `)` is stripped.
+
+    Left in, it would close the tail early and the rest of the line would read
+    as body text — a row that stops parsing without anything looking wrong.
+    """
+    from ciao.proposal_kinds import parse_bullet
+
+    bullet = mp.MemoryProposal(
+        target="learnings",
+        text="A lesson.",
+        source_section="/remember",
+        request="req) and then some prose",
+    ).as_bullet()
+    parsed = parse_bullet(bullet)
+    assert parsed is not None
+    assert parsed.text == "A lesson."
+    assert parsed.request == "req and then some prose"
+
+
 # ── accept_region_fact: the UI accept path's guards ───────────────────────
 #
 # Accepting a queued fact used to call `update_region(action="add")` directly,

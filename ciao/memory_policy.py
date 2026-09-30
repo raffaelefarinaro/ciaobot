@@ -198,6 +198,18 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
         "New region facts need a reviewer; queue them in Workspace/Memory-Proposals.md.",
     ),
     DeferredAction(
+        "Edit a skill, or promote a lesson into a skill or the AGENTS.md guide body",
+        "A recurring lesson is a routing priority, not permission: file a proposal "
+        "or a [review] draft for a person instead (ciao skill-proposal-add, "
+        "ciao skill-draft-add). Recurrence is how often, never who decided.",
+    ),
+    DeferredAction(
+        "Settle a skill proposal or a skill draft",
+        "Settlement follows verified application or an explicit rejection, and an "
+        "unattended run can verify neither; a run that decided something would "
+        "archive an unanswered question as an answer.",
+    ),
+    DeferredAction(
         "Trash, restore, or permanently delete a vault note",
         "ciao vault review mutations require an attended turn (unattended_forbidden).",
     ),
@@ -212,7 +224,9 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
     ),
     DeferredAction(
         "Open or comment on a public GitHub issue, or run a destructive git operation",
-        "Public and destructive actions need the operator's approval.",
+        "Public and destructive actions need the operator's approval. An upstream "
+        "skill lesson is prepared as a [review] draft and waits for that approval; "
+        "ciao.upstream_drafts.approve_draft refuses an unattended caller.",
     ),
 )
 """Dangerous unattended examples, pinned across providers.
@@ -237,7 +251,8 @@ UNATTENDED_CAPSULE_GUIDANCE = (
     "questions or wait for approval, and do not route around the absent "
     "reviewer. Defer and report in your final output any action that needs "
     "approval: promoting a NEW fact into the always-loaded memory regions, "
-    "trashing or permanently deleting a vault note, writing another "
+    "editing a skill or the AGENTS.md guide body, settling a skill proposal or "
+    "draft, trashing or permanently deleting a vault note, writing another "
     "workspace, creating or moving an automation into another workspace, and "
     "public or destructive git actions."
 )

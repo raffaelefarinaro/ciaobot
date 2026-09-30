@@ -1575,7 +1575,9 @@ def test_cli_skill_proposal_add_refuses_a_finding_with_no_evidence(
 
     Evidence is the record's whole claim: which session, which turn, which
     words. A finding without it would be indistinguishable from an invention,
-    and the review surface has no way to show it is unsupported.
+    and the review surface has no way to show it is unsupported. A routed lesson
+    is the one finding whose evidence is a learning link instead, and the next
+    test covers that; this one is the empty-sources case, which stays refused.
     """
     workspace = tmp_path / "workspace"
     _owned_skill_install(workspace, "notes")
@@ -1589,6 +1591,134 @@ def test_cli_skill_proposal_add_refuses_a_finding_with_no_evidence(
     assert "sources" in capsys.readouterr().err
     queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
     assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_accepts_a_lesson_routed_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A lesson with no `sources` is the lesson-routing path, not a loose check.
+
+    The finding is real — a lesson in `Workspace/Learnings.md` applies to a
+    skill the conversation never loaded — and the only honest record of it is the
+    `origins` link, because a `sources` entry would have to name a `turn` the
+    transcript never contained. So the requirement is *one or the other*, and
+    the record says which it was.
+    """
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "unused-skill")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(
+        tmp_path,
+        name="lesson",
+        sources=None,
+        origins=[
+            {
+                "learning_id": "lrn-1",
+                "finding": "the lesson is about a skill this chat never loaded",
+                "source_revision": "abc123",
+                "summary": "Route it to the skill that covers the workflow",
+            }
+        ],
+    )
+    # The lesson route carries no `sources` at all.
+    payload = json.loads(Path(finding).read_text(encoding="utf-8"))
+    del payload["sources"]
+    Path(finding).write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cli.main(["skill-proposal-add", "unused-skill", "--input-file", finding]) == 0
+
+    record = skill_proposals.parse_proposal(
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "unused-skill.md",
+        "personal",
+    )
+    assert record is not None
+    # No fabricated source, and the link that replaces it is filed pending.
+    assert record.sources == ()
+    assert len(record.origins) == 1
+    assert record.origins[0].learning_id == "lrn-1"
+    assert record.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert record.origins[0].verification == ""
+
+
+def test_cli_skill_proposal_add_still_refuses_a_finding_with_neither(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One or the other, not neither.
+
+    Dropping the `sources` requirement for routed lessons must not have become
+    dropping it: a payload carrying neither is a finding with nothing behind it,
+    and the complaint has to name both fields so a caller knows what to add.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, name="bare")
+    payload = json.loads(Path(finding).read_text(encoding="utf-8"))
+    del payload["sources"]
+    Path(finding).write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    err = capsys.readouterr().err
+    assert "sources" in err and "origins" in err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_refuses_a_settled_origin_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A filing is a question; only `skill-proposal-remove` answers one.
+
+    A payload carrying its own `state` could declare the lesson applied and skip
+    the verification an applied needs, so the key is refused by name rather than
+    read and dropped — the same rule the origin reader has always applied.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(
+        tmp_path,
+        name="preset",
+        origins=[{"learning_id": "lrn-1", "finding": "x", "state": "applied"}],
+    )
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+    assert "state" in capsys.readouterr().err
+
+
+def test_cli_skill_proposal_add_still_refuses_a_nonexistent_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The new-skill path does not come through here, and must not start to.
+
+    `resolve_owned_skill` requires an existing owned source, and a lesson about
+    a skill that does not exist yet is a `[review]` draft for a person to create
+    — not a filer pointed at a name with no file behind it.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, name="nonesuch", sources=None, origins=[{"learning_id": "l", "finding": "f"}])
+
+    assert cli.main(["skill-proposal-add", "does-not-exist", "--input-file", finding]) == 1
+    err = capsys.readouterr().err
+    assert "does-not-exist" in err and "owns no canonical source" in err
 
 
 def test_cli_skill_proposal_add_reads_the_finding_from_a_file(
@@ -2427,3 +2557,308 @@ def test_config_discovery_survives_an_exported_empty_workspace(
     # The discovered install wins, so the .env and the root agree.
     assert config.workspace_root == workspace.resolve()
     assert config.pwa_auth_token == "ws-secret-token"
+
+
+# -- skill-draft-* (#728-D) --------------------------------------------------
+
+
+def _draft_workspace(tmp_path: Path) -> Path:
+    """An install whose vault registers `personal`."""
+    root = tmp_path / "workspace"
+    (root / "memory-vault" / "personal" / "Workspace").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _draft_payload(tmp_path: Path, **overrides) -> str:
+    path = tmp_path / "draft.json"
+    payload = {
+        "target": "upstream_issue",
+        "skill": "web-research",
+        "title": "Document the offline fallback for a timed-out fetch",
+        "change": "State that a timed-out fetch is retried once before reporting.",
+        "body": "A fetch that times out is a transport failure, not an empty answer.",
+        "repository": "example/tools",
+        "version": "1.4.0",
+        "private_evidence": "chat-42 turn 7",
+    }
+    payload.update(overrides)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return str(path)
+
+
+def test_cli_skill_draft_add_files_a_review_row_and_writes_nothing_public(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Filing is local and complete: a queue row and a record, and no `gh`.
+
+    The whole unattended contract is that this step is safe to run with nobody
+    watching, so the command that does it must not reach the network — a test
+    that only checked the row would pass with a `gh` call in the middle.
+    """
+    from ciao import upstream_drafts
+
+    called: list[list[str]] = []
+    monkeypatch.setattr(
+        upstream_drafts, "_run_gh", lambda args, timeout=30.0: called.append(list(args))
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path)
+
+    assert cli.main(["skill-draft-add", "--input-file", draft, "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["filed"] is True
+    assert payload["target"] == "upstream_issue"
+    assert called == []
+    assert upstream_drafts.find_draft(_workspace_config(workspace), payload["id"]) is not None
+
+
+def test_cli_skill_draft_add_refuses_a_body_that_would_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The gate is at the door, so a leaking body is never written at all."""
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(
+        tmp_path, body="it happened in turn 4 of chat-1 and I logged it"
+    )
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 2
+    assert "cannot file the draft" in capsys.readouterr().err
+    sidecars = (
+        workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Drafts"
+    )
+    assert not sidecars.is_dir() or list(sidecars.glob("*.json")) == []
+
+
+def test_cli_skill_draft_add_refuses_an_unknown_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No new top-level queue kind, so an unknown target is not a new kind.
+
+    A draft is a routing decision, which is what `[review]` already means, and a
+    command that accepted an arbitrary target string would be inventing kinds
+    the three shared bullet readers never learned to parse.
+    """
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, target="brand_new_kind")
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 2
+    err = capsys.readouterr().err
+    assert "upstream_issue" in err and "new_skill" in err
+
+
+def test_cli_skill_drafts_lists_what_is_open_and_what_is_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path)
+    assert cli.main(["skill-draft-add", "--input-file", draft, "--json"]) == 0
+    identity = json.loads(capsys.readouterr().out)["id"]
+    capsys.readouterr()
+
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    open_rows = json.loads(capsys.readouterr().out)["drafts"]
+    assert [row["id"] for row in open_rows] == [identity]
+
+    assert cli.main(["skill-draft-reject", identity, "--reason", "covered", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["drafts"] == []
+    assert cli.main(["skill-drafts", "--all", "--json"]) == 0
+    settled = json.loads(capsys.readouterr().out)["drafts"]
+    assert [row["lifecycle"] for row in settled] == ["rejected"]
+
+
+def test_cli_skill_draft_approve_searches_before_it_creates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The attended step, driven through the command, links an existing issue."""
+    from ciao import upstream_drafts
+
+    monkeypatch.setattr(
+        upstream_drafts, "search_existing_issues", lambda **_: ["https://example/3"]
+    )
+    created: list[dict] = []
+    monkeypatch.setattr(
+        upstream_drafts, "create_issue", lambda **kw: created.append(kw) or "https://example/9"
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    assert cli.main(["skill-draft-add", "--input-file", _draft_payload(tmp_path), "--json"]) == 0
+    identity = json.loads(capsys.readouterr().out)["id"]
+
+    assert cli.main(["skill-draft-approve", identity, "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["lifecycle"] == "filed"
+    assert payload["issue_url"] == "https://example/3"
+    assert created == []
+
+
+def test_cli_skill_draft_approve_creates_the_new_skill_from_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The new-skill route creates from the file it is given, then settles.
+
+    The content comes from a file for the same reason every other finding does
+    (a skill body is prose a shell would mangle), and the row settles only
+    after the write — so an interrupted run leaves a draft a person can retry
+    rather than a "created" record with no file.
+    """
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(
+        tmp_path,
+        target="new_skill",
+        skill="invoice-recon",
+        body="",
+        change="Create skills/invoice-recon with a trigger and one step.",
+    )
+    assert cli.main(["skill-draft-add", "--input-file", draft, "--json"]) == 0
+    identity = json.loads(capsys.readouterr().out)["id"]
+    content = tmp_path / "SKILL.md"
+    content.write_text(
+        "---\nname: invoice-recon\ndescription: Reconcile an invoice\n---\n\n"
+        "Match the invoice number first.\n",
+        encoding="utf-8",
+    )
+
+    assert cli.main(
+        ["skill-draft-approve", identity, "--content-file", str(content), "--json"]
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["lifecycle"] == "filed"
+    assert payload["issue_url"].endswith("skills/invoice-recon/SKILL.md")
+    assert (workspace / "skills" / "invoice-recon" / "SKILL.md").is_file()
+
+
+def test_cli_skill_draft_approve_needs_content_for_a_new_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A creation with no content would write an empty skill, so it is refused."""
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, target="new_skill", skill="invoice-recon", body="")
+    assert cli.main(["skill-draft-add", "--input-file", draft, "--json"]) == 0
+    identity = json.loads(capsys.readouterr().out)["id"]
+
+    assert cli.main(["skill-draft-approve", identity]) == 2
+    assert "--content-file" in capsys.readouterr().err
+    assert not (workspace / "skills" / "invoice-recon").exists()
+
+
+def test_cli_skill_draft_approve_reports_an_unknown_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-draft-approve", "nope"]) == 1
+    assert "no open draft" in capsys.readouterr().err
+    assert cli.main(["skill-draft-reject", "nope"]) == 1
+
+
+def _workspace_config(root: Path):
+    """The config the CLI itself would build for ``root``, for a direct assertion."""
+    from ciao.config import CiaoConfig
+
+    return CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "test-token",
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_VAULT_ROOT": str(root / "memory-vault"),
+    })
+
+
+def test_cli_skill_draft_add_says_when_the_target_disagrees_with_the_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The routing decision is a real answer, and the filer is told it.
+
+    A pass that files an upstream-issue draft for a skill this workspace owns
+    under `skills/` is filing blind, and the note names the command that would
+    actually apply the change locally. It is a note rather than a refusal because
+    a forked packaged skill is owned *and* still worth reporting upstream.
+    """
+    workspace = tmp_path / "workspace"
+    (workspace / "memory-vault" / "personal" / "Workspace").mkdir(parents=True)
+    skill_md = workspace / "skills" / "notes" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("---\nname: notes\n---\n\n# notes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, skill="notes")
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 0
+
+    out = capsys.readouterr().out
+    assert "is a source this workspace owns under skills/" in out
+    assert "ciao skill-proposal-add" in out
+
+
+def test_cli_skill_draft_add_says_a_new_skill_name_already_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The creation would be refused later; the filer is told now.
+
+    Naming an existing skill as a *new* one means the approval is going to fail
+    on a collision, and a person who has not been told that reads the refusal as
+    a bug rather than as a routing mistake.
+    """
+    workspace = tmp_path / "workspace"
+    (workspace / "memory-vault" / "personal" / "Workspace").mkdir(parents=True)
+    skill_md = workspace / "skills" / "notes" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("---\nname: notes\n---\n\n# notes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, target="new_skill", skill="notes", body="")
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 0
+
+    out = capsys.readouterr().out
+    assert "already exists here, so this is not a new skill" in out
+
+
+def test_cli_skill_draft_add_says_when_there_is_nothing_to_report_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No local source and no installed copy means no upstream either.
+
+    An upstream-issue draft for a name that exists nowhere cannot be filed by
+    anybody: there is no repository it belongs to, and guessing at one is what
+    the contract forbids.
+    """
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, skill="never-heard-of-it")
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 0
+
+    out = capsys.readouterr().out
+    assert "no packaged copy to report upstream" in out
+    assert '"new_skill"' in out
