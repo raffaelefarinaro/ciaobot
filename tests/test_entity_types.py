@@ -33,17 +33,17 @@ def _clear_registry_cache():
     entity_types.clear_entity_types_cache()
 
 
-def test_stock_registry_reproduces_the_hardcoded_constants(tmp_path: Path) -> None:
-    """No vault file: every view equals the constant it will eventually feed."""
+def test_stock_registry_views(tmp_path: Path) -> None:
+    """No vault file: the views equal the stock constants in `vault_index`, and stock is the trimmed list."""
     registry = entity_types.load_entity_types(tmp_path)
 
     # The closed `type:` vocabulary, the folder -> type inference and the
     # near-duplicate spellings a real vault used, all three from vault_index.
     assert registry.canonical_types() == vault_index.CANONICAL_TYPES
     assert registry.dir_type_map() == vault_index.DIR_TYPE_MAP
-    assert len(registry.dir_type_map()) == 15
+    assert len(registry.dir_type_map()) == 9
     assert registry.aliases() == vault_index.TYPE_ALIASES
-    assert len(registry.aliases()) == 9
+    assert len(registry.aliases()) == 4
 
     # The two aging overrides over memory_audit's default (which stays there).
     assert registry.stale_thresholds() == memory_audit.STALE_NOTE_THRESHOLDS_DAYS
@@ -302,7 +302,7 @@ def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: P
     (vault / "People").mkdir(parents=True)
     (vault / "Clients").mkdir(parents=True)
     (vault / "People" / "Alba.md").write_text("# Alba\n", encoding="utf-8")
-    (vault / "People" / "Ben.md").write_text("---\ntype: doc\n---\n# Ben\n", encoding="utf-8")
+    (vault / "People" / "Ben.md").write_text("---\ntype: discussion-prep\n---\n# Ben\n", encoding="utf-8")
     (vault / "Clients" / "Acme.md").write_text(
         "---\ntype: customer\n---\n# Acme\n", encoding="utf-8"
     )
@@ -320,7 +320,7 @@ def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: P
     entries = vault_index.scan_vault(vault)
     assert {e.path.name: e.type for e in entries} == {
         "Alba.md": "person",
-        "Ben.md": "doc",
+        "Ben.md": "discussion-prep",
         "Acme.md": "customer",
     }
     assert {e.path.name: e.workspace for e in entries} == {
@@ -330,7 +330,7 @@ def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: P
     }
 
     # The closed set, over the whole range of a real vault's spellings.
-    for raw in ("project", "Person", "doc", "hackathon-log", "", "customer", "x"):
+    for raw in ("project", "Person", "discussion-prep", "hackathon-log", "", "customer", "x"):
         assert vault_index.canonical_type(raw, registry=registry) == vault_index.canonical_type(raw)
 
     # The linter: an untyped note has no frontmatter, a stock alias and an
@@ -348,7 +348,7 @@ def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: P
     ben = next(
         e for e in issues["frontmatter_errors"] if e["source"] == "People/Ben.md"
     )
-    assert "document" in ben["message"]
+    assert "note" in ben["message"]
 
     # Every horizon, against the constant it replaced.
     for note_type in (*sorted(registry.canonical_types()), "client", "x"):
@@ -359,3 +359,84 @@ def test_no_vault_file_is_identical_for_the_index_lint_and_staleness(tmp_path: P
         assert (
             memory_audit.note_threshold_days(note_type, registry=registry) == expected
         )
+
+
+def test_stock_ships_only_the_trimmed_list(tmp_path: Path) -> None:
+    """Project is the one visible core category; the two system types are hidden."""
+    registry = entity_types.load_entity_types(tmp_path)
+
+    assert [entry.id for entry in registry.entries()] == [
+        "person", "project", "place", "idea", "resource", "journal", "note",
+        "workspace", "skill-proposal",
+    ]
+    core = {entry.id for entry in registry.entries() if entry.core}
+    assert core == {"project", "workspace", "skill-proposal"}
+    hidden = {entry.id for entry in registry.entries() if entry.hidden}
+    assert hidden == {"workspace", "skill-proposal"}
+    # `log` is an alias of `journal`, not a category of its own.
+    assert registry.aliases()["log"] == "journal"
+    assert "log" not in registry.canonical_types()
+
+
+def test_a_vault_file_cannot_turn_off_a_core_category_or_claim_core(tmp_path: Path) -> None:
+    (tmp_path / "entity-types.yaml").write_text(
+        "- id: project\n  enabled: false\n  core: false\n  hidden: true\n"
+        "- id: person\n  core: true\n  hidden: true\n  enabled: false\n"
+        "- id: customer\n  label: Customer\n  kind: entity\n  core: true\n  hidden: true\n",
+        encoding="utf-8",
+    )
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    project = registry.get("project")
+    assert project is not None and project.enabled and project.core and not project.hidden
+    assert "project" in registry.canonical_types()
+    # `enabled` is the user's to state on a non-core entry; `core`/`hidden` never are.
+    person = registry.get("person")
+    assert person is not None and not person.enabled and not person.core and not person.hidden
+    customer = registry.get("customer")
+    assert customer is not None and not customer.core and not customer.hidden
+
+
+def test_effective_payload_carries_core_and_hidden(tmp_path: Path) -> None:
+    registry = entity_types.load_entity_types(tmp_path)
+
+    rows = {row["id"]: row for row in entity_types.effective_payload(registry, {})}
+
+    assert rows["project"]["core"] is True and rows["project"]["hidden"] is False
+    assert rows["workspace"]["core"] is True and rows["workspace"]["hidden"] is True
+    assert rows["person"]["core"] is False
+    # Not part of what a vault file stores.
+    assert entity_types.user_entries(registry) == []
+
+
+def test_retired_entries_parse_and_do_not_collide_with_stock() -> None:
+    retired = entity_types.retired_stock_entries()
+    stock = entity_types.stock_entity_type_registry()
+
+    assert [entry.id for entry in retired] == [
+        "product", "feature", "automation", "document", "reference", "content",
+    ]
+    assert all(not entry.builtin for entry in retired)
+    # Kept alongside stock in a vault file, the list still validates.
+    entity_types.validate_entries([*stock.entries(), *retired])
+
+
+def test_an_old_override_row_for_a_retired_id_stays_a_complete_entry(tmp_path: Path) -> None:
+    """A user who switched Document off has `- id: document, enabled: false` on disk."""
+    (tmp_path / "entity-types.yaml").write_text(
+        "- id: document\n  enabled: false\n- id: log\n  enabled: false\n", encoding="utf-8"
+    )
+
+    registry = entity_types.load_entity_types(tmp_path)
+
+    document = registry.get("document")
+    assert document is not None
+    assert (document.label, document.folder, document.enabled, document.builtin) == (
+        "Document", "Documents", False, False,
+    )
+    assert registry.get("log") is None, "`log` is an alias of journal now"
+    assert registry.aliases()["log"] == "journal"
+    # The panel sends every row back; the list must still validate.
+    rows = entity_types.effective_payload(registry, {})
+    entity_types.validate_entries(entity_types.parse_payload(rows))

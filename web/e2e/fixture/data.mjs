@@ -232,8 +232,8 @@ export const MEMORY_EDGES = [
 /**
  * The vault's category list, in the shape `/api/memory/entity-types` serves it.
  *
- * One builtin, one disabled one and one custom, because those are the three
- * things the Categories panel renders differently and a fixture holding only
+ * One builtin, one core (locked on), one hidden, one disabled and one custom,
+ * because those are the things the Categories panel renders differently and a fixture holding only
  * shipped-and-enabled rows would leave two of them unmeasured.
  */
 export const MEMORY_CATEGORIES = [
@@ -247,6 +247,8 @@ export const MEMORY_CATEGORIES = [
     stale_after_days: 90,
     enabled: true,
     builtin: true,
+    core: false,
+    hidden: false,
     note_count: 1,
   },
   {
@@ -259,6 +261,8 @@ export const MEMORY_CATEGORIES = [
     stale_after_days: 30,
     enabled: true,
     builtin: true,
+    core: true,
+    hidden: false,
     note_count: 1,
   },
   {
@@ -271,6 +275,8 @@ export const MEMORY_CATEGORIES = [
     stale_after_days: 0,
     enabled: false,
     builtin: true,
+    core: false,
+    hidden: false,
     note_count: 1,
   },
   {
@@ -283,7 +289,23 @@ export const MEMORY_CATEGORIES = [
     stale_after_days: 0,
     enabled: true,
     builtin: false,
+    core: false,
+    hidden: false,
     note_count: 0,
+  },
+  {
+    id: 'workspace',
+    label: 'Workspace',
+    kind: 'note',
+    folder: 'Workspace',
+    description: "The agent's own working surface.",
+    aliases: [],
+    stale_after_days: 0,
+    enabled: true,
+    builtin: true,
+    core: true,
+    hidden: true,
+    note_count: 4,
   },
 ]
 

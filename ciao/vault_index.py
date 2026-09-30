@@ -39,7 +39,11 @@ import yaml
 # (it is the module a consumer will import), and the Categories renderer takes
 # the registry as an argument rather than loading one, so this import is a type
 # and a name — no category is read until a caller asks for it.
-from ciao.entity_types import EntityTypeRegistry, load_entity_types
+from ciao.entity_types import (
+    EntityTypeRegistry,
+    load_entity_types,
+    stock_entity_type_registry,
+)
 from ciao.vault_links import (
     FENCED_CODE_RE,
     FM_LIST_ITEM_RE,
@@ -168,54 +172,22 @@ def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
         and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
     )
 
-# Directory-based type inference when frontmatter is missing.
-DIR_TYPE_MAP = {
-    "People": "person",
-    "Projects": "project",
-    "Ideas": "idea",
-    "Resources": "resource",
-    "Places": "place",
-    "Documents": "document",
-    "Workspace": "workspace",
-    "references": "reference",
-    "products": "product",
-    "features": "feature",
-    "active": "project",
-    "completed": "project",
-    "content": "content",
-    "journal": "journal",
-    "automations": "automation",
-}
-
-# The closed vocabulary for frontmatter ``type:``.
+# The stock vocabulary, read off the shipped category list
+# (`ciao/stock/entity-types.yaml`) so the file is the one place a category is
+# declared. These three are what a caller with no vault registry falls back to;
+# a caller that holds one asks it for the same views.
 #
-# Seeded from every DIR_TYPE_MAP *value* so path inference can never produce a
-# type the linter rejects, plus the types the vault earned by use that no
-# directory name implies. Deliberately a separate constant rather than more
-# DIR_TYPE_MAP entries: that map's *keys* are directory names, and
-# ``_workspace_of`` tests membership in them to tell a folder type from a
-# workspace name, so adding a key silently changes workspace inference.
-CANONICAL_TYPES = frozenset(DIR_TYPE_MAP.values()) | {
-    "log",
-    "note",
-    "skill-proposal",
-}
-
-# Near-duplicate values seen in real vaults, mapped to the canonical type they
-# meant. Reported as drift with the target named, so the fix is a rename with a
-# known destination rather than a judgement call. Without this the index grows
-# one section per synonym: `doc (1)` next to `document (1)`.
-TYPE_ALIASES = {
-    "analysis": "reference",
-    "discussion-prep": "note",
-    "doc": "document",
-    "feature-brief": "feature",
-    "hackathon-log": "journal",
-    "plan": "document",
-    "planning-doc": "document",
-    "project-log": "log",
-    "template": "document",
-}
+# `DIR_TYPE_MAP` is directory-based type inference when frontmatter is missing.
+# Its *keys* are directory names and `_workspace_of` tests membership in them to
+# tell a folder type from a workspace name, so a category's folder is a key here
+# for that reason too. `CANONICAL_TYPES` is the closed vocabulary for
+# frontmatter ``type:``. `TYPE_ALIASES` maps near-duplicate values seen in real
+# vaults to the type they meant, reported as drift with the target named so the
+# fix is a rename with a known destination rather than a judgement call.
+_STOCK_REGISTRY = stock_entity_type_registry()
+DIR_TYPE_MAP = _STOCK_REGISTRY.dir_type_map()
+CANONICAL_TYPES = _STOCK_REGISTRY.canonical_types()
+TYPE_ALIASES = _STOCK_REGISTRY.aliases()
 
 
 # How much of a note's filename a sibling temp file may carry. The prefix is

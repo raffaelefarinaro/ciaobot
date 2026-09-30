@@ -37,6 +37,8 @@ function row(overrides: Partial<EntityTypeRow> = {}): EntityTypeRow {
     stale_after_days: 90,
     enabled: true,
     builtin: true,
+    core: false,
+    hidden: false,
     note_count: 4,
     ...overrides,
   }
@@ -53,6 +55,11 @@ const STOCK = [
     id: 'customer', label: 'Customer', folder: 'Customers', description: 'Someone we do business with.',
     aliases: ['client'], stale_after_days: 0, builtin: false, note_count: 2,
   }),
+]
+
+const SYSTEM = [
+  row({ id: 'project', label: 'Project', folder: 'Projects', core: true, note_count: 3 }),
+  row({ id: 'workspace', label: 'Workspace', folder: 'Workspace', core: true, hidden: true, note_count: 9 }),
 ]
 
 /** The shipped list only: `customer` is not in it, so the presets still offer it. */
@@ -89,6 +96,21 @@ describe('MemoryCategoriesPanel', () => {
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()
+  })
+
+  it('lists a core category with its switch locked, and leaves a hidden one out', async () => {
+    const wrapper = await mountPanel([...STOCK, ...SYSTEM])
+    const labels = rowsOf(wrapper).map((r) => r.find('.cat-name-btn').text())
+    expect(labels).toContain('Project')
+    expect(labels).not.toContain('Workspace')
+
+    const project = rowsOf(wrapper).find((r) => r.find('.cat-name-btn').text() === 'Project')!
+    const toggle = project.get('button[role="switch"]')
+    expect((toggle.element as HTMLButtonElement).disabled).toBe(true)
+    expect(toggle.attributes('aria-label')).toContain('required')
+
+    // The heading counts what the page lists, not the hidden types.
+    expect(wrapper.get('#cat-heading').text()).toBe('4 of 4 categories on')
   })
 
   it('reads the active workspace and lists every effective row with its chip and count', async () => {
@@ -186,7 +208,9 @@ describe('MemoryCategoriesPanel', () => {
     await nextTick()
 
     const presets = drawerOf(wrapper).findAll('.cat-preset')
-    expect(presets.map(p => p.text())).toEqual(['Customer', 'Country', 'Organisation', 'Event'])
+    expect(presets.map(p => p.text())).toEqual([
+      'Customer', 'Country', 'Organisation', 'Event', 'Product', 'Document', 'Reference',
+    ])
     // `place` ships as a builtin, so it is named as already there rather than
     // offered as an id the server would refuse as a duplicate.
     expect(drawerOf(wrapper).get('.cat-presets-note').text()).toContain('Place')

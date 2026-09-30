@@ -1275,6 +1275,38 @@ def sync_workspace_skills(
             root,
         )
 
+    try:
+        from ciao import job_runs
+        from ciao.vault_migration import (
+            retain_retired_stock_types_if_needed,
+            retired_receipt_path,
+        )
+
+        vault_root = _resolve_vault_root(root)
+        runtime_root = _resolve_runtime_root(root)
+        # Receipt-gated, like the vocabulary migration above: the check scans
+        # the whole vault, so it runs once per vault, not on every boot.
+        if not retired_receipt_path(runtime_root, vault_root).is_file():
+            with job_runs.track_sync(
+                "retired_stock_categories", "Keep retired stock categories"
+            ) as run:
+                summary = retain_retired_stock_types_if_needed(vault_root, runtime_root)
+                run.extra["retained"] = summary.get("retained") or []
+                if summary.get("failed"):
+                    logger.warning(
+                        "retired stock categories not kept for %s: %s; "
+                        "fix entity-types.yaml and run `ciao vault-migrate --apply`",
+                        vault_root,
+                        summary["failed"],
+                    )
+                if not summary.get("retained"):
+                    run.skip("no note uses a retired stock category")
+    except Exception:  # noqa: BLE001 — never block skill sync on the vault
+        logger.exception(
+            "keeping retired stock categories failed for %s; continuing skill sync",
+            root,
+        )
+
     upstream_updated = 0
     upstream_pruned = 0
 

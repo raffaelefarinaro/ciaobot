@@ -12,12 +12,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ciao import entity_types
 from ciao.vault_migration import (
     RECEIPT_NAME,
     migrate_if_needed,
     migrate_vault_vocabulary,
     read_receipt,
     receipt_path,
+    retain_retired_stock_types,
+    retain_retired_stock_types_if_needed,
+    retired_receipt_path,
 )
 
 
@@ -30,7 +34,7 @@ def _note(vault: Path, relative: str, body: str) -> Path:
 
 def _vault(tmp_path: Path) -> Path:
     vault = tmp_path / "memory-vault"
-    _note(vault, "personal/a.md", "---\ntype: doc\ntitle: A\ntags: [x]\n---\n# A\n\nbody\n")
+    _note(vault, "personal/a.md", "---\ntype: discussion-prep\ntitle: A\ntags: [x]\n---\n# A\n\nbody\n")
     _note(vault, "personal/b.md", '---\ntype: "project-log"\n---\n# B\n')
     _note(vault, "personal/c.md", "---\ntype: frobnicate\n---\n# C\n")
     _note(vault, "personal/d.md", "---\ntype: person\n---\n# D\n")
@@ -48,7 +52,7 @@ def test_dry_run_writes_nothing(tmp_path: Path) -> None:
 
     assert summary["applied"] is False
     assert summary["renamed"] == []
-    assert {change["from"] for change in summary["planned"]} == {"doc", "project-log"}
+    assert {change["from"] for change in summary["planned"]} == {"discussion-prep", "project-log"}
     assert (vault / "personal/a.md").read_text(encoding="utf-8") == before
 
 
@@ -68,7 +72,7 @@ def test_apply_rewrites_only_the_type_line(tmp_path: Path) -> None:
     migrate_vault_vocabulary(vault, apply=True)
 
     assert (vault / "personal/a.md").read_text(encoding="utf-8") == (
-        "---\ntype: document\ntitle: A\ntags: [x]\n---\n# A\n\nbody\n"
+        "---\ntype: note\ntitle: A\ntags: [x]\n---\n# A\n\nbody\n"
     )
 
 
@@ -77,7 +81,7 @@ def test_apply_handles_a_quoted_value(tmp_path: Path) -> None:
 
     migrate_vault_vocabulary(vault, apply=True)
 
-    assert "type: log" in (vault / "personal/b.md").read_text(encoding="utf-8")
+    assert "type: journal" in (vault / "personal/b.md").read_text(encoding="utf-8")
 
 
 def test_a_type_with_no_alias_is_reported_and_left_alone(tmp_path: Path) -> None:
@@ -114,7 +118,7 @@ def test_a_hand_edit_racing_the_migration_is_not_clobbered(tmp_path: Path) -> No
     """The rewrite only fires when the line still holds the value it planned to
     replace, so a concurrent edit fails loudly instead of being overwritten."""
     vault = tmp_path / "memory-vault"
-    note = _note(vault, "personal/a.md", "---\ntype: doc\n---\n# A\n")
+    note = _note(vault, "personal/a.md", "---\ntype: discussion-prep\n---\n# A\n")
     summary = migrate_vault_vocabulary(vault)  # plan against `doc`
     assert summary["planned"]
 
@@ -122,14 +126,14 @@ def test_a_hand_edit_racing_the_migration_is_not_clobbered(tmp_path: Path) -> No
     from ciao.vault_migration import _retype_frontmatter
 
     assert _retype_frontmatter(
-        note.read_text(encoding="utf-8"), expect="doc", replacement="document"
+        note.read_text(encoding="utf-8"), expect="discussion-prep", replacement="note"
     ) is None
 
 
 def test_frontmatter_less_note_is_not_rewritten() -> None:
     from ciao.vault_migration import _retype_frontmatter
 
-    assert _retype_frontmatter("# Just a heading\n", expect="doc", replacement="document") is None
+    assert _retype_frontmatter("# Just a heading\n", expect="discussion-prep", replacement="note") is None
 
 
 # ---- the one-off gate ------------------------------------------------------
@@ -166,7 +170,7 @@ def test_each_vault_migrates_once_behind_one_runtime_root(tmp_path: Path) -> Non
     assert len(first["renamed"]) == 2
     assert "skipped" not in second, "the second workspace's vault was never migrated"
     assert len(second["renamed"]) == 2
-    assert "type: document" in (work / "personal/a.md").read_text(encoding="utf-8")
+    assert "type: note" in (work / "personal/a.md").read_text(encoding="utf-8")
     # One receipt per vault, so neither root rescans on the next boot.
     assert migrate_if_needed(personal, runtime)["skipped"] == "already migrated"
     assert migrate_if_needed(work, runtime)["skipped"] == "already migrated"
@@ -280,3 +284,123 @@ def test_a_corrupt_receipt_does_not_block_the_migration(tmp_path: Path) -> None:
 
     assert len(summary["renamed"]) == 2
     assert json.loads(path.read_text(encoding="utf-8"))["renamed"]
+
+
+# ---- retired stock categories ----------------------------------------------
+
+
+def _retired_vault(tmp_path: Path) -> Path:
+    vault = tmp_path / "memory-vault"
+    _note(vault, "personal/notes/plan.md", "---\ntype: plan\n---\n# Plan\n")
+    _note(vault, "personal/notes/ref.md", "---\ntype: reference\n---\n# Ref\n")
+    _note(vault, "personal/notes/p.md", "---\ntype: person\n---\n# P\n")
+    return vault
+
+
+def test_retire_dry_run_reports_and_writes_nothing(tmp_path: Path) -> None:
+    vault = _retired_vault(tmp_path)
+
+    summary = retain_retired_stock_types(vault)
+
+    assert summary["retained"] == ["document", "reference"]
+    assert "plan" in summary["covers"]
+    assert not (vault / "entity-types.yaml").exists()
+
+
+def test_retire_apply_keeps_used_types_as_custom_and_rewrites_no_note(tmp_path: Path) -> None:
+    vault = _retired_vault(tmp_path)
+    before = {p: p.read_text(encoding="utf-8") for p in vault.rglob("*.md")}
+
+    summary = retain_retired_stock_types(vault, apply=True)
+
+    assert summary["retained"] == ["document", "reference"]
+    assert {p: p.read_text(encoding="utf-8") for p in vault.rglob("*.md")} == before
+    entity_types.clear_entity_types_cache()
+    registry = entity_types.load_entity_types(vault)
+    assert registry.get("document") is not None and not registry.get("document").builtin
+    # The alias travels with the category, so `plan` is no longer drift.
+    assert registry.aliases()["plan"] == "document"
+    assert registry.get("product") is None, "an unused retired type is not copied"
+    drift = migrate_vault_vocabulary(vault)["unresolved"]
+    assert drift == {}
+
+
+def test_retire_is_idempotent_and_leaves_a_vault_definition_alone(tmp_path: Path) -> None:
+    vault = _retired_vault(tmp_path)
+    (vault / "entity-types.yaml").write_text(
+        "- id: reference\n  label: Sources\n  kind: note\n  folder: sources\n",
+        encoding="utf-8",
+    )
+
+    first = retain_retired_stock_types(vault, apply=True)
+    entity_types.clear_entity_types_cache()
+    second = retain_retired_stock_types(vault, apply=True)
+
+    assert first["retained"] == ["document"]
+    assert second["retained"] == []
+    assert entity_types.load_entity_types(vault).get("reference").label == "Sources"
+
+
+def test_retire_refuses_a_write_the_loader_would_drop(tmp_path: Path) -> None:
+    vault = _retired_vault(tmp_path)
+    # A vault category that already owns `doc`: the retired `document` alias list
+    # would collide with it, and a colliding file is dropped whole by the loader.
+    (vault / "entity-types.yaml").write_text(
+        "- id: doc\n  label: Doc\n  kind: note\n  folder: Docs\n", encoding="utf-8"
+    )
+
+    summary = retain_retired_stock_types(vault, apply=True)
+
+    assert summary["retained"] == [] and "failed" in summary
+    assert "document" not in (vault / "entity-types.yaml").read_text(encoding="utf-8")
+
+
+def test_retire_receipt_makes_the_upgrade_step_run_once(tmp_path: Path) -> None:
+    vault = _retired_vault(tmp_path)
+    runtime = tmp_path / ".runtime"
+
+    first = retain_retired_stock_types_if_needed(vault, runtime)
+    assert first["retained"] == ["document", "reference"]
+    assert retired_receipt_path(runtime, vault).is_file()
+
+    _note(vault, "personal/notes/x.md", "---\ntype: product\n---\n# X\n")
+    second = retain_retired_stock_types_if_needed(vault, runtime)
+    assert second["skipped"] == "already checked"
+    entity_types.clear_entity_types_cache()
+    assert entity_types.load_entity_types(vault).get("product") is None
+
+
+def test_retire_leaves_no_receipt_for_a_missing_vault(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+
+    summary = retain_retired_stock_types_if_needed(tmp_path / "nope", runtime)
+
+    assert summary["skipped"]
+    assert not (runtime / "migration").exists()
+
+
+def test_retire_leaves_an_old_disabled_row_alone_and_complete(tmp_path: Path) -> None:
+    vault = _retired_vault(tmp_path)
+    (vault / "entity-types.yaml").write_text("- id: document\n  enabled: false\n", encoding="utf-8")
+
+    summary = retain_retired_stock_types(vault, apply=True)
+
+    # The vault already owns `document`, switched off on purpose; only the rest is kept.
+    assert summary["retained"] == ["reference"]
+    entity_types.clear_entity_types_cache()
+    assert entity_types.load_entity_types(vault).get("document").enabled is False
+
+
+def test_retire_records_a_refused_write_so_it_is_not_retried_every_boot(tmp_path: Path) -> None:
+    vault = _retired_vault(tmp_path)
+    (vault / "entity-types.yaml").write_text(
+        "- id: doc\n  label: Doc\n  kind: note\n  folder: Docs\n", encoding="utf-8"
+    )
+    runtime = tmp_path / ".runtime"
+
+    first = retain_retired_stock_types_if_needed(vault, runtime)
+    second = retain_retired_stock_types_if_needed(vault, runtime)
+
+    assert "failed" in first
+    assert second["skipped"] == "already checked"
+    assert json.loads(retired_receipt_path(runtime, vault).read_text())["failed"]
