@@ -20,6 +20,7 @@ from ciao.providers import opencode
 from tests.test_os_support_processes import _beats_stopped, _leader, _wait_for_beat
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="POSIX signals the one server, as before")
 @pytest.mark.asyncio
 async def test_stopping_a_server_ends_its_whole_tree(tmp_path: Path) -> None:
     beat = tmp_path / "beat"
@@ -46,3 +47,20 @@ async def test_a_server_that_already_exited_is_left_alone(tmp_path: Path) -> Non
     await process.wait()
     await opencode._stop_server(process, tree)  # must not raise
     assert process.returncode == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the orphan case is the Windows shim's")
+@pytest.mark.asyncio
+async def test_a_leader_that_already_exited_does_not_leave_its_server(tmp_path: Path) -> None:
+    """`cmd.exe` gone, `opencode.exe` still serving: the stop still ends it."""
+    beat = tmp_path / "beat"
+    process, tree = await opencode._spawn_server(
+        *_leader(beat, then="sys.exit(0)"),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await asyncio.to_thread(_wait_for_beat, beat)
+    await process.wait()
+    await opencode._stop_server(process, tree)
+    assert await asyncio.to_thread(_beats_stopped, beat), "the orphaned child survived"
+

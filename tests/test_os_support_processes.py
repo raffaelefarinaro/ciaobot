@@ -137,3 +137,36 @@ def test_posix_uses_the_same_session_and_killpg_calls_as_before(
 @pytest.mark.skipif(sys.platform != "win32", reason="Job Objects are the Windows branch")
 def test_windows_starts_a_new_process_group() -> None:
     assert tree_spawn_options() == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="KILL_ON_JOB_CLOSE is the Windows branch")
+def test_windows_a_tree_that_dies_with_the_engine_ends_when_closed(tmp_path: Path) -> None:
+    """The engine exiting closes the job handle; that must end the tree."""
+    beat = tmp_path / "beat"
+    leader = subprocess.Popen(
+        _leader(beat, then="time.sleep(300)"), **tree_spawn_options(dies_with_engine=True)
+    )
+    tree = ProcessTree(leader.pid, dies_with_engine=True)
+    _wait_for_beat(beat)
+    tree.close()
+    leader.wait(timeout=15)  # it would sleep 300 s; the job's close ended it
+    assert _beats_stopped(beat), "the grandchild survived the job closing"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX branch is not defined on Windows")
+def test_posix_a_tree_that_dies_with_the_engine_stays_in_its_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same group as the engine (launchd's group kill reaches it) and one-pid signals."""
+    assert tree_spawn_options(dies_with_engine=True) == {}
+    group: list[tuple[int, int]] = []
+    single: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: group.append((pid, sig)))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: single.append((pid, sig)))
+    tree = ProcessTree(4321, dies_with_engine=True)
+    tree.terminate()
+    tree.kill()
+    tree.kill_descendants()  # a reaped pid may be someone else's: nothing to signal
+    assert group == []
+    assert single == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
+

@@ -1924,13 +1924,16 @@ class _NoOpTree:
     real pid for a Job Object or a process group to hold.
     """
 
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, *, dies_with_engine: bool = False) -> None:
         self.pid = pid
 
     def terminate(self) -> None:
         pass
 
     def kill(self) -> None:
+        pass
+
+    def kill_descendants(self) -> None:
         pass
 
     def close(self) -> None:

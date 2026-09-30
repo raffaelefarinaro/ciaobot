@@ -202,13 +202,16 @@ _SHUTDOWN_TIMEOUT = 5.0
 async def _stop_server(process: asyncio.subprocess.Process, tree: ProcessTree) -> None:
     """Stop an ``opencode serve`` and everything it started, politely first.
 
-    The tree, not the one process: the server starts MCP servers of its own,
-    and on Windows the process we spawned is the npm shim's ``cmd.exe``, whose
-    ``opencode.exe`` child is the actual server and outlived a kill aimed at the
-    shim alone. Same order as before: ask, wait ``_SHUTDOWN_TIMEOUT``, then kill.
+    The tree, not the one process: on Windows the process we spawned is the npm
+    shim's ``cmd.exe``, whose ``opencode.exe`` child is the actual server and
+    outlived a kill aimed at the shim alone. Same order as before: ask, wait
+    ``_SHUTDOWN_TIMEOUT``, then kill. A leader that already exited may have
+    left its tree behind, so that is still ended (``kill_descendants``).
     """
     try:
         if process.returncode is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                tree.kill_descendants()
             return
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             tree.terminate()
@@ -230,17 +233,24 @@ async def _stop_server(process: asyncio.subprocess.Process, tree: ProcessTree) -
 async def _spawn_server(
     *argv: str, **kwargs: Any
 ) -> tuple[asyncio.subprocess.Process, ProcessTree]:
-    """``create_subprocess_exec`` in its own process tree; see ``_stop_server``."""
-    options: dict[str, Any] = {**tree_spawn_options(), **kwargs}
+    """``create_subprocess_exec`` as a tree that dies with the engine.
+
+    ``dies_with_engine``: on POSIX the server stays in the engine's process
+    group, as it always has, so launchd's group kill on an engine crash still
+    reaches it; on Windows its Job Object ends the tree when the engine exits.
+    """
+    options: dict[str, Any] = {**tree_spawn_options(dies_with_engine=True), **kwargs}
     process = await asyncio.create_subprocess_exec(*argv, **options)
     try:
-        tree = ProcessTree(process.pid)
+        tree = ProcessTree(process.pid, dies_with_engine=True)
     except OSError:
         # A server that cannot be stopped as a tree would leak; do not run it.
         process.kill()
         await process.wait()
         raise
     return process, tree
+
+
 _SERVER_START_LOCKS: dict[str, asyncio.Lock] = {}
 _CATALOG_LOCKS: dict[str, asyncio.Lock] = {}
 # Lines of the server's stderr kept for error messages. The pipe must be read
