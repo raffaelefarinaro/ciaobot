@@ -267,12 +267,19 @@ def test_upgrade_notice_includes_a_setup_created_whole_vault_root(
     assert result["notices_found"] == 1
     assert str(tmp_path) in result["notices"][0]["detail"]
     assert str(tmp_path / "research") in result["notices"][0]["detail"]
-    # A setup-created whole-vault root is the case the hand-migration remedy was
-    # written for — the source and the install share a folder — and it is still
-    # the managed command that moves it. The registry is updated by the command,
-    # which is the difference from the hand edit the old remedy described.
-    assert "ciao vault-relocate research --apply" in result["notices"][0]["remedy"]
-    assert "hand-edit" not in result["notices"][0]["remedy"]
+    # The remedy names the managed command, and it does NOT claim the command will
+    # move this one: `vault_relocate.plan` refuses when the vault root IS the
+    # install root, because nothing can tell vault content from install control
+    # files there, and its refusal says to relocate by hand. So the notice points
+    # at the command and warns that `--apply` refuses, and the preview is where the
+    # operator finds out which shape they are in. (The old remedy described the
+    # whole hand migration, including the hand edit of the registry, for exactly
+    # this shape.)
+    remedy = result["notices"][0]["remedy"]
+    assert "ciao vault-relocate research --apply" in remedy
+    assert "refuses rather" in remedy
+    assert "install root" in remedy
+    assert "hand-edit" not in remedy
 
 
 def test_upgrade_notice_includes_an_external_setup_vault(tmp_path: Path) -> None:

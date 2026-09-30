@@ -31,6 +31,9 @@ import pytest
 from ciao import migration_notices
 from ciao.async_reads import run_read
 from ciao.migration_notices import (
+    LINKS_CLEAN,
+    LINKS_FAILED,
+    LINKS_FOUND,
     LINKS_SCAN_TTL_S,
     UNMIGRATED_LINKS_NOTICE,
     VAULT_LOCATION_NOTICE,
@@ -40,6 +43,7 @@ from ciao.migration_notices import (
     refresh_links,
     reset_links_cache,
     resolve_links,
+    start_links_scan,
     vault_location_findings,
 )
 from ciao.operator_actions import DetectionContext, detect_actions, dismiss_action
@@ -141,25 +145,48 @@ def test_home_and_the_audit_agree_on_the_misplaced_vault_and_its_wording(
     assert "ciao vault-relocate personal --undo" in notice["remedy"]
 
 
-def test_the_shared_remedy_names_the_ways_apply_refuses(tmp_path: Path) -> None:
+def test_the_shared_remedy_names_every_shape_apply_can_refuse(tmp_path: Path) -> None:
     """Both surfaces state the refusals, not just the one that opens a chat.
 
-    `--apply` refuses rather than guessing: a symlink source or destination, a
-    top-level entry it cannot classify, a vault holding another workspace's root,
-    and a vault outside the install's git worktree, where there is no `git mv` and
-    no automatic undo at all. That last one is why the remedy points at the
-    refusal instead of restating a route — the command itself tells the operator
-    to finish that case by hand, so a remedy saying "never move it by hand" would
-    be wrong exactly where it matters.
+    The list is read off `vault_relocate.plan` and `relocate`, and a shape added
+    there without being named here would leave an operator on one surface reading
+    a command that refuses them with a reason the other surface never mentioned.
     """
-    finding = vault_location_findings(_moved(tmp_path))
-    remedy = finding[0].remedy
+    remedy = vault_location_findings(_moved(tmp_path))[0].remedy
 
-    assert "symlink" in remedy
-    assert "classify" in remedy
-    assert "another workspace" in remedy
-    assert "outside the install's git worktree" in remedy
-    assert "read it" in remedy
+    for shape in (
+        "symlink",
+        "not empty",
+        "install root",
+        "more than one workspace",
+        "another workspace's root",
+        "nested under the vault",
+        "uncommitted changes",
+        "git worktree",
+    ):
+        assert shape in remedy, shape
+
+
+def test_the_remedy_does_not_promise_a_way_forward_it_cannot_give(
+    tmp_path: Path,
+) -> None:
+    """Most of those refusals only report what would not be done.
+
+    `vault_relocate` names a route for three of them — the install-root shape and
+    the outside-the-worktree one ("relocate it by hand"), and a destination nested
+    under the vault ("repoint the workspace's vault_root first"). The rest only say
+    what would not happen, so a remedy claiming they all say what to do next is a
+    promise the command does not keep. This test is the guard on that sentence: an
+    earlier version of it made exactly that claim.
+    """
+    remedy = vault_location_findings(_moved(tmp_path))[0].remedy
+
+    assert "states what to do next" not in remedy
+    assert "finished by hand" in remedy
+    assert "report only what would not be done" in remedy
+    # The preview is the authority on which shape this is, and the copy says so
+    # rather than pre-empting it.
+    assert "the preview says which shape applies" in remedy
 
 
 def _moved(tmp_path: Path) -> SimpleNamespace:
@@ -510,6 +537,82 @@ def test_two_installs_in_one_process_do_not_share_a_verdict(tmp_path: Path) -> N
     assert cached_links(two, _runtime(tmp_path / "two")) is None
 
 
+# -- a failed scan is an unknown, and an unknown is not retried per poll ------
+
+
+def test_a_failed_walk_is_cached_as_failed_and_never_as_clean(
+    tmp_path: Path,
+) -> None:
+    """The three states are not interchangeable, and this is the one that matters.
+
+    A vault that could not be walked is not a vault with nothing in it. Recording
+    the failure as ``clean`` would make the notice go quiet on the one thing it
+    exists to catch, so it is recorded as its own state: no card, and no claim.
+    """
+    config = _install_at(tmp_path, 3, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+
+    with patch(
+        "ciao.vault_migrate_links.has_unmigrated_links",
+        side_effect=OSError("vault is unreadable"),
+    ):
+        assert resolve_links(config, runtime) is None
+
+    assert cached_links(config, runtime) is None, "a failure is not a finding"
+    assert _stored_state(config.vault_root) == LINKS_FAILED
+    assert _stored_state(config.vault_root) != LINKS_CLEAN
+
+
+def test_a_failed_walk_is_not_retried_on_every_poll(tmp_path: Path) -> None:
+    """The window is what stops a broken vault costing a walk every 60 seconds.
+
+    Without a recorded failure the strip would re-walk and re-log on every poll
+    for as long as the vault stayed unreadable, which is the one cost this
+    design exists to avoid.
+    """
+    config = _install_at(tmp_path, 3, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+
+    with patch(
+        "ciao.vault_migrate_links.has_unmigrated_links",
+        side_effect=OSError("vault is unreadable"),
+    ) as walk:
+        assert resolve_links(config, runtime, now=1000.0) is None
+        assert links_scan_is_stale(config, runtime, now=1000.0) is False
+        assert links_scan_is_stale(config, runtime, now=1000.0 + 60) is False
+        assert links_scan_is_stale(config, runtime, now=1000.0 + 300) is True
+    # Two walks in two windows, not one per poll.
+    assert walk.call_count == 1
+
+
+def test_an_unreadable_receipt_is_a_failure_not_a_clean_vault(tmp_path: Path) -> None:
+    """`read_receipt` blowing up is unknown, and the token still identifies it.
+
+    The scope is known — the runtime root and the vault are both there — so the
+    failure is cacheable, and caching it is what stops the same exception being
+    logged on every poll.
+    """
+    config = _install_at(tmp_path, 3, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    (runtime / "migration" / "vault-links.json").write_text("{ not json", encoding="utf-8")
+
+    with patch(
+        "ciao.vault_migrate_links.read_receipt",
+        side_effect=RuntimeError("receipt read exploded"),
+    ):
+        assert resolve_links(config, runtime) is None
+        assert links_scan_is_stale(config, runtime) is False
+    assert _stored_state(config.vault_root) == LINKS_FAILED
+
+
+def _stored_state(vault: Path) -> str:
+    with migration_notices._CACHE_LOCK:
+        entry = migration_notices._CACHE.get(str(vault))
+    assert entry is not None, "nothing was published for this vault"
+    return entry.state
+
+
 # -- (4) neither notice is a catalog task yet --------------------------------
 
 
@@ -675,6 +778,167 @@ async def test_a_second_scan_inside_the_window_does_no_work(tmp_path: Path) -> N
     with patch("ciao.migration_notices.resolve_links", wraps=resolve_links) as scan:
         await refresh_links(config, runtime, now=500.0 + LINKS_SCAN_TTL_S)
     assert scan.call_count == 1
+
+
+# -- the detached task's whole life ------------------------------------------
+
+
+class _State:
+    """Whatever holds the task handle — Starlette's `app.state` in the app."""
+
+    def __init__(self) -> None:
+        self.links_scan_task: asyncio.Task[None] | None = None
+
+
+async def test_a_cold_poll_starts_one_detached_scan_and_finishes_with_a_card(
+    tmp_path: Path,
+) -> None:
+    """The whole cold path, in the order the PWA will meet it.
+
+    Nothing established yet, so the strip answers with no card and a scan running;
+    the scan lands; the next poll answers with a card that names the note. That
+    sequence is the design, so it is asserted end to end rather than by asserting
+    that a helper was called.
+    """
+    config = _install_at(tmp_path, 5, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    state = _State()
+    context = DetectionContext(config=config, runtime_dir=runtime)
+
+    assert start_links_scan(state, config, runtime) is True
+    assert _cards(context) == [], "the first poll cannot have the verdict yet"
+
+    await state.links_scan_task  # type: ignore[union-attr]
+
+    card = _cards(context)
+    assert [c.id for c in card] == ["vault-unmigrated-links"]
+    assert "wikilinked.md" in card[0].detail
+    # And the answer is stored, so the next poll starts nothing.
+    assert start_links_scan(state, config, runtime) is False
+
+
+def _cards(context: DetectionContext) -> list[Any]:
+    return [a for a in detect_actions(context) if a.kind == "unmigrated-links"]
+
+
+async def test_a_second_poll_does_not_start_a_second_scan(tmp_path: Path) -> None:
+    """One in flight at a time, however fast the polls arrive."""
+    config = _install_at(tmp_path, 3, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    state = _State()
+    release = asyncio.Event()
+
+    async def _slow_scan(*_args: Any, **_kwargs: Any) -> None:
+        await release.wait()
+        resolve_links(config, runtime)
+
+    with patch("ciao.migration_notices.refresh_links", side_effect=_slow_scan):
+        assert start_links_scan(state, config, runtime) is True
+        await asyncio.sleep(0)
+        assert start_links_scan(state, config, runtime) is False
+        release.set()
+        await state.links_scan_task  # type: ignore[union-attr]
+
+    assert cached_links(config, runtime) is not None
+
+
+async def test_a_failing_scan_is_observed_rather_than_left_for_the_gc(
+    tmp_path: Path,
+) -> None:
+    """A detached task's exception is retrieved here, or it surfaces nowhere.
+
+    An executor closed under a restart is the realistic cause. Left alone it would
+    be reported by the garbage collector at some unrelated moment as "Task
+    exception was never retrieved", which is the failure mode
+    `async_reads._observe_failure` exists to prevent for its own workers.
+    """
+    config = _install_at(tmp_path, 3, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    state = _State()
+
+    async def _broken(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("executor is closed")
+
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        with patch("ciao.migration_notices.refresh_links", side_effect=_broken):
+            with patch.object(migration_notices.logger, "warning") as warned:
+                start_links_scan(state, config, runtime)
+                task = state.links_scan_task
+                assert task is not None
+                # `asyncio.wait` rather than `await task`: awaiting would re-raise
+                # here, which says nothing about what the loop does with a task
+                # nobody awaits.
+                await asyncio.wait([task])
+                await asyncio.sleep(0)  # let the done-callback run
+    finally:
+        loop.set_exception_handler(previous)
+
+    # The failure was logged, and it was retrieved, so the loop's own "Task
+    # exception was never retrieved" report has nothing left to say.
+    assert warned.called
+    assert task.done() and not task.cancelled()
+    assert unhandled == []
+
+
+async def test_shutdown_cancels_a_scan_in_flight_and_waits_for_it(
+    tmp_path: Path,
+) -> None:
+    """A restart must not leave a task pending on a closing loop.
+
+    Cancelling detaches the awaiter only — `run_read`'s worker runs to completion
+    and stays joinable by a later caller — so what this asserts is that the task
+    is finished and acknowledged, and that a shutdown with nothing in flight is a
+    no-op rather than an error.
+    """
+    config = _install_at(tmp_path, 3, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    state = _State()
+    release = asyncio.Event()
+
+    async def _slow_scan(*_args: Any, **_kwargs: Any) -> None:
+        await release.wait()
+        resolve_links(config, runtime)
+
+    with patch("ciao.migration_notices.refresh_links", side_effect=_slow_scan):
+        start_links_scan(state, config, runtime)
+        task = state.links_scan_task
+        assert task is not None
+        await asyncio.sleep(0)
+
+        await migration_notices.shutdown_links_scan(state)
+        assert task.done()
+        assert task.cancelled()
+
+        # Nothing in flight, and a task that failed: neither may raise.
+        await migration_notices.shutdown_links_scan(state)
+        state.links_scan_task = asyncio.create_task(_fails())
+        await asyncio.sleep(0)
+        await migration_notices.shutdown_links_scan(state)
+
+
+async def _fails() -> None:
+    raise RuntimeError("boom")
+
+
+async def test_the_shutdown_callback_is_registered_before_the_executor_closes(
+    tmp_path: Path,
+) -> None:
+    """The scan waits on a worker; closing the pool under it is the leak avoided.
+
+    `ciao/main.py` owns the teardown order, so the order is asserted here rather
+    than left to a reader of two files.
+    """
+    source = (Path(__file__).resolve().parents[1] / "ciao" / "main.py").read_text(
+        encoding="utf-8"
+    )
+    block = source.split("app.state.shutdown_callbacks = [", 1)[1].split("]", 1)[0]
+    assert "_shutdown_links_scan" in block
+    assert block.index("_shutdown_links_scan") < block.index("_shutdown_vault_reads")
+    assert "shutdown_links_scan(app.state)" in source
 
 
 # -- neither surface keeps a copy --------------------------------------------

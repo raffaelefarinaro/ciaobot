@@ -43,12 +43,25 @@ by a walk:
 * :func:`cached_links` only reads what a previous scan stored. Home calls it: the
   strip runs on every app open, every window focus and every 60s poll, and this
   is the one fact on it that costs a vault.
-* :func:`refresh_links` runs :func:`resolve_links` through
-  :func:`ciao.async_reads.run_read`, so the walk happens on the bounded vault-read
-  executor — coalesced per install, admission-capped, never on the event loop.
-  The Home route starts it detached and answers the poll from whatever the last
-  scan stored, which is the same trade ``_cached_update_hint`` makes: a card
-  appears a poll or two after the first scan rather than on the first render.
+* :func:`start_links_scan` puts the walk on the bounded vault-read executor
+  (:func:`ciao.async_reads.run_read`, so it is coalesced per install,
+  admission-capped, and never on the event loop) and starts it **detached** from
+  the Home route, which answers the poll from whatever the last scan stored. That
+  is the same trade ``_cached_update_hint`` makes: a card appears a poll or two
+  after the first scan rather than on the first render. It also owns the task's
+  whole life — one in flight at a time, its failure observed rather than left for
+  the garbage collector, and cancellation at shutdown through
+  :func:`shutdown_links_scan`, which ``ciao/main.py`` registers beside the other
+  teardown callbacks.
+
+A stored answer is one of three states, and the difference matters. ``found`` is a
+wikilink a walk located; ``clean`` is a walk that finished and found nothing; and
+``failed`` is a walk or a receipt read that did not finish. Only ``found`` is ever
+a finding, and ``failed`` is never cached as ``clean`` — a vault that could not be
+read is an unknown, and an unknown reporting itself as clean would be the notice
+quietly lying. ``failed`` is still worth caching, because the alternative is a
+broken vault re-walking and re-logging on every 60s poll; the window is how long
+this engine waits before it looks again.
 
 :data:`LINKS_SCAN_TTL_S` is how long one answer may be reused. It is a named
 constant, not a setting and not an env var, and it is deliberately the same
@@ -74,6 +87,7 @@ audit.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -131,7 +145,7 @@ class VaultLocationFinding:
 
     @property
     def remedy(self) -> str:
-        """The managed command, the way back, and the two ways it can refuse.
+        """The managed command, the way back, and the truth about refusing.
 
         `vault-relocate` has an apply/undo cycle and updates the registry itself,
         so a remedy that describes moving the folder and hand-editing the
@@ -141,15 +155,16 @@ class VaultLocationFinding:
         sentence as the way forward.
 
         The refusals belong here rather than in a chat prompt, because both
-        surfaces have to say them and only one of them opens a chat: `--apply`
-        refuses on a source or destination that is a symlink, on any top-level
-        entry it cannot place (`unclassified` — a symlink, most often), on a
-        vault containing another registered workspace's root, and on a vault
-        outside the install's git worktree, where there is no `git mv` and no
-        automatic undo at all. Each of those refusals names what to do next, so
-        the remedy points at the refusal rather than restating a route — which
-        matters for the last one, because the command itself tells the operator
-        to finish that case by hand.
+        surfaces have to say them and only one of them opens a chat. What this
+        must NOT claim is that every refusal hands the operator a way forward:
+        most of them only report what would not be done. So the sentence names
+        the shapes, points at the preview as the place that says which one
+        applies, and attributes a route only to the refusals that really carry
+        one — the install-root and external-vault shapes, which
+        ``vault_relocate`` finishes by hand, and a destination nested under the
+        vault, which needs the registry repointed first. Whether this particular
+        mismatch is one of those is ``vault_relocate.plan``'s answer and not this
+        notice's to pre-empt.
         """
         name = self.workspace
         return (
@@ -158,12 +173,15 @@ class VaultLocationFinding:
             "content into the standard folder, updates the registry, and can be "
             f"reversed exactly with `ciao vault-relocate {name} --undo`. "
             "Ciaobot needs a restart (Settings -> Restart) before the new location "
-            "takes effect everywhere, including in an open chat. `--apply` refuses "
-            "rather than guessing — on a symlink, on any top-level entry it cannot "
-            "classify, on a vault holding another workspace's root, and on a vault "
-            "outside the install's git worktree, which has no automatic undo here. "
-            "Every refusal states what to do next, so read it rather than assuming "
-            "the move happened."
+            "takes effect everywhere, including in an open chat. It refuses rather "
+            "than guessing, and the preview says which shape applies: a symlink, a "
+            "destination that is not empty, a vault root that is the install root "
+            "itself, a shared root claimed by more than one workspace, a vault "
+            "holding another workspace's root, a destination nested under the vault, "
+            "uncommitted changes under the source, or a vault outside the install's "
+            "git worktree. A few of those name the way forward — the install-root and "
+            "outside-the-worktree shapes are finished by hand — and the rest report "
+            "only what would not be done, so nothing is moved on a guess."
         )
 
 
@@ -237,6 +255,17 @@ class LinksFinding:
         )
 
 
+#: A walk located a wikilink. The only state that is ever a finding.
+LINKS_FOUND = "found"
+#: A walk finished and found nothing. Silence, and an honest one.
+LINKS_CLEAN = "clean"
+#: A walk, or the receipt read in front of it, did not finish. Not silence and
+#: not a finding: an unknown, cached so a broken vault is not re-walked and
+#: re-logged on every poll, and never stored as ``clean`` — see the module
+#: docstring for why that distinction is the whole point.
+LINKS_FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class _CacheEntry:
     """One stored verdict, and the situation it was established for.
@@ -250,22 +279,30 @@ class _CacheEntry:
 
     token: str
     computed_at: float
-    example: str
+    state: str
+    example: str = ""
 
 
 _CACHE: dict[str, _CacheEntry] = {}
 _CACHE_LOCK = threading.Lock()
 
 
-def _links_scope(config: Any, runtime_dir: Path | None) -> tuple[Path, str] | None:
-    """The vault to examine and the identity of this situation, or None.
+@dataclass(frozen=True)
+class _Scope:
+    """Where the notice would apply, and whether this install can tell.
 
-    None means the notice cannot apply at all, and the two reasons are different
-    from a clean answer: a caller with no runtime root cannot know whether the
-    migration ran, and a **completed** receipt says it did. `read_receipt` reports
-    only a `status == "migrated"` run, so a receipt left by a run that could not
-    write every note does not silence the notice — the vault is half-converted and
-    the half is the finding.
+    ``vault is None`` means the notice cannot apply at all, which is a different
+    answer from every one of the three scan states: a caller with no runtime root
+    cannot know whether the migration ran, and a **completed** receipt says it
+    did. ``read_receipt`` reports only a `status == "migrated"` run, so a receipt
+    left by a run that could not write every note does not silence the notice —
+    the vault is half-converted and the half is the finding.
+
+    ``readable`` is False when the receipt itself could not be read. That is not
+    out of scope and it is not clean: the scope is still known (the runtime root
+    and the vault are both there, so the answer is cacheable and worth caching),
+    only the evidence is not, and the caller is expected to record that as
+    ``LINKS_FAILED``.
 
     The token is the receipt file's own identity, because the receipt is the
     completion evidence and its identity changes exactly when that evidence does:
@@ -276,31 +313,54 @@ def _links_scope(config: Any, runtime_dir: Path | None) -> tuple[Path, str] | No
     engine — cannot share an answer, because the runtime root and the vault path
     are in the key.
     """
+
+    vault: Path | None = None
+    token: str = ""
+    readable: bool = True
+
+
+def _links_scope(config: Any, runtime_dir: Path | None) -> _Scope:
     if runtime_dir is None:
-        return None
+        return _Scope()
     vault_raw = getattr(config, "vault_root", None)
     if vault_raw is None:
-        return None
+        return _Scope()
+    vault = Path(vault_raw)
     try:
         from ciao.vault_migrate_links import read_receipt, receipt_path
 
-        if read_receipt(runtime_dir) is not None:
-            return None
-        try:
-            stat = receipt_path(runtime_dir).stat()
-            stamp = f"{stat.st_mtime_ns}:{stat.st_size}"
-        except OSError:
-            stamp = "absent"
-    except Exception:  # noqa: BLE001 — advisory; a broken receipt is not a notice
+        completed = read_receipt(runtime_dir)
+    except Exception:  # noqa: BLE001 — advisory; an unreadable receipt is unknown
         logger.exception("migration notices: link-migration receipt read failed")
-        return None
-    vault = Path(vault_raw)
-    return vault, f"{Path(runtime_dir)}|{vault}|{stamp}"
+        return _Scope(vault=vault, token=_links_token(runtime_dir, vault), readable=False)
+    if completed is not None:
+        return _Scope()
+    return _Scope(vault=vault, token=_links_token(runtime_dir, vault))
 
 
-def _publish(key: str, token: str, example: str, instant: float) -> None:
+def _links_token(runtime_dir: Path, vault: Path) -> str:
+    """The identity of this situation: the install, the vault, the receipt.
+
+    Read through ``receipt_path`` rather than a path spelled out here, so the
+    receipt's layout stays the one thing that decides where it lives. A receipt
+    that cannot be stat'd is as good as absent, which is the situation its
+    absence already describes.
+    """
+    try:
+        from ciao.vault_migrate_links import receipt_path
+
+        stat = receipt_path(runtime_dir).stat()
+        stamp = f"{stat.st_mtime_ns}:{stat.st_size}"
+    except (ImportError, OSError, TypeError):
+        stamp = "absent"
+    return f"{Path(runtime_dir)}|{vault}|{stamp}"
+
+
+def _publish(key: str, token: str, state: str, example: str, instant: float) -> None:
     with _CACHE_LOCK:
-        _CACHE[key] = _CacheEntry(token=token, computed_at=instant, example=example)
+        _CACHE[key] = _CacheEntry(
+            token=token, computed_at=instant, state=state, example=example
+        )
 
 
 def _entry_in_window(vault: Path, token: str, instant: float) -> _CacheEntry | None:
@@ -338,23 +398,28 @@ def resolve_links(
     injectable so a test can place an answer inside or outside the window.
     """
     scope = _links_scope(config, runtime_dir)
-    if scope is None:
+    if scope.vault is None:
         return None
-    vault, token = scope
+    instant = time.monotonic() if now is None else now
+    if not scope.readable:
+        _publish(str(scope.vault), scope.token, LINKS_FAILED, "", instant)
+        return None
     try:
         from ciao.vault_migrate_links import has_unmigrated_links
 
-        example = has_unmigrated_links(vault)
+        example = has_unmigrated_links(scope.vault)
     except Exception:  # noqa: BLE001 — advisory; an unreadable vault is not a notice
         logger.exception("migration notices: wikilink scan failed")
+        _publish(str(scope.vault), scope.token, LINKS_FAILED, "", instant)
         return None
     _publish(
-        str(vault),
-        token,
+        str(scope.vault),
+        scope.token,
+        LINKS_FOUND if example else LINKS_CLEAN,
         example,
-        time.monotonic() if now is None else now,
+        instant,
     )
-    return LinksFinding(vault_root=vault, example=example) if example else None
+    return LinksFinding(vault_root=scope.vault, example=example) if example else None
 
 
 def cached_links(
@@ -366,16 +431,18 @@ def cached_links(
     wikilink, so a card drawn from this is a claim somebody can act on rather
     than an inference from a receipt's absence — and an install whose last scan
     found nothing gets no card, which is how the detector reaches zero for a
-    reason other than "a migration ran".
+    reason other than "a migration ran". A ``failed`` answer is silence too, and
+    for the same reason it is the silence the audit gets: nothing was established.
     """
     scope = _links_scope(config, runtime_dir)
-    if scope is None:
+    if scope.vault is None:
         return None
-    vault, token = scope
-    entry = _entry_in_window(vault, token, time.monotonic() if now is None else now)
-    if entry is None or not entry.example:
+    entry = _entry_in_window(
+        scope.vault, scope.token, time.monotonic() if now is None else now
+    )
+    if entry is None or entry.state != LINKS_FOUND or not entry.example:
         return None
-    return LinksFinding(vault_root=vault, example=entry.example)
+    return LinksFinding(vault_root=scope.vault, example=entry.example)
 
 
 def links_scan_is_stale(
@@ -383,15 +450,18 @@ def links_scan_is_stale(
 ) -> bool:
     """Whether Home should start a scan, answered without reading a note.
 
-    False whenever the notice cannot apply — a completed receipt, no runtime
-    root — so a migrated install is not woken every 60s to be told nothing again.
+    False whenever a stored answer of any kind is inside the window — a ``clean``
+    one and a ``failed`` one alike — and false whenever the notice cannot apply
+    at all (a completed receipt, no runtime root), so a migrated install is not
+    woken every 60s to be told nothing again. A ``failed`` answer therefore
+    retries once per window rather than once per poll, which is the whole point
+    of recording it.
     """
     scope = _links_scope(config, runtime_dir)
-    if scope is None:
+    if scope.vault is None:
         return False
-    vault, token = scope
     instant = time.monotonic() if now is None else now
-    return _entry_in_window(vault, token, instant) is None
+    return _entry_in_window(scope.vault, scope.token, instant) is None
 
 
 async def refresh_links(
@@ -399,22 +469,19 @@ async def refresh_links(
 ) -> None:
     """Establish the verdict off the event loop, through the bounded executor.
 
-    Detached from the Home route, so a poll never waits on a vault, and answered
-    by the next poll from the stored value — the arrangement
-    ``routes_api._cached_update_hint`` already uses for the release lookup. The
-    work goes through :func:`ciao.async_reads.run_read`, so it is coalesced per
-    install and admission-capped with every other vault read, and a cancelled
-    caller leaves the worker joinable rather than orphaned.
+    The work goes through :func:`ciao.async_reads.run_read`, so it is coalesced
+    per install and admission-capped with every other vault read, and a cancelled
+    caller leaves the worker joinable rather than orphaned. No request awaits
+    this; :func:`start_links_scan` is what a route calls.
 
     The freshness check is repeated inside the worker, because two polls can pass
     the route's gate before either scan is admitted and only one walk is worth
     doing.
     """
     scope = _links_scope(config, runtime_dir)
-    if scope is None:
+    if scope.vault is None:
         return
-    vault, _token = scope
-    key = f"migration-notices:links:{vault}"
+    key = f"migration-notices:links:{scope.vault}"
 
     def _scan() -> None:
         if not links_scan_is_stale(config, runtime_dir, now=now):
@@ -422,6 +489,62 @@ async def refresh_links(
         resolve_links(config, runtime_dir, now=now)
 
     await run_read(key, _scan)
+
+
+def start_links_scan(state: Any, config: Any, runtime_dir: Path | None) -> bool:
+    """Start the scan detached, at most one at a time. Returns whether it started.
+
+    ``state`` is whatever holds the task handle — Starlette's ``app.state`` in
+    the web app. The gate is the stored answer, not the task: a scan inside its
+    window is not started at all, and one already in flight is not joined, because
+    this poll's answer does not need it and the walk is under way regardless.
+
+    The task's outcome is observed here rather than left to the garbage collector.
+    A scan that raises — an executor closed under a restart, say — would otherwise
+    surface as "Task exception was never retrieved" at some unrelated moment, and
+    a failure nobody looks at is a failure nobody fixes. That is the same reason
+    ``async_reads`` retrieves a detached worker's exception.
+    """
+    if not links_scan_is_stale(config, runtime_dir):
+        return False
+    running = getattr(state, "links_scan_task", None)
+    if running is not None and not running.done():
+        return False
+    task = asyncio.create_task(refresh_links(config, runtime_dir), name="ciao-links-scan")
+    task.add_done_callback(_observe_links_scan)
+    state.links_scan_task = task
+    return True
+
+
+def _observe_links_scan(task: "asyncio.Task[None]") -> None:
+    """Retrieve a finished scan's outcome, so no failure is left unobserved."""
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning("Link scan failed: %s", error, exc_info=error)
+
+
+async def shutdown_links_scan(state: Any) -> None:
+    """Cancel a scan still in flight and wait for it to acknowledge.
+
+    Registered on the application's shutdown callbacks, before the vault-read
+    executor is closed, so a restart is not left holding a task that is waiting on
+    a worker about to be discarded. Cancelling here detaches the awaiter only —
+    ``run_read``'s worker runs to completion and stays joinable by a later caller
+    — so this is about not leaving a task pending on a closing loop, not about
+    stopping the walk.
+    """
+    task = getattr(state, "links_scan_task", None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001 — teardown must not raise past this point
+        logger.exception("Link scan failed while shutting down")
 
 
 def reset_links_cache() -> None:

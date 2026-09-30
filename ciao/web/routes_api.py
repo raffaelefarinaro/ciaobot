@@ -8720,28 +8720,16 @@ def _refresh_links_scan(app: Any, context: "operator_actions.DetectionContext") 
     One notice on the strip needs a fact no cheap read can supply: whether a
     note in the vault still holds a wikilink. Establishing it walks the vault, so
     it cannot run inside the detector pass — this strip is polled every 60s and on
-    every window focus. The walk goes to the bounded off-loop executor
-    (`ciao.migration_notices.refresh_links`) and this returns immediately, so the
-    strip answers from whatever the last scan stored. Same trade
-    `_cached_update_hint` makes for the release lookup: a cold engine reports no
-    card until the first scan lands, and the next poll picks it up.
-
-    One scan in flight at a time, and none at all while the stored answer is
-    inside its window, so a migrated install is not woken every minute to be told
-    nothing again. The scan's own staleness check is repeated inside the worker
-    for the poll that passes this gate while an earlier scan is still admitted.
+    every window focus. `migration_notices.start_links_scan` puts the walk on the
+    bounded off-loop executor, starts it detached, and owns the task from there
+    (one in flight, its failure observed, cancelled at shutdown); this call
+    returns immediately and the strip answers from whatever the last scan stored.
+    Same trade `_cached_update_hint` makes for the release lookup: a cold engine
+    reports no card until the first scan lands, and the next poll picks it up.
     """
     from ciao import migration_notices
 
-    if not migration_notices.links_scan_is_stale(context.config, context.runtime):
-        return
-    task = getattr(app.state, "links_scan_task", None)
-    if task is not None and not task.done():
-        return
-    app.state.links_scan_task = asyncio.create_task(
-        migration_notices.refresh_links(context.config, context.runtime),
-        name="ciao-links-scan",
-    )
+    migration_notices.start_links_scan(app.state, context.config, context.runtime)
 
 
 async def list_housekeeping(request: Request) -> JSONResponse:

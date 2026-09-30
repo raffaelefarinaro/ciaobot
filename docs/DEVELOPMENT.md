@@ -742,17 +742,30 @@ maintainer is checking:
   vault holding a hand-written wikilink — a diagnostic interface losing a finding
   to remove a disagreement. The expensive half of the condition is therefore not
   something a surface may approximate: it is a walk somebody has to do.
-- **Who may establish it?** Three named functions, not a boolean flag, because
-  "who pays" is the part that is allowed to differ. `resolve_links` walks and
-  publishes the verdict; `cached_links` only reads what is published; `refresh_links`
-  runs the walk through `async_reads.run_read`, so it is coalesced, admission-capped
-  and off the event loop like every other vault read. The audit calls
-  `resolve_links` — it is already a full-install pass over every note, and a report
-  that reused a stored verdict could report a stale one. Home calls `cached_links`,
-  because the strip runs on open, on focus and on a 60s poll. `GET /api/housekeeping`
-  starts `refresh_links` **detached** (the same arrangement as
-  `_cached_update_hint`), so a poll never waits on a vault and a cold engine shows
-  no card until the next one picks the verdict up.
+- **Who may establish it?** Named functions, not a boolean flag, because "who
+  pays" is the part that is allowed to differ. `resolve_links` walks and publishes
+  the verdict; `cached_links` only reads what is published; `start_links_scan` runs
+  the walk through `async_reads.run_read`, so it is coalesced, admission-capped and
+  off the event loop, and starts it **detached** (the same arrangement as
+  `_cached_update_hint`). The audit calls `resolve_links` — it is already a
+  full-install pass over every note, and a report that reused a stored verdict
+  could report a stale one. Home calls `cached_links`, because the strip runs on
+  open, on focus and on a 60s poll. `start_links_scan` also owns the task's whole
+  life: one in flight at a time, its outcome observed rather than left for the
+  garbage collector, and cancelled and awaited at shutdown by
+  `shutdown_links_scan`, which `ciao/main.py` registers **before** the read
+  executor is closed (a test asserts that order — the scan is waiting on a worker,
+  and closing the pool under a pending task is the leak being avoided).
+
+A published answer is one of three states, and the third one is the easy mistake.
+`LINKS_FOUND` is a note a walk located and is the only state that is ever a
+finding; `LINKS_CLEAN` is a walk that finished and found nothing; `LINKS_FAILED`
+is a walk or a receipt read that did not finish. **`failed` must never be recorded
+as `clean`**: a vault that could not be read is an unknown, and an unknown
+reporting itself as clean is the notice quietly lying on the one thing it exists to
+catch. It is still worth recording, because the alternative is a broken vault
+re-walking and re-logging on every 60s poll — the window is how long this engine
+waits before it looks again, so a failure costs one walk per window, not per poll.
 
 `LINKS_SCAN_TTL_S` (300) is a named constant, not a setting and not an env var, and
 it is deliberately the same window `update_tasks.APPLICABILITY_TTL_S` gives its
@@ -771,11 +784,23 @@ reason other than "a migration ran". No Home-side suppression is an input to any
 these functions, so when #800's catalog step makes a notice optional and
 dismissible, the dismissal can reach Home and only Home.
 
+The `vault-relocate` remedy names the shapes `--apply` refuses, because both
+surfaces have to say them and only one of them opens a chat. It attributes a
+manual route only to the refusals that really carry one — the install-root shape
+and the outside-the-worktree shape, which `vault_relocate` finishes by hand, and a
+destination nested under the vault, which needs the registry repointed — and leaves
+the rest to the preview. Most of those refusals only report what would not be done,
+so a remedy promising they all name a way forward is a promise the command does not
+keep, and which shape a given install is in is `vault_relocate.plan`'s answer to
+give rather than this notice's to pre-empt.
+
 The bound on the Home side is asserted, not assumed: `tests/test_migration_notices.py`
 counts filesystem accesses under the vault across detection passes, at one note and
 at four hundred, and fails on any of them, with a companion test proving the
 recorder sees a walk. A timing assertion would pass on a fast tmpfs and fail in CI.
-The scan is proven to run on a worker thread and to go through `run_read`.
+The scan is proven to run on a worker thread and to go through `run_read`, and the
+cold path is asserted end to end — one poll starts one detached scan and reports no
+card, the scan lands, the next poll reports a card that names the note.
 
 Neither notice is an update-task catalog row, and the test says so. A catalog task
 needs a registered completion check that reads a real postcondition, and for
