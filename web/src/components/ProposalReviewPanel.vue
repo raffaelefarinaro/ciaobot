@@ -592,9 +592,16 @@ function computeDiff(row: ProposalRow): RowDiff | null {
  * and the diff do not already say. */
 function rowReason(row: ProposalRow): string {
   const preview = store.previews[row.id]
-  if (!preview?.reason) return ''
-  if (preview.action === 'fold_doc') return ''
-  return preview.reason
+  if (preview?.reason && preview.action !== 'fold_doc') return preview.reason
+  // A row the server will not let anyone accept offers no card to read, and the
+  // accept button is gone with it — so its own reason is the only thing that can
+  // tell the owner why a suggestion is on screen with nothing to press. That is
+  // `note_edit` alone: a note that moved, a settled record, a record no longer
+  // on file. A healthy row keeps saying what its own preview says.
+  if (isNoteEdit(row) && row.note_edit?.can_accept === false) {
+    return row.note_edit.reason
+  }
+  return ''
 }
 
 // -- Queue load states ------------------------------------------------------
@@ -826,6 +833,17 @@ function isRehome(row: ProposalRow): boolean {
 
 function isSkill(row: ProposalRow): boolean {
   return row.kind === 'skill'
+}
+
+function isNoteEdit(row: ProposalRow): boolean {
+  return row.kind === 'note_edit'
+}
+
+/** Whether the wording can be adjusted before accepting. Most kinds can; a
+ * `note_edit` cannot, because its accept reads the replacement from the record
+ * and the preview ignores the wording. */
+function isEditable(row: ProposalRow): boolean {
+  return descriptorFor(row).editable !== false
 }
 
 /** The sessions behind a skill finding, as the record holds them.
@@ -1676,7 +1694,7 @@ watch(
                   :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
                   @click="reconcileFirst(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : 'Check first' }}</button>
-                <button v-if="!editingPreview" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
+                <button v-if="!editingPreview && isEditable(row)" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
                 <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
                 <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
                 <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
@@ -1785,7 +1803,7 @@ watch(
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
             <button
-              v-if="canAccept(row) && !isRehome(row)"
+              v-if="canAccept(row) && !isRehome(row) && isEditable(row)"
               type="button"
               class="mr-link pr-edit-first"
               @click="editFirst(row)"

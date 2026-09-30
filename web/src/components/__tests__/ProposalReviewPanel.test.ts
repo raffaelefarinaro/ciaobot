@@ -907,6 +907,101 @@ describe('talk about it', () => {
   }
 })
 
+describe('a note edit row', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+    useProjectStore().activeWorkspace = 'personal'
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  function editRow(over: Partial<ProposalRow> = {}): ProposalRow {
+    return row({
+      id: 'n',
+      kind: 'note_edit',
+      target: 'notes/office.md',
+      text: 'notes/office.md — replace: the third floor no longer exists',
+      note_edit: {
+        id: '4f2a91c0b7d3e6a5',
+        operation: 'replace',
+        outcome: 'update',
+        settled: '',
+        receipt_id: '',
+        can_accept: true,
+        reason: 'the third floor no longer exists',
+        ...(over.note_edit as object),
+      },
+      ...over,
+    })
+  }
+
+  it('offers no editor, because the accept ignores the wording entirely', async () => {
+    // The replacement text is the verification's, read from the sidecar. An
+    // editor here would re-preview wording the accept never sees, under a
+    // "what changes" panel that says the edited text is what gets written.
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) {
+        return Promise.resolve({ ok: true, preview: preview({
+          id: 'n', kind: 'note_edit', action: 'note_edit', operation: 'note_edit',
+          destination: 'notes/office.md', revision: 'rev-n', text: 'notes/office.md — replace',
+        }) })
+      }
+      return Promise.resolve({ rows: [editRow()] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.pr-row .pr-actions button').map(b => b.text())
+    expect(labels).not.toContain('Edit first')
+    // The accept is still there, and the row is enough on its own: the exact
+    // before/after diff is on the row already.
+    expect(labels).toContain('Update note')
+    expect(descriptorFor(editRow()).editable).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('says why a row the server will not accept is on screen at all', async () => {
+    // `can_accept: false` removes the Review button, so the card never opens and
+    // the row's own reason is the only thing that can tell the owner why a
+    // suggestion is sitting there with nothing to press.
+    const blocked = editRow({
+      note_edit: {
+        id: '4f2a91c0b7d3e6a5',
+        operation: 'replace',
+        outcome: 'update',
+        settled: '',
+        receipt_id: '',
+        can_accept: false,
+        reason: 'this note changed since the proposal was filed',
+      } as ProposalRow['note_edit'],
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      if (url.includes('/preview')) return Promise.reject(new Error('no preview'))
+      return Promise.resolve({ rows: [blocked] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const labels = wrapper.findAll('.pr-row .pr-actions button').map(b => b.text())
+    expect(labels).not.toContain('Review')
+    expect(labels).not.toContain('Edit first')
+    expect(labels).toContain('Dismiss')
+    expect(wrapper.get('.pr-row-reason').text())
+      .toBe('this note changed since the proposal was filed')
+    wrapper.unmount()
+  })
+})
+
 describe('workspace scoping', () => {
   let pinia: ReturnType<typeof createPinia>
 

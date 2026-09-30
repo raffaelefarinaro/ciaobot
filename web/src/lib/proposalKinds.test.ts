@@ -42,7 +42,7 @@ describe('descriptorFor', () => {
   })
 
   it('resolves every kind the server can send', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill', 'category']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill', 'category', 'note_edit']) {
       expect(descriptorFor(row({ kind }))).not.toBe(GENERIC)
     }
   })
@@ -59,6 +59,81 @@ describe('descriptorFor', () => {
     // There is no prose to reconcile: the decision is which notes get retyped,
     // so there is no merge chat to fall back to.
     expect(PROPOSAL_KINDS.category.fallback).toBeNull()
+  })
+
+  it('names a note_edit row by the note it would rewrite', () => {
+    // The queue bullet's payload is a sidecar id — a digest says nothing to a
+    // reviewer — so the server resolves it and the row's `target` is the note.
+    const r = row({ kind: 'note_edit', target: 'notes/office.md' })
+    expect(PROPOSAL_KINDS.note_edit.label).toBe('note edit')
+    expect(descriptorFor(r).destination(r)).toBe('notes/office.md')
+    const unnamed = row({ kind: 'note_edit' })
+    expect(descriptorFor(unnamed).destination(unnamed)).toBe('no note named')
+  })
+})
+
+describe('note_edit', () => {
+  function editRow(over: Partial<ProposalRow> = {}): ProposalRow {
+    return row({
+      kind: 'note_edit',
+      target: 'notes/office.md',
+      text: 'notes/office.md — replace: the third floor no longer exists',
+      note_edit: {
+        id: '4f2a91c0b7d3e6a5',
+        operation: 'replace',
+        outcome: 'update',
+        settled: '',
+        receipt_id: '',
+        can_accept: true,
+        reason: 'the third floor no longer exists',
+      },
+      ...over,
+    })
+  }
+
+  it('offers the accept only when the server says the operation can be applied', () => {
+    // The server asks the same question the accept does: a note that moved
+    // since the proposal was filed, or a re-stamp with no frontmatter to stamp,
+    // has a button that could only ever refuse. A row with no `note_edit` block
+    // at all predates the field and stays acceptable.
+    expect(descriptorFor(editRow()).canAccept(editRow())).toBe(true)
+    const blocked = editRow({
+      note_edit: { ...editRow().note_edit!, can_accept: false, reason: 'the note changed' },
+    })
+    expect(descriptorFor(blocked).canAccept(blocked)).toBe(false)
+    const bare = row({ kind: 'note_edit' })
+    expect(descriptorFor(bare).canAccept(bare)).toBe(true)
+  })
+
+  it('separates the three operations in the consequence', () => {
+    // A retirement is the one operation that removes something, so its copy has
+    // to say what happened to the note rather than describing a rewrite.
+    for (const [operation, expected] of [
+      ['replace', 'Rewrites this whole note with the verified text'],
+      ['restamp', 'Marks this note as checked again today'],
+      ['retire', 'Moves this note to the review trash, where it can be restored'],
+    ] as const) {
+      const r = editRow({ note_edit: { ...editRow().note_edit!, operation } })
+      expect(descriptorFor(r).consequence(r), operation).toBe(expected)
+    }
+  })
+
+  it('asks the agent about the decision, not about a region entry', () => {
+    const r = editRow()
+    expect(descriptorFor(r).discussLabel(r))
+      .toBe('a note edit a verification could not settle')
+  })
+
+  it('is the one kind whose wording cannot be edited', () => {
+    // The accept reads the replacement from the sidecar and the preview ignores
+    // the wording, so an editor would re-preview text the write never sees.
+    // Every other kind leaves the flag unset, which means editable.
+    expect(PROPOSAL_KINDS.note_edit.editable).toBe(false)
+    for (const kind of Object.keys(PROPOSAL_KINDS)) {
+      if (kind === 'note_edit') continue
+      expect(PROPOSAL_KINDS[kind as keyof typeof PROPOSAL_KINDS].editable, kind)
+        .not.toBe(false)
+    }
   })
 })
 
@@ -85,6 +160,8 @@ describe('destination', () => {
       [{ kind: 'project' }, 'no project doc named'],
       [{ kind: 'learnings' }, 'Workspace/Learnings.md'],
       [{ kind: 'review' }, 'no destination yet — decide what it is'],
+      [{ kind: 'note_edit', target: 'notes/office.md' }, 'notes/office.md'],
+      [{ kind: 'note_edit' }, 'no note named'],
       [{ kind: 'skill', path: 'skills/thing/SKILL.md' }, 'skills/thing/SKILL.md'],
       [{ kind: 'skill' }, 'a skill proposal file'],
     ]
@@ -135,7 +212,7 @@ describe('canAccept', () => {
   })
 
   it('allows the destination and region kinds', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'category']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'category', 'note_edit']) {
       const r = row({ kind })
       expect(descriptorFor(r).canAccept(r)).toBe(true)
     }
@@ -196,8 +273,12 @@ describe('accept fallback', () => {
     }
   })
 
-  it('has no fallback for the kinds that never offered an accept', () => {
-    for (const kind of ['skill', 'review', 'rehome']) {
+  it('has no fallback for the kinds with nothing a merge chat could resolve', () => {
+    // `note_edit` DOES offer an accept — but the replacement text is the
+    // verification's exact verdict, so a chat asked to merge one would have to
+    // invent it, and its two real refusals (a note that moved, a record that
+    // cannot be read) are not merge problems.
+    for (const kind of ['skill', 'review', 'rehome', 'note_edit']) {
       expect(PROPOSAL_KINDS[kind].fallback, kind).toBeNull()
     }
     expect(GENERIC.fallback).toBeNull()
@@ -282,7 +363,7 @@ describe('consequence', () => {
   }
 
   it('answers for every kind the server can send, naming no file', () => {
-    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill', 'category']) {
+    for (const kind of ['memory', 'profile', 'user', 'people', 'project', 'learnings', 'review', 'rehome', 'skill', 'category', 'note_edit']) {
       const text = consequenceFor({ kind, target: 'Mo', path: 'skills/x.md' })
       expect(text, kind).toBeTruthy()
       expect(text, kind).not.toMatch(/\.md\b/)

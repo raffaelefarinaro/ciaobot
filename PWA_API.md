@@ -866,9 +866,25 @@ never the reverse — a failed write returns **409** with the bullet still queue
 so an over-cap region cannot silently swallow the fact. A `rehome` row is not
 moved here: relocating a note and rewriting every reference to it is
 `vault_rehome`'s job, reversible through its own receipt, and doing half of it
-from a queue row would leave links pointing at a path that moved. `dismiss` writes
-nothing. Batch accept applies the same rule per row and reports `promoted` and
-`dismissed` for each, keeping the bullets it could not write.
+from a queue row would leave links pointing at a path that moved. A `note_edit`
+row IS performed here, and it is the one accept that rewrites a whole vault note:
+through `ciao.note_receipts.commit_note_change`, so it is revision-checked,
+journaled and undoable from History like any other note write, and a note that
+moved since the proposal was filed is a **409** with `conflict: true` and the
+bullet still queued — never an overwrite. A `retire` in the same row is
+attended-only and reversible: it calls `vault_review.trash_note` and moves the
+note into `Workspace/.vault-trash/`, from where the review panel's restore puts
+it back. `dismiss` writes nothing, but on a `note_edit` row it SETTLES the
+proposal, clearing the note-check's `proposal_id` — deliberately not a permanent
+"refused" marker, so the note is not asked about again until its cooldown
+expires and an edited note is proposed again straight away. A write that lands
+but cannot be recorded as decided — the sidecar unreadable, the lock held — is a
+**409**, not a success: the error names the note and its receipt, the bullet
+stays queued, and that dismissal is what settles the record. Reporting it as an
+accept would take away the only control the owner has over a note whose proposal
+is no longer in the queue. Batch accept applies
+the same rules per row and reports `promoted` and `dismissed` for each, keeping
+the bullets it could not write.
 
 ```bash
 # List every queued proposal across all workspaces, plus open skill-proposal
@@ -897,13 +913,32 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 # "Open chat". Dismissing one records the decision and flips its `lifecycle` to
 # `dismissed`: the file stays on disk, readable and still accumulating evidence,
 # and the row leaves the listing.
+#
+# A `kind: "note_edit"` row is one note whose verification the autonomy rule
+# would not apply unattended (a retirement, an update the evidence cannot carry,
+# a `still_valid` with no `updated:` to stamp) — see
+# `ciao/note_edit_proposals.py`. It carries `target` (the vault-relative note the
+# accept would rewrite) and `note_edit: {id, operation, outcome, settled,
+# receipt_id, can_accept, reason}`. `operation` is `replace` | `restamp` |
+# `retire`; `can_accept` is the server's own answer to whether the accept could
+# do what a button saying so claims (false for a note that moved since the
+# proposal was filed - a retirement included, which is refused as a conflict
+# rather than trashing a note nobody judged - a re-stamp with no frontmatter to
+# stamp, a record that has already been decided, and a record that is missing or
+# unreadable), with the reason beside it. The queue bullet's own
+# payload is the sidecar id — a digest that says nothing to a reviewer, so the
+# row is resolved server-side — and the operation, the before/after images and
+# the citations live at
+# `<vault>/Workspace/Memory-Note-Edit-Proposals/<id>.json`. Exactly one row per
+# (note, revision).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 
 # What accepting one row would write, WITHOUT writing it. Returns
 # {ok, preview} where preview is {id, kind, text, action, operation
-# (add|update|move|none), destination, destination_path, before, after,
-# revision, exact, can_accept, reason, truncated}. `before`/`after` are the
-# exact destination body the accept would replace, computed from the same
+# (add|update|move|add_category|note_edit|retire_note|none), destination,
+# destination_path, before, after, revision, exact, can_accept, reason,
+# truncated}. `before`/`after` are the exact destination body the accept would
+# replace, computed from the same
 # functions the accept calls - so a stamped learned-at date, a duplicate that
 # writes nothing, and a learning whose recurrence count is bumped instead of
 # appended all show as what they are. `exact: false` marks a kind whose result
@@ -911,6 +946,13 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 # accept time). `?text=` previews an edited wording against the same current
 # destination. `revision` is the destination digest this preview was computed
 # against; hand it back on the accept below.
+#
+# `note_edit` and `retire_note` are the note-verification operations and are
+# their own values rather than `update`/`move`: a `note_edit` preview is the
+# WHOLE note's before/after, byte-exact and computed against the note as it
+# stands, so its `after` is the bytes the accept writes; a `retire_note` preview
+# has no after body, because the accept moves the note to the review trash
+# rather than rewriting it.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/preview"
 
 # Accept a SKILL proposal into an implementation chat. A skill row is the one

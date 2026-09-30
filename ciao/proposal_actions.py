@@ -40,6 +40,10 @@ AcceptDescriptor = proposal_kinds.AcceptDescriptor
 
 # The accept actions that write to a named destination file rather than to a
 # bounded region of the workspace guide. They share one result shape.
+# ``note_edit`` is NOT among them: it rewrites a whole note through the
+# revision-checked note-receipt transaction (or moves the note to the review
+# trash) and reports a conflict as its own thing, so it has its own branch in
+# :func:`build_accept_result`.
 _DESTINATION_ACTIONS = (
     "fold_doc",
     "write_people_note",
@@ -166,6 +170,30 @@ def build_accept_result(
             destination=str(outcome.get("destination", "")),
             error=(
                 str(outcome.get("error", "could not write the destination"))
+                if failed
+                else None
+            ),
+            conflict=conflict,
+        )
+    if accept.action == "note_edit":
+        # Its own branch rather than the shared destination shape, because the
+        # thing a caller has to be able to tell apart here is a CONFLICT: a note
+        # that moved since the proposal was filed is still promotable, just not
+        # against the text the operator read, so the client reopens its preview
+        # instead of reporting a failed write. A destination branch would carry
+        # the conflict flag, but naming it separately is what keeps a whole-note
+        # rewrite from being read as "a file was written" by anything that
+        # groups accepts by where they land.
+        return ProposalActionResult(
+            id=proposal_id,
+            action=accept.action,
+            dismissed=dismissed,
+            promoted=bool(outcome.get("ok")),
+            # The note the edit was about, or — for a retirement — where it went
+            # into the reversible review trash.
+            destination=str(outcome.get("destination", "")),
+            error=(
+                str(outcome.get("error", "could not write the note"))
                 if failed
                 else None
             ),

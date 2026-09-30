@@ -602,6 +602,259 @@ def _rehome_target(row: dict[str, Any], requested: str) -> tuple[str, str]:
     return target, ""
 
 
+def _note_edit_sidecar(config, workspace: str, sidecar_id: str) -> Any:
+    """The filed proposal behind a `note_edit` payload, or a refusal.
+
+    A :class:`ciao.note_edit_proposals.NoteEditError` comes back AS the refusal
+    (both kinds: a record this version cannot read, and a config that cannot say
+    where the workspace's notes live), and ``None`` for a record that is simply
+    not there. The callers turn all three into an accept that refuses and keeps
+    the row, which is the direction that fails safe. Never guessed: the
+    replacement text is what gets written, so a record nobody can read is a
+    record nobody may act on.
+    """
+    from ciao.note_edit_proposals import NoteEditError, read_sidecar
+
+    try:
+        return read_sidecar(config, workspace, sidecar_id)
+    except NoteEditError as exc:
+        return exc
+
+
+def _note_edit_note_text(vault: Path, relative_path: str) -> str:
+    """The note's exact text right now, or ``""`` when it cannot be read.
+
+    Read as bytes, like every other note read in this repository
+    (``ciao.note_receipts._read_note_text``), so a BOM, CRLF pairs and a missing
+    final newline survive and the revision computed from it is the revision
+    ``commit_note_change`` will compare against. Resolved through
+    ``resolve_note_path``, so a symlinked component or a path outside the vault
+    is a refusal rather than a file somebody did not name.
+    """
+    from ciao import note_receipts as nr
+    from ciao.memory_receipts import MemoryReceiptError
+
+    try:
+        return nr.resolve_note_path(vault, relative_path).read_bytes().decode("utf-8")
+    except (MemoryReceiptError, OSError, UnicodeDecodeError):
+        return ""
+
+
+def _note_edit_moved(proposal: Any, current: str) -> bool:
+    """Whether the note is no longer the text this proposal was filed against.
+
+    The whole of the conflict rule, and the one place it is written down: an
+    unreadable note is not a conflict (it is refused with its own reason) and an
+    unchanged one is not either, so this asks only the revision question. Every
+    accept path that writes or moves bytes asks it here — a retirement included,
+    which reads the note's current text and would otherwise have nothing to
+    check it against.
+    """
+    from ciao import memory_receipts as mr
+
+    if not current:
+        return False
+    expected: str = str(proposal.expected_revision)
+    return bool(mr.content_revision(current) != expected)
+
+
+_CHANGED_SINCE = "this note changed since the proposal was filed"
+"""The opening every "the note moved under this proposal" refusal shares. Two
+operations, two sentences, one phrase to key on: the refusals read alike because
+they are the same problem, and :class:`_NoteEditAfter` carries the conflict flag
+beside them so no caller has to tell them apart by their wording."""
+
+
+_ALREADY_DECIDED = "already decided; dismiss this row"
+"""Why a settled proposal cannot be applied again. The accept path writes or
+trashes first and settles second, so a row whose bullet outlived the settlement
+is the one case that can reach an accept twice; the second click must find
+nothing to do rather than write the same decision again."""
+
+
+@dataclass(frozen=True, slots=True)
+class _NoteEditAfter:
+    """What one `note_edit` would leave behind, or why it cannot.
+
+    A value rather than a ``(text, reason)`` pair because the refusals split in
+    two and the split used to be a substring match on the message: a conflict is
+    a row the owner can decide again after re-reading, and everything else is a
+    permanent failure. A rewording of the sentence would have silently changed
+    what a 409 means to the client, so the distinction is a field — a caller asks
+    :attr:`conflict` and cannot be misled by wording.
+    """
+
+    text: str
+    reason: str
+    conflict: bool = False
+
+
+def _note_edit_after(proposal: Any, current: str) -> _NoteEditAfter:
+    """The exact bytes this note edit would leave behind, or why it cannot.
+
+    Reads the note's CURRENT text rather than the sidecar's before image. The
+    two are the same thing on the day a proposal is filed, and the reason they
+    can differ is the whole conflict rule: the replacement was planned against
+    text that is no longer there, so it is a conflict with nothing written
+    rather than an edit.
+
+    An empty :attr:`_NoteEditAfter.text` with no :attr:`_NoteEditAfter.reason` is
+    a :data:`ciao.note_edit_proposals.RETIRE`, which writes no body at all, and
+    an empty reason is an edit that may be applied. Both refusals the note's own
+    state produces — no readable note, and a note that moved — are conflicts,
+    because in each the note on disk is not the text anybody judged; the rest are
+    refusals about the record itself, which a fresh pass could file again. One
+    function, so a row whose button is offered is exactly a row whose accept can
+    work.
+    """
+    from ciao import note_edit_proposals as nep
+    from ciao.note_verification import _ALREADY_CURRENT
+    from ciao.vault_review import _stamp_updated
+
+    if not current:
+        return _NoteEditAfter(
+            "",
+            (
+                "the note is no longer readable in this vault, so there is nothing "
+                "to write against"
+            ),
+            conflict=True,
+        )
+    if _note_edit_moved(proposal, current):
+        return _NoteEditAfter(
+            "",
+            (
+                f"{_CHANGED_SINCE}, so the replacement was planned against text "
+                "that is no longer there; nothing was written"
+            ),
+            conflict=True,
+        )
+    if proposal.operation == nep.RETIRE:
+        return _NoteEditAfter("", "")
+    if proposal.operation == nep.REPLACE:
+        if not proposal.after.strip():
+            # `file_note_edit` refuses this and the sidecar reader refuses it too;
+            # checked again here because this is the function that decides what
+            # gets written, and an empty write is a deletion.
+            return _NoteEditAfter(
+                "",
+                (
+                    "the filed replacement text is empty, so applying it would "
+                    "empty the note; nothing was written"
+                ),
+            )
+        return _NoteEditAfter(proposal.after, "")
+    if not proposal.stamp_date:
+        # A restamp with no date of its own would stamp whatever day the accept
+        # happened to run, which is exactly the drift the record exists to stop.
+        return _NoteEditAfter(
+            "",
+            (
+                "the filed re-stamp names no date, so there is nothing exact to "
+                "stamp; nothing was written"
+            ),
+        )
+    stamped, status = _stamp_updated(current, proposal.stamp_date)
+    if stamped is not None:
+        return _NoteEditAfter(stamped, "")
+    if status == _ALREADY_CURRENT:
+        # Nothing to stamp, and that is a success rather than a refusal: the
+        # write records a receipt with `changed=False`, so History can show the
+        # verification even though the bytes did not move.
+        return _NoteEditAfter(current, "")
+    return _NoteEditAfter(
+        "",
+        (
+            "the note has no frontmatter `updated:` to stamp, and adding one would "
+            "restructure a file that was only asked to be verified"
+        ),
+    )
+
+
+def _note_edit_row_fields(config, workspace: str, sidecar_id: str) -> dict[str, Any]:
+    """The fields a ``[note_edit]`` bullet adds to its row.
+
+    ``target`` becomes the note the row is about, so a reader (and the PWA's
+    kind descriptor, which already knows how to name a ``target``) sees a path
+    rather than a digest. ``note_edit`` carries the sidecar id the accept
+    resolves, the operation, and ``can_accept`` with the reason — decided by
+    asking :func:`_note_edit_after`, the same function the accept and the
+    preview ask, so a row whose button is offered is exactly a row whose accept
+    can work.
+    """
+    from ciao.note_edit_proposals import NoteEditError
+
+    fields: dict[str, Any] = {"note_edit": {"id": sidecar_id}}
+    proposal = _note_edit_sidecar(config, workspace, sidecar_id)
+    if not isinstance(proposal, NoteEditError) and proposal is None:
+        # No record, so no note to name: the bullet's payload stays off the row
+        # rather than showing a digest as if it were a path. The row's own text
+        # still says which note the verdict was about, so the owner can dismiss
+        # it knowing what they are refusing.
+        fields["target"] = ""
+        fields["note_edit"].update(
+            operation="",
+            outcome="",
+            settled="",
+            receipt_id="",
+            can_accept=False,
+            reason=(
+                "the note edit behind this row is no longer on file; dismiss it "
+                "and let the next verification pass propose it again"
+            ),
+        )
+        return fields
+    if isinstance(proposal, NoteEditError):
+        fields["target"] = ""
+        fields["note_edit"].update(
+            operation="",
+            outcome="",
+            settled="",
+            receipt_id="",
+            can_accept=False,
+            reason=str(proposal),
+        )
+        return fields
+    fields["target"] = proposal.relative_path
+    if proposal.settled:
+        fields["note_edit"].update(
+            operation=proposal.operation,
+            outcome=proposal.outcome,
+            settled=proposal.settled,
+            receipt_id=proposal.receipt_id,
+            can_accept=False,
+            reason=_ALREADY_DECIDED,
+        )
+        return fields
+    try:
+        vault = Path(config.workspace_vault_root(workspace))
+    except (AttributeError, ValueError) as exc:
+        fields["note_edit"].update(
+            operation=proposal.operation,
+            outcome=proposal.outcome,
+            settled=proposal.settled,
+            receipt_id=proposal.receipt_id,
+            can_accept=False,
+            reason=f"could not resolve the vault: {exc}",
+        )
+        return fields
+    plan = _note_edit_after(
+        proposal, _note_edit_note_text(vault, proposal.relative_path)
+    )
+    fields["note_edit"].update(
+        operation=proposal.operation,
+        outcome=proposal.outcome,
+        settled=proposal.settled,
+        receipt_id=proposal.receipt_id,
+        can_accept=not plan.reason,
+        # The refusal, or else the verification's own reason: a row the server
+        # will not let anyone accept shows no card, so this string is the only
+        # place the owner is told why.
+        reason=plan.reason or proposal.reason,
+    )
+    return fields
+
+
 def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     """Scan every workspace's proposal queue and skill-proposal folder.
 
@@ -670,12 +923,27 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                         "stale": bool(signal.get("stale")),
                         "reason": signal["reason"],
                     }
+                elif accept.action == "note_edit":
+                    # The bullet's payload is the sidecar id, not the note: the
+                    # operation and the replacement text are not one line (see
+                    # `ciao.note_edit_proposals`). So the row is resolved from
+                    # the sidecar here and `target` becomes the note the row is
+                    # ABOUT, which is what a reader needs to see on it — the
+                    # same field a `[people]` name or a `[project]` doc path
+                    # rides in. The id stays on the row, because the accept
+                    # helper is handed the row and nothing else.
+                    row.update(_note_edit_row_fields(config, workspace, bullet.target))
                 rows.append(row)
                 by_id[pid] = {
                     "workspace": workspace,
                     "path": str(queue),
                     "line": line_index,
                     "row": row,
+                    # The registry travels with the row's context the way the
+                    # skill rows carry it, so a handler resolving this row's
+                    # sidecar never has to re-derive the vault from the
+                    # workspace name.
+                    "config": config,
                 }
         # Skill proposals are versioned records, not bullets: no parse_bullet,
         # no accept descriptor, and one file per skill is the atomic unit. The
@@ -1580,6 +1848,274 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
     )
 
 
+def _retire_note(config, vault: Path, row: dict[str, Any], proposal: Any) -> AcceptOutcome:
+    """Move one note to the reversible workspace trash, through Vault Review.
+
+    Retirement is attended-only and reversible, and the only primitive this
+    module reaches for it is :func:`ciao.vault_review.trash_note` — the same
+    one the review panel's own *Trash* button uses, with the same candidate
+    guard. ``note_verification`` cannot import a delete or a trash at all (its
+    guardrail test says so), and a proposer that could retire a note
+    unattended would be that same defect one layer out.
+
+    The candidate is resolved from the note's CURRENT hash rather than the
+    proposal's, so ``trash_note``'s own "candidate changed or no longer exists"
+    guard still has something to catch: it compares the hash it was handed
+    against the bytes on disk immediately before the move, which is the window
+    that matters.
+
+    The expected revision is checked FIRST, against the very bytes that hash is
+    then built from, because a retirement is the one operation that would
+    otherwise skip the conflict rule entirely: it moves whatever is on disk, and
+    ``trash_note``'s guard compares the file to itself. A note rewritten after
+    the proposal was filed is a conflict with the note left in place, which is
+    the only answer that does not destroy text nobody judged.
+    """
+    from ciao import vault_review as review
+
+    relative_path = proposal.relative_path
+    current = _note_edit_note_text(vault, relative_path)
+    if not current:
+        return AcceptOutcome(
+            ok=False,
+            conflict=True,
+            error=(
+                f"{relative_path} is no longer a readable note in this vault, so "
+                "it cannot be retired; nothing was written"
+            ),
+        )
+    if _note_edit_moved(proposal, current):
+        return AcceptOutcome(
+            ok=False,
+            conflict=True,
+            destination=relative_path,
+            error=(
+                f"{_CHANGED_SINCE}, so it is no longer the note this retirement "
+                "was judged on; nothing was written"
+            ),
+        )
+    # `trash_note` resolves its source by stripping the vault's own directory
+    # name from the candidate's rendered path, so the path it is given is the
+    # one `vault_review` writes everywhere else: that name plus the note's path
+    # inside the vault.
+    rendered = f"memory-vault/{relative_path}"
+    digest = review.content_hash(current.encode("utf-8"))
+    workspace = str(row.get("workspace") or "")
+    candidate = review.ReviewCandidate(
+        candidate_id=review.candidate_id(workspace, rendered, digest),
+        workspace=workspace,
+        path=rendered,
+        content_hash=digest,
+        signals=(f"note_edit:{proposal.outcome}",),
+        priority=0,
+        evidence={
+            "proposal_id": proposal.proposal_id,
+            "reason": proposal.reason,
+            "citations": [citation.as_dict() for citation in proposal.evidence],
+        },
+    )
+    try:
+        trashed = review.trash_note(vault, candidate, actor="operator")
+    except (ValueError, OSError) as exc:
+        return AcceptOutcome(ok=False, error=f"could not retire {relative_path}: {exc}")
+    # Vault-relative, like every other destination this module reports: the
+    # client shows one shape whatever the operation, and a path inside the
+    # vault's own trash is no more absolute than the note it came from.
+    destination = (
+        review.trash_dir(vault).relative_to(vault) / f"{trashed['candidate_id']}.md"
+    ).as_posix()
+    refusal = _settle_note_edit(config, row, accepted=True)
+    return AcceptOutcome(
+        ok=not refusal,
+        destination=destination,
+        # The note really was trashed, so an unsettleable record is reported
+        # beside what landed rather than as an accept that never happened. The
+        # row stays queued for the same reason an edit's does: it is the only
+        # thing left to dismiss, and a dismissal settles the record. Retrying the
+        # accept instead finds the note gone and refuses, which is why the
+        # message names the dismissal.
+        error=(
+            f"{proposal.relative_path} was moved to {destination} but the "
+            f"proposal could not be settled: {refusal}. Dismiss this row to "
+            "close it out."
+            if refusal
+            else None
+        ),
+    )
+
+
+def _settle_note_edit(
+    config,
+    row: dict[str, Any],
+    *,
+    accepted: bool,
+    receipt_id: str = "",
+    reason: str = "",
+) -> str:
+    """Record the decision behind a `note_edit` row; "" when it is on record.
+
+    A settlement that could not be recorded is not a settlement: the check would
+    keep holding the note for a month with nothing in the queue to settle it, and
+    the proposal on disk would still read as pending. Reported as a string so
+    the caller keeps the row and says why, exactly as
+    :func:`decline_category_row` does for a category.
+    """
+    from ciao.memory_receipts import MemoryReceiptError, QueueLockError
+    from ciao.note_edit_proposals import (
+        NoteEditError,
+        settle_note_edit,
+    )
+
+    sidecar_id = str((row.get("note_edit") or {}).get("id") or "").strip()
+    if not sidecar_id:
+        return "the bullet names no note edit"
+    try:
+        settle_note_edit(
+            config,
+            str(row.get("workspace") or ""),
+            sidecar_id,
+            accepted=accepted,
+            receipt_id=receipt_id,
+            reason=reason,
+        )
+    except NoteEditError as exc:
+        return str(exc)
+    except (MemoryReceiptError, QueueLockError, OSError) as exc:
+        return f"could not record the decision for {sidecar_id}: {exc}"
+    return ""
+
+
+def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
+    """Apply one `note_edit` proposal to the note it is about.
+
+    An edit (a replacement, or a verification re-stamp) goes through
+    ``note_receipts.commit_note_change``, so it is revision-checked, journaled
+    and undoable exactly like every other note write, and a note that moved
+    since the proposal was filed is a ``conflict`` with nothing written. The
+    replacement text is the verification's own, verbatim: this handler does not
+    re-derive, re-stamp or improve it, because a service that rewrote the text
+    it was handed would stop writing the exact bytes the owner read on the card.
+
+    Write-then-dismiss, like every other accept here: the note is written and the
+    proposal settled first, and a failure at either leaves the row queued with
+    nothing lost. Which also means this handler must refuse a record that is
+    already settled, because that is the one state where the row outlived its
+    own decision.
+
+    No explicit re-index. ``fts_search`` indexes on an (mtime, size, ctime)
+    signature and a note write changes all three, so the next incremental pass
+    re-reads it — the same thing the category accept's retypes rely on. A
+    bespoke index call here would be a new failure mode on a path whose note is
+    already committed and undoable.
+    """
+    from ciao import memory_receipts as mr
+    from ciao import note_edit_proposals as nep
+    from ciao import note_receipts as nr
+    from ciao.note_edit_proposals import NoteEditError
+
+    sidecar_id = str((row.get("note_edit") or {}).get("id") or "").strip()
+    if not sidecar_id:
+        return AcceptOutcome(ok=False, error="the bullet names no note edit")
+    workspace = str(row.get("workspace") or "")
+    proposal = _note_edit_sidecar(config, workspace, sidecar_id)
+    if isinstance(proposal, NoteEditError):
+        return AcceptOutcome(ok=False, error=str(proposal))
+    if proposal is None:
+        return AcceptOutcome(
+            ok=False,
+            error=(
+                "the note edit behind this row is no longer on file; dismiss it "
+                "and let the next verification pass propose it again"
+            ),
+        )
+    if proposal.settled:
+        # The accept writes or trashes first and settles second, so a row whose
+        # bullet outlived the settlement is the one way to reach this handler
+        # twice. The second click must find the decision already on record — a
+        # rewrite of a note the owner has already moved on from, or a second
+        # retirement of a note that is already in the trash.
+        return AcceptOutcome(
+            ok=False,
+            destination=proposal.relative_path,
+            error=_ALREADY_DECIDED,
+        )
+    try:
+        vault = nr.canonical_vault(config.workspace_vault_root(workspace))
+    except (mr.MemoryReceiptError, AttributeError, ValueError) as exc:
+        return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
+    destination = proposal.relative_path
+    if proposal.operation == nep.RETIRE:
+        return _retire_note(config, vault, row, proposal)
+    plan = _note_edit_after(
+        proposal, _note_edit_note_text(vault, proposal.relative_path)
+    )
+    if plan.reason:
+        # A conflict is told apart from an ordinary refusal by the flag the plan
+        # carries, not by its wording: the row is still promotable, just not
+        # against the text the owner read, so the client reopens its preview
+        # rather than reporting a permanent failure.
+        return AcceptOutcome(
+            ok=False,
+            conflict=plan.conflict,
+            destination=destination,
+            error=plan.reason,
+        )
+    after_text = plan.text
+    try:
+        receipt = nr.commit_note_change(
+            vault_root=vault,
+            relative_path=proposal.relative_path,
+            expected_revision=proposal.expected_revision,
+            after_text=after_text,
+            actor="operator",
+            source="curation",
+            workspace=workspace,
+            provenance={
+                "outcome": proposal.outcome,
+                "operation": proposal.operation,
+                "coverage": proposal.coverage,
+                "reason": proposal.reason,
+                "proposal_id": proposal.proposal_id,
+                "evidence": [
+                    citation.as_dict() for citation in proposal.evidence
+                ],
+            },
+        )
+    except mr.RevisionConflict as exc:
+        # A note that moved under a read nobody rechecked. Nothing written, and
+        # the row survives so a retry re-reads.
+        return AcceptOutcome(ok=False, conflict=True, destination=destination, error=str(exc))
+    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+        return AcceptOutcome(ok=False, destination=destination, error=str(exc))
+    receipt_id = str(receipt.get("id", ""))
+    refusal = _settle_note_edit(
+        config, row, accepted=True, receipt_id=receipt_id
+    )
+    if refusal:
+        # The note WAS written — so this says what landed, where, and with which
+        # receipt — but it is not a successful accept, and that is the whole point
+        # of saying so. An `ok=True` here takes the bullet out of the queue, and a
+        # bullet is the only thing the owner has to act on: removing it leaves the
+        # sidecar unsettled and the check still pinned to this revision, so
+        # `note_verification._check_settles` suppresses the note indefinitely. For
+        # a re-stamp of an already-current note the revision never moves, so
+        # nothing else would bring it back to a pass. Refused, the row stays: the
+        # next accept finds the conflict and says so, or the owner dismisses it —
+        # and the dismissal is itself a settle, so a transient failure here is
+        # recoverable.
+        return AcceptOutcome(
+            ok=False,
+            destination=destination,
+            receipt_id=receipt_id,
+            error=(
+                f"{destination} was written and the receipt is {receipt_id}, but "
+                f"the proposal could not be settled: {refusal}. Dismiss this row "
+                "to close it out."
+            ),
+        )
+    return AcceptOutcome(ok=True, destination=destination, receipt_id=receipt_id)
+
+
 def decline_category_row(config, row: dict[str, Any]) -> str:
     """Record the refusal of a `[category]` row; "" when it is on record.
 
@@ -2022,6 +2558,97 @@ def _category_preview(config, row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _note_edit_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
+    """What accepting one `note_edit` bullet would leave in the note.
+
+    Byte-exact, unlike a `[project]` fold: a note edit's replacement is fixed the
+    moment the verification produced it, and this preview computes it through
+    the same :func:`_note_edit_after` the accept calls, against the note as it
+    stands right now. So the card's "after" IS the bytes the write produces, and
+    ``revision`` is the digest the accept re-checks under the note lock.
+
+    A retirement has no after body — it moves the note to the review trash — so
+    it carries its own operation and says where the note went, which is the
+    whole of what a person needs to decide it. It is refused on the same two
+    grounds as an edit, though: a note that moved since the proposal was filed
+    is not the note anybody judged, and a record that is already settled is not
+    a question. `revision` is set for both operations, so the card's own
+    handshake covers a retirement instead of being skipped for the one write
+    that cannot be undone by an edit.
+    """
+    from ciao import note_edit_proposals as nep
+    from ciao.memory_receipts import content_revision
+    from ciao.note_edit_proposals import NoteEditError
+
+    out = _base_preview(row)
+    sidecar_id = str((row.get("note_edit") or {}).get("id") or "").strip()
+    workspace = str(row.get("workspace") or "")
+    proposal = _note_edit_sidecar(config, workspace, sidecar_id)
+    if isinstance(proposal, NoteEditError):
+        out["operation"] = "note_edit"
+        out["reason"] = str(proposal)
+        return out
+    if proposal is None:
+        out["operation"] = "note_edit"
+        out["reason"] = (
+            "the note edit behind this row is no longer on file; dismiss it and "
+            "let the next verification pass propose it again"
+        )
+        return out
+    out["destination"] = proposal.relative_path
+    if proposal.settled:
+        out["operation"] = (
+            "retire_note" if proposal.operation == nep.RETIRE else "note_edit"
+        )
+        out["can_accept"] = False
+        out["reason"] = _ALREADY_DECIDED
+        return out
+    try:
+        vault = Path(config.workspace_vault_root(workspace))
+    except (AttributeError, ValueError) as exc:
+        out["operation"] = "note_edit"
+        out["reason"] = f"could not resolve the vault: {exc}"
+        return out
+    current = _note_edit_note_text(vault, proposal.relative_path)
+    out["destination_path"] = str(vault / proposal.relative_path)
+    if proposal.operation == nep.RETIRE:
+        out["operation"] = "retire_note"
+        out["exact"] = True
+        out["revision"] = content_revision(current)
+        if not current:
+            out["can_accept"] = False
+            out["reason"] = (
+                "the note is no longer readable in this vault, so there is "
+                "nothing to retire"
+            )
+        elif _note_edit_moved(proposal, current):
+            out["can_accept"] = False
+            out["reason"] = (
+                f"{_CHANGED_SINCE}, so it is no longer the note this retirement "
+                "was judged on; nothing was written"
+            )
+        else:
+            out["can_accept"] = True
+            out["reason"] = (
+                "moves the note to the review trash, where it can be restored"
+            )
+        return out
+    plan = _note_edit_after(proposal, current)
+    before_clip, before_cut = _clip(current)
+    after_clip, after_cut = _clip(plan.text)
+    out["operation"] = "note_edit"
+    out["before"] = before_clip
+    out["after"] = after_clip
+    out["truncated"] = before_cut or after_cut
+    out["revision"] = content_revision(current)
+    out["exact"] = True
+    out["can_accept"] = not plan.reason
+    out["reason"] = plan.reason or (
+        "rewrites the whole note; the change is undoable from History"
+    )
+    return out
+
+
 def _rehome_preview(config, row: dict[str, Any]) -> dict[str, Any]:
     """A re-home accept moves a note; there is no memory body to replace."""
     out = _base_preview(row)
@@ -2072,6 +2699,8 @@ def preview_row(config, ctx: dict[str, Any], text: str = "") -> dict[str, Any]:
         out = _fold_preview(config, row)
     elif accept.action == "add_category":
         out = _category_preview(config, row)
+    elif accept.action == "note_edit":
+        out = _note_edit_preview(config, row, fact)
     elif accept.action == "move_file":
         out = _rehome_preview(config, row)
     else:
@@ -2141,6 +2770,24 @@ def destination_revision(config, row: dict[str, Any]) -> str:
             if not doc.is_file():
                 return ""
             return content_revision(doc.read_text(encoding="utf-8"))
+        if accept.action == "note_edit":
+            from ciao.note_edit_proposals import NoteEditError
+
+            sidecar_id = str((row.get("note_edit") or {}).get("id") or "").strip()
+            proposal = _note_edit_sidecar(
+                config, str(row.get("workspace") or ""), sidecar_id
+            )
+            if isinstance(proposal, NoteEditError) or proposal is None:
+                return ""
+            # Every operation, a retirement included: it moves the note rather
+            # than rewriting it, but the note is still the thing a person
+            # judged, and the accept refuses it once the bytes move. An empty
+            # string here would skip the card's revision handshake for the one
+            # operation that cannot be walked back by editing the file.
+            vault = Path(config.workspace_vault_root(row["workspace"]))
+            return content_revision(
+                _note_edit_note_text(vault, proposal.relative_path)
+            )
     except (AttributeError, OSError, ValueError) as exc:
         logger.info("proposal preview: could not read the destination (%s)", exc)
         return ""

@@ -582,6 +582,42 @@ stamps `updated:` when the facts still hold.
 `--with-vault` adds the note-aging pass (still informational, never changes the
 exit code). Exit 0 clean, 1 findings, 2 a region could not be read.
 
+### Note-edit proposals
+
+The autonomy rule in `ciao/note_verification.py` refuses some verdicts outright:
+a retirement, an update no citation can carry, a `still_valid` with no
+frontmatter `updated:` to stamp. Each is recorded as a `needs_review` check, and
+`ciao/note_edit_proposals.py` is what turns one into something a person can
+decide — a typed `note_edit` row in the proposal queue, one per `(note,
+revision)`, whose bullet payload is a sidecar id and whose record
+(`<vault>/Workspace/Memory-Note-Edit-Proposals/<id>.json`) holds the operation
+(`replace` | `restamp` | `retire`), the note's full before/after text, the
+`expected_revision` it was planned against, and the evidence behind it. A whole
+note's before/after is not one line, which is why the payload is an id and the
+record lives beside the queue — the same shape as the category sidecar, and for
+the same reason. A re-stamp also records the date the verification was dated:
+its bytes are computed rather than quoted, so the date travels with the proposal
+instead of being read off the clock at accept time, which is what makes a
+previewed card and a clicked one the same `exact` document.
+
+Three rules carry the weight, and they are worth stating before changing any of
+it. Filing is **idempotent per revision** and records the check's `proposal_id`,
+which is the only thing holding a note off a second proposal while the first is
+still queued. Accept applies through `note_receipts.commit_note_change`, so it
+is revision-checked, journaled and undoable, and a note that moved is a
+**conflict** with nothing written. Retirement is **attended-only**: the accept
+path is the only thing that can reach `vault_review.trash_note` (the reversible
+review trash), and `note_verification` still cannot import a delete primitive at
+all — `tests/test_note_verification.py` pins that and
+`tests/test_note_edit_proposals.py` extends the check to the proposer. Neither
+`accept` nor `dismiss` writes a "refused forever" flag, unlike the category
+sidecar's decline: a settlement clears the check's `proposal_id` and leaves the
+check's own 30-day cooldown running, so a note the owner kept is not re-asked
+this month and the moment it is edited the check no longer describes it and it
+is due again. Tests: `tests/test_note_edit_proposals.py`,
+`tests/test_web_proposals.py` for the routes, and
+`tests/test_note_verification.py` for the suppression the filing buys.
+
 The vault-review queue (`ciao/vault_review.py`, the `Review` panel, and
 `POST /api/vault/review`) disposes of a candidate with one of six dispositions,
 and every one of them appends a row to the append-only

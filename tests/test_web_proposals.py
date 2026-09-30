@@ -14,6 +14,7 @@ import json
 import re
 import threading
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -2358,6 +2359,555 @@ def test_batch_accept_covers_a_category_row(tmp_path: Path) -> None:
     assert resp.status_code == 200, resp.json()
     assert resp.json()["results"][0]["promoted"] is True
     assert _CATEGORY_ID in _registry_ids(config)
+
+
+# ---- note_edit proposals: a whole note, decided by a person ----------------
+#
+# The fixture FILES the proposal through the proposer rather than hand-writing
+# a bullet, so these tests drive the real path from a `needs_review` verdict to
+# a click: the row's id, the sidecar, and the check the filing recorded are all
+# the ones a nightly pass would produce.
+
+_EDIT_NOTE = "notes/office.md"
+_EDIT_PLAIN = (
+    "---\ntype: note\nupdated: 2024-01-05\n---\n\n"
+    "# Office\n\nThe office is on Via Verdi 12, third floor.\n"
+)
+_EDIT_FOURTH = _EDIT_PLAIN.replace("third", "fourth")
+
+
+def _note_edit_vault(
+    tmp_path: Path,
+    *,
+    operation: str = "replace",
+    outcome: str = "update",
+    after: str = _EDIT_FOURTH,
+    before: str = _EDIT_PLAIN,
+    text_on_disk: str | None = None,
+    today: date | None = None,
+) -> tuple[CiaoConfig, Any]:
+    """A workspace whose queue holds one `[note_edit]` row over a real note."""
+    from ciao import memory_receipts as mr
+    from ciao import note_edit_proposals as nep
+
+    config = _config(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    note = vault / _EDIT_NOTE
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_bytes((text_on_disk if text_on_disk is not None else before).encode("utf-8"))
+    proposal = nep.file_note_edit(
+        config,
+        workspace="personal",
+        relative_path=_EDIT_NOTE,
+        expected_revision=mr.content_revision(before),
+        operation=operation,
+        before=before,
+        after=after,
+        outcome=outcome,
+        coverage="complete",
+        evidence=(),
+        reason="the third floor no longer exists",
+        today=today,
+    )
+    return config, proposal
+
+
+def _note_edit_row(client: TestClient) -> dict:
+    return _accept_kind_row(client, "note_edit")
+
+
+def test_a_note_edit_row_names_the_note_it_is_about(tmp_path: Path) -> None:
+    """The bullet's payload is a sidecar id; the row a person reads is a path.
+
+    A digest on the row would tell a reviewer nothing about which note they are
+    being asked to change, and `destination_revision` needs the note to have
+    something to compare.
+    """
+    config, proposal = _note_edit_vault(tmp_path)
+    client = _client(config)
+
+    row = _note_edit_row(client)
+
+    assert row["target"] == _EDIT_NOTE
+    assert row["note_edit"]["id"] == proposal.id
+    assert row["note_edit"]["operation"] == "replace"
+    assert row["note_edit"]["can_accept"] is True
+    assert row["note_edit"]["settled"] == ""
+
+
+def test_a_note_edit_preview_is_byte_exact_to_the_accept(tmp_path: Path) -> None:
+    """The card's "after" IS the bytes the write produces.
+
+    A whole-note rewrite is the one accept whose result is fully known before the
+    click, so `exact` is True and `revision` is the digest the accept re-checks
+    — and the preview's after-image has to be the file's bytes afterwards, not
+    something the card recomputed.
+    """
+    config, _proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/preview")
+
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()["preview"]
+    assert body["action"] == "note_edit"
+    assert body["operation"] == "note_edit"
+    assert body["destination"] == _EDIT_NOTE
+    assert body["destination_path"] == str(vault / _EDIT_NOTE)
+    assert body["exact"] is True
+    assert body["can_accept"] is True
+    assert body["before"] == _EDIT_PLAIN
+    assert body["after"] == _EDIT_FOURTH
+
+    accepted = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert accepted.status_code == 200, accepted.json()
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == body["after"]
+
+
+def test_accepting_a_note_edit_applies_it_through_the_note_receipt(
+    tmp_path: Path,
+) -> None:
+    """Journaled, revision-checked and undoable like every other note write."""
+    from ciao.memory_receipts import journal_path, read_receipts
+
+    config, proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 200, resp.json()
+    result = resp.json()["result"]
+    assert result["action"] == "note_edit"
+    assert result["promoted"] is True
+    assert result["dismissed"] is True
+    assert result["destination"] == _EDIT_NOTE
+    assert "region" not in result, "a note edit is not a region write"
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_FOURTH
+
+    receipt = [
+        r
+        for r in read_receipts(journal_path(vault, None))
+        if r["kind"] == "note_apply"
+    ][-1]
+    assert receipt["provenance"]["operation"] == "replace"
+    assert receipt["provenance"]["proposal_id"] == proposal.proposal_id
+
+    # The row is gone and the record says the decision was made, with the
+    # receipt that can undo it.
+    assert client.get("/api/proposals").json()["rows"] == []
+    from ciao import note_edit_proposals as nep
+
+    settled = nep.read_sidecar(config, "personal", proposal.id)
+    assert settled is not None and settled.accepted is True
+    assert settled.receipt_id == receipt["id"]
+
+
+def test_a_note_that_moved_since_the_proposal_is_a_conflict(tmp_path: Path) -> None:
+    """The replacement was planned against text that is no longer there.
+
+    A note nobody can overwrite is the whole point of the expected revision, and
+    a conflict is told apart from a failure so the client reopens its preview
+    rather than reporting the row as broken.
+    """
+    config, _proposal = _note_edit_vault(
+        tmp_path, text_on_disk=_EDIT_PLAIN + "\nA line somebody added by hand.\n"
+    )
+    vault = config.workspace_vault_root("personal")
+    edited = (vault / _EDIT_NOTE).read_bytes()
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    preview = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"]
+    assert preview["can_accept"] is False
+    assert "changed since" in preview["reason"]
+
+    resp = client.post(
+        f"/api/proposals/{row['id']}/accept", json={"expected_revision": preview["revision"]}
+    )
+
+    assert resp.status_code == 409, resp.json()
+    assert resp.json()["conflict"] is True
+    assert (vault / _EDIT_NOTE).read_bytes() == edited, "byte-identical, untouched"
+    # The row survives, so the owner can re-read the note and decide again.
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_stale_preview_is_refused_before_the_write(tmp_path: Path) -> None:
+    """The card's own revision handshake, on the note this accept writes."""
+    config, _proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+    revision = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"][
+        "revision"
+    ]
+    (vault / _EDIT_NOTE).write_text(
+        _EDIT_PLAIN + "\nA line somebody added by hand.\n", encoding="utf-8"
+    )
+
+    resp = client.post(
+        f"/api/proposals/{row['id']}/accept", json={"expected_revision": revision}
+    )
+
+    assert resp.status_code == 409, resp.json()
+    assert "changed since this preview" in resp.json()["error"]
+    assert "preview" in resp.json()
+    assert _EDIT_PLAIN in (vault / _EDIT_NOTE).read_text(encoding="utf-8")
+
+
+def test_accepting_a_retire_trashes_the_note_and_links_the_outcome(
+    tmp_path: Path,
+) -> None:
+    """Attended-only, reversible, and never a delete.
+
+    The only primitive reached is `vault_review.trash_note`, so the note is in
+    the review trash with its metadata and the panel's own restore puts it back.
+    """
+    config, _proposal = _note_edit_vault(
+        tmp_path, operation="retire", outcome="retire", after=""
+    )
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 200, resp.json()
+    result = resp.json()["result"]
+    assert result["promoted"] is True
+    assert not Path(result["destination"]).is_absolute(), (
+        "one destination shape, whichever operation wrote it"
+    )
+    trashed = vault / result["destination"]
+    assert not (vault / _EDIT_NOTE).exists()
+    assert trashed.is_file()
+    assert trashed.read_text(encoding="utf-8") == _EDIT_PLAIN
+
+    from ciao import vault_review as review
+
+    review.restore_note(vault, trashed.stem)
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_PLAIN
+
+
+def test_a_retire_of_a_note_that_moved_is_a_conflict(tmp_path: Path) -> None:
+    """A retirement is checked against the revision, like every other operation.
+
+    A retirement moves whatever is on disk, and `trash_note`'s hash guard compares
+    the note to the bytes the accept just read — so without the expected revision
+    in front of it, a note rewritten after the proposal was filed would go to the
+    trash with the owner's hand-written line in it, under a 200. The note nobody
+    judged is not a note anybody may retire.
+    """
+    config, _proposal = _note_edit_vault(
+        tmp_path, operation="retire", outcome="retire", after=""
+    )
+    vault = config.workspace_vault_root("personal")
+    edited = _EDIT_PLAIN + "\nA line somebody added by hand.\n"
+    (vault / _EDIT_NOTE).write_text(edited, encoding="utf-8")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    preview = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"]
+
+    assert preview["operation"] == "retire_note"
+    assert preview["can_accept"] is False
+    assert "changed since" in preview["reason"]
+    # The card's own revision handshake covers a retirement too, rather than
+    # being skipped for the one write a person cannot walk back by editing.
+    assert preview["revision"]
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert resp.json()["conflict"] is True
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == edited, (
+        "byte-identical, untouched: nothing reached the trash"
+    )
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_settled_note_edit_row_cannot_be_accepted_again(tmp_path: Path) -> None:
+    """The accept writes first and settles second, so a row can outlive its decision.
+
+    A bullet whose removal failed leaves exactly that: a settled record behind a
+    queued row. The second click must find the decision already on record, or a
+    refusal is applied as a rewrite and an accepted retirement is performed twice.
+    """
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+    nep.settle_note_edit(config, "personal", proposal.id, accepted=True)
+
+    preview = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"]
+
+    assert preview["can_accept"] is False
+    assert "already decided" in preview["reason"]
+    assert _note_edit_row(client)["note_edit"]["can_accept"] is False
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert "already decided" in resp.json()["error"]
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_PLAIN, (
+        "the settled decision was applied once, not twice"
+    )
+    # The row is still there, because a decision cannot un-settle itself.
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_restamp_applies_the_date_it_was_filed_on(tmp_path: Path) -> None:
+    """A re-stamp's bytes are computed, so the date has to be on the record.
+
+    `date.today()` at accept time made the preview and the write two different
+    documents whenever the click landed on the other side of midnight — and the
+    card is labelled `exact`. Filed on a fixed date, the note comes back carrying
+    THAT date whatever day the accept runs on.
+    """
+    filed = date(2026, 3, 14)
+    config, _proposal = _note_edit_vault(
+        tmp_path, operation="restamp", outcome="still_valid", after="", today=filed
+    )
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    preview = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"]
+
+    assert preview["can_accept"] is True
+    assert preview["exact"] is True
+    assert "updated: 2026-03-14" in preview["after"]
+
+    accepted = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert accepted.status_code == 200, accepted.json()
+    written = (vault / _EDIT_NOTE).read_text(encoding="utf-8")
+    assert "updated: 2026-03-14" in written
+    assert written == preview["after"], "the preview's bytes are the written bytes"
+
+
+def test_dismissing_a_note_edit_settles_it_without_refusing_it_forever(
+    tmp_path: Path,
+) -> None:
+    """A dismissal releases the check, and leaves an expiring cooldown behind.
+
+    Not a "rejected forever" marker: the note is not asked about again this
+    month, and the moment it is edited the check no longer describes it and a
+    fresh pass may propose it again.
+    """
+    from ciao import note_edit_proposals as nep
+    from ciao import note_verification as nv
+    from ciao.memory_receipts import content_revision
+
+    config, proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert resp.status_code == 200, resp.json()
+    assert client.get("/api/proposals").json()["rows"] == []
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_PLAIN
+    settled = nep.read_sidecar(config, "personal", proposal.id)
+    assert settled is not None and settled.settled != ""
+    assert settled.accepted is False
+    check = nv.read_note_checks(vault)[_EDIT_NOTE]
+    assert check.proposal_id == ""
+    assert nv.should_check(
+        vault, _EDIT_NOTE, content_revision(_EDIT_PLAIN), today=date.today()
+    ) is False, "the cooldown is still running"
+
+
+def test_a_batch_with_a_note_edit_row_returns_an_explicit_result(
+    tmp_path: Path,
+) -> None:
+    """Both ways, and neither may fall through to the `[review]` wording.
+
+    "No destination yet" describes a row with nowhere to go, which is the
+    opposite of a row whose destination is the note it names — and a client
+    reading it would show a decision that has not been asked for.
+    """
+    config, _proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    accepted = client.post(
+        "/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}
+    )
+
+    assert accepted.status_code == 200, accepted.json()
+    results = accepted.json()["results"]
+    assert len(results) == 1
+    assert results[0]["action"] == "note_edit"
+    assert results[0]["promoted"] is True
+    assert "no destination yet" not in json.dumps(results)
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_FOURTH
+
+    # And a row it cannot apply says so, per row, and stays queued.
+    config, _proposal = _note_edit_vault(
+        tmp_path / "conflict",
+        text_on_disk=_EDIT_PLAIN + "\nA line somebody added by hand.\n",
+    )
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    refused = client.post(
+        "/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}
+    )
+
+    assert refused.status_code == 200, refused.json()
+    result = refused.json()["results"][0]
+    assert result["promoted"] is False
+    assert result["conflict"] is True
+    assert "no destination yet" not in result.get("error", "")
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_batch_dismiss_settles_a_note_edit_too(tmp_path: Path) -> None:
+    """A bulk "reject these" must settle what it removed, or the check keeps
+    holding a note with nothing in the queue to settle it."""
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(tmp_path)
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "dismiss", "ids": [row["id"]]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert client.get("/api/proposals").json()["rows"] == []
+    settled = nep.read_sidecar(config, "personal", proposal.id)
+    assert settled is not None and settled.accepted is False
+
+
+def test_a_note_edit_without_its_record_keeps_the_bullet(tmp_path: Path) -> None:
+    """The record IS the operation. Without it there is nothing to apply, so the
+    row survives for the owner to dismiss rather than resolving into a decision
+    that was not made."""
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    nep.sidecar_path(config, "personal", proposal.id).unlink()
+    client = _client(config)
+    row = _note_edit_row(client)
+    assert row["note_edit"]["can_accept"] is False
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert "no longer on file" in resp.json()["error"]
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_PLAIN
+
+
+def test_a_write_that_cannot_be_settled_keeps_the_row_and_says_why(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The write landed; the decision did not. The row has to survive.
+
+    An ``ok=True`` here removes the bullet, and the bullet is the only thing left
+    to act on: the sidecar stays unsettled, the check keeps this revision pinned
+    to a proposal nobody is being asked about, and
+    ``note_verification._check_settles`` suppresses the note for good — for a
+    re-stamp of an already-current note, whose revision never moves, that means
+    it is never verified again. So the accept refuses with what landed and where,
+    and the row stays for the dismissal that settles it.
+    """
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    def _read_only(*_args: Any, **_kwargs: Any) -> Any:
+        raise nep.NoteEditSidecarError("the sidecar is read-only")
+
+    monkeypatch.setattr(nep, "settle_note_edit", _read_only)
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    error = resp.json()["error"]
+    assert f"{_EDIT_NOTE} was written and the receipt is" in error
+    assert "the sidecar is read-only" in error
+    assert "Dismiss this row" in error
+    # The write stands and the row is still there to be acted on.
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_FOURTH
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    unsettled = nep.read_sidecar(config, "personal", proposal.id)
+    assert unsettled is not None and unsettled.settled == ""
+
+    # The transient failure is over, and the row is the recovery path: a
+    # dismissal settles the record it could not.
+    monkeypatch.undo()
+    dismissed = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert dismissed.status_code == 200, dismissed.json()
+    assert client.get("/api/proposals").json()["rows"] == []
+    settled = nep.read_sidecar(config, "personal", proposal.id)
+    assert settled is not None and settled.settled != ""
+    assert settled.accepted is False, "a dismissal is a refusal, not an accept"
+
+
+def test_a_retire_that_cannot_be_settled_keeps_the_row_too(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A retirement is the one write a person cannot walk back by editing.
+
+    So the row that says the note is in the trash has to stay until the record of
+    the decision is on disk: a check pinned to a proposal that is no longer
+    queued suppresses a note nothing will ever ask about again.
+    """
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(
+        tmp_path, operation="retire", outcome="retire", after=""
+    )
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    def _read_only(*_args: Any, **_kwargs: Any) -> Any:
+        raise nep.NoteEditSidecarError("the sidecar is read-only")
+
+    monkeypatch.setattr(nep, "settle_note_edit", _read_only)
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert "could not be settled" in resp.json()["error"]
+    assert not (vault / _EDIT_NOTE).exists(), "the note really was trashed"
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    unsettled = nep.read_sidecar(config, "personal", proposal.id)
+    assert unsettled is not None and unsettled.settled == ""
+
+
+def test_a_dismiss_that_cannot_be_settled_keeps_the_bullet(tmp_path: Path) -> None:
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(tmp_path)
+    nep.sidecar_path(config, "personal", proposal.id).unlink()
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert resp.status_code == 409, resp.json()
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
 
 
 def _undo_client(config: CiaoConfig) -> TestClient:
