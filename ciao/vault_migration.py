@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao import entity_types
 from ciao.vault_index import scan_vault, vocabulary_report
 
 logger = logging.getLogger(__name__)
@@ -246,7 +247,10 @@ def migrate_vault_vocabulary(
         summary["skipped"] = "vault root does not exist"
         return summary
 
-    drift = vocabulary_report(scan_vault(root))["type_drift"]
+    # Judged against this vault's own categories, so a type the owner defined
+    # (or that `retain_retired_stock_types` kept) is not reported as drift.
+    registry = entity_types.load_entity_types(root)
+    drift = vocabulary_report(scan_vault(root), registry=registry)["type_drift"]
     for raw_type, record in sorted(drift.items()):
         # The report's `suggested` target is resolved case-insensitively (a
         # case variant of a canonical or alias value maps to its target), so
@@ -283,6 +287,109 @@ def migrate_vault_vocabulary(
                 summary["failed"].append({**change, "error": str(exc)})
                 continue
             summary["renamed"].append(change)
+    return summary
+
+
+def retain_retired_stock_types(vault_root: Path, *, apply: bool = False) -> dict[str, Any]:
+    """Keep the stock categories that no longer ship, where a vault still uses them.
+
+    Stock dropped Product, Feature, Automation, Document, Reference and Content
+    (they fit one person's vault, not every vault). A vault with notes of those
+    types would otherwise see every one become ``unknown_type`` drift, so this
+    copies each retired definition into the vault's own ``entity-types.yaml``
+    when a note carries its id or one of its aliases. No note is rewritten, and
+    a category nothing uses is not copied. A vault that already defines the id
+    is left alone. Idempotent: the copied entry makes the type canonical, so a
+    second run finds no drift.
+
+    Returns ``retained`` (the ids written, or that would be) and ``vault_file``.
+    """
+    root = Path(vault_root)
+    summary: dict[str, Any] = {
+        "vault_root": str(root),
+        "applied": bool(apply),
+        "retained": [],
+        "covers": [],
+    }
+    if not root.is_dir():
+        summary["skipped"] = "vault root does not exist"
+        return summary
+
+    registry = entity_types.load_entity_types(root)
+    retired_entries = entity_types.retired_stock_entries()
+    by_folder = {retired.folder: retired.id for retired in retired_entries if retired.folder}
+    used: set[str] = set()
+    for entry in scan_vault(root):
+        raw = (entry.type or "").strip().lower()
+        if raw:
+            used.add(raw)
+            continue
+        # An untyped note used to infer its category from the folder it sits in
+        # (`Documents/`, `references/`); those folders are no longer stock, so
+        # it counts toward the retired category that owned the folder.
+        for part in entry.path.parts:
+            if part in by_folder:
+                used.add(by_folder[part])
+                break
+    retained = [
+        retired
+        for retired in retired_entries
+        if registry.get(retired.id) is None
+        and used & {retired.id, *(alias.lower() for alias in retired.aliases)}
+    ]
+    summary["retained"] = [retired.id for retired in retained]
+    # Every `type:` value the kept categories will claim, so a dry run can
+    # leave them out of "no canonical equivalent" instead of listing them.
+    summary["covers"] = sorted(
+        {retired.id for retired in retained}
+        | {alias.lower() for retired in retained for alias in retired.aliases}
+    )
+    if not retained or not apply:
+        return summary
+    entries = [*registry.entries(), *retained]
+    try:
+        entity_types.validate_entries(entries)
+    except entity_types.EntityTypeFileError as exc:
+        # A retired alias or folder that collides with a category the vault
+        # defined itself. Writing it would make the loader drop the whole file,
+        # so nothing is written and the owner sees why.
+        summary["retained"] = []
+        summary["failed"] = str(exc)
+        return summary
+    entity_types.write_vault_file(root, entries)
+    return summary
+
+
+def retired_receipt_path(runtime_root: Path, vault_root: Path) -> Path:
+    return Path(runtime_root) / "migration" / f"retired-stock-types.{_vault_key(vault_root)}.json"
+
+
+def retain_retired_stock_types_if_needed(vault_root: Path, runtime_root: Path) -> dict[str, Any]:
+    """Run :func:`retain_retired_stock_types` once per vault and record a receipt.
+
+    Gated like :func:`migrate_if_needed`, for the same reason: the check scans
+    the whole vault and must not repeat on every boot. No receipt is left while
+    the vault does not exist yet, so the next boot tries again. A refused write
+    (a collision with the vault's own categories) leaves one carrying the reason.
+    """
+    receipt = retired_receipt_path(runtime_root, vault_root)
+    if receipt.is_file():
+        return {"skipped": "already checked", "retained": []}
+    summary = retain_retired_stock_types(vault_root, apply=True)
+    if "skipped" in summary:
+        return summary
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "completed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "vault_root": str(Path(vault_root)),
+        "retained": summary["retained"],
+        # A refused write is recorded too: the owner fixes the collision and
+        # runs `ciao vault-migrate`, rather than every boot rescanning the vault.
+        "failed": summary.get("failed", ""),
+    }
+    tmp = receipt.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(receipt)
     return summary
 
 

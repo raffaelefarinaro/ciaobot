@@ -117,16 +117,9 @@ def test_get_returns_stock_plus_counts(client: TestClient) -> None:
         "place",
         "idea",
         "resource",
-        "product",
-        "feature",
-        "automation",
-        "document",
         "workspace",
-        "reference",
-        "content",
         "journal",
         "note",
-        "log",
         "skill-proposal",
     }
     assert all(row["builtin"] is True for row in rows)

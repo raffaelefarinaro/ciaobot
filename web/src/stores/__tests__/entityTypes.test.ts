@@ -42,6 +42,8 @@ function row(overrides: Partial<EntityTypeRow> = {}): EntityTypeRow {
     stale_after_days: 90,
     enabled: true,
     builtin: true,
+    core: false,
+    hidden: false,
     note_count: 4,
     ...overrides,
   }
@@ -99,6 +101,8 @@ describe('fromResponse', () => {
       stale_after_days: 0,
       enabled: true,
       builtin: false,
+      core: false,
+      hidden: false,
       note_count: 0,
     })
   })

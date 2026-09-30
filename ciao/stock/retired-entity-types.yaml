@@ -1,0 +1,55 @@
+# Stock categories that used to ship and no longer do. They are not part of the
+# effective list: a vault that still has notes carrying one of these types (or
+# an alias of it) gets the entry copied into its own entity-types.yaml by
+# `ciao.vault_migration.retain_retired_stock_types`, so those notes keep
+# resolving. A vault with no such notes never sees them. Same shape as
+# stock entity-types.yaml; `log` is not here because it became an alias of
+# `journal` instead.
+- id: product
+  label: Product
+  kind: note
+  folder: products
+  description: A product, service or line the user ships or sells. Use for versions, pricing, positioning.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+- id: feature
+  label: Feature
+  kind: note
+  folder: features
+  description: A capability of one product. Use for scope, state and spec-level detail.
+  aliases: [feature-brief]
+  stale_after_days: 0
+  enabled: true
+- id: automation
+  label: Automation
+  kind: note
+  folder: automations
+  description: A recurring or triggered routine. Use for what it does, when it fires, how it failed.
+  aliases: []
+  stale_after_days: 0
+  enabled: true
+- id: document
+  label: Document
+  kind: note
+  folder: Documents
+  description: A durable document of the user's own. Use for plans, templates and written material.
+  aliases: [doc, plan, planning-doc, template]
+  stale_after_days: 0
+  enabled: true
+- id: reference
+  label: Reference
+  kind: note
+  folder: references
+  description: Material quoted from elsewhere. Use for external analysis and citations.
+  aliases: [analysis]
+  stale_after_days: 0
+  enabled: true
+- id: content
+  label: Content
+  kind: note
+  folder: content
+  description: Something to publish. Use for drafts, posts and published material.
+  aliases: []
+  stale_after_days: 0
+  enabled: true

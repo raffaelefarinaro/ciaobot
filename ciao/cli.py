@@ -1579,7 +1579,7 @@ def _vault_migrate_command(args: argparse.Namespace) -> int:
     the user's notes, so applying is opt-in even though the substitution is
     mechanical.
     """
-    from ciao.vault_migration import migrate_vault_vocabulary
+    from ciao.vault_migration import migrate_vault_vocabulary, retain_retired_stock_types
 
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
@@ -1589,10 +1589,31 @@ def _vault_migrate_command(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # First, so the renames below are judged against the categories this vault
+    # keeps: a retired stock type still in use becomes a category of its own.
+    retention = retain_retired_stock_types(vault_root, apply=args.apply)
     summary = migrate_vault_vocabulary(vault_root, apply=args.apply)
+    summary["retained"] = retention["retained"]
+    if not args.apply:
+        # Nothing is written yet, so the types the retained categories will
+        # claim still read as unknown; they are not a decision for the user.
+        summary["unresolved"] = {
+            raw: paths
+            for raw, paths in summary["unresolved"].items()
+            if raw.lower() not in retention["covers"]
+        }
+    if "failed" in retention:
+        summary["failed"].append({"path": "entity-types.yaml", "error": retention["failed"]})
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 1 if summary["unresolved"] or summary["failed"] else 0
+
+    if retention["retained"]:
+        verb = "Kept" if args.apply else "Would keep"
+        print(
+            f"{verb} retired stock categories this vault still uses: "
+            f"{', '.join(retention['retained'])}."
+        )
 
     changes = summary["renamed"] if args.apply else summary["planned"]
     verb = "Renamed" if args.apply else "Would rename"
@@ -5906,8 +5927,10 @@ def build_parser() -> argparse.ArgumentParser:
         "vault-migrate",
         help="Rename non-canonical frontmatter types onto the vocabulary.",
         description=(
-            "One-off migration for an existing vault: renames aliased types "
-            "(doc -> document, project-log -> log) and reports types with no "
+            "One-off migration for an existing vault: keeps the stock categories "
+            "that no longer ship (product, feature, automation, document, "
+            "reference, content) when notes still use them, renames aliased "
+            "types (project-log -> journal) and reports types with no "
             "canonical equivalent. Dry-run unless --apply is passed."
         ),
     )

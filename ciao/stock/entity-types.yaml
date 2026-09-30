@@ -16,6 +16,11 @@
 #                   (0 = the caller's default, not "never")
 #   enabled        false keeps the entry out of every derived view, so a user
 #                   can turn a builtin off without deleting it
+#   core           set by the loader, never read from a vault file: the app
+#                   itself depends on this category (a hardcoded folder or
+#                   writer), so it cannot be turned off
+#   hidden         set by the loader, never read from a vault file: the agent
+#                   writes this type itself, so the Categories page leaves it out
 #   builtin        set by the loader, not by this file's author: stock entries
 #                   are builtin, a vault-only id is not
 - id: person
@@ -35,6 +40,7 @@
   aliases: []
   stale_after_days: 30
   enabled: true
+  core: true
   builtin: true
 - id: place
   label: Place
@@ -63,39 +69,21 @@
   stale_after_days: 0
   enabled: true
   builtin: true
-- id: product
-  label: Product
+- id: journal
+  label: Journal
   kind: note
-  folder: products
-  description: A product, service or line the user ships or sells. Use for versions, pricing, positioning.
-  aliases: []
+  folder: journal
+  description: A dated record of what happened. Use for running notes, event logs and project history.
+  aliases: [hackathon-log, log, project-log]
   stale_after_days: 0
   enabled: true
   builtin: true
-- id: feature
-  label: Feature
+- id: note
+  label: Note
   kind: note
-  folder: features
-  description: A capability of one product. Use for scope, state and spec-level detail.
-  aliases: [feature-brief]
-  stale_after_days: 0
-  enabled: true
-  builtin: true
-- id: automation
-  label: Automation
-  kind: note
-  folder: automations
-  description: A recurring or triggered routine. Use for what it does, when it fires, how it failed.
-  aliases: []
-  stale_after_days: 0
-  enabled: true
-  builtin: true
-- id: document
-  label: Document
-  kind: note
-  folder: Documents
-  description: A durable document of the user's own. Use for plans, templates and written material.
-  aliases: [doc, plan, planning-doc, template]
+  folder: ""
+  description: Any other note, such as a document, reference or draft. Use before inventing a new category.
+  aliases: [discussion-prep]
   stale_after_days: 0
   enabled: true
   builtin: true
@@ -107,58 +95,17 @@
   aliases: []
   stale_after_days: 0
   enabled: true
-  builtin: true
-- id: reference
-  label: Reference
-  kind: note
-  folder: references
-  description: Material quoted from elsewhere. Use for external analysis and citations.
-  aliases: [analysis]
-  stale_after_days: 0
-  enabled: true
-  builtin: true
-- id: content
-  label: Content
-  kind: note
-  folder: content
-  description: Something to publish. Use for drafts, posts and published material.
-  aliases: []
-  stale_after_days: 0
-  enabled: true
-  builtin: true
-- id: journal
-  label: Journal
-  kind: note
-  folder: journal
-  description: A dated record of what happened. Use for running notes and event logs.
-  aliases: [hackathon-log]
-  stale_after_days: 0
-  enabled: true
-  builtin: true
-- id: note
-  label: Note
-  kind: note
-  folder: ""
-  description: A note that fits no other category. Use before inventing a new one.
-  aliases: [discussion-prep]
-  stale_after_days: 0
-  enabled: true
-  builtin: true
-- id: log
-  label: Log
-  kind: note
-  folder: ""
-  description: An append-only trace of work done. Use for run history and receipts.
-  aliases: [project-log]
-  stale_after_days: 0
-  enabled: true
+  core: true
+  hidden: true
   builtin: true
 - id: skill-proposal
   label: Skill proposal
   kind: note
   folder: ""
-  description: A candidate new skill, proposed and not yet accepted. Use only for proposals.
+  description: A candidate new skill, proposed and not yet accepted.
   aliases: []
   stale_after_days: 0
   enabled: true
+  core: true
+  hidden: true
   builtin: true
