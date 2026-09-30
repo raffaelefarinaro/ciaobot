@@ -1,13 +1,21 @@
 """Contract tests for durable update-task state and cheap applicability (#756).
 
-Two things are proved here that the shipped data cannot prove, because both
-ship empty: the state store round-trips and suppresses per revision, and the
-applicability layer answers `applicable` / `not_applicable` / `unknown` for a
-detector that exists, one that does not and one that raises. The end-to-end test
-injects a packaged catalog (a temp root, monkeypatched over
-`update_task_catalog.packaged_root`) so the layer is exercised exactly as an
-installed wheel would run it while `ciao/stock/update-tasks/catalog.json` stays
-`[]`.
+Three things are proved here. The state store round-trips and suppresses per
+revision. The applicability layer answers `applicable` / `not_applicable` /
+`unknown` for a detector that exists, one that does not and one that raises. And
+a started task settles from its own completion check rather than staying
+`in_progress` forever (#788) — which is the one property that makes the whole
+framework worth having, since a task nobody can complete is a task Home asks
+about again and again.
+
+The shipped data proves some of this and not all of it: #728-E landed one real
+task (`learnings-cleanup`) with both probes behind it, so the layer's
+vocabulary — `keep`, `reviewed`, a revision the receipt names — is exercised
+against the real implementation rather than a stub. The freshness window and the
+state machine still need names this engine does not ship, so the end-to-end
+catalog test injects one through a temp packaged root (monkeypatched over
+`update_task_catalog.packaged_root`) and runs it exactly as an installed wheel
+would.
 
 Every test drives tmp directories only. No real vault, no real runtime, no
 engine, and no network: the module has no `eval`, no shell and no remote fetch
@@ -1384,3 +1392,576 @@ def test_a_receipt_whose_write_never_landed_does_not_complete_the_task(
 
     assert outcome.applicable is False
     assert outcome.evidence["reason"] == "no_review_receipt"
+
+
+# ── Settling a started task from its own evidence (#788) ────────────────────
+
+
+def _started(config: Any, task: UpdateTask, lifecycle: str) -> None:
+    """A record saying an attempt is under way and nothing has judged it yet."""
+    update_tasks.write_task_state(
+        update_tasks.TaskState(
+            task_id=task.id,
+            revision=task.revision,
+            scope=task.scope,
+            lifecycle=lifecycle,
+            updated_at="2026-01-01T00:00:00+00:00",
+            chat_id="chat-1",
+            prompt_digest="sha-1",
+        ),
+        config=config,
+        workspace="personal",
+    )
+
+
+def _kwargs(*tasks: UpdateTask, **overrides: Any) -> dict[str, Any]:
+    """`evaluate`'s arguments for the given tasks, over a fresh catalog holding them.
+
+    Variadic so a test that needs two scopes in one listing — which is how a
+    write failure in one is shown not to withhold the other's answer — reads the
+    same as every other call here.
+    """
+    return {
+        "workspace": "personal",
+        "installed_version": "1.2.0",
+        "catalog": _catalog(*tasks),
+        **overrides,
+    }
+
+
+async def test_a_started_task_settles_from_its_check_and_leaves_the_offer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point: a check that says yes writes `completed`, and that ends it.
+
+    This is the difference between a task an operator can finish and one Home
+    asks about forever. The detector still says `applicable` — that is its own
+    honest answer about rows a person has not retired — and what stops the offer
+    is the record, read fresh on every call. So one call has to report both: the
+    applicability that did not change, and a lifecycle that did.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, "in_progress")
+    settled: list[bool] = []
+
+    def _check(**_: Any) -> Detection:
+        return Detection(bool(settled), {"receipt": "2026-09-30T00:01:00+00:00"})
+
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    monkeypatch.setattr(update_tasks, "COMPLETION_FUNCTIONS", {CHECK: _check})
+
+    running = await update_tasks.evaluate(config, **_kwargs(task, change_token="a"))
+    assert running[0].state is not None
+    assert running[0].state.lifecycle == "in_progress"
+    assert running[0].offered, "an attempt nobody has judged is still on offer"
+
+    settled.append(True)
+    done = await update_tasks.evaluate(config, **_kwargs(task, change_token="b"))
+
+    assert done[0].state is not None
+    assert done[0].state.lifecycle == "completed"
+    assert done[0].applicability.status == APPLICABLE, (
+        "the answer about the workspace did not change; the decision about the "
+        "task did, and reporting `not_applicable` here would be a second claim "
+        "the detector never made"
+    )
+    assert done[0].suppressed and not done[0].offered
+    assert update_tasks.offered_tasks(done) == []
+    # The check's own evidence, not a flag anybody set: the receipt's name is the
+    # whole record of why this is finished.
+    assert done[0].state.evidence == {"receipt": "2026-09-30T00:01:00+00:00"}
+    document = json.loads(
+        update_tasks.state_path_for(config, "workspace", "personal").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert document["tasks"][f"{task.id}@{task.revision}"]["lifecycle"] == "completed"
+
+
+async def test_the_status_reports_the_settled_record_not_the_one_it_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read that decides *whether* to ask the check and the record that answers
+    are the same moment, so a settlement made during this call has to be visible in
+    this call's answer.
+
+    Reporting the pre-settlement state would mean Home keeps showing Start on a
+    task this very request finished: the record on disk says `completed` and the
+    card says `in_progress`, and neither is wrong about a different thing.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, "in_progress")
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    monkeypatch.setattr(
+        update_tasks,
+        "COMPLETION_FUNCTIONS",
+        {CHECK: lambda **_: Detection(True, {"rows": 0})},
+    )
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task))
+
+    assert statuses[0].state is not None
+    assert statuses[0].state.lifecycle == "completed"
+    assert statuses[0].suppressed
+    assert statuses[0].state.evidence == {"rows": 0}
+
+
+@pytest.mark.parametrize(
+    "lifecycle", ["offered", "dismissed", "completed", "waiting_review", "failed"]
+)
+async def test_only_an_undecided_lifecycle_is_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lifecycle: str
+) -> None:
+    """Every lifecycle that is not an open attempt is left exactly as it was.
+
+    ``offered`` is nobody's attempt. ``dismissed`` is the operator's decision and
+    ``completed`` is a check's own verdict, so re-asking on a timer would reopen
+    decisions nobody asked to reopen. ``waiting_review`` and ``failed`` *are* open
+    attempts — a chat parked on a decision that has since been made, and a turn
+    that may have landed after all — so they are asked, and the check decides
+    whether anything moves.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, lifecycle)
+    asked: list[int] = []
+
+    def _counting(**_: Any) -> Detection:
+        asked.append(1)
+        return Detection(True, {"rows": 0})
+
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    monkeypatch.setattr(update_tasks, "COMPLETION_FUNCTIONS", {CHECK: _counting})
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task))
+
+    open_attempt = lifecycle in update_tasks.SETTLING_LIFECYCLES
+    assert (
+        bool(asked) is open_attempt
+    ), f"{lifecycle} {'should' if open_attempt else 'should not'} have been asked"
+    assert statuses[0].state is not None
+    # An open attempt moves, and to where the check says; anything else stands
+    # exactly where the operator or the previous verdict left it.
+    assert statuses[0].state.lifecycle == ("completed" if open_attempt else lifecycle)
+
+
+async def test_a_task_with_no_record_is_never_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing has been started, so there is no attempt whose evidence could exist.
+
+    Asking anyway would write a ``completed`` record for a task the operator never
+    opened, on the strength of whatever evidence happens to be in the vault — a
+    leftover receipt from a run outside the app, or a workspace somebody reviewed by
+    hand. The evidence is about the workspace; the attempt is what says the
+    workspace was asked, and only one of the two is present here.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    asked: list[int] = []
+
+    def _counting(**_: Any) -> Detection:
+        asked.append(1)
+        return Detection(True, {"rows": 0})
+
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    monkeypatch.setattr(update_tasks, "COMPLETION_FUNCTIONS", {CHECK: _counting})
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task))
+
+    assert asked == []
+    assert statuses[0].state is None
+    assert statuses[0].offered
+    assert not update_tasks.state_path_for(config, "workspace", "personal").exists()
+
+
+async def test_the_freshness_window_bounds_the_check_as_well_as_the_detector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One check per window per task, exactly as for the detector.
+
+    The check is somebody else's code and may be as expensive as a detector — the
+    shipped one reads the learnings document and walks the receipt directory — so
+    it inherits the same bound rather than getting a second timer to be fresh on.
+    The window is also the honest answer about *when*: a task whose evidence lands
+    between two evaluations is noticed at the next one, and the settlement rides
+    the window rather than pretending to be immediate.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, "in_progress")
+    asks: list[int] = []
+
+    def _counting(**_: Any) -> Detection:
+        asks.append(1)
+        return Detection(False, {"rows": 9})
+
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    monkeypatch.setattr(update_tasks, "COMPLETION_FUNCTIONS", {CHECK: _counting})
+
+    await update_tasks.evaluate(config, **_kwargs(task, change_token="a", now=1_000.0))
+    assert len(asks) == 1
+
+    await update_tasks.evaluate(config, **_kwargs(task, change_token="a", now=1_000.5))
+    assert len(asks) == 1, "a warm window must not re-run the check"
+
+    await update_tasks.evaluate(config, **_kwargs(task, change_token="a", now=2_000.0))
+    assert len(asks) == 2, "a closed window asks again, or a settled task never settles"
+
+    # An unsatisfied check left the attempt alone, which is the other half of the
+    # contract: nothing moved and nothing was written.
+    state = update_tasks.read_task_state(task, config=config, workspace="personal")
+    assert state is not None and state.lifecycle == "in_progress"
+
+
+async def test_a_dismissal_during_the_check_wins_over_the_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's decision beats a settlement that started before it.
+
+    The lifecycle that makes a task settleable is read at the top of the
+    evaluation, and the check that answers it runs deliberately outside the write
+    lock — it is somebody else's code and may be slow. So the read behind the
+    write can be minutes stale, and the lock alone does not save it: serialising
+    the two writes while reading a decision from before the first one is exactly
+    how ``completed`` ends up on top of ``dismissed`` with no error anywhere.
+
+    So the dismissal is made from *inside* the check, at the moment a real slow
+    check would be mid-flight. It must win, on disk and in what this call
+    reports: an operator who pressed Dismiss while a card was settling must not
+    find the card back on Home one poll later offering Start.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, "in_progress")
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+
+    def _dismiss_while_checking(**_: Any) -> Detection:
+        update_tasks.record_dismissal(
+            task, config=config, workspace="personal", reason="not now"
+        )
+        return Detection(True, {"rows": 0})
+
+    monkeypatch.setattr(
+        update_tasks, "COMPLETION_FUNCTIONS", {CHECK: _dismiss_while_checking}
+    )
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task))
+
+    on_disk = update_tasks.read_task_state(task, config=config, workspace="personal")
+    assert on_disk is not None and on_disk.lifecycle == "dismissed", (
+        "the settlement overwrote a decision the operator made while its check "
+        "was running"
+    )
+    # And what this call reports is the record as it now stands, not the copy it
+    # read before the check raced it.
+    assert statuses[0].state is not None
+    assert statuses[0].state.lifecycle == "dismissed"
+    assert statuses[0].state.evidence == {"dismiss_reason": "not now"}
+    assert statuses[0].suppressed and not statuses[0].offered
+
+
+@pytest.mark.parametrize("lifecycle", ["dismissed", "completed", "offered"])
+async def test_a_record_that_moved_while_the_check_ran_is_never_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lifecycle: str
+) -> None:
+    """The guard is the whole set, not just the one decision that was reported.
+
+    ``dismissed`` and ``completed`` are the two lifecycles a settlement must not
+    touch — one is the operator's answer and one is a verdict — and ``offered`` is
+    the third because a record that is not an attempt has no evidence this call
+    could have been judging. All three are reachable mid-check (a second tab, a
+    reopen from Settings, an engine that settled it on another thread), and the
+    check has no reason to distinguish them: it says the *work* is done, which was
+    never in question, while the *record* is what this must not overwrite.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, "in_progress")
+
+    def _re_decide(**_: Any) -> Detection:
+        update_tasks.write_task_state(
+            update_tasks.TaskState(
+                task_id=task.id,
+                revision=task.revision,
+                scope=task.scope,
+                lifecycle=lifecycle,
+                updated_at="2026-01-02T00:00:00+00:00",
+            ),
+            config=config,
+            workspace="personal",
+        )
+        return Detection(True, {"rows": 0})
+
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    monkeypatch.setattr(update_tasks, "COMPLETION_FUNCTIONS", {CHECK: _re_decide})
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task))
+
+    on_disk = update_tasks.read_task_state(task, config=config, workspace="personal")
+    assert on_disk is not None and on_disk.lifecycle == lifecycle
+    assert statuses[0].state is not None
+    assert statuses[0].state.lifecycle == lifecycle
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        UpdateTaskStateError("state is not a readable schema-1 document"),
+        OSError("no space left on device"),
+    ],
+)
+async def test_a_settlement_that_cannot_be_written_does_not_break_the_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """A write that cannot land costs one task its completion, not the whole answer.
+
+    This runs on a Home listing, so a state file that went unwritable — a
+    half-finished sync, a read-only mount, a full disk — must not turn into a 500
+    and take every other task's row with it. And it must not be reported as done
+    either: the honest answer for a task whose check said yes and whose record
+    could not take the word is *still running*, which is what the next listing
+    will re-ask about.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    other = _task(id="refresh-index", scope="install")
+    _started(config, task, "in_progress")
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    monkeypatch.setattr(
+        update_tasks,
+        "COMPLETION_FUNCTIONS",
+        {CHECK: lambda **_: Detection(True, {"rows": 0})},
+    )
+
+    def _refuse(*_: Any, **__: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(update_tasks, "_write_document", _refuse)
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task, other))
+
+    assert [status.task.id for status in statuses] == [task.id, other.id]
+    assert statuses[0].state is not None
+    assert (
+        statuses[0].state.lifecycle == "in_progress"
+    ), "a check that could not be recorded is not a completed task"
+    assert statuses[1].offered, "one unwritable record must not withhold the rest"
+
+
+async def test_a_scope_that_goes_unreadable_mid_check_is_not_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unreadable branch has to survive the write side too, not just the read.
+
+    :func:`record_completion` re-reads the record under the lock precisely so it
+    can refuse, and an unreadable document reads as no record at all — which is
+    not a lifecycle in :data:`SETTLING_LIFECYCLES`. So a scope that goes bad
+    between the evaluation's read and the write is refused, not overwritten: this
+    install can no longer say what the operator decided, so it does not get to
+    write a verdict into it.
+
+    The applicability answer is *not* disturbed by this, and that is the point.
+    The detector ran while the file was still readable and its answer about the
+    workspace did not change; only the record did. Rewriting the detector's
+    ``applicable`` into ``unknown`` here would be a second, different retraction
+    of a claim that is still true.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, "in_progress")
+    path = update_tasks.state_path_for(config, "workspace", "personal")
+    truncated = '{"schema": 1, "tasks": {"review-legacy-rows@1": '
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+
+    def _corrupt_while_checking(**_: Any) -> Detection:
+        path.write_text(truncated, encoding="utf-8")
+        return Detection(True, {"rows": 0})
+
+    monkeypatch.setattr(
+        update_tasks, "COMPLETION_FUNCTIONS", {CHECK: _corrupt_while_checking}
+    )
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task))
+
+    assert statuses[0].state is None, "an unreadable record is not a settled one"
+    assert statuses[0].applicability.status == APPLICABLE
+    assert (
+        path.read_text(encoding="utf-8") == truncated
+    ), "the settlement built a new document on top of one it could not read"
+
+
+@pytest.mark.parametrize("reason", ["unregistered", "raises", "unsatisfied", "rude"])
+async def test_a_check_that_cannot_answer_leaves_the_attempt_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    """A check that cannot say yes says nothing at all, and the call still answers.
+
+    Four different failures, one outcome: the record is untouched and ``evaluate``
+    reports a task that is still running. Nothing here may become an error either —
+    a Home render that raised because a completion check misbehaved would take the
+    whole strip down for a task that is merely unfinished.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, "in_progress")
+
+    def _raise(**_: Any) -> Detection:
+        raise OSError("the vault is on a disconnected volume")
+
+    def _rude(**_: Any) -> Any:
+        return "probably done"
+
+    probes: dict[str, Any] = {
+        "raises": _raise,
+        "unsatisfied": lambda **_: Detection(False, {"rows": 9}),
+        "rude": _rude,
+    }
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    if reason == "unregistered":
+        monkeypatch.setattr(update_tasks, "COMPLETION_FUNCTIONS", {})
+    else:
+        monkeypatch.setattr(
+            update_tasks, "COMPLETION_FUNCTIONS", {CHECK: probes[reason]}
+        )
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task))
+
+    assert statuses[0].state is not None
+    assert statuses[0].state.lifecycle == "in_progress"
+    assert statuses[0].applicability.status == APPLICABLE
+    assert statuses[0].offered
+
+
+async def test_an_unreadable_scope_is_not_settled_from_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file the install cannot read withholds the answer; it does not licence a write.
+
+    The record is what says whether the operator already decided, so a scope whose
+    document is unreadable produces ``unknown`` and stops. Asking its completion
+    check anyway would write ``completed`` into a file the same call could not
+    parse — replacing a decision it could not read with a verdict derived from the
+    vault.
+    """
+    config = _config(tmp_path)
+    task = _task()
+    _started(config, task, "in_progress")
+    path = update_tasks.state_path_for(config, "workspace", "personal")
+    path.write_text(
+        '{"schema": 1, "tasks": {"review-legacy-rows@1": ', encoding="utf-8"
+    )
+    asked: list[int] = []
+
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {REGISTERED: lambda **_: Detection(True, {"rows": 3})},
+    )
+    monkeypatch.setattr(
+        update_tasks,
+        "COMPLETION_FUNCTIONS",
+        {CHECK: lambda **_: (asked.append(1), Detection(True, {"rows": 0}))[1]},
+    )
+
+    statuses = await update_tasks.evaluate(config, **_kwargs(task))
+
+    assert asked == []
+    assert statuses[0].applicability.status == UNKNOWN
+    assert statuses[0].state is None
+
+
+async def test_the_shipped_task_settles_from_a_real_attended_review(
+    tmp_path: Path,
+) -> None:
+    """End to end, over the real probes: the prompt's own command closes its task.
+
+    This is #788's actual subject — the ``learnings-cleanup`` row, its shipped
+    detector and its shipped check — with nothing stubbed. A workspace whose
+    review kept the unproposed lesson stays ``applicable`` forever, which is the
+    detector being right: that lesson is still nobody's to retire. Before the
+    settlement this call performs, that made the task permanently unfinishable;
+    here the attended receipt #728-E deliberately writes closes it, and the card
+    goes away on evidence rather than on prose.
+    """
+    from ciao import learnings_cleanup
+
+    task = load_catalog().by_id["learnings-cleanup"]
+    config, vault = _settled_vault(tmp_path)
+    plan = learnings_cleanup.plan_cleanup(vault, workspace="personal", config=config)
+    _started(config, task, "in_progress")
+    kwargs = {"workspace": "personal", "installed_version": "1.2.0"}
+
+    running = await update_tasks.evaluate(config, **kwargs)
+    assert running[0].state is not None and running[0].state.lifecycle == "in_progress"
+    assert running[0].offered, "the unproposed lesson is exactly what this task is for"
+
+    result = learnings_cleanup.apply_cleanup(
+        vault,
+        plan,
+        workspace="personal",
+        config=config,
+        actor="operator",
+        today=date(2026, 9, 30),
+        reviewed=True,
+        approvals={
+            plan.removals[0].learning_id: {
+                "learning_id": plan.removals[0].learning_id,
+                "entry_revision": plan.removals[0].entry_revision,
+                "reason": "the finding landed in the skill",
+                "evidence": "verified into web-research",
+            }
+        },
+    )
+    _record_receipt(config, result.receipt)
+
+    settled = await update_tasks.evaluate(config, change_token="after", **kwargs)
+
+    assert settled[0].state is not None
+    assert settled[0].state.lifecycle == "completed"
+    assert settled[0].state.evidence["receipt"] == result.receipt["removed_at"]
+    assert settled[0].state.evidence["removed"] == 1
+    assert settled[0].applicability.status == APPLICABLE
+    assert not settled[0].offered

@@ -1407,6 +1407,61 @@ detector that returned the wrong shape, an unreadable state file) are not cached
 at all. Change the constant or the token contract and update the tests that pin
 them, and see `tests/test_update_tasks.py`.
 
+#### Settling a task from its completion check (#788)
+
+`record_completion` is the only writer of `completed`, and until #788 nothing in
+production called it — so `in_progress` was terminal, and a task nobody could
+finish was a task Home asked about forever. `evaluate` now settles: when it
+computes a task's fresh detector answer and that task's record is in
+`SETTLING_LIFECYCLES`, it asks the row's registered check once and writes what
+the check says, then re-reads the record so the returned `TaskStatus` reports the
+settled lifecycle rather than the state it replaced.
+
+Adding a lifecycle or moving one into or out of `SETTLING_LIFECYCLES` means
+answering one question: *is this an undecided attempt whose evidence could
+already exist?* `in_progress`, `waiting_review` and `failed` are; `offered` is
+not (no chat was ever opened, so any receipt in the vault belongs to somebody
+else's run), and neither are `completed` or `dismissed` (re-asking a check about
+its own verdict, or an operator's decision, on a timer would reopen decisions
+nobody asked to reopen). Keep `record_completion` the only thing that writes
+`completed`: it already returns `None` for an unregistered, raising, rude or
+unsatisfied check, and a settlement path that wrote anything else would take that
+guarantee with it.
+
+The settlement rides the *same* per-task window as the detector. That is a
+deliberate single clock, not an oversight: the check is somebody else's code and
+can be as expensive as a detector (the shipped one reads the learnings document
+and walks the receipt directory), so it inherits the existing bound rather than
+getting a second timer to be fresh on. The cost is up to `APPLICABILITY_TTL_S` of
+latency between the evidence landing and the card leaving Home, and that bound is
+the one the module already states about how fast it looks at the world. If a
+forced recheck ever becomes worth an endpoint, that is the place to put it — not a
+second window here.
+
+**The lifecycle is re-checked under the write lock, not from the read that
+chose it.** The check runs deliberately *outside* the lock, so the
+`SETTLING_LIFECYCLES` membership that made `_settle` ask the question is stale by
+the time the check answers. `_settle` therefore passes
+`only_from=SETTLING_LIFECYCLES` to `record_completion`, which re-reads the record
+**inside** the lock and writes nothing unless it still shows one of those
+lifecycles. Without it the lock serialises the two *writes* while the decision
+comes from before the first one, and a `dismissed` that arrived mid-check is
+overwritten with `completed` and no error anywhere — the operator's decision lost
+to a read that was never going to see it. On either a refusal or a write that
+cannot land (`UpdateTaskStateError`, `OSError`), `_settle` logs and **re-reads**
+the record rather than leaving its stale copy in `states`: reporting the copy read
+before a check that may have raced it would put a card back on Home offering Start
+for a task the operator had just dismissed. A write failure must not escape
+`evaluate` at all — it runs on a Home listing, and one task's unwritable state
+file must not take the strip down or be reported as done.
+
+`record_completion`'s `only_from` defaults to `None`, which is unconditional and
+keeps the function's original contract for a caller that *knows* the lifecycle is
+settleable (a test pinning `_carried`, or a future surface that wrote the attempt
+itself). **A caller reasoning from a state it read earlier must pass the
+lifecycles it read.** That is the whole rule; the default exists for callers that
+are not reasoning from a read.
+
 ### Update tasks: the launch
 
 `ciao/web/update_task_launch.py` (#761) is the only thing that turns a task into
@@ -1521,7 +1576,11 @@ each other, and `tests/test_memory_pass.py` pins the fail-closed cases.
 The launch path runs no detector, no completion check, no model, no `eval`, no
 shell and no remote fetch. Applicability is a separate, TTL-cached answer
 (`update_tasks.evaluate`) that `GET /api/update-tasks` reports and a start does
-not re-ask for: a start is a decision the operator already made.
+not re-ask for: a start is a decision the operator already made. That same
+answer is what *settles* a task (#788, above), so a launch can never complete one
+and a listing can — which is the point. The check that decides is not in the chat
+that was asked to do the work, and `launch_task` refusing a `completed` record is
+the enforcement boundary behind that.
 `reopen_task` is a thin wrapper over `update_tasks.reopen_task`, and
 `dismiss_task` is the same write with the failed-chat rule above, so the card and
 a direct API call cannot produce two records for one decision. The rule stays on

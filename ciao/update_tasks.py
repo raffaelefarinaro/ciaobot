@@ -61,6 +61,19 @@ made must not wait out a TTL — while the detectors, which are the part that ca
 expensive, run at most once per fresh window. An answer that exists only because a
 probe failed is not an answer about the workspace, so it is never cached.
 
+**A started task settles from evidence, not from prose.** A record in
+:data:`SETTLING_LIFECYCLES` is an attempt nobody has judged yet, and judging it
+is this layer's job rather than the chat's: :func:`evaluate` asks the row's
+registered completion check, through :func:`record_completion`, once per fresh
+window per task, and writes ``completed`` when the check's own postcondition
+holds. Nothing else may write that lifecycle — not the agent, not a ``done=true``,
+not the closure of a chat — and that is the whole reason a reviewed no-op is a
+finished task instead of an offer that never goes away. The settlement rides the
+*same* window as the detector rather than adding a second clock, on purpose: a
+task whose evidence lands mid-window is noticed within
+:data:`APPLICABILITY_TTL_S`, which is the answer this module is willing to give
+about how quickly it looks at the world, and no faster claim is made anywhere.
+
 Two consequences stated rather than hidden. The freshness window is a *named
 constant*, not a setting and not an env var: a per-install knob for "how stale may
 an answer be" is not a decision an operator has ever asked to make, and
@@ -135,6 +148,27 @@ LIFECYCLES: frozenset[str] = frozenset(
 #: another lifecycle is an unfinished attempt, not a decision, and is offered
 #: again.
 SUPPRESSING_LIFECYCLES: frozenset[str] = frozenset({"completed", "dismissed"})
+
+#: The lifecycles whose record is an attempt that may already have produced its
+#: evidence. These are the ones :func:`_settle` asks the completion check about.
+#:
+#: * ``in_progress`` — the prompt is in a chat and the chat may have done the
+#:   work by now.
+#: * ``waiting_review`` — the chat is parked on a decision, and that decision
+#:   has since been made.
+#: * ``failed`` — the turn never reached its chat, so the answer here is
+#:   "nothing to settle" rather than a verdict, and the record keeps saying the
+#:   task failed. Including it is what stops a retry from being needed just to
+#:   find out whether the earlier attempt finished after all.
+#:
+#: ``offered`` is absent because there is nothing to judge: no chat was ever
+#: opened, so no evidence can exist. ``completed`` and ``dismissed`` are absent
+#: because they are decisions already — a dismissal is the operator's, and a
+#: verdict is a check's, and re-asking a check whether its own verdict still
+#: holds would reopen a decision on a timer.
+SETTLING_LIFECYCLES: frozenset[str] = frozenset(
+    {"in_progress", "waiting_review", "failed"}
+)
 
 # ── Applicability ───────────────────────────────────────────────────────────
 
@@ -999,16 +1033,41 @@ def record_completion(
     config: Any,
     workspace: str = "",
     now: datetime | None = None,
+    only_from: frozenset[str] | None = None,
 ) -> TaskState | None:
     """Record this task as done, if and only if its registered check proves it.
 
     Returns the written record, or ``None`` when nothing was written: the check
     name has no implementation, the check raised, it returned something other
-    than a :class:`Detection`, or it said the postcondition does not hold yet.
-    That is the whole reason this function exists rather than a caller writing
+    than a :class:`Detection`, it said the postcondition does not hold yet, or
+    ``only_from`` was given and the record on disk had moved on. That is the whole
+    reason this function exists rather than a caller writing
     ``lifecycle="completed"``: a task is done when a *named, registered,
     deterministic* check says so, evaluated apart from any chat the operator
     started. Opening a chat is not completion, and neither is silence.
+
+    ``only_from`` is the guard :func:`_settle` needs and no other caller does.
+    The check runs outside the write lock on purpose — it is somebody else's
+    code and may be slow, and holding a scope's lock across it would serialise
+    every other writer in that scope behind a probe — so the lifecycle this
+    function started from may be minutes stale by the time it takes the lock. An
+    operator who dismisses or reopens the task while a check is running must win,
+    and without this the lock would serialise the two *writes* while still losing
+    the *decision*: ``completed`` would go over the top of ``dismissed`` with no
+    error anywhere, because the lock did its job and the read behind it did not.
+
+    So when ``only_from`` is given the lifecycle is re-read **under** the lock and
+    the write happens only if that read still shows one of those lifecycles. The
+    decision that wins is the one on disk at the moment of the write, not the one
+    the caller saw before it started waiting. ``None`` (a record) is refused too:
+    an attempt this install cannot see is not one whose verdict may be recorded,
+    and an unreadable scope must not be settled into.
+
+    Left as ``None`` by default, which is unconditional and preserves this
+    function's original contract for a caller that *knows* the lifecycle is
+    settleable — a test pinning ``_carried``, or a future surface that has just
+    written the attempt itself. A caller reasoning from a state it read earlier
+    must pass the lifecycles it read.
     """
     check = COMPLETION_FUNCTIONS.get(task.completion_check)
     if check is None:
@@ -1042,6 +1101,21 @@ def record_completion(
     # other writer in that scope behind a probe. The read of what it replaces and
     # the write that replaces it are still one critical section.
     with _record_lock(task, config, workspace) as (path, previous):
+        if only_from is not None and (
+            previous is None or previous.lifecycle not in only_from
+        ):
+            # Someone decided while the check ran. That decision is the truth
+            # about this task now, and it is not ours to overwrite — the whole
+            # point of a settlement is that it follows the operator rather than
+            # racing them.
+            logger.info(
+                "update task %s@%s: not settling, the record moved to %s while "
+                "the completion check ran",
+                task.id,
+                task.revision,
+                "no readable record" if previous is None else previous.lifecycle,
+            )
+            return None
         state = TaskState(
             task_id=task.id,
             revision=task.revision,
@@ -1321,10 +1395,19 @@ def _evaluate_off_loop(
     ``offered`` on the strength of an answer the install can no longer stand
     behind. Reading the record on every call means the record is what decides
     whether an answer may be used at all.
+
+    A last pass settles whatever the detectors found, before the statuses are
+    built, so the row a caller renders is the settled one rather than the state
+    this call replaced. The statuses are assembled from the ``states`` mapping,
+    so writing the settled record back into it is all that is needed for one
+    call to both answer ``applicable`` and report ``completed`` — the honest
+    pair for a workspace where the review retained rows the detector still
+    counts, and the pair that takes the card off Home.
     """
     states, unreadable = _load_states(tasks, config, workspace)
     computed: dict[str, ApplicabilityResult] = {}
     results: dict[tuple[str, int], ApplicabilityResult] = {}
+    fresh: set[tuple[str, int]] = set()
     for task in tasks:
         identity = (task.id, task.revision)
         key = _read_key(config, task, workspace)
@@ -1347,10 +1430,17 @@ def _evaluate_off_loop(
             continue
         answer = apply_detector(task, config=config, workspace=workspace, today=today)
         results[identity] = answer
+        # Freshly computed, whether or not the answer is one that may be cached:
+        # a detector that raised is retried inside the window by design, and the
+        # completion check is not the detector's business — a task whose evidence
+        # is on disk can be settled even on the turn where its detector is
+        # unwell.
+        fresh.add(identity)
         if _is_cacheable(answer):
             computed[key] = answer
     if computed:
         _store_results(computed, token, instant)
+    _settle(tasks, states, config, workspace, fresh)
     return [
         TaskStatus(
             task=task,
@@ -1359,6 +1449,79 @@ def _evaluate_off_loop(
         )
         for task in tasks
     ]
+
+
+def _settle(
+    tasks: tuple[UpdateTask, ...],
+    states: dict[tuple[str, int], TaskState | None],
+    config: Any,
+    workspace: str,
+    fresh: set[tuple[str, int]],
+) -> None:
+    """Ask each started task's own check whether its work is done, in place.
+
+    ``fresh`` is the set of ``(id, revision)`` identities this call computed
+    rather than served from the window, so a check runs at most once per task per
+    window — the same bound the detector has, and deliberately the same window
+    rather than a second timer.
+
+    Only a record in :data:`SETTLING_LIFECYCLES` is asked, and only about tasks
+    whose state this install may act on: the ``states`` mapping holds ``None`` for
+    an unreadable scope, and ``None`` is not a lifecycle, so a task whose record
+    cannot be read is left alone rather than settled on the strength of evidence
+    the record contradicts.
+
+    That read is at the top of the evaluation and the check may be slow, so the
+    lifecycle it was chosen from is stale by the time the check answers. The
+    authority is still :func:`record_completion` — it resolves the row's
+    registered check and writes nothing for one that is unregistered, raising,
+    rude or unsatisfied — but ``only_from=SETTLING_LIFECYCLES`` makes it
+    re-check that lifecycle under the write lock, so an operator who dismissed or
+    reopened the task mid-check wins instead of being overwritten.
+
+    Two refusals leave the record alone, and both mean the record on disk is no
+    longer what this call read: a dismissal decided mid-check, and a write that
+    could not land (:class:`UpdateTaskStateError`, :class:`OSError` — a document
+    that went unreadable, a full disk). In both cases the record is re-read and
+    reported as it now stands. Reporting the stale copy would put a card on Home
+    offering Start for a task the operator had just dismissed, one poll after the
+    poll that decided it — so the re-read is not tidiness, it is the answer.
+
+    A write that fails is logged and swallowed. #788's rule is that an unfinished
+    task is reported as unfinished rather than as an error, and this runs on a
+    Home listing: one task whose state file cannot be written must not take the
+    whole strip down, and must not be reported as done either.
+    """
+    for task in tasks:
+        identity = (task.id, task.revision)
+        if identity not in fresh:
+            continue
+        state = states.get(identity)
+        if state is None or state.lifecycle not in SETTLING_LIFECYCLES:
+            continue
+        try:
+            record_completion(
+                task,
+                config=config,
+                workspace=workspace,
+                only_from=SETTLING_LIFECYCLES,
+            )
+        except (UpdateTaskStateError, OSError) as exc:
+            logger.warning(
+                "update task %s@%s: the completion check said the work is done but "
+                "the record could not be written (%s); it stays %s until a later "
+                "listing settles it",
+                task.id,
+                task.revision,
+                exc,
+                state.lifecycle,
+            )
+        # Re-read whether the call settled the task or refused it: a settlement
+        # changed the record, and a refusal — a decision that arrived mid-check,
+        # or a write that could not land — means it changed underneath this call.
+        # Either way the file is the account of itself this call reports, never
+        # the copy read before a check that may have raced it.
+        states[identity] = read_task_state(task, config=config, workspace=workspace)
 
 
 async def evaluate(
@@ -1399,6 +1562,20 @@ async def evaluate(
     coalescing key is deliberately the same for a cached and an uncached call —
     two callers of one scope sharing a read share whichever shape of it is
     running, and both are correct answers.
+
+    This is a read of the workspace and a write to one task's own record, and
+    only that write: a task whose attempt has produced the evidence its
+    registered completion check looks for becomes ``completed`` here, through
+    :func:`_settle`. It creates no chat, sends no prompt, starts no model turn,
+    moves no note, and can only ever write the lifecycle
+    :func:`record_completion` is documented to write — an unregistered, raising
+    or unsatisfied check records nothing at all. A settlement that loses a race
+    with an operator's decision, or whose write cannot land, is logged and
+    skipped rather than raised, so a state file that goes unwritable costs one
+    task its completion and never the listing. The write rides the same window as
+    the detector, so it becomes visible within ``APPLICABILITY_TTL_S`` of the
+    evidence landing rather than immediately; the state file itself is still read
+    on every call, so a settled record shows up on the very next listing.
     """
     loaded = catalog if catalog is not None else load_catalog()
     tasks = loaded.eligible(installed_version)

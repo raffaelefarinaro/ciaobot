@@ -43,6 +43,7 @@ from starlette.testclient import TestClient
 from ciao import async_reads, update_task_catalog, update_tasks
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.update_task_catalog import CATALOG_FILENAME, UpdateTask
+from ciao.update_tasks import Detection
 from ciao.web import chat_service, routes_api, update_task_launch
 from ciao.web.routes_api import dismiss_update_task
 from ciao.web.routes_api import list_update_tasks
@@ -1236,6 +1237,63 @@ def test_unknown_task_id_is_409_not_500(tmp_path: Path, packaged: Any) -> None:
         assert resp.status_code == 409, verb
         assert resp.json()["ok"] is False
         assert resp.json()["error"]
+
+
+def test_the_listing_reports_a_settled_task_as_done(
+    tmp_path: Path, packaged: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``GET /api/update-tasks`` is where a card learns a task finished.
+
+    The listing is a detector pass and has always been one, so this is the one
+    place that asserts what a settlement does to the row a Home card renders: it
+    reports ``completed``, reports it as suppressed, and stops offering it — from
+    the read, with no new route, no button and no client-side guess. The
+    applicability answer alongside it is reported as itself, because the rows the
+    detector counts really are still there and a card reading ``not_applicable``
+    here would be claiming the workspace was tidied.
+
+    The settlement rides the freshness window, so the read that settles is the one
+    after the window opens. Dropping the cache is what a restart does for free,
+    and it is the same condition the TTL produces on its own; asserting it here
+    rather than asserting the immediate answer keeps the test on the contract the
+    module states instead of on a timing accident.
+    """
+    config = _config(tmp_path)
+    client = _client(config, _FakePCM())
+    monkeypatch.setattr(
+        update_tasks,
+        "DETECTOR_FUNCTIONS",
+        {DETECTOR: lambda **_: Detection(True, {"rows": 2})},
+    )
+    finished: list[bool] = []
+    monkeypatch.setattr(
+        update_tasks,
+        "COMPLETION_FUNCTIONS",
+        {CHECK: lambda **_: Detection(bool(finished), {"receipt": "2026-09-30T00:02:00+00:00"})},
+    )
+    url = f"/api/update-tasks?workspace={WORKSPACE}"
+
+    client.post(f"/api/update-tasks/review-legacy-rows/start?workspace={WORKSPACE}")
+    running = client.get(url).json()["tasks"][0]
+    assert running["status"] == "in_progress"
+    assert running["offered"] is True, "an unfinished attempt is still on offer"
+
+    finished.append(True)
+    update_tasks.clear_applicability_cache()
+    done = client.get(url).json()["tasks"][0]
+
+    assert done["status"] == "completed"
+    assert done["suppressed"] is True
+    assert done["offered"] is False
+    assert done["applicability"] == "applicable"
+    assert done["chat_id"], "the record keeps the chat it was in"
+    # The strip's copy for "nothing is being offered" has to stay true after a
+    # settlement: a task that is suppressed because it is *done* is not a gap in
+    # what this install can substantiate, and saying so would put a permanent
+    # "no eligible task applies right now" under a card that finished correctly.
+    gap = client.get(url).json()["coverage_gap"]
+    assert gap["reason"] == "nothing_offered"
+    assert "not_substantiated" not in gap["detail"]
 
 
 # ── The helper shape, against the store that validates it ────────────────────
