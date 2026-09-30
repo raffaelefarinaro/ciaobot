@@ -214,7 +214,7 @@ def _gws_generate(dest: Path, *, gws_bin: str = "gws") -> None:
             [binary, "generate-skills"],
             cwd=str(dest),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             check=False,
         )
     except OSError as exc:

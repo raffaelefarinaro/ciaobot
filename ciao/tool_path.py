@@ -121,7 +121,7 @@ def _probe_terminal_path() -> str:
         result = subprocess.run(
             [shell, "-lic", f'printf "{_START}%s{_END}" "$PATH"'],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=5.0,
             env=env,
         )

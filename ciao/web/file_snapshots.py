@@ -176,7 +176,7 @@ class SnapshotStore:
                 truncated=truncated,
             )
             metas.append(meta.to_dict())
-            meta_path.write_text(json.dumps(metas, indent=2))
+            meta_path.write_text(json.dumps(metas, indent=2), encoding="utf-8")
             return meta
 
     def schedule_capture(
@@ -255,7 +255,7 @@ class SnapshotStore:
         if not meta_path.is_file():
             return []
         try:
-            data = json.loads(meta_path.read_text() or "[]")
+            data = json.loads(meta_path.read_text(encoding="utf-8") or "[]")
         except (OSError, json.JSONDecodeError):
             logger.warning("snapshot meta corrupt at %s", meta_path)
             return []

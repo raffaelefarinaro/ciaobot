@@ -170,7 +170,7 @@ def _exec_bash(node: Node, ctx: dict[str, Any]) -> NodeResult:
             cwd=cwd,
             env=env,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=node.timeout_s,
             check=False,
         )
@@ -210,7 +210,7 @@ def _exec_prompt(node: Node, ctx: dict[str, Any]) -> NodeResult:
             input=composed,
             env=env,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=node.timeout_s,
             check=False,
         )
@@ -354,7 +354,7 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
             cwd=node.payload.get("cwd"),
             env=env,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=node.timeout_s,
             check=False,
         )

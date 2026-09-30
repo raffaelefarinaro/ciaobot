@@ -1607,4 +1607,5 @@ against a fake manager over a temp packaged root.
 - **Avoid destructive git** (force push, hard reset on shared branches) unless explicitly asked.
 - **Use the branch model in `CONTRIBUTING.md`.** Day-to-day PRs target `develop`; release PRs target `main`.
 - **Write tests** for new Python behavior; add to `tests/`. PWA changes verify via `npm run build` typecheck at minimum.
+- **Name the encoding.** Every text `open()`, `read_text()`, `write_text()`, `os.fdopen()` and every `subprocess` call that decodes (`text=True`) passes `encoding="utf-8"` — with `errors="replace"` only for tool output that is displayed or logged, never for output that is parsed. Windows' default is the ANSI code page, not UTF-8, and nothing may rely on Python's UTF-8 mode. `tests/test_explicit_encoding.py` fails on a new call without one.
 - **Verify UI accessibility.** For PWA layout changes, check keyboard operation, visible focus, browser zoom, and 44px mobile targets at a narrow-phone viewport in addition to the build.

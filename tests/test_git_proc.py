@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git
+from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git, run_git_sync
 
 
 def _open_fd_count() -> int:
@@ -198,3 +200,21 @@ async def test_no_timeout_waits_for_completion(
     rc, out, _ = await run_git(tmp_path, "fetch")
     assert rc == 0
     assert out.strip() == "done"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a real git")
+def test_sync_output_is_decoded_as_utf8_on_every_os(tmp_path: Path) -> None:
+    """Git writes UTF-8; decoding with the locale's code page (cp1252 on a
+    Western Windows) turned `café ✓` into mojibake rather than failing."""
+    subject = "café ✓ naïve"
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", subject],
+        check=True,
+        env=env,
+    )
+    rc, out, _ = run_git_sync(tmp_path, "log", "-1", "--format=%s")
+    assert rc == 0
+    assert out.strip() == subject

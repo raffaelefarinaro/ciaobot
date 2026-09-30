@@ -42,7 +42,7 @@ def server_addresses(
     if ifconfig_text is None:
         try:
             ifconfig_text = subprocess.run(
-                ["ifconfig", "-a"], capture_output=True, text=True, check=False
+                ["ifconfig", "-a"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
             ).stdout
         except OSError:
             ifconfig_text = ""
@@ -51,7 +51,7 @@ def server_addresses(
             local_hostname = subprocess.run(
                 ["scutil", "--get", "LocalHostName"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 check=False,
             ).stdout.strip()
         except OSError:
@@ -204,7 +204,7 @@ def tailscale_serve_urls(port: int) -> list[str]:
         result = subprocess.run(
             [cli, "serve", "status", "--json"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=False,
             timeout=_TAILSCALE_TIMEOUT_S,
         )

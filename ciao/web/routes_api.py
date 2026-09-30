@@ -4596,7 +4596,7 @@ async def workspace_file_write(request: Request) -> Response:
 
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content)
+        resolved.write_text(content, encoding="utf-8")
     except OSError as exc:
         return JSONResponse({"error": f"write failed: {exc}"}, status_code=500)
 
