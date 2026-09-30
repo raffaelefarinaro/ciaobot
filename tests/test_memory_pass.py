@@ -310,6 +310,22 @@ def test_skill_review_section_formats_every_placeholder() -> None:
     assert "{" not in rendered and "}" not in rendered
 
 
+def test_the_skill_review_section_documents_the_learning_link_without_requiring_it(
+) -> None:
+    """The link is what lets a settlement say *which* lesson landed, so the pass
+    has to know the field is accepted. It stays optional, though: most findings
+    are a correction the user made, and a pass that believed it had to name a
+    learning for every one of them would file invented links rather than none."""
+    prompt = memory_pass.SKILL_REVIEW_PROMPT
+    assert "`origins` list" in prompt
+    assert "`learning_id`" in prompt
+    assert "`source_revision`" in prompt
+    assert "`Workspace/Learnings.md`" in prompt
+    assert "omit `origins` entirely" in prompt
+    # The command line is unchanged: one file per skill, one positional name.
+    assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
+
+
 def test_pass_reviews_the_owned_skills_the_conversation_used(
     tmp_path: Path, passes_enabled: None, streams: _FakeStreams
 ) -> None:

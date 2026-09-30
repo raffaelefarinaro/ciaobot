@@ -801,6 +801,66 @@ def test_a_skill_row_carries_the_record_not_the_filename(tmp_path: Path) -> None
     assert skill[0]["rationale"] == "It handles blocked pages."
     assert [item["chat_id"] for item in skill[0]["sources"]] == ["sess-a1"]
     assert skill[0]["lifecycle"] == skill_proposals.PENDING
+    # Empty for a proposal filed before origins existed. An empty list is not
+    # "this learning is dealt with": it is "this record links nothing", which is
+    # why no learning behind it can be retired by settling the row.
+    assert skill[0]["origins"] == []
+
+
+def test_a_skill_row_carries_its_learning_links(tmp_path: Path) -> None:
+    """Which learnings a finding came from, and what became of each one. The row
+    is the only place a reviewer can see that accepting it will retire a lesson
+    — and that it will not, until the sibling findings are answered too."""
+    config = _config(tmp_path)
+    skill_proposals.upsert_proposal(
+        config,
+        skill_proposals.SkillProposal(
+            id=skill_proposals.proposal_id("personal", "notes"),
+            workspace="personal",
+            skill="notes",
+            canonical_path="/agent/skills/notes/SKILL.md",
+            reviewed_revision="a" * 64,
+            title="Skill reflection: notes",
+            problem="The user corrected the note type twice.",
+            change="Read the Categories block before a type.",
+            rationale="It repeated.",
+            sources=(
+                skill_proposals.SkillEvidence(
+                    chat_id="sess-a1",
+                    archive="2026-08-09T10:00:00Z",
+                    turn="",
+                    excerpt="no, that's a person",
+                ),
+            ),
+            lifecycle=skill_proposals.PENDING,
+            chat_id="",
+            updated_at="2026-08-09T10:00:00Z",
+            origins=(
+                skill_proposals.SkillOrigin(
+                    workspace="personal",
+                    learning_id="5d6b0a1e-6f4a-5b1c-9d2e-3a4b5c6d7e8f",
+                    source_revision="c" * 64,
+                    finding="read the Categories block first",
+                    summary="Add the Categories step.",
+                ),
+            ),
+        ),
+    )
+
+    rows, _by_id = _scan_proposal_rows(config)
+
+    skill = [r for r in rows if r["kind"] == "skill"]
+    assert skill[0]["origins"] == [
+        {
+            "workspace": "personal",
+            "learning_id": "5d6b0a1e-6f4a-5b1c-9d2e-3a4b5c6d7e8f",
+            "source_revision": "c" * 64,
+            "finding": "read the Categories block first",
+            "summary": "Add the Categories step.",
+            "state": skill_proposals.ORIGIN_PENDING,
+            "verification": "",
+        }
+    ]
 
 
 def test_a_legacy_skill_proposal_file_is_still_listed(tmp_path: Path) -> None:
