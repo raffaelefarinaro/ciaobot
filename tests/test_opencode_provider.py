@@ -1917,6 +1917,30 @@ async def test_failure_result_still_carries_the_error(tmp_path, monkeypatch):
 # ── server lifecycle ────────────────────────────────────────────────────
 
 
+class _NoOpTree:
+    """Stands in for ``os_support.processes.ProcessTree`` around a fake process.
+
+    The server is spawned and stopped as a process tree; the fakes here have no
+    real pid for a Job Object or a process group to hold.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _no_op_trees(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("ciao.providers.opencode.ProcessTree", _NoOpTree)
+
+
 @pytest.mark.asyncio
 async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
     """A server we could not validate must not outlive the attempt."""
@@ -1925,7 +1949,13 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
 
     class FakeProcess:
         returncode = None
+        pid = 4242
 
+        async def wait(self):
+            return 0
+
+    class FakeTree(_NoOpTree):
+        # The stop goes to the server's whole tree now, not the one process.
         def terminate(self):
             terminated.append("terminate")
             FakeProcess.returncode = 0
@@ -1933,11 +1963,10 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
         def kill(self):  # pragma: no cover - only on a hung process
             terminated.append("kill")
 
-        async def wait(self):
-            return 0
-
     async def fake_exec(*_args, **_kwargs):
         return FakeProcess()
+
+    monkeypatch.setattr("ciao.providers.opencode.ProcessTree", FakeTree)
 
     monkeypatch.setattr(
         "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
@@ -1970,6 +1999,8 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
     delays: list[float] = []
 
     class FakeProcess:
+        pid = 4242
+
         def __init__(self):
             self.returncode = None
             self.stderr = None
@@ -1983,6 +2014,8 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
     async def fake_exec(*_args, **_kwargs):
         attempts.append(len(attempts) + 1)
         return FakeProcess()
+
+    _no_op_trees(monkeypatch)
 
     async def fake_health():
         if len(attempts) == 1:
@@ -2029,6 +2062,8 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
     delays: list[float] = []
 
     class FakeProcess:
+        pid = 4242
+
         def __init__(self):
             self.returncode = None
             self.stderr = None
@@ -2042,6 +2077,8 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
     async def fake_exec(*_args, **_kwargs):
         attempts.append(len(attempts) + 1)
         return FakeProcess()
+
+    _no_op_trees(monkeypatch)
 
     async def fake_health():
         if len(attempts) == 1:
@@ -2186,6 +2223,7 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
 
     class FakeProcess:
         returncode = 3
+        pid = 4242
         stderr = FakeStderr([b"listening\n", b"port already in use\n"])
 
         def terminate(self):  # pragma: no cover - process already exited
@@ -2202,6 +2240,7 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
         "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
     )
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    _no_op_trees(monkeypatch)
 
     class Request:
         extra_env: dict = {}
@@ -2223,6 +2262,7 @@ async def test_opencode_process_does_not_inherit_the_agent_token(tmp_path, monke
 
     class FakeProcess:
         returncode = None
+        pid = 4242
         stderr = None
 
         def terminate(self):
@@ -2234,6 +2274,8 @@ async def test_opencode_process_does_not_inherit_the_agent_token(tmp_path, monke
     async def fake_exec(*_args, **kwargs):
         spawn_kwargs.update(kwargs)
         return FakeProcess()
+
+    _no_op_trees(monkeypatch)
 
     monkeypatch.setattr(
         "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
