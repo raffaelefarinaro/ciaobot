@@ -846,6 +846,7 @@ def test_default_app_dir_matches_the_release_installer() -> None:
 
 def test_setup_cleans_our_bundles_from_home_applications(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))  # Path.home() on Windows
     home_apps = tmp_path / "home" / "Applications"
     for name, bundle_id in (("Ciao.app", "local.ciao.app"), ("Ciaobot.app", "local.ciaobot.app")):
         contents = home_apps / name / "Contents"
@@ -2435,6 +2436,7 @@ def test_cli_health_reports_the_installed_workspace_from_a_bare_shell(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
 
     reset_reroot_cache()
     try:
@@ -2494,6 +2496,7 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))  # Path.home() on Windows
     (tmp_path / "home").mkdir()
 
     reset_reroot_cache()
@@ -2548,6 +2551,7 @@ def test_config_discovery_survives_an_exported_empty_workspace(
     # The whole point: present in the environment, but empty.
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))  # Path.home() on Windows
     (tmp_path / "home").mkdir()
 
     reset_reroot_cache()

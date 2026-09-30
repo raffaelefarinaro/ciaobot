@@ -785,6 +785,7 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     # `_isolate_launch_agents` redirects the default away from the real
     # ~/Library/LaunchAgents; re-point it at this test's faked home so the
     # assertion still exercises per-user default resolution.

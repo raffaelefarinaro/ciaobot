@@ -168,6 +168,7 @@ def test_legacy_global_cache_is_left_in_place_and_not_used(tmp_path: Path, monke
     """
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     legacy_dir = home / ".ciao"
     legacy_dir.mkdir(parents=True)
     legacy = legacy_dir / fts_search.SEARCH_DB_NAME
