@@ -16,6 +16,8 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
+`python -m ciao <command>` runs the same CLI as the `ciao` console script, from any interpreter that has the package installed.
+
 `ciao setup` is idempotent. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
 
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
@@ -208,6 +210,18 @@ not run `ciao desktop uninstall` yet.
   `mypy ciao` (natively win32), `pytest -n auto tests/` and `npm test`, never
   fails, and puts the four counts in the job summary. The full logs and the failing-test
   list are in its `windows-results` artifact. It becomes blocking at #696's C9.
+  The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
+  plus weekly, never on a PR) records where Claude Code and OpenCode keep their
+  files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
+  tools, runs one tiny real turn each in three workspaces whose paths contain a
+  space, a dot and an underscore, and uploads `agent-discovery-macos` and
+  `agent-discovery-windows` (new-file list, Claude project folder to workspace
+  map, tool locations, turn logs). The Claude turns need the `ANTHROPIC_API_KEY`
+  repository secret and are skipped without it; OpenCode uses the free
+  `opencode/big-pickle` model. Run it with `gh workflow run discover-agents.yml`
+  and fetch the result with `gh run download <run-id>`. Dispatch and the weekly
+  schedule only work once a release has put the file on `main`; before that, run
+  it from a throwaway branch with a temporary `push` trigger.
 - **Release prep:** from a clean checkout, run:
 
 ```bash
@@ -714,6 +728,102 @@ The status and process exit code are a stable contract:
 | `error` | 2 | Required evidence could not be inspected reliably. Findings may still be present, but the report is not a clean bill of health. |
 
 The daily `system-memory-curation` schedule is presented as **Workspace care**. Its packaged prompt runs lightweight memory passes nightly and uses `Workspace/Curation-Log.md`'s `last_full_pass` marker to catch up the deeper weekly work after downtime. A full pass runs `ciao vault-index --write` before `ciao os-audit --json --scope workspace`; a failed index rebuild or audit exit 2 leaves the marker overdue and prevents a healthy/no-op claim. Exit 1 means reliable findings and the pass continues with only safe structural repairs. A full pass also reviews the workspace guide body (AGENTS.md) for misplacement, drift, and bloat, applying the same state-vs-event and entity-placement rules the regions follow; that model-judged review is separate from the two required weekly checks, so an over-budget run that never reaches it does not suppress the next week's guide care.
+
+#### The migration notices, and why they are probed in one place
+
+Two surfaces answer "what did an upgrade leave for this install?": the Home
+strip (`ciao/operator_actions.py`, polled every 60s and on window focus) and the
+`upgrade_notices` section of the audit above (a diagnostic, `pending_action_count`,
+never red). Since #816 both read `ciao/migration_notices.py`, which owns the
+condition, the applicability rule and the wording for the two notices they share.
+They used to carry their own copies, and the copies had drifted in ways only one
+side could see: the vault-location predicate existed twice while the audit's
+remedy described moving the folder and hand-editing the registry — the path the
+engine refuses — and the wikilink notice had two *applicability* rules, so the two
+surfaces answered different questions about the same vault.
+
+Adding a third surface to a notice is a function call, not a copy. Adding a notice
+means answering two questions in that module, and the answers are what a later
+maintainer is checking:
+
+- **What makes it applicable?** One rule, shared, and never one a surface gets to
+  read differently. For the wikilink notice: a runtime root to read the receipt
+  from, no *completed* migration receipt (`read_receipt` gates on
+  `status == "migrated"`, so a run that could not write every note does not silence
+  it), and an actual wikilink still in the vault. There is deliberately **no**
+  `vault_mode` term. It was there once, as a Home-side shortcut, and adopting it
+  as "the shared rule" made the audit agree with Home by going blind on a scratch
+  vault holding a hand-written wikilink — a diagnostic interface losing a finding
+  to remove a disagreement. The expensive half of the condition is therefore not
+  something a surface may approximate: it is a walk somebody has to do.
+- **Who may establish it?** Named functions, not a boolean flag, because "who
+  pays" is the part that is allowed to differ. `resolve_links` walks and publishes
+  the verdict; `cached_links` only reads what is published; `start_links_scan` runs
+  the walk through `async_reads.run_read`, so it is coalesced, admission-capped and
+  off the event loop, and starts it **detached** (the same arrangement as
+  `_cached_update_hint`). The audit calls `resolve_links` — it is already a
+  full-install pass over every note, and a report that reused a stored verdict
+  could report a stale one. Home calls `cached_links`, because the strip runs on
+  open, on focus and on a 60s poll. `start_links_scan` also owns the task's whole
+  life: one in flight at a time, its outcome observed rather than left for the
+  garbage collector, and cancelled and awaited at shutdown by
+  `shutdown_links_scan`, which `ciao/main.py` registers **before** the read
+  executor is closed (a test asserts that order — the scan is waiting on a worker,
+  and closing the pool under a pending task is the leak being avoided).
+
+A published answer is one of three states, and the third one is the easy mistake.
+`LINKS_FOUND` is a note a walk located and is the only state that is ever a
+finding; `LINKS_CLEAN` is a walk that finished and found nothing; `LINKS_FAILED`
+is a walk or a receipt read that did not finish. **`failed` must never be recorded
+as `clean`**: a vault that could not be read is an unknown, and an unknown
+reporting itself as clean is the notice quietly lying on the one thing it exists to
+catch. It is still worth recording, because the alternative is a broken vault
+re-walking and re-logging on every 60s poll — the window is how long this engine
+waits before it looks again, so a failure costs one walk per window, not per poll.
+
+`LINKS_SCAN_TTL_S` (300) is a named constant, not a setting and not an env var, and
+it is deliberately the same window `update_tasks.APPLICABILITY_TTL_S` gives its
+detectors: one clock for how fast this engine looks at somebody's own notes,
+rather than one per surface. Re-establishing a positive answer is cheap (the walk
+stops at the first hit); re-establishing a clean one costs the whole vault, which
+is why the window is minutes rather than seconds. The stored answer is keyed on the
+receipt file's own mtime and size, so a migration, an un-migration and a retry of a
+partial one each land a token it was not computed for, and on the runtime root and
+vault path, so two installs in one process cannot share one. A completed receipt
+means there is nothing to scan for, so a migrated install is not woken every 60s.
+
+Because a finding exists only once a walk found a note, the card **names** it
+instead of hedging on a receipt's absence, and a clean vault reaches zero for a
+reason other than "a migration ran". No Home-side suppression is an input to any of
+these functions, so when #800's catalog step makes a notice optional and
+dismissible, the dismissal can reach Home and only Home.
+
+The `vault-relocate` remedy names the shapes `--apply` refuses, because both
+surfaces have to say them and only one of them opens a chat. It attributes a
+manual route only to the refusals that really carry one — the install-root shape
+and the outside-the-worktree shape, which `vault_relocate` finishes by hand, and a
+destination nested under the vault, which needs the registry repointed — and leaves
+the rest to the preview. Most of those refusals only report what would not be done,
+so a remedy promising they all name a way forward is a promise the command does not
+keep, and which shape a given install is in is `vault_relocate.plan`'s answer to
+give rather than this notice's to pre-empt.
+
+The bound on the Home side is asserted, not assumed: `tests/test_migration_notices.py`
+counts filesystem accesses under the vault across detection passes, at one note and
+at four hundred, and fails on any of them, with a companion test proving the
+recorder sees a walk. A timing assertion would pass on a fast tmpfs and fail in CI.
+The scan is proven to run on a worker thread and to go through `run_read`, and the
+cold path is asserted end to end — one poll starts one detached scan and reports no
+card, the scan lands, the next poll reports a card that names the note.
+
+Neither notice is an update-task catalog row, and the test says so. A catalog task
+needs a registered completion check that reads a real postcondition, and for
+these two the only "evidence" the work was done is the condition's absence
+recomputed each render, which makes the check a tautology. `vault-relocate` is the
+best candidate for a receipt (it has an apply/undo cycle and a registry update to
+hang one on); the link migration's receipt is per *install*, not per vault, so a
+per-workspace loop over its remedy is not available either. Do not add a row
+because a card looks like a task.
 
 ### Bounded-memory rot audit
 

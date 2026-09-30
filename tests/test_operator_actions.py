@@ -15,11 +15,20 @@ from unittest.mock import patch
 
 import pytest
 
+from ciao.migration_notices import reset_links_cache, resolve_links
 from ciao.operator_actions import (
     DetectionContext,
     detect_actions,
     run_action,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_link_verdicts():
+    """The wikilink cache is process-wide, so a verdict must not leak between tests."""
+    reset_links_cache()
+    yield
+    reset_links_cache()
 
 
 class _FakeConfig:
@@ -30,11 +39,9 @@ class _FakeConfig:
         tmp_path: Path,
         *,
         workspaces: tuple[str, ...] = ("personal",),
-        vault_mode: str = "scratch",
     ) -> None:
         self.workspace_root = tmp_path
         self.vault_root = tmp_path / "memory-vault"
-        self.vault_mode = vault_mode
         self._names = list(workspaces)
         self._roots = {
             name: self.vault_root / name for name in self._names
@@ -339,16 +346,24 @@ def test_vault_vocabulary_fires_on_unresolved_only(tmp_path: Path) -> None:
     assert "vault-vocabulary" in ids
 
 
-def test_unmigrated_links_fires_only_for_existing_mode(tmp_path: Path) -> None:
+def test_unmigrated_links_card_needs_an_established_wikilink(tmp_path: Path) -> None:
+    """The card is a finding, not an inference from a receipt's absence.
+
+    A scan established the verdict; before one exists there is nothing to report,
+    and a completed receipt retires the notice even though the wikilink is still
+    in the vault, because the receipt is the migration's own record of the work.
+    """
     runtime = _runtime(tmp_path)
-    context = DetectionContext(
-        config=_FakeConfig(tmp_path, workspaces=("personal",), vault_mode="scratch"),
-        runtime_dir=runtime,
-    )
+    config = _FakeConfig(tmp_path, workspaces=("personal",))
+    root = config.workspace_vault_root("personal")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "a.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
+    context = DetectionContext(config=config, runtime_dir=runtime)
+
+    # No scan yet: the poll may not walk, so it has no verdict to report.
     assert "vault-unmigrated-links" not in [a.id for a in detect_actions(context)]
 
-    config = _FakeConfig(tmp_path, workspaces=("personal",), vault_mode="existing")
-    context = DetectionContext(config=config, runtime_dir=runtime)
+    resolve_links(config, runtime)
     ids = [a.id for a in detect_actions(context)]
     assert "vault-unmigrated-links" in ids
 
@@ -465,7 +480,7 @@ def test_missed_schedules_honors_fire_time_of_day(tmp_path: Path) -> None:
 def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
     """Contract 4: no action is a bare notice with neither a run nor a chat."""
     # Force every detector to fire so the whole registry is exercised.
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"), vault_mode="existing")
+    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
     runtime = _runtime(tmp_path)
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-vocabulary.json").write_text(
@@ -494,7 +509,7 @@ def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
 
 def test_ids_are_stable_across_calls(tmp_path: Path) -> None:
     """Contract 3: byte-identical actions across two passes."""
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"), vault_mode="existing")
+    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
     runtime = _runtime(tmp_path)
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-vocabulary.json").write_text(
@@ -537,7 +552,7 @@ def test_scan_vault_is_never_touched(tmp_path: Path) -> None:
     from ciao.operator_actions import detect_actions
     from ciao.vault_index import scan_vault
 
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"), vault_mode="existing")
+    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
     runtime = _runtime(tmp_path)
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-vocabulary.json").write_text(
@@ -563,37 +578,43 @@ async def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
         await run_action("no-such-action", DetectionContext(config=_FakeConfig(tmp_path)))
 
 
-def test_unmigrated_links_tile_does_not_assert_wikilinks_it_cannot_verify(
+def test_unmigrated_links_tile_names_a_note_only_because_one_was_found(
     tmp_path: Path,
 ) -> None:
-    """The cheap predicate cannot know a wikilink exists, so it must not claim one.
+    """The tile used to hedge because it could not know; now it can, and says so.
 
-    This detector fires on "vault adopted, no migration receipt", which is true
-    of an adopted vault that was written in markdown links from the start and
-    has nothing to convert. It runs on every app open and window focus, so it
-    cannot call has_unmigrated_links, which walks the vault. The audit's notice
-    does run that accurate check and may legitimately stay silent here, so the
-    two surfaces disagree by design and the tile's wording has to be honest
-    about what it actually knows.
+    It fires on a completed scan that actually found a wikilink, so the card
+    names the note rather than inferring one from a missing receipt — and a vault
+    written in markdown links from the start, which the old predicate could not
+    tell from an unconverted one, gets no card at all.
     """
     config = _FakeConfig(tmp_path, workspaces=("personal",))
-    config.vault_mode = "existing"
     root = config.workspace_vault_root("personal")
     root.mkdir(parents=True, exist_ok=True)
-    # A markdown link only: nothing to migrate.
-    (root / "Note.md").write_text("[Peter](./People/Peter.md)\n", encoding="utf-8")
-
+    (root / "linked.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
+    runtime = _runtime(tmp_path)
     context = DetectionContext(
-        config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store([])
+        config=config, runtime_dir=runtime, schedule_store=_Store([])
     )
-    tiles = [a for a in detect_actions(context) if a.kind == "unmigrated-links"]
 
-    assert tiles, "the tile should still offer the preview"
+    assert [
+        a for a in detect_actions(context) if a.kind == "unmigrated-links"
+    ] == [], "an unscanned vault is not a finding yet"
+
+    resolve_links(config, runtime)
+    tiles = [a for a in detect_actions(context) if a.kind == "unmigrated-links"]
+    assert tiles, "a scan that found a wikilink must offer the conversion"
     action = tiles[0]
-    assert "may still" in action.title
-    # It must not state as fact that wikilinks are present.
-    assert "still uses the retired" not in action.title
-    assert "still contains" not in action.detail
+    assert "still uses the retired" in action.title
+    assert "linked.md" in action.detail
+
+    # A clean vault reaches zero for a reason other than "a migration ran".
+    (root / "linked.md").unlink()
+    (root / "Note.md").write_text("[Peter](./People/Peter.md)\n", encoding="utf-8")
+    resolve_links(config, runtime)
+    assert [
+        a for a in detect_actions(context) if a.kind == "unmigrated-links"
+    ] == []
 
 
 
