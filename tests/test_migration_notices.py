@@ -4,18 +4,23 @@
 wording for the two notices Home and the OS audit used to keep separate copies
 of. The contracts under test, one per acceptance item in #816:
 
-1. the vault-location condition and its wording are the same on both surfaces;
-2. the audit keeps reporting a links finding the Home card does not carry, and
+1. the vault-location condition and its wording are the same on both surfaces,
+   and the remedy names the ways `vault-relocate --apply` can refuse;
+2. the audit reports a links finding the Home card cannot yet know about, and
    nothing Home does can silence it;
-3. the two surfaces cannot disagree about whether the wikilink dialect is in
-   scope;
+3. the two surfaces ask one question about the wikilink dialect and cannot
+   answer it differently — including for a **scratch** vault holding a
+   hand-written wikilink, which is the diagnostic the audit must not lose;
 4. neither notice is an update-task catalog row, because neither has an honest
    completion receipt yet;
-5. a Home poll touches no file under the vault, at any vault size.
+5. a Home poll opens no file under the vault, at any vault size, and the scan
+   that establishes the verdict runs off the event loop.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,15 +29,29 @@ from unittest.mock import patch
 import pytest
 
 from ciao import migration_notices
+from ciao.async_reads import run_read
 from ciao.migration_notices import (
+    LINKS_SCAN_TTL_S,
     UNMIGRATED_LINKS_NOTICE,
     VAULT_LOCATION_NOTICE,
     LinksFinding,
-    unmigrated_links,
+    cached_links,
+    links_scan_is_stale,
+    refresh_links,
+    reset_links_cache,
+    resolve_links,
     vault_location_findings,
 )
 from ciao.operator_actions import DetectionContext, detect_actions, dismiss_action
 from ciao.os_audit import audit_upgrade_notices
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_verdicts():
+    """The wikilink cache is process-wide, so a verdict must not leak between tests."""
+    reset_links_cache()
+    yield
+    reset_links_cache()
 
 
 # -- fixtures ----------------------------------------------------------------
@@ -79,7 +98,13 @@ def _notes(root: Path, count: int, *, wikilink: str | None = None) -> Path:
 
 
 def _audit_types(config: object, runtime: Path | None) -> set[str]:
-    return {n["type"] for n in audit_upgrade_notices(config, runtime_dir=runtime)["notices"]}
+    notices = audit_upgrade_notices(config, runtime_dir=runtime)["notices"]
+    return {n["type"] for n in notices}
+
+
+def _tiles(config: object, runtime: Path) -> list[Any]:
+    context = DetectionContext(config=config, runtime_dir=runtime)
+    return [a for a in detect_actions(context) if a.kind == "unmigrated-links"]
 
 
 # -- (1) one condition, one wording, for the vault location ------------------
@@ -114,6 +139,33 @@ def test_home_and_the_audit_agree_on_the_misplaced_vault_and_its_wording(
     # the command is in both and the hand path is in neither.
     assert "ciao vault-relocate personal --apply" in tile.chat_prompt
     assert "ciao vault-relocate personal --undo" in notice["remedy"]
+
+
+def test_the_shared_remedy_names_the_ways_apply_refuses(tmp_path: Path) -> None:
+    """Both surfaces state the refusals, not just the one that opens a chat.
+
+    `--apply` refuses rather than guessing: a symlink source or destination, a
+    top-level entry it cannot classify, a vault holding another workspace's root,
+    and a vault outside the install's git worktree, where there is no `git mv` and
+    no automatic undo at all. That last one is why the remedy points at the
+    refusal instead of restating a route — the command itself tells the operator
+    to finish that case by hand, so a remedy saying "never move it by hand" would
+    be wrong exactly where it matters.
+    """
+    finding = vault_location_findings(_moved(tmp_path))
+    remedy = finding[0].remedy
+
+    assert "symlink" in remedy
+    assert "classify" in remedy
+    assert "another workspace" in remedy
+    assert "outside the install's git worktree" in remedy
+    assert "read it" in remedy
+
+
+def _moved(tmp_path: Path) -> SimpleNamespace:
+    elsewhere = tmp_path / "elsewhere" / "personal"
+    elsewhere.mkdir(parents=True, exist_ok=True)
+    return _cfg(tmp_path, roots={"personal": elsewhere})
 
 
 def test_one_finding_per_misplaced_workspace(tmp_path: Path) -> None:
@@ -177,35 +229,55 @@ def test_a_config_without_a_registry_reports_nothing(tmp_path: Path) -> None:
 # -- (2) the audit's finding outlives the Home card --------------------------
 
 
-def test_the_audit_reports_a_finding_the_home_card_does_not_carry(
+def test_the_audit_reports_a_scratch_vault_with_a_hand_written_wikilink(
     tmp_path: Path,
 ) -> None:
-    """Sharing a probe must not turn the audit into a mirror of the strip.
+    """The diagnostic the mode gate would have deleted (R0/R1).
 
-    Home's card is a pointer: the walk that establishes a wikilink is not
-    available on the poll path, so the card says the dialect *may* be in use. The
-    audit runs the same probe with the example established and names a note. The
-    temptation this pins is making the shared probe's applicability depend on
-    which surface asked — the cheapest way to stop the two surfaces disagreeing
-    is to let the surface that cannot afford the work declare the condition out of
-    scope, and that deletes a true finding from a diagnostic.
+    A `scratch` vault is created conformant, so it is clean unless somebody puts
+    a wikilink in it — and an operator pasting one from another tool is the whole
+    reason this notice exists. Gating the notice on `vault_mode` made the audit
+    agree with Home by going blind here, which is the one thing a diagnostic
+    interface must not do to remove a disagreement.
     """
-    config = _cfg(tmp_path)
-    _notes(config.vault_root / "personal", 3, wikilink="People/Peter")
+    config = _cfg(tmp_path, vault_mode="scratch")
+    _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
     runtime = _runtime(tmp_path)
 
-    tile = next(
-        a for a in detect_actions(DetectionContext(config=config, runtime_dir=runtime))
-        if a.kind == "unmigrated-links"
-    )
     notice = next(
         n for n in audit_upgrade_notices(config, runtime_dir=runtime)["notices"]
         if n["type"] == UNMIGRATED_LINKS_NOTICE
     )
 
-    assert "may still" in tile.title
-    assert "wikilinked.md" not in tile.detail
     assert "wikilinked.md" in notice["detail"]
+    assert "may still" not in notice["detail"]
+
+
+def test_home_reports_the_same_finding_once_a_scan_has_established_it(
+    tmp_path: Path,
+) -> None:
+    """Parity is not a rule both surfaces apply; it is one answer both read.
+
+    Home cannot walk the vault, so the answer reaches it through a bounded
+    off-loop scan. Once that has run, Home and the audit are quoting the same
+    sentence about the same note — which is what a shared probe is for.
+    """
+    config = _cfg(tmp_path)
+    _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+
+    # Before a scan: nothing. The tile is not a guess from a receipt's absence.
+    assert _tiles(config, runtime) == []
+
+    assert resolve_links(config, runtime) is not None
+    tile = _tiles(config, runtime)[0]
+    notice = next(
+        n for n in audit_upgrade_notices(config, runtime_dir=runtime)["notices"]
+        if n["type"] == UNMIGRATED_LINKS_NOTICE
+    )
+
+    assert tile.detail == notice["detail"]
+    assert "wikilinked.md" in tile.detail
 
 
 def test_nothing_home_does_silences_the_audit_finding(tmp_path: Path) -> None:
@@ -222,12 +294,56 @@ def test_nothing_home_does_silences_the_audit_finding(tmp_path: Path) -> None:
     _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
     runtime = _runtime(tmp_path)
     context = DetectionContext(config=config, runtime_dir=runtime)
+    resolve_links(config, runtime)
 
     with pytest.raises(ValueError):
         dismiss_action("vault-unmigrated-links", context)
 
     assert UNMIGRATED_LINKS_NOTICE in _audit_types(config, runtime)
     assert "vault-unmigrated-links" in {a.id for a in detect_actions(context)}
+
+
+def test_the_audit_resolves_its_own_verdict_rather_than_reading_the_cache(
+    tmp_path: Path,
+) -> None:
+    """A report that reused a stored verdict could report a stale one.
+
+    Home's answer is allowed to be minutes old — that is what the window is for.
+    An audit run is not: it is the surface an operator opens to find out what is
+    true, so it walks. The cache is a convenience for Home, never an authority
+    over the audit.
+    """
+    config = _cfg(tmp_path)
+    _notes(config.vault_root / "personal", 1, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+
+    # A stored "clean" verdict, published as if a scan had just found nothing.
+    resolve_links(config, runtime)
+    _notes(config.vault_root / "personal", 1, wikilink="People/Peter")
+    (config.vault_root / "personal" / "late.md").write_text(
+        "---\ntype: note\n---\nSee [[People/Peter]].\n", encoding="utf-8"
+    )
+
+    assert UNMIGRATED_LINKS_NOTICE in _audit_types(config, runtime)
+
+
+# -- (3) one question, two surfaces ------------------------------------------
+
+
+def test_a_completed_receipt_retires_the_notice_on_both_surfaces(
+    tmp_path: Path,
+) -> None:
+    from ciao.vault_migrate_links import write_receipt
+
+    config = _cfg(tmp_path)
+    _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    write_receipt(runtime, {"vault_root": str(config.vault_root), "files_rewritten": 2})
+
+    assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, runtime)
+    assert _tiles(config, runtime) == []
+    # Nothing to wake a scan for: the receipt says the work is done.
+    assert links_scan_is_stale(config, runtime) is False
 
 
 def test_a_partial_migration_leaves_the_finding_on_both_surfaces(
@@ -253,43 +369,40 @@ def test_a_partial_migration_leaves_the_finding_on_both_surfaces(
     )
 
     assert UNMIGRATED_LINKS_NOTICE in _audit_types(config, runtime)
-    assert "vault-unmigrated-links" in {
-        a.id for a in detect_actions(DetectionContext(config=config, runtime_dir=runtime))
-    }
+    assert [t.id for t in _tiles(config, runtime)] == ["vault-unmigrated-links"]
 
 
-# -- (3) one applicability rule for the wikilink dialect ---------------------
+def test_a_clean_vault_raises_nothing_on_either_surface(tmp_path: Path) -> None:
+    """The reason this notice can now reach zero is not "a migration ran".
 
-
-def test_a_completed_receipt_retires_the_notice_on_both_surfaces(
-    tmp_path: Path,
-) -> None:
-    from ciao.vault_migrate_links import write_receipt
-
-    config = _cfg(tmp_path)
-    _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
-    runtime = _runtime(tmp_path)
-    write_receipt(runtime, {"vault_root": str(config.vault_root), "files_rewritten": 2})
-
-    assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, runtime)
-    assert "vault-unmigrated-links" not in {
-        a.id for a in detect_actions(DetectionContext(config=config, runtime_dir=runtime))
-    }
-
-
-def test_a_config_without_a_declared_mode_is_out_of_scope(tmp_path: Path) -> None:
-    """An undeclared mode means a vault Ciaobot created, so the dialect never applied.
-
-    A real `CiaoConfig` always declares it, so this only decides how a stub or a
-    programmatic caller is read — and it has to be decided the same way on both
-    surfaces, which is the whole point.
+    A vault written in markdown links from the start satisfies every old
+    applicability condition and has nothing to convert. The old card fired on it
+    anyway, forever; the audit was right and the card was not. Both are now
+    silent because a walk established there is nothing to do.
     """
     config = _cfg(tmp_path)
-    del config.vault_mode
-    _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
+    _notes(config.vault_root / "personal", 3)
+    runtime = _runtime(tmp_path)
 
-    assert unmigrated_links(config, _runtime(tmp_path)) is None
-    assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, _runtime(tmp_path))
+    assert resolve_links(config, runtime) is None
+    assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, runtime)
+    assert _tiles(config, runtime) == []
+
+
+def test_a_vault_mode_never_decides_whether_a_wikilink_is_reported(
+    tmp_path: Path,
+) -> None:
+    """Both modes are scanned, so the mode is not a rule with two readings."""
+    for mode in ("existing", "scratch", "", None):
+        config = _cfg(tmp_path, vault_mode=mode or "existing")
+        if mode is None:
+            del config.vault_mode
+        _notes(config.vault_root / "personal", 1, wikilink="People/Peter")
+        runtime = _runtime(tmp_path)
+
+        assert resolve_links(config, runtime) is not None, mode
+        assert UNMIGRATED_LINKS_NOTICE in _audit_types(config, runtime), mode
+        reset_links_cache()
 
 
 def test_without_a_runtime_root_nothing_guesses(tmp_path: Path) -> None:
@@ -297,53 +410,15 @@ def test_without_a_runtime_root_nothing_guesses(tmp_path: Path) -> None:
     config = _cfg(tmp_path)
     _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
 
-    assert unmigrated_links(config, None) is None
+    assert resolve_links(config, None) is None
+    assert cached_links(config, None) is None
     assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, None)
 
 
-def test_a_scratch_vault_reaches_zero_on_both_surfaces(tmp_path: Path) -> None:
-    """A conformant vault is not nagged, and its card cannot be permanent."""
-    config = _cfg(tmp_path, vault_mode="scratch")
-    _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
-    runtime = _runtime(tmp_path)
-
-    assert unmigrated_links(config, runtime) is None
-    assert UNMIGRATED_LINKS_NOTICE not in _audit_types(config, runtime)
-    assert "vault-unmigrated-links" not in {
-        a.id for a in detect_actions(DetectionContext(config=config, runtime_dir=runtime))
-    }
-
-
-def test_an_empty_example_is_an_unanswered_question_not_a_clean_vault(
+def test_a_receipt_the_install_cannot_read_is_scanned_not_trusted(
     tmp_path: Path,
 ) -> None:
-    """The wording is the guard against a receipt's absence becoming a claim."""
-    unanswered = LinksFinding(vault_root=tmp_path)
-    answered = LinksFinding(vault_root=tmp_path, example="personal/a.md")
-
-    assert unanswered.established is False
-    assert "may still" in unanswered.title
-    assert "may still contain" in unanswered.detail
-    assert answered.established is True
-    assert "still uses" in answered.title
-    assert "personal/a.md" in answered.detail
-    # One remedy either way: the preview finds nothing on a clean vault, so the
-    # way back and the way forward are the same sentence in both cases.
-    assert unanswered.remedy == answered.remedy
-
-
-def test_a_receipt_the_install_cannot_read_is_raised_on_both_surfaces(
-    tmp_path: Path,
-) -> None:
-    """Unreadable is not "migrated", and both surfaces have to say so alike.
-
-    `read_receipt` returns `None` for a receipt it cannot parse, so an
-    unreadable one leaves the notice raised — the fail-safe direction, since a
-    migration that is reported as done is the failure that leaves wikilinks in a
-    vault for good. What matters here is that both surfaces reach that reading
-    through the one function, rather than one treating unreadable as complete and
-    the other as absent.
-    """
+    """Unreadable is not "migrated", and both surfaces go and look."""
     config = _cfg(tmp_path)
     _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
     runtime = _runtime(tmp_path)
@@ -351,9 +426,88 @@ def test_a_receipt_the_install_cannot_read_is_raised_on_both_surfaces(
     (runtime / "migration" / "vault-links.json").write_text("{ not json", encoding="utf-8")
 
     assert UNMIGRATED_LINKS_NOTICE in _audit_types(config, runtime)
-    assert "vault-unmigrated-links" in {
-        a.id for a in detect_actions(DetectionContext(config=config, runtime_dir=runtime))
-    }
+    assert [t.id for t in _tiles(config, runtime)] == ["vault-unmigrated-links"]
+
+
+def test_a_finding_names_a_note_because_one_was_found() -> None:
+    """The wording is the guard against a receipt's absence becoming a claim."""
+    finding = LinksFinding(vault_root=Path("/v"), example="personal/a.md")
+
+    assert "still uses" in finding.title
+    assert "personal/a.md" in finding.detail
+    assert "vault-unmigrate-links --apply" in finding.remedy
+
+
+# -- the freshness window, and what invalidates an answer ---------------------
+
+
+def test_a_stored_verdict_is_reused_inside_its_window_and_not_outside(
+    tmp_path: Path,
+) -> None:
+    """One clock for how fast this engine looks at somebody's notes.
+
+    Home polls every 60s, so a window shorter than the poll would buy nothing and
+    a window with no end would let a converted note keep the card for ever. The
+    value is a named constant, and this is the test that has to change with it.
+    """
+    config = _cfg(tmp_path)
+    _notes(config.vault_root / "personal", 1, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    resolve_links(config, runtime, now=1000.0)
+
+    assert cached_links(config, runtime, now=1000.0) is not None
+    assert cached_links(config, runtime, now=1000.0 + LINKS_SCAN_TTL_S - 1) is not None
+    assert cached_links(config, runtime, now=1000.0 + LINKS_SCAN_TTL_S) is None
+    assert links_scan_is_stale(config, runtime, now=1000.0) is False
+    assert links_scan_is_stale(config, runtime, now=1000.0 + LINKS_SCAN_TTL_S) is True
+    # A clock that has not reached the window is not inside it.
+    assert cached_links(config, runtime, now=999.0) is None
+
+
+def test_a_changed_receipt_invalidates_the_stored_verdict(tmp_path: Path) -> None:
+    """The token is the receipt's identity, because the receipt is the evidence.
+
+    A migration writes and archives one and an un-migration replaces it, so either
+    one lands a token the stored answer was not computed for — which is what
+    stops a verdict established before an un-migration from outliving it.
+    """
+    from ciao.vault_migrate_links import write_receipt
+
+    config = _cfg(tmp_path)
+    _notes(config.vault_root / "personal", 1, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+    resolve_links(config, runtime)
+    assert cached_links(config, runtime) is not None
+
+    # A partial receipt is a *different* receipt, so the answer it was computed
+    # against no longer applies and Home has to look again — which it does, and
+    # the notice stays raised, because the migration is not complete.
+    write_receipt(
+        runtime,
+        {"vault_root": str(config.vault_root), "failed": [{"path": "x", "error": "no"}]},
+    )
+    assert cached_links(config, runtime) is None
+    assert links_scan_is_stale(config, runtime) is True
+    assert resolve_links(config, runtime) is not None
+    assert cached_links(config, runtime) is not None
+
+    # A completed one puts the notice out of scope, and the stored answer with it.
+    write_receipt(runtime, {"vault_root": str(config.vault_root), "files_rewritten": 2})
+    assert cached_links(config, runtime) is None
+    assert resolve_links(config, runtime) is None
+
+
+def test_two_installs_in_one_process_do_not_share_a_verdict(tmp_path: Path) -> None:
+    """A test, or a dev checkout beside a real engine, is two installs."""
+    one = _cfg(tmp_path / "one")
+    two = _cfg(tmp_path / "two")
+    _notes(one.vault_root / "personal", 1, wikilink="People/Peter")
+    _notes(two.vault_root / "personal", 1)
+
+    resolve_links(one, _runtime(tmp_path / "one"))
+
+    assert cached_links(one, _runtime(tmp_path / "one")) is not None
+    assert cached_links(two, _runtime(tmp_path / "two")) is None
 
 
 # -- (4) neither notice is a catalog task yet --------------------------------
@@ -382,7 +536,7 @@ def test_neither_notice_is_an_update_task() -> None:
     ]
 
 
-# -- (5) a Home poll never walks the vault -----------------------------------
+# -- (5) a Home poll never walks the vault, and the scan is off-loop ----------
 
 
 def _vault_reads_under(root: Path, call: Any) -> list[str]:
@@ -425,10 +579,10 @@ def _vault_reads_under(root: Path, call: Any) -> list[str]:
     return accesses
 
 
-def _install_at(root: Path, count: int) -> SimpleNamespace:
-    """A config whose one adopted workspace holds `count` notes and a wikilink."""
+def _install_at(root: Path, count: int, *, wikilink: str | None = None) -> SimpleNamespace:
+    """A config whose one workspace holds `count` notes and maybe a wikilink."""
     config = _cfg(root)
-    _notes(config.vault_root / "personal", count, wikilink="People/Peter")
+    _notes(config.vault_root / "personal", count, wikilink=wikilink)
     return config
 
 
@@ -438,10 +592,10 @@ def test_the_read_recorder_sees_a_walk(tmp_path: Path) -> None:
     If the recorder stopped watching the accessor a walk uses, the poll count
     would stay zero for the wrong reason and the bound would be untested.
     """
+    from ciao.vault_migrate_links import has_unmigrated_links
+
     config = _install_at(tmp_path, 3)
     vault = config.vault_root / "personal"
-
-    from ciao.vault_migrate_links import has_unmigrated_links
 
     assert _vault_reads_under(vault, lambda: has_unmigrated_links(vault))
 
@@ -450,66 +604,97 @@ def test_a_home_poll_opens_nothing_under_the_vault(tmp_path: Path) -> None:
     """The bound is a count, not a duration, and it does not scale with the vault.
 
     The wikilink notice is the one condition whose accurate answer needs a walk,
-    so this is where the poll would have paid for it. A registry value, a receipt
-    and an `is_dir()` are the only things a pass may read, and none of them
-    touches a note. The small and large vaults are both checked because "cheap"
-    has to mean independent of the vault, not merely small enough to measure.
+    so this is where the poll would have paid for it — with a card in the strip,
+    without one, and after a scan established one. A registry value, a receipt
+    and a stored verdict are the only things a pass may read. The small and large
+    vaults are both checked because "cheap" has to mean independent of the vault,
+    not merely small enough to measure.
     """
-    small = tmp_path / "small"
-    _install_at(small, 1)
-    big = tmp_path / "big"
-    _install_at(big, 400)
-
-    for root, count in ((small, 1), (big, 400)):
-        config = _cfg(root)
+    for count in (1, 400):
+        root = tmp_path / f"vault-{count}"
+        config = _install_at(root, count, wikilink="People/Peter")
         runtime = _runtime(root)
+        vault = config.vault_root / "personal"
         context = DetectionContext(config=config, runtime_dir=runtime)
+        resolve_links(config, runtime)
 
         def _poll() -> None:
             # One pass per poll tick, plus the window-focus pass on top of it.
             for _ in range(3):
                 detect_actions(context)
 
-        assert _vault_reads_under(config.vault_root / "personal", _poll) == [], count
+        # Before a scan as well: the cold path must be as cheap as the warm one.
+        assert _vault_reads_under(vault, _poll) == [], count
 
 
-def test_the_links_walk_is_the_audit_halfs_to_pay_for(tmp_path: Path) -> None:
-    """One walk, on the surface that can afford it, and only where it was asked for."""
-    config = _cfg(tmp_path)
-    _notes(config.vault_root / "personal", 2, wikilink="People/Peter")
+def test_the_scan_runs_on_another_thread_and_through_the_bounded_executor(
+    tmp_path: Path,
+) -> None:
+    """A vault walk may not hold the event loop, or the heartbeats behind it.
+
+    `async_reads.run_read` is the bounded, coalesced executor the rest of the
+    engine uses for exactly this, so the probe goes through it rather than
+    inventing a second one. Both halves are asserted: the walk ran on a worker
+    thread, and the call went through `run_read`.
+    """
+    config = _install_at(tmp_path, 5, wikilink="People/Peter")
     runtime = _runtime(tmp_path)
-    context = DetectionContext(config=config, runtime_dir=runtime)
+    seen: list[str] = []
+    real = migration_notices.resolve_links
 
+    def _note_thread(*args: Any, **kwargs: Any) -> LinksFinding | None:
+        seen.append(threading.current_thread().name)
+        return real(*args, **kwargs)
+
+    async def _run() -> None:
+        with patch("ciao.migration_notices.run_read", wraps=run_read) as reader:
+            with patch("ciao.migration_notices.resolve_links", side_effect=_note_thread):
+                await refresh_links(config, runtime)
+        reader.assert_called_once()
+        assert cached_links(config, runtime) is not None
+
+    asyncio.run(_run())
+
+    assert seen and all(name != "MainThread" for name in seen), seen
+
+
+async def test_a_second_scan_inside_the_window_does_no_work(tmp_path: Path) -> None:
+    """Two polls can pass the route's gate; only one walk is worth doing."""
+    config = _install_at(tmp_path, 3, wikilink="People/Peter")
+    runtime = _runtime(tmp_path)
+
+    await refresh_links(config, runtime, now=500.0)
     with patch(
-        "ciao.vault_migrate_links.has_unmigrated_links",
-        side_effect=AssertionError("the poll path walked the vault"),
-    ) as walk:
-        detect_actions(context)
-    walk.assert_not_called()
+        "ciao.migration_notices.resolve_links",
+        side_effect=AssertionError("the window was ignored"),
+    ):
+        await refresh_links(config, runtime, now=500.0)
+        assert await refresh_links(config, runtime, now=500.0 + LINKS_SCAN_TTL_S - 1) is None
 
-    # The audit is the caller that establishes the example, so it is the one that
-    # walks, and having walked it names the note it found.
-    notice = next(
-        n for n in audit_upgrade_notices(config, runtime_dir=runtime)["notices"]
-        if n["type"] == UNMIGRATED_LINKS_NOTICE
-    )
-    assert "wikilinked.md" in notice["detail"]
+    # Past the window it walks again — the vault changed under it, or may have.
+    with patch("ciao.migration_notices.resolve_links", wraps=resolve_links) as scan:
+        await refresh_links(config, runtime, now=500.0 + LINKS_SCAN_TTL_S)
+    assert scan.call_count == 1
+
+
+# -- neither surface keeps a copy --------------------------------------------
 
 
 def test_neither_surface_keeps_a_second_implementation() -> None:
     """A duplicate predicate is the exact regression #816 was filed for.
 
     `operator_actions` and `os_audit` both name this module's probes and its
-    notice types — same objects, not re-declared strings — and neither resolves a
-    canonical vault root or walks for wikilinks of its own. Duplicated *logic* is
+    notice types — same objects, not re-declared strings — and neither walks for
+    wikilinks or resolves a canonical vault root of its own. Duplicated *logic* is
     what this removes; duplicated *cards* were never the problem.
     """
     from ciao import operator_actions, os_audit
 
-    assert operator_actions.unmigrated_links is unmigrated_links
+    assert operator_actions.cached_links is cached_links
     assert operator_actions.vault_location_findings is vault_location_findings
     assert os_audit.VAULT_LOCATION_NOTICE == VAULT_LOCATION_NOTICE
     assert os_audit.UNMIGRATED_LINKS_NOTICE == UNMIGRATED_LINKS_NOTICE
+    assert os_audit.resolve_links is resolve_links
 
     package = Path(migration_notices.__file__).parent
     for module in ("operator_actions.py", "os_audit.py"):
@@ -522,12 +707,11 @@ def test_neither_surface_keeps_a_second_implementation() -> None:
         assert "vault_migrate_links import read_receipt" not in text, module
 
 
-def test_a_json_receipt_that_is_not_an_object_does_not_silence_the_notice(
+def test_a_json_receipt_that_is_not_an_object_does_not_retire_the_notice(
     tmp_path: Path,
 ) -> None:
     """`read_receipt` gates on shape as well as status; a list is not a migration."""
-    config = _cfg(tmp_path)
-    _notes(config.vault_root / "personal", 1, wikilink="People/Peter")
+    config = _install_at(tmp_path, 1, wikilink="People/Peter")
     runtime = _runtime(tmp_path)
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-links.json").write_text(

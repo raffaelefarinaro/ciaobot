@@ -8714,6 +8714,36 @@ def _housekeeping_context(request: Request) -> "operator_actions.DetectionContex
     )
 
 
+def _refresh_links_scan(app: Any, context: "operator_actions.DetectionContext") -> None:
+    """Keep the wikilink verdict warm without a poll ever waiting on it.
+
+    One notice on the strip needs a fact no cheap read can supply: whether a
+    note in the vault still holds a wikilink. Establishing it walks the vault, so
+    it cannot run inside the detector pass — this strip is polled every 60s and on
+    every window focus. The walk goes to the bounded off-loop executor
+    (`ciao.migration_notices.refresh_links`) and this returns immediately, so the
+    strip answers from whatever the last scan stored. Same trade
+    `_cached_update_hint` makes for the release lookup: a cold engine reports no
+    card until the first scan lands, and the next poll picks it up.
+
+    One scan in flight at a time, and none at all while the stored answer is
+    inside its window, so a migrated install is not woken every minute to be told
+    nothing again. The scan's own staleness check is repeated inside the worker
+    for the poll that passes this gate while an earlier scan is still admitted.
+    """
+    from ciao import migration_notices
+
+    if not migration_notices.links_scan_is_stale(context.config, context.runtime):
+        return
+    task = getattr(app.state, "links_scan_task", None)
+    if task is not None and not task.done():
+        return
+    app.state.links_scan_task = asyncio.create_task(
+        migration_notices.refresh_links(context.config, context.runtime),
+        name="ciao-links-scan",
+    )
+
+
 async def list_housekeeping(request: Request) -> JSONResponse:
     """Return every detectable operator action for the home strip.
 
@@ -8723,7 +8753,9 @@ async def list_housekeeping(request: Request) -> JSONResponse:
     """
     from ciao import operator_actions
 
-    actions = operator_actions.detect_actions(_housekeeping_context(request))
+    context = _housekeeping_context(request)
+    _refresh_links_scan(request.app, context)
+    actions = operator_actions.detect_actions(context)
     return JSONResponse({"actions": [action.as_dict() for action in actions]})
 
 

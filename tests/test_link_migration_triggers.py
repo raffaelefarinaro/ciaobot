@@ -1,10 +1,20 @@
 """The three OKF migration triggers: detect and surface, never rewrite."""
 from __future__ import annotations
 from pathlib import Path
+import pytest
+from ciao.migration_notices import reset_links_cache, resolve_links
 from ciao.operator_actions import DetectionContext, detect_actions
 from ciao.os_audit import audit_upgrade_notices
 from ciao.vault_migrate_links import has_unmigrated_links, write_receipt
 from types import SimpleNamespace
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_link_verdicts():
+    """The wikilink cache is process-wide, so a verdict must not leak between tests."""
+    reset_links_cache()
+    yield
+    reset_links_cache()
 
 
 def _vault(tmp_path: Path) -> Path:
@@ -34,12 +44,8 @@ def test_detector_skips_code_and_escapes(tmp_path: Path) -> None:
 
 
 def _cfg(v: Path):
-    # `vault_mode="existing"` is the notice's own applicability, shared with the
-    # Home card since #816: the retired wikilink dialect is in scope for a vault
-    # this install adopted, not for one Ciaobot created conformant. A stub that
-    # does not declare its mode is a vault Ciaobot created, and is silent.
     return SimpleNamespace(
-        vault_root=v, workspace_root=v.parent, vault_mode="existing",
+        vault_root=v, workspace_root=v.parent,
         workspace_names=lambda: ["personal"],
         workspace_vault_root=lambda n: v / n,
         canonical_workspace_vault_root=lambda n: v / n,
@@ -90,15 +96,14 @@ def test_no_runtime_dir_means_no_notice(tmp_path: Path) -> None:
     assert "unmigrated_vault_links" not in {n["type"] for n in result["notices"]}
 
 
-def test_a_scratch_vault_is_out_of_scope_on_both_surfaces(tmp_path: Path) -> None:
-    """A vault Ciaobot created conformant never had the dialect to migrate.
+def test_a_scratch_vault_with_a_wikilink_is_still_reported(tmp_path: Path) -> None:
+    """A vault Ciaobot created is also the one an operator can hand a wikilink.
 
-    The Home card has always gated on `vault_mode`; the audit did not, so the two
-    surfaces answered different questions about the same vault — the cheap way to
-    "stop them disagreeing" would have been to let the surface that cannot afford
-    the walk declare the condition out of scope, which deletes a finding from a
-    diagnostic. The shared applicability is the adopted-vault one both had half of:
-    here a `scratch` vault is silent, on the audit as well as on Home.
+    `scratch` means the folder starts conformant, not that it stays that way: a
+    paste from another tool puts a `[[wikilink]]` in it, and reporting that is
+    what this notice is for. An earlier attempt at Home/audit parity gated the
+    audit on `vault_mode` too, which made the two surfaces agree by deleting the
+    finding — the one move a diagnostic interface must not make.
     """
     v = _vault(tmp_path)
     cfg = _cfg(v)
@@ -106,20 +111,39 @@ def test_a_scratch_vault_is_out_of_scope_on_both_surfaces(tmp_path: Path) -> Non
 
     result = audit_upgrade_notices(cfg, runtime_dir=tmp_path / ".runtime")
 
+    assert "unmigrated_vault_links" in {n["type"] for n in result["notices"]}
+
+
+def test_a_clean_vault_is_silent_in_either_mode(tmp_path: Path) -> None:
+    """Nothing to report is the answer for a conformant vault, and it is reached
+    by looking rather than by assuming the folder started clean."""
+    v = tmp_path / "memory-vault" / "personal"
+    v.mkdir(parents=True)
+    (v / "a.md").write_text("[Peter](../People/Peter.md)\n", encoding="utf-8")
+    cfg = _cfg(tmp_path / "memory-vault")
+
+    result = audit_upgrade_notices(cfg, runtime_dir=tmp_path / ".runtime")
+
     assert "unmigrated_vault_links" not in {n["type"] for n in result["notices"]}
 
 
-def test_the_audit_reports_what_home_only_points_at(tmp_path: Path) -> None:
-    """Home hedges because it may not walk; the audit walks, so it tells the truth.
+def test_home_reports_the_same_finding_once_a_scan_has_run(tmp_path: Path) -> None:
+    """One question, one answer, two surfaces.
 
-    One applicability, two costs. The card cannot claim a wikilink exists on the
-    strength of a receipt's absence, so the notice is the surface that names a
-    first offending note — and it keeps doing that however the card is worded.
+    Home cannot walk the vault, so it reads a verdict a bounded off-loop scan
+    established; the audit walks. Once the scan has run the two quote the same
+    sentence about the same note, which is what sharing the probe is for.
     """
     v = _vault(tmp_path)
     rt = tmp_path / ".runtime"
     cfg = _cfg(v)
 
+    assert not [
+        a for a in detect_actions(DetectionContext(config=cfg, runtime_dir=rt))
+        if a.kind == "unmigrated-links"
+    ], "no scan has run, so there is nothing to report"
+
+    resolve_links(cfg, rt)
     tile = next(
         a for a in detect_actions(DetectionContext(config=cfg, runtime_dir=rt))
         if a.kind == "unmigrated-links"
@@ -129,6 +153,5 @@ def test_the_audit_reports_what_home_only_points_at(tmp_path: Path) -> None:
         n for n in result["notices"] if n["type"] == "unmigrated_vault_links"
     )
 
-    assert "may still" in tile.title
-    assert "personal/a.md" not in tile.detail
-    assert "personal/a.md" in notice["detail"]
+    assert tile.detail == notice["detail"]
+    assert "personal/a.md" in tile.detail

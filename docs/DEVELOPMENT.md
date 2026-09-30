@@ -732,30 +732,50 @@ Adding a third surface to a notice is a function call, not a copy. Adding a noti
 means answering two questions in that module, and the answers are what a later
 maintainer is checking:
 
-- **What makes it applicable?** One rule, shared. For the wikilink notice that is
-  an adopted vault (`vault_mode == "existing"`), a runtime root to read the
-  receipt from, and no *completed* migration receipt — `read_receipt` gates on
-  `status == "migrated"`, so a run that could not write every note does not
-  silence it. A config that does not declare its mode is read as a vault Ciaobot
-  created, which is out of scope and is also what lets the Home card reach zero.
-  A surface that decides applicability for itself is a disagreement waiting to be
-  filed as a bug, and the cheap version of that bug — letting the surface that
-  cannot afford the work declare the condition out of scope — deletes a true
-  finding from the audit.
-- **What does it cost?** The expensive half is a named argument
-  (`establish=True`), never a private copy of the rules. Home may only call the
-  cheap half: read a receipt, compare two registry-resolved paths, `is_dir()` the
-  result. The audit may run the wikilink walk, because it already reads every
-  note in the vault, and that is what lets it name a first offending note while
-  the card says the dialect *may* be in use — a receipt's absence is not a
-  wikilink, and a card that claimed otherwise would be lying. No Home-side
-  suppression is an input to these functions, so when #800's catalog step makes a
-  notice optional and dismissible, the dismissal can reach Home and only Home.
+- **What makes it applicable?** One rule, shared, and never one a surface gets to
+  read differently. For the wikilink notice: a runtime root to read the receipt
+  from, no *completed* migration receipt (`read_receipt` gates on
+  `status == "migrated"`, so a run that could not write every note does not silence
+  it), and an actual wikilink still in the vault. There is deliberately **no**
+  `vault_mode` term. It was there once, as a Home-side shortcut, and adopting it
+  as "the shared rule" made the audit agree with Home by going blind on a scratch
+  vault holding a hand-written wikilink — a diagnostic interface losing a finding
+  to remove a disagreement. The expensive half of the condition is therefore not
+  something a surface may approximate: it is a walk somebody has to do.
+- **Who may establish it?** Three named functions, not a boolean flag, because
+  "who pays" is the part that is allowed to differ. `resolve_links` walks and
+  publishes the verdict; `cached_links` only reads what is published; `refresh_links`
+  runs the walk through `async_reads.run_read`, so it is coalesced, admission-capped
+  and off the event loop like every other vault read. The audit calls
+  `resolve_links` — it is already a full-install pass over every note, and a report
+  that reused a stored verdict could report a stale one. Home calls `cached_links`,
+  because the strip runs on open, on focus and on a 60s poll. `GET /api/housekeeping`
+  starts `refresh_links` **detached** (the same arrangement as
+  `_cached_update_hint`), so a poll never waits on a vault and a cold engine shows
+  no card until the next one picks the verdict up.
 
-The bound on the Home side is asserted, not assumed:
-`tests/test_migration_notices.py` counts filesystem accesses under the vault
-across three detection passes, at one note and at four hundred, and fails on any
-of them. A timing assertion would pass on a fast tmpfs and fail in CI.
+`LINKS_SCAN_TTL_S` (300) is a named constant, not a setting and not an env var, and
+it is deliberately the same window `update_tasks.APPLICABILITY_TTL_S` gives its
+detectors: one clock for how fast this engine looks at somebody's own notes,
+rather than one per surface. Re-establishing a positive answer is cheap (the walk
+stops at the first hit); re-establishing a clean one costs the whole vault, which
+is why the window is minutes rather than seconds. The stored answer is keyed on the
+receipt file's own mtime and size, so a migration, an un-migration and a retry of a
+partial one each land a token it was not computed for, and on the runtime root and
+vault path, so two installs in one process cannot share one. A completed receipt
+means there is nothing to scan for, so a migrated install is not woken every 60s.
+
+Because a finding exists only once a walk found a note, the card **names** it
+instead of hedging on a receipt's absence, and a clean vault reaches zero for a
+reason other than "a migration ran". No Home-side suppression is an input to any of
+these functions, so when #800's catalog step makes a notice optional and
+dismissible, the dismissal can reach Home and only Home.
+
+The bound on the Home side is asserted, not assumed: `tests/test_migration_notices.py`
+counts filesystem accesses under the vault across detection passes, at one note and
+at four hundred, and fails on any of them, with a companion test proving the
+recorder sees a walk. A timing assertion would pass on a fast tmpfs and fail in CI.
+The scan is proven to run on a worker thread and to go through `run_read`.
 
 Neither notice is an update-task catalog row, and the test says so. A catalog task
 needs a registered completion check that reads a real postcondition, and for

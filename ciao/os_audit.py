@@ -21,7 +21,7 @@ from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
 from ciao.migration_notices import (
     UNMIGRATED_LINKS_NOTICE,
     VAULT_LOCATION_NOTICE,
-    unmigrated_links,
+    resolve_links,
     vault_location_findings,
 )
 from ciao.memory_audit import audit_entries, find_stale_entries, find_stale_notes
@@ -1207,18 +1207,19 @@ def audit_upgrade_notices(
     # leaving it in a release note nobody re-reads. Notices are pending actions
     # the weekly hygiene routine surfaces without turning the audit red.
     #
-    # `establish=True` because the audit is the surface that may pay for the
-    # walk: it already reads every note in the vault for the hygiene section, and
-    # a notice naming a first offending note is the truthful one. Applicability
-    # is the audit's own call, from the shared probe — a scratch vault and an
-    # adopted one that has completed its migration are silent here for the same
-    # reason Home is silent about them.
+    # Resolved here, by walking, rather than read from the cache the Home strip
+    # uses: the audit is already a full-install pass over every note, and a
+    # report that reused a stored verdict could report a stale one. What it finds
+    # is published, so a run of the audit warms the strip for free. There is no
+    # vault-mode gate, deliberately — a scratch vault is created conformant and so
+    # is clean, but it is also the vault an operator can hand a wikilink, and
+    # reporting that is what this notice is for.
     try:
-        links = unmigrated_links(config, runtime_dir, establish=True)
+        links = resolve_links(config, runtime_dir)
     except Exception:  # noqa: BLE001 — advisory section, never fail the audit
         logger.exception("upgrade notices: link-dialect check failed")
         links = None
-    if links is not None and links.established:
+    if links is not None:
         notices.append({
             "type": UNMIGRATED_LINKS_NOTICE,
             "workspace": "",
