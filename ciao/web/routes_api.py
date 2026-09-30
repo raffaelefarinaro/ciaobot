@@ -3608,6 +3608,14 @@ async def vault_graph(request: Request) -> JSONResponse:
             "unverified": coverage.unverified,
             "uncovered": coverage.uncovered,
             "stale": coverage.stale,
+            # Whether this note's TYPE never ages out — a `log`, a `journal`, a
+            # `Workspace/` queue. Carried so a client can say so, because
+            # `uncovered` on a journal is a different statement from `uncovered`
+            # on a person note: the first is a record of what happened and is not
+            # meant to be verified at all, the second is a fact nobody has read.
+            # Without it the only way to tell them apart is to keep a copy of
+            # the exempt set in the browser.
+            "note_exempt": coverage.note_exempt,
             "coverage_ratio": round(coverage.coverage_ratio, 4),
             "fully_verified": coverage.fully_verified,
             "stale_entries": [

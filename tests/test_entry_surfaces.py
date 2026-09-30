@@ -20,13 +20,17 @@ import pytest
 TODAY = datetime.date(2026, 9, 30)
 
 
-def _person_note(*, related: str = "") -> str:
-    """A note whose own date is current and whose second fact is from 2019.
+def _person_note(*, related: str = "", updated: str = "2026-09-29") -> str:
+    """A note whose second fact is from 2019, whatever its own date says.
 
     The shape the whole level exists for: re-stamping the file last week cleared
     the whole-note flag and silently re-certified everything in it. ``related``
     adds a resolved frontmatter ref, which is how a fixture gets rid of the
-    `unlinked` signal so a test can look at one finding at a time.
+    `unlinked` signal so a test can look at one finding at a time. ``updated``
+    moves the note's *own* date, which is the other axis: a test that wants the
+    row queued on the whole-note signal rather than the entry one sets an old
+    date, and a test that wants the row queued *only* because of an overdue fact
+    leaves it current.
     """
     link = f"related: [{related}]\n" if related else ""
     # Composed rather than interpolated into a dedented template: `dedent`
@@ -37,7 +41,7 @@ def _person_note(*, related: str = "") -> str:
     return (
         "---\n"
         "type: person\n"
-        "updated: 2026-09-29\n"
+        f"updated: {updated}\n"
         "tags: [person]\n"
         "aliases: [Ali]\n"
         f"{link}"
@@ -71,7 +75,9 @@ def _entry(text: str, relative: str, prefix: str):
 # --- vault review ----------------------------------------------------------
 
 
-def _review_vault(tmp_path: Path) -> Path:
+def _review_vault(
+    tmp_path: Path, *, related: str = "People/Bob.md", updated: str = "2026-09-29"
+) -> Path:
     people = tmp_path / "People"
     people.mkdir(parents=True)
     (people / "Bob.md").write_text(
@@ -90,7 +96,7 @@ def _review_vault(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (people / "Alice.md").write_text(
-        _person_note(related="People/Bob.md"), encoding="utf-8"
+        _person_note(related=related, updated=updated), encoding="utf-8"
     )
     (tmp_path / "Workspace").mkdir(exist_ok=True)
     return tmp_path
@@ -249,13 +255,16 @@ def test_coverage_is_reported_for_a_queued_note_whose_facts_are_prose(
         rendered="memory-vault/People/Bob.md",
         today=TODAY,
     )
-    block = review._entry_evidence(
+    block, due = review._entry_evidence(
         coverage, selected, document, relative="People/Bob.md", root=tmp_path
     )
     assert block["entries"] == 0
     assert block["uncovered"] == 1
     assert block["fully_verified"] is False
     assert block["stale_entries"] == []
+    # Nothing due: the note is unmeasured, not overdue, so it is not a question
+    # the queue puts to anybody.
+    assert due == 0
 
 
 def test_an_entry_candidate_links_its_pending_proposal_rather_than_duplicating(
@@ -267,12 +276,18 @@ def test_an_entry_candidate_links_its_pending_proposal_rather_than_duplicating(
     rewrites or removes exactly that bullet. The review row's own buttons are
     about the whole file, so offering a second accept of the same question in two
     places is how a person answers it twice.
+
+    The note is written with an **old `updated:`** so the row is queued on the
+    whole-note signal whatever the entry findings say: the entry has a pending
+    proposal, so its entry finding is settled and must not queue the row (see
+    `test_a_settled_entry_is_reported_but_not_re_asked_about`). What is under test
+    is the link, so the row has to be there for some other reason.
     """
     from ciao import entry_verification as ev
     from ciao import vault_review as review
 
-    vault = _review_vault(tmp_path)
-    text = _person_note()
+    vault = _review_vault(tmp_path, updated="2024-01-02")
+    text = _person_note(updated="2024-01-02")
     entry = _entry(text, "People/Alice.md", "- Landlord")
     identity, fingerprint = entry.identity, entry.fingerprint
     ev.record_entry_check(
@@ -297,15 +312,92 @@ def test_an_entry_candidate_links_its_pending_proposal_rather_than_duplicating(
         now=datetime.datetime(2026, 9, 30, 12, 0, tzinfo=datetime.UTC),
     )
     alice = [row for row in rows if row.path.endswith("People/Alice.md")][0]
-    proposals = alice.evidence["entry_verification"]["proposals"]
+    block = alice.evidence["entry_verification"]
+    proposals = block["proposals"]
     assert [p["identity"] for p in proposals] == [identity]
     assert proposals[0]["proposal_id"] == "pr1"
     # A conflict is reported rather than hidden: an accept that can only fail is
     # worse than one that says what went wrong.
     assert proposals[0]["conflicted"] is False
-    # The check still settles the entry for the worklist, and the row does not
-    # pretend it is unchecked.
+    # The finding is still *visible* — the fact is still old — and the check is
+    # on it, so the row can say why the note is not being asked about again.
+    assert [f["settled"] for f in block["stale_entries"]] == [True]
+    assert block["stale_entries"][0]["checked_outcome"] == ev.STILL_VALID
+    assert block["due"] == 0
+    # And the signal did not fire: the worklist filters its plan by the very same
+    # predicate, and a queue that offered this question would be asking about it
+    # twice.
+    assert "unverified_entries" not in alice.signals
     assert ev.should_check_entry(vault, identity, fingerprint, today=TODAY) is False
+
+
+def test_a_settled_entry_is_reported_but_not_re_asked_about(
+    tmp_path: Path,
+) -> None:
+    """The disagreement this fixes, in one note.
+
+    The nightly `stale_entry` pass drops an entry whose `EntryCheck` settles it
+    — inside its 30-day cooldown, or waiting on a proposal. A queue that raised
+    `unverified_entries` for the same entry anyway would promise a person a
+    question the pass has already put to somebody else, and the two lists would
+    disagree about the same fact in the same vault on the same night.
+
+    Nothing is hidden: the entry is still old, so it stays in the block with
+    ``settled`` and the verdict beside it. What changes is the signal.
+
+    The note is written with an old `updated:`, so the row survives the entry
+    finding being settled: it is queued on the whole-note signal instead, which
+    is what lets the test read the entry block on a row that exists.
+    """
+    from ciao import entry_verification as ev
+    from ciao import vault_review as review
+
+    vault = _review_vault(tmp_path, updated="2024-01-02")
+    rows = review.generate_candidates(
+        vault,
+        workspace="personal",
+        write_queue=False,
+        now=datetime.datetime(2026, 9, 30, 12, 0, tzinfo=datetime.UTC),
+    )
+    alice = [row for row in rows if row.path.endswith("People/Alice.md")][0]
+    assert "unverified_entries" in alice.signals
+    assert alice.evidence["entry_verification"]["due"] == 1
+    assert [
+        f["settled"] for f in alice.evidence["entry_verification"]["stale_entries"]
+    ] == [False]
+
+    # Now somebody answers it, the way the pass would.
+    entry = _entry(_person_note(updated="2024-01-02"), "People/Alice.md", "- Landlord")
+    ev.record_entry_check(
+        vault,
+        ev.EntryCheck(
+            identity=entry.identity,
+            note_path="People/Alice.md",
+            workspace="personal",
+            content_fingerprint=entry.fingerprint,
+            outcome=ev.STILL_VALID,
+            checked_at=TODAY,
+            retry_after=TODAY + datetime.timedelta(days=30),
+            coverage=ev.COVERAGE_COMPLETE,
+            reason="the March release notes still name her",
+        ),
+    )
+    rows = review.generate_candidates(
+        vault,
+        workspace="personal",
+        write_queue=False,
+        now=datetime.datetime(2026, 9, 30, 12, 0, tzinfo=datetime.UTC),
+    )
+    alice = [row for row in rows if row.path.endswith("People/Alice.md")][0]
+    block = alice.evidence["entry_verification"]
+    assert block["due"] == 0
+    assert "unverified_entries" not in alice.signals
+    # Visible, with the verdict, so the row explains the silence.
+    assert block["stale_entries"][0]["settled"] is True
+    assert block["stale_entries"][0]["checked_at"] == TODAY.isoformat()
+    assert ev.should_check_entry(
+        vault, entry.identity, entry.fingerprint, today=TODAY
+    ) is False
 
 
 def test_an_entry_proposal_the_note_has_left_is_reported_as_a_conflict(
@@ -540,13 +632,15 @@ def test_an_ordinary_save_cannot_carry_a_stamp_it_did_not_earn() -> None:
         "- Works at Radix\n"
     )
     # The changed bullets now read as unverified to the detector, which is the
-    # honest state for a fact nobody checked.
+    # honest state for a fact nobody checked. The note is aged on purpose: an
+    # unstamped bullet inherits the note's date, so in a fresh note it is current
+    # exactly as far as the file is and there is nothing left to re-read.
     from ciao.memory_audit import note_entry_coverage
 
     _coverage, selected, _doc = note_entry_coverage(
         cleaned,
         note_type="person",
-        updated="2026-09-30",
+        updated="2024-01-02",
         mtime=0.0,
         note_path="People/A.md",
         rendered="memory-vault/People/A.md",
@@ -555,20 +649,86 @@ def test_an_ordinary_save_cannot_carry_a_stamp_it_did_not_earn() -> None:
     assert {v.reason_code for v in selected} == {"no-stamp", "aged"}
 
 
-def test_a_pure_restamp_survives_the_save_rule() -> None:
-    """The reason the rule is fingerprint-based and not a date test.
+def test_an_untouched_bullet_survives_an_unrelated_save(tmp_path: Path) -> None:
+    """The case the rule must NOT touch, which is the whole risk of adding it.
 
-    A `still_valid` re-stamp changes the date and nothing else; the entry's own
-    words are byte-identical, so whatever was verified then is still verified now
-    and the stamp must survive an unrelated save in the same file.
+    A save that rewrites one bullet in a file must leave every other bullet's
+    stamp exactly as it was — including the case this rule is *not* about: a
+    bullet whose own date moved because the `still_valid` verdict wrote it. That
+    write is a verification and goes through
+    `ciao.note_receipts.apply_entry_edit`, which never runs this function; an
+    ordinary save that merely happens to leave the token alone must be a no-op.
     """
     from ciao import note_entries as ne
 
-    before = "- Lives in Porto [verified: 2020-01-01]\n"
-    after = "- Lives in Porto [verified: 2026-09-30]\n"
-    cleaned, dropped = ne.invalidate_stale_stamps(before, after)
-    assert dropped == 0
-    assert cleaned == after
+    before = (
+        "- Lives in Porto [verified: 2026-09-20]\n"
+        "- Landlord is Mr Silva [verified: 2020-01-01]\n"
+    )
+    after = (
+        "- Lives in Lisbon [verified: 2026-09-20]\n"
+        "- Landlord is Mr Silva [verified: 2020-01-01]\n"
+    )
+    cleaned, changed = ne.invalidate_stale_stamps(before, after)
+    # Only the bullet whose words changed, and only because its claim is gone.
+    assert changed == 1
+    assert cleaned == (
+        "- Lives in Lisbon\n- Landlord is Mr Silva [verified: 2020-01-01]\n"
+    )
+
+
+def test_a_redated_unchanged_bullet_is_put_back() -> None:
+    """The half a fingerprint cannot see, and the one that mattered.
+
+    The fingerprint ignores the stamp by design — that is what makes a re-stamp
+    invisible to it — so "the words are unchanged" cannot also mean "the stamp is
+    fine". A save that re-dates a bullet it did not touch is the exact failure
+    the writers exist to stop: today's date, attached to a sentence somebody
+    checked six years ago. The date ``before`` carried is restored, not merely
+    removed, because removing it would also lose a real verification.
+    """
+    from ciao import note_entries as ne
+
+    before = "- Lives in Berlin [verified: 2020-01-01]\n"
+    after = "- Lives in Berlin [verified: 2026-09-30]\n"
+    cleaned, changed = ne.invalidate_stale_stamps(before, after)
+    assert changed == 1
+    assert cleaned == before
+
+
+def test_a_stamp_added_to_an_unchanged_bullet_is_cut() -> None:
+    """The other shape of the same failure: none before, one after.
+
+    Nothing was verified about those exact words on any day, and a save is not a
+    check, so the token goes rather than being dated back to something `before`
+    never held.
+    """
+    from ciao import note_entries as ne
+
+    cleaned, changed = ne.invalidate_stale_stamps(
+        "- Lives in Berlin\n", "- Lives in Berlin [verified: 2026-09-30]\n"
+    )
+    assert changed == 1
+    assert cleaned == "- Lives in Berlin\n"
+
+
+def test_a_neighbour_is_left_alone_while_a_redated_sibling_is_put_back() -> None:
+    """The two rules together, on one file.
+
+    A save that rewrote one bullet and re-dated another has to produce a file
+    where the untouched bullet keeps its real date, the changed one has none, and
+    the re-dated one is back to what it was — the whole point being that the
+    writer is a filter, not a reset.
+    """
+    from ciao import note_entries as ne
+
+    before = "- Speaks Greek [verified: 2020-01-01]\n- Works at Acme [verified: 2019-01-01]\n"
+    after = "- Speaks Greek [verified: 2026-09-30]\n- Works at Helios [verified: 2026-09-30]\n"
+    cleaned, changed = ne.invalidate_stale_stamps(before, after)
+    assert changed == 2
+    assert cleaned == (
+        "- Speaks Greek [verified: 2020-01-01]\n- Works at Helios\n"
+    )
 
 
 def test_the_fold_writer_strips_stamps_before_it_writes(tmp_path: Path) -> None:
@@ -583,6 +743,74 @@ def test_the_fold_writer_strips_stamps_before_it_writes(tmp_path: Path) -> None:
     current = "- Landlord is Mr Silva [verified: 2020-01-01]\n"
     updated = "- Landlord is Mr Costa [verified: 2020-01-01]\n"
     assert _invalidate_stamps(current, updated) == "- Landlord is Mr Costa\n"
+
+
+def test_the_fold_writer_puts_a_redated_bullet_back(tmp_path: Path) -> None:
+    """The `people` accept, on the re-date: a bullet nobody touched.
+
+    A model rewriting a person note is the most likely source of this, because
+    it re-emits the whole file and has today's date in whatever context it was
+    given. The writer is shared by the two accept paths, so this asserts the
+    shared helper here and the `project` path below pins that the call site is
+    wired in both places.
+    """
+    from ciao.project_doc_update import _invalidate_stamps
+
+    current = "- Landlord is Mr Silva [verified: 2020-01-01]\n"
+    updated = "- Landlord is Mr Silva [verified: 2026-09-30]\n"
+    assert _invalidate_stamps(current, updated) == current
+
+
+@pytest.mark.parametrize(
+    "writer, current, updated, expected",
+    [
+        # `update_project_doc`: a project doc folded from a session's insights.
+        (
+            "project",
+            "- Ships monthly [verified: 2024-03-01]\n",
+            "- Ships monthly [verified: 2026-09-30]\n",
+            "- Ships monthly [verified: 2024-03-01]\n",
+        ),
+        (
+            "project",
+            "- Owner is Dana [verified: 2024-03-01]\n",
+            "- Owner is Rae [verified: 2026-09-30]\n",
+            "- Owner is Rae\n",
+        ),
+        # `fold_fact_into_person_note`: a fact merged into a person note.
+        (
+            "people",
+            "- Prefers terse replies [verified: 2024-03-01]\n",
+            "- Prefers terse replies [verified: 2026-09-30]\n",
+            "- Prefers terse replies [verified: 2024-03-01]\n",
+        ),
+        (
+            "people",
+            "- Based in Porto [verified: 2024-03-01]\n",
+            "- Based in Lisbon [verified: 2026-09-30]\n",
+            "- Based in Lisbon\n",
+        ),
+    ],
+)
+def test_both_accept_paths_run_the_invalidator(
+    writer: str, current: str, updated: str, expected: str
+) -> None:
+    """Both writers, both shapes, through the helper they each call.
+
+    `update_project_doc` and `fold_fact_into_person_note` are separate call
+    sites for one rule, and a rule enforced at one of them is a rule the other
+    does not have. Asserting the *shared* helper once would not catch a call site
+    that stopped calling it, which is the failure this pair exists to prevent.
+    """
+    import inspect
+
+    from ciao import project_doc_update as pdu
+
+    source = inspect.getsource(
+        pdu.update_project_doc if writer == "project" else pdu.fold_fact_into_person_note
+    )
+    assert "_invalidate_stamps(" in source, f"the {writer} writer stopped calling it"
+    assert pdu._invalidate_stamps(current, updated) == expected
 
 
 def test_the_authoring_guidance_names_the_entry_contract() -> None:

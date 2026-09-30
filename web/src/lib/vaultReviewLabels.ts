@@ -71,7 +71,14 @@ function plural(count: number, singular: string, plural_?: string): string {
  * "12% covered" for a perfectly well-kept note would be alarm. What matters is
  * whether the *assertions* were read, which is what `uncovered` counts: prose
  * paragraphs, tables and quotes are assertions nothing here checked, and one is
- * enough to stop the note being called fully verified. */
+ * enough to stop the note being called fully verified.
+ *
+ * `unverified` is deliberately one bucket, so the sentence says "not verified"
+ * rather than "never checked": it covers a bullet with no stamp *and* one
+ * carrying a stamp that cannot be read, and only the per-card copy below the
+ * list can tell those apart. Calling the second "never checked" would put a
+ * claim on the card that its own excerpt contradicts.
+ */
 export function coverageSummary(evidence: VaultReviewEvidence): string {
   const cov = evidence.entry_verification
   if (!cov) return ''
@@ -83,7 +90,7 @@ export function coverageSummary(evidence: VaultReviewEvidence): string {
   }
   const parts = [`${plural(cov.entries, 'fact')} in the note`]
   if (cov.stale) parts.push(`${cov.stale} past due`)
-  if (cov.unverified) parts.push(`${cov.unverified} never checked`)
+  if (cov.unverified) parts.push(`${cov.unverified} not verified`)
   if (cov.exempt) parts.push(`${cov.exempt} recorded as events`)
   if (cov.uncovered) parts.push(`${plural(cov.uncovered, 'block')} of prose not read as facts`)
   return parts.join(' · ')

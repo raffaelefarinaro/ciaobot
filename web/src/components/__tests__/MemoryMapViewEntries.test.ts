@@ -87,6 +87,15 @@ function payload() {
         id: 'unreadable', title: 'Unreadable', type: 'person', stale: false,
         entry_coverage: null,
       }),
+      base({
+        id: 'journal', title: 'Journal', type: 'journal', stale: false,
+        entry_coverage: {
+          entries: 0, checked: 0, exempt: 0, unverified: 0, uncovered: 1, stale: 0,
+          coverage_ratio: 0.1, fully_verified: false,
+          note_exempt: true,
+          stale_entries: [], more_stale_entries: 0,
+        },
+      }),
     ],
     edges: [],
   }
@@ -194,6 +203,19 @@ describe('MemoryMapView entry coverage', () => {
     const block = wrapper.get('.mm-tile-entries')
     expect(block.text()).toContain('no facts written as list items')
     expect(block.text()).toContain('1 block of prose this check could not read')
+    wrapper.unmount()
+  })
+
+  it('says so when the note type never ages out, rather than reporting a gap', async () => {
+    // A journal's prose is a record of what happened and is not meant to be
+    // verified, so printing "1 block of prose not read as facts" beside a fact
+    // nobody has read makes two different problems look like one. The server
+    // sends `note_exempt` for this; a client without it says nothing, which is
+    // the conservative direction.
+    const { wrapper } = await open('journal')
+    const block = wrapper.get('.mm-tile-entries')
+    expect(block.text()).toContain("type never ages out")
+    expect(block.text()).toContain('nothing in it needs checking')
     wrapper.unmount()
   })
 

@@ -61,7 +61,7 @@ test.describe('a note holding one overdue fact', () => {
     await expect(head).toContainText('Facts inside this note')
     await expect(head).toContainText('3 facts in the note')
     await expect(head).toContainText('1 past due')
-    await expect(head).toContainText('1 never checked')
+    await expect(head).toContainText('1 not verified')
     await expect(head).toContainText('1 block of prose not read as facts')
     await expect(head).toContainText('never counted as verified')
 
@@ -76,10 +76,10 @@ test.describe('a note holding one overdue fact', () => {
     await expect(row.locator('.vr-entry-dates').first()).toContainText('2019-05-01')
     await expect(row.locator('.vr-entry-dates').first()).toContainText("on the entry's own stamp")
 
-    // The second kind: never checked at all, and the only date it has is the
-    // note's. Saying "checked 2026-09-29" without saying whose date that is
-    // would be a claim about the fact that was never made.
-    await expect(row.locator('.vr-entry-why').nth(1)).toContainText('Never checked')
+    // The second kind: a stamp the note's freshness cannot vouch for. Its date
+    // is the file's — inherited, not its own — and the panel says so rather
+    // than presenting a date nobody could have checked anything on.
+    await expect(row.locator('.vr-entry-why').nth(1)).toContainText('not a usable date')
     await expect(row.locator('.vr-entry-dates').nth(1)).toContainText("that is the")
     await expect(row.locator('.vr-entry-dates').nth(1)).toContainText('this fact carries no stamp')
   })
@@ -167,7 +167,7 @@ test.describe('a note holding one overdue fact', () => {
     // "never checked" figure beside no such entry describes a fact the reader
     // cannot see.
     await expect(block).toContainText('Checked 2019-05-01 — unverified for 2698d against a 90d horizon')
-    await expect(block).toContainText('Never checked')
+    await expect(block).toContainText('not a usable date')
     // The whole-note flag is untouched: the map reports beside it, because the
     // nightly worklist is where an overdue bullet becomes a plan.
     await expect(tile.locator('.mm-tile-stale')).toHaveCount(0)

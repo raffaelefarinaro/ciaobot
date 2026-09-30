@@ -974,10 +974,39 @@ dressed as a number: the 400 days are the *file's*. `EntryVerdict.own_date` and 
 review panel's "that is the note's date, this fact carries no stamp of its own"
 exist for the same reason.
 
-**A missing or unusable stamp is `unverified`, never fresh.**
-`[verified: 2026-13-01]`, `[verified: yesterday]` and no stamp at all are three
-spellings of one absence. A *future* stamp joins them: nobody verified a fact on a
-day that has not come.
+**Selection and the check state agree everywhere.** The detector has no check
+state — it is pure, over text — so the two filters live in the consumers, and both
+use the *same* predicate: `entry_verification.check_settles_entry`, which is the one
+`verify_entry` short-circuits on. `_stale_entry_items` filters its plan by it, and
+`vault_review._entry_evidence` reports a `due` count the `unverified_entries`
+signal reads, adding `settled`/`checked_at`/`checked_outcome` to each finding so a
+row can say *why* the note is not being asked about rather than dropping it. A
+queue that raised the signal for an entry already inside its cooldown would offer
+a person a question the nightly pass has already put to somebody else, and the two
+lists would disagree about the same fact on the same night.
+
+**A note with no usable date is still scanned for its entries.**
+`_stale_findings` returns such a note with `dated=False` and `age_days=None` rather
+than dropping it. "Unverifiable is not stale" is right about a *file* and wrong
+one bullet in, because an entry carrying its own valid stamp is aged from that
+stamp and the note's date is only the fallback — and a note with no `updated:` and
+an unreadable mtime can still be holding a fact from 2019. The note pass cannot
+plan such a note (`stale` is False and the age is `None`, which is the invariant
+the sort key relies on); the entry pass can, and must, or `os-audit` and the map
+report an overdue fact the nightly plan says nothing about.
+
+**An unusable stamp is always a finding; a *missing* one is a finding only once
+the horizon has passed.** `[verified: 2026-13-01]` and `[verified: yesterday]` are
+selected whatever the note says — a stamp that cannot be read is nobody having
+checked, and a *future* stamp is nobody having checked either. A bullet with no
+stamp at all **inherits the note's date**, and inheriting is what makes it
+current when the note is: the two are the same claim at two widths. Selecting
+unstamped bullets unconditionally made every bullet in a vault written before
+`[verified:]` stamps existed read as never checked, and turned a nightly plan into
+a list of one-day-old entries in any vault that had been re-stamped — the failure
+the whole level was meant to prevent, in a different costume. Such a bullet is
+counted as checked-and-current, not `unverified`, and becomes work the day the
+note ages.
 
 **Exemptions are explicit, and a date is not one.** An entry in an explicit event
 section (`## Events`, `## History`, `## Log`, `## Journal`, `## Changelog`, …) is
@@ -1012,7 +1041,9 @@ filed under a heading nobody wrote.
 whole-note verdict and the nightly worklist is where a stale bullet becomes a
 plan; it reports beside it, so a mixed note is visibly mixed. It is `None` for a
 node the queue would never show and for a body that could not be read, because a
-default object of zeroes would read as "read nothing, found nothing wrong".
+default object of zeroes would read as "read nothing, found nothing wrong", and it
+carries `note_exempt` so a client can say "this type never ages out" instead of
+reporting a journal's prose as a coverage gap beside a fact nobody has read.
 `vault_review` adds a `unverified_entries` signal, which is in
 `CHECK_ONLY_SIGNALS` so a note whose only finding is an overdue fact never gets a
 Retire button it did not earn, and an `entry_verification` evidence block naming
@@ -1029,14 +1060,25 @@ beside the note ones rather than merged into them.
 whole file, and a whole-file rewrite is exactly how a `[verified: today]` ends up
 on the sentence most likely to have changed. The prompts ask the model to leave
 the stamps alone; `project_doc_update._invalidate_stamps` is what makes it true.
-`note_entries.invalidate_stale_stamps(before, after)` keeps a stamp only when the
-bullet carrying it has a fingerprint `before` already held — so a pure re-stamp, a
-reordering and an untouched neighbour all survive, and only the changed or new
-bullets lose theirs, which makes them read as *unverified* on the next scan. It is
-**not** used by `note_receipts.apply_entry_edit` or by the managed verification: a
-`still_valid` re-stamp and an accepted `replace_entry` write a new fingerprint
-carrying a stamp on purpose, and running them through this would delete the exact
-claim the operation exists to record.
+`note_entries.invalidate_stale_stamps(before, after)` has **two** halves, and the
+second is the one a fingerprint-only rule silently lacks:
+
+* the bullet's words changed, or the entry is new — `before` never held that
+  fingerprint, so nothing was ever verified about it, and the stamp is **cut**;
+* the words are unchanged and the stamp differs — a stamp that was not there is
+  cut, and one that was there with a *different* value is **restored to the token
+  `before` carried**, so the file ends up on the text the fact was really verified
+  on rather than on a date the save happened to compute.
+
+That second half is the "the model carried today's date onto a bullet" failure,
+and the fingerprint cannot see it at all, because the words are byte-identical
+and the fingerprint ignores the stamp by design. An untouched neighbour and a
+reordering survive both halves untouched, and a changed bullet comes back as
+*unverified* on the next scan. It is **not** used by
+`note_receipts.apply_entry_edit` or by the managed verification: a `still_valid`
+re-stamp and an accepted `replace_entry` write a new fingerprint carrying a stamp
+on purpose, and running them through this would delete the exact claim the
+operation exists to record.
 
 ### Note-edit proposals
 

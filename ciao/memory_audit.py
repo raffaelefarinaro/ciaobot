@@ -714,11 +714,15 @@ def find_stale_notes(
 #   own `updated:` says — a whole-note selection re-stamped yesterday would
 #   otherwise re-list a bullet from two years ago and a bullet checked this
 #   morning in the same list.
-# * **A missing or unusable stamp is `unverified`, never fresh.** `[verified:
-#   2026-13-01]`, `[verified: yesterday]` and no stamp at all are three spellings
-#   of the same absence, and the detector says so rather than reading the
-#   impossible date as a recent check. A *future* stamp is in that set too:
-#   nobody verified a fact on a day that has not come.
+# * **A missing or unusable stamp is `unverified` only once the horizon has
+#   passed.** `[verified: 2026-13-01]` and `[verified: yesterday]` are always
+#   findings: a stamp that cannot be believed is nobody having checked, and a
+#   *future* stamp is nobody having checked either. A bullet with no stamp at all
+#   **inherits the note's date**, so it is current exactly as far as the note is
+#   — selecting it unconditionally made every bullet written before `[verified:]`
+#   stamps existed read as never checked, and turned a nightly plan into a list
+#   of one-day-old entries in any vault that had been re-stamped. That is the
+#   failure the whole level was supposed to prevent, in a different costume.
 # * **Event-shaped entries and explicit event sections are exempt.** A log entry
 #   from 2019 is as true as the day it was written, and a heading that says
 #   `## Events` is a stronger signal than any guess made from the shape of a
@@ -1154,6 +1158,15 @@ def note_entry_coverage(
     alone; the note's date is what an unstamped or unusable-stamp entry falls back
     to, and ``EntryVerdict.own_date`` records which one it was.
 
+    Inheriting is what makes an unstamped entry *current* when the note is: the
+    two are the same claim at two widths, so a note re-stamped yesterday and its
+    unstamped bullets agree. A bullet that inherits a date inside the horizon is
+    counted as checked-and-current and selected for nothing; only an unstamped
+    bullet past the horizon, or one with no date anywhere to age it from, is
+    reported as unverified. An unusable stamp is always reported, whatever the
+    note's date says, because a stamp that cannot be read is a claim nobody can
+    act on and the note reads as verified anyway.
+
     Returns the coverage, the entries that were **selected** — the ones whose
     own date is past the horizon, plus the ones nobody ever verified — and the
     parse itself. The document travels because a caller holding a check state has
@@ -1221,13 +1234,28 @@ def note_entry_coverage(
             code = STALE_ENTRY_BAD_STAMP
         else:
             code = STALE_ENTRY_AGED
-        if code == STALE_ENTRY_NO_STAMP:
+        if code == STALE_ENTRY_BAD_STAMP:
+            # Always selected. A stamp that cannot be believed is not an old
+            # check and not a fresh one — it is nobody having checked, and it is
+            # the one case a reader most needs told, because the note reads as
+            # verified and is not.
             unverified += 1
-        elif code == STALE_ENTRY_BAD_STAMP:
-            unverified += 1
-        elif age is not None and age >= threshold:
-            stale += 1
+        elif age is None or age >= threshold:
+            # Past the horizon, or with no date anywhere to age it from. Both are
+            # real work; neither is an artefact of the note having been touched
+            # yesterday.
+            if code == STALE_ENTRY_NO_STAMP:
+                unverified += 1
+            else:
+                stale += 1
         else:
+            # Inside the horizon. A stamped entry is genuinely current, and an
+            # unstamped one **inherits** the note's date — so it is current
+            # exactly as far as the note is, and counting it as `unverified`
+            # would make every bullet in a vault written before `[verified:]`
+            # stamps existed read as never checked. Selecting those regardless
+            # is what filled a nightly plan with one-day-old entries: the note
+            # was re-stamped, not the facts.
             continue
         selected.append(
             _verdict_for(

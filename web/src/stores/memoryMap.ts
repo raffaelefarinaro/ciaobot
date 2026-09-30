@@ -85,6 +85,22 @@ export interface MemoryGraphEntryCoverage {
   unverified: number
   /** Runs of note text that are not entries at all — prose, a table, a quote. */
   uncovered: number
+  /**
+   * Whether this note's *type* never ages out — a `log`, a `journal`, a
+   * `Workspace/` queue.
+   *
+   * Carried so a client can say so, because `uncovered` on a journal is a
+   * different statement from `uncovered` on a person note: the first is a record
+   * of what happened and is not meant to be verified at all, the second is a
+   * fact nobody has read. Without it the only way to tell them apart is to keep
+   * a second copy of the exempt set in the browser, which is the one thing the
+   * server-side `never_queued`/`is_stale_exempt_type` pair exists to avoid.
+   *
+   * Optional because a server older than this client does not send it, and
+   * absent means "not exempt" — which is what such a server means, since every
+   * note it reports has a horizon.
+   */
+  note_exempt?: boolean
   /** Judged entries whose own date is past the horizon. */
   stale: number
   /** Share of the note read as entries, 0–1. */

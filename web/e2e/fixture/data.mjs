@@ -509,18 +509,21 @@ export const VERIFICATION_REVIEW = {
               supported: true,
             },
             {
-              // Never checked, and carrying the note's date rather than one of
-              // its own — the second kind of staleness, and the one a whole-note
-              // age cannot express. The prose the note also carries is reported
-              // by the `uncovered` count instead: a paragraph is not an entry,
-              // and the server never puts one in this list.
+              // A stamp the parser refuses: the note reads as verified and the
+              // bullet is not, which is the one entry kind a *current* note can
+              // still owe a check on. An **unstamped** bullet beside it would be
+              // the opposite — it inherits the note's fresh date, so the server
+              // selects nothing for it, and a card claiming otherwise would
+              // contradict the detector. The prose the note also carries is
+              // reported by the `uncovered` count instead: a paragraph is not an
+              // entry, and the server never puts one in this list.
               identity: 'entry-identity-uncov-000000000000000000000000000000000000000000000000000000',
               line_number: 11,
               section: 'Nadia',
-              excerpt: '- Leads the platform team [verified: 2026-09-29]',
+              excerpt: '- Leads the platform team [verified: 2026-02-30]',
               context: ['- Based in Lisbon [verified: 2026-09-28]'],
-              reason: 'no-stamp',
-              detail: "nobody has recorded a [verified:] check on this entry; it is unverified for 1d on the note's own last-verified date",
+              reason: 'unusable-stamp',
+              detail: 'the [verified:] stamp on this entry is unusable (impossible), so nobody has recorded a check on it',
               age_days: 1,
               last_verified: '2026-09-29',
               own_date: false,
@@ -678,8 +681,8 @@ export const VERIFICATION_PROPOSALS = [
 /** The history rows a settled verification leaves behind. */
 /** The one line an entry-scope retirement removes, and the note around it. */
 const NADIA_ENTRY = '- Reports to the CTO [verified: 2019-05-01]\n'
-const NADIA_NOTE_BEFORE = '---\ntype: person\nupdated: 2026-09-29\n---\n\n# Nadia\n\n- Based in Lisbon [verified: 2026-09-28]\n- Leads the platform team [verified: 2026-09-29]\n- Reports to the CTO [verified: 2019-05-01]\n'
-const NADIA_NOTE_AFTER = '---\ntype: person\nupdated: 2026-09-29\n---\n\n# Nadia\n\n- Based in Lisbon [verified: 2026-09-28]\n- Leads the platform team [verified: 2026-09-29]\n'
+const NADIA_NOTE_BEFORE = '---\ntype: person\nupdated: 2026-09-29\n---\n\n# Nadia\n\n- Based in Lisbon [verified: 2026-09-28]\n- Leads the platform team [verified: 2026-02-30]\n- Reports to the CTO [verified: 2019-05-01]\n'
+const NADIA_NOTE_AFTER = '---\ntype: person\nupdated: 2026-09-29\n---\n\n# Nadia\n\n- Based in Lisbon [verified: 2026-09-28]\n- Leads the platform team [verified: 2026-02-30]\n'
 const NADIA_ENTRY_START = NADIA_NOTE_BEFORE.indexOf(NADIA_ENTRY)
 const NADIA_ENTRY_END = NADIA_ENTRY_START + NADIA_ENTRY.length
 
@@ -905,10 +908,14 @@ const entryCoverage = (over = {}) => ({
       own_date: true,
     },
     {
+      // Unusable, not missing: see the review fixture's second entry. An
+      // unstamped bullet in a note dated yesterday inherits yesterday, so nothing
+      // is selected for it and a `no-stamp` finding here would be a claim the
+      // detector never makes.
       identity: 'entry-identity-uncov-000000000000000000000000000000000000000000000000000000',
-      excerpt: '- Leads the platform team',
-      reason: 'no-stamp',
-      detail: "nobody has recorded a [verified:] check on this entry; it is unverified for 1d on the note's own last-verified date",
+      excerpt: '- Leads the platform team [verified: 2026-02-30]',
+      reason: 'unusable-stamp',
+      detail: 'the [verified:] stamp on this entry is unusable (impossible), so nobody has recorded a check on it',
       age_days: 1,
       last_verified: '2026-09-29',
       own_date: false,

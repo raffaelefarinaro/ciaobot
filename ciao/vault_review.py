@@ -18,7 +18,7 @@ import tempfile
 from dataclasses import dataclass, asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, cast
 from urllib.parse import quote
 
 from ciao.memory_audit import (
@@ -32,6 +32,7 @@ from ciao.vault_index import build_filename_index, canonical_type, scan_vault, t
 from ciao.vault_lint import is_template_stem, run_validation
 
 if TYPE_CHECKING:  # the runtime import lives in the functions, to avoid the cycle
+    from ciao.entry_verification import EntryCheck
     from ciao.note_verification import NoteCheck
 
 # No retention window. A `RETENTION_DAYS = 30` constant sat here unread while
@@ -385,16 +386,28 @@ def _entry_evidence(
     *,
     relative: str,
     root: Path,
-) -> dict[str, Any]:
-    """What the queue shows about one note's *facts*, and what it can act on.
+    checks: Mapping[str, EntryCheck] | None = None,
+    today: date | None = None,
+) -> tuple[dict[str, Any], int]:
+    """What the queue shows about one note's *facts*, and how many are still due.
 
-    The note-level ``unverified`` signal above answers "has this file gone too
-    long without being read". This answers the question one level in, which is
-    the one a whole-note answer cannot: a person re-verified the address last
-    week and silently re-certified the landlord's name from 2019 with it. So the
-    row carries the exact entries, their own ages, and how much of the note was
-    read as entries at all — the last of which is what stops a note whose facts
-    live in a paragraph from reading as clean.
+    Returns the evidence block and the count of entries the queue is actually
+    asking about, so the caller decides the signal on the *due* number rather
+    than on the number the detector produced. The two differ whenever somebody
+    has already been asked: the nightly ``stale_entry`` pass filters its plan
+    through
+    :func:`ciao.entry_verification.check_settles_entry` — an entry with a check
+    inside its cooldown, or one a proposal is waiting on, is not work — and a
+    queue that raised ``unverified_entries`` for those anyway would promise a
+    person a question the pass has already put to somebody else. That is the same
+    predicate the note-level path applies with
+    :func:`ciao.note_verification._check_settles`, one level down.
+
+    A settled entry stays **visible** in ``stale_entries`` with ``settled: true``
+    and the check beside it, for the reason the note-level block does the same:
+    a fact nobody has re-checked is still old, and a row that quietly dropped it
+    the moment a verdict came back would be claiming the vault got tidier than
+    it did. It is the *signal* that follows the check, not the evidence.
 
     ``proposals`` is the half that makes this actionable. An entry that came back
     ``needs_review`` has a ``note_edit`` proposal filed against it, keyed by the
@@ -409,6 +422,11 @@ def _entry_evidence(
     decided"; the sidecar is only consulted for which of the three entry
     operations it would be, and a store that cannot be read must not take the
     note's coverage down with it.
+
+    ``checks`` is the scan's **one** read of the entry sidecar, passed in rather
+    than re-read per note: :func:`ciao.entry_verification.read_entry_checks`
+    re-reads and re-parses the whole document on every call, and this runs once
+    per note the scan looks at.
     """
     from ciao import entry_verification as ev
 
@@ -416,9 +434,11 @@ def _entry_evidence(
     # say a pending entry proposal is still live. The document came out of the
     # same parse the coverage did, so this costs no second read.
     present = {entry.identity: entry.fingerprint for entry in document.entries}
+    state = ev.read_entry_checks(root) if checks is None else checks
+    day = today or datetime.now(UTC).date()
     operations = _entry_proposal_operations(root)
     pending: list[dict[str, Any]] = []
-    for check in ev.read_entry_checks(root).values():
+    for check in state.values():
         if check.note_path != relative or not check.proposal_id:
             continue
         pending.append(
@@ -442,16 +462,15 @@ def _entry_evidence(
                 "conflicted": present.get(check.identity) != check.content_fingerprint,
             }
         )
-    return {
-        "entries": coverage.entries,
-        "checked": coverage.checked,
-        "exempt": coverage.exempt,
-        "unverified": coverage.unverified,
-        "uncovered": coverage.uncovered,
-        "stale": coverage.stale,
-        "coverage_ratio": round(coverage.coverage_ratio, 4),
-        "fully_verified": coverage.fully_verified,
-        "stale_entries": [
+    findings: list[dict[str, Any]] = []
+    due = 0
+    for verdict in selected:
+        settled = ev.check_settles_entry(
+            state, verdict.identity, verdict.fingerprint, today=day
+        )
+        if not settled:
+            due += 1
+        findings.append(
             {
                 "identity": verdict.identity,
                 "line_number": verdict.line_number,
@@ -466,13 +485,41 @@ def _entry_evidence(
                 ),
                 "own_date": verdict.own_date,
                 "supported": verdict.supported,
+                # Somebody has already been asked about this fact, and the answer
+                # — or the proposal waiting for one — is on record. The entry is
+                # still old; it is not still *work*.
+                "settled": settled,
+                "checked_at": (
+                    state[verdict.identity].checked_at.isoformat()
+                    if settled and verdict.identity in state
+                    else ""
+                ),
+                "checked_outcome": (
+                    str(state[verdict.identity].outcome)
+                    if settled and verdict.identity in state
+                    else ""
+                ),
             }
-            for verdict in selected[:_ENTRY_FINDINGS_PER_ROW]
-        ],
-        "more_stale_entries": max(0, len(selected) - _ENTRY_FINDINGS_PER_ROW),
+        )
+    block = {
+        "entries": coverage.entries,
+        "checked": coverage.checked,
+        "exempt": coverage.exempt,
+        "unverified": coverage.unverified,
+        "uncovered": coverage.uncovered,
+        "stale": coverage.stale,
+        # How many of the findings below the queue is still asking about. Zero
+        # with a non-empty list is the honest "asked and answered" state, and it
+        # is the number the signal reads.
+        "due": due,
+        "coverage_ratio": round(coverage.coverage_ratio, 4),
+        "fully_verified": coverage.fully_verified,
+        "stale_entries": findings[:_ENTRY_FINDINGS_PER_ROW],
+        "more_stale_entries": max(0, len(findings) - _ENTRY_FINDINGS_PER_ROW),
         "proposals": pending[:_ENTRY_PROPOSALS_PER_ROW],
         "more_proposals": max(0, len(pending) - _ENTRY_PROPOSALS_PER_ROW),
     }
+    return block, due
 
 
 def _entry_proposal_operations(root: Path) -> dict[str, str]:
@@ -802,9 +849,17 @@ def _generate_candidates(
     # a check about text that has since been replaced is reported as a conflict
     # rather than as a pending question.
     from ciao import memory_receipts as mr
+    from ciao.entry_verification import read_entry_checks
     from ciao.note_verification import read_note_checks
 
     note_checks = read_note_checks(root)
+    # The *entry* half of the same sidecar, on the same terms: one read for the
+    # whole scan, because `read_entry_checks` re-parses the whole document on
+    # every call and this is the one caller that would otherwise ask once per
+    # note it looks at. It is what lets the `unverified_entries` signal use the
+    # same settled predicate the nightly entry pass filters its plan by, so the
+    # queue and the worklist cannot offer a person the same question twice.
+    entry_checks = read_entry_checks(root)
     # What the vault actually holds right now, by path and by content. A note
     # renamed in an editor leaves its old path but never left the vault, and
     # `_record_vanished` must not say otherwise.
@@ -937,10 +992,22 @@ def _generate_candidates(
                 workspace=workspace,
                 today=today,
             )
-            entry_state = _entry_evidence(
-                coverage, selected, document, relative=relative, root=root
+            entry_state, entry_due = _entry_evidence(
+                coverage,
+                selected,
+                document,
+                relative=relative,
+                root=root,
+                checks=entry_checks,
+                today=today,
             )
-            if selected:
+            # The signal follows the **due** count, not the detector's: an entry
+            # somebody has already been asked about — inside its cooldown, or
+            # waiting on a proposal — is not a question for this queue, and the
+            # nightly `stale_entry` pass filters its plan by the very same
+            # predicate. The finding stays visible either way, so the row says
+            # why the note is not being asked about rather than dropping it.
+            if entry_due:
                 signals.append("unverified_entries")
             # `coverage.uncovered` is deliberately **not** a signal. A note
             # whose facts live in a paragraph is not a note with something wrong

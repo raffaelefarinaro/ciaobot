@@ -1430,21 +1430,31 @@ function staleRuleWords(n: MemoryGraphNode): string {
  * train the reader to ignore the number. What matters is whether the
  * *assertions* were read, which is what the prose count says — and one is
  * enough to stop the note being called fully checked.
+ *
+ * An exempt type leads with that, because its numbers mean something different
+ * throughout: a journal's prose is a record of what happened and is not meant to
+ * be verified, so "1 block of prose not read as facts" beside a fact nobody has
+ * read makes two different problems look like one. The server sends
+ * `note_exempt`; a client without it says nothing, which is the conservative
+ * direction.
  */
 function entryCoverageWords(cov: MemoryGraphEntryCoverage): string {
   const facts = cov.checked + cov.exempt
   const blocks = `${cov.uncovered} block${cov.uncovered === 1 ? '' : 's'}`
+  const lead = cov.note_exempt
+    ? "This note's type never ages out — it records what happened rather than what is true, so nothing in it needs checking. "
+    : ''
   if (!facts) {
-    return cov.uncovered
+    return lead + (cov.uncovered
       ? `no facts written as list items — ${blocks} of prose this check could not read.`
-      : 'nothing in this note is written as a list item, so there is nothing to check fact by fact.'
+      : 'nothing in this note is written as a list item, so there is nothing to check fact by fact.')
   }
   const parts = [`${facts} fact${facts === 1 ? '' : 's'}`]
   if (cov.stale) parts.push(`${cov.stale} past due`)
-  if (cov.unverified) parts.push(`${cov.unverified} never checked`)
+  if (cov.unverified) parts.push(`${cov.unverified} not verified`)
   if (cov.exempt) parts.push(`${cov.exempt} recorded as events`)
   parts.push(cov.uncovered ? `${blocks} of prose not read as facts` : 'all of the note read as facts')
-  return parts.join(' · ') + '.'
+  return lead + parts.join(' · ') + '.'
 }
 
 /** Why one fact was picked out, in words.

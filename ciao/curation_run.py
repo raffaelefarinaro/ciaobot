@@ -464,7 +464,19 @@ class _ScannedNote:
     :func:`ciao.memory_audit.note_entry_coverage` instead of re-deriving a note
     age from a flattened field. The detector then reaches the same
     :func:`ciao.memory_audit.note_verification` verdict this row already holds, on
-    the same values, with no second stat and no second spelling of the date rule.
+    the same values, with no second stat and no second spelling of the date
+    rule.
+
+    ``dated`` is False for a note with no usable date at all, and those rows are
+    here for the **entry** pass alone: an entry that carries its own valid
+    `[verified:]` stamp is aged from that day whatever the note says, so a note
+    whose frontmatter has no `updated:` and whose file cannot be stat'ed can
+    still be holding a fact from 2019. Dropping the row — as this scan used to
+    — meant the audit and the map reported those entries as overdue while the
+    nightly plan said nothing, which is the disagreement the entry level is
+    supposed to have removed. ``age_days`` is ``None`` rather than zero for them,
+    because "no date" is not "verified today", and ``stale`` is necessarily False:
+    the note pass plans notes with a usable date and nothing else.
     """
 
     rendered: str
@@ -472,12 +484,13 @@ class _ScannedNote:
     title: str
     stale: bool
     exempt: bool
-    age_days: int
+    age_days: int | None
     threshold_days: int
     last_verified: date | None
     note_type: str = ""
     updated: str = ""
     mtime: float = 0.0
+    dated: bool = True
 
 
 def _stale_findings(
@@ -498,9 +511,15 @@ def _stale_findings(
     frontmatter-then-mtime date rule are :mod:`ciao.memory_audit`'s, and are taken
     from it by calling it — once for the verdict it reports, and once per note for
     the ones it does not, so that the entry pass gets every note's horizon rather
-    than only the stale ones'. A note with no usable date at all is left out
-    entirely, for the audit's reason: "unverifiable" is not "stale", and guessing a
-    date for an entry inside such a note would be the same guess one level in.
+    than only the stale ones'.
+
+    **A note with no usable date is still returned**, flagged ``dated: False`` and
+    with ``age_days: None``. It cannot be planned by the *note* pass — that is
+    what "unverifiable is not stale" means, and it is right — but it can be
+    holding an entry that carries its own `[verified:]` stamp, and the entry
+    detector ages that from the stamp rather than from the note. Dropping the row
+    is what made ``os-audit`` and the Memory Map report an overdue fact in such a
+    note while this worklist reported nothing.
 
     The second element is why the scan was abandoned, or ``""``; a vault that is
     not there, and a scan that raised, both land there and both mean "this pass
@@ -508,7 +527,12 @@ def _stale_findings(
     worklist is computed on every ``curation-begin`` regardless of what any one
     pass found.
     """
-    from ciao.memory_audit import find_stale_notes, note_verification
+    from ciao.memory_audit import (
+        find_stale_notes,
+        is_stale_exempt_type,
+        note_threshold_days,
+        note_verification,
+    )
     from ciao.vault_index import VAULT_RENDER_PREFIX, scan_vault
 
     root = Path(vault_root)
@@ -538,6 +562,7 @@ def _stale_findings(
         rendered = str(entry.path)
         mtime = _mtime_of(root, rendered, prefix)
         note_type = (entry.type or "").strip()
+        relative = _vault_relative(rendered, prefix)
         verification = note_verification(
             note_type,
             entry.updated,
@@ -546,8 +571,35 @@ def _stale_findings(
             registry=registry,
         )
         if verification is None:
+            # Kept for the **entry** pass, not the note one. "Unverifiable is not
+            # stale" is the note-level answer and it is right: calling a note
+            # with no usable date stale would be a guess. It is the wrong answer
+            # one bullet in, because an entry carrying its own `[verified:]`
+            # stamp is aged from that day and the note's date is only the
+            # fallback. Skipping the note here meant the audit and the map
+            # reported those entries as overdue while this plan said nothing —
+            # exactly the disagreement the entry level was built to remove, and
+            # it was still here, in the one place the two passes diverge.
+            #
+            # `stale` is False and `age_days` is None, so the note pass cannot
+            # plan it: `_stale_note_items` sorts on the age and reads the flag.
+            scanned.append(
+                _ScannedNote(
+                    rendered=rendered,
+                    relative=relative,
+                    title=str(entry.title or "") or relative,
+                    stale=False,
+                    exempt=is_stale_exempt_type(note_type, registry=registry),
+                    age_days=None,
+                    threshold_days=note_threshold_days(note_type, registry=registry),
+                    last_verified=None,
+                    note_type=note_type,
+                    updated=entry.updated or "",
+                    mtime=mtime,
+                    dated=False,
+                )
+            )
             continue
-        relative = _vault_relative(rendered, prefix)
         scanned.append(
             _ScannedNote(
                 rendered=rendered,
@@ -561,6 +613,7 @@ def _stale_findings(
                 note_type=note_type,
                 updated=entry.updated or "",
                 mtime=mtime,
+                dated=True,
             )
         )
     return scanned, ""
@@ -657,7 +710,10 @@ def _stale_note_items(
     # happening to agree.
     flagged = sorted(
         (note for note in scanned if note.stale),
-        key=lambda note: (-note.age_days, note.rendered),
+        # `age_days` is `None` for a note the scan could not date, and such a note
+        # is never `stale` — so the coalesce is unreachable, and states the
+        # invariant the type checker cannot.
+        key=lambda note: (-(note.age_days or 0), note.rendered),
     )
     items: list[WorklistItem] = []
     settled = 0

@@ -65,7 +65,9 @@ describe('vault review labels', () => {
   it('distinguishes the three kinds of entry staleness in words', () => {
     // A row that showed only the code would leave a reader unable to tell
     // "nobody ever checked this bullet" from "the last check is two years old" —
-    // two different amounts of work.
+    // two different amounts of work. The coarse summary line below the list is
+    // deliberately blunter, because its `unverified` bucket holds both of the
+    // first two; only the per-card copy can tell them apart.
     expect(entryReasonLabel('no-stamp')).toBe('never checked')
     expect(entryReasonLabel('unusable-stamp')).toBe('the check on it is not a usable date')
     expect(entryReasonLabel('aged')).toBe('last checked too long ago')
@@ -78,7 +80,7 @@ describe('vault review labels', () => {
       backlinks: [], outbound_links: [], bridge: false, duplicate_group: [], last_update: '', type: 'person', age_days: null,
     }
     expect(coverageSummary({ ...base, entry_verification: coverage() }))
-      .toBe('4 facts in the note · 1 past due · 1 never checked · 1 recorded as events')
+      .toBe('4 facts in the note · 1 past due · 1 not verified · 1 recorded as events')
     // A low share is normal — a note is mostly frontmatter, headings and blank
     // lines — so the ratio is deliberately absent from the sentence.
     expect(coverageSummary({ ...base, entry_verification: coverage({ coverage_ratio: 0.12 }) }))

@@ -352,8 +352,39 @@ def test_one_fresh_bullet_never_clears_a_stale_siblings_badge() -> None:
     `fully_verified` is deliberately stricter than "no stale entry": the reader
     of a badge, a map node or a review row has to be able to trust that the note
     is clean, and a note with one fresh bullet beside a two-year-old one is not.
+
+    The sibling is stale on its **own** stamp rather than by inheriting the
+    note's, which is the shape the property is really about: a note re-stamped
+    yesterday with a bullet last checked in 2019 inside it. An *unstamped*
+    sibling in a fresh note is not stale — see
+    `test_an_unstamped_bullet_in_a_fresh_note_is_current`.
     """
     mixed = _cover(
+        textwrap.dedent(
+            """\
+            - Lives in Porto [verified: 2026-09-28]
+            - Landlord is Mr Silva [verified: 2019-05-01]
+            """
+        ),
+        updated="2026-09-29",
+    )
+    assert mixed.stale == 1
+    assert mixed.unverified == 0
+    assert mixed.fully_verified is False
+    assert mixed.coverage_ratio < 1.0
+
+
+def test_an_unstamped_bullet_in_a_fresh_note_is_current() -> None:
+    """Inheriting the note's date is what makes an unstamped bullet current.
+
+    Nearly every bullet in a vault written before `[verified:]` stamps existed
+    has no stamp, so selecting them unconditionally made every note read as
+    "never checked" and filled a nightly plan with one-day-old entries in any
+    vault that had been re-stamped. The note *is* the claim at that width: a note
+    re-stamped yesterday has been re-read, and its unstamped bullets are as
+    current as the file is.
+    """
+    coverage, selected, _doc = _selected(
         textwrap.dedent(
             """\
             - Lives in Porto [verified: 2026-09-28]
@@ -362,10 +393,31 @@ def test_one_fresh_bullet_never_clears_a_stale_siblings_badge() -> None:
         ),
         updated="2026-09-29",
     )
-    assert mixed.stale == 0
-    assert mixed.unverified == 1
-    assert mixed.fully_verified is False
-    assert mixed.coverage_ratio < 1.0
+    assert selected == ()
+    assert coverage.checked == 2
+    # Counted as judged and current, never as `unverified`: the count a reader
+    # sees is "how much of this note has been looked at", and this note has.
+    assert coverage.unverified == 0
+    assert coverage.stale == 0
+    assert coverage.fully_verified is True
+
+
+def test_an_unstamped_bullet_becomes_work_once_the_note_ages() -> None:
+    """The other half of the same rule, and why it is a horizon and not a
+    blanket exemption.
+
+    The same bullet in the same note is current for as long as the note is, and
+    overdue the day after it is not — which is the note-level verdict read one
+    bullet in, and the reason the plan still finds unstamped facts eventually.
+    """
+    fresh, none_fresh, _doc = _selected(
+        "- Landlord is Mr Silva", updated="2026-09-29"
+    )
+    assert none_fresh == ()
+    old, selected, _doc = _selected("- Landlord is Mr Silva", updated="2024-01-02")
+    assert [v.reason_code for v in selected] == [ma.STALE_ENTRY_NO_STAMP]
+    assert old.unverified == 1
+    assert old.fully_verified is False
 
 
 # --- horizons: aliases and custom categories -------------------------------
@@ -473,7 +525,7 @@ def test_find_stale_entries_reports_counts_coverage_and_diagnostics(
             textwrap.dedent(
                 """\
                 - Lives in Porto [verified: 2026-09-28]
-                - Landlord is Mr Silva
+                - Landlord is Mr Silva [verified: 2019-05-01]
                 """
             )
         ),
@@ -505,12 +557,12 @@ def test_find_stale_entries_reports_counts_coverage_and_diagnostics(
     assert [row["path"] for row in result["stale_entries"]] == [
         "memory-vault/People/Alice.md"
     ]
-    # Both of Alice's bullets were judged (one fresh, one never checked) and the
-    # one that was never checked is the one selected. The four counts are what
-    # make "no findings" honest: an empty list beside `uncovered: 0` is a clean
-    # note, and beside `uncovered: 1` it is a note nobody read.
+    # Both of Alice's bullets were judged and the aged one is the one selected.
+    # The four counts are what make "no findings" honest: an empty list beside
+    # `uncovered: 0` is a clean note, and beside `uncovered: 1` it is a note
+    # nobody read.
     assert result["entries_checked"] == 2
-    assert result["entries_unverified"] == 1
+    assert result["entries_unverified"] == 0
     assert result["entries_uncovered"] == 1  # Bob's table
     assert result["notes_unreadable"] == ["memory-vault/People/Gone.md"]
     coverage = {row["relative_path"]: row for row in result["entry_coverage"]}
@@ -520,10 +572,10 @@ def test_find_stale_entries_reports_counts_coverage_and_diagnostics(
     # The finding carries everything a caller cannot rederive.
     finding = result["stale_entries"][0]
     assert finding["identity"] and finding["fingerprint"] and finding["revision"]
-    assert finding["reason"] == ma.STALE_ENTRY_NO_STAMP
+    assert finding["reason"] == ma.STALE_ENTRY_AGED
     assert "Landlord" in finding["excerpt"]
     assert finding["context"]  # the neighbouring line is named
-    assert finding["own_date"] is False
+    assert finding["own_date"] is True
 
 
 def test_find_stale_entries_is_a_pure_seam_over_caller_supplied_texts() -> None:
