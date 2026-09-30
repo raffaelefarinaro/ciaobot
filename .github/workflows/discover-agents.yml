@@ -107,7 +107,10 @@ jobs:
     - name: Run one tiny real turn per workspace
       timeout-minutes: 25
       env:
-        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        # Not ANTHROPIC_API_KEY: the step also runs the unpinned opencode
+        # binary, which must never see the Claude secret. It is handed to
+        # claude alone, below.
+        ANTHROPIC_KEY_SRC: ${{ secrets.ANTHROPIC_API_KEY }}
       run: |
         set +e
         T="$RUNNER_TEMP"; if command -v cygpath >/dev/null 2>&1; then T="$(cygpath -u "$RUNNER_TEMP")"; fi
@@ -140,7 +143,7 @@ jobs:
         printf '# provider\tworkspace\texit\treply_contains_OK\n' > "$TURNS"
         printf '# folder\tworkspace (pwd)\tworkspace (pwd -W, Windows only)\n' > "$CPROJ"
 
-        if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        if [ -z "${ANTHROPIC_KEY_SRC:-}" ]; then
           echo "::notice::ANTHROPIC_API_KEY is not set; skipping the Claude turns"
           printf 'claude\t-\tskipped\t-\n' >> "$TURNS"
           printf '# skipped: ANTHROPIC_API_KEY is not set\n' >> "$CPROJ"
@@ -159,10 +162,10 @@ jobs:
           printf 'opencode\t%s\t%s\t%s\n' "$ws" "$rc" "$ok" >> "$TURNS"
           echo "opencode turn $n ($ws): exit $rc, OK=$ok"
 
-          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+          if [ -n "${ANTHROPIC_KEY_SRC:-}" ]; then
             ls -1 "$CLAUDE_DIR" 2>/dev/null | sort > "$T/cp-before.txt"
             log="$OUT/turn-claude-$n-$LABEL.log"
-            ( cd "$ws" && run_timed 240 "$log" claude -p "Reply with exactly: OK" --max-turns 1 )
+            ( cd "$ws" && ANTHROPIC_API_KEY="$ANTHROPIC_KEY_SRC" run_timed 240 "$log" claude -p "Reply with exactly: OK" --max-turns 1 )
             rc=$?
             ok=no; grep -q 'OK' "$log" && ok=yes
             printf 'claude\t%s\t%s\t%s\n' "$ws" "$rc" "$ok" >> "$TURNS"

@@ -217,7 +217,9 @@ not run `ciao desktop uninstall` yet.
   map, tool locations, turn logs). The Claude turns need the `ANTHROPIC_API_KEY`
   repository secret and are skipped without it; OpenCode uses the free
   `opencode/big-pickle` model. Run it with `gh workflow run discover-agents.yml`
-  and fetch the result with `gh run download <run-id>`.
+  and fetch the result with `gh run download <run-id>`. Dispatch and the weekly
+  schedule only work once a release has put the file on `main`; before that, run
+  it from a throwaway branch with a temporary `push` trigger.
 - **Release prep:** from a clean checkout, run:
 
 ```bash
