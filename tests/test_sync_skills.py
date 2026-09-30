@@ -6,11 +6,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ciao import sync_skills
+from ciao.os_support.links import is_link, link_dir
 
 
 def _write(path: Path, text: str = "content\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _dangling_dir_link(target: Path, link: Path, *, relative_to: Path | None = None) -> None:
+    """A directory link whose target is gone (a Windows junction needs it to exist first)."""
+    target.mkdir(parents=True, exist_ok=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link_dir(target, link, relative_to=relative_to)
+    target.rmdir()
 
 
 def test_upstream_skills_removed(tmp_path: Path) -> None:
@@ -82,7 +91,7 @@ def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     claude_skill = workspace / ".claude" / "skills" / "demo"
-    assert claude_skill.is_symlink()
+    assert is_link(claude_skill)
     assert claude_skill.resolve() == (workspace / "skills" / "demo").resolve()
     assert result.custom_installed == 1
 
@@ -143,16 +152,22 @@ def test_sync_prunes_legacy_codex_agents_skills_symlinks(tmp_path: Path) -> None
     agents_skills = workspace / ".agents" / "skills"
     agents_skills.mkdir(parents=True)
     # Live Codex-era leftovers in both historical shapes.
-    (agents_skills / "kept").symlink_to("../../skills/kept")
-    (agents_skills / "also-kept").symlink_to("../../.claude/skills/also-kept")
+    link_dir(workspace / "skills" / "kept", agents_skills / "kept", relative_to=agents_skills)
+    _dangling_dir_link(
+        workspace / ".claude" / "skills" / "also-kept",
+        agents_skills / "also-kept",
+        relative_to=agents_skills,
+    )
     # Broken leftover: its skill is gone, so sync cannot relink it.
-    (agents_skills / "stale").symlink_to("../../skills/stale")
+    _dangling_dir_link(
+        workspace / "skills" / "stale", agents_skills / "stale", relative_to=agents_skills
+    )
     # User-owned content sync must never touch.
     _write(agents_skills / "upstream" / "SKILL.md", "# Upstream package\n")
-    (agents_skills / "elsewhere").symlink_to("/tmp/somewhere-else")
+    _dangling_dir_link(tmp_path / "outside" / "somewhere-else", agents_skills / "elsewhere")
     # Foreign same-name links must survive: same basename and a /skills/
     # segment, but outside this workspace's catalogs.
-    (agents_skills / "foreign").symlink_to("/tmp/skills/foreign")
+    _dangling_dir_link(tmp_path / "outside" / "skills" / "foreign", agents_skills / "foreign")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -161,16 +176,14 @@ def test_sync_prunes_legacy_codex_agents_skills_symlinks(tmp_path: Path) -> None
     assert remaining == {"upstream", "elsewhere", "foreign"}
     assert (agents_skills / "upstream" / "SKILL.md").is_file()
     # The live skill itself still syncs into the maintained catalog.
-    assert (workspace / ".claude" / "skills" / "kept").is_symlink()
+    assert is_link(workspace / ".claude" / "skills" / "kept")
 
 
 def test_sync_workspace_skills_prunes_orphaned_custom_links(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "kept" / "SKILL.md")
     (workspace / ".claude" / "skills").mkdir(parents=True)
-    (workspace / ".claude" / "skills" / "stale").symlink_to(
-        workspace / "skills" / "stale"
-    )
+    _dangling_dir_link(workspace / "skills" / "stale", workspace / ".claude" / "skills" / "stale")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -482,7 +495,7 @@ def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     link = workspace / ".claude" / "skills" / "web-research"
-    assert link.is_symlink()
+    assert is_link(link)
     assert link.resolve() == (workspace / "skills" / "web-research").resolve()
 
 
