@@ -607,6 +607,82 @@ def test_the_undo_restores_the_exact_bytes_and_the_next_pass_keeps_them(
     assert lc.unmigrate_cleanup(vault, result.receipt, apply=True)["failed"]
 
 
+def test_the_undo_re_records_a_store_that_never_learned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An undo protects the restored line even when the store is behind the file.
+
+    The apply writes the document first and the store second, because a pair
+    recorded for an entry still on disk suppresses an entry that is still there.
+    So the store can be left knowing nothing about a removal the document has
+    already made — and then the undo puts the line back, and the next nightly pass
+    re-derives the same removals from the same fold and takes it out again. The
+    receipt names every pair, so the undo can put them back itself: re-recording
+    is a merge, not an overwrite, so the pairs a healthy apply already stored are
+    left exactly as they are.
+    """
+    config = _config(tmp_path)
+    path = _write(config, _document(RETIRED_RECORD, PENDING_RECORD))
+    vault = path.parent.parent
+    _file_settled(config, _origin(RETIRED_RECORD))
+
+    def _refuse(vault_root: Path, added: list[tuple[str, str]], **_: object) -> None:
+        raise OSError("the store could not be written")
+
+    monkeypatch.setattr(lc, "write_suppressions", _refuse)
+    result = lc.apply_cleanup(
+        vault, _plan(config, vault), workspace=WORKSPACE, config=config, today=TODAY
+    )
+    assert result.applied is True
+    assert result.suppressed == ()
+    assert lc.read_suppressions(vault) == {}
+
+    monkeypatch.undo()
+    undo = lc.unmigrate_cleanup(vault, result.receipt, apply=True, today=TODAY)
+
+    assert undo["entries_reverted"] == 1
+    assert undo["failed"] == []
+    assert render_learning(RETIRED_RECORD) in path.read_text(encoding="utf-8")
+    # The store now holds the pair the apply could not write, and the plan that
+    # would otherwise offer the line straight back keeps it.
+    assert set(lc.read_suppressions(vault)) == {
+        (RETIRED_RECORD.learning_id, entry_revision(RETIRED_RECORD))
+    }
+    assert _plan(config, vault).removals == ()
+    assert undo["suppressions_kept"] == [
+        {
+            "learning_id": RETIRED_RECORD.learning_id,
+            "entry_revision": entry_revision(RETIRED_RECORD),
+        }
+    ]
+
+
+def test_an_undo_that_cannot_hold_the_restored_line_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restored file and a store that does not know about it is a half-finished
+    undo, and the next pass would quietly undo it again — so it is reported as the
+    failure it is rather than as a clean revert."""
+    config = _config(tmp_path)
+    path = _write(config, _document(RETIRED_RECORD))
+    vault = path.parent.parent
+    _file_settled(config, _origin(RETIRED_RECORD))
+    result = lc.apply_cleanup(
+        vault, _plan(config, vault), workspace=WORKSPACE, config=config, today=TODAY
+    )
+    assert result.applied is True
+
+    def _refuse(vault_root: Path, added: list[tuple[str, str]], **_: object) -> None:
+        raise lc._SuppressionUnreadable("the store is nonsense")
+
+    monkeypatch.setattr(lc, "write_suppressions", _refuse)
+    undo = lc.unmigrate_cleanup(vault, result.receipt, apply=True, today=TODAY)
+
+    assert undo["entries_reverted"] == 1
+    assert [item["path"] for item in undo["failed"]] == [lc.SUPPRESSION_RELATIVE]
+    assert render_learning(RETIRED_RECORD) in path.read_text(encoding="utf-8")
+
+
 def test_a_re_reviewed_entry_is_eligible_again(tmp_path: Path) -> None:
     """A changed line is a new fact, not the one that was retired.
 
@@ -1144,6 +1220,12 @@ def test_a_receipt_that_landed_before_a_write_that_did_not_is_inert(
     still holds the entries. The retry needs no reconciliation at all, because the
     document's revision is still the one the plan was computed from — which is the
     whole reason the plan is a plan and not a cursor.
+
+    A process that *dies* is what leaves that receipt behind, so that is what this
+    drives: a ``BaseException`` out of the write, which is the one failure the run
+    cannot catch, tidy up after, or report. The recoverable failures below take
+    their receipt back instead, which is why this test raises something no
+    ``except`` in the module will see.
     """
     config = _config(tmp_path)
     text = _document(RETIRED_RECORD, PENDING_RECORD)
@@ -1153,19 +1235,19 @@ def test_a_receipt_that_landed_before_a_write_that_did_not_is_inert(
     receipt_file = tmp_path / "receipts" / "learnings-cleanup-1.json"
 
     def _die(path_arg: Path, body: str, *, expect: str = "") -> None:
-        raise OSError("the process died between the two writes")
+        raise KeyboardInterrupt("the process died between the two writes")
 
     monkeypatch.setattr(lc, "_write_locked", _die)
-    crashed = lc.apply_cleanup(
-        vault,
-        _plan(config, vault),
-        workspace=WORKSPACE,
-        config=config,
-        today=TODAY,
-        receipt_path=receipt_file,
-    )
+    with pytest.raises(KeyboardInterrupt):
+        lc.apply_cleanup(
+            vault,
+            _plan(config, vault),
+            workspace=WORKSPACE,
+            config=config,
+            today=TODAY,
+            receipt_path=receipt_file,
+        )
 
-    assert crashed.applied is False
     assert path.read_bytes() == text.encode("utf-8")
     orphan = lc.read_receipt(receipt_file)
     assert orphan is not None
@@ -1193,6 +1275,77 @@ def test_a_receipt_that_landed_before_a_write_that_did_not_is_inert(
     assert retried.applied is True
     assert [row.key for row in retried.removed] == ["blocked-pages"]
     assert render_learning(RETIRED_RECORD) not in path.read_text(encoding="utf-8")
+
+
+def test_a_write_that_fails_takes_its_receipt_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run still alive when the document write fails does not leave its receipt.
+
+    The run knows the removals did not happen, so the record of them is not true
+    and is taken back rather than left for the next reader to interpret. What that
+    protects is concrete: the update task's completion check asks whether a receipt
+    certifies a review of the document as it stands, and this receipt would name
+    exactly the revision the file still has while describing entries it never took
+    out. The retry is an ordinary apply, so nothing is lost by removing the file.
+    """
+    config = _config(tmp_path)
+    text = _document(RETIRED_RECORD, PENDING_RECORD)
+    path = _write(config, text)
+    _file_settled(config, _origin(RETIRED_RECORD))
+    vault = path.parent.parent
+    receipt_file = tmp_path / "receipts" / "learnings-cleanup-1.json"
+
+    def _refuse(path_arg: Path, body: str, *, expect: str = "") -> None:
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(lc, "_write_locked", _refuse)
+    result = lc.apply_cleanup(
+        vault,
+        _plan(config, vault),
+        workspace=WORKSPACE,
+        config=config,
+        today=TODAY,
+        receipt_path=receipt_file,
+    )
+
+    assert result.applied is False
+    assert result.failed
+    assert result.receipt_path == ""
+    assert path.read_bytes() == text.encode("utf-8")
+    assert lc.read_receipt(receipt_file) is None
+    assert lc.read_suppressions(vault) == {}
+
+    # And the same on the other recoverable failure, the document moving under the
+    # run between the revision check and the write.
+    def _moved(path_arg: Path, body: str, *, expect: str = "") -> None:
+        raise lc._RevisionMoved("the document moved under the run")
+
+    monkeypatch.setattr(lc, "_write_locked", _moved)
+    second = lc.apply_cleanup(
+        vault,
+        _plan(config, vault),
+        workspace=WORKSPACE,
+        config=config,
+        today=TODAY,
+        receipt_path=tmp_path / "receipts" / "learnings-cleanup-2.json",
+    )
+
+    assert second.applied is False
+    assert second.conflicts
+    assert lc.read_receipt(tmp_path / "receipts" / "learnings-cleanup-2.json") is None
+
+    monkeypatch.undo()
+    retried = lc.apply_cleanup(
+        vault,
+        _plan(config, vault),
+        workspace=WORKSPACE,
+        config=config,
+        today=TODAY,
+        receipt_path=tmp_path / "receipts" / "learnings-cleanup-3.json",
+    )
+    assert retried.applied is True
+    assert [row.key for row in retried.removed] == ["blocked-pages"]
 
 
 def test_the_store_is_read_and_written_under_its_own_lock(

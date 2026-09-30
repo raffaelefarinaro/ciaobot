@@ -583,6 +583,9 @@ after the bytes are gone could only report the gap rather than close it. So a
 receipt that cannot be written means nothing is removed, and a run that dies
 between the two writes leaves an *inert* receipt: the document still holds the
 entries, so no anchor in that receipt describes it and `--revert` refuses it. The
+two failures a run can catch — the document moving, or the write erroring — take
+that receipt back instead, because a run still alive knows the removals did not
+happen and should not leave a record saying they did. The
 retry needs no reconciliation at all, because the document's revision is still the
 one the plan was computed from.
 `--revert` fills the gaps from those bytes and refuses the whole file if the
@@ -592,7 +595,9 @@ one's gap plus exactly the bytes the first one took — so the undo walks *gaps*
 not spans, and fills each in a single insertion. It deliberately does **not** lift
 the suppression, or the next nightly pass would remove the line the operator just
 put back; the entry becomes eligible again when it is edited (a new revision) or
-when somebody reapproves it. Removed pairs live in
+when somebody reapproves it. It does **re-record** the receipt's pairs instead,
+because the apply writes the store after the document, and an undo that restored a
+line nothing holds would hand it straight back to the next pass. Removed pairs live in
 `Workspace/learnings-cleanup.json`, which is reserved bookkeeping and is kept out
 of recall indexing; it is a read-modify-write under its own queue lock, because
 two concurrent runs without one would drop each other's pairs and the next pass
@@ -614,10 +619,15 @@ evidence — an obsolete classification has to be stated, not guessed.
 `ciao/stock/update-tasks/catalog.json` with its packaged prompt, and it is the
 first row the catalog carries. Its detector answers `applicable` when the
 reconciliation has rows it will not retire; its completion check requires a
-durable receipt naming the document's **current** revision, so a table that was
-generated, or an approval that is still waiting, does not complete it — while a
-fully reviewed no-op does, because that run writes a receipt with no removals in
-it.
+durable receipt that a **person** stands behind — `reviewed`, or approvals naming
+the rows they approved — so a table that was generated, an approval that is still
+waiting, or a receipt the unattended `--apply-settled` run wrote does not complete
+it. It also has to name the document as it stands *now*: a run that removed
+something is only a review of the present file if its write landed, so that
+receipt must carry the revision it left, while a fully reviewed no-op removed
+nothing and matches on the revision it read. A receipt persisted before a write
+that never happened names the untouched file on that first side, which is exactly
+why it does not count.
 
 `Learnings.md` is bookkeeping rather than an entity note here too, so this is
 deliberately *not* a `commit_note_change`; see `ciao/learnings_cleanup.py` for why

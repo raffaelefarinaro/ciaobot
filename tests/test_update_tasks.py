@@ -1190,13 +1190,13 @@ def test_the_shipped_completion_check_needs_a_receipt_for_the_current_revision(
     assert stale.evidence["reason"] == "no_review_receipt"
 
 
-def test_the_shipped_completion_check_accepts_a_receipt_that_removed_something(
-    tmp_path: Path,
-) -> None:
-    """A removal is the other half of the same answer, and the receipt names the
-    revision it *left* as well as the one it read — so the check has to look at
-    both sides or it would never be satisfied by the work it was written for."""
-    from ciao import learnings_cleanup
+def _settled_vault(tmp_path: Path) -> tuple[Any, Path]:
+    """A vault with one entry the reconciliation proposes and one it will not.
+
+    The settled half is what a receipt can be written about; the unproposed half
+    is what the detector exists to offer, so every document here carries both and
+    a test that only ever sees one of them proves less than it looks like it does.
+    """
     from ciao.learning_records import (
         LearningRecord,
         allocate_learning_id,
@@ -1217,7 +1217,6 @@ def test_the_shipped_completion_check_accepts_a_receipt_that_removed_something(
         "# Learnings\n\n## Active\n\n"
         f"{render_learning(record)}\n- Nothing has ever proposed this lesson.\n",
     )
-    vault = Path(config.workspace_vault_root("personal"))
     proposal = sp.SkillProposal(
         id=sp.proposal_id("personal", "web-research"),
         workspace="personal",
@@ -1235,18 +1234,153 @@ def test_the_shipped_completion_check_accepts_a_receipt_that_removed_something(
     write_queue_atomically(
         sp.proposal_path(config, "personal", "web-research"), sp.render_proposal(proposal)
     )
+    return config, Path(config.workspace_vault_root("personal"))
 
+
+def _record_receipt(config: Any, receipt: dict[str, Any] | None) -> None:
+    """Persist a receipt the way the command does: at its own path, under the
+    runtime directory, named for the minute."""
+    from ciao import learnings_cleanup
+
+    assert receipt is not None
+    learnings_cleanup.write_receipt(
+        learnings_cleanup.new_receipt_path(Path(config.state_path).parent), receipt
+    )
+
+
+def test_the_shipped_completion_check_accepts_a_receipt_that_removed_something(
+    tmp_path: Path,
+) -> None:
+    """A removal is the other half of the same answer, and the receipt names the
+    revision it *left* as well as the one it read — so the check has to look at
+    that side or it would never be satisfied by the work it was written for.
+
+    Attended, because that is the only shape of removal that certifies anything:
+    an operator approved the row, so the receipt carries the approval, the reason
+    and the evidence behind it.
+    """
+    from ciao import learnings_cleanup
+
+    check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
+    config, vault = _settled_vault(tmp_path)
     plan = learnings_cleanup.plan_cleanup(vault, workspace="personal", config=config)
     assert [row.key for row in plan.removals] == ["settled"]
     result = learnings_cleanup.apply_cleanup(
-        vault, plan, workspace="personal", config=config, today=date(2026, 9, 30)
+        vault,
+        plan,
+        workspace="personal",
+        config=config,
+        actor="operator",
+        today=date(2026, 9, 30),
+        reviewed=True,
+        approvals={
+            plan.removals[0].learning_id: {
+                "learning_id": plan.removals[0].learning_id,
+                "entry_revision": plan.removals[0].entry_revision,
+                "reason": "the finding landed in the skill",
+                "evidence": "verified into web-research",
+            }
+        },
     )
-    learnings_cleanup.write_receipt(
-        learnings_cleanup.new_receipt_path(Path(config.state_path).parent), result.receipt
-    )
+    _record_receipt(config, result.receipt)
 
-    check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
     outcome = check(config=config, workspace="personal")
 
     assert outcome.applicable is True
     assert outcome.evidence["removed"] == 1
+    assert outcome.evidence["approvals"] == 1
+
+
+def test_an_unattended_receipt_does_not_complete_the_task(tmp_path: Path) -> None:
+    """A receipt the nightly pass wrote is a removal, not a review.
+
+    ``--apply-settled`` removes the rows the reconciliation already proposed and
+    writes its receipt on the same terms as any other removal, so "a receipt
+    exists for this revision" cannot be the test. If it were, one unattended pass
+    would close the attended task that exists to have a person read the document,
+    and the entries nothing has ever proposed would never be looked at by anyone.
+    """
+    from ciao import learnings_cleanup
+
+    check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
+    config, vault = _settled_vault(tmp_path)
+    plan = learnings_cleanup.plan_cleanup(vault, workspace="personal", config=config)
+    result = learnings_cleanup.apply_cleanup(
+        vault,
+        plan,
+        workspace="personal",
+        config=config,
+        actor="system",
+        today=date(2026, 9, 30),
+    )
+    assert result.applied is True
+    _record_receipt(config, result.receipt)
+
+    outcome = check(config=config, workspace="personal")
+
+    assert outcome.applicable is False
+    assert outcome.evidence["reason"] == "no_review_receipt"
+
+
+def test_a_receipt_whose_write_never_landed_does_not_complete_the_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt is written before the document, so a run that dies in between
+    leaves a record of a removal that never happened — naming the revision the
+    file still has, on the side that means "this is what it looked like before".
+
+    Accepting that side is how a run that removed no bytes at all comes to certify
+    a cleanup somebody never performed, and it is the same document a real review
+    would have been asked about. The window is closed at its source where the run
+    survives to close it, so the one left here is a process that actually died: the
+    readers have to be right about it, which is what this pins.
+    """
+    from ciao import learnings_cleanup
+    from ciao.memory_receipts import content_revision
+
+    check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
+    config, vault = _settled_vault(tmp_path)
+    document = vault / "Workspace" / "Learnings.md"
+    before = document.read_bytes()
+    plan = learnings_cleanup.plan_cleanup(vault, workspace="personal", config=config)
+
+    def _die(target: Path, text: str, *, expect: str = "") -> None:
+        raise KeyboardInterrupt("the process died between the two writes")
+
+    monkeypatch.setattr(learnings_cleanup, "_write_locked", _die)
+    with pytest.raises(KeyboardInterrupt):
+        learnings_cleanup.apply_cleanup(
+            vault,
+            plan,
+            workspace="personal",
+            config=config,
+            actor="operator",
+            today=date(2026, 9, 30),
+            reviewed=True,
+            receipt_path=learnings_cleanup.new_receipt_path(
+                Path(config.state_path).parent
+            ),
+        )
+    # The receipt is there and it is attended. What makes it a review of nothing
+    # is the side that names the untouched file — the side a removal has to stop
+    # counting on as soon as its write has landed.
+    migration = Path(config.state_path).parent / "migration"
+    orphans = [
+        found
+        for found in (
+            learnings_cleanup.read_receipt(candidate)
+            for candidate in sorted(migration.glob("learnings-cleanup-*.json"))
+        )
+        if found is not None
+    ]
+    assert document.read_bytes() == before
+    assert len(orphans) == 1
+    assert orphans[0]["entries_removed"] == 1
+    assert orphans[0]["reviewed"] is True
+    assert orphans[0]["revision_before"] == content_revision(before.decode("utf-8"))
+    assert orphans[0]["revision_after"] != orphans[0]["revision_before"]
+
+    outcome = check(config=config, workspace="personal")
+
+    assert outcome.applicable is False
+    assert outcome.evidence["reason"] == "no_review_receipt"

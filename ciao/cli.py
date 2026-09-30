@@ -2392,7 +2392,15 @@ def _cleanup_status(result: Any, stale: list[str], plan: Any) -> int:
 
 
 def _print_cleanup_revert(summary: dict[str, Any], *, apply: bool) -> None:
-    """What an undo did, or would do."""
+    """What an undo did, or would do.
+
+    A failure is printed first whatever else came of it. An undo that restored the
+    file and could not record the restored line as removed has left the next pass
+    free to take it straight out again, and that is the one thing about the run
+    the operator has to read — so it is not swallowed by the success message.
+    """
+    for item in summary.get("failed") or []:
+        print(f"  {item.get('path')}: {item.get('error')}", file=sys.stderr)
     if summary.get("entries_reverted"):
         verb = "Restored" if apply else "Would restore"
         print(f"{verb} {summary['entries_reverted']} learning entr(y/ies).")
@@ -2405,8 +2413,6 @@ def _print_cleanup_revert(summary: dict[str, Any], *, apply: bool) -> None:
         if not apply:
             print("\nRe-run with --apply to write these changes.")
         return
-    for item in summary.get("failed") or []:
-        print(f"  {item.get('path')}: {item.get('error')}", file=sys.stderr)
     if summary.get("skipped"):
         print(f"Nothing to restore: {summary['skipped']}.")
     else:

@@ -189,7 +189,16 @@ CONTEXT_KEYS: tuple[str, ...] = tuple(policy.key for policy in CONTEXT_POLICIES)
 
 @dataclass(frozen=True, slots=True)
 class DeferredAction:
-    """One approval-requiring action an unattended run must defer and report."""
+    """One approval-requiring action an unattended run must defer and report.
+
+    ``action`` names the *judgement*, never the mechanism. An entry may also say
+    what the run is allowed to do on the same subject — retiring a learning whose
+    findings are already settled is not a judgement, and saying so is what keeps
+    the row from reading as a blanket prohibition the engine then breaks every
+    night. What must not appear is an action whose own name is something the run
+    may do: a list that defers what the code then performs teaches a model to
+    route around the deferral.
+    """
 
     action: str
     reason: str
@@ -228,13 +237,15 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
         "question again.",
     ),
     DeferredAction(
-        "Retire a learning from Workspace/Learnings.md",
-        "The nightly run may remove an Active entry whose every finding is already "
-        "applied-with-a-verification or dismissed — that is settlement, already "
-        "recorded by a person, and the removal is reversible from a receipt. It "
-        "does that through `ciao learnings-cleanup --apply-settled`, which retires "
-        "only the rows the reconciliation itself proposed, never reapproves one, "
-        "and is capped at LEARNINGS_CLEANUP_MAX_ITEMS. It may not remove an entry "
+        "Judge a learning obsolete, or retire an Active entry the reconciliation "
+        "did not propose",
+        "The judgement is a person's, never a flag's. The nightly run *may* remove "
+        "an Active entry whose every finding is already applied-with-a-verification "
+        "or dismissed — that is settlement, already recorded by a person, and the "
+        "removal is reversible from a receipt — through `ciao learnings-cleanup "
+        "--apply-settled`, which retires only the rows the reconciliation itself "
+        "proposed, never reapproves one, and is capped at "
+        "LEARNINGS_CLEANUP_MAX_ITEMS. What it may not do is remove an entry "
         "nothing has ever proposed, one whose finding is still open, or one whose "
         "only destination was an upstream issue: those are judgements, not "
         "settlements, and they are `ciao learnings-cleanup --apply --approval-file`, "

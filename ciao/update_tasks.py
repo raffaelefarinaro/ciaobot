@@ -257,6 +257,32 @@ def _learnings_cleanup_review_needed(
     )
 
 
+def _review_is_attended(receipt: dict[str, Any]) -> bool:
+    """Whether a person stands behind this receipt, rather than a flag.
+
+    Three shapes of receipt land in the same directory and only one of them is a
+    review of anything:
+
+    * the attended workflow, ``ciao learnings-cleanup --apply --approval-file``,
+      which records ``reviewed`` — or names the rows it approved, each with the
+      reason and the evidence a person wrote for it;
+    * the nightly pass, ``--apply-settled``, which retires the rows the fold
+      already proposed and certifies nothing. It writes a receipt too, because a
+      removal without one could not be reversed, so "a receipt exists" is not the
+      test — ``removed_by`` is in every receipt for exactly this question;
+    * a run that persisted its receipt and then failed at, or died before, the
+      document write. Nothing was reviewed and nothing was removed.
+
+    The last two are the reason this is a positive test on ``reviewed``/``approvals``
+    rather than a check that the receipt is merely well-formed. A completion check
+    that a flag can satisfy is not a review, and the task it closes is the one
+    asking a person to look.
+    """
+    if str(receipt.get("removed_by") or "") == "system":
+        return False
+    return bool(receipt.get("reviewed") or receipt.get("approvals"))
+
+
 def _learnings_cleanup_review_recorded(
     *, config: Any, workspace: str = "", today: date | None = None
 ) -> Detection:
@@ -264,15 +290,23 @@ def _learnings_cleanup_review_recorded(
 
     A receipt, not a chat. The postcondition is "a person looked at this file as
     it is now and said what should go", and the only durable record of that is the
-    receipt ``ciao learnings-cleanup --apply`` writes — including when it removed
-    nothing, which is why a fully reviewed no-op completes and generating the
-    table does not.
+    receipt ``ciao learnings-cleanup --apply --approval-file`` writes — including
+    when it removed nothing, which is why a fully reviewed no-op completes and
+    generating the table does not.
 
-    "As it stands" is checked, not assumed: the receipt must name the current
-    document revision, on either side of its own write (``revision_before`` for a
-    reviewed no-op, ``revision_after`` for one that removed something). A receipt
-    for a document that has since been edited is not a review of this document,
-    and treating it as one is how a stale cleanup comes to certify itself.
+    "As it stands" is checked, not assumed, and it is checked on the right side of
+    the receipt's own write. A receipt names two revisions: a run that removed
+    something is only a review of the document that is there now when the write
+    *landed*, so it must be ``revision_after``. Its ``revision_before`` is the
+    revision the file still has precisely when the write did not happen — a
+    receipt persisted by a run that then failed is a review of nothing, and
+    accepting that side is how a run that removed no bytes at all comes to
+    certify a cleanup. A no-op removed nothing, so there was no second write and
+    both sides name the reviewed revision; it matches on ``revision_before``.
+
+    A receipt for a document that has since been edited is not a review of this
+    document, and treating it as one is how a stale cleanup comes to certify
+    itself.
     """
     from ciao.learnings_cleanup import read_receipt
 
@@ -292,10 +326,14 @@ def _learnings_cleanup_review_recorded(
         receipt = read_receipt(path)
         if receipt is None or str(receipt.get("workspace") or "") != workspace:
             continue
-        if current not in (
-            str(receipt.get("revision_before") or ""),
-            str(receipt.get("revision_after") or ""),
-        ):
+        if not _review_is_attended(receipt):
+            continue
+        side = (
+            "revision_before"
+            if int(receipt.get("entries_removed") or 0) == 0
+            else "revision_after"
+        )
+        if str(receipt.get(side) or "") != current:
             continue
         if newest is None or str(receipt.get("removed_at") or "") > str(
             newest.get("removed_at") or ""

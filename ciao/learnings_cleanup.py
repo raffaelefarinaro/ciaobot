@@ -1151,6 +1151,7 @@ def _build_receipt(
     after: str,
     actor: str,
     approvals: dict[str, dict[str, Any]],
+    reviewed: bool,
     shift: int = 0,
 ) -> dict[str, Any]:
     """The reverse map, as the document that will be written.
@@ -1163,6 +1164,14 @@ def _build_receipt(
     either side of it. Those are the direction ``--revert`` walks, and the only
     direction in which a removal can be checked at all.
 
+    ``reviewed`` is the caller's attestation that a person read this document, and
+    it is recorded rather than inferred from ``removed_by``: three different runs
+    write a receipt into the same directory, and only one of them is a review. The
+    nightly pass (``--apply-settled``) removes rows the fold already proposed and
+    certifies nothing, so a reader downstream has to be able to tell "a person
+    looked at this and said what should go" from "a flag did it" — and only this
+    field says which.
+
     ``shift`` moves every offset by the amount the ``updated:`` restamp moved the
     document, so the offsets in here are already the ones in the file on disk and
     the anchors read at :func:`_with_anchors` are sampled at the same positions.
@@ -1171,6 +1180,7 @@ def _build_receipt(
         "schema_version": RECEIPT_VERSION,
         "removed_at": _now(),
         "removed_by": actor,
+        "reviewed": bool(reviewed),
         "vault_root": str(vault_root),
         "path": LEARNINGS_RELATIVE,
         "workspace": plan.workspace,
@@ -1232,7 +1242,11 @@ def apply_cleanup(
     which is inert rather than dangerous — the document still holds the entries, so
     every anchor in that receipt is wrong and ``--revert`` refuses it — and the
     retry is an ordinary apply, because the document's revision still equals the
-    one the plan was computed from.
+    one the plan was computed from. The two *recoverable* ends of that window take
+    the receipt back (:func:`_discard_receipt`) rather than leaving a record of a
+    removal that did not happen for a reader to mistake for a review; only a
+    process that actually dies can still leave one, and every reader of these
+    receipts has to tell the two apart on its own.
 
     The two windows this cannot close are named here rather than left implied.
     Eligibility is re-folded outside the file lock, and the write takes the
@@ -1244,8 +1258,10 @@ def apply_cleanup(
     resulting removal reversible by hand. The second is the store: it is written
     after the document, because a pair recorded for an entry still on disk
     suppresses an entry that is still there. The receipt names every pair, so the
-    store is reconstructible, and the next night's run re-derives the same
-    removals from the same fold rather than from the store alone.
+    store is reconstructible — ``--revert`` re-records them, so an undo cannot
+    hand the next pass a line it has just put back — and the next night's run
+    re-derives the same removals from the same fold rather than from the store
+    alone.
 
     ``reapprove`` lifts the suppression on every candidate. It is for the
     attended workflow only, where a person has just said *remove this one
@@ -1284,6 +1300,10 @@ def apply_cleanup(
                 "schema_version": RECEIPT_VERSION,
                 "removed_at": _now(),
                 "removed_by": actor,
+                # True in both branches, and that is the point: this receipt exists
+                # *only* because the caller attested to a review, so its presence
+                # is the attestation. A run nobody looked at does not get one.
+                "reviewed": True,
                 "vault_root": str(root),
                 "path": LEARNINGS_RELATIVE,
                 "workspace": workspace,
@@ -1418,6 +1438,7 @@ def apply_cleanup(
         after=after,
         actor=actor,
         approvals=approvals,
+        reviewed=reviewed,
         shift=len(proposed) - len(spliced),
     )
     # Anchored against the document as it will be *written*, offsets included: the
@@ -1450,6 +1471,7 @@ def apply_cleanup(
     try:
         _write_locked(path, proposed, expect=before)
     except _RevisionMoved:
+        _discard_receipt(recorded)
         return CleanupResult(
             workspace=workspace,
             path=LEARNINGS_RELATIVE,
@@ -1459,6 +1481,7 @@ def apply_cleanup(
             conflicts=("the file changed while the cleanup was running",),
         )
     except OSError as exc:
+        _discard_receipt(recorded)
         return CleanupResult(
             workspace=workspace,
             path=LEARNINGS_RELATIVE,
@@ -1572,9 +1595,10 @@ def write_receipt(path: Path, receipt: dict[str, Any]) -> Path:
     bytes are gone can only report the gap afterwards. So a receipt here may
     describe a write that never happened — a run that dies in between leaves one,
     and it is inert, because the document still holds the entries and so no anchor
-    in the receipt describes it. The alternative reading, that a receipt must never
-    claim spans which are not on disk, is what makes this a report instead of a
-    gate, and a report cannot prevent anything.
+    in the receipt describes it; the two recoverable ends of that window take it
+    back instead (see :func:`_discard_receipt`). The alternative reading, that a
+    receipt must never claim spans which are not on disk, is what makes this a
+    report instead of a gate, and a report cannot prevent anything.
 
     Written atomically anyway, so ``--revert`` never reads half of one.
     """
@@ -1588,6 +1612,34 @@ def write_receipt(path: Path, receipt: dict[str, Any]) -> Path:
         tmp.unlink(missing_ok=True)
         raise
     return target
+
+
+def _discard_receipt(recorded: str) -> None:
+    """Take back a receipt whose document write did not happen.
+
+    The receipt is written first so its absence can stop a removal, and that
+    leaves the one window this module cannot argue its way out of: a run that dies
+    between the two writes leaves a durable record of a removal that never
+    happened, naming a revision the file still has. The undo already refuses it,
+    because the document still holds the entries and no anchor in it describes
+    that file — but a reader that only asks "is there a receipt for this
+    revision?" cannot tell it from a review, and an unattended pass that retires
+    entries produces exactly the same shape.
+
+    So the recoverable ends of that window close here rather than being left for
+    every reader to re-derive: this run is still alive, it knows the write did not
+    land, and nothing it wrote is true. Best-effort and silent, because a receipt
+    that survives an unlink which itself failed is inert rather than dangerous, and
+    a run must not turn "the removals did not happen" into a second failure about
+    the tidy-up. The only producer left is a process that actually dies, which is
+    the window the readers have to be right about.
+    """
+    if not recorded:
+        return
+    try:
+        Path(recorded).unlink(missing_ok=True)
+    except OSError:  # noqa: BLE001 — a receipt nobody can delete is not fatal
+        logger.warning("learnings cleanup: could not remove the receipt %s", recorded)
 
 
 def read_receipt(path: Path) -> dict[str, Any] | None:
@@ -1633,6 +1685,28 @@ def _gap_groups(removals: list[Any]) -> list[list[dict[str, Any]]]:
     return groups
 
 
+def _receipt_pairs(receipt: dict[str, Any]) -> list[tuple[str, str]]:
+    """The ``(learning_id, entry_revision)`` pairs a receipt's spans name.
+
+    The store is reconstructible from the receipt rather than from itself, which
+    is the whole reason the spans carry both keys: an apply that wrote the
+    document and then failed to write the store has left the two disagreeing, and
+    every consumer of that disagreement — the undo re-recording them, the report
+    saying what stayed suppressed — reads them from here. A span missing either
+    key is not a pair and is dropped rather than recorded as an empty one, which
+    would suppress nothing and look like it had.
+    """
+    pairs: list[tuple[str, str]] = []
+    for item in receipt.get("removals") or []:
+        if not isinstance(item, dict):
+            continue
+        learning_id = str(item.get("learning_id") or "").strip()
+        revision = str(item.get("entry_revision") or "").strip()
+        if learning_id and revision:
+            pairs.append((learning_id, revision))
+    return pairs
+
+
 def unmigrate_cleanup(
     vault_root: Path,
     receipt: dict[str, Any],
@@ -1654,7 +1728,11 @@ def unmigrate_cleanup(
     for a person to read; leaving it suppressed is what stops the next nightly
     pass from removing the line they just restored. It comes back on its own
     when the entry is edited (a new revision) or when somebody reapproves it
-    through ``--reapprove``.
+    through ``--reapprove``. Re-recording the receipt's pairs on the way out is
+    what makes that hold when the store never learned about them: the apply
+    writes the document first and the store second, so a crash or a failed write
+    in between leaves restored entries that nothing holds, and the next pass
+    would take them straight back out.
 
     The check is on the *context* either side of each gap rather than on the
     bytes at the offset, because a removal leaves nothing at the offset to check.
@@ -1740,15 +1818,32 @@ def unmigrate_cleanup(
         except OSError as exc:
             summary["failed"].append({"path": LEARNINGS_RELATIVE, "error": str(exc)})
             return summary
+        # The lines are back on disk, so the store has to say they were removed.
+        # Normally it does — the apply wrote it after the document, and a pair
+        # already in the store is left exactly as it is. It does not when the
+        # apply died or failed between the two writes, and then this is the only
+        # record left of what was taken out: without it the next pass re-derives
+        # the same removals from the same fold and removes the line a person just
+        # put back. Reported like any other failure, because an undo that
+        # restored the file and could not hold it is not a finished undo.
+        try:
+            write_suppressions(
+                root,
+                _receipt_pairs(receipt),
+                actor=str(receipt.get("removed_by") or "operator"),
+            )
+        except (OSError, _SuppressionUnreadable) as exc:
+            summary["failed"].append(
+                {
+                    "path": SUPPRESSION_RELATIVE,
+                    "error": f"the restored entries are not recorded as removed: {exc}",
+                }
+            )
     summary["entries_reverted"] = len(removals)
     summary["reverted"].append(LEARNINGS_RELATIVE)
     summary["suppressions_kept"] = [
-        {
-            "learning_id": str(item.get("learning_id") or ""),
-            "entry_revision": str(item.get("entry_revision") or ""),
-        }
-        for item in removals
-        if isinstance(item, dict)
+        {"learning_id": learning_id, "entry_revision": revision}
+        for learning_id, revision in _receipt_pairs(receipt)
     ]
     summary["revision_before"] = content_revision(text)
     summary["revision_after"] = content_revision(restored)
