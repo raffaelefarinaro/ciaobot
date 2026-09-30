@@ -1,0 +1,14 @@
+{
+  "_about": "Folder names Claude Code wrote under ~/.claude/projects for a workspace cwd. Windows rows: Claude Code 2.1.285 on Windows 11, 2026-09-30 (#696). macOS rows: existing ~/.claude/projects folders on the maintainer's Mac (#696).",
+  "windows": [
+    ["C:\\dev\\ciaobot", "C--dev-ciaobot"],
+    ["C:\\dev\\disco\\with space", "C--dev-disco-with-space"],
+    ["C:\\dev\\disco\\a.b\\c_d\\Mixed-Case", "C--dev-disco-a-b-c-d-Mixed-Case"],
+    ["C:\\dev\\disco\\ciào ü", "C--dev-disco-ci-o--"],
+    ["c:\\dev\\disco\\lower", "c--dev-disco-lower"]
+  ],
+  "macos": [
+    ["/Users/me/ciao", "-Users-me-ciao"],
+    ["/Users/raffaelefarinaro/.archon/workspaces/x", "-Users-raffaelefarinaro--archon-workspaces-x"]
+  ]
+}

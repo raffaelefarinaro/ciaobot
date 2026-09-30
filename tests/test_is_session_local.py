@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import MagicMock
 
+from ciao.agent_paths import claude_project_slug
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -49,9 +50,8 @@ def test_is_session_local_claude_happy_path(tmp_path: Path, monkeypatch: pytest.
     pcm = _make_manager(tmp_path)
     
     # workspace root: tmp_path
-    # slug for tmp_path is str(tmp_path).replace("/", "-").lstrip("-")
-    slug = str(tmp_path).replace("/", "-").lstrip("-")
-    projects_dir = tmp_path / ".claude" / "projects" / f"-{slug}"
+    # Claude Code's slug for the workspace root (tmp_path).
+    projects_dir = tmp_path / ".claude" / "projects" / claude_project_slug(tmp_path)
     projects_dir.mkdir(parents=True, exist_ok=True)
     
     session_id = "12345678-1234-4123-8123-123456789abc"

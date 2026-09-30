@@ -78,6 +78,9 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    # Windows' Path.home() reads USERPROFILE, not HOME: without it the "fake"
+    # sessions were written into the real ~/.claude/projects.
+    monkeypatch.setenv("USERPROFILE", str(home))
     return home
 
 
