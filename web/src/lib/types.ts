@@ -1416,6 +1416,16 @@ export interface VaultReviewCandidate {
    * client, and a button the engine refuses is worse than no button.
    */
   completable: boolean
+  /**
+   * Whether that completion moves a whole project FOLDER rather than the one
+   * note. An untyped note nested under `projects/active/<x>/` is completable on
+   * its own — completing it closes the project, so the plan, the meeting notes
+   * and the attachments beside it all move. A button that said only "Complete"
+   * made that read as one file being moved, which is why the panel's confirm
+   * asks about the folder when this is set. Read off the payload for the same
+   * reason as `completable`: the layout decision is the engine's.
+   */
+  completion_moves_folder: boolean
 }
 
 /** One restorable note in `.vault-trash`, from `GET /api/vault/review?include=trashed`. */

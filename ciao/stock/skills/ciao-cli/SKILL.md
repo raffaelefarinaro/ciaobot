@@ -49,6 +49,8 @@ Not for:
 | `vault review keep --candidate ID` | Record a "keep" decision: clears the row and stamps the note's `updated:` date to today. | Mutating; needs an attended turn — `unattended_forbidden` when run from a schedule or other automation. |
 | `vault review trash --candidate ID` | Move a note to trash (reversible). | Same attended-turn guard as `keep`. |
 | `vault review restore --candidate ID` | Restore a trashed note. | Same attended-turn guard. |
+| `vault review complete --candidate ID` | Close a project out: move it to `projects/completed/` (the whole folder for a folder project), rewrite `status: active` to `status: completed`, and repoint every note that links to it. Refuses a note that is not a project — retire that one instead. | Same attended-turn guard; a folder project's siblings and backlinks move with it. |
+| `vault review restore-completed --candidate ID` | Undo a completion: put the project, its `status:` line and every rewritten link back. Refuses when the original path is occupied or a note the completion rewrote has been edited since. | Same attended-turn guard. |
 | `vault review delete --candidate ID --confirm ID` | Permanently delete a trashed note. | Same attended-turn guard, plus `--confirm` must repeat the candidate id; irreversible. |
 
 ### Memory-proposal review queue
@@ -205,7 +207,7 @@ ciao context get
 
 - **`file_not_found`** — `file surface` only opens a path that already exists under the workspace root. Check the file was actually written (or that the path is relative to the workspace, not absolute or outside it) before surfacing it.
 - **`memory_update_invalid` / `invalid_action`** — every `action`-style flag across this CLI is a closed enum, not free text (`memory update` takes `add`/`replace`/`remove`, never `append`). Run `ciao memory update --help` (or the equivalent `--help` on any command) to see the exact accepted values before guessing.
-- **`unattended_forbidden`** — `vault review keep|trash|restore|delete` only resolve during an attended turn. Running as a schedule or other unattended automation, don't attempt the mutation: report the candidate and its evidence instead, and let an attended turn decide.
+- **`unattended_forbidden`** — `vault review keep|trash|restore|complete|restore-completed|delete` only resolve during an attended turn. Running as a schedule or other unattended automation, don't attempt the mutation: report the candidate and its evidence instead, and let an attended turn decide.
 
 ## Operation names for telemetry
 
@@ -219,6 +221,8 @@ ciao context get
   "vault review keep": "vault_review",
   "vault review trash": "vault_review",
   "vault review restore": "vault_review",
+  "vault review complete": "vault_review",
+  "vault review restore-completed": "vault_review",
   "vault review delete": "vault_review",
   "file surface": "file_surface",
   "chat list": "chats_list",

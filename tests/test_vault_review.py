@@ -281,6 +281,51 @@ def test_an_earlier_unattended_turn_does_not_block_a_later_attended_trash(tmp_pa
     assert not (tmp_path / "People" / "A.md").exists()
 
 
+def test_an_unattended_turn_cannot_complete_or_restore_a_project(tmp_path: Path) -> None:
+    """The attended-turn guard is an invariant, not a remembered list of actions.
+
+    It held for every mutating action the control plane offers, and completion
+    joined that surface: the destructive class (a folder move, a backlink
+    rewrite across the vault, a terminal ledger row), which the panel already
+    makes an attended and confirmed click. The same engine reached from a
+    schedule must answer the same way. `restore_completed` is guarded for the
+    reason `restore` is: undoing a disposition is as much a decision as making
+    it.
+    """
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+
+    _project(tmp_path, "demo")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    chat = SimpleNamespace(user_turn_count=2, user_turn_unattended={"1": True})
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object(), workspace_vault_root=lambda name: tmp_path),
+        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: chat),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="token-1", chat_id="chat-1", project_id="project-1",
+        workspace="personal", provider="opencode",
+    )
+
+    with pytest.raises(ControlPlaneError) as completing:
+        plane.vault_review(principal, "complete", candidate_id=candidate.candidate_id)
+    assert completing.value.code == "unattended_forbidden"
+    with pytest.raises(ControlPlaneError) as undoing:
+        plane.vault_review(principal, "restore_completed", candidate_id=candidate.candidate_id)
+    assert undoing.value.code == "unattended_forbidden"
+    # The refusal is the whole outcome: nothing moved, nothing recorded.
+    assert (tmp_path / "projects" / "active" / "demo" / "demo.md").is_file()
+    assert read_ledger(tmp_path) == []
+
+    # And an attended turn still completes it — the guard reads the CURRENT turn,
+    # so one scheduled turn in the chat does not close the project for good.
+    chat.user_turn_unattended.pop("1")
+    assert plane.vault_review(principal, "complete", candidate_id=candidate.candidate_id)["ok"]
+    assert (tmp_path / "projects" / "completed" / "demo" / "demo.md").is_file()
+
+
 def test_lookup_notes_need_more_than_unlinked_to_be_offered_for_retirement(tmp_path: Path) -> None:
     """Nothing links to a person note by design, so `unlinked` alone is not a finding.
 
@@ -1594,6 +1639,60 @@ def test_the_payload_says_whether_a_candidate_can_be_completed(tmp_path: Path) -
     assert str(tmp_path) not in json.dumps(flat.as_dict())
 
 
+def test_the_payload_says_whether_completion_moves_a_folder(tmp_path: Path) -> None:
+    """A row that closes a whole directory must not read as a one-file move.
+
+    Any note under `projects/active/<x>/` is completable in its own right — the
+    candidate need not be the entry markdown — but completing one of them moves
+    the project FOLDER: the plan, the notes and the attachments beside it travel
+    too. A row whose button said only "Complete" made that read as one file
+    being filed away, which is the kind of small dishonesty the `completable`
+    flag was added to stop. The panel has to be able to ask about the right unit,
+    and it has no way to know that from `completable` alone.
+    """
+    _project(tmp_path, "demo")
+    nested = tmp_path / "projects" / "active" / "demo" / "meetings"
+    nested.mkdir()
+    # Untyped on purpose: a declared `type:` always wins, so a note inside a
+    # project folder is a project candidate because of where it sits — the shape
+    # a real project folder has. `updated:` is what queues it.
+    (nested / "2026-01.md").write_text(
+        "---\nupdated: 2026-05-19\n---\n# 2026-01\n\nKickoff.\n", encoding="utf-8"
+    )
+    # The flat form: no folder of its own, so completing it moves exactly the
+    # file the row names.
+    (tmp_path / "projects" / "Solo.md").write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n# Solo\n\nIn flight.\n",
+        encoding="utf-8",
+    )
+    by_path = {
+        item.path: item.as_dict()
+        for item in generate_candidates(tmp_path, workspace="personal", max_candidates=50, now=_SEPT)
+    }
+
+    assert by_path["memory-vault/projects/active/demo/meetings/2026-01.md"]["completable"] is True
+    assert by_path["memory-vault/projects/active/demo/meetings/2026-01.md"]["completion_moves_folder"] is True
+    # And the same project read from its own entry markdown, which is the note
+    # that drags the folder.
+    assert by_path["memory-vault/projects/active/demo/demo.md"]["completion_moves_folder"] is True
+    # The flat project: still completable, moves nothing but itself.
+    assert by_path["memory-vault/projects/Solo.md"]["completable"] is True
+    assert by_path["memory-vault/projects/Solo.md"]["completion_moves_folder"] is False
+
+    # Gated on the same refusal the flag beside it is: a row whose Complete would
+    # be refused must not also describe what the refused move would have done.
+    (tmp_path / "projects" / "completed").mkdir()
+    (tmp_path / "projects" / "completed" / "Solo.md").write_text(
+        "---\ntype: project\n---\n# Solo\n", encoding="utf-8"
+    )
+    assert _project_candidate(tmp_path, "projects/Solo.md").as_dict()["completion_moves_folder"] is False
+    # And a bool, never the path it was read from: an absolute path on the
+    # operator's disk means nothing to a client.
+    flat = _unqueued_candidate(tmp_path, "memory-vault/projects/Solo.md")
+    assert isinstance(flat.as_dict()["completion_moves_folder"], bool)
+    assert str(tmp_path) not in json.dumps(flat.as_dict())
+
+
 def test_an_occupied_completion_destination_takes_complete_off_the_row(tmp_path: Path) -> None:
     """Two projects landing on one name is a content decision, never a move.
 
@@ -1723,6 +1822,70 @@ def test_completion_refuses_a_non_project_and_an_occupied_destination(tmp_path: 
     assert (tmp_path / "projects" / "A.md").read_text(encoding="utf-8").count("status: active") == 1
     assert (tmp_path / "projects" / "completed" / "A.md").read_text(encoding="utf-8") == "---\ntype: project\n---\n# A\n"
     assert read_ledger(tmp_path) == []
+
+
+def test_the_control_plane_can_complete_and_restore_a_project(tmp_path: Path) -> None:
+    """An agent could see `completable` and had no verb to act on it.
+
+    The CLI and the MCP tool both land here, so the gap was the whole agent
+    surface: a project an agent was told to close out could only be retired,
+    which hides it and leaves every link behind. The pair has to be reachable
+    through the same resolver `inspect` and `decide` use — a completed project
+    is out of the queue by then, so its id cannot come from a fresh scan.
+    """
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = (
+        "---\ntype: note\nupdated: 2026-05-19\n---\n"
+        "# Hub\n\n[[projects/active/demo/demo]].\n"
+    )
+    (tmp_path / "notes" / "Hub.md").write_text(hub, encoding="utf-8")
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object(), workspace_vault_root=lambda name: tmp_path),
+        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: None),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="token-1", chat_id="chat-1", project_id="project-1",
+        workspace="personal", provider="opencode",
+    )
+
+    listed = plane.vault_review(principal, "list")["data"]["candidates"]
+    project = next(item for item in listed if item["path"].endswith("projects/active/demo/demo.md"))
+    assert project["completable"] is True
+
+    closed = plane.vault_review(principal, "complete", candidate_id=project["candidate_id"])
+    assert closed["ok"]
+    assert closed["data"]["new_path"].endswith("projects/completed/demo/demo.md")
+    assert (tmp_path / "projects" / "completed" / "demo" / "demo.md").is_file()
+    assert not (tmp_path / "projects" / "active" / "demo").exists()
+    assert "projects/completed/demo" in (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8")
+
+    # The way back, addressed by the same id — it is in neither the queue nor
+    # the trash, so the id can only have come from the completion's own row.
+    restored = plane.vault_review(
+        principal, "restore_completed", candidate_id=project["candidate_id"]
+    )
+    assert restored["ok"]
+    source = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    assert source.is_file()
+    assert "status: active" in source.read_text(encoding="utf-8")
+    assert (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8") == hub
+
+    # And the refusal the PWA already shows: a non-project is a retire, said in
+    # the engine's own words so both surfaces report the same thing.
+    people = next(item for item in plane.vault_review(principal, "list")["data"]["candidates"]
+                  if item["path"].endswith("People/A.md"))
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.vault_review(principal, "complete", candidate_id=people["candidate_id"])
+    assert refused.value.code == "vault_review_invalid"
+    assert "only a project can be completed" in str(refused.value)
+    assert (tmp_path / "People" / "A.md").is_file()
 
 
 def test_a_failed_completion_audit_puts_the_move_and_every_link_back(

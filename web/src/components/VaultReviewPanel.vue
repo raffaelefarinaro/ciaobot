@@ -43,12 +43,23 @@ const showStaleError = computed(() => hasCurrentSnapshot.value && Boolean(store.
 // names the panel, not one of its actions: a failed completion is not a failed
 // retirement, and the old wording told the user they had tried to do something
 // this row never offered.
+//
+// The body is the store's plain copy; the engine's own message rides along in
+// `errorText`, which is what a fix chat is seeded with. A refusal the store
+// translated is therefore never lost, just not read by default.
 watch(
   () => store.error,
   (message) => {
     if (!message) return
-    projectStore.pushErrorToast('Review action failed', message)
+    projectStore.pushToast({
+      chat_id: '',
+      title: 'Review action failed',
+      body: message,
+      variant: 'error',
+      errorText: store.errorDetail || message,
+    })
     store.error = ''
+    store.errorDetail = ''
   },
 )
 
@@ -369,11 +380,21 @@ async function trashRow(candidate: VaultReviewCandidate) {
  * hang a Restore button on. So a misclick rewrites every note that links to the
  * project and leaves no in-app way back — which is exactly what a confirm is
  * for. The wording says so rather than implying the action is free.
+ *
+ * The confirm also names the unit of the move. A nested candidate is completable
+ * in its own right, but completing it closes the PROJECT: the folder holding it
+ * travels too, so "moves it" for a note that takes a directory with it reads as
+ * a smaller act than it is. The backend answers which case this is
+ * (`completion_moves_folder`) rather than the panel re-deriving the layout from
+ * the path.
  */
 async function completeRow(candidate: VaultReviewCandidate) {
   const title = candidateLeaf(candidate.path)
+  const moves = candidate.completion_moves_folder === true
+    ? 'The whole project folder moves to projects/completed/'
+    : 'It moves to projects/completed/'
   if (!await askConfirm(
-    `Complete "${title}"? It moves to projects/completed/ and every note that links to it is rewritten to follow. This cannot be undone from here.`,
+    `Complete "${title}"? ${moves} and every note that links to it is rewritten to follow. This cannot be undone from here.`,
     { title: 'Complete project', confirmLabel: 'Complete', destructive: true },
   )) return
   await store.complete(workspace.value, candidate.candidate_id)

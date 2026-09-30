@@ -38,6 +38,7 @@ function candidate(overrides: Partial<VaultReviewCandidate> = {}): VaultReviewCa
     disposition: '',
     deferred_until: '',
     completable: false,
+    completion_moves_folder: false,
     ...overrides,
   }
 }
@@ -50,6 +51,9 @@ function projectCandidate(
     candidate_id: 'proj123proj123proj123proj1',
     path: 'memory-vault/projects/active/faraman/Faraman-Calendar.md',
     completable: true,
+    // A folder project: completing any note under it closes the whole folder,
+    // so the backend says so and the confirm asks about the folder.
+    completion_moves_folder: true,
     evidence: { ...candidate().evidence, type: 'project' },
     ...overrides,
   })
@@ -703,6 +707,10 @@ describe('VaultReviewPanel', () => {
     expect(ask?.message).toContain('Complete "Faraman-Calendar"?')
     expect(ask?.message).toContain('every note that links to it is rewritten')
     expect(ask?.message).toContain('This cannot be undone from here.')
+    // And it names the unit of the move. A folder project takes the plan, the
+    // notes and the attachments beside it, so "it moves" would read as a smaller
+    // act than the one being confirmed.
+    expect(ask?.message).toContain('The whole project folder moves to projects/completed/')
     expect(ask?.destructive).toBe(true)
     expect(ask?.confirmLabel).toBe('Complete')
     expect(ask?.cancelLabel).toBe('Cancel')
@@ -713,6 +721,35 @@ describe('VaultReviewPanel', () => {
     await flushPromises()
     expect(apiPost).not.toHaveBeenCalled()
     expect(wrapper.findAll('.vr-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('confirms a flat project by the note, since nothing else travels with it', async () => {
+    // `projects/<name>.md` has no folder of its own, so completing it moves
+    // exactly the file the row names. Asking about a folder there would describe
+    // an act that is not happening.
+    apiGet.mockResolvedValue({
+      candidates: [projectCandidate({
+        candidate_id: 'flat123flat123flat123flat',
+        path: 'memory-vault/projects/Solo.md',
+        completion_moves_folder: false,
+      })],
+      trashed: [],
+    })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const clicked = buttonByText(wrapper, 'Complete').trigger('click')
+    await flushPromises()
+
+    const ask = pendingConfirm.value
+    expect(ask?.message).toContain('Complete "Solo"?')
+    expect(ask?.message).toContain('It moves to projects/completed/')
+    expect(ask?.message).not.toContain('whole project folder')
+
+    pendingConfirm.value?.resolve(true)
+    await clicked
+    await flushPromises()
     wrapper.unmount()
   })
 

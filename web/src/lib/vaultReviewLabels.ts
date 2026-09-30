@@ -109,3 +109,57 @@ export function verificationLabel(ageDays: number | null, lastUpdate: string): s
   }
   return lastUpdate ? `last verified ${lastUpdate}` : 'never verified'
 }
+
+/**
+ * The completion refusals `complete_project_note` raises, in the engine's own
+ * words, each with what the operator should do instead.
+ *
+ * The row is decided server-side, so a refusal usually means the row was stale —
+ * and its message reached the error toast verbatim: "only a project can be
+ * completed; retire this note instead" is a sentence written for a log reader,
+ * not for someone who just clicked Complete on a project. Matched by prefix
+ * because several of them carry the offending path behind them.
+ */
+const COMPLETION_REFUSALS: ReadonlyArray<readonly [string, string]> = [
+  [
+    'only a project can be completed',
+    'This is not a project, so there is nothing to complete. Retire moves it to Retired instead.',
+  ],
+  [
+    'note is outside the vault',
+    'That note is no longer inside this workspace’s vault.',
+  ],
+  [
+    'candidate changed or no longer exists',
+    'This note changed since this list was built. The list has been refreshed — try again.',
+  ],
+  [
+    'this note has no projects/ layout',
+    'This note has no projects/ layout, so there is nowhere to complete it into.',
+  ],
+  [
+    'completion path is outside the vault',
+    'Completing this note would land outside the vault, so the move was refused.',
+  ],
+  [
+    'completion destination is outside the vault',
+    'Completing this note would land outside the vault, so the move was refused.',
+  ],
+  [
+    'a note already exists at',
+    'Something already sits at the completed path for this project, so the move was refused.',
+  ],
+]
+
+/**
+ * Plain copy for a completion refusal, or '' when the message is not one.
+ *
+ * An empty answer is the important half: anything the engine says that this
+ * table does not recognise — a genuine 500, a message from a newer engine —
+ * keeps its own wording rather than being replaced by a confident guess about
+ * a failure nobody has described here.
+ */
+export function completionRefusalCopy(message: string): string {
+  const hit = COMPLETION_REFUSALS.find(([prefix]) => message.includes(prefix))
+  return hit ? hit[1] : ''
+}

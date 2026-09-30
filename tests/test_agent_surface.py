@@ -141,6 +141,9 @@ def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> Non
         (["vault", "search", "who is Sofia", "--limit", "3"], ("vault_search", {"query": "who is Sofia", "limit": 3})),
         (["vault", "review", "list"], ("vault_review", {"action": "list"})),
         (["vault", "review", "keep", "--candidate", "c1"], ("vault_review", {"action": "decide", "candidate_id": "c1", "disposition": "keep"})),
+        (["vault", "review", "complete", "--candidate", "c1"], ("vault_review", {"action": "complete", "candidate_id": "c1"})),
+        # The verb is hyphenated on the command line and snake_cased on the wire.
+        (["vault", "review", "restore-completed", "--candidate", "c1"], ("vault_review", {"action": "restore_completed", "candidate_id": "c1"})),
         (["file", "surface", "out/report.md"], ("file_surface", {"path": "out/report.md"})),
         (["chat", "list", "--project", "p1"], ("chats_list", {"project_id": "p1"})),
         (["chat", "get", "--chat", "c2"], ("chat_get", {"chat_id": "c2"})),
@@ -194,6 +197,7 @@ def test_every_documented_command_parses() -> None:
         "vault search": ["q"], "vault review show": ["p"],
         "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
         "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
+        "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
         "project complete": ["p"], "project delete": ["p"], "schedule update": ["s"], "schedule pause": ["s"],
