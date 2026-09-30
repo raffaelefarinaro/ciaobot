@@ -902,8 +902,10 @@ the bullets it could not write.
 # receipt_id, can_accept, reason}`. `operation` is `replace` | `restamp` |
 # `retire`; `can_accept` is the server's own answer to whether the accept could
 # do what a button saying so claims (false for a note that moved since the
-# proposal was filed, a re-stamp with no frontmatter to stamp, and a record that
-# is missing or unreadable), with the reason beside it. The queue bullet's own
+# proposal was filed - a retirement included, which is refused as a conflict
+# rather than trashing a note nobody judged - a re-stamp with no frontmatter to
+# stamp, a record that has already been decided, and a record that is missing or
+# unreadable), with the reason beside it. The queue bullet's own
 # payload is the sidecar id — a digest that says nothing to a reviewer, so the
 # row is resolved server-side — and the operation, the before/after images and
 # the citations live at

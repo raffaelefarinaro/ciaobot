@@ -2384,6 +2384,7 @@ def _note_edit_vault(
     after: str = _EDIT_FOURTH,
     before: str = _EDIT_PLAIN,
     text_on_disk: str | None = None,
+    today: date | None = None,
 ) -> tuple[CiaoConfig, Any]:
     """A workspace whose queue holds one `[note_edit]` row over a real note."""
     from ciao import memory_receipts as mr
@@ -2407,6 +2408,7 @@ def _note_edit_vault(
         coverage="complete",
         evidence=(),
         reason="the third floor no longer exists",
+        today=today,
     )
     return config, proposal
 
@@ -2579,6 +2581,9 @@ def test_accepting_a_retire_trashes_the_note_and_links_the_outcome(
     assert resp.status_code == 200, resp.json()
     result = resp.json()["result"]
     assert result["promoted"] is True
+    assert not Path(result["destination"]).is_absolute(), (
+        "one destination shape, whichever operation wrote it"
+    )
     trashed = vault / result["destination"]
     assert not (vault / _EDIT_NOTE).exists()
     assert trashed.is_file()
@@ -2588,6 +2593,105 @@ def test_accepting_a_retire_trashes_the_note_and_links_the_outcome(
 
     review.restore_note(vault, trashed.stem)
     assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_PLAIN
+
+
+def test_a_retire_of_a_note_that_moved_is_a_conflict(tmp_path: Path) -> None:
+    """A retirement is checked against the revision, like every other operation.
+
+    A retirement moves whatever is on disk, and `trash_note`'s hash guard compares
+    the note to the bytes the accept just read — so without the expected revision
+    in front of it, a note rewritten after the proposal was filed would go to the
+    trash with the owner's hand-written line in it, under a 200. The note nobody
+    judged is not a note anybody may retire.
+    """
+    config, _proposal = _note_edit_vault(
+        tmp_path, operation="retire", outcome="retire", after=""
+    )
+    vault = config.workspace_vault_root("personal")
+    edited = _EDIT_PLAIN + "\nA line somebody added by hand.\n"
+    (vault / _EDIT_NOTE).write_text(edited, encoding="utf-8")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    preview = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"]
+
+    assert preview["operation"] == "retire_note"
+    assert preview["can_accept"] is False
+    assert "changed since" in preview["reason"]
+    # The card's own revision handshake covers a retirement too, rather than
+    # being skipped for the one write a person cannot walk back by editing.
+    assert preview["revision"]
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert resp.json()["conflict"] is True
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == edited, (
+        "byte-identical, untouched: nothing reached the trash"
+    )
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_settled_note_edit_row_cannot_be_accepted_again(tmp_path: Path) -> None:
+    """The accept writes first and settles second, so a row can outlive its decision.
+
+    A bullet whose removal failed leaves exactly that: a settled record behind a
+    queued row. The second click must find the decision already on record, or a
+    refusal is applied as a rewrite and an accepted retirement is performed twice.
+    """
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+    nep.settle_note_edit(config, "personal", proposal.id, accepted=True)
+
+    preview = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"]
+
+    assert preview["can_accept"] is False
+    assert "already decided" in preview["reason"]
+    assert _note_edit_row(client)["note_edit"]["can_accept"] is False
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert "already decided" in resp.json()["error"]
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_PLAIN, (
+        "the settled decision was applied once, not twice"
+    )
+    # The row is still there, because a decision cannot un-settle itself.
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_restamp_applies_the_date_it_was_filed_on(tmp_path: Path) -> None:
+    """A re-stamp's bytes are computed, so the date has to be on the record.
+
+    `date.today()` at accept time made the preview and the write two different
+    documents whenever the click landed on the other side of midnight — and the
+    card is labelled `exact`. Filed on a fixed date, the note comes back carrying
+    THAT date whatever day the accept runs on.
+    """
+    filed = date(2026, 3, 14)
+    config, _proposal = _note_edit_vault(
+        tmp_path, operation="restamp", outcome="still_valid", after="", today=filed
+    )
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    preview = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"]
+
+    assert preview["can_accept"] is True
+    assert preview["exact"] is True
+    assert "updated: 2026-03-14" in preview["after"]
+
+    accepted = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert accepted.status_code == 200, accepted.json()
+    written = (vault / _EDIT_NOTE).read_text(encoding="utf-8")
+    assert "updated: 2026-03-14" in written
+    assert written == preview["after"], "the preview's bytes are the written bytes"
 
 
 def test_dismissing_a_note_edit_settles_it_without_refusing_it_forever(

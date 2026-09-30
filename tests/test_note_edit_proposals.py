@@ -16,10 +16,13 @@ pinned here is the pair of properties the whole child exists for:
   proposed again. The category sidecar's permanent decline flag is the thing
   this design refuses to copy.
 
-Plus the two refusals that make the record trustworthy: a sidecar this version
-cannot read is refused rather than applied against a guessed operation, and a
-retirement is never anything but an attended accept — `note_verification` still
-cannot reach a delete primitive, and nothing here can reach one either.
+Plus the refusals that make the record trustworthy: a sidecar this version
+cannot read is refused rather than applied against a guessed operation, the
+reader re-asserts every per-operation rule `file_note_edit` enforced (a
+`replace` with no body, a retirement carrying one, a partial-coverage re-stamp,
+a re-stamp with no date, an outcome or coverage no verification produces), and
+a retirement is never anything but an attended accept — `note_verification`
+still cannot reach a delete primitive, and nothing here can reach one either.
 
 Every test uses a temporary synthetic vault and a config that answers one
 question about where its notes live. Nothing here reads or writes a real
@@ -577,6 +580,161 @@ def test_the_sidecar_fails_closed_on_a_malformed_row(tmp_path: Path) -> None:
     _write_row(good)
     assert nep.read_sidecar(config, "personal", proposal.id) == proposal
     assert nep.read_sidecar(config, "personal", "nope") is None
+
+
+def test_a_replace_with_no_replacement_is_refused_on_read(tmp_path: Path) -> None:
+    """The reader re-asserts the rules filing enforced, one operation at a time.
+
+    A `replace` whose `after` was emptied is the defect the reader exists to
+    stop: every field is the right type, so a type-only check waves it through,
+    and the accept then writes `''`. Filing refuses it, so a record that carries
+    one was not filed — it was written by a hand or a truncation, and it must not
+    be applied.
+    """
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+    proposal = _file(config, note)
+    path = nep.sidecar_path(config, "personal", proposal.id)
+    good = json.loads(path.read_text(encoding="utf-8"))
+
+    for blank in ("", "   "):
+        broken = json.loads(json.dumps(good))
+        broken["proposal"]["after"] = blank
+        path.write_text(json.dumps(broken), encoding="utf-8")
+        with pytest.raises(nep.NoteEditSidecarError, match="empty the note"):
+            nep.read_sidecar(config, "personal", proposal.id)
+    assert note.read_bytes() == PLAIN.encode("utf-8")
+
+
+def test_a_retire_that_carries_an_after_image_is_refused(tmp_path: Path) -> None:
+    """A retirement writes nothing, so an after image is not a small difference.
+
+    Filing drops it, so a record carrying one was not filed. Diffing it against
+    the before image would show a body that a retirement never wrote, and the
+    accept's own revision check says nothing about which text is right.
+    """
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+    proposal = _file(config, note, operation=nep.RETIRE, outcome=nv.RETIRE, after="")
+    path = nep.sidecar_path(config, "personal", proposal.id)
+
+    broken = json.loads(path.read_text(encoding="utf-8"))
+    broken["proposal"]["after"] = FOURTH
+    path.write_text(json.dumps(broken), encoding="utf-8")
+
+    with pytest.raises(nep.NoteEditSidecarError, match="after image"):
+        nep.read_sidecar(config, "personal", proposal.id)
+
+
+def test_a_restamp_needs_complete_coverage_on_read_too(tmp_path: Path) -> None:
+    """A re-stamp from partial coverage claims more than the check looked at.
+
+    The rule is 726-B's, and a record that drops it would re-stamp a note whose
+    claims were only half checked — the one outcome the partial-coverage verdict
+    exists to prevent.
+    """
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+    proposal = _file(
+        config,
+        note,
+        operation=nep.RESTAMP,
+        outcome=nv.STILL_VALID,
+        after="",
+    )
+    path = nep.sidecar_path(config, "personal", proposal.id)
+
+    broken = json.loads(path.read_text(encoding="utf-8"))
+    broken["proposal"]["coverage"] = nv.COVERAGE_PARTIAL
+    path.write_text(json.dumps(broken), encoding="utf-8")
+
+    with pytest.raises(nep.NoteEditSidecarError, match="coverage"):
+        nep.read_sidecar(config, "personal", proposal.id)
+
+
+def test_a_restamp_naming_no_stamp_date_is_refused(tmp_path: Path) -> None:
+    """The stamp date is on the record, so a blank one leaves the accept a guess.
+
+    `date.today()` at accept time is what this field replaced: a card previewed
+    on one day and clicked on the next applied bytes the reviewer never saw, under
+    an `exact` label. A record with no date of its own can only be applied that
+    way, so it is refused instead.
+    """
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+    proposal = _file(
+        config,
+        note,
+        operation=nep.RESTAMP,
+        outcome=nv.STILL_VALID,
+        after="",
+    )
+    path = nep.sidecar_path(config, "personal", proposal.id)
+
+    for blank in ("", "the other day"):
+        broken = json.loads(json.dumps(json.loads(path.read_text(encoding="utf-8"))))
+        broken["proposal"]["stamp_date"] = blank
+        path.write_text(json.dumps(broken), encoding="utf-8")
+        with pytest.raises(nep.NoteEditSidecarError, match="stamp date"):
+            nep.read_sidecar(config, "personal", proposal.id)
+
+
+def test_a_verdict_no_verification_reaches_is_refused(tmp_path: Path) -> None:
+    """`outcome` and `coverage` are a verification's, read against its own lists.
+
+    Neither is a free-text label: the outcome names which verdict the proposal
+    was filed from and the coverage is the limit on what that verdict may do, so
+    a row carrying anything else describes a verification that did not happen.
+    """
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+    proposal = _file(config, note)
+    path = nep.sidecar_path(config, "personal", proposal.id)
+    good = json.loads(path.read_text(encoding="utf-8"))
+
+    broken = json.loads(json.dumps(good))
+    broken["proposal"]["outcome"] = "looks_fine_to_me"
+    path.write_text(json.dumps(broken), encoding="utf-8")
+    with pytest.raises(nep.NoteEditSidecarError, match="outcome"):
+        nep.read_sidecar(config, "personal", proposal.id)
+
+    broken = json.loads(json.dumps(good))
+    broken["proposal"]["coverage"] = "most_of_it"
+    path.write_text(json.dumps(broken), encoding="utf-8")
+    with pytest.raises(nep.NoteEditSidecarError, match="coverage"):
+        nep.read_sidecar(config, "personal", proposal.id)
+
+    path.write_text(json.dumps(good), encoding="utf-8")
+    assert nep.read_sidecar(config, "personal", proposal.id) == proposal
+
+
+def test_a_restamp_records_the_date_it_was_filed_on(tmp_path: Path) -> None:
+    """The date is the verification's, written down when it was asked.
+
+    A re-stamp is the one operation whose bytes are computed rather than quoted,
+    so the date has to travel with the proposal or the accept would stamp the day
+    the button was pressed.
+    """
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+
+    restamp = _file(
+        config, note, operation=nep.RESTAMP, outcome=nv.STILL_VALID, after=""
+    )
+
+    assert restamp.stamp_date == TODAY.isoformat()
+    assert nep.read_sidecar(config, "personal", restamp.id).stamp_date == TODAY.isoformat()
+    # And no other operation carries one, so there is nothing to apply to a
+    # rewrite or a retirement.
+    replaced = _file(config, note, before=FOURTH, after=FOURTH)
+    assert replaced.stamp_date == ""
+    assert nep.read_sidecar(config, "personal", replaced.id).stamp_date == ""
 
 
 def test_a_corrupt_record_does_not_stop_the_others_from_settling(

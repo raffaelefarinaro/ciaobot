@@ -63,7 +63,10 @@ EXPECTED_KEYS: dict[str, list[str]] = {
     "project_fold_raised": ["error", "ok"],
     "note_edit_no_sidecar": ["error", "ok"],
     "note_edit_vault_refused": ["error", "ok"],
+    "note_edit_settled": ["destination", "error", "ok"],
     "note_edit_conflict": ["conflict", "destination", "error", "ok"],
+    "note_edit_retire_conflict": ["conflict", "destination", "error", "ok"],
+    "note_edit_retire_unreadable": ["conflict", "error", "ok"],
     "note_edit_no_frontmatter": ["destination", "error", "ok"],
     "note_edit_unreadable": ["destination", "error", "ok"],
     "note_edit_replaced": ["destination", "ok", "receipt_id"],
@@ -452,6 +455,17 @@ def test_note_edit_keys(tmp_path: Path) -> None:
         ),
     )
 
+    vault, proposal, row = _note_edit_fixture(config, tmp_path / "settled")
+    # A record the owner already decided. The accept writes or trashes first and
+    # settles second, so a row whose bullet outlived its settlement is the one
+    # way to arrive here twice, and the second arrival must write nothing.
+    nep.settle_note_edit(config, "personal", proposal.id, accepted=True)
+    payload = _assert_keys(
+        "note_edit_settled", proposal_service._accept_note_edit_row(config, row)
+    )
+    assert payload["destination"] == NOTE
+    assert (vault / NOTE).read_bytes() == PLAIN.encode("utf-8"), "no second write"
+
     vault, _proposal, row = _note_edit_fixture(config, tmp_path)
     # A note the record does not describe any more: a conflict, never an
     # overwrite. The note is byte-identical afterwards.
@@ -539,7 +553,12 @@ def test_note_edit_keys(tmp_path: Path) -> None:
 
 def test_note_edit_trash_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A retirement is attended-only and reversible: it moves the note into the
-    review trash through ``vault_review.trash_note`` and nothing else."""
+    review trash through ``vault_review.trash_note`` and nothing else.
+
+    The expected revision guards it first, which is the only conflict check a
+    move has: `trash_note` hashes the bytes the accept just read, so on its own
+    it compares the note to itself.
+    """
     from ciao import note_edit_proposals as nep
     from ciao import vault_review as review
 
@@ -556,10 +575,37 @@ def test_note_edit_trash_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     trashed = vault / payload["destination"]
     assert trashed.is_file(), payload["destination"]
     assert trashed.read_text(encoding="utf-8") == PLAIN
+    assert not Path(payload["destination"]).is_absolute(), (
+        "a destination inside the vault is named like every other one"
+    )
     # Restore is the review panel's own primitive, and it puts the note back:
     # a retirement is a move, not a deletion.
     review.restore_note(vault, trashed.stem)
     assert (vault / NOTE).read_text(encoding="utf-8") == PLAIN
+
+    # A note rewritten after the proposal was filed is a conflict, and the note
+    # is left exactly as it stands: the hand-written line was never judged.
+    vault, _proposal, row = _note_edit_fixture(
+        config, tmp_path / "moved", operation=nep.RETIRE, outcome="retire", after=""
+    )
+    edited = (FOURTH + "A line somebody added by hand.\n").encode("utf-8")
+    (vault / NOTE).write_bytes(edited)
+    payload = _assert_keys(
+        "note_edit_retire_conflict", proposal_service._accept_note_edit_row(config, row)
+    )
+    assert payload["destination"] == NOTE
+    assert (vault / NOTE).read_bytes() == edited
+
+    # A note that is not there at all cannot be retired, and says so as a
+    # conflict rather than an ordinary failure.
+    vault, _proposal, row = _note_edit_fixture(
+        config, tmp_path / "gone", operation=nep.RETIRE, outcome="retire", after=""
+    )
+    (vault / NOTE).unlink()
+    _assert_keys(
+        "note_edit_retire_unreadable",
+        proposal_service._accept_note_edit_row(config, row),
+    )
 
     # A trash that cannot happen is a refusal, and the note is still there.
     vault, _proposal, row = _note_edit_fixture(

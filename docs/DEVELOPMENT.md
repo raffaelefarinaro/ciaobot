@@ -572,7 +572,10 @@ revision)`, whose bullet payload is a sidecar id and whose record
 `expected_revision` it was planned against, and the evidence behind it. A whole
 note's before/after is not one line, which is why the payload is an id and the
 record lives beside the queue — the same shape as the category sidecar, and for
-the same reason.
+the same reason. A re-stamp also records the date the verification was dated:
+its bytes are computed rather than quoted, so the date travels with the proposal
+instead of being read off the clock at accept time, which is what makes a
+previewed card and a clicked one the same `exact` document.
 
 Three rules carry the weight, and they are worth stating before changing any of
 it. Filing is **idempotent per revision** and records the check's `proposal_id`,

@@ -136,6 +136,13 @@ class NoteEditProposal:
     it is the whole of the accept's conflict check: a note that moved since is a
     conflict with nothing written, never an overwrite.
 
+    ``stamp_date`` is the date a :data:`RESTAMP` writes into the note's
+    frontmatter, fixed HERE, when the verification that filed it was dated. It
+    cannot be left to the accept: a card previewed before midnight and clicked
+    after it would then apply a different date than the card showed, under an
+    ``exact`` label that promises the two are the same bytes. It is empty for
+    every other operation, which writes a date of nobody's business or none.
+
     ``settled`` is when the owner decided and ``accepted`` is which way, because
     a trashed note and a rewritten one are different outcomes and a record that
     cannot tell them apart says nothing. ``receipt_id`` is the note receipt an
@@ -158,6 +165,7 @@ class NoteEditProposal:
     receipt_id: str = ""
     settled: str = ""
     accepted: bool = False
+    stamp_date: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """The row the sidecar file stores."""
@@ -178,6 +186,7 @@ class NoteEditProposal:
             "receipt_id": self.receipt_id,
             "settled": self.settled,
             "accepted": self.accepted,
+            "stamp_date": self.stamp_date,
         }
 
 
@@ -260,6 +269,7 @@ _STRING_FIELDS = (
     "proposal_id",
     "receipt_id",
     "settled",
+    "stamp_date",
 )
 
 
@@ -272,6 +282,13 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
     which is the direction the rule already fails toward. Here the unreadable
     field IS the accept — the operation and the replacement text are what get
     written — so a row missing one is refused rather than defaulted.
+
+    The per-operation rules below are :func:`file_note_edit`'s, re-asserted here.
+    They have to be: a file this wrote is not the only way to get one, and a
+    hand-edited or truncated row that kept every field's TYPE could still carry
+    a ``replace`` with no replacement text, which the accept would happily write
+    as an emptied note. Checking what filing checked means the reader cannot be
+    talked into an operation nobody filed.
     """
     if not isinstance(raw, dict):
         raise NoteEditSidecarError(
@@ -305,6 +322,7 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
         receipt_id=str(raw["receipt_id"]),
         settled=str(raw["settled"]),
         accepted=bool(raw["accepted"]),
+        stamp_date=str(raw["stamp_date"]),
     )
     if not proposal.expected_revision:
         raise NoteEditSidecarError(
@@ -316,6 +334,43 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
             f"note-edit proposal {where} names operation {proposal.operation!r}, "
             f"which is not one of {', '.join(OPERATIONS)}"
         )
+    if proposal.outcome not in nv.OUTCOMES:
+        raise NoteEditSidecarError(
+            f"note-edit proposal {where} names outcome {proposal.outcome!r}, "
+            f"which is not a verification's, so it describes no verdict; nothing "
+            f"was written (expected one of {', '.join(nv.OUTCOMES)})"
+        )
+    if proposal.coverage not in (nv.COVERAGE_COMPLETE, nv.COVERAGE_PARTIAL):
+        raise NoteEditSidecarError(
+            f"note-edit proposal {where} names coverage {proposal.coverage!r}, "
+            f"which is neither {nv.COVERAGE_COMPLETE!r} nor "
+            f"{nv.COVERAGE_PARTIAL!r}; nothing was written"
+        )
+    if proposal.operation == REPLACE and not proposal.after.strip():
+        raise NoteEditSidecarError(
+            f"note-edit proposal {where} is a replace with no replacement text, "
+            "so applying it would empty the note; nothing was written"
+        )
+    if proposal.operation == RETIRE and proposal.after:
+        raise NoteEditSidecarError(
+            f"note-edit proposal {where} is a retirement that carries an after "
+            "image, so it is not the record that was filed; nothing was written"
+        )
+    if proposal.operation == RESTAMP:
+        if proposal.coverage != nv.COVERAGE_COMPLETE:
+            raise NoteEditSidecarError(
+                f"note-edit proposal {where} is a re-stamp from "
+                f"{proposal.coverage!r} coverage, and a re-stamp claims the whole "
+                "note is still true; nothing was written"
+            )
+        try:
+            date.fromisoformat(proposal.stamp_date)
+        except ValueError:
+            raise NoteEditSidecarError(
+                f"note-edit proposal {where} is a re-stamp naming stamp date "
+                f"{proposal.stamp_date!r}, which is not a date, so the date it "
+                "would stamp is not the one that was filed; nothing was written"
+            ) from None
     return proposal
 
 
@@ -545,6 +600,11 @@ def file_note_edit(
     order it was first asked in, and nothing about the new question depends on
     the answer to the old one.
 
+    ``today`` is the verification's date and it is recorded, not merely used: it
+    becomes a re-stamp's :attr:`NoteEditProposal.stamp_date`, so the accept
+    stamps the day the verdict was reached rather than the day the button was
+    pressed.
+
     Raises :class:`NoteEditRefused` for anything that is not a note edit that
     may be filed — see that class for the list. It never applies anything: the
     edit waits for a person, and a retirement is a human click all the way down.
@@ -597,6 +657,11 @@ def file_note_edit(
     # No body for a retirement: keeping an after image would let a reader diff
     # an "edit" that is really a removal.
     after_text = "" if operation == RETIRE else str(after or "")
+    # And the re-stamp's date is THIS verification's date, recorded rather than
+    # left to the accept: the card is labelled `exact`, so the date the reviewer
+    # read and the date the note gets must be the same string, and a click on the
+    # other side of midnight would otherwise stamp a day nobody agreed to.
+    stamp_date = day.isoformat() if operation == RESTAMP else ""
 
     root = _vault_root(config, workspace)
     proposal_id = note_edit_id(workspace, key, revision)
@@ -622,6 +687,7 @@ def file_note_edit(
         coverage=coverage,
         evidence=tuple(evidence or ()),
         reason=str(reason or ""),
+        stamp_date=stamp_date,
         # A re-filing rebuilds the record from the verdict in hand, because the
         # id is derived from the note and its revision and a later pass may have
         # reached a DIFFERENT verdict about that same text — a retirement that
