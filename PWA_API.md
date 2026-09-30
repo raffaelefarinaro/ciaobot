@@ -862,7 +862,12 @@ note into `Workspace/.vault-trash/`, from where the review panel's restore puts
 it back. `dismiss` writes nothing, but on a `note_edit` row it SETTLES the
 proposal, clearing the note-check's `proposal_id` — deliberately not a permanent
 "refused" marker, so the note is not asked about again until its cooldown
-expires and an edited note is proposed again straight away. Batch accept applies
+expires and an edited note is proposed again straight away. A write that lands
+but cannot be recorded as decided — the sidecar unreadable, the lock held — is a
+**409**, not a success: the error names the note and its receipt, the bullet
+stays queued, and that dismissal is what settles the record. Reporting it as an
+accept would take away the only control the owner has over a note whose proposal
+is no longer in the queue. Batch accept applies
 the same rules per row and reports `promoted` and `dismissed` for each, keeping
 the bullets it could not write.
 

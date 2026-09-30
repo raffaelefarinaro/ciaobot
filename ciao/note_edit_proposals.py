@@ -504,10 +504,21 @@ def _bullet_fields(
     about one exact text, so the reviewer is entitled to see which one — and when
     the note has moved, the row's accept says so as a conflict rather than
     quietly rewriting what is there now.
+
+    The text is built through :func:`ciao.memory_proposals._one_line`, the queue's
+    own collapse, because ``append_proposals`` writes the bullet that way: a
+    reason carrying a newline or a run of spaces reaches the file collapsed, and a
+    text that was not built the same way is not the text the queue then holds —
+    so :func:`_queued_row_id` would never match it, ``record_note_check`` would be
+    skipped, and every pass would re-verify and re-file the same note. Built the
+    same way, a multi-line reason is the same question as the one-line one, which
+    is what the reviewer filed and what dedupe is entitled to call a duplicate.
     """
+    from ciao.memory_proposals import _one_line
+
     head = f"{relative_path} — {operation} (rev {expected_revision[:8]})"
     text = f"{head}: {reason}" if reason else head
-    return text, f"note verification · {operation}"
+    return _one_line(text), f"note verification · {operation}"
 
 
 def _queued_row_id(
@@ -521,21 +532,49 @@ def _queued_row_id(
     well as the live queue, so a bullet it declined to write would otherwise be
     reported as filed — and the check would then be pinned to a proposal id that
     names nothing.
+
+    Compared through the queue's own :func:`ciao.memory_proposals._one_line` on
+    both sides, because that is how the file was written: matching the raw text
+    against a parsed bullet misses every reason carrying a newline or a run of
+    spaces, and a miss here is not a cosmetic one — it is an unpinned check, so
+    the next pass re-verifies and re-files a note that is already on file.
     """
+    from ciao.memory_proposals import _one_line
+
     root = _vault_root(config, workspace)
     rel_path = Path(workspace).joinpath(*_QUEUE_RELATIVE).as_posix()
     try:
         queued = root.joinpath(*_QUEUE_RELATIVE).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return ""
+    wanted = _one_line(text)
     for entry in proposal_tracking.walk_proposal_queue(workspace, rel_path, queued):
         if (
             entry.bullet.kind == KIND
-            and entry.bullet.text == text
+            and _one_line(entry.bullet.text) == wanted
             and entry.bullet.source == source
         ):
             return entry.proposal_id
     return ""
+
+
+def _same_question(
+    existing: NoteEditProposal, *, operation: str, after: str, stamp_date: str
+) -> bool:
+    """Whether a re-filing asks the question the record on file already asks.
+
+    Only what ACCEPTING it would do is compared: the operation, the exact bytes
+    it would write, and the date a re-stamp would stamp. The outcome, the
+    coverage and the evidence explain the question rather than change the write,
+    so a later pass that reached the same operation with better evidence is
+    still the same question and re-arms the record rather than queuing a second
+    row for it.
+    """
+    return (
+        existing.operation == operation
+        and existing.after == after
+        and existing.stamp_date == stamp_date
+    )
 
 
 def _check_for(proposal: NoteEditProposal, *, today: date) -> nv.NoteCheck:
@@ -595,10 +634,17 @@ def file_note_edit(
     the same verdict about the same text while its row is still queued returns
     the proposal already on file and writes nothing, so a nightly pass that
     reaches the same conclusion twice cannot leave the owner two identical rows
-    to decide. Once that row is settled the record is re-armed from the verdict
-    in hand, and the bullet is written again — the sidecar's own order is the
-    order it was first asked in, and nothing about the new question depends on
-    the answer to the old one.
+    to decide.
+
+    A second filing that reaches a DIFFERENT verdict about that text — a
+    retirement that became an update, or the other way round — is the case the id
+    cannot answer on its own, because the id is the note and its revision and
+    nothing about which question is being asked. So the row already in the queue
+    wins until it is decided: the record is not overwritten, because the record
+    is the operation an accept applies and the queued bullet names that record.
+    Once the row is gone the record is re-armed from the verdict in hand — the
+    sidecar's own order is the order it was first asked in, and nothing about the
+    new question depends on the answer to the old one.
 
     ``today`` is the verification's date and it is recorded, not merely used: it
     becomes a re-stamp's :attr:`NoteEditProposal.stamp_date`, so the accept
@@ -669,11 +715,39 @@ def file_note_edit(
 
     existing = read_sidecar(config, workspace, proposal_id)
     if existing is not None and not existing.settled:
-        if _queued_row_id(config, workspace, text, source):
-            return existing
-        # The record is on file but its bullet is gone — a dismissal straight
-        # from the CLI, or a hand edit. Re-queue it below rather than leaving a
-        # pending proposal nobody is being asked about.
+        if _same_question(
+            existing, operation=operation, after=after_text, stamp_date=stamp_date
+        ):
+            if _queued_row_id(config, workspace, text, source):
+                return existing
+            # The record is on file but its bullet is gone — a dismissal straight
+            # from the CLI, or a hand edit. Re-queue it below rather than leaving a
+            # pending proposal nobody is being asked about.
+        else:
+            # A DIFFERENT verdict about the very same text, while the question the
+            # record on file asks is still in the queue. The record IS the
+            # operation an accept applies, so writing this one over it would leave
+            # the queued bullet reading "replace" and resolve to a retirement
+            # nobody was asked about — the one outcome worse than filing nothing.
+            # The pending row wins until it is decided; a later pass re-arms the
+            # record from the verdict in hand once that row is gone, which is the
+            # same path a settled record takes.
+            pending_text, pending_source = _bullet_fields(
+                existing.relative_path,
+                existing.operation,
+                existing.expected_revision,
+                existing.reason,
+            )
+            if _queued_row_id(config, workspace, pending_text, pending_source):
+                logger.info(
+                    "note edit %s: a %s for %s is still queued, so this %s is not "
+                    "filed over it",
+                    proposal_id,
+                    existing.operation,
+                    key,
+                    operation,
+                )
+                return existing
 
     proposal = NoteEditProposal(
         id=proposal_id,

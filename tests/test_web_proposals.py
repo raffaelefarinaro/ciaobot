@@ -2813,6 +2813,89 @@ def test_a_note_edit_without_its_record_keeps_the_bullet(tmp_path: Path) -> None
     assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_PLAIN
 
 
+def test_a_write_that_cannot_be_settled_keeps_the_row_and_says_why(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The write landed; the decision did not. The row has to survive.
+
+    An ``ok=True`` here removes the bullet, and the bullet is the only thing left
+    to act on: the sidecar stays unsettled, the check keeps this revision pinned
+    to a proposal nobody is being asked about, and
+    ``note_verification._check_settles`` suppresses the note for good — for a
+    re-stamp of an already-current note, whose revision never moves, that means
+    it is never verified again. So the accept refuses with what landed and where,
+    and the row stays for the dismissal that settles it.
+    """
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    def _read_only(*_args: Any, **_kwargs: Any) -> Any:
+        raise nep.NoteEditSidecarError("the sidecar is read-only")
+
+    monkeypatch.setattr(nep, "settle_note_edit", _read_only)
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    error = resp.json()["error"]
+    assert f"{_EDIT_NOTE} was written and the receipt is" in error
+    assert "the sidecar is read-only" in error
+    assert "Dismiss this row" in error
+    # The write stands and the row is still there to be acted on.
+    assert (vault / _EDIT_NOTE).read_text(encoding="utf-8") == _EDIT_FOURTH
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    unsettled = nep.read_sidecar(config, "personal", proposal.id)
+    assert unsettled is not None and unsettled.settled == ""
+
+    # The transient failure is over, and the row is the recovery path: a
+    # dismissal settles the record it could not.
+    monkeypatch.undo()
+    dismissed = client.post(f"/api/proposals/{row['id']}/dismiss")
+
+    assert dismissed.status_code == 200, dismissed.json()
+    assert client.get("/api/proposals").json()["rows"] == []
+    settled = nep.read_sidecar(config, "personal", proposal.id)
+    assert settled is not None and settled.settled != ""
+    assert settled.accepted is False, "a dismissal is a refusal, not an accept"
+
+
+def test_a_retire_that_cannot_be_settled_keeps_the_row_too(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A retirement is the one write a person cannot walk back by editing.
+
+    So the row that says the note is in the trash has to stay until the record of
+    the decision is on disk: a check pinned to a proposal that is no longer
+    queued suppresses a note nothing will ever ask about again.
+    """
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(
+        tmp_path, operation="retire", outcome="retire", after=""
+    )
+    vault = config.workspace_vault_root("personal")
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    def _read_only(*_args: Any, **_kwargs: Any) -> Any:
+        raise nep.NoteEditSidecarError("the sidecar is read-only")
+
+    monkeypatch.setattr(nep, "settle_note_edit", _read_only)
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert "could not be settled" in resp.json()["error"]
+    assert not (vault / _EDIT_NOTE).exists(), "the note really was trashed"
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+    unsettled = nep.read_sidecar(config, "personal", proposal.id)
+    assert unsettled is not None and unsettled.settled == ""
+
+
 def test_a_dismiss_that_cannot_be_settled_keeps_the_bullet(tmp_path: Path) -> None:
     from ciao import note_edit_proposals as nep
 

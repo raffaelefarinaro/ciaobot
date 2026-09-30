@@ -238,6 +238,88 @@ def test_refiling_the_same_revision_writes_nothing(tmp_path: Path) -> None:
     )
 
 
+def test_a_later_verdict_never_overwrites_a_still_queued_question(
+    tmp_path: Path,
+) -> None:
+    """The record IS the operation, so a queued bullet must keep naming it.
+
+    The id is derived from the note and its revision and nothing else, so a
+    retirement filed over a still-queued replacement lands on the same file. The
+    replacement's bullet stays in the queue reading "replace" while the record it
+    points at now says "retire" — a row whose accept removes a note the reviewer
+    was asked to rewrite. So the row already in the queue wins until it is
+    decided, and the later verdict is filed once the answer is in.
+    """
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+
+    first = _file(config, note)
+    second = _file(
+        config, note, operation=nep.RETIRE, outcome=nv.RETIRE, after=""
+    )
+
+    assert second == first, "the question the owner is being asked wins"
+    assert second.operation == nep.REPLACE
+    assert second.after == FOURTH, "not the replacement text of a retirement"
+    queued = _queue_text(vault)
+    assert queued.count("- [note_edit ") == 1, "one row, not a second question"
+    assert f"— {nep.REPLACE} (rev {_revision(PLAIN)[:8]})" in queued
+    assert nep.RETIRE not in queued, "the label matches what accepting it does"
+    # And the check keeps pinning the row that is actually queued.
+    assert nv.read_note_checks(vault)[NOTE].proposal_id == first.proposal_id
+
+    # Once that row is decided the record re-arms from the verdict in hand, so a
+    # retirement the later pass reached is not lost to the earlier question.
+    nep.settle_note_edit(config, "personal", first.id, accepted=False)
+    _dismiss_row(vault, first.id)
+
+    third = _file(
+        config, note, operation=nep.RETIRE, outcome=nv.RETIRE, after=""
+    )
+
+    assert third.id == first.id, "one record per (note, revision)"
+    assert third.operation == nep.RETIRE
+    assert third.after == ""
+    assert _queue_text(vault).count("- [note_edit ") == 1
+    assert f"— {nep.RETIRE} (rev {_revision(PLAIN)[:8]})" in _queue_text(vault)
+    assert nv.read_note_checks(vault)[NOTE].proposal_id == third.proposal_id
+
+
+def test_a_reason_that_spans_lines_still_pins_the_check(tmp_path: Path) -> None:
+    """A multi-line reason is one bullet, so it is one question with one row.
+
+    The queue is line-oriented and `append_proposals` collapses the reason
+    through `_one_line` before writing it. Reading the row back with the RAW text
+    found nothing, so the filing skipped `record_note_check` — and a check with
+    no `proposal_id` holds off nothing, so every pass re-verified the note and
+    re-filed it against a row that was already there. The bullet is built and
+    matched through the queue's own collapse, which is what makes the row
+    findable at all.
+    """
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+    reason = "the third floor no longer exists\nand reception moved to Via Leoni 4"
+
+    proposal = _file(config, note, reason=reason)
+
+    queued = _queue_text(vault)
+    assert queued.count("- [note_edit ") == 1
+    assert (
+        f"— {nep.REPLACE} (rev {_revision(PLAIN)[:8]}): the third floor no longer "
+        "exists and reception moved to Via Leoni 4" in queued
+    ), "collapsed onto one line, exactly as the queue writes it"
+    assert proposal.proposal_id, "the row id was read back, so the check can name it"
+    assert nv.read_note_checks(vault)[NOTE].proposal_id == proposal.proposal_id
+
+    # And the same verdict again is the same question, not a second row.
+    again = _file(config, note, reason=reason)
+
+    assert again == proposal
+    assert _queue_text(vault).count("- [note_edit ") == 1
+
+
 def test_a_filed_proposal_records_a_check_naming_its_queue_row(
     tmp_path: Path,
 ) -> None:

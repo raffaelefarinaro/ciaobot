@@ -659,12 +659,10 @@ def _note_edit_moved(proposal: Any, current: str) -> bool:
 
 
 _CHANGED_SINCE = "this note changed since the proposal was filed"
-"""The opening every "the note moved under this proposal" refusal shares, and
-the substring :func:`_accept_note_edit_row` matches to tell a conflict from an
-ordinary refusal. Two operations, two sentences, one phrase to key on: the
-client reopens its preview for a conflict and reports a permanent failure for
-anything else, so the distinction has to live in the text, not in a second
-return value nobody reads."""
+"""The opening every "the note moved under this proposal" refusal shares. Two
+operations, two sentences, one phrase to key on: the refusals read alike because
+they are the same problem, and :class:`_NoteEditAfter` carries the conflict flag
+beside them so no caller has to tell them apart by their wording."""
 
 
 _ALREADY_DECIDED = "already decided; dismiss this row"
@@ -674,7 +672,24 @@ is the one case that can reach an accept twice; the second click must find
 nothing to do rather than write the same decision again."""
 
 
-def _note_edit_after(proposal: Any, current: str) -> tuple[str, str]:
+@dataclass(frozen=True, slots=True)
+class _NoteEditAfter:
+    """What one `note_edit` would leave behind, or why it cannot.
+
+    A value rather than a ``(text, reason)`` pair because the refusals split in
+    two and the split used to be a substring match on the message: a conflict is
+    a row the owner can decide again after re-reading, and everything else is a
+    permanent failure. A rewording of the sentence would have silently changed
+    what a 409 means to the client, so the distinction is a field — a caller asks
+    :attr:`conflict` and cannot be misled by wording.
+    """
+
+    text: str
+    reason: str
+    conflict: bool = False
+
+
+def _note_edit_after(proposal: Any, current: str) -> _NoteEditAfter:
     """The exact bytes this note edit would leave behind, or why it cannot.
 
     Reads the note's CURRENT text rather than the sidecar's before image. The
@@ -683,56 +698,76 @@ def _note_edit_after(proposal: Any, current: str) -> tuple[str, str]:
     text that is no longer there, so it is a conflict with nothing written
     rather than an edit.
 
-    Returns ``("", "")`` for a :data:`ciao.note_edit_proposals.RETIRE`, which
-    writes no body at all, and ``(text, "")`` for an edit that may be applied.
-    A refusal is ``("", reason)``; the caller turns the reason into the
-    preview's `can_accept: False` and the accept's error, from this one function
-    so a row whose button is offered is exactly a row whose accept can work.
+    An empty :attr:`_NoteEditAfter.text` with no :attr:`_NoteEditAfter.reason` is
+    a :data:`ciao.note_edit_proposals.RETIRE`, which writes no body at all, and
+    an empty reason is an edit that may be applied. Both refusals the note's own
+    state produces — no readable note, and a note that moved — are conflicts,
+    because in each the note on disk is not the text anybody judged; the rest are
+    refusals about the record itself, which a fresh pass could file again. One
+    function, so a row whose button is offered is exactly a row whose accept can
+    work.
     """
     from ciao import note_edit_proposals as nep
     from ciao.note_verification import _ALREADY_CURRENT
     from ciao.vault_review import _stamp_updated
 
     if not current:
-        return "", (
-            "the note is no longer readable in this vault, so there is nothing "
-            "to write against"
+        return _NoteEditAfter(
+            "",
+            (
+                "the note is no longer readable in this vault, so there is nothing "
+                "to write against"
+            ),
+            conflict=True,
         )
     if _note_edit_moved(proposal, current):
-        return "", (
-            f"{_CHANGED_SINCE}, so the replacement was planned against text "
-            "that is no longer there; nothing was written"
+        return _NoteEditAfter(
+            "",
+            (
+                f"{_CHANGED_SINCE}, so the replacement was planned against text "
+                "that is no longer there; nothing was written"
+            ),
+            conflict=True,
         )
     if proposal.operation == nep.RETIRE:
-        return "", ""
+        return _NoteEditAfter("", "")
     if proposal.operation == nep.REPLACE:
         if not proposal.after.strip():
             # `file_note_edit` refuses this and the sidecar reader refuses it too;
             # checked again here because this is the function that decides what
             # gets written, and an empty write is a deletion.
-            return "", (
-                "the filed replacement text is empty, so applying it would empty "
-                "the note; nothing was written"
+            return _NoteEditAfter(
+                "",
+                (
+                    "the filed replacement text is empty, so applying it would "
+                    "empty the note; nothing was written"
+                ),
             )
-        return proposal.after, ""
+        return _NoteEditAfter(proposal.after, "")
     if not proposal.stamp_date:
         # A restamp with no date of its own would stamp whatever day the accept
         # happened to run, which is exactly the drift the record exists to stop.
-        return "", (
-            "the filed re-stamp names no date, so there is nothing exact to "
-            "stamp; nothing was written"
+        return _NoteEditAfter(
+            "",
+            (
+                "the filed re-stamp names no date, so there is nothing exact to "
+                "stamp; nothing was written"
+            ),
         )
     stamped, status = _stamp_updated(current, proposal.stamp_date)
     if stamped is not None:
-        return stamped, ""
+        return _NoteEditAfter(stamped, "")
     if status == _ALREADY_CURRENT:
         # Nothing to stamp, and that is a success rather than a refusal: the
         # write records a receipt with `changed=False`, so History can show the
         # verification even though the bytes did not move.
-        return current, ""
-    return "", (
-        "the note has no frontmatter `updated:` to stamp, and adding one would "
-        "restructure a file that was only asked to be verified"
+        return _NoteEditAfter(current, "")
+    return _NoteEditAfter(
+        "",
+        (
+            "the note has no frontmatter `updated:` to stamp, and adding one would "
+            "restructure a file that was only asked to be verified"
+        ),
     )
 
 
@@ -803,7 +838,7 @@ def _note_edit_row_fields(config, workspace: str, sidecar_id: str) -> dict[str, 
             reason=f"could not resolve the vault: {exc}",
         )
         return fields
-    _after, refusal = _note_edit_after(
+    plan = _note_edit_after(
         proposal, _note_edit_note_text(vault, proposal.relative_path)
     )
     fields["note_edit"].update(
@@ -811,8 +846,11 @@ def _note_edit_row_fields(config, workspace: str, sidecar_id: str) -> dict[str, 
         outcome=proposal.outcome,
         settled=proposal.settled,
         receipt_id=proposal.receipt_id,
-        can_accept=not refusal,
-        reason=refusal or proposal.reason,
+        can_accept=not plan.reason,
+        # The refusal, or else the verification's own reason: a row the server
+        # will not let anyone accept shows no card, so this string is the only
+        # place the owner is told why.
+        reason=plan.reason or proposal.reason,
     )
     return fields
 
@@ -1888,10 +1926,14 @@ def _retire_note(config, vault: Path, row: dict[str, Any], proposal: Any) -> Acc
     ).as_posix()
     refusal = _settle_note_edit(config, row, accepted=True)
     return AcceptOutcome(
-        ok=True,
+        ok=not refusal,
         destination=destination,
         # The note really was trashed, so an unsettleable record is reported
-        # beside what landed rather than as a failed accept.
+        # beside what landed rather than as an accept that never happened. The
+        # row stays queued for the same reason an edit's does: it is the only
+        # thing left to dismiss, and a dismissal settles the record. Retrying the
+        # accept instead finds the note gone and refuses, which is why the
+        # message names the dismissal.
         error=(
             f"{proposal.relative_path} was moved to {destination} but the "
             f"proposal could not be settled: {refusal}. Dismiss this row to "
@@ -2004,19 +2046,21 @@ def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
     destination = proposal.relative_path
     if proposal.operation == nep.RETIRE:
         return _retire_note(config, vault, row, proposal)
-    after_text, refusal = _note_edit_after(
+    plan = _note_edit_after(
         proposal, _note_edit_note_text(vault, proposal.relative_path)
     )
-    if refusal:
-        # A conflict is told apart from an ordinary refusal because the row is
-        # still promotable, just not against the text the owner read: the client
-        # reopens its preview rather than reporting a permanent failure.
+    if plan.reason:
+        # A conflict is told apart from an ordinary refusal by the flag the plan
+        # carries, not by its wording: the row is still promotable, just not
+        # against the text the owner read, so the client reopens its preview
+        # rather than reporting a permanent failure.
         return AcceptOutcome(
             ok=False,
-            conflict="changed since the proposal was filed" in refusal,
+            conflict=plan.conflict,
             destination=destination,
-            error=refusal,
+            error=plan.reason,
         )
+    after_text = plan.text
     try:
         receipt = nr.commit_note_change(
             vault_root=vault,
@@ -2048,10 +2092,19 @@ def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
         config, row, accepted=True, receipt_id=receipt_id
     )
     if refusal:
-        # The note really was written, so this is not reported as a failed
-        # accept: it says what landed, where, and what could not be recorded.
+        # The note WAS written — so this says what landed, where, and with which
+        # receipt — but it is not a successful accept, and that is the whole point
+        # of saying so. An `ok=True` here takes the bullet out of the queue, and a
+        # bullet is the only thing the owner has to act on: removing it leaves the
+        # sidecar unsettled and the check still pinned to this revision, so
+        # `note_verification._check_settles` suppresses the note indefinitely. For
+        # a re-stamp of an already-current note the revision never moves, so
+        # nothing else would bring it back to a pass. Refused, the row stays: the
+        # next accept finds the conflict and says so, or the owner dismisses it —
+        # and the dismissal is itself a settle, so a transient failure here is
+        # recoverable.
         return AcceptOutcome(
-            ok=True,
+            ok=False,
             destination=destination,
             receipt_id=receipt_id,
             error=(
@@ -2580,17 +2633,17 @@ def _note_edit_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
                 "moves the note to the review trash, where it can be restored"
             )
         return out
-    after_text, refusal = _note_edit_after(proposal, current)
+    plan = _note_edit_after(proposal, current)
     before_clip, before_cut = _clip(current)
-    after_clip, after_cut = _clip(after_text)
+    after_clip, after_cut = _clip(plan.text)
     out["operation"] = "note_edit"
     out["before"] = before_clip
     out["after"] = after_clip
     out["truncated"] = before_cut or after_cut
     out["revision"] = content_revision(current)
     out["exact"] = True
-    out["can_accept"] = not refusal
-    out["reason"] = refusal or (
+    out["can_accept"] = not plan.reason
+    out["reason"] = plan.reason or (
         "rewrites the whole note; the change is undoable from History"
     )
     return out

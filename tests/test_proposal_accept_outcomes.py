@@ -68,10 +68,13 @@ EXPECTED_KEYS: dict[str, list[str]] = {
     "note_edit_retire_conflict": ["conflict", "destination", "error", "ok"],
     "note_edit_retire_unreadable": ["conflict", "error", "ok"],
     "note_edit_no_frontmatter": ["destination", "error", "ok"],
-    "note_edit_unreadable": ["destination", "error", "ok"],
+    # A note that is not there any more is a conflict on BOTH operations, so the
+    # client reopens the preview for it exactly as it does for a note that moved.
+    "note_edit_unreadable": ["conflict", "destination", "error", "ok"],
     "note_edit_replaced": ["destination", "ok", "receipt_id"],
     "note_edit_written_raised": ["destination", "error", "ok", "receipt_id"],
     "note_edit_trashed": ["destination", "ok"],
+    "note_edit_trash_unsettleable": ["destination", "error", "ok"],
     "note_edit_trash_raised": ["error", "ok"],
 }
 
@@ -494,14 +497,16 @@ def test_note_edit_keys(tmp_path: Path) -> None:
     )
     assert payload["destination"] == NOTE
 
-    # A note that is not there at all.
+    # A note that is not there at all: a conflict, like a retirement's, so the
+    # client reopens its preview rather than reporting a permanent failure.
     vault, _proposal, row = _note_edit_fixture(
         config, tmp_path / "unreadable"
     )
     (vault / NOTE).unlink()
-    _assert_keys(
+    payload = _assert_keys(
         "note_edit_unreadable", proposal_service._accept_note_edit_row(config, row)
     )
+    assert payload["conflict"] is True
 
     # A config that cannot say where the workspace's notes live. Refused rather
     # than written somewhere a caller chose.
@@ -532,9 +537,11 @@ def test_note_edit_keys(tmp_path: Path) -> None:
     assert settled.accepted is True
     assert settled.receipt_id == payload["receipt_id"]
 
-    # A write that lands and then cannot be recorded as settled is reported as
-    # what it is: the note really was written, with the receipt to prove it, and
-    # a row to dismiss by hand. Never as a failed accept.
+    # A write that lands and then cannot be recorded as settled says what landed
+    # — the note, the path and the receipt to undo it — and is NOT a successful
+    # accept. The bullet is the only thing left to act on, so an ok here would
+    # remove it, leave the record unsettled and the check still pinned to this
+    # revision: `_check_settles` would then suppress the note for good.
     vault, _proposal, row = _note_edit_fixture(config, tmp_path / "unsettleable")
     monkey = proposal_service._settle_note_edit
     try:
@@ -547,8 +554,12 @@ def test_note_edit_keys(tmp_path: Path) -> None:
         )
     finally:
         proposal_service._settle_note_edit = monkey  # type: ignore[assignment]
+    assert payload["ok"] is False, "the row must survive to be dismissed"
     assert payload["receipt_id"] != ""
     assert "could not be settled" in payload["error"]
+    assert (vault / NOTE).read_bytes() == FOURTH.encode("utf-8"), "the write stands"
+    still = nep.read_sidecar(config, "personal", _proposal.id)
+    assert still is not None and still.settled == "", "nothing was recorded"
 
 
 def test_note_edit_trash_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -607,7 +618,29 @@ def test_note_edit_trash_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         proposal_service._accept_note_edit_row(config, row),
     )
 
-    # A trash that cannot happen is a refusal, and the note is still there.
+    # A retirement that lands and then cannot be recorded is the same shape as an
+    # edit's: the note is in the trash, the row stays, and the row is the only
+    # thing left to dismiss — and a dismissal settles the record.
+    vault, _proposal, row = _note_edit_fixture(
+        config,
+        tmp_path / "unsettleable",
+        operation=nep.RETIRE,
+        outcome="retire",
+        after="",
+    )
+    monkeypatch.setattr(
+        proposal_service, "_settle_note_edit", lambda *a, **k: "the sidecar is read-only"
+    )
+    payload = _assert_keys(
+        "note_edit_trash_unsettleable",
+        proposal_service._accept_note_edit_row(config, row),
+    )
+    assert payload["ok"] is False, "the row must survive to be dismissed"
+    assert "could not be settled" in payload["error"]
+    assert (vault / payload["destination"]).is_file()
+
+    # A trash that cannot happen is a refusal, and the note is still there. Last,
+    # because it patches out the very primitive the two cases above performed.
     vault, _proposal, row = _note_edit_fixture(
         config, tmp_path / "refused", operation=nep.RETIRE, outcome="retire", after=""
     )

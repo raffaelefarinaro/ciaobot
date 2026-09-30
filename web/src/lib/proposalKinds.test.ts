@@ -123,6 +123,18 @@ describe('note_edit', () => {
     expect(descriptorFor(r).discussLabel(r))
       .toBe('a note edit a verification could not settle')
   })
+
+  it('is the one kind whose wording cannot be edited', () => {
+    // The accept reads the replacement from the sidecar and the preview ignores
+    // the wording, so an editor would re-preview text the write never sees.
+    // Every other kind leaves the flag unset, which means editable.
+    expect(PROPOSAL_KINDS.note_edit.editable).toBe(false)
+    for (const kind of Object.keys(PROPOSAL_KINDS)) {
+      if (kind === 'note_edit') continue
+      expect(PROPOSAL_KINDS[kind as keyof typeof PROPOSAL_KINDS].editable, kind)
+        .not.toBe(false)
+    }
+  })
 })
 
 describe('kindLabel', () => {
