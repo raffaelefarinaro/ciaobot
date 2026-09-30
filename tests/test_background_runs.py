@@ -11,13 +11,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import stat
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ciao import background, job_runs
+from ciao.os_support.processes import ProcessTree
+from tests.test_os_support_processes import _beats_stopped, _leader, _wait_for_beat
 from ciao.background import (
     BackgroundRun,
     BackgroundRunError,
@@ -405,6 +409,79 @@ async def test_cancel_terminates_the_whole_process_tree(tmp_path: Path) -> None:
     assert len(collector.finished) == 1
 
 
+
+async def test_cancel_ends_a_grandchild_on_every_os(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real spawn, tree and cancel, with a Python command that forks."""
+    monkeypatch.setattr(background, "CANCEL_GRACE_SECONDS", 0.5)
+    runner = _runner(tmp_path)
+    beat = tmp_path / "beat"
+    run = await runner.start_run(
+        parent_chat_id="chat-1", cmd=_leader(beat, then="time.sleep(300)"), timeout_s=300
+    )
+    await asyncio.to_thread(_wait_for_beat, beat)
+    final = await runner.cancel(run.run_id)
+    assert final.status == "cancelled"
+    assert await asyncio.to_thread(_beats_stopped, beat), "the grandchild survived the cancel"
+
+
+# Ignore the polite stop (SIGTERM on POSIX, CTRL_BREAK on Windows), so only the
+# kill after the grace period can end the process that runs this.
+_IGNORE_STOP = (
+    "import signal; "
+    "[signal.signal(getattr(signal, name), signal.SIG_IGN) "
+    "for name in ('SIGTERM', 'SIGBREAK') if hasattr(signal, name)]"
+)
+
+
+async def test_shutdown_kills_a_grandchild_after_the_leader_exits_in_the_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stop()` must still reach the tree when the leader is gone before the kill.
+
+    The leader outlives the polite stop, then exits on its own inside the grace
+    period, so the supervisor finishes before `_terminate` sends its kill. If the
+    supervisor closed the tree at that point, the kill would have nothing to
+    reach on Windows and the grandchild, which also ignores the polite stop,
+    would keep beating.
+    """
+    monkeypatch.setattr(background, "CANCEL_GRACE_SECONDS", 3.0)
+    runner = _runner(tmp_path)
+    beat = tmp_path / "beat"
+    # The real interpreter, not a venv's launcher: a launcher does not ignore
+    # the polite stop, and its death takes its interpreter with it, which would
+    # end the grandchild whatever the kill did.
+    python = getattr(sys, "_base_executable", sys.executable)
+    grandchild ="\n".join(
+        [
+            _IGNORE_STOP,
+            "import sys, time",
+            "while True:",
+            "    open(sys.argv[1], 'w').write(str(time.monotonic()))",
+            "    time.sleep(0.05)",
+        ]
+    )
+    leader = "\n".join(
+        [
+            _IGNORE_STOP,
+            "import subprocess, sys, time",
+            # Not on the run's pipe: holding it open would keep the supervisor
+            # waiting past the kill, and the leader's exit has to finish it.
+            f"subprocess.Popen([{python!r}, '-c', {grandchild!r}, {str(beat)!r}],"
+            " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+            "time.sleep(1.5)",
+        ]
+    )
+    await runner.start_run(
+        parent_chat_id="chat-1", cmd=[python, "-c", leader], timeout_s=300
+    )
+    await asyncio.to_thread(_wait_for_beat, beat)
+    await runner.stop()
+    assert await asyncio.to_thread(_beats_stopped, beat), "the grandchild survived the shutdown"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pins the POSIX killpg calls")
 async def test_terminate_kills_group_after_leader_has_exited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -421,16 +498,16 @@ async def test_terminate_kills_group_after_leader_has_exited(
 
     monkeypatch.setattr(background, "CANCEL_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(
-        background.os,
+        os,
         "killpg",
         lambda pid, sig: signals.append((pid, sig)),
     )
 
-    await runner._terminate(_ExitedProcess())  # type: ignore[arg-type]
+    await runner._terminate(_ExitedProcess(), ProcessTree(12345))  # type: ignore[arg-type]
 
     assert signals == [
-        (12345, background.signal.SIGTERM),
-        (12345, background.signal.SIGKILL),
+        (12345, signal.SIGTERM),
+        (12345, signal.SIGKILL),
     ]
 
 
@@ -578,7 +655,7 @@ async def test_stop_terminates_multiple_live_runs_concurrently(tmp_path: Path) -
     started: list[object] = []
     release = asyncio.Event()
 
-    async def fake_terminate(proc: object) -> None:
+    async def fake_terminate(proc: object, tree: object) -> None:
         started.append(proc)
         if len(started) == 1:
             first_started.set()
@@ -587,6 +664,10 @@ async def test_stop_terminates_multiple_live_runs_concurrently(tmp_path: Path) -
         await release.wait()
 
     runner._procs = {"run-a": object(), "run-b": object()}  # type: ignore[assignment]
+    runner._trees = {  # type: ignore[assignment]
+        "run-a": SimpleNamespace(close=lambda: None),
+        "run-b": SimpleNamespace(close=lambda: None),
+    }
     runner._terminate = fake_terminate  # type: ignore[method-assign]
 
     stop_task = asyncio.create_task(runner.stop())

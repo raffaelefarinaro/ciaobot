@@ -1230,3 +1230,21 @@ async def test_a_tests_folder_inside_a_workspace_vault_is_not_a_fixture(
     assert scoped["eligible"] == ["personal/memory-vault/tests/server.key"]
     assert any("server.key" in blocker for blocker in scoped["blockers"])
     assert any("server.key" in blocker for blocker in manual["blockers"])
+
+
+async def test_the_manual_preflight_buckets_changes_by_their_posix_path(
+    tmp_path: Path,
+) -> None:
+    """The buckets match `ciao/`, `memory-vault/`, `scripts/`: a native Windows
+    path (`memory-vault\note.md`) matched none and filed everything as other."""
+    local = _make_data_repo(tmp_path)
+    _write(local / "memory-vault" / "People" / "Mo.md", "note\n")
+    _write(local / "ciao" / "tool.py", "x = 1\n")
+    _write(local / "scripts" / "run.sh", "echo\n")
+    mgr = LocalSessionManager(workspace=local, runtime_root=tmp_path / "rt")
+
+    changed = (await mgr.preflight())["changed_files"]
+
+    assert changed["vault"] == ["memory-vault/People/Mo.md"]
+    assert changed["code"] == ["ciao/tool.py"]
+    assert changed["scripts"] == ["scripts/run.sh"]

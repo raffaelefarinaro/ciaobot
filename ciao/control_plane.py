@@ -2714,7 +2714,7 @@ class CiaoControlPlane:
                     score = _suggestion_score(wanted_stem, stem)
                     if score is None:
                         continue
-                    rel = os.path.relpath(os.path.join(dirpath, name), root)
+                    rel = Path(os.path.relpath(os.path.join(dirpath, name), root)).as_posix()
                     candidates.append((score, rel))
         except OSError:
             logger.debug("file_surface suggestions: workspace walk failed", exc_info=True)

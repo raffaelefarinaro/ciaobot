@@ -3153,7 +3153,7 @@ def _collect_vault_markdown_paths(config) -> list[str]:
             except OSError:
                 continue
             try:
-                display = str(resolved.relative_to(workspace))
+                display = resolved.relative_to(workspace).as_posix()
             except ValueError:
                 display = str(resolved)
             if display in seen:
@@ -3174,7 +3174,7 @@ def _collect_vault_markdown_paths(config) -> list[str]:
             except OSError:
                 continue
             try:
-                display = str(resolved.relative_to(workspace))
+                display = resolved.relative_to(workspace).as_posix()
             except ValueError:
                 display = str(resolved)
             if display in seen:
@@ -3456,7 +3456,7 @@ async def vault_graph(request: Request) -> JSONResponse:
         workspaces = sorted({e.workspace for e in entries if e.workspace})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
     graph = _build_graph(scoped)
-    by_path = {str(e.path) for e in scoped}
+    by_path = {e.path_key for e in scoped}
 
     # `mtime` lets the Memory Map seed its local view from the note you touched
     # most recently, which is a far more useful entry point than "whatever the
@@ -3532,7 +3532,7 @@ async def vault_graph(request: Request) -> JSONResponse:
         checks = _checks_for(e)
         if not checks:
             return None, "", ""
-        target = absolute.get(str(e.path))
+        target = absolute.get(e.path_key)
         root = vault_by_workspace[str(e.workspace or "")]
         if target is None or root is None:
             return None, "", ""
@@ -3576,7 +3576,7 @@ async def vault_graph(request: Request) -> JSONResponse:
         """
         from ciao.memory_audit import note_entry_coverage
 
-        target = absolute.get(str(e.path))
+        target = absolute.get(e.path_key)
         if target is None:
             return None
         try:
@@ -3588,19 +3588,19 @@ async def vault_graph(request: Request) -> JSONResponse:
                 Path(config.workspace_vault_root(str(e.workspace or ""))).resolve()
             ).as_posix()
         except (AttributeError, ValueError, OSError):
-            relative = Path(str(e.path)).as_posix()
+            relative = e.path_key
         coverage, selected, _document = note_entry_coverage(
             text,
             note_type=e.type or "",
             updated=e.updated or "",
-            mtime=_mtime(str(e.path)),
+            mtime=_mtime(e.path_key),
             note_path=relative,
-            rendered=str(e.path),
+            rendered=e.path_key,
             title=e.title,
             workspace=str(e.workspace or ""),
             today=current_date,
         )
-        if never_queued(str(e.path)):
+        if never_queued(e.path_key):
             return None
         return {
             "entries": coverage.entries,
@@ -3663,7 +3663,7 @@ async def vault_graph(request: Request) -> JSONResponse:
         bullet becomes a plan — it reports beside it.
         """
         verification = note_verification(
-            e.type or "", e.updated or "", _mtime(str(e.path)), today=current_date
+            e.type or "", e.updated or "", _mtime(e.path_key), today=current_date
         )
         if verification is None:
             return {
@@ -3684,7 +3684,7 @@ async def vault_graph(request: Request) -> JSONResponse:
             if check is not None
             else None
         )
-        stale = verification.stale and not never_queued(str(e.path))
+        stale = verification.stale and not never_queued(e.path_key)
         node_check: dict[str, Any] | None = None
         if check is not None:
             settled = _check_settles(check, revision, today=current_date)
@@ -3719,15 +3719,15 @@ async def vault_graph(request: Request) -> JSONResponse:
 
     nodes = [
         {
-            "id": str(e.path),
+            "id": e.path_key,
             "title": e.title,
             "type": e.type,
             "tags": e.tags,
             "aliases": e.aliases,
             "description": e.description,
             "workspace": e.workspace,
-            "degree": len(graph.get(str(e.path), ())),
-            "mtime": _mtime(str(e.path)),
+            "degree": len(graph.get(e.path_key, ())),
+            "mtime": _mtime(e.path_key),
             "updated": e.updated,
             **_staleness_fields(e),
         }
