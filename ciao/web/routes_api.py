@@ -46,6 +46,7 @@ from ciao import provider_registry
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
+from ciao.os_support.private import make_private_dir
 from ciao.web.auth import is_loopback_client
 from ciao.web.document_conversion import is_anydoc_document
 from ciao.config import (
@@ -1124,7 +1125,7 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
         try:
             # the dir holds only this profile's Google OAuth material; tighten
             # it for installs whose older setup left it group/world-readable
-            config_dir.chmod(0o700)
+            make_private_dir(config_dir)
         except OSError as exc:
             logger.warning("Failed to tighten %s permissions: %s", config_dir, exc)
         path = config_dir / "client_secret.json"

@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.private import open_private
 from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
@@ -414,7 +415,7 @@ def _open_private(path: Path, *, flags: int, mode: int = 0o600) -> int:
     minus the umask: a 0600 note's own before/after images ended up readable by
     every local account on the machine.
     """
-    return os.open(path, flags | os.O_CREAT, mode)
+    return open_private(path, flags, mode)
 
 
 def _append(journal: Path, payload: dict[str, Any]) -> None:

@@ -49,6 +49,7 @@ import pytest
 from ciao import memory_receipts as mr
 from ciao import note_entries as ne
 from ciao import note_receipts as nr
+from ciao.os_support.private import is_private, make_private
 
 NOTE = "notes/topic.md"
 
@@ -114,6 +115,28 @@ def _rows(vault: Path) -> list[dict[str, Any]]:
 # write that appended a final newline would fail here too.
 BOM_CRLF = "﻿# Topic\r\n\r\nfirst line\r\nlast line, unterminated"
 BOM_CRLF_AFTER = "﻿# Topic\r\n\r\nfirst line\r\nedited line, unterminated"
+
+
+def test_a_private_note_stays_private_through_apply_and_undo(tmp_path):
+    """The temp + ``os.replace`` must not widen a note its owner made private.
+
+    On POSIX that is the mode carried by ``fchmod``. On Windows the temp only
+    inherits the directory's ACL, so without ``carry_mode`` a private note
+    would come back readable by whoever the folder lets in.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, BOM_CRLF)
+    make_private(path)
+    assert is_private(path)
+
+    receipt = _apply(vault, after=BOM_CRLF_AFTER)
+    assert receipt["status"] == mr.APPLIED
+    assert path.read_bytes() == BOM_CRLF_AFTER.encode("utf-8")
+    assert is_private(path)
+
+    mr.undo_receipt(receipt["id"], vault_root=vault)
+    assert path.read_bytes() == BOM_CRLF.encode("utf-8")
+    assert is_private(path)
 
 
 def test_note_apply_and_undo_preserve_exact_bytes_and_mode(tmp_path):

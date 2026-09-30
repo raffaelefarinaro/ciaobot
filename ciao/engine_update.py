@@ -37,6 +37,7 @@ from typing import IO, Any, Callable, Sequence
 
 from ciao import install_receipt, macos_service, package_version, release_manifest
 from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.private import make_private, make_private_dir
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +236,7 @@ def write_operation(op: Operation, state_dir: Path | None = None) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(asdict(op), indent=2, sort_keys=True) + "\n")
-        os.chmod(tmp, 0o600)
+        make_private(tmp)
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
@@ -436,7 +437,7 @@ def stage_update(
     """
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
+    make_private_dir(root)
     handle = acquire_lock(root)
     try:
         return _stage_locked(
@@ -478,7 +479,7 @@ def _stage_locked(
     stage_dir = state_dir / target
     shutil.rmtree(stage_dir, ignore_errors=True)
     stage_dir.mkdir(parents=True)
-    os.chmod(stage_dir, 0o700)
+    make_private_dir(stage_dir)
 
     now = _now()
     op = Operation(
@@ -720,7 +721,7 @@ def _write_plist(plist: dict[str, Any], target: Path) -> Path:
     try:
         with os.fdopen(fd, "wb") as handle:
             plistlib.dump(plist, handle)
-        os.chmod(tmp, 0o600)
+        make_private(tmp)
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
@@ -1293,7 +1294,7 @@ def apply_update(
     """
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
+    make_private_dir(root)
     post = http_post or _post_json
     launch = launchctl or (lambda args: macos_service._launchctl(args))
     domain_uid = os.getuid() if uid is None else uid

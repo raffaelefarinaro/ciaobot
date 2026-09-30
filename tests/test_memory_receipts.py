@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import threading
 from pathlib import Path
 
@@ -27,6 +26,7 @@ import pytest
 from ciao import memory_proposals as mp
 from ciao import memory_receipts as mr
 from ciao import memory_tool as mt
+from ciao.os_support.private import is_private
 
 
 def _guide(tmp_path: Path, memory: list[str] | None = None) -> Path:
@@ -379,19 +379,19 @@ def test_a_new_journal_and_its_lock_are_private(tmp_path):
     finally:
         os.umask(previous)
 
-    assert stat.S_IMODE(journal.stat().st_mode) == 0o600
+    assert is_private(journal)
     lock = journal.with_name(journal.name + ".lock")
-    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    assert is_private(lock)
 
-    # A journal the owner deliberately shared keeps the mode they set, and a
-    # second append does not quietly narrow it.
-    os.chmod(journal, 0o644)
-    mr._append(journal, {"id": "mrcpt_shared", "status": mr.APPLIED, "ts": "t2"})
-    assert stat.S_IMODE(journal.stat().st_mode) == 0o644
-    assert [row["id"] for row in mr.read_receipts(journal)] == [
-        "mrcpt_private",
-        "mrcpt_shared",
-    ]
+    # A journal the owner deliberately shared keeps the permissions they set,
+    # and an append does not quietly narrow it.
+    shared = journal.with_name("Shared-Receipts.jsonl")
+    shared.write_text("", encoding="utf-8")
+    os.chmod(shared, 0o644)
+    assert not is_private(shared)
+    mr._append(shared, {"id": "mrcpt_shared", "status": mr.APPLIED, "ts": "t2"})
+    assert not is_private(shared)
+    assert [row["id"] for row in mr.read_receipts(shared)] == ["mrcpt_shared"]
 
 
 def test_trim_bounds_a_byte_heavy_journal_and_spares_a_pending_row(
@@ -440,12 +440,12 @@ def test_trim_bounds_a_byte_heavy_journal_and_spares_a_pending_row(
 
     # It settles, and the next appends are what the byte cut is for.
     mr._append(journal, {"id": "mrcpt_pending_huge", "status": mr.APPLIED, "ts": "t3"})
-    temp_modes: list[int] = []
+    temp_private: list[bool] = []
     real_replace = os.replace
 
     def probe(src, dst):  # type: ignore[no-untyped-def]
         if str(dst) == str(journal):
-            temp_modes.append(stat.S_IMODE(os.stat(src).st_mode))
+            temp_private.append(is_private(src))
         return real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", probe)
@@ -463,8 +463,8 @@ def test_trim_bounds_a_byte_heavy_journal_and_spares_a_pending_row(
     assert journal.read_text(encoding="utf-8").count("\n") == len(rows)
     # The trim temp holds the same note bodies and is no wider than the journal
     # it replaces, and leaves nothing behind.
-    assert temp_modes and set(temp_modes) == {0o600}
-    assert stat.S_IMODE(journal.stat().st_mode) == 0o600
+    assert temp_private and set(temp_private) == {True}
+    assert is_private(journal)
     assert not list(journal.parent.glob("*.trim.tmp"))
 
 

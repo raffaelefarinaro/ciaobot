@@ -7,7 +7,6 @@ import json
 import os
 import plistlib
 import shutil
-import stat
 import subprocess
 import time
 import urllib.error
@@ -50,6 +49,7 @@ from ciao.engine_update import (
 from ciao import install_receipt, macos_service
 from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
 from ciao.release_manifest import artifact_entry, build_manifest
+from ciao.os_support.private import is_private
 
 # The minisign helpers are copied from tests/test_release_manifest.py rather
 # than imported, so a change there cannot silently change what these tests
@@ -238,8 +238,8 @@ def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run)
 
     assert read_operation(tmp_path / "state") == op
     record = tmp_path / "state" / "operation.json"
-    assert stat.S_IMODE(record.stat().st_mode) == 0o600
-    assert stat.S_IMODE((tmp_path / "state").stat().st_mode) == 0o700
+    assert is_private(record)
+    assert is_private(tmp_path / "state")
     # The staged env is really on disk, not just described by the record.
     assert (env_dir / "bin" / "python").exists()
 
@@ -1181,7 +1181,7 @@ def test_apply_drains_then_bootstraps_updater(tmp_path: Path) -> None:
         )
     )
     assert plist_path.is_file()
-    assert stat.S_IMODE(plist_path.stat().st_mode) == 0o600
+    assert is_private(plist_path)
 
     plist = plistlib.loads(plist_path.read_bytes())
     assert plist["Label"] == UPDATER_LABEL
@@ -2180,7 +2180,7 @@ def test_apply_installs_a_durable_recovery_agent(tmp_path: Path) -> None:
     # of it would be fixing the fire with the fuel.
     recover_plist = state / RECOVER_PLIST_NAME
     assert recover_plist.is_file()
-    assert stat.S_IMODE(recover_plist.stat().st_mode) == 0o600
+    assert is_private(recover_plist)
     plist = plistlib.loads(recover_plist.read_bytes())
     assert plist["Label"] == RECOVER_LABEL
     assert plist["ProgramArguments"] == [
@@ -2214,7 +2214,7 @@ def test_apply_installs_a_durable_recovery_agent(tmp_path: Path) -> None:
     login_plist = _login_recover_plist()
     assert login_plist.is_file()
     assert login_plist.read_bytes() == recover_plist.read_bytes()
-    assert stat.S_IMODE(login_plist.stat().st_mode) == 0o600
+    assert is_private(login_plist)
 
 
 def test_apply_installs_the_recovery_agent_before_the_engine_is_stopped(

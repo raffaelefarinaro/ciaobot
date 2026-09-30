@@ -25,6 +25,7 @@ import urllib.request
 from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
+from ciao.os_support.private import make_private
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
@@ -890,7 +891,7 @@ def setup_workspace(
             "\n".join(f"{key}={value}" for key, value in desired_env) + "\n",
             encoding="utf-8",
         )
-        env_path.chmod(0o600)
+        make_private(env_path)
         written.append(env_path)
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace

@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from ciao import gws_auth
+from ciao.os_support.private import is_private
 
 
 def _config(tmp_path: Path) -> SimpleNamespace:
@@ -295,8 +296,8 @@ def test_store_credentials_writes_0600_and_retires_stale(tmp_path: Path) -> None
     creds = json.loads(creds_path.read_text())
     assert creds["refresh_token"] == "rtok"
     assert creds["email"] == "me@example.com"
-    assert (creds_path.stat().st_mode & 0o777) == 0o600
-    assert (config_dir.stat().st_mode & 0o777) == 0o700
+    assert is_private(creds_path)
+    assert is_private(config_dir)
     # Stale encrypted copy is moved aside so gws doesn't keep using it.
     assert not (config_dir / "credentials.enc").exists()
     assert (config_dir / "credentials.enc.old").exists()
