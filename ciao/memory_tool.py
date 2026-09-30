@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.vault_index import temp_prefix
 
 logger = logging.getLogger(__name__)
@@ -426,12 +427,10 @@ def write_guide_atomically(path: Path, text: str) -> None:
 
 def _guide_lock(guide: Path):
     """Return a best-effort process lock for read/merge/write operations."""
-    import fcntl
-
     lock = guide.with_name(f"{guide.name}.lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
     handle = lock.open("a+", encoding="utf-8")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    lock_exclusive(handle.fileno())
     return handle
 
 
@@ -463,7 +462,6 @@ def guide_lock(guide: Path, *, timeout_s: float = DEFAULT_LOCK_TIMEOUT_S):
     callers must let it propagate rather than fall through to an unlocked
     write.
     """
-    import fcntl
     import time
 
     lock = guide.with_name(f"{guide.name}.lock")
@@ -475,7 +473,7 @@ def guide_lock(guide: Path, *, timeout_s: float = DEFAULT_LOCK_TIMEOUT_S):
     deadline = time.monotonic() + max(0.0, timeout_s)
     while True:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(handle.fileno(), blocking=False)
             return handle
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -494,9 +492,7 @@ def release_guide_lock(handle: Any | None) -> None:
     if handle is None:
         return
     try:
-        import fcntl
-
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        unlock(handle.fileno())
     except Exception:  # noqa: BLE001 — releasing is best-effort
         pass
     try:
@@ -807,9 +803,7 @@ def migrate_region_caps(guide: Path) -> list[str]:
                 return []
         return restamped
     finally:
-        import fcntl
-
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        unlock(lock.fileno())
         lock.close()
 
 

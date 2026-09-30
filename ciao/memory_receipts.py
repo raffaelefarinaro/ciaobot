@@ -60,6 +60,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
@@ -311,7 +313,6 @@ def queue_lock(
     A lock that cannot be taken raises :class:`QueueLockError`; callers must let
     it propagate rather than fall through to an unlocked write.
     """
-    import fcntl
     import time
 
     try:
@@ -340,7 +341,7 @@ def queue_lock(
     deadline = time.monotonic() + max(0.0, timeout_s)
     while True:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(handle.fileno(), blocking=False)
             break
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -358,7 +359,7 @@ def queue_lock(
     finally:
         depths.pop(key, None)
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle.fileno())
         except OSError:
             pass
         handle.close()
@@ -422,15 +423,10 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
     row = {**payload, "v": RECEIPT_VERSION}
     line = json.dumps(row, ensure_ascii=False) + "\n"
     lock = journal.with_name(journal.name + ".lock")
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - non-POSIX
-        fcntl = None  # type: ignore[assignment]
     lock_fd = _open_private(lock, flags=os.O_RDWR | os.O_APPEND)
     handle = os.fdopen(lock_fd, "a+", encoding="utf-8")
     try:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        lock_exclusive(handle.fileno())
         journal_fd = _open_private(journal, flags=os.O_WRONLY | os.O_APPEND)
         with os.fdopen(journal_fd, "a", encoding="utf-8") as f:
             f.write(line)
@@ -441,11 +437,10 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
         # and the stale snapshot then silently deleted that newer receipt.
         _trim_if_large(journal)
     finally:
-        if fcntl is not None:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
+        try:
+            unlock(handle.fileno())
+        except OSError:
+            pass
         handle.close()
 
 

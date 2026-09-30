@@ -61,10 +61,6 @@ class UnknownModelError(ValueError):
     ``invalid_request`` (#259).
     """
 
-try:  # pragma: no cover - Ciaobot targets Unix; fallback keeps imports portable.
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
 
 import yaml
 
@@ -93,6 +89,7 @@ from ciao.models import (
     StreamEvent,
     ToolUseEvent,
 )
+from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
@@ -270,13 +267,11 @@ def _state_file_lock(path: Path) -> Iterator[None]:
     lock_path = path.with_name(f"{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        lock_exclusive(handle.fileno())
         try:
             yield
         finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle.fileno())
 
 
 # Legacy IDs from the removed auto-imported Claude Code CLI view.

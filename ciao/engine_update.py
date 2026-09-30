@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import logging
@@ -37,6 +36,7 @@ from pathlib import Path
 from typing import IO, Any, Callable, Sequence
 
 from ciao import install_receipt, macos_service, package_version, release_manifest
+from ciao.os_support.locks import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +253,7 @@ def acquire_lock(state_dir: Path | None = None) -> IO[str]:
     root.mkdir(parents=True, exist_ok=True)
     handle = open(root / LOCK_NAME, "a+", encoding="utf-8")
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_exclusive(handle.fileno(), blocking=False)
     except OSError as exc:
         handle.close()
         raise UpdateInProgress(
@@ -265,7 +265,7 @@ def acquire_lock(state_dir: Path | None = None) -> IO[str]:
 def release_lock(handle: IO[str]) -> None:
     """Drop the update lock and close its handle. Safe to call once."""
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        unlock(handle.fileno())
     except OSError:
         pass
     handle.close()

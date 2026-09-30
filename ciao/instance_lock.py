@@ -10,10 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
-try:  # pragma: no cover - Ciaobot's supported server platforms are Unix.
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
+from ciao.os_support.locks import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +49,10 @@ class WorkspaceInstanceLock:
     def acquire(self) -> None:
         if self._handle is not None:
             return
-        if fcntl is None:  # pragma: no cover
-            raise RuntimeError("Ciaobot's server lock requires Unix file locking support.")
-
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+", encoding="utf-8")
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(handle.fileno(), blocking=False)
         except OSError as exc:
             if exc.errno not in {errno.EACCES, errno.EAGAIN}:
                 handle.close()
@@ -133,8 +127,7 @@ class WorkspaceInstanceLock:
             except OSError:
                 logger.exception("Failed to update server-lock metadata %s", self.path)
         finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle.fileno())
             handle.close()
             self._handle = None
 

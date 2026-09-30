@@ -491,7 +491,7 @@ def test_the_write_is_serialized_against_the_migration(
     `queue_lock`, so the two cannot interleave — which is only true if the accept
     takes it too.
     """
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive
 
     vault = _crlf_vault(tmp_path)
     from ciao import memory_receipts
@@ -508,7 +508,7 @@ def test_the_write_is_serialized_against_the_migration(
             # nothing.
             fd = os.open(target, os.O_RDONLY)
             try:
-                assert fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB) is None
+                lock_exclusive(fd, blocking=False)
             finally:
                 os.close(fd)
             yield
