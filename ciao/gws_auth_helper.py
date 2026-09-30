@@ -24,6 +24,7 @@ from typing import Sequence
 
 from ciao import gws_auth, gws_wrapper
 from ciao.gws_auth import fingerprint
+from ciao.os_support.files import open_fd
 
 _PERSONAL_SCOPES = gws_auth._PERSONAL_SCOPES  # noqa: SLF001
 
@@ -70,7 +71,7 @@ def _store_pending_verifier(config_dir, code_verifier: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Create with 0600 rather than writing then chmod-ing: the verifier must
     # never exist group/world-readable, even briefly.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = open_fd(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(code_verifier)
     os.chmod(path, 0o600)

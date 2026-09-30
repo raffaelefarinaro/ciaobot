@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ciao.os_support.files import open_fd
+
 
 def read_json_dict(path: Path) -> dict[str, Any]:
     """Load a UTF-8 JSON file expected to hold an object, as a typed ``dict``.
@@ -28,7 +30,7 @@ def write_private_text(path: Path, text: str) -> None:
     only tighten afterwards; this creates with 0600 directly, then chmods to
     repair a pre-existing file that was made looser by an older version.
     """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = open_fd(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     os.chmod(path, 0o600)
