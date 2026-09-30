@@ -1299,7 +1299,7 @@ def sync_workspace_skills(
                         vault_root,
                         summary["failed"],
                     )
-                if not summary.get("retained"):
+                elif not summary.get("retained"):
                     run.skip("no note uses a retired stock category")
     except Exception:  # noqa: BLE001 — never block skill sync on the vault
         logger.exception(

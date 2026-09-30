@@ -316,14 +316,24 @@ def retain_retired_stock_types(vault_root: Path, *, apply: bool = False) -> dict
         return summary
 
     registry = entity_types.load_entity_types(root)
+    retired_entries = entity_types.retired_stock_entries()
+    by_folder = {retired.folder: retired.id for retired in retired_entries if retired.folder}
     used: set[str] = set()
     for entry in scan_vault(root):
         raw = (entry.type or "").strip().lower()
         if raw:
             used.add(raw)
+            continue
+        # An untyped note used to infer its category from the folder it sits in
+        # (`Documents/`, `references/`); those folders are no longer stock, so
+        # it counts toward the retired category that owned the folder.
+        for part in entry.path.parts:
+            if part in by_folder:
+                used.add(by_folder[part])
+                break
     retained = [
         retired
-        for retired in entity_types.retired_stock_entries()
+        for retired in retired_entries
         if registry.get(retired.id) is None
         and used & {retired.id, *(alias.lower() for alias in retired.aliases)}
     ]

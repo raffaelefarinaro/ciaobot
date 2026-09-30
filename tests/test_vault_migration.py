@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from ciao import entity_types
+from ciao.vault_index import scan_vault
 from ciao.vault_migration import (
     RECEIPT_NAME,
     migrate_if_needed,
@@ -404,3 +405,15 @@ def test_retire_records_a_refused_write_so_it_is_not_retried_every_boot(tmp_path
     assert "failed" in first
     assert second["skipped"] == "already checked"
     assert json.loads(retired_receipt_path(runtime, vault).read_text())["failed"]
+
+
+def test_retire_counts_untyped_notes_in_a_retired_folder(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    _note(vault, "personal/Documents/Plan.md", "# Plan\n")
+    _note(vault, "personal/notes/p.md", "---\ntype: person\n---\n# P\n")
+
+    summary = retain_retired_stock_types(vault, apply=True)
+
+    assert summary["retained"] == ["document"]
+    entity_types.clear_entity_types_cache()
+    assert {e.path.name: e.type for e in scan_vault(vault)}["Plan.md"] == "document"
