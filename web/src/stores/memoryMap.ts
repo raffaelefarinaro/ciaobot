@@ -36,6 +36,20 @@ export interface MemoryGraphNode {
   /** The note type's staleness horizon in days, from the server's table;
    * null when the note has no usable date or the server is older. */
   thresholdDays?: number | null
+  /**
+   * What the managed verification pass concluded about this note's CURRENT
+   * revision, or null when nobody has checked it.
+   *
+   * A check inside its cooldown clears `stale` even though the note's own
+   * `updated:` is old: the question has been asked, and asking it again is what
+   * the cooldown exists to prevent. So the map has to be able to say *why* a
+   * note dropped off the "unchecked" count rather than leaving the operator to
+   * wonder whether the note was quietly forgotten.
+   *
+   * `pending` is the state that matters most to show: a proposal is filed and
+   * waiting for a person, which is not the same as a note nobody looked at.
+   */
+  check?: MemoryGraphCheck | null
   // simulation state, owned by the canvas but persisted here so the graph
   // does not re-scatter every time the sidebar touches the store.
   x: number
@@ -43,6 +57,32 @@ export interface MemoryGraphNode {
   vx: number
   vy: number
 }
+
+/** One note's last verification, as the memory map reports it. */
+export interface MemoryGraphCheck {
+  /** `still_valid` | `update` | `retire` | `unverified`. */
+  outcome: string
+  /** `YYYY-MM-DD`: when the check ran. */
+  checked_at: string
+  /** `YYYY-MM-DD`: the end of the cooldown. */
+  retry_after: string
+  /** `complete` | `partial`: how much of the note the check covered. */
+  coverage: string
+  reason: string
+  /** How many citations the verdict rested on. */
+  citations: number
+  /** The note receipt an applied verdict wrote, or '' for one that wrote none. */
+  receipt_id: string
+  /** The check answers this revision: in cooldown, or waiting on a proposal. */
+  settled: boolean
+  /** Settled AND waiting on a `note_edit` proposal — asked, not yet answered. */
+  pending: boolean
+  /** The queue row to link to, when `pending`. */
+  proposal_id: string
+  /** A proposal is pinned to a revision this note has left, so it is dead. */
+  conflicted: boolean
+}
+
 export interface MemoryGraphEdge { source: string; target: string }
 
 export const MEMORY_TYPE_META: Record<string, { label: string; color: string }> = {
@@ -370,6 +410,10 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
         stale: n.stale === true,
         ageDays: typeof n.age_days === 'number' ? n.age_days : null,
         thresholdDays: typeof n.threshold_days === 'number' ? n.threshold_days : null,
+        // `null` rather than a default object, so "nobody checked this" and "the
+        // server is older than this client" both read as absence and neither
+        // puts a "checked" claim on a note nothing checked.
+        check: (n.check && typeof n.check === 'object') ? n.check : null,
         x: seededOffset(n.id, 'x'),
         y: seededOffset(n.id, 'y'),
         vx: 0,

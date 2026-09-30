@@ -3469,21 +3469,140 @@ async def vault_graph(request: Request) -> JSONResponse:
     # disagree with the queue it sends the user to. Notes the queue never lists
     # (Workspace/ files, templates, completed projects) and exempt types
     # (logs, journals) keep their age but are never flagged.
+    #
+    # On top of that, the managed verification state: a note somebody has
+    # actually checked recently is not "unchecked" however old its own
+    # `updated:` says, and one with a proposal waiting on it is not unchecked
+    # either — it is being decided, which is the whole difference between a
+    # queue asking a question and a queue asking it twice. The check state lives
+    # in the vault the notes came from, so it is read per target root rather
+    # than once for the install.
+    from ciao import memory_receipts as mr
     from ciao.memory_audit import note_verification
-    from ciao.vault_review import never_queued
+    from ciao.note_verification import NoteCheck, _check_settles, read_note_checks
+    from ciao.vault_review import never_queued, verification_evidence
 
     current_date = datetime.now(UTC).date()
+    # The check state is filed per workspace, under the root
+    # `note_verification`'s own writer uses (`config.workspace_vault_root`), and
+    # one workspace is read once however many notes it holds. The scan targets
+    # are NOT the answer: on the shared-vault layout a target is the whole
+    # install while a workspace's notes live under it, so a target would look in
+    # a directory the pass never wrote to and find nothing — silently, which is
+    # exactly how a checked note goes on being flagged as unchecked.
+    checks_by_workspace: dict[str, dict[str, Any]] = {}
+    vault_by_workspace: dict[str, Path | None] = {}
 
-    def _staleness(e) -> tuple[bool, int | None, int | None]:
+    def _checks_for(e) -> dict[str, Any]:
+        """The check state for this entry's workspace, read once."""
+        workspace = str(e.workspace or "")
+        if workspace not in checks_by_workspace:
+            try:
+                root: Path | None = Path(config.workspace_vault_root(workspace))
+            except (AttributeError, ValueError, OSError):
+                root = None
+            vault_by_workspace[workspace] = root
+            checks_by_workspace[workspace] = (
+                read_note_checks(root) if root is not None else {}
+            )
+        return checks_by_workspace[workspace]
+
+    def _check_for(e) -> tuple[NoteCheck | None, str, str]:
+        """This note's recorded check, its key in the state, and its revision.
+
+        The body is read only for a note that HAS a check, which is a small
+        fraction of a vault and none of a fresh one: a note nobody has verified
+        has nothing to compare against, and hashing every body would be a second
+        full read of the vault on the map's own hot path.
+        """
+        checks = _checks_for(e)
+        if not checks:
+            return None, "", ""
+        target = absolute.get(str(e.path))
+        root = vault_by_workspace[str(e.workspace or "")]
+        if target is None or root is None:
+            return None, "", ""
+        try:
+            relative = target.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None, "", ""
+        check = checks.get(relative)
+        if check is None:
+            return None, relative, ""
+        try:
+            text = target.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Unreadable is not "no check": the check is real, this node simply
+            # cannot say whether it still describes the note. Reporting it as
+            # settled would hide the note; reporting it as stale would claim a
+            # judgement nobody made. An empty revision below makes
+            # `verification_evidence` read it as a conflict, which is the
+            # honest middle.
+            return check, relative, ""
+        return check, relative, mr.content_revision(text)
+
+    def _staleness_fields(e) -> dict[str, Any]:
+        """One node's aging, and what the managed pass concluded about it.
+
+        ``stale`` is the age rule, and the check state only ever *clears* it. A
+        note somebody checked inside its cooldown is not "unchecked" however old
+        its own ``updated:`` reads, and neither is one a proposal is waiting on:
+        in both cases the question has been asked and the queue has deliberately
+        stopped asking. Leaving the flag on would put this map and the queue it
+        links to into open disagreement about the same notes, which is the one
+        thing the shared predicate above exists to prevent.
+
+        The check rides along either way, so the map can say *why* a note is not
+        being asked about again rather than silently dropping it off the
+        "unchecked" count.
+        """
         verification = note_verification(
             e.type or "", e.updated or "", _mtime(str(e.path)), today=current_date
         )
         if verification is None:
-            return False, None, None
+            return {
+                "stale": False,
+                "age_days": None,
+                "threshold_days": None,
+                "check": None,
+            }
+        check, relative, revision = _check_for(e)
+        state = (
+            verification_evidence(check, revision, relative)
+            if check is not None
+            else None
+        )
         stale = verification.stale and not never_queued(str(e.path))
-        # The horizon travels with the flag so the map can name the rule
-        # without keeping its own copy of the thresholds table.
-        return stale, verification.age_days, verification.threshold_days
+        node_check: dict[str, Any] | None = None
+        if check is not None:
+            settled = _check_settles(check, revision, today=current_date)
+            if settled:
+                stale = False
+            node_check = {
+                "outcome": check.outcome,
+                "checked_at": check.checked_at.isoformat(),
+                "retry_after": check.retry_after.isoformat(),
+                "coverage": check.coverage,
+                "reason": check.reason,
+                "citations": len(check.evidence),
+                "receipt_id": check.receipt_id,
+                # A check inside its cooldown is a note asked and answered; one
+                # with a proposal pinned to it has been asked and is WAITING for
+                # an answer. Two different things to say out loud, and the map
+                # has a link for the second.
+                "settled": settled,
+                "pending": bool(settled and check.proposal_id),
+                "proposal_id": check.proposal_id,
+                "conflicted": bool(state and state.get("conflicted")),
+            }
+        return {
+            "stale": stale,
+            # The horizon travels with the flag so the map can name the rule
+            # without keeping its own copy of the thresholds table.
+            "age_days": verification.age_days,
+            "threshold_days": verification.threshold_days,
+            "check": node_check,
+        }
 
     nodes = [
         {
@@ -3497,7 +3616,7 @@ async def vault_graph(request: Request) -> JSONResponse:
             "degree": len(graph.get(str(e.path), ())),
             "mtime": _mtime(str(e.path)),
             "updated": e.updated,
-            **dict(zip(("stale", "age_days", "threshold_days"), _staleness(e))),
+            **_staleness_fields(e),
         }
         for e in scoped
     ]
@@ -6731,7 +6850,17 @@ def abs_ts_gap(left: str, right: str) -> float:
 
 
 def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
-    """The `change` pointer one decision row carries, from its receipt."""
+    """The `change` pointer one decision row carries, from its receipt.
+
+    ``undoable`` comes from the receipt protocol's own predicate, so an Undo
+    button appears exactly where an undo would be honoured: a ``note_apply``
+    from an accepted note edit carries its before image and is reversible, while
+    a retirement has no ``note_apply`` at all (it moved a file, and the reverse
+    of that is Vault Review's restore, not a receipt undo) and so is reported
+    without one. ``changed`` is the other half of the honesty: a re-stamp of a
+    note that already carried today's date writes nothing, and a row claiming
+    otherwise would be describing an edit that never happened.
+    """
     from ciao.memory_receipts import is_undoable
 
     return {
@@ -6744,6 +6873,34 @@ def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
         "changed": bool(receipt.get("changed", True)),
         "ts": str(receipt.get("ts", "")),
     }
+
+
+#: A retirement is reversible, but not by an undo: the note went to the review
+#: trash and comes back through Vault Review's restore, which has its own
+#: ledger. Said as data rather than inferred in the client so a row can explain
+#: where the way back is without the UI holding a rule about dispositions.
+_TRASH_PREFIX = "Workspace/.vault-trash/"
+
+
+def _restore_hint(row: dict[str, Any]) -> str:
+    """How a decision that left no undoable receipt is reversed, or "".
+
+    Only a `note_edit` retirement qualifies. It is the one decision in this
+    ledger that moves a note without a ``note_apply`` receipt — `trash_note`
+    journals to the review ledger, not the memory journal — so
+    ``_attach_change_receipts`` finds no receipt for it and History would
+    otherwise print "No change snapshot available", which is a different claim:
+    the change is recorded, it just is not an undo. The way back is the trash.
+    """
+    if str(row.get("kind") or "") != "note_edit":
+        return ""
+    if str(row.get("action") or "") != "accepted":
+        return ""
+    destination = str(row.get("destination") or "")
+    if not destination.startswith(_TRASH_PREFIX):
+        return ""
+    return "restore"
+
 
 
 def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
@@ -6822,6 +6979,71 @@ def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
             continue
         claimed.add(str(found.get("id", "")))
         row["change"] = _change_payload(found)
+
+
+def _attach_note_edit_detail(
+    config: Any, workspace: str, rows: list[dict[str, Any]]
+) -> None:
+    """Point each `note_edit` decision at the filed record behind it.
+
+    The decision sidecar records the bullet's one line — what was noticed — and
+    nothing else, because that text is the dedupe key and the only field the
+    queue needs. Everything a reader of History needs to judge the decision is
+    in the note-edit sidecar: the note it is about, the exact before/after it
+    was going to write, the evidence the verdict rested on, how much of the note
+    the check covered, and whether it was ever settled. So a `note_edit` row is
+    resolved back to its record and given that block.
+
+    Without it a verified note edit in History reads as one opaque sentence with
+    a destination — "the office move is in Notes" — with no way to see what was
+    about to be written, what it was written on the strength of, or that a
+    conflict was recorded as a conflict rather than as an applied change.
+
+    A row whose sidecar cannot be read is left exactly as it is, with no
+    ``note_edit`` key. That is the same contract as a missing receipt: History
+    renders "no snapshot available" rather than inventing one, and a corrupt
+    record for one proposal must not stop the rest of the page.
+    """
+    if not any(str(row.get("kind") or "") == "note_edit" for row in rows):
+        return
+    from ciao.note_edit_proposals import NoteEditError, list_sidecars
+
+    try:
+        records = {
+            record.proposal_id: record
+            for record in list_sidecars(config, workspace)
+            if record.proposal_id
+        }
+    except (NoteEditError, OSError):
+        # A vault whose sidecar directory cannot be listed at all. Left
+        # unannotated rather than fatal: the decision itself is still on record,
+        # and one unreadable sidecar store must not blank the page.
+        return
+    for row in rows:
+        if str(row.get("kind") or "") != "note_edit":
+            continue
+        record = records.get(str(row.get("proposal_id") or ""))
+        if record is None:
+            continue
+        row["note_edit"] = {
+            "id": record.id,
+            "relative_path": record.relative_path,
+            "operation": record.operation,
+            "outcome": record.outcome,
+            "coverage": record.coverage,
+            "before": record.before,
+            "after": record.after,
+            "reason": record.reason,
+            "evidence": [citation.as_dict() for citation in record.evidence],
+            "settled": record.settled,
+            "accepted": record.accepted,
+            "receipt_id": record.receipt_id,
+            # A record the owner decided reads differently from one still open,
+            # and the two must not be confusable: a settled accept is what
+            # History links an undo to, a settled dismissal is why nothing
+            # changed, and an unsettled one is a decision that has not happened.
+            "pending": not record.settled,
+        }
 
 
 # The archive tree is `<logs_root>/Chats/<chat-id>/<provider>/<stem>.md`, and a
@@ -6922,6 +7144,7 @@ async def proposals_history(request: Request) -> JSONResponse:
         await asyncio.to_thread(
             _attach_change_receipts, vault_for_receipts, workspace_rows
         )
+        _attach_note_edit_detail(config, workspace, workspace_rows)
         rows.extend(workspace_rows)
 
     # Newest first; undated legacy rows (empty ts) sort last within that order.
@@ -6944,6 +7167,9 @@ async def proposals_history(request: Request) -> JSONResponse:
         path = index.get(str(row.get("source", "")))
         if path:
             row["source_path"] = path
+        hint = _restore_hint(row)
+        if hint:
+            row["reversible_by"] = hint
     return JSONResponse(
         {
             "rows": served,

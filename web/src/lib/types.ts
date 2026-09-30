@@ -1436,6 +1436,51 @@ export interface ProposalHistoryRow {
    * "No change snapshot available" rather than offering an undo it cannot
    * honour. */
   change?: ProposalHistoryChange
+  /**
+   * The `note_edit` record behind this decision, when the server could still
+   * read it. ABSENT for a `note_edit` whose sidecar is gone or unreadable —
+   * same contract as `change`, and for the same reason: a record nobody can
+   * read must not be rendered as one nobody can check.
+   *
+   * This is what makes a verified note edit in History judgeable rather than a
+   * bare sentence: the exact before/after, the evidence the verdict rested on,
+   * how much of the note the check covered, and whether the decision is still
+   * open.
+   */
+  note_edit?: ProposalHistoryNoteEdit
+  /**
+   * `'restore'` for a decision that moved a note to the review trash. That
+   * change has no memory receipt, so there is no Undo — but it is not
+   * unrecoverable either, and saying "no change snapshot available" beside a
+   * retirement that really happened reads as a false claim. Vault Review's
+   * restore is the way back.
+   */
+  reversible_by?: 'restore'
+}
+
+/** One filed `note_edit` as the history ledger reports it. */
+export interface ProposalHistoryNoteEdit {
+  id: string
+  /** The vault-relative note this edit is about. */
+  relative_path: string
+  /** `replace` | `restamp` | `retire`. */
+  operation: string
+  outcome: string
+  /** `complete` | `partial`. */
+  coverage: string
+  /** The note's full text before the edit. */
+  before: string
+  /** The note's full text after it; empty for a retirement. */
+  after: string
+  reason: string
+  evidence: { source_type: string; source_ref: string; quoted: string; supports: string }[]
+  /** When the owner decided; empty while the proposal is still open. */
+  settled: string
+  accepted: boolean
+  /** The note receipt the accept's write handed back. */
+  receipt_id: string
+  /** The decision has not been made yet. */
+  pending: boolean
 }
 
 /** The receipt behind one history row, from `GET /api/proposals/history`. */
@@ -1518,9 +1563,58 @@ export interface VaultReviewEvidence {
    * limit for its type, and where that date came from. Optional (and null
    * when the signal is absent) so an older server simply leaves it out. */
   unverified?: VaultReviewUnverified | null
+  /** What the managed verification pass already concluded about this note's
+   * CURRENT revision, from `Workspace/Note-Checks.json`. `null` when nobody has
+   * checked the note, which is the ordinary case.
+   *
+   * `checked_at` is when the check RAN, which is not the note's own `updated:`:
+   * a verdict that came back `unverified` writes nothing, so the two dates
+   * diverge and the panel shows both rather than collapsing them. */
+  verification?: VaultReviewCheck | null
   /** Where a `superseded_language` candidate says so: the 1-based line, the
    * line itself, the phrase that matched, and the nearest line either side. */
   superseded?: VaultReviewSuperseded | null
+}
+
+/** One note's last verification, as the review queue reports it. */
+export interface VaultReviewCheck {
+  /** `still_valid` | `update` | `retire` | `unverified`. */
+  outcome: string
+  /** `YYYY-MM-DD`: when the check ran. */
+  checked_at: string
+  /** `YYYY-MM-DD`: the end of the cooldown, before the note is asked again. */
+  retry_after: string
+  /** `complete` | `partial`: how much of the note the check actually covered. */
+  coverage: string
+  /** Why the verdict came out the way it did, in the pass's own words. */
+  reason: string
+  /** How many citations the verdict rested on. */
+  citations: number
+  /** The note receipt an applied verdict wrote, or '' for one that wrote none. */
+  receipt_id: string
+  /** The revision the check describes. */
+  revision: string
+  /** A `note_edit` proposal is waiting on a person for this exact revision. */
+  pending: boolean
+  /** A proposal is pinned to a revision the note is no longer in, so it can no
+   * longer be applied. The note is due to be checked again. */
+  conflicted: boolean
+  /** The queue row id of the pending proposal, when `pending`. */
+  proposal_id: string
+}
+
+/** The verification proposal a row links to instead of duplicating its decision. */
+export interface VaultReviewPendingProposal {
+  /** The queue row the review card is keyed by — the thing a client links to. */
+  proposal_id: string
+  /** The sidecar the accept resolves, for a direct read of the filed record. */
+  note_edit_id: string
+  outcome: string
+  checked_at: string
+  retry_after: string
+  coverage: string
+  reason: string
+  citations: number
 }
 
 export interface VaultReviewUnverified {
@@ -1576,6 +1670,25 @@ export interface VaultReviewCandidate {
    * reason as `completable`: the layout decision is the engine's.
    */
   completion_moves_folder: boolean
+  /**
+   * The verification proposal this row links to, when one is waiting on a
+   * person for the note's CURRENT revision, and `null` otherwise.
+   *
+   * The queue used to offer a second, independent *Still true* / *Retire* on
+   * the same revision the pass had already filed a proposal about — the same
+   * question asked twice, in two places, with the two answers able to disagree.
+   * A row carrying this points at the proposal instead, and takes its own
+   * retirement action away when nothing else justifies it.
+   */
+  pending_verification?: VaultReviewPendingProposal | null
+  /**
+   * Whether the row still offers its terminal action (Retire, or Complete on a
+   * project). False only when a verification proposal is the note's *sole*
+   * reason for being here: some other signal — unlinked, duplicate, superseded
+   * wording — is an independent finding about the note, and the queue must not
+   * lose it because the pass happened to reach the same note first.
+   */
+  retirement_offered?: boolean
 }
 
 /** One restorable note in `.vault-trash`, from `GET /api/vault/review?include=trashed`. */

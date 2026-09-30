@@ -297,6 +297,17 @@ export const useProposalsStore = defineStore('proposals', () => {
   const search = ref('')
   const selected = ref<Set<string>>(new Set())
 
+  /** The row a link from another surface asked the queue to show, or ''.
+   *
+   * The review panel's "Open the proposal" link names a queue row rather than
+   * rendering its own copy of the card, and that row can be hidden by whatever
+   * filter the operator left on the queue. Clearing those filters and naming the
+   * row here is what makes the link land on the proposal rather than on a list
+   * the row is not in. A one-shot id: the panel clears it once it has scrolled
+   * and focused, so coming back to the queue later does not re-scroll to a row
+   * somebody looked at days ago. */
+  const revealedRowId = ref('')
+
   // Queue vs. decision history. Lives here rather than in the panel because
   // the panel's tab bar sets it while `fetch` reads it, to refresh a history
   // tab that is already open after a queue mutation.
@@ -379,6 +390,20 @@ export const useProposalsStore = defineStore('proposals', () => {
     search.value = ''
     historyActionFilter.value = 'all'
     historyActorFilter.value = 'all'
+  }
+
+  /** Show one named row, clearing whatever would hide it.
+   *
+   * The kind filter and the search box are the two things that can hide a row
+   * the user was linked to, and both are operator state worth keeping — so this
+   * clears them rather than hunting for a "reveal" that respects them, and the
+   * queue is a page away from wherever the link was pressed.
+   */
+  function revealRow(id: string) {
+    if (!id) return
+    kindFilter.value = 'all'
+    search.value = ''
+    revealedRowId.value = id
   }
 
   function pruneSelected() {
@@ -736,7 +761,7 @@ export const useProposalsStore = defineStore('proposals', () => {
     rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, acceptSkill, batch, dismissOlderThan,
     previews, previewErrors, isPreviewLoading, loadPreview, prefetchPreviews, dropPreview, conflictIds, lastBatchSummary,
     receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
-    kindFilter, search, selected,
+    kindFilter, search, selected, revealedRowId, revealRow,
     scopedRows, visibleRows, kindCounts, resetFilters,
     view, historyRows, historyLoading, historyLoaded, historyTruncated, historyLimit,
     historyAtMax, historyTotal, historyCanLoadMore, historyFiltersActive, historyError, historyWorkspace,

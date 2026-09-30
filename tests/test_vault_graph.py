@@ -254,3 +254,140 @@ def test_keep_clears_the_graph_stale_flag(client, tmp_path):
     assert mo()["threshold_days"] == 90
     record_decision(vault, candidate, disposition="keep")
     assert mo()["stale"] is False
+
+
+# ---- The managed check state, as the map reports it -------------------------
+#
+# A note somebody checked is not "unchecked" however old its own `updated:` says,
+# and neither is one a proposal is waiting on. Without this the map flagged the
+# note and linked onward to a queue that had deliberately stopped asking.
+
+
+def _checked_client(tmp_path):
+    """A graph client over a vault whose notes carry recorded checks.
+
+    Returns the client, the config, and the vault root. The check state is filed
+    under `config.workspace_vault_root`, which is the same answer
+    `note_verification.note_check_state_path` gives, and the note key inside it
+    is the vault-relative path — the route resolves that from the scan's own
+    absolute map rather than by stripping a prefix.
+    """
+    from ciao.config import CiaoConfig
+    from ciao.web.app import create_app
+
+    vault = tmp_path / "memory-vault"
+    (vault / "personal").mkdir(parents=True, exist_ok=True)
+    for name in ("Checked", "Pending", "Untouched"):
+        (vault / "personal" / f"{name}.md").write_text(
+            f"---\ntype: note\nupdated: 2025-01-01\n---\n# {name}\n", encoding="utf-8"
+        )
+    cfg = CiaoConfig(
+        pwa_auth_token="test-secret",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime",
+        media_root=tmp_path / "media",
+        pwa_auth_required=False,
+        vault_root=vault,
+    )
+    return TestClient(create_app(cfg)), cfg, vault
+
+
+def _record(cfg, title: str, *, proposal_id: str = "") -> None:
+    """Record a check against one note's current text, as the pass would."""
+    from datetime import date, timedelta
+
+    from ciao import memory_receipts as mr
+    from ciao import note_verification as nv
+
+    # `workspace_vault_root` IS the workspace's vault after the re-rooting, so
+    # the note's key in the state is its path inside that root.
+    vault = cfg.workspace_vault_root("personal")
+    relative = f"{title}.md"
+    today = date.today()
+    nv.record_note_check(
+        vault,
+        nv.NoteCheck(
+            relative_path=relative,
+            content_revision=mr.content_revision(
+                (vault / relative).read_text(encoding="utf-8")
+            ),
+            outcome="unverified" if not proposal_id else "update",
+            checked_at=today,
+            retry_after=today + timedelta(days=30),
+            coverage="complete",
+            proposal_id=proposal_id,
+        ),
+    )
+
+
+def _graph_node(client, title):
+    return next(
+        n for n in client.get("/api/vault/graph").json()["nodes"] if n["title"] == title
+    )
+
+
+def test_a_note_checked_inside_its_cooldown_is_not_stale(client, tmp_path):
+    _checked, cfg, _vault = _checked_client(tmp_path)
+    _record(cfg, "Checked")
+
+    node = _graph_node(_checked, "Checked")
+
+    assert node["stale"] is False, "the note's own updated: is still a year old"
+    check = node["check"]
+    assert check["outcome"] == "unverified"
+    assert check["settled"] is True
+    assert check["pending"] is False
+    assert check["citations"] == 0
+    # The age and the horizon still ride along, so the map can explain itself.
+    assert node["threshold_days"] == 180
+    assert node["age_days"] > 300
+
+
+def test_a_note_with_a_pending_proposal_is_not_stale_and_says_why(
+    client, tmp_path
+):
+    """Being asked about is not being ignored."""
+    _checked, cfg, _vault = _checked_client(tmp_path)
+    _record(cfg, "Pending", proposal_id="p-1")
+
+    node = _graph_node(_checked, "Pending")
+
+    assert node["stale"] is False
+    assert node["check"]["pending"] is True
+    assert node["check"]["proposal_id"] == "p-1"
+    assert node["check"]["conflicted"] is False
+
+
+def test_a_proposal_whose_note_moved_is_stale_again_and_says_it_is_dead(
+    client, tmp_path
+):
+    """A check pinned to text the note has left describes nothing.
+
+    It cannot clear the flag — the note really is unchecked — and the tile has
+    to say the proposal is dead rather than offering a link to a card whose
+    accept would refuse.
+    """
+    _checked, cfg, _vault = _checked_client(tmp_path)
+    _record(cfg, "Checked", proposal_id="p-2")
+    vault = cfg.workspace_vault_root("personal")
+    (vault / "Checked.md").write_text(
+        "---\ntype: note\nupdated: 2025-01-01\n---\n# Checked\n\nEdited by hand.\n",
+        encoding="utf-8",
+    )
+
+    node = _graph_node(_checked, "Checked")
+
+    assert node["stale"] is True
+    assert node["check"]["settled"] is False
+    assert node["check"]["pending"] is False
+    assert node["check"]["conflicted"] is True
+
+
+def test_an_unchecked_note_still_reports_no_check_at_all(client, tmp_path):
+    """`null` is the honest answer, and it must not read as a stale note."""
+    _checked, _cfg, _vault = _checked_client(tmp_path)
+
+    node = _graph_node(_checked, "Untouched")
+
+    assert node["check"] is None
+    assert node["stale"] is True

@@ -18,7 +18,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
-import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, snapshotFrame } from './data.mjs'
+import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, VERIFICATION_REVIEW, VERIFICATION_PROPOSALS, VERIFICATION_HISTORY, VERIFICATION_RECEIPT, VERIFICATION_NODES, snapshotFrame } from './data.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
@@ -107,10 +107,17 @@ const GET_ROUTES = {
   '/api/schedules': () => SCHEDULES,
   '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': () => ({ actions: [] }),
-  '/api/proposals': () => ({ rows: PROPOSALS }),
-  '/api/proposals/history': () => ({ rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
-  '/api/vault/graph': () => ({ workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
-  '/api/vault/review': () => ({ candidates: [], trashed: [], cleared: [] }),
+  // The three queues behind "To decide". A spec that wants the managed
+  // verification states (a pending proposal linked from a review row, a dead
+  // proposal, a settled verdict) opts in through POST /__fixture__/verification
+  // rather than replacing these defaults for everybody: the other review specs
+  // assert the empty and the plain states, which must stay the default.
+  '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
+  '/api/proposals/history': (req) => (sessionOf(req).verification ? VERIFICATION_HISTORY : { rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
+  '/api/vault/graph': (req) => (sessionOf(req).verification
+    ? { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
+    : { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
+  '/api/vault/review': (req) => (sessionOf(req).verification ? VERIFICATION_REVIEW : { candidates: [], trashed: [], cleared: [] }),
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   '/api/models': () => ({
     models: ['synthetic-model'],
@@ -178,6 +185,10 @@ const GET_PATTERNS = [
   // POST /__fixture__/transcript rather than giving every spec one.
   [/^\/api\/chats\/[^/]+\/messages$/, (req) => sessionOf(req).transcript || []],
   [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
+  // The receipt behind a settled verification's accept, so the History card's
+  // Undo is the real affordance a `note_apply` carries rather than an
+  // assertion about one.
+  [/^\/api\/memory\/receipts\/mrcpt_fixture_2$/, () => VERIFICATION_RECEIPT],
 ]
 
 /**
@@ -272,6 +283,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/__fixture__/ws-count') {
       return sendJson(res, { connections: state.connections, open: state.sockets.size })
+    }
+    if (pathname === '/__fixture__/verification') {
+      // Opt this session into the managed-verification payloads. Per session for
+      // the same reason the transcript is: one server serves every worker, and a
+      // spec that emptied the review queue would be visible to a spec running
+      // beside it.
+      state.verification = true
+      return sendJson(res, { ok: true, candidates: VERIFICATION_REVIEW.candidates.length, history: VERIFICATION_HISTORY.rows.length })
     }
     if (pathname === '/__fixture__/transcript') {
       // Opt this session's chat into having a transcript. The default is an

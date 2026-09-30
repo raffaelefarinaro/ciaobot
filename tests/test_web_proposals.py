@@ -3440,3 +3440,207 @@ def test_an_unshaped_refusal_is_not_marked_deferred(
 
     assert resp.status_code == 409, resp.json()
     assert "deferred" not in resp.json()
+
+
+# ---- History: a settled verification, in full and with its undo --------------
+#
+# The decision sidecar records the bullet's one line — that text is the dedupe
+# key, and the queue needs nothing more. Everything a reader of History needs to
+# judge the decision lives in the note-edit record, so the route resolves each
+# `note_edit` decision back to it.
+
+
+def _history_rows(client: TestClient) -> list[dict[str, Any]]:
+    return client.get("/api/proposals/history").json()["rows"]
+
+
+def test_history_shows_an_accepted_note_edit_with_its_evidence_and_undo(
+    tmp_path: Path,
+) -> None:
+    """Before, after, why, on what, and the button that reverses it.
+
+    Without the record a settled verification reads as one opaque sentence with
+    a destination: nothing a reader could check a decision against months later.
+    The undo is real, because the accept went through `note_receipts`.
+    """
+    config, _proposal = _note_edit_vault(tmp_path)
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+    decision = next(
+        r for r in _history_rows(client) if r.get("kind") == "note_edit"
+    )
+    detail = decision["note_edit"]
+    assert detail["relative_path"] == _EDIT_NOTE
+    assert detail["operation"] == "replace"
+    assert detail["outcome"] == "update"
+    assert detail["coverage"] == "complete"
+    assert detail["before"] == _EDIT_PLAIN
+    assert detail["after"] == _EDIT_FOURTH
+    assert detail["reason"] == "the third floor no longer exists"
+    assert detail["pending"] is False
+    assert detail["accepted"] is True
+    assert detail["settled"] != ""
+    # A retirement is NOT this: reversible through Vault Review, not an undo.
+    assert "reversible_by" not in decision
+    assert decision["change"]["kind"] == "note_apply"
+    assert decision["change"]["undoable"] is True
+    assert decision["change"]["changed"] is True
+
+
+def test_history_cites_the_evidence_a_verdict_rested_on(tmp_path: Path) -> None:
+    """The citations travel with the decision, not just with the queue row.
+
+    A check can be auto-applied only when every evidence row is a citation
+    somebody could re-open, so the record of *why* a note was rewritten is the
+    record of what was checked — and it is gone from the queue the moment the
+    row is resolved.
+    """
+    from ciao import memory_receipts as mr
+    from ciao import note_edit_proposals as nep
+
+    config = _config(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    note = vault / _EDIT_NOTE
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_bytes(_EDIT_PLAIN.encode("utf-8"))
+    citation = nep.nv.Evidence(
+        source_type="url",
+        source_ref="https://example.test/office-move",
+        quoted="The office is now on the fourth floor.",
+        supports="notes/office.md",
+    )
+    nep.file_note_edit(
+        config,
+        workspace="personal",
+        relative_path=_EDIT_NOTE,
+        expected_revision=mr.content_revision(_EDIT_PLAIN),
+        operation="replace",
+        before=_EDIT_PLAIN,
+        after=_EDIT_FOURTH,
+        outcome="update",
+        coverage="complete",
+        evidence=(citation,),
+        reason="the office moved up a floor",
+    )
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+
+    detail = next(
+        r for r in _history_rows(client) if r.get("kind") == "note_edit"
+    )["note_edit"]
+    assert len(detail["evidence"]) == 1
+    assert detail["evidence"][0]["source_ref"] == "https://example.test/office-move"
+    assert detail["evidence"][0]["quoted"].startswith("The office is now")
+    assert detail["evidence"][0]["supports"] == _EDIT_NOTE
+
+
+def test_history_shows_a_retirement_as_reversible_through_the_trash(
+    tmp_path: Path,
+) -> None:
+    """No receipt, so no Undo — and emphatically not "nothing happened".
+
+    A retirement journals to the review ledger, not the memory journal, so
+    `_attach_change_receipts` finds nothing and the row would render as "no
+    change snapshot available" beside a note that really was moved. The trash is
+    where it went and Restore is the way back.
+    """
+    config, _proposal = _note_edit_vault(
+        tmp_path, operation="retire", outcome="retire", after=""
+    )
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    accepted = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert accepted.status_code == 200, accepted.json()
+    decision = next(
+        r for r in _history_rows(client) if r.get("kind") == "note_edit"
+    )
+    assert decision["reversible_by"] == "restore"
+    # The change itself is still described: the record knows it was a retirement,
+    # and it carries no after-image because a retirement writes no text.
+    assert decision["note_edit"]["operation"] == "retire"
+    assert decision["note_edit"]["after"] == ""
+    assert decision["note_edit"]["accepted"] is True
+
+
+def test_history_shows_a_dismissed_verification_as_a_dismissal(tmp_path: Path) -> None:
+    """A refusal wrote nothing, and must not read as a change.
+
+    A dismissal leaves the note exactly as it was and settles the record with
+    `accepted: False`, so the note is the before-image and there is no receipt —
+    which is the honest "nothing was written" state, not a missing snapshot.
+    """
+    config, _proposal = _note_edit_vault(tmp_path)
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+
+    decision = next(
+        r for r in _history_rows(client) if r.get("kind") == "note_edit"
+    )
+    assert decision["action"] == "dismissed"
+    assert decision["note_edit"]["accepted"] is False
+    assert decision["note_edit"]["pending"] is False
+    assert decision["note_edit"]["before"] == _EDIT_PLAIN
+    assert decision["note_edit"]["after"] == _EDIT_FOURTH, (
+        "the after-image is what WOULD have been written, and nothing wrote it"
+    )
+    # The one receipt a dismissal does leave describes the QUEUE — the bullet it
+    # removed — and not the note, which is exactly the distinction a reader needs:
+    # undoing this brings the row back, it does not apply the edit.
+    assert decision["change"]["kind"] == "queue_resolve"
+    assert decision["change"]["destination"] == ""
+
+
+def test_a_conflict_is_never_rendered_as_an_applied_change(tmp_path: Path) -> None:
+    """A refused accept leaves the row queued and records no decision at all.
+
+    The 409 is a conflict, not a failure, and the note is byte-identical — so
+    there is nothing in History to show and nothing to undo, and the row the
+    owner can still decide is the row that is still there.
+    """
+    config, _proposal = _note_edit_vault(
+        tmp_path, text_on_disk=_EDIT_PLAIN + "\nA line somebody added by hand.\n"
+    )
+    client = _client(config)
+    row = _note_edit_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409
+    assert resp.json()["conflict"] is True
+    assert _history_rows(client) == []
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_a_note_edit_whose_record_is_gone_is_left_unannotated(tmp_path: Path) -> None:
+    """Same contract as a missing receipt: absence, never an invented record.
+
+    The decision is still on record and the page still renders — one corrupt
+    sidecar must not blank History or claim a before/after nobody can read.
+    """
+    from ciao import note_edit_proposals as nep
+
+    config, proposal = _note_edit_vault(tmp_path)
+    client = _client(config)
+    row = _note_edit_row(client)
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+    nep.sidecar_path(config, "personal", proposal.id).unlink()
+
+    decision = next(
+        r for r in _history_rows(client) if r.get("kind") == "note_edit"
+    )
+
+    assert "note_edit" not in decision
+    assert decision["change"]["undoable"] is True, (
+        "the receipt is the durable record; losing the sidecar loses the prose, "
+        "not the ability to reverse the write"
+    )

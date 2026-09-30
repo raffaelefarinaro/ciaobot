@@ -249,10 +249,15 @@ establish:
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. |
 | `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, and that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap. |
 | `chat-loading-layout.spec.ts` | That the held history-loading skeleton has separated rows within the chat pane at desktop and phone widths. |
+| `note-verification.spec.ts` | That a review row which defers to a pending verification proposal lands on the proposal *in focus*. The link sets a row id and navigates, the queue's rows arrive with a fetch, and the panel is still behind the review filter's `v-show` for the first frames — a `nextTick` reveal focuses a `display: none` element, which is a silent no-op that no unit test can see. Also the copy, which is the only place a reader learns a dismissal declines rather than verifies, and the 44px touch minimum on a disclosure that reports a whole note's before/after. |
 
 The fixture serves an empty chat history by default. A spec that needs real
 turns to select opts in per session with `POST /__fixture__/transcript`, so the
-specs beside it keep seeing the empty chat.
+specs beside it keep seeing the empty chat. `POST /__fixture__/verification` is
+the same idea for the managed note-verification payloads: the review queue, the
+proposal queue, the history ledger and the note graph all default to their empty
+or plain states, and a spec that needs a pending proposal, a dead one, or a
+settled verdict opts in.
 
 Everything else stays in vitest. Adding to this suite is a trade, not a free
 win: each spec is roughly a hundred times slower than the equivalent unit test

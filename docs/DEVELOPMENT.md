@@ -630,7 +630,13 @@ it, so the three cannot disagree. The map additionally leaves `stale` off notes
 the review queue never lists (`Workspace/` paths, templates,
 `projects/completed/`), so its "unchecked" count is what the queue can show.
 Like `superseded_state_candidates` these findings are informational: they
-surface in `os-audit`'s memory section, the Memory Map, the vault-review queue,
+surface in `os-audit`'s memory section,  The
+managed verification pass sits on top of that: a note somebody has actually
+checked inside its 30-day cooldown, or one a `note_edit` proposal is waiting on,
+is not `stale` and not `unverified` however old its own `updated:` reads, because
+the question has been asked and the queue has deliberately stopped asking. All
+three surfaces ask `note_verification._check_settles` for that, not their own
+test of the cooldown — see the next section.the Memory Map, the vault-review queue,
 and the daily `system-memory-curation` run.
 
 ### The stale-note pass and the managed `verify_note` operation
@@ -741,6 +747,49 @@ this month and the moment it is edited the check no longer describes it and it
 is due again. Tests: `tests/test_note_edit_proposals.py`,
 `tests/test_web_proposals.py` for the routes, and
 `tests/test_note_verification.py` for the suppression the filing buys.
+
+### How the surfaces show the verification state
+
+Three surfaces read the check state, and they read it through the **same**
+predicates, because the alternative is three answers to "is this note due?".
+
+- `vault_review._generate_candidates` calls `read_note_checks` once per scan and
+  then asks `note_verification._check_settles` — the same predicate
+  `verify_note` short-circuits on and `should_check` wraps — whether a recorded
+  check already answers this revision. If it does, the `unverified` signal is
+  not raised. A check that is waiting on a proposal counts as answering.
+- `routes_api.vault_graph` reads the state per vault target and **clears** a
+  node's `stale` flag the same way, and ships the check on the node as `check`
+  so the tile can explain the flag's absence.
+- The history route resolves a `note_edit` decision back to its sidecar and
+  ships it as `note_edit`, plus `reversible_by: restore` for a retirement.
+
+A candidate whose check carries a `proposal_id` **for its current revision**
+carries `pending_verification` and `retirement_offered` in its payload. The
+panel then links the proposal instead of offering *Still true* / *Retire* on the
+same revision. `retirement_offered` is False only when the pending proposal is
+the note's **sole** reason for being queued — a second signal is an independent
+finding and the queue must not lose it. A proposal pinned to a revision the note
+has left is `conflicted`, suppresses nothing (its accept would refuse anyway,
+and the note is due), and the panel says so.
+
+`tests/test_note_verification_surfaces.py` drives the whole thing against a
+synthetic vault — selection, the four verdict shapes, the proposal, an accept
+and an undo, a dismissal, a conflict — and asserts the review, map and history
+payloads at each step, which is the seam where three surfaces reading one
+predicate could otherwise drift. `web/e2e/specs/note-verification.spec.ts` is
+the browser half: the link from a review row to its proposal has to land on that
+proposal *in focus*, and only a real browser can say whether it did (the row is
+behind the review filter's `v-show` for the first frames, and `focus()` on a
+`display: none` element is a silent no-op).
+
+Two things to keep true if you touch this.Two things to keep true if you touch this. `checked_at` is when the check RAN and
+is not the note's `updated:` — a verdict that came back `unverified` writes
+nothing, so a note can be checked yesterday and still carry last year's date,
+and the panel shows both rather than collapsing them. And a retirement has no
+`note_apply` receipt (it moves a file into the review trash), so it is reported
+as reversible through Vault Review's restore, never as "no change snapshot
+available" and never with an Undo button.
 
 The vault-review queue (`ciao/vault_review.py`, the `Review` panel, and
 `POST /api/vault/review`) disposes of a candidate with one of six dispositions,

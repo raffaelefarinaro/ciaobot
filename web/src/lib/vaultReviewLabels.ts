@@ -31,6 +31,38 @@ const SIGNAL_CHIP_LABELS: Record<string, string> = {
  * "retire it" first. Unknown signals sort after, alphabetically. */
 const SIGNAL_ORDER = ['superseded_language', 'unverified', 'possible_duplicate', 'unlinked', 'weak_provenance']
 
+/** What a verification's `outcome` verdict was, in the pass's own words.
+ *
+ * These are claims about a note, not about the operation that checked it: an
+ * `unverified` outcome is a real answer ("I looked and could not confirm it"),
+ * not a failure, and the word is shared with the operation's own status for
+ * exactly that reason. Rendered verbatim rather than translated, so a reader can
+ * match what the panel says against what the agent reported. */
+const VERDICT_WORDS: Record<string, string> = {
+  still_valid: 'the note is still true',
+  update: 'the note needs updating',
+  retire: 'the note should be retired',
+  unverified: 'could not be confirmed',
+}
+
+/** One verdict, in words. An outcome this client has not heard of is shown
+ * as-is rather than hidden, since the server's vocabulary is the authority. */
+export function verdictLabel(outcome: string): string {
+  return VERDICT_WORDS[outcome] || outcome || 'not recorded'
+}
+
+/** How much of a note a check actually covered, in words.
+ *
+ * `partial` matters more than it looks: a re-stamp claims the WHOLE note is
+ * still true, so the pass only auto-applies one from `complete` coverage, and a
+ * half-checked note is recorded as unverified and asked again. A row that said
+ * "checked" without this would claim more than the pass did. */
+export function coverageLabel(coverage: string): string {
+  if (coverage === 'complete') return 'the whole note'
+  if (coverage === 'partial') return 'part of the note'
+  return 'an unstated amount of the note'
+}
+
 function humanize(signal: string): string {
   return signal.replace(/_/g, ' ')
 }

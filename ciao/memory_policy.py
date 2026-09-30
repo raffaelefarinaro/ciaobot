@@ -133,9 +133,12 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
         summary=(
             "The nightly Workspace care run may consolidate a region at/above "
             "~85% of its cap (merge duplicates, drop expired, move project-scoped "
-            "facts out) under the undo log. It never promotes a NEW region fact, "
-            "never trashes or permanently deletes a note, and defers anything "
-            "that needs a reviewer."
+            "facts out) under the undo log, and may VERIFY a stale note: "
+            "re-stamp one it found still true, or apply a cited whole-note "
+            "replacement, both through the undo log. It never promotes a NEW "
+            "region fact, never retires/trashes or permanently deletes a note, "
+            "and defers anything that needs a reviewer — including a retirement "
+            "verdict, which it files as a note_edit proposal instead of applying."
         ),
         writes_regions=True,
         writes_vault=True,
@@ -214,6 +217,15 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
     DeferredAction(
         "Trash, restore, or permanently delete a vault note",
         "ciao vault review mutations require an attended turn (unattended_forbidden).",
+    ),
+    DeferredAction(
+        "Retire a note a verification found wrong",
+        "A verification may re-stamp a note it read in full, or apply a cited "
+        "whole-note replacement, but retirement is a human decision: note_verification "
+        "imports no delete primitive at all and returns the verdict as a note_edit "
+        "proposal, which only an attended accept or dismiss settles. While that "
+        "proposal waits, the review queue links to it instead of asking the same "
+        "question again.",
     ),
     DeferredAction(
         "Write memory or a project doc in another workspace",
