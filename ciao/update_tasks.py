@@ -1033,16 +1033,41 @@ def record_completion(
     config: Any,
     workspace: str = "",
     now: datetime | None = None,
+    only_from: frozenset[str] | None = None,
 ) -> TaskState | None:
     """Record this task as done, if and only if its registered check proves it.
 
     Returns the written record, or ``None`` when nothing was written: the check
     name has no implementation, the check raised, it returned something other
-    than a :class:`Detection`, or it said the postcondition does not hold yet.
-    That is the whole reason this function exists rather than a caller writing
+    than a :class:`Detection`, it said the postcondition does not hold yet, or
+    ``only_from`` was given and the record on disk had moved on. That is the whole
+    reason this function exists rather than a caller writing
     ``lifecycle="completed"``: a task is done when a *named, registered,
     deterministic* check says so, evaluated apart from any chat the operator
     started. Opening a chat is not completion, and neither is silence.
+
+    ``only_from`` is the guard :func:`_settle` needs and no other caller does.
+    The check runs outside the write lock on purpose — it is somebody else's
+    code and may be slow, and holding a scope's lock across it would serialise
+    every other writer in that scope behind a probe — so the lifecycle this
+    function started from may be minutes stale by the time it takes the lock. An
+    operator who dismisses or reopens the task while a check is running must win,
+    and without this the lock would serialise the two *writes* while still losing
+    the *decision*: ``completed`` would go over the top of ``dismissed`` with no
+    error anywhere, because the lock did its job and the read behind it did not.
+
+    So when ``only_from`` is given the lifecycle is re-read **under** the lock and
+    the write happens only if that read still shows one of those lifecycles. The
+    decision that wins is the one on disk at the moment of the write, not the one
+    the caller saw before it started waiting. ``None`` (a record) is refused too:
+    an attempt this install cannot see is not one whose verdict may be recorded,
+    and an unreadable scope must not be settled into.
+
+    Left as ``None`` by default, which is unconditional and preserves this
+    function's original contract for a caller that *knows* the lifecycle is
+    settleable — a test pinning ``_carried``, or a future surface that has just
+    written the attempt itself. A caller reasoning from a state it read earlier
+    must pass the lifecycles it read.
     """
     check = COMPLETION_FUNCTIONS.get(task.completion_check)
     if check is None:
@@ -1076,6 +1101,21 @@ def record_completion(
     # other writer in that scope behind a probe. The read of what it replaces and
     # the write that replaces it are still one critical section.
     with _record_lock(task, config, workspace) as (path, previous):
+        if only_from is not None and (
+            previous is None or previous.lifecycle not in only_from
+        ):
+            # Someone decided while the check ran. That decision is the truth
+            # about this task now, and it is not ours to overwrite — the whole
+            # point of a settlement is that it follows the operator rather than
+            # racing them.
+            logger.info(
+                "update task %s@%s: not settling, the record moved to %s while "
+                "the completion check ran",
+                task.id,
+                task.revision,
+                "no readable record" if previous is None else previous.lifecycle,
+            )
+            return None
         state = TaskState(
             task_id=task.id,
             revision=task.revision,
@@ -1431,15 +1471,26 @@ def _settle(
     cannot be read is left alone rather than settled on the strength of evidence
     the record contradicts.
 
-    :func:`record_completion` is the whole of the authority here. It resolves the
-    row's registered check, returns ``None`` for one that is unregistered,
-    raising, rude or unsatisfied, and writes nothing in any of those cases — so
-    this function has no failure mode of its own to handle, and a check that
-    cannot answer leaves the lifecycle exactly as the operator left it.
+    That read is at the top of the evaluation and the check may be slow, so the
+    lifecycle it was chosen from is stale by the time the check answers. The
+    authority is still :func:`record_completion` — it resolves the row's
+    registered check and writes nothing for one that is unregistered, raising,
+    rude or unsatisfied — but ``only_from=SETTLING_LIFECYCLES`` makes it
+    re-check that lifecycle under the write lock, so an operator who dismissed or
+    reopened the task mid-check wins instead of being overwritten.
 
-    A settled record is read back through the public lock-free reader rather than
-    assembled from what was written: the write is somebody else's return value,
-    and the status this call returns should be the file's own account of itself.
+    Two refusals leave the record alone, and both mean the record on disk is no
+    longer what this call read: a dismissal decided mid-check, and a write that
+    could not land (:class:`UpdateTaskStateError`, :class:`OSError` — a document
+    that went unreadable, a full disk). In both cases the record is re-read and
+    reported as it now stands. Reporting the stale copy would put a card on Home
+    offering Start for a task the operator had just dismissed, one poll after the
+    poll that decided it — so the re-read is not tidiness, it is the answer.
+
+    A write that fails is logged and swallowed. #788's rule is that an unfinished
+    task is reported as unfinished rather than as an error, and this runs on a
+    Home listing: one task whose state file cannot be written must not take the
+    whole strip down, and must not be reported as done either.
     """
     for task in tasks:
         identity = (task.id, task.revision)
@@ -1448,9 +1499,29 @@ def _settle(
         state = states.get(identity)
         if state is None or state.lifecycle not in SETTLING_LIFECYCLES:
             continue
-        settled = record_completion(task, config=config, workspace=workspace)
-        if settled is not None:
-            states[identity] = read_task_state(task, config=config, workspace=workspace)
+        try:
+            record_completion(
+                task,
+                config=config,
+                workspace=workspace,
+                only_from=SETTLING_LIFECYCLES,
+            )
+        except (UpdateTaskStateError, OSError) as exc:
+            logger.warning(
+                "update task %s@%s: the completion check said the work is done but "
+                "the record could not be written (%s); it stays %s until a later "
+                "listing settles it",
+                task.id,
+                task.revision,
+                exc,
+                state.lifecycle,
+            )
+        # Re-read whether the call settled the task or refused it: a settlement
+        # changed the record, and a refusal — a decision that arrived mid-check,
+        # or a write that could not land — means it changed underneath this call.
+        # Either way the file is the account of itself this call reports, never
+        # the copy read before a check that may have raced it.
+        states[identity] = read_task_state(task, config=config, workspace=workspace)
 
 
 async def evaluate(
@@ -1498,8 +1569,11 @@ async def evaluate(
     :func:`_settle`. It creates no chat, sends no prompt, starts no model turn,
     moves no note, and can only ever write the lifecycle
     :func:`record_completion` is documented to write — an unregistered, raising
-    or unsatisfied check records nothing at all. The write rides the same window
-    as the detector, so it becomes visible within ``APPLICABILITY_TTL_S`` of the
+    or unsatisfied check records nothing at all. A settlement that loses a race
+    with an operator's decision, or whose write cannot land, is logged and
+    skipped rather than raised, so a state file that goes unwritable costs one
+    task its completion and never the listing. The write rides the same window as
+    the detector, so it becomes visible within ``APPLICABILITY_TTL_S`` of the
     evidence landing rather than immediately; the state file itself is still read
     on every call, so a settled record shows up on the very next listing.
     """

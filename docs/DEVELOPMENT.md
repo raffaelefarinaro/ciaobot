@@ -1433,6 +1433,30 @@ the one the module already states about how fast it looks at the world. If a
 forced recheck ever becomes worth an endpoint, that is the place to put it — not a
 second window here.
 
+**The lifecycle is re-checked under the write lock, not from the read that
+chose it.** The check runs deliberately *outside* the lock, so the
+`SETTLING_LIFECYCLES` membership that made `_settle` ask the question is stale by
+the time the check answers. `_settle` therefore passes
+`only_from=SETTLING_LIFECYCLES` to `record_completion`, which re-reads the record
+**inside** the lock and writes nothing unless it still shows one of those
+lifecycles. Without it the lock serialises the two *writes* while the decision
+comes from before the first one, and a `dismissed` that arrived mid-check is
+overwritten with `completed` and no error anywhere — the operator's decision lost
+to a read that was never going to see it. On either a refusal or a write that
+cannot land (`UpdateTaskStateError`, `OSError`), `_settle` logs and **re-reads**
+the record rather than leaving its stale copy in `states`: reporting the copy read
+before a check that may have raced it would put a card back on Home offering Start
+for a task the operator had just dismissed. A write failure must not escape
+`evaluate` at all — it runs on a Home listing, and one task's unwritable state
+file must not take the strip down or be reported as done.
+
+`record_completion`'s `only_from` defaults to `None`, which is unconditional and
+keeps the function's original contract for a caller that *knows* the lifecycle is
+settleable (a test pinning `_carried`, or a future surface that wrote the attempt
+itself). **A caller reasoning from a state it read earlier must pass the
+lifecycles it read.** That is the whole rule; the default exists for callers that
+are not reasoning from a read.
+
 ### Update tasks: the launch
 
 `ciao/web/update_task_launch.py` (#761) is the only thing that turns a task into
