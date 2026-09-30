@@ -18,6 +18,12 @@ from collections.abc import Sequence
 from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
+from ciao.migration_notices import (
+    UNMIGRATED_LINKS_NOTICE,
+    VAULT_LOCATION_NOTICE,
+    unmigrated_links,
+    vault_location_findings,
+)
 from ciao.memory_audit import audit_entries, find_stale_entries, find_stale_notes
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
@@ -1180,69 +1186,45 @@ def audit_upgrade_notices(
     if not callable(standardizer):
         return {"notices": notices, "notices_found": 0, "errors": errors}
 
-    for name in names:
-        # Compare the registry-resolved path with the standard folder supplied
-        # by config. Setup-created whole-vault roots, adopted external folders,
-        # and pre-nesting siblings all remain usable until the user approves an
-        # interactive migration, but all should receive the same guided path
-        # into the standard named folder.
-        try:
-            actual = Path(resolver(name)).resolve()
-            standard = Path(standardizer(name)).resolve()
-        except Exception:  # noqa: BLE001 — advisory section
-            continue
-        if actual != standard and actual.is_dir():
-            notices.append({
-                "type": "vault_outside_vault_root",
-                "workspace": name,
-                "detail": (
-                    f"Workspace '{name}' keeps its vault at the nonstandard "
-                    f"location {actual}; its standard location is {standard}."
-                ),
-                "remedy": (
-                    f"Open a Ciaobot chat in workspace '{name}' and ask it to "
-                    f"migrate the vault from {actual} to {standard}. It should "
-                    "inspect both locations, ask before resolving conflicts, "
-                    "identify which files are vault content when the source also "
-                    "contains Ciaobot runtime files, and make a backup before "
-                    "moving anything. After confirmation it should move the "
-                    "approved content, atomically update the active workspace "
-                    "registry to the standard path, and restart Ciaobot as its "
-                    "final step. Verify the workspace before removing the backup."
-                ),
-            })
+    # The registry-resolved path against the standard folder config supplies, from
+    # the same probe the Home tile reads. Setup-created whole-vault roots, adopted
+    # external folders and pre-nesting siblings all remain usable until the user
+    # approves the managed relocation, but all get one shared description of it
+    # and one shared remedy — the audit used to carry its own copy here, including
+    # a remedy that described moving the folder and hand-editing the registry,
+    # which is the path the engine refuses.
+    for finding in vault_location_findings(config):
+        notices.append({
+            "type": VAULT_LOCATION_NOTICE,
+            "workspace": finding.workspace,
+            "detail": finding.detail,
+            "remedy": finding.remedy,
+        })
 
     # The vault still speaks the retired link dialect. Surfaced, never applied:
     # rewriting a user's own notes is not a decision an upgrade makes on their
     # behalf, and this is the notice that makes the choice visible instead of
     # leaving it in a release note nobody re-reads. Notices are pending actions
     # the weekly hygiene routine surfaces without turning the audit red.
-    if runtime_dir is not None:
-        try:
-            from ciao.vault_migrate_links import has_unmigrated_links, read_receipt
-
-            if read_receipt(runtime_dir) is None:
-                example = has_unmigrated_links(Path(vault_raw))
-                if example:
-                    notices.append({
-                        "type": "unmigrated_vault_links",
-                        "workspace": "",
-                        "detail": (
-                            "The vault still uses `[[wikilinks]]`, which nothing "
-                            "reads any more: they are not graph edges, not "
-                            "backlinks, and not clickable in the file viewer. "
-                            f"First example: {example}."
-                        ),
-                        "remedy": (
-                            "Preview with `ciao vault-migrate-links` (dry-run by "
-                            "default), then apply with "
-                            "`ciao vault-migrate-links --apply`. Every rewrite is "
-                            "recorded, so `ciao vault-unmigrate-links --apply` "
-                            "restores the notes byte for byte."
-                        ),
-                    })
-        except Exception:  # noqa: BLE001 — advisory section, never fail the audit
-            logger.exception("upgrade notices: link-dialect check failed")
+    #
+    # `establish=True` because the audit is the surface that may pay for the
+    # walk: it already reads every note in the vault for the hygiene section, and
+    # a notice naming a first offending note is the truthful one. Applicability
+    # is the audit's own call, from the shared probe — a scratch vault and an
+    # adopted one that has completed its migration are silent here for the same
+    # reason Home is silent about them.
+    try:
+        links = unmigrated_links(config, runtime_dir, establish=True)
+    except Exception:  # noqa: BLE001 — advisory section, never fail the audit
+        logger.exception("upgrade notices: link-dialect check failed")
+        links = None
+    if links is not None and links.established:
+        notices.append({
+            "type": UNMIGRATED_LINKS_NOTICE,
+            "workspace": "",
+            "detail": links.detail,
+            "remedy": links.remedy,
+        })
 
     # Person notes filed into the wrong workspace by the per-workspace curation
     # bug. Surfaced, never applied, and detected from the receipt's presence

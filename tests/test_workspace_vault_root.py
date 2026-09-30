@@ -227,9 +227,13 @@ def test_upgrade_notice_reports_a_vault_left_outside_the_vault_root(tmp_path: Pa
     notice = result["notices"][0]
     assert notice["type"] == "vault_outside_vault_root"
     assert notice["workspace"] == "research"
-    assert "Open a Ciaobot chat" in notice["remedy"]
-    assert str(legacy) in notice["remedy"]
-    assert str(tmp_path / "memory-vault" / "research") in notice["remedy"]
+    # The remedy is the managed command and nothing else. It used to describe
+    # moving the folder, backing it up and hand-editing the registry, which is
+    # the path the engine refuses; the paths themselves are the detail.
+    assert "ciao vault-relocate research --apply" in notice["remedy"]
+    assert "ciao vault-relocate research --undo" in notice["remedy"]
+    assert str(legacy) in notice["detail"]
+    assert str(tmp_path / "memory-vault" / "research") in notice["detail"]
 
 
 def test_upgrade_notices_stay_quiet_for_a_correctly_placed_vault(tmp_path: Path) -> None:
@@ -261,11 +265,14 @@ def test_upgrade_notice_includes_a_setup_created_whole_vault_root(
     result = audit_upgrade_notices(config)
 
     assert result["notices_found"] == 1
-    assert str(tmp_path) in result["notices"][0]["remedy"]
-    assert str(tmp_path / "research") in result["notices"][0]["remedy"]
-    assert "atomically update the active workspace registry" in (
-        result["notices"][0]["remedy"]
-    )
+    assert str(tmp_path) in result["notices"][0]["detail"]
+    assert str(tmp_path / "research") in result["notices"][0]["detail"]
+    # A setup-created whole-vault root is the case the hand-migration remedy was
+    # written for — the source and the install share a folder — and it is still
+    # the managed command that moves it. The registry is updated by the command,
+    # which is the difference from the hand edit the old remedy described.
+    assert "ciao vault-relocate research --apply" in result["notices"][0]["remedy"]
+    assert "hand-edit" not in result["notices"][0]["remedy"]
 
 
 def test_upgrade_notice_includes_an_external_setup_vault(tmp_path: Path) -> None:
@@ -290,10 +297,11 @@ def test_upgrade_notice_includes_an_external_setup_vault(tmp_path: Path) -> None
     result = audit_upgrade_notices(config)
 
     assert result["notices_found"] == 1
-    assert str(external) in result["notices"][0]["remedy"]
+    assert str(external) in result["notices"][0]["detail"]
     assert str(workspace / "memory-vault" / "research") in (
-        result["notices"][0]["remedy"]
+        result["notices"][0]["detail"]
     )
+    assert "ciao vault-relocate research" in result["notices"][0]["remedy"]
 
 
 def test_upgrade_notices_tolerate_a_config_without_a_registry() -> None:

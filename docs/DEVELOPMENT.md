@@ -715,6 +715,57 @@ The status and process exit code are a stable contract:
 
 The daily `system-memory-curation` schedule is presented as **Workspace care**. Its packaged prompt runs lightweight memory passes nightly and uses `Workspace/Curation-Log.md`'s `last_full_pass` marker to catch up the deeper weekly work after downtime. A full pass runs `ciao vault-index --write` before `ciao os-audit --json --scope workspace`; a failed index rebuild or audit exit 2 leaves the marker overdue and prevents a healthy/no-op claim. Exit 1 means reliable findings and the pass continues with only safe structural repairs. A full pass also reviews the workspace guide body (AGENTS.md) for misplacement, drift, and bloat, applying the same state-vs-event and entity-placement rules the regions follow; that model-judged review is separate from the two required weekly checks, so an over-budget run that never reaches it does not suppress the next week's guide care.
 
+#### The migration notices, and why they are probed in one place
+
+Two surfaces answer "what did an upgrade leave for this install?": the Home
+strip (`ciao/operator_actions.py`, polled every 60s and on window focus) and the
+`upgrade_notices` section of the audit above (a diagnostic, `pending_action_count`,
+never red). Since #816 both read `ciao/migration_notices.py`, which owns the
+condition, the applicability rule and the wording for the two notices they share.
+They used to carry their own copies, and the copies had drifted in ways only one
+side could see: the vault-location predicate existed twice while the audit's
+remedy described moving the folder and hand-editing the registry — the path the
+engine refuses — and the wikilink notice had two *applicability* rules, so the two
+surfaces answered different questions about the same vault.
+
+Adding a third surface to a notice is a function call, not a copy. Adding a notice
+means answering two questions in that module, and the answers are what a later
+maintainer is checking:
+
+- **What makes it applicable?** One rule, shared. For the wikilink notice that is
+  an adopted vault (`vault_mode == "existing"`), a runtime root to read the
+  receipt from, and no *completed* migration receipt — `read_receipt` gates on
+  `status == "migrated"`, so a run that could not write every note does not
+  silence it. A config that does not declare its mode is read as a vault Ciaobot
+  created, which is out of scope and is also what lets the Home card reach zero.
+  A surface that decides applicability for itself is a disagreement waiting to be
+  filed as a bug, and the cheap version of that bug — letting the surface that
+  cannot afford the work declare the condition out of scope — deletes a true
+  finding from the audit.
+- **What does it cost?** The expensive half is a named argument
+  (`establish=True`), never a private copy of the rules. Home may only call the
+  cheap half: read a receipt, compare two registry-resolved paths, `is_dir()` the
+  result. The audit may run the wikilink walk, because it already reads every
+  note in the vault, and that is what lets it name a first offending note while
+  the card says the dialect *may* be in use — a receipt's absence is not a
+  wikilink, and a card that claimed otherwise would be lying. No Home-side
+  suppression is an input to these functions, so when #800's catalog step makes a
+  notice optional and dismissible, the dismissal can reach Home and only Home.
+
+The bound on the Home side is asserted, not assumed:
+`tests/test_migration_notices.py` counts filesystem accesses under the vault
+across three detection passes, at one note and at four hundred, and fails on any
+of them. A timing assertion would pass on a fast tmpfs and fail in CI.
+
+Neither notice is an update-task catalog row, and the test says so. A catalog task
+needs a registered completion check that reads a real postcondition, and for
+these two the only "evidence" the work was done is the condition's absence
+recomputed each render, which makes the check a tautology. `vault-relocate` is the
+best candidate for a receipt (it has an apply/undo cycle and a registry update to
+hang one on); the link migration's receipt is per *install*, not per vault, so a
+per-workspace loop over its remedy is not available either. Do not add a row
+because a card looks like a task.
+
 ### Bounded-memory rot audit
 
 `ciao/memory_audit.py` checks whether the content of the always-loaded
