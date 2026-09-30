@@ -112,9 +112,25 @@ describe('note_edit', () => {
       ['replace', 'Rewrites this whole note with the verified text'],
       ['restamp', 'Marks this note as checked again today'],
       ['retire', 'Moves this note to the review trash, where it can be restored'],
+      // The entry operations change ONE list item and leave the rest of the file
+      // alone. Describing them as rewriting the whole note is the one thing a
+      // reviewer must not be told about a write they are about to click.
+      ['replace_entry', 'Rewrites this one entry with the verified text'],
+      ['restamp_entry', 'Marks this one entry as checked again today'],
+      ['retire_entry', 'Removes this one entry from the note; the note itself is kept'],
     ] as const) {
       const r = editRow({ note_edit: { ...editRow().note_edit!, operation } })
       expect(descriptorFor(r).consequence(r), operation).toBe(expected)
+    }
+  })
+
+  it('never describes an entry operation as a whole-note write', () => {
+    // The default branch is the fallback for a kind this version does not know,
+    // so it names the note. An entry operation must never fall through to it.
+    for (const operation of ['replace_entry', 'restamp_entry', 'retire_entry'] as const) {
+      const r = editRow({ note_edit: { ...editRow().note_edit!, operation } })
+      expect(descriptorFor(r).consequence(r), operation).not.toContain('whole note')
+      expect(descriptorFor(r).consequence(r), operation).not.toContain('trash')
     }
   })
 

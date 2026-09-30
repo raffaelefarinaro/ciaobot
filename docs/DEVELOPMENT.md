@@ -850,6 +850,58 @@ the CLI mapping.
 `--with-vault` adds the note-aging pass (still informational, never changes the
 exit code). Exit 0 clean, 1 findings, 2 a region could not be read.
 
+### The stale-entry pass and the entry-level operation
+
+A note is not the unit a person keeps current. Its frontmatter `updated:` is one
+date for every fact in it, so re-verifying somebody's address last week silently
+re-certified the landlord's name from 2019 with it — and a whole-note verdict has
+nowhere to put a fact that is two years out of date while its neighbours are
+current. `PASS_STALE_ENTRY` in `ciao/curation_run.py` is that other half: one
+`WorklistItem` per **list item**, keyed by `note_entries.entry_identity`, capped
+at `STALE_ENTRY_MAX_ITEMS`, sitting directly after `PASS_STALE_NOTE` in
+`PASS_ORDER` and nowhere near the weekly hygiene keys.
+
+Three properties are worth preserving before changing any of it.
+
+**The selection walks every note, and ages each entry on its own date.** The
+audit selected *notes*; a bullet stamped in 2024 inside a note re-stamped
+yesterday is not in that list at all, which is the whole point. So the pass calls
+`memory_audit.note_verification` per note for the entity type's horizon (a custom
+category's `stale_after_days` included) and compares each entry's own
+`[verified: YYYY-MM-DD]` against it. An entry with no stamp — or a stamp that is
+malformed, an impossible day, or a date that has not happened, and therefore is
+not a verification — inherits the note's date, so it stays the same work the note
+pass found. Exempt types and `vault_review.never_queued` are the audit's and the
+queue's, not second copies, and the two stale passes share one `scan_vault` walk
+(`_stale_findings`), because scanning a vault twice in one worklist is twice the
+frontmatter parsing for a selection that cannot differ.
+
+**The key is the identity, not a path and not a line.** `entry_identity` digests
+the workspace, note path, nearest heading, the entry's own fingerprint and a
+duplicate ordinal — and deliberately no line number and no offset, so a fact keeps
+its key when the note is reordered or a fact is inserted above it, and two
+identical bullets under one heading stay distinct. A key carrying an offset would
+go stale the moment anybody edited the file above it, and the pass holding it would
+re-ask a question it had already answered. The filter is
+`entry_verification.should_check_entry`, the **same** predicate `verify_entry`
+short-circuits on, and the cap is applied after it for the note pass's reason: the
+cooled-down entry that is still the oldest would otherwise take a slot every night.
+
+**The judgement is the same managed operation with an entry selector.** One
+payload file, two requests, and the `entry` field is the only thing that says
+which: an `entry` identity plus the `entry_fingerprint` it was read at names one
+fact, and its absence means the note. Everything else is identical — the payload is
+confined to the caller's own workspace root and capped, a `workspace` naming
+another one is refused, the whole thing runs as one bounded coalesced off-loop
+read (keyed on the entry's identity *and* fingerprint as well as the note and
+revision), the receipt's `source` follows the turn, and an oversized note is
+`failed` rather than `applied`. `before`/`after` change meaning with the selector,
+in the direction of the smaller unit: they are the **entry's** text, because a
+whole-note replacement in an entry payload is the caller rewriting every other
+fact in the file to correct one. The reply carries `scope: "entry"` so a caller
+reading both shapes is never guessing which one it got. The judgement itself is
+`ciao/entry_verification.py`, called rather than reimplemented.
+
 ### Note-edit proposals
 
 The autonomy rule in `ciao/note_verification.py` refuses some verdicts outright:
@@ -859,7 +911,8 @@ frontmatter `updated:` to stamp. Each is recorded as a `needs_review` check, and
 decide — a typed `note_edit` row in the proposal queue, one per `(note,
 revision)`, whose bullet payload is a sidecar id and whose record
 (`<vault>/Workspace/Memory-Note-Edit-Proposals/<id>.json`) holds the operation
-(`replace` | `restamp` | `retire`), the note's full before/after text, the
+(`replace` | `restamp` | `retire` | `replace_entry` | `restamp_entry` |
+`retire_entry`), the note's full before/after text, the
 `expected_revision` it was planned against, and the evidence behind it. A whole
 note's before/after is not one line, which is why the payload is an id and the
 record lives beside the queue — the same shape as the category sidecar, and for
@@ -867,6 +920,28 @@ the same reason. A re-stamp also records the date the verification was dated:
 its bytes are computed rather than quoted, so the date travels with the proposal
 instead of being read off the clock at accept time, which is what makes a
 previewed card and a clicked one the same `exact` document.
+
+An **entry** operation is the same record one level in, and the difference is
+worth stating before changing any of it. Its images are still the note's full text
+both ways — the accept applies a whole-note `commit_note_change` either way, and a
+bounded patch is a different operation with different rules — and what it adds is
+the entry's `identity`, the `fingerprint` its verdict was reached about, and the
+`(start, end)` span. The span is **measured** from the note at filing time, not
+taken from the caller: the note must still be at `expected_revision` and the entry
+must still be there under that fingerprint, so a payload built for text that has
+since been rewritten is refused here rather than queueing a splice at offsets that
+now mean other words. `entry_replacement` is the exact inverse of that splice, and
+it is what lets the accept go through `note_receipts.apply_entry_edit` — which
+resolves the entry again and refuses on any mismatch — instead of writing a whole
+note's text on the strength of a record. Filing is **idempotent per unit of work**:
+`(note, revision)` for a whole-note operation and `(note, revision,
+entry_identity)` for an entry one, because two bullets of one note at one revision
+are two different questions and an id shared by both would leave a reviewer
+deciding about one while the other silently goes unasked. The check it pins is an
+`EntryCheck` keyed by the identity rather than a `NoteCheck` keyed by the path, and
+both are written through the one `note_verification.update_check_state` that owns
+the shared sidecar — two writers each rewriting that document from their own read
+would drop the other map's cooldowns on every record.
 
 Three rules carry the weight, and they are worth stating before changing any of
 it. Filing is **idempotent per revision** and records the check's `proposal_id`,
@@ -877,7 +952,12 @@ is revision-checked, journaled and undoable, and a note that moved is a
 path is the only thing that can reach `vault_review.trash_note` (the reversible
 review trash), and `note_verification` still cannot import a delete primitive at
 all — `tests/test_note_verification.py` pins that and
-`tests/test_note_edit_proposals.py` extends the check to the proposer. Neither
+`tests/test_note_edit_proposals.py` extends the check to the proposer. An **entry**
+retirement is the same rule at a smaller width: it deletes exactly one span
+through `apply_entry_edit`, on a click, never from a pass — so the note survives
+with its other facts and the bullet comes back through the same whole-note undo.
+A whole-*file* retirement stays Vault Review's, and nothing on the entry path
+reaches a trash at all. Neither
 `accept` nor `dismiss` writes a "refused forever" flag, unlike the category
 sidecar's decline: a settlement clears the check's `proposal_id` and leaves the
 check's own 30-day cooldown running, so a note the owner kept is not re-asked

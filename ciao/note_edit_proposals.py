@@ -15,14 +15,34 @@ sidecar is a row whose accept refuses and keeps; a sidecar with no bullet is
 litter, which is the direction that fails safe, so the sidecar is written
 FIRST.
 
-**What is filed, and what is not.** Exactly one proposal per
-``(note, expected_revision)``: the id is derived from those two, so a second
-pass that reaches the same verdict about the same text finds the record it
-already wrote and writes nothing. The proof that this actually happened is the
-``proposal_id`` on the :class:`ciao.note_verification.NoteCheck` —
-``_check_settles`` suppresses a revision that is waiting on a proposal whatever
-its cooldown says, so filing without recording the id would let the next nightly
-pass file a second row for a note that already has one.
+**Whole-note and one-entry, in the same record.** :mod:`ciao.note_verification`
+judges a whole note; :mod:`ciao.entry_verification` judges one list item inside
+one. Both verdicts file here, told apart by the operation
+(:data:`REPLACE`, :data:`RESTAMP`, :data:`RETIRE` against :data:`REPLACE_ENTRY`,
+:data:`RESTAMP_ENTRY`, :data:`RETIRE_ENTRY`) and by the three entry fields
+:attr:`NoteEditProposal.entry_identity`,
+:attr:`NoteEditProposal.entry_fingerprint` and
+:attr:`NoteEditProposal.entry_span`. The images stay the NOTE's full text both
+ways for both, and that is deliberate rather than a leftover: a bounded patch is a
+different operation with different rules, and what an accept applies is a
+whole-note :func:`ciao.note_receipts.commit_note_change` either way. What an
+entry operation adds is the *identity* of the entry, the *fingerprint* the
+verdict was reached about, and the *span* — so the accept can prove the entry is
+still the entry the reviewer read, compose the exact bytes, and refuse on any
+mismatch instead of rewriting whatever sits at those offsets now.
+
+**What is filed, and what is not.** Exactly one proposal per unit of work: for a
+whole-note operation that is ``(note, expected_revision)``, for an entry operation
+that is ``(note, expected_revision, entry_identity)``, so two entries of one note
+at one revision are two different questions and get two rows. The id is derived
+from those, so a second pass that reaches the same verdict about the same text
+finds the record it already wrote and writes nothing. The proof that this actually
+happened is the ``proposal_id`` on the check the filing recorded —
+:func:`ciao.note_verification._check_settles` for a note, its entry-level twin
+:func:`ciao.entry_verification.should_check_entry` for an entry, both of which
+suppress what is waiting on a proposal whatever its cooldown says. Filing without
+recording the id would let the next nightly pass file a second row for something
+that already has one.
 
 **Nothing here applies anything.** This module files and settles; the accept
 lives with the other accept handlers in :mod:`ciao.web.proposal_service`, and a
@@ -52,7 +72,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ciao import entry_verification as ev
 from ciao import memory_receipts as mr
+from ciao import note_entries as ne
+from ciao import note_receipts as nr
 from ciao import note_verification as nv
 from ciao import proposal_tracking
 
@@ -85,12 +108,33 @@ REPLACE = "replace"
 RESTAMP = "restamp"
 RETIRE = "retire"
 
-OPERATIONS = (REPLACE, RESTAMP, RETIRE)
-"""The three operations a note edit can carry.
+REPLACE_ENTRY = "replace_entry"
+RESTAMP_ENTRY = "restamp_entry"
+RETIRE_ENTRY = "retire_entry"
 
-``replace`` is the agent's exact replacement text, ``restamp`` is a
-verification date re-stamped on the note's own frontmatter, and ``retire`` is
-the one operation that removes a note — attended only, never from a pass.
+OPERATIONS = (REPLACE, RESTAMP, RETIRE, REPLACE_ENTRY, RESTAMP_ENTRY, RETIRE_ENTRY)
+"""The six operations a note edit can carry.
+
+``replace`` is the agent's exact replacement text, ``restamp`` is a verification
+date re-stamped on the note's own frontmatter, and ``retire`` is the one operation
+that removes a whole note — attended only, never from a pass.
+
+The three ``*_entry`` operations are those same three, narrowed to one list item
+inside the note: an exact replacement of that item's span, a re-stamp of that
+item's own ``[verified:]`` date, and the removal of that item alone. The note
+itself is never trashed by any of them — that stays
+:func:`ciao.vault_review.trash_note`'s — and every one of them is a whole-note
+:func:`ciao.note_receipts.commit_note_change` underneath, so undo is unchanged.
+"""
+
+ENTRY_OPERATIONS = (REPLACE_ENTRY, RESTAMP_ENTRY, RETIRE_ENTRY)
+"""The operations that name an entry rather than a note.
+
+Split out because the two halves file genuinely different things: a whole-note
+operation needs a path and a revision, an entry operation needs the entry's
+identity, the fingerprint its verdict was about and the span it replaced — and
+each is refused without them. A caller cannot file an entry edit for an entry it
+cannot name, let alone for one that is not there.
 """
 
 #: The queue file a `note_edit` bullet is appended to, as the row id is derived
@@ -109,8 +153,11 @@ class NoteEditRefused(NoteEditError):
     Raised by :func:`file_note_edit` for an operation outside
     :data:`OPERATIONS`, a path that is not vault-relative, a missing revision,
     a ``replace`` with no replacement text (which would empty the note, and
-    emptying a note is the deletion this whole path refuses to perform), or a
-    re-stamp that does not cover the note.
+    emptying a note is the deletion this whole path refuses to perform), a
+    re-stamp that does not cover the note, an entry operation with no entry
+    identity or fingerprint, a whole-note operation carrying one, or an entry
+    whose span cannot be measured because the note moved, the entry is gone or
+    the entry is not the text the verdict was reached about.
     """
 
 
@@ -147,6 +194,18 @@ class NoteEditProposal:
     a trashed note and a rewritten one are different outcomes and a record that
     cannot tell them apart says nothing. ``receipt_id`` is the note receipt an
     accept's write handed back, so an undo has something to point at.
+
+    The three entry fields are empty for a whole-note operation, and
+    :data:`ENTRY_OPERATIONS` operations are refused without all three. They are
+    the entry's :func:`ciao.note_entries.entry_identity`, the
+    :func:`ciao.note_entries.refresh_fingerprint` its verdict was reached about,
+    and the ``(start, end)`` character offsets that entry occupied in ``before``.
+    The span is recorded rather than trusted because it is checkable: an accept
+    recovers the entry's exact replacement from it (see :func:`entry_replacement`)
+    and hands that to
+    :func:`ciao.note_receipts.apply_entry_edit`, which resolves the entry again by
+    identity and refuses on any mismatch. Nothing here is ever spliced at a bare
+    offset the file happens to hold.
     """
 
     id: str
@@ -166,6 +225,9 @@ class NoteEditProposal:
     settled: str = ""
     accepted: bool = False
     stamp_date: str = ""
+    entry_identity: str = ""
+    entry_fingerprint: str = ""
+    entry_span: tuple[int, int] = (0, 0)
 
     def as_dict(self) -> dict[str, Any]:
         """The row the sidecar file stores."""
@@ -187,24 +249,86 @@ class NoteEditProposal:
             "settled": self.settled,
             "accepted": self.accepted,
             "stamp_date": self.stamp_date,
+            "entry_identity": self.entry_identity,
+            "entry_fingerprint": self.entry_fingerprint,
+            "entry_span": [self.entry_span[0], self.entry_span[1]],
         }
+
+
+# ── Entry operations ───────────────────────────────────────────────────────
+
+
+def entry_replacement(proposal: NoteEditProposal) -> str:
+    """The entry's exact new text, recovered from the recorded splice.
+
+    The inverse of :func:`ciao.note_receipts.compose_entry_edit`. ``before`` and
+    ``after`` are the whole note either way, and ``entry_span`` says which slice of
+    ``before`` the edit replaced — so the replacement is exactly the slice of
+    ``after`` between the same prefix and the same suffix, and the note's other
+    bytes are the same bytes in both images by construction.
+
+    This is what lets an accept go through
+    :func:`ciao.note_receipts.apply_entry_edit` rather than writing the stored
+    ``after`` verbatim: the managed helper takes the *entry's* new text, resolves
+    the entry again by identity, and refuses on any mismatch, so a row that was
+    hand-edited, truncated or forged cannot turn a whole-note image into an
+    entry's worth of prose. The refusal here is the same check run a second time,
+    on the record, before anything reaches the vault.
+
+    Raises :class:`NoteEditError` when the row is not a clean inverse — an entry
+    operation without a span, a span outside ``before``, or an ``after`` that
+    does not keep the note's own prefix and suffix. A whole-note proposal has no
+    entry to recover and is refused outright.
+    """
+    if proposal.operation not in ENTRY_OPERATIONS:
+        raise NoteEditError(
+            f"a {proposal.operation} is a whole-note edit and names no entry, so "
+            "there is no entry replacement to recover"
+        )
+    start, end = proposal.entry_span
+    before, after = proposal.before, proposal.after
+    if not (0 <= start <= end <= len(before)):
+        raise NoteEditError(
+            f"the entry span ({start}, {end}) is outside the {len(before)}-character "
+            "note this record was filed against, so its replacement cannot be recovered"
+        )
+    if not after.startswith(before[:start]) or not after.endswith(before[end:]):
+        raise NoteEditError(
+            "the recorded after image does not keep the note's own text outside "
+            "the entry's span, so it is not the image this edit produced"
+        )
+    return after[start : len(after) - (len(before) - end)]
+
 
 
 # ── Identity ───────────────────────────────────────────────────────────────
 
 
-def note_edit_id(workspace: str, relative_path: str, expected_revision: str) -> str:
-    """The stable sidecar id for one edit of one revision of one note.
+def note_edit_id(
+    workspace: str, relative_path: str, expected_revision: str, entry_identity: str = ""
+) -> str:
+    """The stable sidecar id for one edit of one revision of one note or entry.
 
-    Derived from the three things that make the proposal what it is, the way
-    :func:`ciao.proposal_tracking.stable_proposal_id` derives a queue row's: so
-    a second pass reaching the same verdict about the same text computes the
-    same id and finds the record it already wrote, and a note that changed
-    computes a different one and is a new question. The revision is in the basis
-    because a check — and this proposal — describes exactly one revision.
+    Derived from the things that make the proposal what it is, the way
+    :func:`ciao.proposal_tracking.stable_proposal_id` derives a queue row's: so a
+    second pass reaching the same verdict about the same text computes the same id
+    and finds the record it already wrote, and a note that changed computes a
+    different one and is a new question. The revision is in the basis because a
+    check — and this proposal — describes exactly one revision.
+
+    ``entry_identity`` is in the basis for an entry operation and empty for a
+    whole-note one, and the empty case is byte-identical to the id this function
+    produced before entry operations existed. It has to be: two entries of one
+    note at one revision are two different questions, and an id shared by both
+    would let the second filing find the first's record, call it the same
+    question and leave a reviewer deciding about one bullet while the other
+    silently goes unasked.
     """
-    raw = f"{workspace}\x00{relative_path}\x00{expected_revision}".encode("utf-8")
+    raw = (
+        f"{workspace}\x00{relative_path}\x00{expected_revision}\x00{entry_identity}"
+    ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
+
 
 
 def _now() -> str:
@@ -272,6 +396,41 @@ _STRING_FIELDS = (
     "stamp_date",
 )
 
+#: Fields an *entry* operation cannot be read without. Optional on a whole-note
+#: row rather than required, because a file written before entry operations
+#: existed is still a readable whole-note record and refusing it would strand a
+#: proposal nobody is being asked about any more; required for an entry
+#: operation, because a splice with no identity to bind it to is not an edit to
+#: anything. :func:`_proposal_from_mapping` re-asserts the per-operation rules, so
+#: this is a second, independent refusal rather than the only one.
+_ENTRY_STRING_FIELDS = ("entry_identity", "entry_fingerprint")
+
+
+def _stored_span(raw: Any, where: Path) -> tuple[int, int]:
+    """One stored ``entry_span`` as a ``(start, end)`` pair, or a refusal.
+
+    A two-element list of integers and nothing else. A span is what a splice is
+    cut at, so a string, a float, a negative, an inverted pair or a three-element
+    list is a record whose edit cannot be located — and the failure mode of
+    guessing is writing over the wrong part of somebody's note.
+    """
+    if (
+        not isinstance(raw, list)
+        or len(raw) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in raw)
+    ):
+        raise NoteEditSidecarError(
+            f"note-edit proposal {where} has an entry_span of {raw!r}, which is not a "
+            "[start, end] pair of whole numbers, so no entry can be located in it"
+        )
+    start, end = int(raw[0]), int(raw[1])
+    if not 0 <= start <= end:
+        raise NoteEditSidecarError(
+            f"note-edit proposal {where} has an entry_span of ({start}, {end}), which "
+            "is not an ordered pair, so no entry can be located in it"
+        )
+    return start, end
+
 
 def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
     """One stored row as a :class:`NoteEditProposal`, or a refusal.
@@ -289,14 +448,24 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
     a ``replace`` with no replacement text, which the accept would happily write
     as an emptied note. Checking what filing checked means the reader cannot be
     talked into an operation nobody filed.
+
+    The entry rules are the same idea one level in, and the strictest of them is
+    :func:`entry_replacement`: the row has to be a clean inverse of the splice it
+    claims, so an accept can hand the managed helper an entry's own text rather
+    than the note's. :data:`RESTAMP_ENTRY` adds the check that the replacement's
+    fingerprint is the one the verdict was about, which is what makes a re-stamp
+    a re-stamp — a record that changes the fact while calling itself a stamp is
+    refused rather than quietly written.
     """
     if not isinstance(raw, dict):
         raise NoteEditSidecarError(
             f"note-edit proposal {where} is a {type(raw).__name__}, not an object"
         )
+    is_entry = raw.get("operation") in ENTRY_OPERATIONS
+    entry_names = _ENTRY_STRING_FIELDS if is_entry else ()
     problems: list[str] = [
         f"{name} must be a string"
-        for name in _STRING_FIELDS
+        for name in _STRING_FIELDS + entry_names
         if not isinstance(raw.get(name), str)
     ]
     if not isinstance(raw.get("evidence"), list):
@@ -305,6 +474,14 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
         problems.append("accepted must be a boolean")
     if problems:
         raise NoteEditSidecarError(f"note-edit proposal {where}: {'; '.join(problems)}")
+    span: tuple[int, int] = (0, 0)
+    if is_entry:
+        span = _stored_span(raw.get("entry_span"), where)
+    elif raw.get("entry_span") not in (None, [], [0, 0]):
+        raise NoteEditSidecarError(
+            f"note-edit proposal {where} is a whole-note edit that carries an entry "
+            "span, so it is not the record that was filed; nothing was written"
+        )
     proposal = NoteEditProposal(
         id=str(raw["id"]),
         workspace=str(raw["workspace"]),
@@ -323,6 +500,9 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
         settled=str(raw["settled"]),
         accepted=bool(raw["accepted"]),
         stamp_date=str(raw["stamp_date"]),
+        entry_identity=str(raw.get("entry_identity") or ""),
+        entry_fingerprint=str(raw.get("entry_fingerprint") or ""),
+        entry_span=span,
     )
     if not proposal.expected_revision:
         raise NoteEditSidecarError(
@@ -346,7 +526,7 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
             f"which is neither {nv.COVERAGE_COMPLETE!r} nor "
             f"{nv.COVERAGE_PARTIAL!r}; nothing was written"
         )
-    if proposal.operation == REPLACE and not proposal.after.strip():
+    if proposal.operation in (REPLACE, REPLACE_ENTRY) and not proposal.after.strip():
         raise NoteEditSidecarError(
             f"note-edit proposal {where} is a replace with no replacement text, "
             "so applying it would empty the note; nothing was written"
@@ -356,7 +536,9 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
             f"note-edit proposal {where} is a retirement that carries an after "
             "image, so it is not the record that was filed; nothing was written"
         )
-    if proposal.operation == RESTAMP:
+    if is_entry:
+        _check_entry_fields(proposal, where)
+    if proposal.operation in (RESTAMP, RESTAMP_ENTRY):
         if proposal.coverage != nv.COVERAGE_COMPLETE:
             raise NoteEditSidecarError(
                 f"note-edit proposal {where} is a re-stamp from "
@@ -372,6 +554,88 @@ def _proposal_from_mapping(raw: Any, where: Path) -> NoteEditProposal:
                 "would stamp is not the one that was filed; nothing was written"
             ) from None
     return proposal
+
+
+def _entry_refusal(proposal: NoteEditProposal, where: str) -> str:
+    """Why this entry record may not be applied, or ``""`` when it may.
+
+    Five rules, and each names a way a record could describe an edit that is not
+    the one filed. Deliberately *pure* — it returns a reason rather than raising —
+    because both sides need it and neither may hold the other's exception: filing
+    raises :class:`NoteEditRefused`, the reader raises
+    :class:`NoteEditSidecarError`, and a record that passes filing but not reading
+    is a file somebody edited between the two.
+
+    * an entry **identity**, which is the only thing the accept can resolve the
+      entry by — an edit with no identity is a splice at an offset in a file, and
+      that is the whole thing this path exists to avoid;
+    * the **fingerprint** the verdict was about, so the accept can prove the entry
+      is still the entry the reviewer read rather than a bullet that happens to sit
+      at the same offsets now;
+    * a **clean inverse** — :func:`entry_replacement` must recover the entry's own
+      text from the recorded span, which is what stops a whole-note image being
+      passed off as an entry's replacement;
+    * for :data:`RETIRE_ENTRY`, an **empty** replacement: the record removes that
+      span and nothing else, so a "retirement" that also carries new text is not
+      the record that was filed. And a non-empty ``after`` overall, because a
+      retire whose splice empties the note is a note deletion wearing a bullet's
+      clothes — the refusal Vault Review's trash exists to be asked about instead;
+    * for :data:`RESTAMP_ENTRY`, a replacement whose fingerprint **equals** the
+      recorded one. A re-stamp changes the fact's date and nothing else, so a
+      record that changes the words while calling itself a re-stamp is refused
+      rather than written: a reviewer clicking "re-stamp this" must never get a
+      rewrite.
+    """
+    where = f"note-edit proposal {where}" if where else "this note edit"
+    identity = proposal.entry_identity.strip()
+    if not identity:
+        return (
+            f"{where} is a {proposal.operation} naming no entry identity, so there "
+            "is nothing to splice"
+        )
+    try:
+        ev._stored_key(identity)
+    except ev.EntryCheckRefused as exc:
+        return f"{where}: {exc}"
+    if not proposal.entry_fingerprint.strip():
+        return (
+            f"{where} is a {proposal.operation} naming no entry fingerprint, so it "
+            "cannot be checked against the text it was judged on"
+        )
+    try:
+        replacement = entry_replacement(proposal)
+    except NoteEditError as exc:
+        return f"{where}: {exc}"
+    if proposal.operation == RETIRE_ENTRY:
+        if replacement:
+            return (
+                f"{where} is an entry retirement that also replaces the entry with "
+                f"{replacement!r}, so it is not the record that was filed"
+            )
+        if not proposal.after:
+            return (
+                f"{where} is an entry retirement whose after image is empty, so "
+                "applying it would empty the whole note; a note is retired through "
+                "Vault Review, not by deleting one of its bullets"
+            )
+        return ""
+    if proposal.operation == RESTAMP_ENTRY:
+        stamped = ne.refresh_fingerprint(replacement)
+        if stamped != proposal.entry_fingerprint.strip():
+            return (
+                f"{where} is a re-stamp whose replacement changes the entry's own "
+                f"text (fingerprint {stamped[:12]} is not "
+                f"{proposal.entry_fingerprint[:12]}), so it is a rewrite rather than "
+                "a re-stamp"
+            )
+    return ""
+
+
+def _check_entry_fields(proposal: NoteEditProposal, where: Path) -> None:
+    """:func:`_entry_refusal` as a reader's exception, or nothing."""
+    reason = _entry_refusal(proposal, str(where))
+    if reason:
+        raise NoteEditSidecarError(f"{reason}; nothing was written")
 
 
 def read_sidecar(
@@ -486,7 +750,11 @@ def list_sidecars(config: Any, workspace: str) -> list[NoteEditProposal]:
 
 
 def _bullet_fields(
-    relative_path: str, operation: str, expected_revision: str, reason: str
+    relative_path: str,
+    operation: str,
+    expected_revision: str,
+    reason: str,
+    entry_identity: str = "",
 ) -> tuple[str, str]:
     """The one line a `note_edit` bullet carries, and its source tag.
 
@@ -499,6 +767,13 @@ def _bullet_fields(
     same note and the same reason, however much the note had changed since: a
     sidecar nobody is being asked about, and a check that stays pinned to a
     proposal id that is not in the queue.
+
+    An entry operation's text names the entry too, for the same reason and one
+    more: the head is the dedupe key, so two entries of one note at one revision
+    whose reasons collapsed to the same words would be one question to the queue
+    even though they are two to the person deciding. The identity's first twelve
+    hex characters are what tells those two bullets apart, and they are the same
+    twelve the worklist's own key is built from.
 
     It is also the honest thing for the row to say. A note edit is a verdict
     about one exact text, so the reviewer is entitled to see which one — and when
@@ -516,9 +791,13 @@ def _bullet_fields(
     """
     from ciao.memory_proposals import _one_line
 
-    head = f"{relative_path} — {operation} (rev {expected_revision[:8]})"
+    head = f"{relative_path} — {operation} (rev {expected_revision[:8]}"
+    if entry_identity:
+        head = f"{head}, entry {entry_identity[:12]}"
+    head = f"{head})"
     text = f"{head}: {reason}" if reason else head
     return _one_line(text), f"note verification · {operation}"
+
 
 
 def _queued_row_id(
@@ -600,6 +879,104 @@ def _check_for(proposal: NoteEditProposal, *, today: date) -> nv.NoteCheck:
     )
 
 
+def record_pending_check(
+    root: Path, proposal: NoteEditProposal, *, today: date
+) -> None:
+    """Pin the check this proposal is waiting on, in whichever map owns it.
+
+    The two halves write different records for one reason — 726-B judges a note
+    and this proposal may be about one entry of it — and both suppress the same
+    way: a ``proposal_id`` holds the question off while a person decides, whatever
+    its cooldown says. Writing both from one place is what keeps a caller from
+    having to remember which map a given operation lands in, and a proposal that
+    pins neither is a proposal whose verdict is re-asked every night.
+    """
+    if proposal.operation in ENTRY_OPERATIONS:
+        ev.record_entry_check(root, _entry_check_for(proposal, today=today))
+        return
+    nv.record_note_check(root, _check_for(proposal, today=today))
+
+
+def _entry_check_for(proposal: NoteEditProposal, *, today: date) -> ev.EntryCheck:
+    """The entry-level twin of :func:`_check_for`, keyed by the entry's identity.
+
+    Same fields, same arguments, and the same reason they are the *entry's* words
+    rather than the note's: the record describes one fact, and the fact's own
+    fingerprint is what says whether the text a later pass opens is still the one
+    somebody verified. A whole-note re-stamp moves the note's revision and this
+    row does not care; a re-worded bullet changes this row's fingerprint and it
+    stops suppressing, which is exactly when the question should come back.
+    """
+    return ev.EntryCheck(
+        identity=proposal.entry_identity,
+        note_path=proposal.relative_path,
+        workspace=proposal.workspace,
+        content_fingerprint=proposal.entry_fingerprint,
+        outcome=proposal.outcome,
+        checked_at=today,
+        retry_after=today + timedelta(days=ev.CHECK_COOLDOWN_DAYS),
+        evidence=proposal.evidence,
+        coverage=proposal.coverage,
+        reason=proposal.reason,
+        proposal_id=proposal.proposal_id,
+    )
+
+
+def _entry_span(
+    root: Path,
+    *,
+    key: str,
+    revision: str,
+    workspace: str,
+    identity: str,
+    fingerprint: str,
+) -> tuple[int, int]:
+    """Where the named entry sits in the note as it stands, or a refusal.
+
+    Measured, never taken from the caller. Three things have to hold and all three
+    are checked against the note's own bytes:
+
+    * the note is still at ``revision``, because the span is only meaningful
+      relative to the text the verdict was reached about, and a stale note's
+      offsets describe different words;
+    * an entry with this :func:`ciao.note_entries.entry_identity` is there at all
+      — which is a question about the note, and the note may have been rewritten
+      around the entry without the entry changing;
+    * its :func:`ciao.note_entries.refresh_fingerprint` is the one the caller read.
+      A re-*stamped* entry passes this, because the stamp is metadata; a re-worded
+      one does not, and that is the difference between a re-stamp and a rewrite
+      arriving wearing a re-stamp's name.
+
+    All three refusals leave the file untouched, and a queue row whose span could
+    not be measured is one an accept would have to refuse anyway — so the work is
+    done once, here, where the reason can name what it was.
+    """
+    try:
+        target = nr.resolve_note_path(root, key)
+        text = target.read_bytes().decode("utf-8")
+    except (mr.MemoryReceiptError, OSError, UnicodeDecodeError) as exc:
+        raise NoteEditRefused(f"the note could not be read to place its entry: {exc}")
+    if mr.content_revision(text) != revision:
+        raise NoteEditRefused(
+            f"{key} changed since this verdict was reached, so the entry's span "
+            "cannot be recorded against text that is no longer there; nothing was "
+            "filed, and the entry must be read again"
+        )
+    entry = nr.find_entry(text, identity=identity, note_path=key, workspace=workspace)
+    if entry is None:
+        raise NoteEditRefused(
+            f"{key} holds no entry with identity {identity[:12]}, so there is no "
+            "entry to propose an edit about; nothing was filed"
+        )
+    if entry.fingerprint != fingerprint:
+        raise NoteEditRefused(
+            f"the entry {identity[:12]} in {key} is not the text this verdict was "
+            f"reached about (its fingerprint is {entry.fingerprint[:12]}, not "
+            f"{fingerprint[:12]}); nothing was filed"
+        )
+    return entry.start, entry.end
+
+
 def file_note_edit(
     config: Any,
     *,
@@ -614,12 +991,15 @@ def file_note_edit(
     evidence: tuple[nv.Evidence, ...],
     reason: str,
     today: date | None = None,
+    entry_identity: str = "",
+    entry_fingerprint: str = "",
 ) -> NoteEditProposal:
     """File one typed `note_edit` proposal and pin the check that asked for it.
 
-    The whole operation, in order: validate, return the record already on file
-    if this exact revision is already queued, write the sidecar, append the
-    bullet, read the row id back, and record the check with it.
+    The whole operation, in order: validate, resolve the entry if this is an entry
+    operation, return the record already on file if this exact unit of work is
+    already queued, write the sidecar, append the bullet, read the row id back,
+    and record the check with it.
 
     The sidecar is written BEFORE the bullet, deliberately, the same way the
     category sidecar is: a sidecar with no bullet is litter this pass will
@@ -630,11 +1010,12 @@ def file_note_edit(
     check pinned to a proposal id that names nothing would suppress the note for
     a month with nothing in the queue to settle.
 
-    Idempotent per ``(relative_path, expected_revision)``: a second filing of
-    the same verdict about the same text while its row is still queued returns
-    the proposal already on file and writes nothing, so a nightly pass that
-    reaches the same conclusion twice cannot leave the owner two identical rows
-    to decide.
+    Idempotent per ``(relative_path, expected_revision)`` — and per
+    ``entry_identity`` as well for an entry operation, so two bullets of one note
+    at one revision are two questions. A second filing of the same verdict about
+    the same text while its row is still queued returns the proposal already on
+    file and writes nothing, so a nightly pass that reaches the same conclusion
+    twice cannot leave the owner two identical rows to decide.
 
     A second filing that reaches a DIFFERENT verdict about that text — a
     retirement that became an update, or the other way round — is the case the id
@@ -645,6 +1026,20 @@ def file_note_edit(
     Once the row is gone the record is re-armed from the verdict in hand — the
     sidecar's own order is the order it was first asked in, and nothing about the
     new question depends on the answer to the old one.
+
+    **An entry operation reads the note, to record the span.** A whole-note
+    operation needs no body: the ``after`` image it stores IS the write. An entry
+    operation stores both images whole (see this module's docstring) *and* the
+    slice of ``before`` the entry occupied, because an accept recovers the entry's
+    own replacement from that slice rather than splicing the note at it. A span
+    a caller supplied would be a span nobody checked, so the span is measured here
+    from the note as it stands, and the note must still be at
+    ``expected_revision`` for that measurement to describe the text the verdict
+    was reached about. The entry must also still be there, under the identity the
+    caller named, with the fingerprint they read. Both refusals are
+    :class:`NoteEditRefused` and nothing is written, which is the direction that
+    fails safe: a queue row nobody can act on is better than one that removes the
+    wrong bullet.
 
     ``today`` is the verification's date and it is recorded, not merely used: it
     becomes a re-stamp's :attr:`NoteEditProposal.stamp_date`, so the accept
@@ -686,7 +1081,7 @@ def file_note_edit(
             f"unknown verification coverage {coverage!r}; expected "
             f"{nv.COVERAGE_COMPLETE!r} or {nv.COVERAGE_PARTIAL!r}"
         )
-    if operation == REPLACE and not str(after or "").strip():
+    if operation in (REPLACE, REPLACE_ENTRY) and not str(after or "").strip():
         # An update that leaves the note with no content is a deletion, which is
         # the one thing this path refuses to do at all — see
         # `note_verification._plan_update`, which returns the same verdict for
@@ -695,23 +1090,56 @@ def file_note_edit(
             "a replace needs the note's exact replacement text; a replacement "
             "that empties the note is a deletion, which is never filed"
         )
-    if operation == RESTAMP and coverage != nv.COVERAGE_COMPLETE:
+    if operation in (RESTAMP, RESTAMP_ENTRY) and coverage != nv.COVERAGE_COMPLETE:
         raise NoteEditRefused(
             "a re-stamp claims the whole note is still true, so it is only filed "
             f"from complete coverage, not {coverage or 'nothing'}"
         )
-    # No body for a retirement: keeping an after image would let a reader diff
-    # an "edit" that is really a removal.
+    # No body for a whole-note retirement: keeping an after image would let a
+    # reader diff an "edit" that is really a removal. An *entry* retirement keeps
+    # one, because it is the note with that entry spliced out and the span is what
+    # says so — see `entry_replacement`.
     after_text = "" if operation == RETIRE else str(after or "")
     # And the re-stamp's date is THIS verification's date, recorded rather than
     # left to the accept: the card is labelled `exact`, so the date the reviewer
     # read and the date the note gets must be the same string, and a click on the
     # other side of midnight would otherwise stamp a day nobody agreed to.
-    stamp_date = day.isoformat() if operation == RESTAMP else ""
+    stamp_date = day.isoformat() if operation in (RESTAMP, RESTAMP_ENTRY) else ""
 
     root = _vault_root(config, workspace)
-    proposal_id = note_edit_id(workspace, key, revision)
-    text, source = _bullet_fields(key, operation, revision, str(reason or ""))
+    span: tuple[int, int] = (0, 0)
+    identity = str(entry_identity or "").strip()
+    if operation in ENTRY_OPERATIONS:
+        if not identity:
+            raise NoteEditRefused(
+                f"a {operation} names an entry, so it needs that entry's identity; "
+                "a splice with nothing to bind it to is an edit to no particular fact"
+            )
+        fingerprint = str(entry_fingerprint or "").strip()
+        if not fingerprint:
+            raise NoteEditRefused(
+                f"a {operation} needs the entry fingerprint the verdict was reached "
+                "about, so the accept can prove the entry is still the one that was "
+                "judged"
+            )
+        span = _entry_span(
+            root,
+            key=key,
+            revision=revision,
+            workspace=workspace,
+            identity=identity,
+            fingerprint=fingerprint,
+        )
+    elif identity or str(entry_fingerprint or "").strip():
+        raise NoteEditRefused(
+            f"a {operation} is a whole-note edit and names no entry, so it cannot "
+            "carry an entry identity or fingerprint"
+        )
+
+    proposal_id = note_edit_id(workspace, key, revision, identity)
+    text, source = _bullet_fields(
+        key, operation, revision, str(reason or ""), identity
+    )
 
     existing = read_sidecar(config, workspace, proposal_id)
     if existing is not None and not existing.settled:
@@ -737,6 +1165,7 @@ def file_note_edit(
                 existing.operation,
                 existing.expected_revision,
                 existing.reason,
+                existing.entry_identity,
             )
             if _queued_row_id(config, workspace, pending_text, pending_source):
                 logger.info(
@@ -762,6 +1191,9 @@ def file_note_edit(
         evidence=tuple(evidence or ()),
         reason=str(reason or ""),
         stamp_date=stamp_date,
+        entry_identity=identity,
+        entry_fingerprint=str(entry_fingerprint or "").strip(),
+        entry_span=span,
         # A re-filing rebuilds the record from the verdict in hand, because the
         # id is derived from the note and its revision and a later pass may have
         # reached a DIFFERENT verdict about that same text — a retirement that
@@ -771,6 +1203,14 @@ def file_note_edit(
         # the order it was first asked in, which is the order a reader wants.
         created_at=existing.created_at if existing is not None else _now(),
     )
+    if operation in ENTRY_OPERATIONS:
+        # The same rules the reader re-asserts, run before the record is written
+        # rather than only when somebody comes to accept it. A `retire_entry` that
+        # also carries new text, or a `restamp_entry` that moves the words, is
+        # refused here — so a queue row nobody can act on never reaches the owner.
+        reason = _entry_refusal(proposal, "")
+        if reason:
+            raise NoteEditRefused(f"{reason}; nothing was filed")
     write_sidecar(config, proposal)
 
     from ciao.memory_proposals import MemoryProposal, append_proposals
@@ -805,7 +1245,7 @@ def file_note_edit(
         return proposal
     proposal = replace(proposal, proposal_id=row_id)
     write_sidecar(config, proposal)
-    nv.record_note_check(root, _check_for(proposal, today=day))
+    record_pending_check(root, proposal, today=day)
     return proposal
 
 
@@ -862,17 +1302,38 @@ def settle_note_edit(
 
 
 def _clear_pending_check(root: Path, proposal: NoteEditProposal) -> None:
-    """Drop this proposal's hold on its note's check, if it still holds it.
+    """Drop this proposal's hold on its check, if it still holds it.
 
-    Only a check that names THIS proposal is touched. Another note's check, and
-    this note's own next check (which may already have been filed since), are
-    left exactly as they are — a settlement is not allowed to unblock something
-    it knows nothing about.
+    Which check that is depends on the operation: an entry edit holds an
+    :class:`ciao.entry_verification.EntryCheck` off by the entry's identity, and a
+    whole-note edit a :class:`ciao.note_verification.NoteCheck` off by the path.
+    Both halves are in one place because the two are the same bookkeeping and
+    forgetting one leaves a proposal whose verdict is re-asked every night for as
+    long as its cooldown runs.
+
+    Only a check that names THIS proposal is touched. Another note's check, another
+    entry's check, and this unit's own next check (which may already have been
+    filed since) are left exactly as they are — a settlement is not allowed to
+    unblock something it knows nothing about.
     """
-    check = nv.read_note_checks(root).get(proposal.relative_path)
-    if check is None or not proposal.proposal_id:
+    if not proposal.proposal_id:
         return
-    if check.proposal_id != proposal.proposal_id:
+    if proposal.operation in ENTRY_OPERATIONS:
+        entry_check = ev.read_entry_checks(root).get(proposal.entry_identity)
+        if entry_check is None or entry_check.proposal_id != proposal.proposal_id:
+            return
+        try:
+            ev.record_entry_check(root, replace(entry_check, proposal_id=""))
+        except (ev.EntryCheckRefused, mr.MemoryReceiptError, mr.QueueLockError) as exc:
+            logger.warning(
+                "note edit %s: could not clear the pending entry check for %s: %s",
+                proposal.id,
+                proposal.relative_path,
+                exc,
+            )
+        return
+    check = nv.read_note_checks(root).get(proposal.relative_path)
+    if check is None or check.proposal_id != proposal.proposal_id:
         return
     try:
         nv.record_note_check(root, replace(check, proposal_id=""))

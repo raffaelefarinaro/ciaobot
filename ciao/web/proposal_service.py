@@ -689,7 +689,9 @@ class _NoteEditAfter:
     conflict: bool = False
 
 
-def _note_edit_after(proposal: Any, current: str) -> _NoteEditAfter:
+def _note_edit_after(
+    proposal: Any, current: str, *, workspace: str = ""
+) -> _NoteEditAfter:
     """The exact bytes this note edit would leave behind, or why it cannot.
 
     Reads the note's CURRENT text rather than the sidecar's before image. The
@@ -706,6 +708,17 @@ def _note_edit_after(proposal: Any, current: str) -> _NoteEditAfter:
     refusals about the record itself, which a fresh pass could file again. One
     function, so a row whose button is offered is exactly a row whose accept can
     work.
+
+    An **entry** operation is answered from the same function and the same bytes,
+    which is what makes the card's "after" the file's bytes afterwards: the entry
+    is resolved again by identity, its fingerprint has to be the one the verdict
+    was reached about, and the replacement is the *entry's* own text — recovered
+    from the recorded splice by
+    :func:`ciao.note_edit_proposals.entry_replacement` and composed by
+    :func:`ciao.note_receipts.compose_entry_edit` — so an entry that moved, was
+    re-worded, or is no longer the same bullet is a conflict rather than a
+    rewrite of whatever now sits at those offsets. The accept re-runs the same
+    composition under the note's lock, which is why the two cannot disagree.
     """
     from ciao import note_edit_proposals as nep
     from ciao.note_verification import _ALREADY_CURRENT
@@ -729,6 +742,8 @@ def _note_edit_after(proposal: Any, current: str) -> _NoteEditAfter:
             ),
             conflict=True,
         )
+    if proposal.operation in nep.ENTRY_OPERATIONS:
+        return _note_edit_entry_after(proposal, current, workspace=workspace)
     if proposal.operation == nep.RETIRE:
         return _NoteEditAfter("", "")
     if proposal.operation == nep.REPLACE:
@@ -769,6 +784,72 @@ def _note_edit_after(proposal: Any, current: str) -> _NoteEditAfter:
             "restructure a file that was only asked to be verified"
         ),
     )
+
+
+def _note_edit_entry_after(
+    proposal: Any, current: str, *, workspace: str
+) -> _NoteEditAfter:
+    """The bytes one entry operation would leave in the note, or why not.
+
+    Split from :func:`_note_edit_after` because it is the one place that resolves
+    an entry, and there is exactly one: the entry has to be found by
+    :func:`ciao.note_entries.entry_identity` and confirmed by its
+    :func:`ciao.note_entries.refresh_fingerprint` before a single offset is
+    trusted. Everything after that is :func:`ciao.note_receipts.apply_entry_edit`
+    doing the same composition under the note's own lock, so the preview and the
+    write are one function's answer to one question about the same bytes.
+
+    Every refusal here is a **conflict**: the note is at the revision the record
+    was filed against, so the only way an entry operation can fail here is that
+    the record does not describe the entry in front of the reviewer — which is a
+    question they can answer again after re-reading, not a permanent failure.
+    """
+    from ciao import note_edit_proposals as nep
+    from ciao import note_receipts as nr
+
+    entry = nr.find_entry(
+        current,
+        identity=proposal.entry_identity,
+        note_path=proposal.relative_path,
+        workspace=workspace,
+    )
+    if entry is None:
+        return _NoteEditAfter(
+            "",
+            (
+                f"{proposal.relative_path} holds no entry with identity "
+                f"{str(proposal.entry_identity)[:12]}, so it is not the fact this "
+                "edit was judged on; nothing was written"
+            ),
+            conflict=True,
+        )
+    if entry.fingerprint != str(proposal.entry_fingerprint or "").strip():
+        return _NoteEditAfter(
+            "",
+            (
+                f"the entry {str(proposal.entry_identity)[:12]} in "
+                f"{proposal.relative_path} is not the text this edit was planned "
+                "against, so its span no longer means the same words; nothing was "
+                "written"
+            ),
+            conflict=True,
+        )
+    try:
+        replacement = nep.entry_replacement(proposal)
+    except nep.NoteEditError as exc:
+        # A record that is not a clean inverse of its own splice. A refusal
+        # rather than a conflict: the note is exactly as filed, so no amount of
+        # re-reading will fix a record that does not add up.
+        return _NoteEditAfter("", str(exc))
+    after, refusal = nr.compose_entry_edit(
+        current,
+        entry,
+        replacement=None if proposal.operation == nep.RETIRE_ENTRY else replacement,
+        delete=proposal.operation == nep.RETIRE_ENTRY,
+    )
+    if refusal:
+        return _NoteEditAfter("", f"the entry edit was refused: {refusal}")
+    return _NoteEditAfter(after, "")
 
 
 def _note_edit_row_fields(config, workspace: str, sidecar_id: str) -> dict[str, Any]:
@@ -839,7 +920,9 @@ def _note_edit_row_fields(config, workspace: str, sidecar_id: str) -> dict[str, 
         )
         return fields
     plan = _note_edit_after(
-        proposal, _note_edit_note_text(vault, proposal.relative_path)
+        proposal,
+        _note_edit_note_text(vault, proposal.relative_path),
+        workspace=workspace,
     )
     fields["note_edit"].update(
         operation=proposal.operation,
@@ -2062,7 +2145,9 @@ def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
     if proposal.operation == nep.RETIRE:
         return _retire_note(config, vault, row, proposal)
     plan = _note_edit_after(
-        proposal, _note_edit_note_text(vault, proposal.relative_path)
+        proposal,
+        _note_edit_note_text(vault, proposal.relative_path),
+        workspace=workspace,
     )
     if plan.reason:
         # A conflict is told apart from an ordinary refusal by the flag the plan
@@ -2076,6 +2161,8 @@ def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
             error=plan.reason,
         )
     after_text = plan.text
+    if proposal.operation in nep.ENTRY_OPERATIONS:
+        return _accept_note_edit_entry(config, row, vault, workspace, proposal)
     try:
         receipt = nr.commit_note_change(
             vault_root=vault,
@@ -2118,6 +2205,100 @@ def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
         # next accept finds the conflict and says so, or the owner dismisses it —
         # and the dismissal is itself a settle, so a transient failure here is
         # recoverable.
+        return AcceptOutcome(
+            ok=False,
+            destination=destination,
+            receipt_id=receipt_id,
+            error=(
+                f"{destination} was written and the receipt is {receipt_id}, but "
+                f"the proposal could not be settled: {refusal}. Dismiss this row "
+                "to close it out."
+            ),
+        )
+    return AcceptOutcome(ok=True, destination=destination, receipt_id=receipt_id)
+
+
+def _accept_note_edit_entry(
+    config: Any,
+    row: dict[str, Any],
+    vault: Path,
+    workspace: str,
+    proposal: Any,
+) -> AcceptOutcome:
+    """Apply one entry operation to the note it names, through the range helper.
+
+    The whole-note path above writes the ``after`` image it was handed, because
+    that image *is* the write. An entry operation goes through
+    :func:`ciao.note_receipts.apply_entry_edit` instead, which takes the *entry's*
+    new text, resolves the entry again by
+    :func:`ciao.note_entries.entry_identity` under the note's own lock, and
+    refuses on any mismatch. That is the difference between "this note is the one
+    the record was filed against" — which ``expected_revision`` already proves —
+    and "this bullet is the one a person read", which nothing but the identity and
+    the fingerprint can.
+
+    :func:`_note_edit_after` has already resolved and composed the same splice
+    against the same bytes to answer the preview, and the two answers are
+    identical by construction: both run
+    :func:`ciao.note_receipts.compose_entry_edit` over the same revision, and
+    ``expected_revision`` is what keeps them on the same revision. So the write is
+    the bytes the card said, and the card is not a recomputation the write ignores.
+
+    A retire here removes the entry and nothing else. It is a deletion, so it is
+    attended-only — this handler is only ever reached from a click — and it is
+    undone by the same whole-note receipt undo as any other edit, which is the
+    difference from a note retirement, which goes to the trash instead. The note
+    itself is never trashed by an entry operation, and this module reaches no
+    trash primitive on that path at all.
+    """
+    from ciao import memory_receipts as mr
+    from ciao import note_edit_proposals as nep
+    from ciao import note_receipts as nr
+
+    destination = proposal.relative_path
+    try:
+        replacement = nep.entry_replacement(proposal)
+    except nep.NoteEditError as exc:
+        return AcceptOutcome(ok=False, destination=destination, error=str(exc))
+    try:
+        receipt = nr.apply_entry_edit(
+            vault_root=vault,
+            relative_path=destination,
+            expected_revision=proposal.expected_revision,
+            identity=proposal.entry_identity,
+            fingerprint=proposal.entry_fingerprint,
+            replacement=None if proposal.operation == nep.RETIRE_ENTRY else replacement,
+            delete=proposal.operation == nep.RETIRE_ENTRY,
+            actor="operator",
+            source="curation",
+            workspace=workspace,
+            provenance={
+                "outcome": proposal.outcome,
+                "operation": proposal.operation,
+                "coverage": proposal.coverage,
+                "reason": proposal.reason,
+                "proposal_id": proposal.proposal_id,
+                "entry_identity": proposal.entry_identity,
+                "entry_fingerprint": proposal.entry_fingerprint,
+                "evidence": [
+                    citation.as_dict() for citation in proposal.evidence
+                ],
+            },
+        )
+    except mr.RevisionConflict as exc:
+        # The note moved, or the entry is not the one the record describes, under
+        # a read nobody rechecked. Nothing written, and the row survives so a
+        # retry re-reads.
+        return AcceptOutcome(
+            ok=False, conflict=True, destination=destination, error=str(exc)
+        )
+    except (mr.MemoryReceiptError, mr.QueueLockError, OSError) as exc:
+        return AcceptOutcome(ok=False, destination=destination, error=str(exc))
+    receipt_id = str(receipt.get("id", ""))
+    refusal = _settle_note_edit(
+        config, row, accepted=True, receipt_id=receipt_id
+    )
+    if refusal:
         return AcceptOutcome(
             ok=False,
             destination=destination,
@@ -2654,7 +2835,7 @@ def _note_edit_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
                 "moves the note to the review trash, where it can be restored"
             )
         return out
-    plan = _note_edit_after(proposal, current)
+    plan = _note_edit_after(proposal, current, workspace=workspace)
     before_clip, before_cut = _clip(current)
     after_clip, after_cut = _clip(plan.text)
     out["operation"] = "note_edit"
@@ -2665,7 +2846,15 @@ def _note_edit_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
     out["exact"] = True
     out["can_accept"] = not plan.reason
     out["reason"] = plan.reason or (
-        "rewrites the whole note; the change is undoable from History"
+        (
+            "removes one entry from the note and nothing else; the change is "
+            "undoable from History"
+            if proposal.operation == nep.RETIRE_ENTRY
+            else "rewrites one entry in the note and nothing else; the change is "
+            "undoable from History"
+        )
+        if proposal.operation in nep.ENTRY_OPERATIONS
+        else "rewrites the whole note; the change is undoable from History"
     )
     return out
 

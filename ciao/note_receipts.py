@@ -8,6 +8,19 @@ nothing else. It is a foundation for the note business rules, not those rules:
 there is no evidence policy, no proposal or check-state settlement, no
 retirement or deletion, and no caller-facing surface here.
 
+**The transaction is whole-note; a range is a composition.** There is no range
+parameter on :func:`commit_note_change`, and there is not going to be one. A
+receipt keeps a full before image and a full after image precisely so an undo
+can put a file back without knowing anything about how it changed, and a
+partial-image receipt would make that impossible for the one operation most
+likely to need it. :func:`apply_entry_edit` is therefore a *composer*, not a
+second protocol: it re-reads the note under the note's own lock, resolves one
+entry by :func:`ciao.note_entries.entry_identity`, confirms its
+:func:`ciao.note_entries.refresh_fingerprint` still matches what the caller
+judged, and splices exactly that entry's span into an ``after_text`` — which is
+then handed to :func:`commit_note_change` unchanged. The journal, the revision
+check, the atomic replace and undo are the same ones a whole-note write gets.
+
 The protocol is the receipt protocol, narrowed to a file:
 
 * **The caller names a vault-relative path, never a path.** Absolute paths,
@@ -74,6 +87,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao import memory_receipts as mr
+from ciao import note_entries as ne
 from ciao.vault_index import is_reserved_bookkeeping, temp_prefix
 
 logger = logging.getLogger(__name__)
@@ -538,6 +552,230 @@ def _commit_note_change(
             )
             return {**base, "status": mr.PREPARED, "changed": True}
         return applied
+
+
+# ── Managed entry-range edits ──────────────────────────────────────────────
+#
+# One list item is the smallest thing a person maintains in a note, and it is
+# the smallest thing a verification can act on: a whole-note write to change one
+# fact rewrites every other fact in the file, and a whole-file retirement to
+# drop one fact takes the rest with it. So there is a managed edit for one entry's
+# exact span — and it is a *composition*, not a second transaction.
+
+
+def find_entry(
+    text: str,
+    *,
+    identity: str,
+    note_path: str = "",
+    workspace: str = "",
+) -> ne.NoteEntry | None:
+    """The entry in *text* carrying this identity, or ``None``.
+
+    ``note_path`` and ``workspace`` are load-bearing rather than cosmetic: they
+    are two of the six inputs :func:`ciao.note_entries.entry_identity` digests, so
+    an identity minted for one note resolves to nothing in another. A caller that
+    omitted them would be asking a question whose answer is always "no such
+    entry", and the failure that produces — a conflict, or a "the entry is gone"
+    refusal — is the right answer for a caller that got it wrong, which is why
+    there is no default that guesses: a caller with no coordinates to hand is a
+    caller that cannot resolve anything, and saying so is better than returning
+    an entry the caller did not name.
+
+    The fingerprint is *not* checked here. This answers "is this entry in this
+    text"; whether it is the entry a caller judged is
+    :func:`apply_entry_edit`'s question, and it is a different one.
+    """
+    wanted = str(identity or "").strip()
+    if not wanted:
+        return None
+    document = ne.parse_note_entries(
+        text, note_path=note_path, workspace=workspace
+    )
+    for entry in document.entries:
+        if entry.identity == wanted:
+            return entry
+    return None
+
+
+def compose_entry_edit(
+    text: str, entry: ne.NoteEntry, *, replacement: str | None = None, delete: bool = False
+) -> tuple[str, str]:
+    """The note's exact text after one entry edit, and why it cannot be composed.
+
+    The whole edit is ``text[:entry.start] + replacement + text[entry.end:]``, and
+    the rest of the note is not touched: a BOM, a CRLF pair, a trailing space and
+    a note's last line without a newline all come back exactly as they were. That
+    is the whole point of splicing a span rather than rewriting a document, and
+    the reason the receipt journal is handed a *full* after image to store even
+    though the write moved a few dozen characters.
+
+    A delete takes the entry's terminating newline with it. A list item's line is
+    what delimits it; leaving the newline behind would turn every removed bullet
+    into a blank line, and a note that has been emptied of facts would read as
+    full of gaps.
+
+    A replacement must be *one* list item and must begin with it. A bullet
+    carrying several assertions is one entry by
+    :mod:`ciao.note_entries`'s contract, so an edit that splices prose in where a
+    bullet was, or several bullets in where one was, is not a change to one fact
+    and is refused rather than written. The check goes through the same parser the
+    entry came from, so the two cannot disagree about what a list item is.
+
+    A re-stamp is not a separate case here: it is a replacement whose
+    :func:`ciao.note_entries.refresh_fingerprint` is unchanged, which is exactly
+    what :func:`ciao.entry_verification.stamp_entry` produces. Splicing the
+    opening line alone would be byte-identical for that call, and strictly more
+    dangerous for every other one: a caller who passed just the new opening line
+    for a multi-line entry would silently lose the entry's continuation lines,
+    which no fingerprint check runs before the write.
+
+    Returns ``("", reason)`` for a refusal, so a caller never writes the empty
+    string it would get from a failed composition.
+    """
+    if delete and replacement is not None:
+        return "", (
+            "an entry edit either replaces the entry or deletes it; both were asked "
+            "for, so nothing was composed"
+        )
+    if delete:
+        end = entry.end
+        if text[end : end + 1] == "\n":
+            end += 1
+        return text[: entry.start] + text[end:], ""
+    if replacement is None:
+        return "", (
+            "an entry edit needs the entry's exact replacement text, or delete=True "
+            "to remove it; neither was given"
+        )
+    if not str(replacement).strip():
+        # An empty replacement is a deletion wearing a different name, and the
+        # only reason to spell it this way would be to reach one without the
+        # delete's accounting. Refused, and the refusal says what to do instead.
+        return "", (
+            "the replacement text is empty, which would delete the entry; pass "
+            "delete=True so the removal is composed as one"
+        )
+    if not (0 <= entry.start <= entry.end <= len(text)) or text[
+        entry.start : entry.end
+    ] != entry.text:
+        return "", (
+            "the entry's span no longer matches the note's text, so the splice "
+            "would corrupt a different part of the file"
+        )
+    document = ne.parse_note_entries(
+        str(replacement), note_path=entry.note_path, workspace=entry.workspace
+    )
+    if len(document.entries) != 1 or document.entries[0].start != 0:
+        return "", (
+            f"the replacement text holds {len(document.entries)} list items rather "
+            "than one, so it is not an edit to a single fact; nothing was composed"
+        )
+    return text[: entry.start] + str(replacement) + text[entry.end :], ""
+
+
+def apply_entry_edit(
+    *,
+    vault_root: Path,
+    relative_path: str,
+    expected_revision: str,
+    identity: str,
+    fingerprint: str,
+    replacement: str | None = None,
+    delete: bool = False,
+    actor: str,
+    source: str,
+    workspace: str = "",
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Replace or delete one entry's exact span, journaled like any note write.
+
+    Four checks stand between the caller's judgement and the write, in this order,
+    and the first three write nothing at all:
+
+    * ``expected_revision`` is compared against the note's exact bytes *under the
+      note's own lock*, so a caller that read a different revision is a
+      :class:`ciao.memory_receipts.RevisionConflict` rather than an overwrite. A
+      note that moved is not the note anybody judged, whatever the entry is.
+    * the entry is resolved **by identity**, which
+      :func:`ciao.note_entries.entry_identity` derives from the workspace, the
+      note path, the nearest heading, the entry's own fingerprint and a duplicate
+      ordinal — and from no line number and no offset. So a caller whose offsets
+      went stale with the note still gets the entry it named, a note whose
+      unrelated content moved still gets the same entry, and an identity that
+      names nothing here is a conflict, never a guess at the nearest bullet.
+    * the entry's current :func:`ciao.note_entries.refresh_fingerprint` must equal
+      the one the caller judged. The identity already covers the fingerprint, so
+      this is the second half of the same binding stated where a reader can see
+      it: it is what makes a *re-stamp* provably the same fact, since a re-stamp
+      leaves the fingerprint alone by construction and a re-worded entry does not.
+    * the composed ``after_text`` is then written by :func:`commit_note_change`
+      unchanged, so the receipt holds both full images, the write is atomic under
+      the same lock, and :func:`undo_note_receipt` restores the whole file byte
+      for byte.
+
+    Returns that same receipt. ``delete=True`` removes the entry and its line, and
+    is reversible exactly like any other edit: the whole file comes back through
+    undo, and the row says which entry it was. A *whole-note* retirement is
+    still :func:`ciao.vault_review.trash_note`'s, and this module has no trash,
+    no delete and no archive of its own.
+    """
+    root = canonical_vault(vault_root)
+    target = resolve_note_path(root, relative_path)
+    stored_path = target.relative_to(root).as_posix()
+    expected = str(expected_revision or "").strip()
+    if not expected:
+        # Not a stale revision but a missing one: a caller that cannot say what it
+        # read is asking for a blind overwrite, which is the one thing this
+        # protocol exists to prevent.
+        raise mr.MemoryReceiptError(
+            "an expected revision is required; this primitive never overwrites a "
+            "note it has not read"
+        )
+    with mr.queue_lock(target):
+        text = _read_note_text(target)
+        current = mr.content_revision(text)
+        if current != expected:
+            raise mr.RevisionConflict(
+                "the note changed since this entry edit was planned; nothing was "
+                "written"
+            )
+        entry = find_entry(
+            text, identity=identity, note_path=stored_path, workspace=workspace
+        )
+        if entry is None:
+            raise mr.RevisionConflict(
+                f"{stored_path} holds no entry with identity {str(identity)[:12]}, so "
+                "there is nothing this edit can be applied to; nothing was written"
+            )
+        if entry.fingerprint != str(fingerprint or "").strip():
+            raise mr.RevisionConflict(
+                f"the entry {str(identity)[:12]} in {stored_path} is not the text this "
+                "edit was planned against (its fingerprint has changed); nothing was "
+                "written, and the caller must read the entry again"
+            )
+        after_text, refusal = compose_entry_edit(
+            text, entry, replacement=replacement, delete=delete
+        )
+    if refusal:
+        raise mr.MemoryReceiptError(
+            f"the entry edit was refused and nothing was written: {refusal}"
+        )
+    # Outside the lock, which this thread still holds (it is re-entrant) but which
+    # `commit_note_change` re-takes around the rename and re-checks the revision
+    # against: the `after_text` above was composed from exactly the bytes whose
+    # revision is `expected`, so the two images in the receipt describe one
+    # operation even though the write is a second, journaled step.
+    return commit_note_change(
+        vault_root=root,
+        relative_path=stored_path,
+        expected_revision=expected,
+        after_text=after_text,
+        actor=actor,
+        source=source,
+        workspace=workspace,
+        provenance=provenance,
+    )
 
 
 def _settle_quietly(

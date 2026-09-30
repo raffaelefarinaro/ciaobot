@@ -237,6 +237,16 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
         "question again.",
     ),
     DeferredAction(
+        "Retire one fact inside a note, or retire the note a fact lives in",
+        "The same rule one level in. An entry verification may re-stamp that "
+        "entry's own `[verified:]` date or apply a cited replacement for its exact "
+        "span, and entry_verification imports no delete primitive either; a "
+        "retired entry comes back as a retire_entry proposal whose accept removes "
+        "that one span through the same whole-note receipt, so it is reversible and "
+        "the note's other facts survive. A whole-note retirement stays Vault "
+        "Review's trash and is never reachable from either verification path.",
+    ),
+    DeferredAction(
         "Judge a learning obsolete, or retire an Active entry the reconciliation "
         "did not propose",
         "The judgement is a person's, never a flag's. The nightly run *may* remove "

@@ -41,6 +41,7 @@ import pytest
 
 from ciao import memory_receipts as mr
 from ciao import note_edit_proposals as nep
+from ciao import note_entries as ne
 from ciao import note_verification as nv
 
 NOTE = "notes/office.md"
@@ -951,3 +952,403 @@ def test_a_needs_review_verdict_files_a_proposal_that_settles_its_check(
     assert settled.proposal_id == ""
     assert settled.outcome == nv.UPDATE
     assert settled.reason == "the third floor no longer exists"
+
+
+# ── Entry operations ───────────────────────────────────────────────────────
+#
+# The same proposal kind, one list item in. What is pinned here is the
+# difference that matters: an entry operation is bound to an *entry*, and every
+# way a record could describe an edit to no particular fact is refused on the
+# way in and again on the way out.
+
+ENTRY_PLAIN = (
+    "---\ntype: note\nupdated: 2026-01-05\n---\n\n"
+    "# Office\n\n"
+    "- The office is on Via Verdi 12, third floor [verified: 2024-01-05]\n"
+    "- The landlord is Bianchi\n"
+)
+"""The two facts an entry operation is about, one stamped and one not."""
+
+
+def _entry_vault(
+    tmp_path: Path, text: str = ENTRY_PLAIN, name: str = "entry-vault"
+) -> tuple[Path, SimpleNamespace, Any]:
+    """A vault holding a bullet list, and the entry the caller would name.
+
+    A second vault rather than a second filing, because a queued row wins over a
+    later verdict about the same entry by design — so a refusal to test needs no
+    row in the way.
+    """
+    vault = _vault(tmp_path, name)
+    _write(vault, NOTE, text)
+    entry = ne.parse_note_entries(text, note_path=NOTE, workspace="personal").entries[0]
+    return vault, _config(vault), entry
+
+
+def _entry(text: str = ENTRY_PLAIN, index: int = 0) -> Any:
+    return ne.parse_note_entries(text, note_path=NOTE, workspace="personal").entries[index]
+
+
+def _file_entry(
+    config: Any,
+    entry: Any,
+    *,
+    operation: str = nep.REPLACE_ENTRY,
+    outcome: str = nv.UPDATE,
+    coverage: str = nv.COVERAGE_COMPLETE,
+    after: str = "",
+    delete: bool = False,
+    today: date = TODAY,
+    identity: str = "",
+    fingerprint: str = "",
+) -> nep.NoteEditProposal:
+    """File one entry operation, with its images composed the way a caller would.
+
+    The `after` image is the whole note with the entry spliced — that is what the
+    record stores, and :func:`ciao.note_receipts.compose_entry_edit` is what
+    produces it. ``delete`` is separate from ``operation`` so a test can file the
+    record an operation and a body that contradict each other, which is exactly
+    the case both the filing rules and the reader rules refuse.
+    """
+    from ciao import note_receipts as nr
+
+    composed = nr.compose_entry_edit(
+        ENTRY_PLAIN, entry, replacement=after or None, delete=delete
+    )[0]
+    return nep.file_note_edit(
+        config,
+        workspace="personal",
+        relative_path=NOTE,
+        expected_revision=_revision(ENTRY_PLAIN),
+        operation=operation,
+        before=ENTRY_PLAIN,
+        after=composed,
+        outcome=outcome,
+        coverage=coverage,
+        evidence=(CITATION,),
+        reason="the third floor no longer exists",
+        today=today,
+        entry_identity=identity or entry.identity,
+        entry_fingerprint=fingerprint or entry.fingerprint,
+    )
+
+
+def _queued(vault: Path) -> int:
+    """How many `[note_edit]` rows the queue is asking the owner about."""
+    return _queue_text(vault).count(f"[{nep.KIND} ")
+
+
+def test_an_entry_operation_files_one_row_and_pins_an_entry_check(
+    tmp_path: Path,
+) -> None:
+    """One question per entry, and the check that holds it is the entry's.
+
+    Two entries of one note at one revision are two different questions, and each
+    gets its own row and its own check. An entry check keyed by the note path
+    would be one row suppressing the other — the acceptance criterion this whole
+    child exists to meet.
+    """
+    from ciao import entry_verification as ev
+
+    vault, config, entry = _entry_vault(tmp_path)
+    second = _entry(index=1)
+
+    first = _file_entry(
+        config, entry, after="- The office is on Via Verdi 12, fourth floor"
+    )
+    other = _file_entry(config, second, after="- The landlord is Bianchi Rossi")
+
+    assert first.proposal_id and other.proposal_id
+    assert first.id != other.id, "two entries of one note are two questions"
+    assert _queued(vault) == 2
+    checks = ev.read_entry_checks(vault)
+    assert set(checks) == {entry.identity, second.identity}
+    assert checks[entry.identity].proposal_id == first.proposal_id
+    assert checks[entry.identity].note_path == NOTE
+    assert checks[entry.identity].content_fingerprint == entry.fingerprint
+    # The note map is untouched: an entry verdict is not a note verdict.
+    assert nv.read_note_checks(vault) == {}
+
+
+def test_the_bullet_names_the_entry_so_two_rows_stay_distinct(tmp_path: Path) -> None:
+    """The head is the queue's dedupe key.
+
+    A row whose text did not name the entry would collapse two bullets of one
+    note into one row as soon as their reasons collapsed to the same words — and
+    the one left out is silently never asked about.
+    """
+    vault, config, entry = _entry_vault(tmp_path)
+    second = _entry(index=1)
+
+    _file_entry(config, entry, after="- Moved to the fourth floor")
+    _file_entry(config, second, after="- The landlord is Bianchi Rossi")
+
+    queue = _queue_text(vault)
+    assert entry.identity[:12] in queue
+    assert second.identity[:12] in queue
+    assert _queued(vault) == 2
+
+
+def test_an_entry_record_recovers_its_own_replacement_from_the_span(
+    tmp_path: Path,
+) -> None:
+    """The inverse of the splice, which is what lets an accept use the range
+    helper instead of writing the stored image verbatim.
+
+    An accept that trusted `after` would be writing a whole note's text on the
+    strength of a record; going through the entry's own text means the managed
+    helper resolves the entry again and refuses on any mismatch.
+    """
+    from ciao import note_receipts as nr
+
+    vault, config, entry = _entry_vault(tmp_path)
+    replacement = "- The office is on Via Verdi 12, fourth floor"
+    proposal = _file_entry(config, entry, after=replacement)
+
+    assert nep.entry_replacement(proposal) == replacement
+    composed, refusal = nr.compose_entry_edit(
+        ENTRY_PLAIN, entry, replacement=nep.entry_replacement(proposal)
+    )
+    assert not refusal
+    assert composed == proposal.after
+    assert proposal.before == ENTRY_PLAIN, "both images are the whole note"
+
+
+def test_a_retire_entry_needs_an_empty_replacement_and_a_living_note(
+    tmp_path: Path,
+) -> None:
+    """An entry retirement removes that span and nothing else.
+
+    A "retirement" that also carries new text is not the record that was filed,
+    and one whose splice empties the whole note is a note deletion wearing a
+    bullet's clothes — the refusal Vault Review's trash exists to be asked about
+    instead.
+    """
+    vault, config, entry = _entry_vault(tmp_path)
+
+    proposal = _file_entry(
+        config, entry, operation=nep.RETIRE_ENTRY, outcome=nv.RETIRE, delete=True
+    )
+
+    assert nep.entry_replacement(proposal) == ""
+    assert proposal.after == ENTRY_PLAIN[: entry.start] + ENTRY_PLAIN[entry.end + 1 :]
+    assert "The landlord is Bianchi" in proposal.after
+
+    # A retirement that also replaces the entry is not the record that was
+    # filed. A second vault, because the first filing's row is still queued and a
+    # second verdict about the same entry loses to it by design.
+    other_vault, other_config, other_entry = _entry_vault(tmp_path, ENTRY_PLAIN, "entry-vault-2")
+    with pytest.raises(nep.NoteEditRefused, match="also replaces the entry"):
+        _file_entry(
+            other_config,
+            other_entry,
+            operation=nep.RETIRE_ENTRY,
+            outcome=nv.RETIRE,
+            after="- something else entirely",
+        )
+
+
+def test_a_restamp_entry_may_not_change_the_words(tmp_path: Path) -> None:
+    """A reviewer clicking "re-stamp this entry" must never get a rewrite.
+
+    The check is on the fingerprint rather than on the operation's name, because
+    the fingerprint is what the entry's identity and its check are keyed on: a
+    record that moved the words while claiming to only move the date would leave
+    a check pointing at a fact that no longer exists.
+    """
+    vault, config, entry = _entry_vault(tmp_path)
+    stamped = _entry(ENTRY_PLAIN.replace("2024-01-05", TODAY.isoformat()))
+
+    good = _file_entry(
+        config,
+        entry,
+        operation=nep.RESTAMP_ENTRY,
+        outcome=nv.STILL_VALID,
+        after=stamped.text,
+    )
+
+    assert nep.entry_replacement(good) == stamped.text
+    assert ne.refresh_fingerprint(stamped.text) == entry.fingerprint
+    assert good.stamp_date == TODAY.isoformat(), "the date is fixed at filing"
+
+    _, other_config, other_entry = _entry_vault(tmp_path, ENTRY_PLAIN, "entry-vault-2")
+    with pytest.raises(nep.NoteEditRefused, match="rewrite rather than a re-stamp"):
+        _file_entry(
+            other_config,
+            other_entry,
+            operation=nep.RESTAMP_ENTRY,
+            outcome=nv.STILL_VALID,
+            after="- The office moved to the fourth floor",
+        )
+
+
+def test_an_entry_operation_needs_an_identity_and_a_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """An edit with nothing to bind it to is a splice at an offset in a file."""
+    vault, config, entry = _entry_vault(tmp_path)
+    _, other_config, _ = _entry_vault(tmp_path, ENTRY_PLAIN, "entry-vault-2")
+
+    with pytest.raises(nep.NoteEditRefused, match="identity"):
+        # A key that is not an entry identity at all, and a key that is empty.
+        _file_entry(config, entry, after="- Moved", identity="x" * 64)
+    with pytest.raises(nep.NoteEditRefused, match="identity"):
+        nep.file_note_edit(
+            other_config,
+            workspace="personal",
+            relative_path=NOTE,
+            expected_revision=_revision(ENTRY_PLAIN),
+            operation=nep.REPLACE_ENTRY,
+            before=ENTRY_PLAIN,
+            after="- The office is on Via Verdi 12, fourth floor",
+            outcome=nv.UPDATE,
+            coverage=nv.COVERAGE_COMPLETE,
+            evidence=(CITATION,),
+            reason="",
+            today=TODAY,
+            entry_fingerprint=entry.fingerprint,
+        )
+    with pytest.raises(nep.NoteEditRefused, match="fingerprint"):
+        _file_entry(config, entry, after="- Moved", fingerprint="a" * 64)
+    with pytest.raises(nep.NoteEditRefused, match="whole-note"):
+        _file_entry(config, entry, after="- Moved", operation=nep.REPLACE)
+
+
+def test_filing_an_entry_edit_against_a_note_that_moved_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The span is measured, and a stale note's offsets describe different words.
+
+    A whole-note `replace` can be filed against a revision the note has since
+    left — the accept reports a conflict and the row survives. An entry operation
+    cannot: the span it records would be the span of *other text*, so it is
+    refused here, with nothing written.
+    """
+    vault, config, entry = _entry_vault(tmp_path)
+    _write(vault, NOTE, ENTRY_PLAIN + "\nA new paragraph.\n")
+
+    with pytest.raises(nep.NoteEditRefused, match="changed since this verdict"):
+        _file_entry(
+            config, entry, after="- The office is on Via Verdi 12, fourth floor"
+        )
+    assert _queue_text(vault) == ""
+
+
+def test_filing_an_entry_edit_for_an_entry_that_is_not_there_is_refused(
+    tmp_path: Path,
+) -> None:
+    """And for one whose fingerprint is not the text the verdict was about."""
+    vault, config, entry = _entry_vault(tmp_path)
+
+    with pytest.raises(nep.NoteEditRefused, match="no entry with identity"):
+        _file_entry(config, entry, after="- Moved", identity="b" * 64)
+    with pytest.raises(nep.NoteEditRefused, match="not the text this verdict"):
+        _file_entry(config, entry, after="- Moved", fingerprint="c" * 64)
+
+
+def test_the_reader_refuses_an_entry_record_whose_splice_does_not_add_up(
+    tmp_path: Path,
+) -> None:
+    """Fail-closed on read, the other way round from the note map's drop-a-row.
+
+    The images and the span are what get written, so a record that is not a clean
+    inverse of its own splice is a record whose accept could only be a guess. And
+    a `restamp_entry` whose replacement changes the fingerprint is refused here
+    even though it is a well-formed row of the right types — which is the case a
+    hand-edited file gets past filing.
+    """
+    from dataclasses import replace as _replace
+
+    vault, config, entry = _entry_vault(tmp_path)
+    proposal = _file_entry(config, entry, after="- The office is on Via Verdi 12, fourth")
+    path = nep.sidecar_path(config, "personal", proposal.id)
+    good = proposal.as_dict()
+
+    def _write_row(row: dict[str, Any]) -> None:
+        path.write_text(
+            json.dumps({"schema": nep.SIDECAR_SCHEMA, "proposal": row}),
+            encoding="utf-8",
+        )
+
+    _write_row({**good, "entry_span": "0,1"})
+    with pytest.raises(nep.NoteEditSidecarError, match="entry_span"):
+        nep.read_sidecar(config, "personal", proposal.id)
+
+    _write_row({**good, "entry_span": [0, 1]})
+    with pytest.raises(nep.NoteEditSidecarError, match="not the image this edit produced"):
+        nep.read_sidecar(config, "personal", proposal.id)
+
+    _write_row({**good, "entry_identity": ""})
+    with pytest.raises(nep.NoteEditSidecarError, match="naming no entry identity"):
+        nep.read_sidecar(config, "personal", proposal.id)
+
+    _write_row(
+        _replace(
+            proposal, operation=nep.RESTAMP_ENTRY, stamp_date=TODAY.isoformat()
+        ).as_dict()
+    )
+    with pytest.raises(nep.NoteEditSidecarError, match="rewrite rather than a re-stamp"):
+        nep.read_sidecar(config, "personal", proposal.id)
+
+    # A whole-note row that grew an entry span is not the record that was filed.
+    whole = _file(config, _write(vault, NOTE, PLAIN))
+    payload = json.loads(
+        nep.sidecar_path(config, "personal", whole.id).read_text(encoding="utf-8")
+    )
+    payload["proposal"]["entry_span"] = [3, 9]
+    nep.sidecar_path(config, "personal", whole.id).write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    with pytest.raises(nep.NoteEditSidecarError, match="whole-note edit that carries"):
+        nep.read_sidecar(config, "personal", whole.id)
+
+    # And the good row is still readable, so the refusals above are about the
+    # record rather than about the file having been damaged.
+    _write_row(good)
+    assert nep.read_sidecar(config, "personal", proposal.id) == proposal
+
+
+def test_a_settled_entry_row_clears_its_own_entry_check(tmp_path: Path) -> None:
+    """A settlement is temporary, an entry exactly as a note.
+
+    It clears the `proposal_id` and leaves the cooldown running, so the same fact
+    is not asked about again this month — and the moment it is re-worded the
+    fingerprint no longer matches and it is due again. There is deliberately no
+    "refused forever" flag.
+    """
+    from dataclasses import replace as _replace
+
+    from ciao import entry_verification as ev
+
+    vault, config, entry = _entry_vault(tmp_path)
+    proposal = _file_entry(config, entry, after="- The office is on Via Verdi 12, fourth")
+    _dismiss_row(vault, proposal.id)
+
+    settled = nep.settle_note_edit(config, "personal", proposal.id, accepted=True)
+
+    assert settled.settled and settled.accepted
+    check = ev.read_entry_checks(vault)[entry.identity]
+    assert check.proposal_id == ""
+    # The cooldown is still running, so this is not a second question tonight.
+    assert not ev.should_check_entry(
+        vault, entry.identity, entry.fingerprint, today=TODAY
+    )
+    # A re-worded fact is due again, because the check describes the words.
+    assert ev.should_check_entry(vault, entry.identity, "b" * 64, today=TODAY)
+    # And a settlement only ever clears the check that names it.
+    ev.record_entry_check(
+        vault,
+        ev.EntryCheck(
+            identity="c" * 64,
+            note_path=NOTE,
+            workspace="personal",
+            content_fingerprint="d" * 64,
+            outcome=nv.UNVERIFIED,
+            checked_at=TODAY,
+            retry_after=TODAY + timedelta(days=99),
+            proposal_id=proposal.proposal_id,
+        ),
+    )
+    nep.settle_note_edit(config, "personal", proposal.id, accepted=False)
+    assert ev.read_entry_checks(vault)["c" * 64].proposal_id == proposal.proposal_id
+    assert _replace

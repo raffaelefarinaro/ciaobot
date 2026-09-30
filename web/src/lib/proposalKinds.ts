@@ -320,6 +320,14 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
       if (operation === 'retire') return 'Moves this note to the review trash, where it can be restored'
       if (operation === 'restamp') return 'Marks this note as checked again today'
       if (operation === 'replace') return 'Rewrites this whole note with the verified text'
+      // The three `*_entry` operations touch ONE list item inside the note, and
+      // saying "this whole note" about them is a lie the reviewer reads before
+      // clicking: a retired entry leaves every other fact in the file, and it
+      // does not go to the review trash at all. Naming the unit is the difference
+      // between a card that describes the write and one that overstates it.
+      if (operation === 'retire_entry') return 'Removes this one entry from the note; the note itself is kept'
+      if (operation === 'restamp_entry') return 'Marks this one entry as checked again today'
+      if (operation === 'replace_entry') return 'Rewrites this one entry with the verified text'
       return 'Rewrites this whole note once you have checked the evidence'
     },
     canAccept: (row) => row.note_edit?.can_accept !== false,

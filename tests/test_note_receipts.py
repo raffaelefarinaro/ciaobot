@@ -47,6 +47,7 @@ from typing import Any
 import pytest
 
 from ciao import memory_receipts as mr
+from ciao import note_entries as ne
 from ciao import note_receipts as nr
 
 NOTE = "notes/topic.md"
@@ -1250,3 +1251,352 @@ def test_note_undo_of_a_deleted_note_is_a_revision_conflict(tmp_path):
     with pytest.raises(mr.RevisionConflict):
         mr.undo_receipt(receipt["id"], vault_root=vault)
     assert outside.read_bytes() == b"elsewhere\n"
+
+
+# ── Managed entry-range edits ──────────────────────────────────────────────
+#
+# One list item is the unit a person keeps current, so it is the unit a managed
+# edit can act on. What is pinned here is that the edit is a *composition* and
+# not a second protocol: the receipt still holds both full images, the revision
+# is still checked, the write is still atomic, and undo still puts the whole
+# file back byte for byte.
+
+ENTRY_NOTE = "notes/people.md"
+WORKSPACE = "personal"
+
+
+def _entry_text(body: str = "") -> str:
+    """A note whose facts are bullets, so `parse_note_entries` has something to
+    find. `body` is the date on the FIRST bullet's own stamp; the second has
+    none, which is what makes it a different question."""
+    stamp = f" [verified: {body}]" if body else ""
+    return (
+        "---\ntype: person\nupdated: 2026-01-01\n---\n\n"
+        "# Sofia\n\n"
+        f"- Lives in Via Verdi 12{stamp}\n"
+        "- Works at Acme\n"
+        "  and has since 2019.\n"
+        "\nSome prose about the office that no entry model reads.\n"
+    )
+
+
+def _entries(vault: Path, text: str) -> tuple[Any, ...]:
+    """Every entry in the note at ``ENTRY_NOTE``, as a caller would resolve them."""
+    return tuple(
+        ne.parse_note_entries(
+            text, note_path=ENTRY_NOTE, workspace=WORKSPACE
+        ).entries
+    )
+
+
+def _apply_entry(
+    vault: Path,
+    path: Path,
+    entry: Any,
+    *,
+    replacement: str | None = None,
+    delete: bool = False,
+    expected: str | None = None,
+    fingerprint: str | None = None,
+    identity: str | None = None,
+) -> dict[str, Any]:
+    """One managed entry edit, the way `entry_verification` makes it."""
+    return nr.apply_entry_edit(
+        vault_root=vault,
+        relative_path=ENTRY_NOTE,
+        expected_revision=expected if expected is not None else _revision(path),
+        identity=identity if identity is not None else entry.identity,
+        fingerprint=fingerprint if fingerprint is not None else entry.fingerprint,
+        replacement=replacement,
+        delete=delete,
+        actor="operator",
+        source="curation",
+        workspace=WORKSPACE,
+    )
+
+
+def test_an_entry_edit_replaces_exactly_its_span_and_preserves_the_rest(
+    tmp_path: Path,
+) -> None:
+    """The acceptance criterion, byte for byte.
+
+    A whole-note rewrite to correct one bullet rewrites every other bullet with
+    it. Here the other bullet, the blank line, the continuation line, the
+    frontmatter and the prose paragraph nobody read all come back exactly as they
+    were — including a trailing space and a CRLF pair, which a text-mode round
+    trip would quietly normalise.
+    """
+    vault = _vault(tmp_path)
+    text = "# Office\r\n\r\n- Via Verdi 12, third floor \t[verified: 2026-01-01]\r\n- Bianchi\r\n"
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+
+    receipt = _apply_entry(vault, path, entry, replacement="- Via Verdi 12, fourth floor")
+
+    after = path.read_bytes().decode("utf-8")
+    assert after == (
+        text[: entry.start]
+        + "- Via Verdi 12, fourth floor"
+        + text[entry.end :]
+    )
+    # Not the text the replacement spells, and not the text minus the entry: the
+    # entry's marker, its stamp and its CRLF are the *only* things that went.
+    assert b"third floor" not in path.read_bytes()
+    assert b"Bianchi\r\n" in path.read_bytes()
+    assert receipt["kind"] == nr.NOTE_APPLY
+    assert receipt["before_text"] == text
+    assert receipt["after_text"] == after
+    assert mr.is_undoable(receipt) is True
+
+
+def test_a_stamp_only_edit_leaves_the_fingerprint_alone(tmp_path: Path) -> None:
+    """A re-stamp changes the date on the line and nothing the fact says.
+
+    That is what `should_check_entry` relies on to tell a re-stamp from a
+    re-wording: the fingerprint ignores the stamp token, so a verified fact is
+    not asked about again tonight, while edited prose is.
+    """
+    from ciao import entry_verification as ev
+
+    vault = _vault(tmp_path)
+    text = _entry_text("2026-01-01")
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+
+    stamped = ev.stamp_entry(entry.text, "2026-09-19")
+    _apply_entry(vault, path, entry, replacement=stamped)
+
+    after = path.read_bytes().decode("utf-8")
+    reparsed = ne.parse_note_entries(
+        after, note_path=ENTRY_NOTE, workspace=WORKSPACE
+    ).entries[0]
+    assert "[verified: 2026-09-19]" in after
+    assert reparsed.fingerprint == entry.fingerprint
+    assert reparsed.verified is not None
+    assert reparsed.verified.isoformat() == "2026-09-19"
+
+
+def test_deleting_an_entry_takes_its_line_and_leaves_no_gap(tmp_path: Path) -> None:
+    """A list item's line is what delimits it; a blank left behind reads as a gap.
+
+    The second bullet has a continuation line, so the removal is also the proof
+    that a multi-line entry is removed whole: half a fact is worse than a stale
+    one.
+    """
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[1]
+
+    _apply_entry(vault, path, entry, delete=True)
+
+    after = path.read_bytes().decode("utf-8")
+    assert after == text[: entry.start] + text[entry.end + 1 :]
+    assert "Works at Acme" not in after
+    assert "and has since 2019." not in after
+    assert "\n\nLives in" not in after, "the removed line left a blank behind"
+    assert "Some prose about the office" in after
+
+
+def test_a_fingerprint_mismatch_is_a_conflict_that_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """The whole point of carrying the fingerprint.
+
+    `expected_revision` already proves the note is the one the caller read, so
+    this is the second, independent binding: the entry at those offsets must be
+    the entry a verdict was reached about. A verdict about 2019's wording must
+    not install 2026's.
+    """
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+    before_bytes = path.read_bytes()
+
+    with pytest.raises(mr.RevisionConflict):
+        _apply_entry(
+            vault, path, entry, replacement="- Lives elsewhere", fingerprint="b" * 64
+        )
+
+    assert path.read_bytes() == before_bytes
+    assert _rows(vault) == [], "a refused entry edit journals nothing"
+
+
+def test_an_identity_the_note_no_longer_holds_is_a_conflict(tmp_path: Path) -> None:
+    """No entry, no edit — and never a guess at the nearest bullet.
+
+    An identity that resolves to nothing is the honest answer when the note was
+    rewritten around the entry, and splicing whatever is at those offsets now
+    would be the exact failure the identity exists to prevent.
+    """
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+    before_bytes = path.read_bytes()
+
+    with pytest.raises(mr.RevisionConflict):
+        _apply_entry(vault, path, entry, replacement="- Lives elsewhere", identity="c" * 64)
+
+    assert path.read_bytes() == before_bytes
+
+
+def test_an_entry_edit_survives_the_note_gaining_another_fact(tmp_path: Path) -> None:
+    """The identity is line-free and offset-free, so an unrelated insert is not a
+    conflict — it is just a new offset.
+
+    A key carrying a line number would go stale the moment anybody edited the
+    file above it, and the pass that holds it would re-ask a fact it had already
+    answered. This is the case `entry_identity`'s absence of offsets buys.
+    """
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[1]
+    grown = text.replace(
+        "# Sofia\n\n", "# Sofia\n\n- Speaks Italian and Greek\n"
+    )
+    path = _write(vault, ENTRY_NOTE, grown)
+    after_insert = _entries(vault, grown)[2]
+
+    assert after_insert.identity == entry.identity
+    _apply_entry(vault, path, after_insert, replacement="- Works at Acme, still")
+    assert "Works at Acme, still" in path.read_text(encoding="utf-8")
+    assert "Speaks Italian and Greek" in path.read_text(encoding="utf-8")
+
+
+def test_an_entry_edit_needs_the_revision_it_composed_from(tmp_path: Path) -> None:
+    """The mandatory revision, not a special case of the entry path."""
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+    before_bytes = path.read_bytes()
+
+    with pytest.raises(mr.MemoryReceiptError):
+        _apply_entry(
+            vault, path, entry, replacement="- Lives elsewhere", expected=""
+        )
+    with pytest.raises(mr.RevisionConflict):
+        _apply_entry(
+            vault,
+            path,
+            entry,
+            replacement="- Lives elsewhere",
+            expected="d" * 64,
+        )
+    assert path.read_bytes() == before_bytes
+
+
+def test_undoing_an_entry_edit_restores_the_whole_file(tmp_path: Path) -> None:
+    """Whole-note undo, exactly as it was for every other note write."""
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+    before_bytes = path.read_bytes()
+
+    receipt = _apply_entry(vault, path, entry, delete=True)
+    assert path.read_bytes() != before_bytes
+
+    undone = mr.undo_receipt(receipt["id"], vault_root=vault)
+
+    assert undone["status"] == mr.UNDONE
+    assert path.read_bytes() == before_bytes
+
+
+def test_undo_after_a_later_entry_edit_refuses(tmp_path: Path) -> None:
+    """A note that moved since is a conflict, not an undo.
+
+    Restoring the before image would discard the later edit whether that was a
+    second managed write or somebody's own hand, which is why the note pass and
+    the entry pass share this and not merely look alike.
+    """
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    path = _write(vault, ENTRY_NOTE, text)
+    entries = _entries(vault, text)
+
+    first = _apply_entry(vault, path, entries[0], delete=True)
+    _apply_entry(
+        vault,
+        path,
+        ne.parse_note_entries(
+            path.read_text(encoding="utf-8"),
+            note_path=ENTRY_NOTE,
+            workspace=WORKSPACE,
+        ).entries[0],
+        replacement="- Works at Bianchi instead",
+    )
+
+    with pytest.raises(mr.RevisionConflict):
+        mr.undo_receipt(first["id"], vault_root=vault)
+    assert "Works at Bianchi instead" in path.read_text(encoding="utf-8")
+
+
+def test_a_replacement_that_is_not_one_list_item_is_refused(tmp_path: Path) -> None:
+    """A splice is an edit to one fact; prose or two bullets are not.
+
+    Checked through the same parser the entry came from, so "what a list item is"
+    has one answer in this codebase rather than two that can drift.
+    """
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+    before_bytes = path.read_bytes()
+
+    for replacement in (
+        "The office moved to the fourth floor.",
+        "",
+        "- Lives in Via Verdi 12\n- Works at Acme",
+    ):
+        with pytest.raises(mr.MemoryReceiptError):
+            _apply_entry(vault, path, entry, replacement=replacement)
+    assert path.read_bytes() == before_bytes
+
+
+def test_deleting_and_replacing_at_once_is_refused(tmp_path: Path) -> None:
+    """An entry edit is one of the two, and asking for both is a caller bug."""
+    vault = _vault(tmp_path)
+    text = _entry_text()
+    path = _write(vault, ENTRY_NOTE, text)
+    entry = _entries(vault, text)[0]
+
+    with pytest.raises(mr.MemoryReceiptError):
+        nr.apply_entry_edit(
+            vault_root=vault,
+            relative_path=ENTRY_NOTE,
+            expected_revision=_revision(path),
+            identity=entry.identity,
+            fingerprint=entry.fingerprint,
+            replacement="- Lives elsewhere",
+            delete=True,
+            actor="operator",
+            source="curation",
+            workspace=WORKSPACE,
+        )
+
+
+def test_an_entry_edit_outside_the_vault_is_refused_like_any_note_write(
+    tmp_path: Path,
+) -> None:
+    """The confinement rules are the whole-note protocol's, not a second set."""
+    vault = _vault(tmp_path)
+    path = _write(vault, ENTRY_NOTE, _entry_text())
+    entry = _entries(vault, _entry_text())[0]
+
+    for relative in ("../outside.md", "Workspace/Memory-Proposals.md", "nope.md"):
+        with pytest.raises(nr.NoteTargetRefused):
+            nr.apply_entry_edit(
+                vault_root=vault,
+                relative_path=relative,
+                expected_revision=_revision(path),
+                identity=entry.identity,
+                fingerprint=entry.fingerprint,
+                delete=True,
+                actor="operator",
+                source="curation",
+                workspace=WORKSPACE,
+            )

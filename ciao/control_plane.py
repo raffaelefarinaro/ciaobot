@@ -242,18 +242,7 @@ def _verification_request(raw: dict[str, Any], *, nv: Any, workspace: str) -> An
     to :func:`ciao.note_verification.plan_note_verification` and is not
     duplicated here.
     """
-    named = _payload_text(raw, "workspace")
-    if named and named != workspace:
-        # The same refusal shape `schedule` uses for a cross-workspace
-        # `workspace` argument: the check state and the note-edit sidecar are
-        # filed per workspace, so pairing one workspace's name with another
-        # workspace's vault records a verdict in a vault nobody claimed and
-        # pins the wrong note's cooldown.
-        raise ControlPlaneError(
-            "workspace_forbidden",
-            f"This provider process is scoped to workspace '{workspace}'; a "
-            "verification payload may not name another.",
-        )
+    _refuse_foreign_workspace(raw, workspace=workspace)
     outcome = _payload_text(raw, "outcome").strip()
     if not outcome:
         raise ControlPlaneError(
@@ -298,6 +287,122 @@ def _verification_request(raw: dict[str, Any], *, nv: Any, workspace: str) -> An
         coverage=coverage,
         reason=_payload_text(raw, "reason").strip(),
     )
+
+
+def _refuse_foreign_workspace(raw: dict[str, Any], *, workspace: str) -> None:
+    """Refuse a payload naming a workspace other than the caller's own.
+
+    The same refusal shape `schedule` uses for a cross-workspace `workspace`
+    argument, and the reason it holds for both request shapes: the check state and
+    the note-edit sidecar are filed per workspace, so pairing one workspace's name
+    with another workspace's vault records a verdict in a vault nobody claimed and
+    pins the wrong note's cooldown.
+    """
+    named = _payload_text(raw, "workspace")
+    if named and named != workspace:
+        raise ControlPlaneError(
+            "workspace_forbidden",
+            f"This provider process is scoped to workspace '{workspace}'; a "
+            "verification payload may not name another.",
+        )
+
+
+def _entry_verification_request(
+    raw: dict[str, Any], *, ev: Any, workspace: str
+) -> Any:
+    """One payload document as an :class:`ciao.entry_verification.EntryVerificationRequest`,
+    or ``None`` when it is about a whole note.
+
+    The same payload file, and the same four outcomes, with one extra field: an
+    ``entry`` identity. Which request a payload is depends on that one field and
+    nothing else, so a caller cannot end up with a whole-note verdict filed under
+    an entry's identity or the other way round — and the entry's fingerprint is
+    required alongside it, because an entry selector that cannot say WHICH version
+    of the fact was read is a selector that could name any version.
+
+    ``before``/``after`` change meaning with the selector, deliberately and in the
+    direction of the smaller unit: for a whole-note request they are the note's
+    full text, and for an entry request they are the **entry's** text, because a
+    whole-note replacement in an entry payload would be the caller rewriting every
+    other fact to correct one.
+    """
+    identity = _payload_text(raw, "entry").strip()
+    if not identity:
+        return None
+    _refuse_foreign_workspace(raw, workspace=workspace)
+    fingerprint = _payload_text(raw, "entry_fingerprint").strip()
+    if not fingerprint:
+        raise ControlPlaneError(
+            "payload_invalid",
+            "'entry' needs 'entry_fingerprint': an entry selector that cannot say "
+            "which version of the fact was read is a selector that could name any "
+            "version.",
+        )
+    return _entry_request(
+        raw, ev=ev, workspace=workspace, identity=identity, fingerprint=fingerprint
+    )
+
+
+def _entry_request(
+    raw: dict[str, Any], *, ev: Any, workspace: str, identity: str, fingerprint: str
+) -> Any:
+    """The entry-level request body, once the selector has been validated."""
+    outcome = _payload_text(raw, "outcome").strip()
+    if not outcome:
+        raise ControlPlaneError(
+            "payload_invalid",
+            "'outcome' is required: one of " + ", ".join(ev.OUTCOMES) + ".",
+        )
+    if outcome not in ev.OUTCOMES:
+        raise ControlPlaneError(
+            "payload_invalid",
+            f"unknown verification outcome {outcome!r}; expected one of "
+            f"{', '.join(ev.OUTCOMES)}.",
+        )
+    coverage = _payload_text(raw, "coverage").strip() or ev.COVERAGE_PARTIAL
+    if coverage not in (ev.COVERAGE_COMPLETE, ev.COVERAGE_PARTIAL):
+        raise ControlPlaneError(
+            "payload_invalid",
+            f"unknown coverage {coverage!r}; expected "
+            f"{ev.COVERAGE_COMPLETE!r} or {ev.COVERAGE_PARTIAL!r}.",
+        )
+    before = _payload_text(raw, "before")
+    after = _payload_text(raw, "after")
+    edit = ev.EntryEdit(before=before, after=after) if before or after else None
+    return ev.EntryVerificationRequest(
+        workspace=workspace,
+        relative_path=_payload_text(raw, "relative_path").strip(),
+        identity=identity,
+        entry_fingerprint=fingerprint,
+        expected_revision=_payload_text(raw, "expected_revision").strip(),
+        outcome=outcome,
+        edit=edit,
+        evidence=ev.Evidence.from_mappings(raw.get("evidence")),
+        coverage=coverage,
+        reason=_payload_text(raw, "reason").strip(),
+    )
+
+
+def _entry_digest(request: Any) -> str:
+    """A short, stable id for the question an entry payload asks.
+
+    The same reasoning as :func:`_verification_digest`, and for the same reason:
+    the off-loop read coalesces by key, so the key has to carry the whole verdict
+    and not only the entry it is about. Over the fields that decide the answer —
+    outcome, coverage, evidence and the edit's two images — and not over the
+    request's identity, which the key already spells out.
+    """
+    edit = request.edit
+    body = {
+        "outcome": str(request.outcome or ""),
+        "coverage": str(request.coverage or ""),
+        "evidence": [row.as_dict() for row in request.evidence],
+        "before": "" if edit is None else edit.before,
+        "after": "" if edit is None else edit.after,
+    }
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _verification_digest(request: Any) -> str:
@@ -449,6 +554,163 @@ def _file_review_proposal(
         # A sidecar with no queue row is litter the next pass overwrites: the
         # proposal is on file but nothing is asking the owner, and reporting
         # that as a working row would be the one wrong answer here.
+        "queued": bool(proposal.proposal_id),
+    }, ""
+
+
+def _entry_verification_reply(
+    status: str,
+    message: str,
+    *,
+    receipt_id: str = "",
+    check: Any = None,
+    proposal: dict[str, Any] | None = None,
+    proposal_error: str = "",
+) -> dict[str, Any]:
+    """One entry verification's whole report, in the shape every exit shares.
+
+    The same flat shape as :func:`_verification_reply` and the same key set, with
+    the check's own subject fields swapped for an entry's — an agent reading either
+    reply must not have to learn two shapes, and a missing `proposal` must still
+    mean "nothing was filed" rather than "the reply was cut off".
+    """
+    from ciao import entry_verification as ev
+
+    return {
+        "status": status,
+        "receipt_id": receipt_id,
+        "message": message,
+        "scope": "entry",
+        "check": (
+            None
+            if check is None
+            else {
+                "identity": check.identity,
+                "note_path": check.note_path,
+                "content_fingerprint": check.content_fingerprint,
+                "outcome": check.outcome,
+                "checked_at": check.checked_at.isoformat(),
+                "retry_after": check.retry_after.isoformat(),
+                "coverage": check.coverage,
+                "reason": check.reason,
+                "proposal_id": check.proposal_id,
+                "evidence": [row.as_dict() for row in check.evidence],
+            }
+        ),
+        "proposal": proposal,
+        "proposal_error": proposal_error,
+        "auto_applied": status == ev.APPLIED,
+    }
+
+
+def _file_entry_review_proposal(
+    result: Any,
+    *,
+    request: Any,
+    note_text: str,
+    config: Any,
+    workspace: str,
+    today: date,
+    ev: Any,
+    nep: Any,
+    mr: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """File the one entry ``note_edit`` proposal an entry verdict becomes.
+
+    The entry-level twin of :func:`_file_review_proposal`, and the same three
+    things it gets right: the operation comes from the outcome the *rule* reached
+    rather than the one the caller asked for, nothing is applied, and a filing
+    that fails is reported rather than swallowed — the fact was judged and nobody
+    was asked.
+
+    What it composes is the ``after`` image, and it composes it through
+    :func:`ciao.note_receipts.compose_entry_edit` over the note's own bytes: the
+    entry's span, the caller's replacement for an update, this verification's date
+    for a re-stamp, and nothing at all for a retirement. ``file_note_edit`` then
+    measures the span again from the note and refuses if the entry is not the one
+    the verdict was about, so a stale payload cannot file a splice at offsets that
+    now mean other words.
+    """
+    from ciao import note_receipts as nr
+
+    operation = {
+        ev.RETIRE: nep.RETIRE_ENTRY,
+        ev.STILL_VALID: nep.RESTAMP_ENTRY,
+        ev.UPDATE: nep.REPLACE_ENTRY,
+    }.get(str(request.outcome or "").strip(), "")
+    if not operation:
+        return None, (
+            f"a needs_review verdict with outcome {request.outcome!r} has no "
+            "entry-edit operation to file; nothing was queued"
+        )
+    entry = nr.find_entry(
+        note_text,
+        identity=request.identity,
+        note_path=request.relative_path,
+        workspace=workspace,
+    )
+    if entry is None:
+        return None, (
+            f"{request.relative_path} holds no entry with identity "
+            f"{str(request.identity)[:12]}, so no entry edit could be composed for "
+            f"it; nothing was queued about {request.relative_path}"
+        )
+    if entry.fingerprint != str(request.entry_fingerprint or "").strip():
+        return None, (
+            f"the entry {str(request.identity)[:12]} in {request.relative_path} is "
+            "not the text this verdict was reached about, so no entry edit was "
+            f"composed; nothing was queued about {request.relative_path}"
+        )
+    if operation == nep.RESTAMP_ENTRY:
+        replacement: str | None = ev.stamp_entry(entry.text, today.isoformat())
+    elif operation == nep.REPLACE_ENTRY:
+        replacement = request.edit.after if request.edit is not None else None
+    else:
+        replacement = None
+    after, refusal = nr.compose_entry_edit(
+        note_text, entry, replacement=replacement, delete=operation == nep.RETIRE_ENTRY
+    )
+    if refusal:
+        return None, (
+            f"the entry edit could not be composed ({refusal}); nothing was queued "
+            f"about {request.relative_path}"
+        )
+    try:
+        proposal = nep.file_note_edit(
+            config,
+            workspace=workspace,
+            relative_path=request.relative_path,
+            expected_revision=request.expected_revision,
+            operation=operation,
+            before=note_text,
+            after=after,
+            outcome=str(request.outcome).strip(),
+            coverage=request.coverage,
+            evidence=request.evidence,
+            reason=result.message or request.reason,
+            today=today,
+            entry_identity=entry.identity,
+            entry_fingerprint=entry.fingerprint,
+        )
+    except (
+        nep.NoteEditError,
+        ev.EntryCheckRefused,
+        mr.MemoryReceiptError,
+        mr.QueueLockError,
+        OSError,
+    ) as exc:
+        return None, (
+            f"the entry-edit proposal could not be filed: {exc}. The verdict is "
+            f"recorded, but nobody has been asked about entry "
+            f"{str(request.identity)[:12]} of {request.relative_path}."
+        )
+    return {
+        "id": proposal.id,
+        "relative_path": proposal.relative_path,
+        "operation": proposal.operation,
+        "proposal_id": proposal.proposal_id,
+        "entry_identity": proposal.entry_identity,
+        "entry_span": list(proposal.entry_span),
         "queued": bool(proposal.proposal_id),
     }, ""
 
@@ -1016,6 +1278,22 @@ class CiaoControlPlane:
         ``needs_review`` a note with no frontmatter reaches, and its proposal is
         a human click all the way down.
 
+        **The same call, one entry.** A payload carrying an ``entry`` identity and
+        the ``entry_fingerprint`` it was read at is a request about one Markdown
+        list item rather than the whole note, and it runs the same pipeline one
+        level in: the same payload confinement, the same workspace scope, the same
+        coalesced bounded read, the same ``source`` from the turn, and the same
+        "a ``needs_review`` verdict files exactly one proposal" wiring — filing a
+        ``replace_entry`` / ``restamp_entry`` / ``retire_entry`` instead of the
+        whole-note kinds. The service is :func:`ciao.entry_verification.verify_entry`
+        (called, not reimplemented) and the reply carries ``scope: "entry"`` so a
+        caller reading both shapes of reply is never guessing which one it got.
+
+        ``before``/``after`` change meaning with the selector, in the direction of
+        the smaller unit: they are the *entry's* text for an entry request, because
+        a whole-note replacement in an entry payload is the caller rewriting every
+        other fact in the file to correct one.
+
         The verification and the filing are one bounded off-loop read
         (:func:`ciao.async_reads.run_read`), coalesced by workspace, note, expected
         revision **and the payload's own content** — two agents judging the same
@@ -1035,6 +1313,7 @@ class CiaoControlPlane:
         an input we cannot settle, and reporting it as a completed verification
         would pin a verdict about text nobody showed the service.
         """
+        from ciao import entry_verification as ev
         from ciao import memory_receipts as mr
         from ciao import note_edit_proposals as nep
         from ciao import note_receipts as nr
@@ -1042,6 +1321,23 @@ class CiaoControlPlane:
 
         workspace = self._workspace(principal)
         raw_payload = self._verification_payload(principal, payload_file, workspace=workspace)
+        # One payload file, two requests, and the `entry` field is the only thing
+        # that says which: an identity plus a fingerprint names one fact inside one
+        # note, and its absence means the note itself. Decided here rather than in
+        # the service so a caller cannot get a whole-note verdict filed under an
+        # entry's identity, or the other way round.
+        entry_request = _entry_verification_request(raw_payload, ev=ev, workspace=workspace)
+        if entry_request is not None:
+            return await self._verify_one_entry(
+                entry_request,
+                principal=principal,
+                raw_payload=raw_payload,
+                workspace=workspace,
+                nep=nep,
+                nr=nr,
+                ev=ev,
+                nv=nv,
+            )
         request = _verification_request(raw_payload, nv=nv, workspace=workspace)
         # The same answer `note_verification` and `note_edit_proposals` resolve
         # the vault through, so the service, the check state and the sidecar
@@ -1116,6 +1412,96 @@ class CiaoControlPlane:
             f"verify-note:{self._search_runtime_dir()}:"
             f"{workspace}:{request.relative_path}:{request.expected_revision}:"
             f"{_verification_digest(request)}"
+        )
+        reported: dict[str, Any] = await run_read(key, _run, coalesce=True)
+        return _ok(reported)
+
+    async def _verify_one_entry(
+        self,
+        request: Any,
+        *,
+        principal: AgentPrincipal,
+        raw_payload: dict[str, Any],
+        workspace: str,
+        nep: Any,
+        nr: Any,
+        ev: Any,
+        nv: Any,
+    ) -> dict[str, Any]:
+        """Run one entry verdict through the same pipeline as one note's.
+
+        The whole-note path above, in the order it does everything: read the note's
+        exact bytes, call the entry service, and file the one proposal a refused
+        verdict becomes — all three inside one bounded off-loop read, so a second
+        caller cannot interleave a different verdict for the same entry between the
+        check being recorded and the proposal that pins it.
+
+        The read is coalesced on the entry's identity AND its fingerprint AND a
+        digest of the whole payload, not on the note: two agents judging the same
+        fact at the same revision in the same workspace share one read only when
+        they are asking the same question, and the answer to "is this entry still
+        what I read it as" is not the answer to "is this note still what I read it
+        as".
+        """
+        from ciao import memory_receipts as mr
+
+        del raw_payload  # the request already carries everything the read needs
+        vault_root = Path(self.config.workspace_vault_root(workspace))
+        today = date.today()
+        source = "curation" if self._unattended_turn(principal) else "chat"
+
+        def _run() -> dict[str, Any]:
+            try:
+                target = nr.resolve_note_path(vault_root, request.relative_path)
+                note_text = target.read_bytes().decode("utf-8")
+            except (mr.MemoryReceiptError, OSError, UnicodeDecodeError) as exc:
+                return _entry_verification_reply(
+                    ev.FAILED, f"the note could not be read: {exc}"
+                )
+            result = ev.verify_entry(
+                request,
+                vault_root=vault_root,
+                config=self.config,
+                actor="agent",
+                source=source,
+                today=today,
+            )
+            if result.status != ev.NEEDS_REVIEW:
+                return _entry_verification_reply(
+                    result.status,
+                    result.message,
+                    receipt_id=result.receipt_id,
+                    check=result.check,
+                )
+            filed, filing_error = _file_entry_review_proposal(
+                result,
+                request=request,
+                note_text=note_text,
+                config=self.config,
+                workspace=workspace,
+                today=today,
+                ev=ev,
+                nep=nep,
+                mr=mr,
+            )
+            # The check the reply carries is re-read, not the row `verify_entry`
+            # returned: filing is what pins it, and reporting the pre-filing row
+            # would tell the agent a verdict nobody is waiting on.
+            pinned = ev.read_entry_checks(vault_root).get(request.identity)
+            return _entry_verification_reply(
+                result.status,
+                result.message,
+                receipt_id=result.receipt_id,
+                check=result.check if pinned is None else pinned,
+                proposal=filed,
+                proposal_error=filing_error,
+            )
+
+        key = (
+            f"verify-entry:{self._search_runtime_dir()}:{workspace}:"
+            f"{request.relative_path}:{request.identity}:"
+            f"{request.entry_fingerprint}:{request.expected_revision}:"
+            f"{_entry_digest(request)}"
         )
         reported: dict[str, Any] = await run_read(key, _run, coalesce=True)
         return _ok(reported)
