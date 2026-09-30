@@ -1238,6 +1238,16 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Background runner shutdown failed")
 
+    async def _shutdown_links_scan() -> None:
+        # Cancel a Home wikilink scan still in flight and wait for it to
+        # acknowledge, before the read executor below is closed. The walk itself
+        # is not interruptible — `run_read`'s worker finishes and stays joinable —
+        # but leaving a task pending on a closing loop is the part a restart
+        # notices.
+        from ciao.migration_notices import shutdown_links_scan
+
+        await shutdown_links_scan(app.state)
+
     async def _shutdown_vault_reads() -> None:
         # Discard vault reads still queued for the off-loop executor (bounded,
         # cancel_futures=True) so a restart is not held up by a backlog of
@@ -1261,6 +1271,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.shutdown_callbacks = [
         _shutdown_providers,
         _shutdown_background_runs,
+        # Before the read executor: the scan is waiting on a worker, and closing
+        # the pool out from under a pending task is the leak worth avoiding.
+        _shutdown_links_scan,
         _shutdown_vault_reads,
         _shutdown_backup,
     ]

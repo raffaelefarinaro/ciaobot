@@ -8715,6 +8715,24 @@ def _housekeeping_context(request: Request) -> "operator_actions.DetectionContex
     )
 
 
+def _refresh_links_scan(app: Any, context: "operator_actions.DetectionContext") -> None:
+    """Keep the wikilink verdict warm without a poll ever waiting on it.
+
+    One notice on the strip needs a fact no cheap read can supply: whether a
+    note in the vault still holds a wikilink. Establishing it walks the vault, so
+    it cannot run inside the detector pass — this strip is polled every 60s and on
+    every window focus. `migration_notices.start_links_scan` puts the walk on the
+    bounded off-loop executor, starts it detached, and owns the task from there
+    (one in flight, its failure observed, cancelled at shutdown); this call
+    returns immediately and the strip answers from whatever the last scan stored.
+    Same trade `_cached_update_hint` makes for the release lookup: a cold engine
+    reports no card until the first scan lands, and the next poll picks it up.
+    """
+    from ciao import migration_notices
+
+    migration_notices.start_links_scan(app.state, context.config, context.runtime)
+
+
 async def list_housekeeping(request: Request) -> JSONResponse:
     """Return every detectable operator action for the home strip.
 
@@ -8724,7 +8742,9 @@ async def list_housekeeping(request: Request) -> JSONResponse:
     """
     from ciao import operator_actions
 
-    actions = operator_actions.detect_actions(_housekeeping_context(request))
+    context = _housekeeping_context(request)
+    _refresh_links_scan(request.app, context)
+    actions = operator_actions.detect_actions(context)
     return JSONResponse({"actions": [action.as_dict() for action in actions]})
 
 
