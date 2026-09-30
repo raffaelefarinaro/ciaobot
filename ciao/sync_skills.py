@@ -21,6 +21,8 @@ from ciao.os_support.links import (
     link_source,
     link_target,
     points_to,
+    preserve_divergent_mirror,
+    prune_orphan_sidecars,
     remove_link,
 )
 from ciao.workspace_guide import GUIDE_NAME, guide_path
@@ -169,6 +171,14 @@ def _ensure_symlink(source: Path, link: Path, *, relative_to: Path | None = None
     source = source.resolve()
     if link.exists() and points_to(link, source):
         return True
+    kept = preserve_divergent_mirror(link)
+    if kept is not None:
+        # An editor saved the mirror by replacing it: the edit is in the
+        # mirror, not the source. Never discard it.
+        print(
+            f"WARN: {link} had edits that are not in {source}; kept them as {kept}",
+            file=sys.stderr,
+        )
     if is_link(link):
         remove_link(link)
     elif link.exists():
@@ -629,6 +639,7 @@ def _mirror_dir_symlinks(
             continue
         _remove_path(entry)
         pruned += 1
+    prune_orphan_sidecars(dest_dir)
     return linked, pruned
 
 

@@ -26,8 +26,12 @@ Windows cannot create a symlink without Developer Mode or admin (D-06, #696):
   and the file is the recorded source's inode, or the recorded source is gone.
   An editor that saves the source by replacing it breaks the link; the file
   then still has a sidecar but a different inode, ``is_link`` is false,
-  ``points_to`` is false, and the next sync re-links it. A file without a
-  sidecar is never ours.
+  ``points_to`` is false, and the next sync re-links it. If it was the
+  *mirror* that was saved that way, the mirror holds the newer text, and
+  ``preserve_divergent_mirror`` moves it beside the source as
+  ``<source>.ciao-conflict-<timestamp>`` before the re-link, so an edit is
+  never discarded. ``prune_orphan_sidecars`` tidies sidecars whose mirror was
+  deleted by hand. A file without a sidecar is never ours.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from pathlib import Path
 
 if sys.platform == "win32":
     import _winapi
+    import time
 
     _PREFIXES = ("\\\\?\\", "\\??\\")
     SIDECAR_SUFFIX = ".ciao-link"
@@ -135,6 +140,45 @@ if sys.platform == "win32":
         candidate.unlink(missing_ok=True)
         _sidecar(candidate).unlink(missing_ok=True)
 
+    def preserve_divergent_mirror(link: str | os.PathLike[str]) -> Path | None:
+        """Keep an edit made to a mirror before a sync re-links it; see the module docstring.
+
+        Only a sidecar'd file that no longer shares its source's inode can hold
+        such an edit: an editor saved the *mirror* by replacing it. Identical
+        bytes, or a source newer than the mirror (the source was the one
+        replaced), mean there is nothing to keep. Otherwise the mirror is moved
+        beside the source as ``<source>.ciao-conflict-<timestamp>`` and that
+        path is returned, so the caller can say where the text went.
+        """
+        candidate = Path(link)
+        source = _recorded_source(candidate)
+        if source is None or not candidate.is_file() or not source.is_file():
+            return None
+        try:
+            if os.path.samefile(candidate, source):
+                return None
+            if candidate.read_bytes() == source.read_bytes():
+                return None
+            if candidate.stat().st_mtime <= source.stat().st_mtime:
+                return None
+        except OSError:
+            return None
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(candidate.stat().st_mtime))
+        source = source.resolve()
+        kept = source.with_name(f"{source.name}.ciao-conflict-{stamp}")
+        os.replace(candidate, kept)
+        return kept
+
+    def prune_orphan_sidecars(folder: str | os.PathLike[str]) -> int:
+        """Remove sidecars whose mirror is gone (deleted by hand); returns how many."""
+        pruned = 0
+        for sidecar in Path(folder).glob(f"*{SIDECAR_SUFFIX}"):
+            mirror = sidecar.with_name(sidecar.name[: -len(SIDECAR_SUFFIX)])
+            if not os.path.lexists(mirror):
+                sidecar.unlink(missing_ok=True)
+                pruned += 1
+        return pruned
+
 else:
 
     def link_dir(
@@ -180,3 +224,11 @@ else:
     def remove_link(path: str | os.PathLike[str]) -> None:
         """Remove the link itself, never what it points at."""
         Path(path).unlink(missing_ok=True)
+
+    def preserve_divergent_mirror(link: str | os.PathLike[str]) -> Path | None:
+        """Nothing to keep: a symlink cannot diverge from its source."""
+        return None
+
+    def prune_orphan_sidecars(folder: str | os.PathLike[str]) -> int:
+        """No sidecars on POSIX."""
+        return 0

@@ -175,3 +175,78 @@ def test_windows_uses_a_junction_and_a_sidecared_hard_link(tmp_path: Path) -> No
     assert os.path.samefile(link, source)
     sidecar = link.with_name("x.md.ciao-link")
     assert sidecar.read_text(encoding="utf-8").strip() == "../../commands/x.md"
+
+
+def _age(path: Path, seconds: float) -> None:
+    stamp = path.stat().st_mtime - seconds
+    os.utime(path, (stamp, stamp))
+
+
+def test_a_source_replaced_and_newer_is_simply_re_linked(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    source = workspace / "commands" / "note-it.md"
+    replacement = source.with_name(".note-it.md.tmp")
+    _write(replacement, "# Note it, v2\n")
+    os.replace(replacement, source)
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    mirror = workspace / ".claude" / "commands" / "note-it.md"
+    assert points_to(mirror, source)
+    assert mirror.read_bytes() == b"# Note it, v2\n"
+    assert not list(source.parent.glob("*.ciao-conflict-*"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only a hard-linked mirror can diverge")
+def test_an_edit_saved_to_the_mirror_by_replacement_is_kept(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An editor's atomic save to the *mirror* breaks the hard link, and the
+    mirror holds the only copy of the edit; the sync must not discard it."""
+    workspace = _workspace(tmp_path)
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    source = workspace / "commands" / "note-it.md"
+    mirror = workspace / ".claude" / "commands" / "note-it.md"
+    _age(source, 60)
+    replacement = mirror.with_name(".note-it.md.tmp")
+    _write(replacement, "# Note it, edited in the mirror\n")
+    os.replace(replacement, mirror)
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    kept = list(source.parent.glob("note-it.md.ciao-conflict-*"))
+    assert len(kept) == 1
+    assert kept[0].read_bytes() == b"# Note it, edited in the mirror\n"
+    assert source.read_bytes() == b"# Note it\n"
+    assert points_to(mirror, source)
+    assert str(kept[0]) in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only a hard-linked mirror can diverge")
+def test_a_diverged_mirror_with_the_same_bytes_is_just_re_linked(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    source = workspace / "commands" / "note-it.md"
+    mirror = workspace / ".claude" / "commands" / "note-it.md"
+    replacement = mirror.with_name(".note-it.md.tmp")
+    _write(replacement, "# Note it\n")
+    os.replace(replacement, mirror)
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert points_to(mirror, source)
+    assert not list(source.parent.glob("*.ciao-conflict-*"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="sidecars are the Windows branch")
+def test_a_sidecar_whose_mirror_was_deleted_is_tidied(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    (workspace / "commands" / "note-it.md").unlink()
+    mirror = workspace / ".claude" / "commands" / "note-it.md"
+    mirror.unlink()  # the user deletes the mirror by hand; the sidecar stays
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert not os.path.lexists(mirror.with_name("note-it.md.ciao-link"))
