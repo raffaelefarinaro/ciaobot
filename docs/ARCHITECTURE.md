@@ -15,6 +15,7 @@ docs/                          Long-form docs (this file, DEVELOPMENT.md).
 ciao/                          Python backend (Starlette).
   main.py                      Web server entry point, route wiring, startup hooks.
   cli.py                       Packaged `ciao` CLI: run, supervise, setup, setup-url, dev, auth, scaffold, sync-skills, skills-sync, skills, critique, vault-index, vault-search, vault-lint, os-audit, memory-audit, label-hygiene, cleanup-sdk-blobs, create-chat, eval, public-preflight, package-smoke, prepare-release, health, desktop, and desktop-service commands.
+  __main__.py                   `python -m ciao`: the same entry point as the `ciao` console script, delegating to `ciao.cli.main` (#791).
   setup_status.py              Bootstrap/setup readiness API and wizard finish handler.
   dev.py                       Local dev runner: backend on :8543 plus Vite frontend on :5173. CLI: `ciao dev`.
   config.py                    Env var loading, workspace config.
