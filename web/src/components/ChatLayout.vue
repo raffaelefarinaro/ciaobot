@@ -971,7 +971,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     // lane's project menu moved the menu's focus *and* roamed the chat grid,
     // leaving the menu open with focus somewhere else entirely.
     if (e.defaultPrevented) return
-    if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
+    if (homeRecentRef.value?.onArrow?.(e.key)) e.preventDefault()
     return
   }
 
