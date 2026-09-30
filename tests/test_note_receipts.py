@@ -10,14 +10,18 @@ region does not:
   are carried across the replacement;
 * confinement: a caller names a vault-relative path, and an absolute, ``..``,
   symlinked, missing, non-Markdown or non-file target is refused, as is the app's
-  own bookkeeping under ``Workspace/`` and a name two on-disk files claim on a
-  case-sensitive filesystem; both spellings of a name on a case-insensitive one
-  resolve to a single file, so two writers cannot reach one note through two
-  locks. A *receipt* whose recorded target does not resolve inside the vault the
-  journal is actually found in is refused just the same;
+  own bookkeeping under ``Workspace/`` and a spelling no on-disk entry answers
+  to (on a case-sensitive filesystem ``notes/a.md`` is refused when only
+  ``Notes/A.md`` exists, rather than redirecting the write there); both spellings
+  of a name on a case-insensitive one resolve to a single file, so two writers
+  cannot reach one note through two locks. A *receipt* whose recorded target does
+  not resolve inside the vault the journal is actually found in is refused just
+  the same;
 * never view-only: content that is not UTF-8, or whose image is larger than a
   receipt can hold, is refused before the mutation rather than applied and left
-  un-undoable; a write that changed nothing is not offered an undo;
+  un-undoable; a write that changed nothing is not offered an undo, and the undo
+  primitive refuses such a row itself rather than trusting the caller to ask
+  first;
 * honest settlement: a journal that cannot record the prepared row aborts the
   write; a write that replaced the note but could not confirm it leaves a
   recoverable row, never a terminal one that would hide the mutation; and an
@@ -241,6 +245,48 @@ def test_note_noop_apply_offers_no_undo(tmp_path):
     assert path.read_bytes() == b"already correct\n"
 
 
+def test_note_undo_primitive_refuses_a_noop_row_itself(tmp_path):
+    """The undo primitive refuses a no-op row, not only its caller.
+
+    The no-op row carries the note's own text as both images, so it passes
+    every image and revision check inside the undo primitive, and the reverse
+    write puts the file's current bytes back over themselves — a locked,
+    journaled, recoverable write of nothing, plus a ``note_undo`` row recording
+    it. Only ``undo_receipt`` asked ``is_undoable`` first, so a direct call to
+    the primitive could reverse a write that changed nothing. The refusal
+    belongs at the boundary, not to one caller.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "already correct\n")
+    noop = _apply(vault, after="already correct\n")
+    journal = _journal(vault)
+
+    with pytest.raises(mr.UndoUnsupported):
+        nr.undo_note_receipt(
+            noop, journal, vault_root=vault, actor="operator", source="pwa"
+        )
+
+    # Refused before the reverse write: the note is untouched, no `note_undo`
+    # row was journaled, and there is nothing half-done to settle.
+    assert path.read_bytes() == b"already correct\n"
+    assert [row["kind"] for row in _rows(vault)] == ["note_apply"]
+    assert mr.find_receipt(journal, noop["id"])["status"] == mr.APPLIED
+    assert mr.recover_pending(journal=journal).reconciled == []
+
+    # Either flag alone is enough, so a row carrying only the other spelling of
+    # "this changed nothing" is refused just the same.
+    for flag in ("undoable", "changed"):
+        with pytest.raises(mr.UndoUnsupported):
+            nr.undo_note_receipt(
+                {**noop, flag: True},
+                journal,
+                vault_root=vault,
+                actor="operator",
+                source="pwa",
+            )
+    assert path.read_bytes() == b"already correct\n"
+
+
 def test_note_revision_conflict_preserves_external_edit(tmp_path):
     """A stale expectation refuses; the hand edit that made it stale survives."""
     vault = _vault(tmp_path)
@@ -402,12 +448,14 @@ def test_note_both_spellings_of_a_name_are_one_file_one_lock(tmp_path):
 
 
 def test_note_refuses_a_name_two_files_claim(tmp_path):
-    """A name two on-disk entries match is not a name to write through.
+    """A name no on-disk entry answers to is not a name to write through.
 
-    Only reachable on a case-sensitive filesystem, where ``A.md`` and ``a.md``
-    can both exist and a caller asking for ``A.MD`` matches neither exactly.
-    Picking one would be a coin flip the caller cannot see, so the walk refuses
-    instead of writing a file the caller did not name.
+    ``Topics/Alpha.md`` and ``Topics/alpha.md`` both exist and the caller asks
+    for ``Topics/ALPHA.md``, a third spelling that is neither. The walk only
+    canonicalizes a name the filesystem itself resolved, so a spelling that
+    names nothing is refused as the missing note it is. Picking one of the two
+    would be a coin flip the caller cannot see, and a write to a file they never
+    named is worse than a refusal.
     """
     if _case_insensitive_filesystem(tmp_path):
         pytest.skip("a case-insensitive filesystem cannot hold both spellings")
@@ -415,12 +463,59 @@ def test_note_refuses_a_name_two_files_claim(tmp_path):
     upper = _write(vault, "Topics/Alpha.md", "the upper one\n")
     lower = _write(vault, "Topics/alpha.md", "the lower one\n")
 
-    with pytest.raises(nr.NoteTargetRefused):
+    with pytest.raises(nr.NoteTargetRefused, match="no such note"):
         nr.resolve_note_path(vault, "Topics/ALPHA.md")
 
-    # The exact spellings are still fine: one of them is what the caller named.
+    # The exact spellings are still fine — one of them is what the caller named
+    # — and neither file was redirected onto the other.
     assert nr.resolve_note_path(vault, "Topics/Alpha.md") == upper
     assert nr.resolve_note_path(vault, "Topics/alpha.md") == lower
+    assert upper.read_bytes() == b"the upper one\n"
+    assert lower.read_bytes() == b"the lower one\n"
+
+
+def test_note_refuses_a_spelling_the_filesystem_does_not_resolve(tmp_path):
+    """A case-folded match must not stand in for a name that is not there.
+
+    ``Notes/Alpha.md`` exists and the caller asks for ``notes/alpha.md``. On a
+    case-sensitive filesystem that path is simply not there, and the protocol
+    has to say so: resolving it onto ``Notes/Alpha.md`` answers a question the
+    caller did not ask, and their write lands on a file they never named — the
+    "no such note" refusal simply disappears. So the case-insensitive match
+    runs only where the caller's own spelling resolved, which is the
+    case-insensitive case, and this test is the case-sensitive one. (Where the
+    filesystem resolves both spellings to one file, they are one note: see
+    ``test_note_both_spellings_of_a_name_are_one_file_one_lock``.)
+    """
+    if _case_insensitive_filesystem(tmp_path):
+        pytest.skip("a case-insensitive filesystem resolves both spellings to one file")
+    vault = _vault(tmp_path)
+    path = _write(vault, "Notes/Alpha.md", "the note as it stands\n")
+    before = path.read_bytes()
+
+    # Both components are wrong-cased: the folder and the file.
+    with pytest.raises(nr.NoteTargetRefused, match="no such note"):
+        nr.resolve_note_path(vault, "notes/alpha.md")
+    # Only the file is: the folder resolves, the name under it does not.
+    with pytest.raises(nr.NoteTargetRefused, match="no such note"):
+        nr.resolve_note_path(vault, "Notes/ALPHA.md")
+
+    # The refusal is the whole answer: the file that is there is untouched, and
+    # it is still reachable under the spelling it actually has.
+    assert path.read_bytes() == before
+    assert nr.resolve_note_path(vault, "Notes/Alpha.md") == path
+
+    # And the write path refuses the same way, before the prepared row, so a
+    # caller cannot land a write on a file it spelled differently.
+    with pytest.raises(nr.NoteTargetRefused, match="no such note"):
+        _apply(
+            vault,
+            after="written to a file the caller never named\n",
+            path=path,
+            relative="notes/alpha.md",
+        )
+    assert path.read_bytes() == before
+    assert _rows(vault) == []
 
 
 @pytest.mark.parametrize(

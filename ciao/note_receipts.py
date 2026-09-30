@@ -148,23 +148,32 @@ def _on_disk_name(parent: Path, part: str) -> Path:
     place the real spelling exists, so the walk reads it and takes that.
 
     An exact match wins, so this is a no-op on a case-sensitive filesystem
-    (where the caller already spelled the name correctly). Otherwise the single
-    entry matching case-insensitively is used, and a *tie* — two entries
-    differing only in case — is refused rather than guessed at: a name the
-    caller cannot pick unambiguously is not a name this protocol should write
-    through. A component that is not there at all is returned unchanged for the
-    walk's own "no such note" refusal below, so a missing path and an unreadable
-    directory are reported the same way they always were.
+    (where the caller already spelled the name correctly). A component the
+    *caller's own spelling does not resolve* is returned unchanged, so it
+    reaches the walk's "no such note" refusal below: canonicalizing a name that
+    is not there would answer a different question, and on a case-sensitive
+    filesystem the two spellings are different paths — asking for
+    ``notes/a.md`` with only ``Notes/A.md`` on disk would write a file nobody
+    named. So the case-insensitive match runs only where the filesystem itself
+    already resolved the caller's spelling, which is exactly the
+    case-insensitive case. The single entry matching case-insensitively is then
+    used, and a *tie* — two entries differing only in case under a filesystem
+    that resolved one spelling to a file — is refused rather than guessed at: a
+    name the caller cannot pick unambiguously is not a name this protocol
+    should write through. A component that is not there at all, and an
+    unreadable directory, are reported the same way they always were.
     """
     try:
         with os.scandir(parent) as entries:
-            names = [entry.name for entry in entries]
+            names = {entry.name for entry in entries}
     except OSError:
         return parent / part
     if part in names:
         return parent / part
+    if not (parent / part).exists():
+        return parent / part
     folded = part.casefold()
-    matches = sorted({name for name in names if name.casefold() == folded})
+    matches = sorted(name for name in names if name.casefold() == folded)
     if not matches:
         return parent / part
     if len(matches) > 1:
@@ -221,16 +230,19 @@ def resolve_note_path(vault_root: Path | str, relative_path: str) -> Path:
         raise NoteTargetRefused(f"not a regular file: {raw}")
     if target.suffix.lower() != ".md":
         raise NoteTargetRefused(f"only Markdown notes are writable here: {raw}")
+    # Belt and braces: the component walk above already refuses every link, so
+    # a resolved path that still left the vault would mean that walk was wrong.
+    # Checked before the first `relative_to`, which would raise a bare
+    # `ValueError` for exactly that regression — a 500 for an ordinary user
+    # action, where every other way of naming the wrong file is a refusal.
+    if not target.is_relative_to(root):
+        raise NoteTargetRefused(f"a note path may not leave the vault: {raw}")
     if is_reserved_bookkeeping(target.relative_to(root)):
         raise NoteTargetRefused(
             f"{target.name} is the app's own vault bookkeeping under "
             f"{target.parent.name}/, not a note: it is written by the pipeline "
             f"that owns it, not by a note edit"
         )
-    # Belt and braces: the component walk above already refuses every link, so
-    # a resolved path that still left the vault would mean that walk was wrong.
-    if not target.is_relative_to(root):
-        raise NoteTargetRefused(f"a note path may not leave the vault: {raw}")
     return target
 
 
@@ -687,7 +699,9 @@ def undo_note_receipt(
     before image would discard whatever landed in between, whether that was
     another managed write or the user's own hand. The before image must also
     still hash to the revision the receipt records, so a journal row that was
-    edited or forged cannot install content the receipt never wrote.
+    edited or forged cannot install content the receipt never wrote, and a row
+    that changed nothing is refused outright — its before image is the note's
+    own text, so reversing it would write the file over itself.
 
     The reverse write goes through the same journaled protocol as a forward one
     — ``prepared``, replace, confirm — as a ``note_undo`` row carrying
@@ -712,6 +726,17 @@ def undo_note_receipt(
     """
     if str(receipt.get("kind", "")) != NOTE_APPLY:
         raise mr.UndoUnsupported("only a note apply can be undone")
+    # The no-op write is journaled with both images, so it passes every image
+    # and revision check below and the reverse write would put the note's own
+    # bytes back over themselves. `memory_receipts.undo_receipt` refuses it via
+    # `is_undoable`, but that is the only caller guarding it: this is the
+    # primitive, so it refuses the row itself rather than trusting every caller
+    # to have asked first.
+    if receipt.get("undoable", True) is False or receipt.get("changed", True) is False:
+        raise mr.UndoUnsupported(
+            "this write changed nothing, so there is no change to reverse; it "
+            "stays view-only"
+        )
     before = receipt.get("before_text")
     after = receipt.get("after_text")
     if not isinstance(before, str) or not isinstance(after, str):

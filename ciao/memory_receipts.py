@@ -512,20 +512,36 @@ def _trim_if_large(journal: Path) -> None:
         # unresolved receipt either keeps everything after it or stops the trim
         # entirely. The newest row is never dropped either: a journal is kept
         # because it records something.
-        payload = _serialize_rows(kept)
-        while len(kept) > 1 and len(payload.encode("utf-8")) > MAX_BYTES:
-            head = _safe_row(kept[0]) or {}
-            if str(head.get("id", "")) in pending_ids:
+        #
+        # Sizes are computed once and subtracted as the head advances, and the
+        # rows are serialized once at the end. Re-joining and re-encoding the
+        # whole remainder per popped row was quadratic — thousands of rows each
+        # rebuilding megabytes under the journal lock, on the append path of
+        # every write. `len(line) + 1` is the row plus the newline that follows
+        # it, which is one byte more than the joined file can ever be, so the
+        # budget below is an upper bound and the cap still holds.
+        sizes = [len(line.encode("utf-8")) + 1 for line in kept]
+        total = sum(sizes)
+        head = 0
+        while head < len(kept) - 1 and total > MAX_BYTES:
+            first = _safe_row(kept[head]) or {}
+            if str(first.get("id", "")) in pending_ids:
                 break
-            kept.pop(0)
-            payload = _serialize_rows(kept)
+            total -= sizes[head]
+            head += 1
+        payload = _serialize_rows(kept[head:])
         tmp = journal.with_name(f".{journal.name}.trim.tmp")
         # The temp holds the whole retained journal, note bodies included, so it
         # is created 0600 — carrying the journal's own mode when there is one, so
         # the `os.replace` never silently re-modes a file its owner set a mode
         # on. `os.open`'s mode applies only to the file it creates, so a temp
         # left behind by a trim that died mid-write is removed first rather
-        # than reused under whatever mode it happened to get.
+        # than reused under whatever mode it happened to get, and `O_EXCL` with
+        # it means the open can only ever create: a temp that appeared in the
+        # window between the unlink and the open — or a link planted in its
+        # place — fails the open instead of being written through, and the
+        # best-effort trim is skipped rather than following a link out of the
+        # vault with the whole journal in its hands.
         try:
             tmp.unlink()
         except OSError:
@@ -534,7 +550,9 @@ def _trim_if_large(journal: Path) -> None:
             mode = stat.S_IMODE(journal.stat().st_mode)
         except OSError:
             mode = 0o600
-        tmp_fd = _open_private(tmp, flags=os.O_WRONLY | os.O_TRUNC, mode=mode)
+        tmp_fd = _open_private(
+            tmp, flags=os.O_WRONLY | os.O_EXCL | os.O_NOFOLLOW, mode=mode
+        )
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()

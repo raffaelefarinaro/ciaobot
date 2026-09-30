@@ -9,8 +9,9 @@ These pin AI-05's acceptance criteria:
   operation;
 * undo refuses a changed destination, cannot remove unrelated later facts, and
   leaves unsupported legacy operations view-only;
-* the journal, its lock and the trim temp are private files, and the trim is
-  bounded in bytes as well as in rows without dropping a pending receipt.
+* the journal, its lock and the trim temp are private files, the temp can only
+  ever be created rather than opened, and the trim is bounded in bytes as well
+  as in rows without dropping a pending receipt.
 """
 
 from __future__ import annotations
@@ -465,6 +466,45 @@ def test_trim_bounds_a_byte_heavy_journal_and_spares_a_pending_row(
     assert temp_modes and set(temp_modes) == {0o600}
     assert stat.S_IMODE(journal.stat().st_mode) == 0o600
     assert not list(journal.parent.glob("*.trim.tmp"))
+
+
+def test_trim_temp_is_created_not_reused(tmp_path, monkeypatch):
+    """The trim temp can only ever be a file this trim created.
+
+    The whole retained journal — note bodies included — is written to the temp
+    before the `os.replace`, so an open that follows whatever sits at that name
+    hands the contents of an arbitrary file to anyone who can read it, and one
+    that truncates it destroys a file the vault did not lose. The stale temp is
+    therefore unlinked explicitly first, and the open that follows is
+    `O_EXCL | O_NOFOLLOW`: it can only create, never open what is already there
+    and never write through a link planted in the window between the two.
+    """
+    monkeypatch.setattr(mr, "MAX_BYTES", 1)  # every append trims
+    monkeypatch.setattr(mr, "KEEP_LINES", 50)  # ...but drops nothing
+    journal = _journal(tmp_path)
+    for i in range(3):
+        mr._append(
+            journal, {"id": f"mrcpt_flag_{i}", "status": mr.APPLIED, "ts": f"t{i}"}
+        )
+
+    opened: list[tuple[Path, int]] = []
+    real_open_private = mr._open_private
+
+    def record(path: Path, *, flags: int, mode: int = 0o600) -> int:
+        opened.append((path, flags))
+        return real_open_private(path, flags=flags, mode=mode)
+
+    monkeypatch.setattr(mr, "_open_private", record)
+    mr._append(journal, {"id": "mrcpt_flag_3", "status": mr.APPLIED, "ts": "t3"})
+
+    temps = [(path, flags) for path, flags in opened if path.name.endswith(".trim.tmp")]
+    assert temps, "the trim never opened its temp"
+    for _path, flags in temps:
+        assert flags & os.O_EXCL, "the temp open must fail on an existing name"
+        assert flags & os.O_NOFOLLOW, "the temp open must refuse a symlink"
+        assert not flags & os.O_TRUNC, "an existing file is unlinked, not truncated"
+    # The trim still did its job through those flags.
+    assert {r["id"] for r in mr.read_receipts(journal)} == {"mrcpt_flag_3"}
 
 
 def test_recovery_applied_when_crash_landed_after_the_write(tmp_path):
