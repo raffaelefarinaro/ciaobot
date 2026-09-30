@@ -1689,6 +1689,128 @@ def test_the_cleanup_backlog_is_capped_and_reported(tmp_path: Path) -> None:
     assert {i.pass_id for i in worklist.items} >= {cr.PASS_HYGIENE, cr.PASS_GUIDE}
 
 
+def test_a_maximal_cleanup_backlog_leaves_the_required_hygiene_keys_planned(
+    tmp_path: Path,
+) -> None:
+    """The two keys ``last_full_pass`` may not advance without, named rather than
+    implied.
+
+    A cleanup backlog three times the cap is the shape that starves a run: the
+    cleanup pass sits seventh of nine, the budget is a whole-run allowance, and
+    ``last_full_pass`` is what tells the next week the workspace was actually
+    cared for. So the claim is not "the other passes appear" — it is that *these*
+    two keys are still in a plan that has a cleanup backlog in it.
+    """
+    records = [
+        _settled_learning(f"Lesson {index} is settled.", f"lesson-{index}")
+        for index in range(cr.LEARNINGS_CLEANUP_MAX_ITEMS * 3)
+    ]
+    vault = _settled_vault(tmp_path, *records)
+    guide = _guide(tmp_path)
+    # The weekly pass is due, which is the only way these keys exist at all.
+    _fresh_log(vault, last_full_pass=date(2026, 9, 1).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    keys = {key for item in worklist.items for key in item.keys}
+
+    assert {i.pass_id for i in worklist.items if i.pass_id == cr.PASS_LEARNINGS_CLEANUP}
+    assert cr.REQUIRED_HYGIENE_KEYS <= keys
+    # And they are planned, not merely present: the cap means the cleanup pass's
+    # own tail is what gets deferred, never the checks the marker depends on.
+    plan = cr.plan_run(worklist, cr.RunBudget())
+    assert cr.REQUIRED_HYGIENE_KEYS <= {key for item in plan.planned for key in item.keys}
+
+
+def test_the_cleanup_item_names_the_mode_that_performs_it(tmp_path: Path) -> None:
+    """A worklist that made the agent look up which flag retires a settled entry
+    is a worklist whose eligible rows stay eligible forever.
+
+    The pass plans and the command carries out the plan, so the command is in the
+    row the agent is reading — and the row says which rows are *not* its business,
+    because the attended rows still need a person and an approval file.
+    """
+    vault = _settled_vault(tmp_path, _settled_learning("First lesson.", "first"))
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    item = next(i for i in worklist.items if i.pass_id == cr.PASS_LEARNINGS_CLEANUP)
+    assert "ciao learnings-cleanup --apply-settled" in item.reason
+    assert "no approval file" in item.reason
+
+
+def test_the_pass_finds_nothing_after_the_unattended_mode_has_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """"A second run is a no-op", stated at the level the pass reads from.
+
+    ``test_a_settled_entry_already_removed_is_not_planned_again`` calls the apply
+    directly. This one goes through the mode the worklist names, with the mode's
+    own cap, so the pass's claim and the command it points at are pinned against
+    each other rather than against a hand-assembled call — and the pass stops
+    offering the work, which is the property the budget depends on.
+    """
+    from ciao import cli
+    from ciao import learnings_cleanup
+
+    records = [
+        _settled_learning(f"Lesson {index} is settled.", f"lesson-{index}")
+        for index in range(cr.LEARNINGS_CLEANUP_MAX_ITEMS)
+    ]
+    vault = _settled_vault(tmp_path, *records)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    config = _cleanup_config(tmp_path, vault)
+    mode = [
+        "learnings-cleanup",
+        "--apply-settled",
+        "--vault-root",
+        str(vault),
+        "--workspace",
+        vault.name,
+        "--runtime-root",
+        str(tmp_path / ".runtime"),
+    ]
+    assert cli.main(mode) == 0
+    assert f"Removed {cr.LEARNINGS_CLEANUP_MAX_ITEMS} entr(y/ies)." in capsys.readouterr().out
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=_guide(tmp_path),
+        category_registry=_categories(vault),
+        config=config,
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    after = learnings_cleanup.plan_cleanup(vault, workspace=vault.name, config=config)
+
+    assert after.removals == ()
+    assert cr.PASS_LEARNINGS_CLEANUP not in {i.pass_id for i in worklist.items}
+    assert all(
+        record.key not in (vault / cr.LEARNINGS_RELATIVE).read_text(encoding="utf-8")
+        for record in records
+    )
+    # And the mode itself, run again, retires nothing rather than re-reading the
+    # file and finding a reason to.
+    capsys.readouterr()
+    assert cli.main(mode) == 0
+    assert "Nothing to remove." in capsys.readouterr().out
+
+
 def test_the_cleanup_pass_does_not_starve_a_short_budget(tmp_path: Path) -> None:
     """Splitting within a pass is what lets a queue of proposals drain every night
     instead of being deferred whole forever. The cleanup keys are ordinary keys

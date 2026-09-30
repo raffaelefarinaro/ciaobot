@@ -23,9 +23,11 @@ reads a real vault, or leaves a lock file in the shared temp root.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -40,7 +42,7 @@ from ciao.learning_records import (
     parse_learnings,
     render_learning,
 )
-from ciao.memory_receipts import write_queue_atomically
+from ciao.memory_receipts import content_revision, write_queue_atomically
 
 WORKSPACE = "personal"
 TODAY = date(2026, 9, 30)
@@ -89,6 +91,19 @@ def _record(text: str, key: str, legacy: str) -> LearningRecord:
 RETIRED_RECORD = _record(RETIRED, "blocked-pages", f"- {RETIRED}")
 PENDING_RECORD = _record(PENDING, "long-transcripts", f"- {PENDING}")
 UNLINKED_RECORD = _record(NEVER_MENTIONED, "rate-limits", f"- {NEVER_MENTIONED}")
+#: Two more Active entries, so a run can remove three of five and produce every
+#: gap shape: three separate gaps, one gap shared by a removed pair, and one gap
+#: shared by a whole run of them. A single removal cannot tell those apart.
+FOURTH_RECORD = _record(
+    "Session logs grow faster than the notes they describe.",
+    "log-growth",
+    "- Session logs grow faster than the notes they describe.",
+)
+FIFTH_RECORD = _record(
+    "Promotions need a dated review, not a mention.",
+    "dated-review",
+    "- Promotions need a dated review, not a mention.",
+)
 PROMOTED_RECORD = LearningRecord(
     learning_id=allocate_learning_id(WORKSPACE, "- [shipped] already done"),
     key="shipped",
@@ -99,6 +114,9 @@ PROMOTED_RECORD = LearningRecord(
 )
 
 FRONTMATTER = "---\ntags: [ciao, learnings]\nupdated: 2020-01-01\n---\n"
+#: The same frontmatter with an ``updated:`` the restamp has to *lengthen*, so the
+#: write moves every offset below it.
+_SHORT_STAMP = "---\ntags: [ciao, learnings]\nupdated: 2020-1-1\n---\n"
 FORMAT_NOTES = (
     "## Format\n\n"
     "An example, which is not an entry and must survive byte for byte:\n\n"
@@ -185,6 +203,19 @@ def _file_settled(config: CiaoConfig, *origins: sp.SkillOrigin, skill: str = "we
 
 def _plan(config: CiaoConfig, vault: Path, **kwargs: object) -> lc.CleanupPlan:
     return lc.plan_cleanup(vault, workspace=WORKSPACE, config=config, **kwargs)
+
+
+def _settle_every(config: CiaoConfig, *records: LearningRecord) -> None:
+    """One settled proposal linking a finding to each of *records*.
+
+    One proposal rather than one each, so the three removals below are decided by
+    a single fold in a single queue — which is the shape a real workspace has, and
+    the one that makes a single apply do all three splices.
+    """
+    _file_settled(
+        config,
+        *(_origin(record, finding=f"finding for {record.key}") for record in records),
+    )
 
 
 # ── The happy path, and the losslessness ───────────────────────────────────
@@ -318,6 +349,140 @@ def test_a_bom_and_crlf_survive_the_whole_round_trip(
     assert result.applied is True
     assert raw == expected.encode("utf-8")
     assert b"\r\n" in raw if newline == "\r\n" else b"\r\n" not in raw
+
+
+# ── More than one removal, which is a different claim ────────────────────────
+
+
+#: The three shapes a multi-removal run can leave behind, over five Active
+#: entries. What they differ in is the *gaps*: how many there are, and how many
+#: entries share one.
+#:
+#: * ``separate`` — none of the three touches its neighbour, so three gaps, and
+#:   two of the three recorded offsets are shifted left by the bytes the entries
+#:   below them took out. This is the case a single-removal test cannot see.
+#: * ``shared-pair`` — the first two were side by side, so they left one gap
+#:   between them and one of their own.
+#: * ``one-run`` — all three were side by side, so the three removals left a
+#:   single gap, and an undo that filled it three times would put the second
+#:   entry inside the first one's bytes.
+_REMOVAL_SHAPES: tuple[tuple[tuple[LearningRecord, ...], int], ...] = (
+    ((RETIRED_RECORD, UNLINKED_RECORD, FIFTH_RECORD), 3),
+    ((RETIRED_RECORD, PENDING_RECORD, FOURTH_RECORD), 2),
+    ((RETIRED_RECORD, PENDING_RECORD, UNLINKED_RECORD), 1),
+)
+
+_FIVE_RECORDS = (
+    RETIRED_RECORD,
+    PENDING_RECORD,
+    UNLINKED_RECORD,
+    FOURTH_RECORD,
+    FIFTH_RECORD,
+)
+
+
+@pytest.mark.parametrize("bom", ["", "﻿"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize(
+    ("removed", "gaps"),
+    _REMOVAL_SHAPES,
+    ids=["separate-gaps", "shared-pair", "one-run"],
+)
+def test_three_removals_revert_to_the_exact_bytes(
+    tmp_path: Path,
+    bom: str,
+    newline: str,
+    removed: tuple[LearningRecord, ...],
+    gaps: int,
+) -> None:
+    """Reversible means reversible, and a run of three is a different claim than a
+    run of one.
+
+    A receipt's offset is the position of the gap **in the text the run left**, and
+    for the second and later removals in a run that is not the text it read: an
+    entry further up the document also removed takes its bytes with it, so the gap
+    ends up further left than the span's own start. Recording the start anyway put
+    the bytes back in the wrong places — silently, because the anchors were
+    sampled from the same wrong offsets and so the undo's own check agreed with
+    itself. Every existing revert test removed exactly one entry, which is why
+    this was not visible.
+
+    The assertion is on the bytes, not on the arithmetic, and the anchors are
+    checked against the file on disk *before* the undo runs so that a receipt
+    which could not possibly match is caught as such instead of being repaired by
+    an undo that happens to be lenient.
+    """
+    config = _config(tmp_path)
+    text = _document(*_FIVE_RECORDS)
+    path = _write(config, "")
+    path.write_bytes((bom + text).replace("\n", newline).encode("utf-8"))
+    _settle_every(config, *removed)
+    vault = path.parent.parent
+
+    result = lc.apply_cleanup(
+        vault, _plan(config, vault), workspace=WORKSPACE, config=config, today=TODAY
+    )
+
+    assert [row.key for row in result.removed] == [row.key for row in removed]
+    receipt = result.receipt
+    assert receipt is not None
+    assert receipt["entries_removed"] == 3
+    # The gaps are what the undo has, so they are checked against the file rather
+    # than against the receipt's own bookkeeping.
+    after = path.read_bytes().decode("utf-8")
+    for span in receipt["removals"]:
+        offset = int(span["offset"])
+        assert after[offset : offset + len(span["after"])] == span["after"]
+        assert after[max(0, offset - len(span["before"])) : offset] == span["before"]
+    offsets = [int(span["offset"]) for span in receipt["removals"]]
+    assert offsets == sorted(offsets)
+    # Two entries removed side by side really do leave one gap between them, so
+    # the receipt says so rather than inventing a second one.
+    assert len(set(offsets)) == gaps
+
+    undo = lc.unmigrate_cleanup(vault, receipt, apply=True, today=TODAY)
+
+    assert undo["failed"] == []
+    assert undo["entries_reverted"] == 3
+    expected = (bom + text).replace("\n", newline)
+    expected = expected.replace("updated: 2020-01-01", "updated: 2026-09-30")
+    assert path.read_bytes() == expected.encode("utf-8")
+    # And a second undo is refused rather than doubling the lines back.
+    assert lc.unmigrate_cleanup(vault, receipt, apply=True)["failed"]
+
+
+def test_the_anchors_are_sampled_from_the_document_that_lands(
+    tmp_path: Path,
+) -> None:
+    """The anchors are sampled from what is written, not from the spliced text.
+
+    The ``updated:`` restamp runs between the splice and the write, and it can
+    change the document's length: ``updated: 2020-1-1`` becomes a full ISO date.
+    An entry near the frontmatter — within :data:`~ciao.learnings_cleanup.ANCHOR_CHARS`
+    of it — then has its whole gap moved by those extra bytes, and an anchor
+    sampled from the pre-restamp text describes a document that never existed.
+    The undo would refuse a perfectly good receipt, which is the safe direction
+    and still a lie about what is on disk.
+    """
+    config = _config(tmp_path)
+    text = _document(RETIRED_RECORD, PENDING_RECORD, frontmatter=_SHORT_STAMP)
+    path = _write(config, text)
+    _file_settled(config, _origin(RETIRED_RECORD))
+    vault = path.parent.parent
+
+    result = lc.apply_cleanup(
+        vault, _plan(config, vault), workspace=WORKSPACE, config=config, today=TODAY
+    )
+
+    receipt = result.receipt
+    assert receipt is not None
+    assert len(text) != len(text.replace("updated: 2020-1-1", "updated: 2026-09-30"))
+    after = path.read_text(encoding="utf-8")
+    span = receipt["removals"][0]
+    offset = int(span["offset"])
+    assert after[offset : offset + len(span["after"])] == span["after"]
+    assert after[max(0, offset - len(span["before"])) : offset] == span["before"]
+    assert lc.unmigrate_cleanup(vault, receipt, apply=True, today=TODAY)["failed"] == []
 
 
 # ── Idempotence, suppression and the undo ────────────────────────────────────
@@ -922,6 +1087,142 @@ def test_a_failed_write_removes_nothing_and_records_no_receipt(
     assert path.read_text(encoding="utf-8") == text
     # And nothing was remembered as removed, so the next run tries again.
     assert lc.read_suppressions(vault) == {}
+
+
+def test_a_receipt_that_cannot_be_written_removes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reverse map is what makes a removal reversible, so it is written *first*.
+
+    Prepared-then-persisted-then-written is three different things, and only the
+    middle one is the contract: a receipt serialized in memory and handed back
+    after the document is gone cannot stop anything, it can only be reported
+    missing afterwards — which is exactly what happened, and the CLI's own way of
+    describing it was "the removals landed but their receipt could not be
+    written". So the write of the receipt is the last thing that can fail, and it
+    fails closed: not one byte of the document moves.
+    """
+    config = _config(tmp_path)
+    text = _document(RETIRED_RECORD, PENDING_RECORD)
+    path = _write(config, text)
+    _file_settled(config, _origin(RETIRED_RECORD))
+    vault = path.parent.parent
+
+    def _refuse(target: Path, receipt: dict[str, object]) -> Path:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(lc, "write_receipt", _refuse)
+    result = lc.apply_cleanup(
+        vault,
+        _plan(config, vault),
+        workspace=WORKSPACE,
+        config=config,
+        today=TODAY,
+        receipt_path=tmp_path / "receipts" / "learnings-cleanup-1.json",
+    )
+
+    assert result.applied is False
+    assert result.removed_count == 0
+    assert result.receipt is None
+    assert result.receipt_path == ""
+    assert result.failed
+    assert "no space left on device" in result.failed[0]
+    assert path.read_bytes() == text.encode("utf-8")
+    # And nothing was remembered as removed, so the next run tries again.
+    assert lc.read_suppressions(vault) == {}
+
+
+def test_a_receipt_that_landed_before_a_write_that_did_not_is_inert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one window the new order opens, and what a run that dies in it leaves.
+
+    The receipt is durable and the document is untouched, which looks like a
+    removal that half-happened and is in fact inert: the entries are still on
+    disk, so every anchor in that receipt describes a document that was never
+    written and ``--revert`` refuses it rather than filling gaps in a file that
+    still holds the entries. The retry needs no reconciliation at all, because the
+    document's revision is still the one the plan was computed from — which is the
+    whole reason the plan is a plan and not a cursor.
+    """
+    config = _config(tmp_path)
+    text = _document(RETIRED_RECORD, PENDING_RECORD)
+    path = _write(config, text)
+    _file_settled(config, _origin(RETIRED_RECORD))
+    vault = path.parent.parent
+    receipt_file = tmp_path / "receipts" / "learnings-cleanup-1.json"
+
+    def _die(path_arg: Path, body: str, *, expect: str = "") -> None:
+        raise OSError("the process died between the two writes")
+
+    monkeypatch.setattr(lc, "_write_locked", _die)
+    crashed = lc.apply_cleanup(
+        vault,
+        _plan(config, vault),
+        workspace=WORKSPACE,
+        config=config,
+        today=TODAY,
+        receipt_path=receipt_file,
+    )
+
+    assert crashed.applied is False
+    assert path.read_bytes() == text.encode("utf-8")
+    orphan = lc.read_receipt(receipt_file)
+    assert orphan is not None
+    # The tell: the receipt's *before* image is still the file. Nothing was
+    # removed, and the next plan is computed against the same revision.
+    assert orphan["revision_before"] == content_revision(text)
+    assert orphan["revision_after"] != orphan["revision_before"]
+    assert lc.read_suppressions(vault) == {}
+
+    stale = lc.unmigrate_cleanup(vault, orphan, apply=True, today=TODAY)
+    assert stale["entries_reverted"] == 0
+    assert stale["failed"]
+    assert path.read_bytes() == text.encode("utf-8")
+
+    monkeypatch.undo()
+    retried = lc.apply_cleanup(
+        vault,
+        _plan(config, vault),
+        workspace=WORKSPACE,
+        config=config,
+        today=TODAY,
+        receipt_path=tmp_path / "receipts" / "learnings-cleanup-2.json",
+    )
+
+    assert retried.applied is True
+    assert [row.key for row in retried.removed] == ["blocked-pages"]
+    assert render_learning(RETIRED_RECORD) not in path.read_text(encoding="utf-8")
+
+
+def test_the_store_is_read_and_written_under_its_own_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store is a read-modify-write, so it needs the lock every other queue
+    writer here takes.
+
+    Unlocked, two concurrent runs each read the store, each add their own pairs,
+    and the second write discards the first run's — so the entries that run
+    removed are not recorded as removed and the next pass removes them a second
+    time. The check is that the lock is actually *taken*, since a lock that is
+    documented and not held is the bug it was added to fix.
+    """
+    config = _config(tmp_path)
+    vault = Path(config.workspace_vault_root(WORKSPACE))
+    held: list[Path] = []
+    real = lc.queue_lock
+
+    @contextmanager
+    def _spy(path: Path) -> Iterator[None]:
+        held.append(Path(path))
+        with real(path):
+            yield
+
+    monkeypatch.setattr(lc, "queue_lock", _spy)
+    lc.write_suppressions(vault, [("a" * 8, "b" * 64)], actor="operator")
+    assert lc.clear_suppression(vault, "a" * 8, "b" * 64) is True
+
+    assert held == [lc.suppression_path(vault)] * 2
 
 
 def test_an_undo_of_a_changed_file_is_refused_entirely(tmp_path: Path) -> None:

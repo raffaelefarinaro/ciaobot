@@ -231,12 +231,15 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
         "Retire a learning from Workspace/Learnings.md",
         "The nightly run may remove an Active entry whose every finding is already "
         "applied-with-a-verification or dismissed — that is settlement, already "
-        "recorded by a person, and the removal is reversible from a receipt. It may "
-        "not remove an entry nothing has ever proposed, one whose finding is still "
-        "open, or one whose only destination was an upstream issue: those are "
-        "judgements, not settlements, and they are `ciao learnings-cleanup --apply "
-        "--approval-file`, which refuses without a stated reason and its evidence "
-        "per row. An unattended run never sets `reapprove`.",
+        "recorded by a person, and the removal is reversible from a receipt. It "
+        "does that through `ciao learnings-cleanup --apply-settled`, which retires "
+        "only the rows the reconciliation itself proposed, never reapproves one, "
+        "and is capped at LEARNINGS_CLEANUP_MAX_ITEMS. It may not remove an entry "
+        "nothing has ever proposed, one whose finding is still open, or one whose "
+        "only destination was an upstream issue: those are judgements, not "
+        "settlements, and they are `ciao learnings-cleanup --apply --approval-file`, "
+        "which refuses without a stated reason and its evidence per row. An "
+        "unattended run never sets `reapprove`.",
     ),
     DeferredAction(
         "Write memory or a project doc in another workspace",

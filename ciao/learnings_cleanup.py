@@ -36,11 +36,17 @@ whose settlement changed, or whose line moved, since the plan is dropped from
 *that* apply rather than removed on a stale answer. Both revisions, before and
 after, go in the receipt.
 
-**Receipt-backed and reversible.** The reverse map is built and serialized
-*before* the file is written, per span, with the exact bytes each removal took
-out — so ``--revert`` restores the removed lines from the record rather than
-re-deriving what they probably said. A receipt that cannot be prepared removes
-nothing.
+**Receipt-backed and reversible.** The reverse map is built, serialized and
+**written to disk** before the file is, per span, with the exact bytes each removal
+took out — so ``--revert`` restores the removed lines from the record rather than
+re-deriving what they probably said, and a receipt that cannot be recorded removes
+nothing. The order is the contract rather than an accident: a receipt persisted
+once the bytes are already gone can only report the missing reverse map, not
+prevent the removal it was supposed to make reversible. The window that opens in
+exchange is inert — the document still holds the entries, so no anchor in that
+receipt describes it and ``--revert`` refuses it — and the retry needs no
+reconciliation, because the document's revision is still the one the plan was
+computed from.
 
 **Idempotent by suppression.** A second run finds nothing: the entry is gone, and
 if it comes *back* the same bytes are not removed again. ``(learning_id,
@@ -113,7 +119,7 @@ from ciao.learnings_migrate import (
     _write_locked,
     learnings_file,
 )
-from ciao.memory_receipts import content_revision, write_queue_atomically
+from ciao.memory_receipts import content_revision, queue_lock, write_queue_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +348,13 @@ class CleanupResult:
     conflicts: tuple[str, ...] = ()
     suppressed: tuple[tuple[str, str], ...] = ()
     receipt: dict[str, Any] | None = None
+    receipt_path: str = ""
+    """Where that receipt landed, when one did.
+
+    Written by the apply itself, before the document, so a caller that supplied a
+    path learns from this that the reverse map is durable rather than having to
+    assume it. Empty when no receipt was produced or none was asked for.
+    """
     failed: tuple[str, ...] = ()
     skipped: str = ""
 
@@ -367,6 +380,7 @@ class CleanupResult:
             "failed": list(self.failed),
             "skipped": self.skipped,
             "receipt": self.receipt,
+            "receipt_path": self.receipt_path,
         }
 
 
@@ -422,31 +436,39 @@ def write_suppressions(
     oldest entries in it are the ones whose ``learning_id`` no longer exists in
     the document. Trimming is by insertion order, so the newest removals — the
     ones an undo could plausibly hit — are the ones kept.
+
+    Read-modify-write, so it takes the same per-file lock every other queue
+    writer here does. Without it two concurrent runs each read the store, each
+    add their own pairs, and the second write discards the first run's — which
+    means the entries that run removed are not recorded as removed, and the next
+    pass removes them a second time. Re-entrant within a thread, so the caller
+    that already holds the document's lock can nest this without deadlocking.
     """
-    existing = read_suppressions(vault_root)
-    merged: list[dict[str, Any]] = []
-    for (learning_id, revision), item in existing.items():
-        merged.append(dict(item))
-    for learning_id, revision in added:
-        if (learning_id, revision) in existing:
-            continue
-        merged.append(
-            {
-                "learning_id": learning_id,
-                "entry_revision": revision,
-                "removed_at": _now(),
-                "removed_by": actor,
-            }
-        )
-    merged = merged[-MAX_SUPPRESSED:]
-    payload = {
-        "schema_version": SUPPRESSION_SCHEMA,
-        "updated_at": _now(),
-        "removed": merged,
-    }
     path = suppression_path(vault_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_queue_atomically(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    with queue_lock(path):
+        existing = read_suppressions(vault_root)
+        merged: list[dict[str, Any]] = []
+        for (learning_id, revision), item in existing.items():
+            merged.append(dict(item))
+        for learning_id, revision in added:
+            if (learning_id, revision) in existing:
+                continue
+            merged.append(
+                {
+                    "learning_id": learning_id,
+                    "entry_revision": revision,
+                    "removed_at": _now(),
+                    "removed_by": actor,
+                }
+            )
+        merged = merged[-MAX_SUPPRESSED:]
+        payload = {
+            "schema_version": SUPPRESSION_SCHEMA,
+            "updated_at": _now(),
+            "removed": merged,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_queue_atomically(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return {
         (str(item["learning_id"]), str(item["entry_revision"])): item for item in merged
     }
@@ -460,24 +482,30 @@ def clear_suppression(vault_root: Path, learning_id: str, revision: str) -> bool
     which is not a decision but is the same statement in practice — the entry
     has been looked at and written differently, so it is a new fact rather than
     the one that was retired.
+
+    Locked for the same read-modify-write reason as :func:`write_suppressions`:
+    a drop computed from a store another run has already replaced would clear a
+    pair that was never there and leave the rest of that run's write behind.
     """
-    existing = read_suppressions(vault_root)
-    if (learning_id, revision) not in existing:
-        return False
-    remaining = [
-        dict(item)
-        for (stored_id, stored_rev), item in existing.items()
-        if (stored_id, stored_rev) != (learning_id, revision)
-    ]
-    payload = {
-        "schema_version": SUPPRESSION_SCHEMA,
-        "updated_at": _now(),
-        "removed": remaining,
-    }
-    write_queue_atomically(
-        suppression_path(vault_root),
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-    )
+    path = suppression_path(vault_root)
+    with queue_lock(path):
+        existing = read_suppressions(vault_root)
+        if (learning_id, revision) not in existing:
+            return False
+        remaining = [
+            dict(item)
+            for (stored_id, stored_rev), item in existing.items()
+            if (stored_id, stored_rev) != (learning_id, revision)
+        ]
+        payload = {
+            "schema_version": SUPPRESSION_SCHEMA,
+            "updated_at": _now(),
+            "removed": remaining,
+        }
+        write_queue_atomically(
+            path,
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        )
     return True
 
 
@@ -1020,40 +1048,62 @@ def _restamp(text: str, *, today: date) -> str:
 # ── The apply ───────────────────────────────────────────────────────────────
 
 
+def _removal_end(text: str, row: CleanupRow) -> int:
+    """Where this row's removal actually stops: past its own line terminator.
+
+    Each span takes its terminator with it, so removing an entry removes the
+    blank-line pairing with it rather than leaving a doubled newline behind. The
+    terminator is read from the document rather than from the platform: a CRLF
+    document whose removals left ``\\n`` would be a document with mixed endings,
+    which is exactly the byte-level damage this module promises not to do.
+    """
+    end = row.end
+    if text[end : end + 2] == "\r\n":
+        return end + 2
+    if text[end : end + 1] == "\n":
+        return end + 1
+    return end
+
+
 def _splice(text: str, rows: list[CleanupRow]) -> tuple[str, list[dict[str, Any]]]:
-    """The text with each row's span removed, back to front.
+    """The text with each row's span removed, and where each gap lands in it.
 
     Back to front, so every row's ``start`` is still valid in the string being
     built when its turn comes *and* stays valid afterwards — nothing below a span
-    has moved. That is what lets the offsets recorded in the receipt be read as
-    offsets into the text the run *leaves behind*, which is the only text an undo
-    will ever be looking at.
+    has moved. That is what makes a recorded offset meaningful, but only once it
+    is an offset into the text the run *leaves behind*, which is the only text an
+    undo will ever be holding.
 
-    Each span takes its own line terminator with it, so removing an entry removes
-    the blank-line pairing with it rather than leaving a doubled newline behind.
-    The terminator is read from the document rather than from the platform: a
-    CRLF document whose removals left ``\\n`` would be a document with mixed
-    endings, which is exactly the byte-level damage this module promises not to
-    do.
+    Those are two different numbers, and conflating them corrupts a file. A span's
+    own ``start`` is the position of its gap in the text as handed in; the gap it
+    finally leaves sits further left by the bytes every *lower* span took out. A
+    run that removes one entry cannot tell the difference, which is why every
+    single-entry revert test passed while a run that removed two or more put the
+    bytes back in the wrong places. So the offsets are computed up front, from
+    the span lengths, before the first byte is spliced: ``start`` minus the total
+    removed below it.
 
-    Each span is returned with the bytes that will sit either side of the gap in
-    the spliced text, because a removal leaves nothing at the offset to check
-    against — an undo has to be able to prove the gap is still the same gap
-    before it fills it.
+    Two entries removed side by side therefore share one offset, because the
+    second one's ``start`` is the first one's gap plus exactly the bytes the first
+    one took. That is not a collision, it is the truth about the result: they left
+    a single gap, and :func:`unmigrate_cleanup` fills it in one pass.
     """
+    ordered = sorted(rows, key=lambda item: item.start)
+    placed: list[tuple[CleanupRow, int]] = []
+    below = 0
+    for row in ordered:
+        placed.append((row, row.start - below))
+        below += _removal_end(text, row) - row.start
+
     out = text
     spans: list[dict[str, Any]] = []
-    for row in sorted(rows, key=lambda item: item.start, reverse=True):
-        end = row.end
-        if out[end : end + 2] == "\r\n":
-            end += 2
-        elif out[end : end + 1] == "\n":
-            end += 1
+    for row, offset in reversed(placed):
+        end = _removal_end(out, row)
         removed = out[row.start : end]
         out = out[: row.start] + out[end:]
         spans.append(
             {
-                "offset": row.start,
+                "offset": offset,
                 "from": removed,
                 "learning_id": row.learning_id,
                 "entry_revision": row.entry_revision,
@@ -1072,16 +1122,24 @@ def _splice(text: str, rows: list[CleanupRow]) -> tuple[str, list[dict[str, Any]
 ANCHOR_CHARS = 24
 
 
-def _with_anchors(spans: list[dict[str, Any]], spliced: str) -> None:
+def _with_anchors(spans: list[dict[str, Any]], written: str) -> None:
     """Attach the before/after context each gap will have, in place.
 
-    Mutated rather than rebuilt so the offsets the splice computed are the ones
-    that are recorded; the two cannot then describe different files.
+    ``written`` is the text this run is about to put on disk, not the text the
+    splice produced: the ``updated:`` restamp runs between the two, and an entry
+    within :data:`ANCHOR_CHARS` of the frontmatter would then have its context
+    sampled from a document that no longer exists. Sampling the file the undo
+    will actually be holding is what makes the check mean anything, and the two
+    are only the same document because :func:`_build_receipt` has already applied
+    the restamp's shift to the offsets these anchors are read at.
+
+    Mutated rather than rebuilt so the offsets the receipt records are the ones
+    that are anchored; the two cannot then describe different files.
     """
     for span in spans:
         offset = int(span["offset"])
-        span["before"] = spliced[max(0, offset - ANCHOR_CHARS) : offset]
-        span["after"] = spliced[offset : offset + ANCHOR_CHARS]
+        span["before"] = written[max(0, offset - ANCHOR_CHARS) : offset]
+        span["after"] = written[offset : offset + ANCHOR_CHARS]
 
 
 def _build_receipt(
@@ -1100,13 +1158,14 @@ def _build_receipt(
     Pure, and it is built *before* the file is touched: a receipt that cannot be
     assembled removes nothing, because a removal nobody can reverse is the one
     outcome this module does not have. Each span carries the exact bytes it took
-    out, the offset that gap occupies in the **post-removal** text, and the
-    context either side of it — which is the direction ``--revert`` walks, and the
-    only direction in which a removal can be checked at all.
+    out, the offset that gap occupies in the **post-removal** text, and — added by
+    :func:`_with_anchors`, against the text that is actually written — the context
+    either side of it. Those are the direction ``--revert`` walks, and the only
+    direction in which a removal can be checked at all.
 
     ``shift`` moves every offset by the amount the ``updated:`` restamp moved the
-    document, so a receipt written after that edit still addresses the bytes the
-    run actually left on disk.
+    document, so the offsets in here are already the ones in the file on disk and
+    the anchors read at :func:`_with_anchors` are sampled at the same positions.
     """
     return {
         "schema_version": RECEIPT_VERSION,
@@ -1139,6 +1198,7 @@ def apply_cleanup(
     approvals: dict[str, dict[str, Any]] | None = None,
     reviewed: bool = False,
     max_removals: int | None = None,
+    receipt_path: Path | None = None,
 ) -> CleanupResult:
     """Remove the plan's eligible entries, or nothing at all.
 
@@ -1153,13 +1213,39 @@ def apply_cleanup(
     * every candidate's span still holds the exact bytes it was planned from;
     * every candidate is eligible *again*, against a record parsed from the bytes
       under this very lock, with the settlement re-folded from the queue;
-    * the receipt can be assembled and serialized.
+    * the receipt can be assembled, serialized and **persisted**.
 
     Only then is the file written, through the same lock and atomic helper the
     migration and the proposal queue use, with ``expect=`` the revision read
     inside the lock. A failure anywhere above leaves the document exactly as it
     was, and the suppression store is not touched — so a run that could not
     remove anything also cannot make the next run think it did.
+
+    ``receipt_path`` is where the reverse map is written, and it is written
+    *before* the document rather than after it. The order is the whole contract:
+    "no receipt ⇒ remove nothing" is only true if the receipt's absence can stop a
+    removal, and a receipt persisted once the bytes are already gone cannot stop
+    anything — it can only be reported missing afterwards. So the write here is
+    the last thing that can fail, and it fails closed: an ``OSError`` from
+    :func:`write_receipt` returns ``failed`` with the file byte-identical. A run
+    that dies between the two leaves a receipt describing work that never landed,
+    which is inert rather than dangerous — the document still holds the entries, so
+    every anchor in that receipt is wrong and ``--revert`` refuses it — and the
+    retry is an ordinary apply, because the document's revision still equals the
+    one the plan was computed from.
+
+    The two windows this cannot close are named here rather than left implied.
+    Eligibility is re-folded outside the file lock, and the write takes the
+    *document's* lock and not the proposal queue's, so a settlement that lands
+    between the fold and the write is not seen by this run; the entry it would
+    have kept is removed on the answer that was true when it was asked. That is
+    the direction the whole fold is built to fail in — every check only ever
+    removes *less* — but it is a window, and the receipt is what makes the
+    resulting removal reversible by hand. The second is the store: it is written
+    after the document, because a pair recorded for an entry still on disk
+    suppresses an entry that is still there. The receipt names every pair, so the
+    store is reconstructible, and the next night's run re-derives the same
+    removals from the same fold rather than from the store alone.
 
     ``reapprove`` lifts the suppression on every candidate. It is for the
     attended workflow only, where a person has just said *remove this one
@@ -1192,6 +1278,7 @@ def apply_cleanup(
         # names the revision that was reviewed and the rows that were approved
         # against it, which is the whole difference between the two.
         review: dict[str, Any] | None = None
+        recorded = ""
         if reviewed or approvals:
             review = {
                 "schema_version": RECEIPT_VERSION,
@@ -1209,6 +1296,22 @@ def apply_cleanup(
                 "diagnostics": list(plan.diagnostics),
             }
             json.dumps(review)
+            if receipt_path is not None:
+                try:
+                    recorded = str(write_receipt(Path(receipt_path), review))
+                except OSError as exc:
+                    # Nothing was removed, so a receipt this code cannot record is
+                    # a review that did not happen — reported as a failure rather
+                    # than as a review the completion check can see.
+                    return CleanupResult(
+                        workspace=workspace,
+                        path=LEARNINGS_RELATIVE,
+                        applied=False,
+                        revision_before=plan.revision,
+                        kept=plan.kept,
+                        conflicts=tuple(row.detail for row in plan.conflicts),
+                        failed=(f"{receipt_path}: {exc}",),
+                    )
         return CleanupResult(
             workspace=workspace,
             path=LEARNINGS_RELATIVE,
@@ -1217,6 +1320,7 @@ def apply_cleanup(
             kept=plan.kept,
             conflicts=tuple(row.detail for row in plan.conflicts),
             receipt=review,
+            receipt_path=recorded,
         )
 
     path = learnings_file(root)
@@ -1304,7 +1408,6 @@ def apply_cleanup(
         )
 
     spliced, spans = _splice(text, selected)
-    _with_anchors(spans, spliced)
     proposed = _restamp(spliced, today=stamp)
     after = content_revision(proposed)
     receipt = _build_receipt(
@@ -1317,10 +1420,32 @@ def apply_cleanup(
         approvals=approvals,
         shift=len(proposed) - len(spliced),
     )
+    # Anchored against the document as it will be *written*, offsets included: the
+    # restamp can move a gap that sits near the frontmatter, and an anchor sampled
+    # from the text that is not the text on disk is an anchor that will not match.
+    _with_anchors(receipt["removals"], proposed)
     # Prepared before the file is touched. A reverse map this code cannot
     # serialize is a removal nobody could undo, and the answer to that is to
     # remove nothing.
     json.dumps(receipt)
+    # …and *persisted* before the file is touched, which is the half that actually
+    # holds. A receipt written after the document reports a removal it can no
+    # longer prevent, and the contract this module sells is the one that says a
+    # removal without a receipt does not happen.
+    recorded = ""
+    if receipt_path is not None:
+        try:
+            recorded = str(write_receipt(Path(receipt_path), receipt))
+        except OSError as exc:
+            return CleanupResult(
+                workspace=workspace,
+                path=LEARNINGS_RELATIVE,
+                applied=False,
+                revision_before=before,
+                kept=plan.kept,
+                conflicts=tuple(dropped),
+                failed=(f"{receipt_path}: {exc}",),
+            )
 
     try:
         _write_locked(path, proposed, expect=before)
@@ -1368,6 +1493,7 @@ def apply_cleanup(
         conflicts=tuple(dropped),
         suppressed=tuple(remember),
         receipt=receipt,
+        receipt_path=recorded,
     )
 
 
@@ -1440,8 +1566,17 @@ def new_receipt_path(runtime_root: Path) -> Path:
 def write_receipt(path: Path, receipt: dict[str, Any]) -> Path:
     """Persist the reverse map through a temp file and ``os.replace``.
 
-    Called only after the write landed, so a receipt never claims spans that are
-    not on disk, and written atomically so ``--revert`` never reads half of one.
+    Called *before* the document is written, and that order is the contract rather
+    than an accident of the call site: "no receipt ⇒ remove nothing" is only true if
+    the receipt's absence can still stop a removal, and a receipt written after the
+    bytes are gone can only report the gap afterwards. So a receipt here may
+    describe a write that never happened — a run that dies in between leaves one,
+    and it is inert, because the document still holds the entries and so no anchor
+    in the receipt describes it. The alternative reading, that a receipt must never
+    claim spans which are not on disk, is what makes this a report instead of a
+    gate, and a report cannot prevent anything.
+
+    Written atomically anyway, so ``--revert`` never reads half of one.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1474,6 +1609,30 @@ def read_receipt(path: Path) -> dict[str, Any] | None:
     return data
 
 
+def _gap_groups(removals: list[Any]) -> list[list[dict[str, Any]]]:
+    """The receipt's spans grouped by the gap they share, highest offset first.
+
+    Two entries removed side by side leave one gap rather than two, and the
+    receipt says so honestly: their offsets are equal, because the second entry's
+    ``start`` is the first one's gap plus exactly the bytes the first one took.
+    So the walk is over gaps, not spans, and a gap is filled by one insertion of
+    the group's bytes concatenated in the receipt's order — which is document
+    order, because :func:`_build_receipt` records the spans that way.
+
+    The sort is stable, so the members of a group keep that order while the
+    groups themselves come out highest-offset-first: the only order in which a
+    lower gap's offset is still valid once a higher one has been filled.
+    """
+    spans = [item for item in removals if isinstance(item, dict)]
+    groups: list[list[dict[str, Any]]] = []
+    for item in sorted(spans, key=lambda span: int(span.get("offset", 0)), reverse=True):
+        if groups and int(groups[-1][0].get("offset", 0)) == int(item.get("offset", 0)):
+            groups[-1].append(item)
+        else:
+            groups.append([item])
+    return groups
+
+
 def unmigrate_cleanup(
     vault_root: Path,
     receipt: dict[str, Any],
@@ -1484,10 +1643,12 @@ def unmigrate_cleanup(
     """Put back every span a cleanup receipt records, exactly.
 
     Exact rather than re-derived: the bytes come from the receipt, so a line the
-    owner wrote is not reconstructed by guessing at it. Back to front, so the
-    recorded offsets stay valid as the text grows, and a file that disagrees with
-    the receipt at any offset is reported and left **entirely** untouched — a
-    half-reverted file is worse than an unreverted one.
+    owner wrote is not reconstructed by guessing at it. Gap by gap from the end of
+    the document, so the recorded offsets stay valid as the text grows, and a file
+    that disagrees with the receipt at any offset is reported and left
+    **entirely** untouched — a half-reverted file is worse than an unreverted one.
+    (Which means the *offsets* have to be offsets into the file the run left, not
+    into the file it read: :func:`_splice` is where that distinction is drawn.)
 
     The suppression is deliberately *not* lifted. The undo puts the entry back
     for a person to read; leaving it suppressed is what stops the next nightly
@@ -1499,7 +1660,9 @@ def unmigrate_cleanup(
     bytes at the offset, because a removal leaves nothing at the offset to check.
     A hand edit anywhere near the removal changes that context and the whole undo
     is refused, which is the point: the run's reverse map is only an exact map of
-    the file it produced.
+    the file it produced. It is also why a receipt persisted by a run that then
+    died before writing the file is inert rather than dangerous — that document
+    still holds the entries, so no anchor in that receipt describes it.
     """
     root = Path(vault_root)
     summary: dict[str, Any] = {
@@ -1527,15 +1690,10 @@ def unmigrate_cleanup(
         return summary
 
     restored = text
-    for span in sorted(
-        (item for item in removals if isinstance(item, dict)),
-        key=lambda item: int(item.get("offset", 0)),
-        reverse=True,
-    ):
-        offset = int(span.get("offset", 0))
-        original = str(span.get("from", ""))
-        before_anchor = str(span.get("before", ""))
-        after_anchor = str(span.get("after", ""))
+    for group in _gap_groups(removals):
+        offset = int(group[0].get("offset", 0))
+        before_anchor = str(group[0].get("before", ""))
+        after_anchor = str(group[0].get("after", ""))
         start = max(0, offset - len(before_anchor))
         if restored[start:offset] != before_anchor or restored[
             offset : offset + len(after_anchor)
@@ -1553,7 +1711,15 @@ def unmigrate_cleanup(
                 }
             )
             return summary
-        restored = restored[:offset] + original + restored[offset:]
+        # One insertion per gap, not per entry: two entries removed side by side
+        # left one gap, and filling it twice would put the second pair of bytes
+        # *inside* the first pair's, where the ``after`` anchor can no longer be
+        # found. The group's own order is the receipt's, which is document order.
+        restored = (
+            restored[:offset]
+            + "".join(str(span.get("from", "")) for span in group)
+            + restored[offset:]
+        )
     if restored == text:
         return summary
 

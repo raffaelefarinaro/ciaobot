@@ -509,11 +509,20 @@ whose findings are durably settled and a run that reaches it has therefore
 already passed the pass that proposes and decides. It holds no second scheduler
 and takes its keys from the same whole-run budget as everything else, capped at
 `LEARNINGS_CLEANUP_MAX_ITEMS` so a backlog cannot spend the budget the required
-weekly keys need. It plans; the agent runs the command to act.
+weekly keys need. It plans, and the worklist row names the command that performs
+the plan: `ciao learnings-cleanup --apply-settled`, which retires only the rows
+the reconciliation itself proposed, never reapproves one, and is capped at the
+same number. A worklist whose eligible rows can only be acted on with a person
+holding an approval file is a worklist whose eligible rows never are.
 
 ```bash
 # The table: every Active entry, with the decision and the evidence beside it.
 ciao learnings-cleanup --vault-root memory-vault/personal
+
+# Unattended: the settled entries, and only those. No approval file, no
+# reapproval, no more than LEARNINGS_CLEANUP_MAX_ITEMS. This is what the nightly
+# worklist item points at.
+ciao learnings-cleanup --vault-root memory-vault/personal --apply-settled
 
 # Retiring approved rows. The approval file names each learning_id, the exact
 # entry_revision it was reviewed at, a reason and the evidence for it.
@@ -568,18 +577,34 @@ as written.
 
 **Undo, and why it is not reversed.** Each removal's exact bytes, the gap they
 left, and the context either side of that gap go into a timestamped receipt under
-`<runtime>/migration/`, built and serialized *before* the file is written — a
-removal nobody can reverse is the one outcome the module does not have.
+`<runtime>/migration/`, written **before** the document — a removal nobody can
+reverse is the one outcome the module does not have, and a receipt persisted
+after the bytes are gone could only report the gap rather than close it. So a
+receipt that cannot be written means nothing is removed, and a run that dies
+between the two writes leaves an *inert* receipt: the document still holds the
+entries, so no anchor in that receipt describes it and `--revert` refuses it. The
+retry needs no reconciliation at all, because the document's revision is still the
+one the plan was computed from.
 `--revert` fills the gaps from those bytes and refuses the whole file if the
-context no longer matches. It deliberately does **not** lift the suppression, or
-the next nightly pass would remove the line the operator just put back; the entry
-becomes eligible again when it is edited (a new revision) or when somebody
-reapproves it. Removed pairs live in `Workspace/learnings-cleanup.json`, which is
-reserved bookkeeping and is kept out of recall indexing.
+context no longer matches. Two entries removed side by side left one gap rather
+than two, and their offsets are equal because the second one's start is the first
+one's gap plus exactly the bytes the first one took — so the undo walks *gaps*,
+not spans, and fills each in a single insertion. It deliberately does **not** lift
+the suppression, or the next nightly pass would remove the line the operator just
+put back; the entry becomes eligible again when it is edited (a new revision) or
+when somebody reapproves it. Removed pairs live in
+`Workspace/learnings-cleanup.json`, which is reserved bookkeeping and is kept out
+of recall indexing; it is a read-modify-write under its own queue lock, because
+two concurrent runs without one would drop each other's pairs and the next pass
+would remove the same entries again.
 
 **Legacy entries are an attended job.** Nothing in the unattended pass removes an
-entry no proposal has ever linked, and `ciao learnings-cleanup` is how a person
-judges those. `--apply` refuses without `--approval-file`; the file binds each
+entry no proposal has ever linked, and `ciao learnings-cleanup --apply
+--approval-file` is how a person judges those — which is also why
+`--apply-settled` refuses an approval file rather than honouring it: it retires
+rows a fold already answered, and a receipt holding somebody's reason and evidence
+for a row a flag chose cannot be read back afterwards.
+`--apply` refuses without `--approval-file`; the file binds each
 approval to the exact entry revision it was reviewed at, so a stale one is
 reported and re-confirmed rather than applied to the closest thing. Retiring a
 row the planner *kept* needs `"reapprove": true` on that row plus the reason and

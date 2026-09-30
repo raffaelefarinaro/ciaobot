@@ -623,12 +623,16 @@ def _learnings_cleanup_items(
     the same answers, and a run that arrives before the settlement is written
     removes nothing.
 
-    It is a *planning* pass, not the removal: the worklist carries one key per
-    candidate and the reason, and the agent runs ``ciao learnings-cleanup
-    --apply`` (or the curation pass's own apply) to act. Splitting it that way is
-    what keeps an unattended run from being the thing that decides, because
-    deciding is a fold over the queue and the decision is recorded before
-    anything is spliced.
+    It plans the removals and the worklist item **names the mode that performs
+    them**: ``ciao learnings-cleanup --apply-settled``, which retires exactly the
+    rows this plan proposed, unattended, capped at the same
+    :data:`LEARNINGS_CLEANUP_MAX_ITEMS`, and writes its receipt before it writes
+    the document. So the pass plans, the command that carries out the plan is one
+    the worklist already says out loud, and the rows this pass does *not* propose
+    are still the attended ``--apply --approval-file`` workflow rather than
+    something a flag decided. The deciding is a fold over the queue and the
+    draft sidecar either way; splitting it from the splicing is what keeps an
+    unattended run from being the thing that judges.
 
     The parent rule is kept verbatim: an entry whose finding is pending, whose
     proposal is still implementing, or that no proposal has ever linked consumes
@@ -676,6 +680,14 @@ def _learnings_cleanup_items(
         reasons.append("over this run's cap")
     item: WorklistItem | None = None
     if plan.removals:
+        # The command is in the reason, not only in the docs: the agent reading
+        # this row is the one that has to run the mode that carries out the plan,
+        # and a worklist that made it look up which flag retires a settled entry
+        # is a worklist whose eligible rows stay eligible forever.
+        reasons.append(
+            "retire them with `ciao learnings-cleanup --apply-settled` (no "
+            "approval file; the rows the reconciliation kept are not its business)"
+        )
         item = WorklistItem(
             pass_id=PASS_LEARNINGS_CLEANUP,
             label="Retire the learnings whose findings are durably settled",

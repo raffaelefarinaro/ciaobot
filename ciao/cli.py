@@ -2154,19 +2154,36 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
     reviewed at, a reason and the evidence for it, and the receipt keeps all four
     so the decision outlives the run.
 
+    ``--apply-settled`` is the other half, and it is the one the nightly pass
+    names. It removes only the rows the reconciliation *already* proposed —
+    ``actor="system"``, no approval file, no ``reapprove``, and the same
+    :data:`~ciao.curation_run.LEARNINGS_CLEANUP_MAX_ITEMS` cap the worklist
+    budget gives the pass — so what it can remove is exactly what a fold over the
+    proposal queue and the draft sidecar already answered, which is settlement
+    rather than judgement. It is a separate flag rather than a form of
+    ``--apply`` because it is a different decision: every row it removes is
+    reversible from a receipt, and none of them carries anybody's reason, so it
+    never produces the reviewed no-op receipt and never lifts a suppression.
+
     ``--revert`` restores the removed bytes from a receipt. It does not lift the
     suppression, so the next nightly pass does not undo the undo; the entry
     becomes eligible again when it is edited, or when somebody approves it with
     ``reapprove``.
+
+    The receipt is written by the apply, before the document, so a run whose
+    receipt could not be persisted removes nothing at all rather than printing
+    that the removals landed without a way back.
 
     The exit code reports what a person has to look at rather than only what
     failed: an unreadable line, an approval that was not used, or a removal that
     was refused all exit 1, because in each case something is still outstanding
     and a script told "0" would stop looking.
     """
+    from ciao.curation_run import LEARNINGS_CLEANUP_MAX_ITEMS
     from ciao.learnings_cleanup import (
         KEEP,
         apply_cleanup,
+        new_receipt_path,
         plan_cleanup,
         read_receipt,
         unmigrate_cleanup,
@@ -2178,6 +2195,35 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
         return 1
     workspace = args.workspace or vault_root.name
     config = _curation_config(vault_root.parent, vault_root)
+
+    # The three write flags are three different decisions, and a run may make one.
+    # Refused up here, before any of them does any work, because the point of
+    # refusing is that nothing happened — not that something happened and was then
+    # undone. (``--revert --apply`` is not a conflict: that pair is how an undo is
+    # written at all, and `--apply` is what tells it to write.)
+    if args.revert and args.apply_settled:
+        print(
+            "--revert restores a previous run from its receipt; it takes no "
+            "--apply-settled, and the two say opposite things about a removed "
+            "entry.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.apply_settled and args.approval_file:
+        print(
+            "--apply-settled retires the rows the reconciliation already proposed "
+            "and reads no approval file, so the two cannot be combined. Use "
+            "--apply --approval-file for the attended rows.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.apply_settled and args.apply:
+        print(
+            "--apply and --apply-settled are two different decisions in one run; "
+            "pick the one this run is making.",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.revert:
         receipt = read_receipt(Path(args.revert))
@@ -2217,12 +2263,23 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
             "--apply needs --approval-file. Run without it to see the table, "
             "then approve the rows you want retired with their entry revision, "
             "a reason and the evidence for it. An empty list records that you "
-            "reviewed the table and nothing should be removed.",
+            "reviewed the table and nothing should be removed. To retire only the "
+            "rows the reconciliation already proposed, unattended, use "
+            "--apply-settled instead.",
             file=sys.stderr,
         )
         return 1
 
-    plan = plan_cleanup(vault_root, workspace=workspace, config=config)
+    plan = plan_cleanup(
+        vault_root,
+        workspace=workspace,
+        config=config,
+        # The unattended mode is the nightly pass, and the pass is capped at the
+        # same number of removals. Capped on the *plan* as well as on the apply, so
+        # the table cannot print `REMOVE` beside a row this run will not remove —
+        # the capped rows become `LATER` here, and the run says a backlog exists.
+        max_removals=LEARNINGS_CLEANUP_MAX_ITEMS if args.apply_settled else None,
+    )
     stale: list[str] = []
     if args.approval_file:
         allowed, stale = _apply_approvals(plan, approved)
@@ -2257,7 +2314,7 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
             + tuple(deferred),
         )
 
-    if not args.apply:
+    if not args.apply and not args.apply_settled:
         # The dry run stops here. Not "apply and then describe it": a preview that
         # has already written is not a preview, and the promise the command makes
         # is that this computation is the same one the apply performs — not that
@@ -2268,18 +2325,25 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
         _print_cleanup_table(plan, stale=stale, applied=False)
         return _cleanup_status(None, stale, plan)
 
+    # The receipt path is allocated here and handed to the apply, which writes it
+    # *before* the document. A run that cannot record the reverse map removes
+    # nothing, which is the whole point of having this be one call rather than a
+    # write the command does afterwards.
+    receipt_path = new_receipt_path(_resolve_runtime_root(args.runtime_root))
     result = apply_cleanup(
         vault_root,
         plan,
         workspace=workspace,
         config=config,
-        actor="operator",
-        reapprove=True,
+        actor="system" if args.apply_settled else "operator",
+        reapprove=not args.apply_settled,
         approvals=approved,
         # An approval file *was* supplied, even an empty one: that is a person
         # saying they read the table, and the receipt is the only durable record
-        # of it.
-        reviewed=args.approval_file is not None,
+        # of it. ``--apply-settled`` supplies none, and gets no such receipt.
+        reviewed=not args.apply_settled and args.approval_file is not None,
+        max_removals=LEARNINGS_CLEANUP_MAX_ITEMS if args.apply_settled else None,
+        receipt_path=receipt_path,
     )
     if args.json:
         print(
@@ -2293,19 +2357,17 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
 
     _print_cleanup_table(plan, stale=stale, applied=result.applied)
     if result.applied:
-        receipt_path = _write_cleanup_receipt(args, result)
         print(f"\nRemoved {result.removed_count} entr(y/ies).")
-        if receipt_path:
-            print(f"Receipt: {receipt_path}")
+        if result.receipt_path:
+            print(f"Receipt: {result.receipt_path}")
             print(
                 "Reverse it exactly with `ciao learnings-cleanup --revert "
-                f"{receipt_path} --apply`."
+                f"{result.receipt_path} --apply`."
             )
     elif result.receipt is not None:
-        receipt_path = _write_cleanup_receipt(args, result)
         print("\nNothing was removed; the review itself is recorded.")
-        if receipt_path:
-            print(f"Receipt: {receipt_path}")
+        if result.receipt_path:
+            print(f"Receipt: {result.receipt_path}")
     for note in result.conflicts:
         print(f"  not removed: {note}", file=sys.stderr)
     for failure in result.failed:
@@ -2313,34 +2375,6 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
     if result.skipped:
         print(f"Nothing was written: {result.skipped}")
     return _cleanup_status(result, stale, plan)
-
-
-def _write_cleanup_receipt(args: argparse.Namespace, result: Any) -> str:
-    """Persist the receipt an applied run produced, and return its path.
-
-    Only for a run that actually wrote — a receipt for a dry run would reverse
-    spans that are still in their original place. The reviewed no-op is the one
-    exception, and it is deliberate: its receipt is the record that a person
-    looked at this document and decided there was nothing to remove, which is
-    exactly what "done" means for an update task.
-    """
-    from ciao.learnings_cleanup import new_receipt_path, write_receipt
-
-    if result.receipt is None:
-        return ""
-    try:
-        return str(
-            write_receipt(
-                new_receipt_path(_resolve_runtime_root(args.runtime_root)),
-                result.receipt,
-            )
-        )
-    except OSError as exc:
-        print(
-            f"  the removals landed but their receipt could not be written: {exc}",
-            file=sys.stderr,
-        )
-        return ""
 
 
 def _cleanup_status(result: Any, stale: list[str], plan: Any) -> int:
@@ -6027,8 +6061,10 @@ def build_parser() -> argparse.ArgumentParser:
             "reversible from a receipt under .runtime/migration/; every other "
             "byte of the file, the `## Promoted / Resolved` section, the format "
             "notes, the BOM and CRLF endings included, is preserved except the "
-            "frontmatter's `updated:`. Dry-run unless --apply is passed, and "
-            "--apply refuses without --approval-file."
+            "frontmatter's `updated:`. Dry-run unless --apply or --apply-settled "
+            "is passed; --apply refuses without --approval-file, and "
+            "--apply-settled retires only the rows the reconciliation already "
+            "proposed."
         ),
     )
     cleanup_parser.add_argument(
@@ -6072,6 +6108,19 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Write the removals named in --approval-file. Without both flags "
             "nothing is written."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--apply-settled",
+        action="store_true",
+        help=(
+            "Retire only the entries the reconciliation already proposed, "
+            "unattended and without an approval file: no reapproval, no judgement "
+            "of a kept row, and no more removals than "
+            "LEARNINGS_CLEANUP_MAX_ITEMS. This is what the nightly cleanup pass "
+            "names; everything that needs a person is still --apply "
+            "--approval-file. Cannot be combined with --apply or "
+            "--approval-file."
         ),
     )
     cleanup_parser.add_argument(

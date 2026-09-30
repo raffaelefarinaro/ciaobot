@@ -49,6 +49,27 @@ def _record(text: str, key: str) -> LearningRecord:
 
 RETIRED_RECORD = _record(RETIRED, "blocked-pages")
 UNPROPOSED_RECORD = _record(UNPROPOSED, "rate-limits")
+SECOND_RECORD = _record("Long transcripts need chunking.", "long-transcripts")
+THIRD_RECORD = _record("Session logs outgrow the notes.", "log-growth")
+FIFTH_RECORD = _record("Promotions need a dated review.", "dated-review")
+
+#: Five Active entries, so three of them can be removed in one run in every gap
+#: shape: three separate gaps, one gap shared by a removed pair, and one gap
+#: shared by a whole run of them. A run of one cannot tell those apart, which is
+#: why a single-removal revert test proves nothing about a batch.
+FIVE_RECORDS = (
+    RETIRED_RECORD,
+    SECOND_RECORD,
+    UNPROPOSED_RECORD,
+    THIRD_RECORD,
+    FIFTH_RECORD,
+)
+
+_REMOVAL_SHAPES: tuple[tuple[LearningRecord, ...], ...] = (
+    (RETIRED_RECORD, UNPROPOSED_RECORD, FIFTH_RECORD),
+    (RETIRED_RECORD, SECOND_RECORD, THIRD_RECORD),
+    (RETIRED_RECORD, SECOND_RECORD, UNPROPOSED_RECORD),
+)
 
 
 def _install(
@@ -57,12 +78,18 @@ def _install(
     *,
     records: tuple[LearningRecord, ...],
     settled: bool = True,
+    bom: str = "",
+    newline: str = "\n",
 ) -> Path:
     """A workspace with a learnings document, and optionally a settled finding.
 
     The proposal is written straight to the queue rather than filed through
     ``ciao skill-proposal-add``, because a filed origin is always ``pending`` and
     these tests are about what happens *after* somebody has answered it.
+
+    ``bom`` and ``newline`` write bytes rather than text, because a CRLF document
+    read through ``read_text`` comes back LF — the byte-level claims would then
+    hold of the preview and be false of the file.
     """
     workspace = tmp_path / "workspace"
     (workspace / "memory-vault" / WORKSPACE / "Workspace").mkdir(parents=True)
@@ -70,17 +97,24 @@ def _install(
     monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
     monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
     body = "".join(f"{render_learning(record)}\n" for record in records)
-    (workspace / "memory-vault" / WORKSPACE / "Workspace" / "Learnings.md").write_text(
+    document = (
         f"---\ntags: [ciao, learnings]\nupdated: 2020-01-01\n---\n"
-        f"# Learnings\n\n## Active\n\n{body}",
-        encoding="utf-8",
+        f"# Learnings\n\n## Active\n\n{body}"
     )
+    (
+        workspace / "memory-vault" / WORKSPACE / "Workspace" / "Learnings.md"
+    ).write_bytes((bom + document).replace("\n", newline).encode("utf-8"))
     if settled:
         _settle(workspace, RETIRED_RECORD)
     return workspace / "memory-vault" / WORKSPACE
 
 
-def _settle(workspace: Path, record: LearningRecord, skill: str = "web-research") -> None:
+def _settle(workspace: Path, *records: LearningRecord, skill: str = "web-research") -> None:
+    """One proposal in the queue, carrying a settled finding per given record.
+
+    Variadic because the interesting removals are batches: three entries decided
+    in one fold, spliced by one apply, and reversed from one receipt.
+    """
     proposal = sp.SkillProposal(
         id=sp.proposal_id(WORKSPACE, skill),
         workspace=WORKSPACE,
@@ -99,15 +133,16 @@ def _settle(workspace: Path, record: LearningRecord, skill: str = "web-research"
         lifecycle=sp.PENDING,
         chat_id="",
         updated_at="2026-08-09T10:00:00Z",
-        origins=(
+        origins=tuple(
             sp.SkillOrigin(
                 workspace=WORKSPACE,
                 learning_id=record.learning_id,
                 source_revision=entry_revision(record),
-                finding="add the defuddle fallback",
+                finding=f"the finding for {record.key}",
                 state=sp.ORIGIN_APPLIED,
                 verification="mrcpt_0123456789abcdef",
-            ),
+            )
+            for record in records
         ),
     )
     path = (
@@ -135,6 +170,19 @@ def _write_approval(tmp_path: Path, rows: list[dict[str, object]]) -> Path:
     path = tmp_path / "approved.json"
     path.write_text(json.dumps(rows), encoding="utf-8")
     return path
+
+
+def _approvals(*records: LearningRecord) -> list[dict[str, object]]:
+    """One approved row per record, each bound to the revision it was reviewed at."""
+    return [
+        {
+            "learning_id": record.learning_id,
+            "entry_revision": entry_revision(record),
+            "reason": f"the finding for {record.key} is settled",
+            "evidence": "mrcpt_0123456789abcdef",
+        }
+        for record in records
+    ]
 
 
 def _learnings(vault: Path) -> str:
@@ -588,6 +636,52 @@ def test_the_undo_restores_the_exact_bytes(
     assert "still recorded as removed" in out
 
 
+@pytest.mark.parametrize(
+    "removed",
+    _REMOVAL_SHAPES,
+    ids=["separate-gaps", "shared-pair", "one-run"],
+)
+def test_three_removals_revert_to_the_exact_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    removed: tuple[LearningRecord, ...],
+) -> None:
+    """A batch is reversible, byte for byte, through the command as well.
+
+    The failure this pins is the one the whole review turned on: a receipt's
+    offsets address the text the run *left*, and for the second and later removals
+    in a run that is not the text it read. Recording a span's own start anyway put
+    the bytes back in the wrong places, silently, because the anchors were sampled
+    from those same wrong offsets — the undo's own check agreed with itself. Only
+    a run of two or more shows it, and only a run of three with a survivor between
+    two of them shows it *and* keeps the other entries in place to check.
+
+    CRLF and a BOM throughout, because the offsets are byte offsets and a reader
+    that normalises newlines is a reader addressing a different document.
+    """
+    vault = _install(
+        tmp_path, monkeypatch, records=FIVE_RECORDS, bom="﻿", newline="\r\n"
+    )
+    path = vault / "Workspace" / "Learnings.md"
+    before = path.read_bytes()
+    _settle(tmp_path / "workspace", *removed)
+    approval = _write_approval(tmp_path, _approvals(*removed))
+    runtime = str(tmp_path / ".runtime")
+
+    cli.main(_run("--apply", "--approval-file", str(approval), "--runtime-root", runtime))
+    capsys.readouterr()
+    receipt = next((tmp_path / ".runtime" / "migration").glob("learnings-cleanup-*.json"))
+
+    assert cli.main(_run("--revert", str(receipt), "--apply", "--runtime-root", runtime)) == 0
+
+    out = capsys.readouterr().out
+    assert "Restored 3 learning entr(y/ies)." in out
+    assert path.read_bytes() == before.replace(
+        b"updated: 2020-01-01", f"updated: {lc._now()[:10]}".encode()
+    )
+
+
 def test_a_dry_run_undo_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -695,3 +789,139 @@ def test_an_unreadable_receipt_is_refused(
 
     assert cli.main(_run("--revert", str(path), "--apply")) == 1
     assert "Not a readable learnings-cleanup receipt" in capsys.readouterr().err
+
+
+# ── The unattended mode (#728-E, review round 1) ────────────────────────────
+#
+# The policy has always said the nightly run may retire a settled learning while
+# nothing in the code could: every apply needed `--approval-file`, so the worklist
+# item named a work nobody could do without a person. `--apply-settled` is the
+# other half — the same fold, the same splice, the same receipt, and no judgement
+# of anything the fold did not already answer.
+
+
+def test_the_unattended_mode_needs_no_approval_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The gap this mode closes, in one assertion: a run with nobody in it removes
+    a settled entry, and the next run with nobody in it removes nothing."""
+    vault = _install(
+        tmp_path,
+        monkeypatch,
+        records=(RETIRED_RECORD, UNPROPOSED_RECORD, SECOND_RECORD),
+    )
+    _settle(tmp_path / "workspace", RETIRED_RECORD, SECOND_RECORD)
+    runtime = str(tmp_path / ".runtime")
+
+    assert cli.main(_run("--apply-settled", "--runtime-root", runtime)) == 0
+
+    out = capsys.readouterr().out
+    after = _learnings(vault)
+    assert "Removed 2 entr(y/ies)." in out
+    assert render_learning(RETIRED_RECORD) not in after
+    assert render_learning(SECOND_RECORD) not in after
+    # The row the reconciliation kept is untouched: nothing has ever linked a
+    # finding to it, and an unattended run has no opinion about that.
+    assert render_learning(UNPROPOSED_RECORD) in after
+    # It is a receipt, on the same terms as every other removal, so the reversal
+    # is the command's own.
+    receipt = next((tmp_path / ".runtime" / "migration").glob("learnings-cleanup-*.json"))
+    assert json.loads(receipt.read_text(encoding="utf-8"))["removed_by"] == "system"
+    capsys.readouterr()
+    assert cli.main(_run("--revert", str(receipt), "--apply", "--runtime-root", runtime)) == 0
+    capsys.readouterr()
+
+    # A second unattended run is a no-op: the entries are gone, and the ones an
+    # undo put back are suppressed rather than removed again.
+    assert cli.main(_run("--apply-settled", "--runtime-root", runtime)) == 0
+    out = capsys.readouterr().out
+    assert "Nothing to remove." in out
+    assert "0 removable" in out
+    assert all(
+        render_learning(record) in _learnings(vault)
+        for record in (RETIRED_RECORD, SECOND_RECORD, UNPROPOSED_RECORD)
+    )
+
+
+def test_the_unattended_mode_takes_the_pass_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A backlog allowed to drain at full speed takes the whole night's budget and
+    the required weekly hygiene keys are never reached, so ``last_full_pass`` can
+    never advance. The cap is what keeps this a pass rather than a takeover, and it
+    is the *plan* that is capped too — a table printing ``REMOVE`` beside a row
+    this run will not remove is a table that lies about what it did."""
+    from ciao.curation_run import LEARNINGS_CLEANUP_MAX_ITEMS
+
+    records = tuple(
+        _record(f"Lesson {index} is settled.", f"lesson-{index}")
+        for index in range(LEARNINGS_CLEANUP_MAX_ITEMS + 3)
+    )
+    vault = _install(tmp_path, monkeypatch, records=records, settled=False)
+    _settle(tmp_path / "workspace", *records)
+    runtime = str(tmp_path / ".runtime")
+
+    assert cli.main(_run("--apply-settled", "--runtime-root", runtime)) == 0
+
+    out = capsys.readouterr().out
+    assert f"Removed {LEARNINGS_CLEANUP_MAX_ITEMS} entr(y/ies)." in out
+    assert "More are settled than one run retires" in out
+    # The rows behind the cap are marked as waiting rather than as removed, so a
+    # reader of the table is not misled about either.
+    assert out.count("REMOVE") == LEARNINGS_CLEANUP_MAX_ITEMS
+    assert out.count("LATER") == 3
+    assert out.count("this run is capped at") == 3
+
+    # And the backlog drains over the next runs rather than stalling.
+    for _ in range(3):
+        cli.main(_run("--apply-settled", "--runtime-root", runtime))
+        capsys.readouterr()
+    assert all(render_learning(record) not in _learnings(vault) for record in records)
+
+
+def test_the_unattended_mode_is_not_the_attended_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two decisions, so two flags, and a run may only make one of them.
+
+    ``--apply-settled`` retires the rows the reconciliation proposed and writes no
+    review, so accepting an approval file alongside it would mean a receipt holding
+    somebody's reasons and evidence for rows a flag chose, with no way to tell
+    afterwards which was which. Refused rather than reconciled.
+    """
+    _install(tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD))
+    approval = _write_approval(
+        tmp_path, _approval(RETIRED_RECORD.learning_id, entry_revision(RETIRED_RECORD))
+    )
+    runtime = str(tmp_path / ".runtime")
+
+    for extra, expected in (
+        (["--approval-file", str(approval)], "cannot be combined"),
+        (["--apply"], "two different decisions"),
+        (["--revert", str(approval)], "takes no --apply-settled"),
+    ):
+        capsys.readouterr()
+        assert cli.main(_run(*extra, "--apply-settled", "--runtime-root", runtime)) == 1
+        assert expected in capsys.readouterr().err
+    assert render_learning(RETIRED_RECORD) in _learnings(
+        tmp_path / "workspace" / "memory-vault" / WORKSPACE
+    )
+
+
+def test_the_unattended_mode_says_when_there_is_nothing_to_retire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run with nothing to do is still a run: it reports the whole Active list,
+    and it writes no receipt claiming a review nobody made."""
+    vault = _install(
+        tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD), settled=False
+    )
+    before = (vault / "Workspace" / "Learnings.md").read_bytes()
+
+    assert cli.main(_run("--apply-settled")) == 0
+
+    out = capsys.readouterr().out
+    assert "2 Active entr(y/ies)" in out
+    assert "0 removable" in out
+    assert (vault / "Workspace" / "Learnings.md").read_bytes() == before
+    assert not (tmp_path / ".runtime" / "migration").exists()
