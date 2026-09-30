@@ -79,6 +79,7 @@ PASS_AUDIT = "audit"
 PASS_STALE_NOTE = "stale_note"
 PASS_CATEGORIES = "categories"
 PASS_LEARNINGS = "learnings"
+PASS_LEARNINGS_CLEANUP = "learnings_cleanup"
 PASS_HYGIENE = "hygiene"
 PASS_GUIDE = "guide"
 PASS_LOGS = "logs"
@@ -96,6 +97,12 @@ PASS_ORDER: tuple[str, ...] = (
     PASS_STALE_NOTE,
     PASS_CATEGORIES,
     PASS_LEARNINGS,
+    # Immediately after the learnings pass, and that ordering is the whole
+    # design: cleanup only ever removes an entry whose findings are durably
+    # settled, so a run that reaches it has already passed the pass that proposes
+    # and decides. Putting it earlier would let it judge a proposal the same run
+    # has not looked at yet.
+    PASS_LEARNINGS_CLEANUP,
     PASS_HYGIENE,
     PASS_GUIDE,
     PASS_LOGS,
@@ -128,6 +135,21 @@ DEFAULT_MAX_SECONDS = 1800.0
 # and a journaled write, so five is a night's work for a human-sized pass, and
 # the constant exists to keep that number honest rather than to fill the budget.
 STALE_NOTE_MAX_ITEMS = 5
+
+# How many settled learnings one night may retire, however many are due.
+#
+# A removal is not a model turn — it is one parse, one fold of the proposal queue
+# and one splice — but the *keys* it consumes are the same keys every other pass
+# spends, and a workspace that let a large backlog drain at full speed would take
+# the whole night's budget on pass seven of nine and never reach the required
+# weekly hygiene keys, so `last_full_pass` could not advance and the backlog
+# would still be there tomorrow. The cap is what keeps this pass a pass rather
+# than a takeover.
+#
+# Ten is a judgement about urgency, not about safety: the removals are reversible
+# and the suppression store makes a second run a no-op, so the only cost of
+# being slow is that the Active list stays a little longer than it needs to.
+LEARNINGS_CLEANUP_MAX_ITEMS = 10
 
 
 class CurationBusy(RuntimeError):
@@ -585,6 +607,116 @@ def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
     ]
 
 
+def _learnings_cleanup_items(
+    vault_root: Path,
+    *,
+    config: Any,
+    today: date,
+) -> tuple[list[WorklistItem], str]:
+    """The settled learnings this night may retire, and a note about the rest.
+
+    The only pass here that removes a line the owner wrote, and therefore the
+    only one that needs a settlement to be *durable* before it acts:
+    :func:`ciao.learnings_cleanup.plan_cleanup` is called, and it answers per
+    entry from the proposal queue and the upstream draft sidecar — never from a
+    cache, never from a previous night's plan. Two runs in a row therefore see
+    the same answers, and a run that arrives before the settlement is written
+    removes nothing.
+
+    It plans the removals and the worklist item **names the mode that performs
+    them**: ``ciao learnings-cleanup --apply-settled``, which retires exactly the
+    rows this plan proposed, unattended, capped at the same
+    :data:`LEARNINGS_CLEANUP_MAX_ITEMS`, and writes its receipt before it writes
+    the document. So the pass plans, the command that carries out the plan is one
+    the worklist already says out loud, and the rows this pass does *not* propose
+    are still the attended ``--apply --approval-file`` workflow rather than
+    something a flag decided. The deciding is a fold over the queue and the
+    draft sidecar either way; splitting it from the splicing is what keeps an
+    unattended run from being the thing that judges.
+
+    The parent rule is kept verbatim: an entry whose finding is pending, whose
+    proposal is still implementing, or that no proposal has ever linked consumes
+    **no** key, so the same entry cannot take a slot every night. A backlog is
+    reported through the worklist note rather than through a growing key list, for
+    the reason the stale-note pass reports its cap the same way.
+
+    ``today`` is threaded through rather than read so the plan the tests compare
+    is the plan a run on another day would produce.
+    """
+    from ciao import learnings_cleanup
+
+    root = Path(vault_root)
+    try:
+        plan = learnings_cleanup.plan_cleanup(
+            root,
+            workspace=root.name,
+            config=config,
+            today=today,
+            max_removals=LEARNINGS_CLEANUP_MAX_ITEMS,
+        )
+    except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
+        logger.warning("curation: learnings cleanup plan failed", exc_info=True)
+        return [], ""
+    if plan.blocked:
+        return [], f"learnings cleanup did not run: {plan.blocked}"
+
+    counts = plan.counts
+    reasons = [
+        f"{counts['active']} active entr(y/ies)",
+        f"{counts['remove']} settled and removable",
+        f"{counts['keep']} kept",
+    ]
+    if counts["conflict"]:
+        reasons.append(f"{counts['conflict']} line(s) this code cannot read")
+    if counts["routes"]:
+        # Named apart from the kept count on purpose: an entry routed to a
+        # packaged skill is waiting on whoever maintains that skill, and presenting
+        # it beside this workspace's own backlog would read as work the nightly run
+        # could do. It is reported, never planned.
+        reasons.append(
+            f"{counts['routes']} routed upstream, waiting on another maintainer"
+        )
+    if plan.over_cap:
+        reasons.append("over this run's cap")
+    item: WorklistItem | None = None
+    if plan.removals:
+        # The command is in the reason, not only in the docs: the agent reading
+        # this row is the one that has to run the mode that carries out the plan,
+        # and a worklist that made it look up which flag retires a settled entry
+        # is a worklist whose eligible rows stay eligible forever.
+        reasons.append(
+            "retire them with `ciao learnings-cleanup --apply-settled` (no "
+            "approval file; the rows the reconciliation kept are not its business)"
+        )
+        item = WorklistItem(
+            pass_id=PASS_LEARNINGS_CLEANUP,
+            label="Retire the learnings whose findings are durably settled",
+            reason="; ".join(reasons),
+            keys=tuple(
+                item_key(PASS_LEARNINGS_CLEANUP, f"retire:{row.learning_id}")
+                for row in plan.removals
+            ),
+        )
+    notes: list[str] = []
+    if plan.over_cap:
+        notes.append(
+            f"more than {LEARNINGS_CLEANUP_MAX_ITEMS} settled learnings are due; "
+            f"this run plans {len(plan.removals)} and the rest wait for the next "
+            "one, so the other keys keep their budget"
+        )
+    if counts["conflict"]:
+        notes.append(
+            f"{counts['conflict']} Active line(s) could not be read and are left "
+            "exactly as written; `ciao learnings-cleanup` names them"
+        )
+    if plan.diagnostics:
+        notes.append(
+            f"{len(plan.diagnostics)} parsing issue(s) in the learnings document; "
+            "the affected lines are kept as written"
+        )
+    return ([item] if item is not None else []), " ".join(notes)
+
+
 def _category_cluster_items(
     vault_root: Path, *, registry: EntityTypeRegistry
 ) -> list[WorklistItem]:
@@ -724,6 +856,7 @@ def build_worklist(
     vault_root: Path,
     guide_path: Path,
     category_registry: EntityTypeRegistry,
+    config: Any = None,
     workspace_dir: Path | None = None,
     path_prefix: Path | None = None,
     today: date | None = None,
@@ -739,6 +872,13 @@ def build_worklist(
     agent vault root, the notes to this workspace's root. The caller resolves it
     through the config (the CLI does) so a category the owner accepted cannot be
     re-proposed as unlisted.
+
+    ``config`` is the workspace registry, and it is optional only because two
+    passes need it and one does not: the skill-proposal queue and the upstream
+    draft sidecar are addressed through it, so the cleanup pass has nothing to
+    read without it. When it is absent the cleanup pass is skipped and says so in
+    the notes rather than reporting a clean workspace — a pass that silently
+    found nothing must never look like a pass that found nothing to do.
 
     ``done_keys`` are the keys an earlier run of the same night already
     finished; they are removed here rather than inside each pass so a pass whose
@@ -797,6 +937,18 @@ def build_worklist(
     if stale_note:
         notes.append(stale_note)
     collected.extend(_learning_items(vault_root, today=today))
+    if config is None:
+        notes.append(
+            "learnings cleanup was not planned: this worklist was built without a "
+            "workspace registry, and the settlement fold needs one"
+        )
+    else:
+        cleanup_items, cleanup_note = _learnings_cleanup_items(
+            vault_root, config=config, today=today
+        )
+        collected.extend(cleanup_items)
+        if cleanup_note:
+            notes.append(cleanup_note)
     collected.extend(_hygiene_items(weekly_due=weekly_due))
     collected.extend(_guide_items(weekly_due=weekly_due))
     collected.extend(_log_items(vault_root))

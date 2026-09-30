@@ -44,6 +44,12 @@ REGISTERED = "has-legacy-rows"
 UNREGISTERED = "no-such-detector"
 CHECK = "no-legacy-rows"
 
+# The one real task (#728-E) and the two probes behind it.
+SHIPPED: dict[str, str] = {
+    "detector": "learnings-cleanup-review-needed",
+    "completion_check": "learnings-cleanup-review-recorded",
+}
+
 
 @pytest.fixture(autouse=True)
 def clean_caches() -> Iterator[None]:
@@ -935,22 +941,40 @@ async def test_a_downgrade_hides_a_task_and_keeps_its_state(
 # ── The shipped catalog, and the layer over an injected one ─────────────────
 
 
-def test_the_shipped_catalog_ships_no_task_and_no_implementation() -> None:
-    """Nothing to offer yet, and no name pretending otherwise."""
+def test_the_shipped_catalog_ships_one_task_and_both_probes_exist(
+    tmp_path: Path,
+) -> None:
+    """The catalog's names and this module's implementations are the same set.
+
+    This is the property the whole applicability layer rests on: a task row may
+    only name a probe that exists, so there is no state in which the packaged
+    catalog offers follow-up work this engine cannot decide or verify. Before
+    #728-E both registries were empty and the catalog shipped no task; the first
+    real task landed with its detector and its completion check, and the two have
+    to keep landing together.
+    """
     catalog = load_catalog()
 
     assert not catalog.diagnostics, (
         "the packaged catalog has diagnostics: "
         f"{[(d.code, d.message) for d in catalog.diagnostics]}"
     )
-    assert catalog.tasks == ()
-    assert update_tasks.DETECTOR_FUNCTIONS == {}
-    assert update_tasks.COMPLETION_FUNCTIONS == {}
-    assert update_task_catalog.DETECTORS == frozenset()
-    assert update_task_catalog.COMPLETION_CHECKS == frozenset()
-    # A shipped task whose detector had no implementation would load as
-    # `not_implemented`; that is a catalog that must not ship.
-    assert {d.code for d in catalog.diagnostics} == set()
+    assert [task.id for task in catalog.tasks] == ["learnings-cleanup"]
+    assert update_task_catalog.DETECTORS == set(update_tasks.DETECTOR_FUNCTIONS)
+    assert update_task_catalog.COMPLETION_CHECKS == set(
+        update_tasks.COMPLETION_FUNCTIONS
+    )
+    # And the shipped task actually reaches its probe over a real workspace,
+    # rather than answering `detector_not_implemented` on a Home render. An empty
+    # vault has no learnings document, so the honest answer here is
+    # `not_applicable` — the postcondition is absent, and that is a claim rather
+    # than an admission that nothing ran.
+    for task in catalog.tasks:
+        result = update_tasks.apply_detector(
+            task, config=_config(tmp_path), workspace="personal"
+        )
+        assert result.status == NOT_APPLICABLE, result.evidence
+        assert "detector_not_implemented" not in result.evidence.values()
 
 
 async def test_a_test_injected_catalog_proves_the_layer_end_to_end(
@@ -1052,3 +1076,311 @@ def _catalog(*tasks: UpdateTask) -> update_task_catalog.TaskCatalog:
     one catalog.
     """
     return update_task_catalog.TaskCatalog(tasks=tuple(tasks))
+
+
+# ── The shipped probes (#728-E) ─────────────────────────────────────────────
+
+
+def _learnings_vault(tmp_path: Path, text: str) -> CiaoConfig:
+    """A registry whose ``personal`` workspace holds a learnings document."""
+    config = _config(tmp_path)
+    vault = Path(config.workspace_vault_root("personal"))
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    (vault / "Workspace" / "Learnings.md").write_text(text, encoding="utf-8")
+    return config
+
+
+_ONE_ENTRY = (
+    "---\ntags: [ciao, learnings]\nupdated: 2026-09-01\n---\n"
+    "# Learnings\n\n## Active\n\n"
+    "- Nothing has ever proposed this lesson.\n"
+)
+
+
+def test_the_shipped_detector_answers_on_the_vault_it_is_given(tmp_path: Path) -> None:
+    """Applicable exactly when the reconciliation has rows it will not retire.
+
+    Those are the rows the attended workflow exists for. An empty set of them means
+    the unattended pass is already doing everything this engine can do on its own,
+    so there is nothing to offer — and the evidence is the counts, not a boolean,
+    so a document that gained a lesson comes back as a different situation.
+    """
+    detector = update_tasks.DETECTOR_FUNCTIONS[SHIPPED["detector"]]
+    config = _learnings_vault(tmp_path, _ONE_ENTRY)
+
+    outcome = detector(config=config, workspace="personal", today=date(2026, 9, 30))
+
+    assert isinstance(outcome, Detection)
+    assert outcome.applicable is True
+    assert outcome.evidence["active"] == 1
+    assert outcome.evidence["unmatched"] == 1
+    assert outcome.evidence["reasons"] == ["never_proposed"]
+
+    # A workspace with no learnings document has nothing for a person to review,
+    # which is a positive claim about the absence rather than a failure to look.
+    empty = _config(tmp_path / "other")
+    (Path(empty.workspace_vault_root("personal")) / "Workspace").mkdir(parents=True)
+    assert detector(
+        config=empty, workspace="personal", today=date(2026, 9, 30)
+    ).applicable is False
+
+
+def test_the_shipped_detector_refuses_to_plan_when_the_store_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    """A store this code cannot read blocks the plan, and the detector has to
+    report that as "no" rather than as "applicable" — offering the operator a
+    review of a document the engine has just refused to reconcile."""
+    detector = update_tasks.DETECTOR_FUNCTIONS[SHIPPED["detector"]]
+    config = _learnings_vault(tmp_path, _ONE_ENTRY)
+    store = Path(config.workspace_vault_root("personal")) / "Workspace" / (
+        "learnings-cleanup.json"
+    )
+    store.write_text("{ not json", encoding="utf-8")
+
+    outcome = detector(config=config, workspace="personal", today=date(2026, 9, 30))
+
+    assert outcome.applicable is False
+    assert "cannot be read" in outcome.evidence["blocked"]
+
+
+def test_the_shipped_completion_check_needs_a_receipt_for_the_current_revision(
+    tmp_path: Path,
+) -> None:
+    """A receipt, not a chat — and for *this* document.
+
+    The postcondition is "a person looked at this file as it is now and said what
+    should go", and the receipt is the only durable record of it. One that names a
+    revision the file no longer has is a review of a different document, and
+    treating it as one is how a stale cleanup comes to certify itself.
+    """
+    from ciao import learnings_cleanup
+
+    check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
+    config = _learnings_vault(tmp_path, _ONE_ENTRY)
+    vault = Path(config.workspace_vault_root("personal"))
+    migration = Path(config.state_path).parent / "migration"
+    migration.mkdir(parents=True, exist_ok=True)
+
+    # Nothing has been reviewed: not complete.
+    assert check(config=config, workspace="personal").applicable is False
+
+    # A reviewed no-op: the caller attests, and a receipt lands with no removals.
+    plan = learnings_cleanup.plan_cleanup(vault, workspace="personal", config=config)
+    result = learnings_cleanup.apply_cleanup(
+        vault,
+        plan,
+        workspace="personal",
+        config=config,
+        actor="operator",
+        today=date(2026, 9, 30),
+        reviewed=True,
+    )
+    learnings_cleanup.write_receipt(
+        learnings_cleanup.new_receipt_path(Path(config.state_path).parent), result.receipt
+    )
+    assert check(config=config, workspace="personal").applicable is True
+
+    # Edit the document: the receipt is now about other bytes.
+    (vault / "Workspace" / "Learnings.md").write_text(
+        _ONE_ENTRY + "- A brand new lesson.\n", encoding="utf-8"
+    )
+    stale = check(config=config, workspace="personal")
+    assert stale.applicable is False
+    assert stale.evidence["reason"] == "no_review_receipt"
+
+
+def _settled_vault(tmp_path: Path) -> tuple[Any, Path]:
+    """A vault with one entry the reconciliation proposes and one it will not.
+
+    The settled half is what a receipt can be written about; the unproposed half
+    is what the detector exists to offer, so every document here carries both and
+    a test that only ever sees one of them proves less than it looks like it does.
+    """
+    from ciao.learning_records import (
+        LearningRecord,
+        allocate_learning_id,
+        entry_revision,
+        render_learning,
+    )
+    from ciao import skill_proposals as sp
+    from ciao.memory_receipts import write_queue_atomically
+
+    record = LearningRecord(
+        learning_id=allocate_learning_id("personal", "- A settled lesson."),
+        key="settled",
+        text="A settled lesson.",
+    )
+    config = _learnings_vault(
+        tmp_path,
+        "---\ntags: [ciao, learnings]\nupdated: 2026-09-01\n---\n"
+        "# Learnings\n\n## Active\n\n"
+        f"{render_learning(record)}\n- Nothing has ever proposed this lesson.\n",
+    )
+    proposal = sp.SkillProposal(
+        id=sp.proposal_id("personal", "web-research"),
+        workspace="personal",
+        skill="web-research",
+        canonical_path="/agent/skills/web-research/SKILL.md",
+        reviewed_revision="a" * 64,
+        title="t", problem="p", change="c", rationale="r",
+        sources=(sp.SkillEvidence(chat_id="s", archive="a", turn="", excerpt="e"),),
+        lifecycle=sp.PENDING, chat_id="", updated_at="2026-09-01T00:00:00Z",
+        origins=(sp.SkillOrigin(
+            workspace="personal", learning_id=record.learning_id,
+            source_revision=entry_revision(record), finding="add it",
+            state=sp.ORIGIN_APPLIED, verification="mrcpt_0123456789abcdef"),),
+    )
+    write_queue_atomically(
+        sp.proposal_path(config, "personal", "web-research"), sp.render_proposal(proposal)
+    )
+    return config, Path(config.workspace_vault_root("personal"))
+
+
+def _record_receipt(config: Any, receipt: dict[str, Any] | None) -> None:
+    """Persist a receipt the way the command does: at its own path, under the
+    runtime directory, named for the minute."""
+    from ciao import learnings_cleanup
+
+    assert receipt is not None
+    learnings_cleanup.write_receipt(
+        learnings_cleanup.new_receipt_path(Path(config.state_path).parent), receipt
+    )
+
+
+def test_the_shipped_completion_check_accepts_a_receipt_that_removed_something(
+    tmp_path: Path,
+) -> None:
+    """A removal is the other half of the same answer, and the receipt names the
+    revision it *left* as well as the one it read — so the check has to look at
+    that side or it would never be satisfied by the work it was written for.
+
+    Attended, because that is the only shape of removal that certifies anything:
+    an operator approved the row, so the receipt carries the approval, the reason
+    and the evidence behind it.
+    """
+    from ciao import learnings_cleanup
+
+    check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
+    config, vault = _settled_vault(tmp_path)
+    plan = learnings_cleanup.plan_cleanup(vault, workspace="personal", config=config)
+    assert [row.key for row in plan.removals] == ["settled"]
+    result = learnings_cleanup.apply_cleanup(
+        vault,
+        plan,
+        workspace="personal",
+        config=config,
+        actor="operator",
+        today=date(2026, 9, 30),
+        reviewed=True,
+        approvals={
+            plan.removals[0].learning_id: {
+                "learning_id": plan.removals[0].learning_id,
+                "entry_revision": plan.removals[0].entry_revision,
+                "reason": "the finding landed in the skill",
+                "evidence": "verified into web-research",
+            }
+        },
+    )
+    _record_receipt(config, result.receipt)
+
+    outcome = check(config=config, workspace="personal")
+
+    assert outcome.applicable is True
+    assert outcome.evidence["removed"] == 1
+    assert outcome.evidence["approvals"] == 1
+
+
+def test_an_unattended_receipt_does_not_complete_the_task(tmp_path: Path) -> None:
+    """A receipt the nightly pass wrote is a removal, not a review.
+
+    ``--apply-settled`` removes the rows the reconciliation already proposed and
+    writes its receipt on the same terms as any other removal, so "a receipt
+    exists for this revision" cannot be the test. If it were, one unattended pass
+    would close the attended task that exists to have a person read the document,
+    and the entries nothing has ever proposed would never be looked at by anyone.
+    """
+    from ciao import learnings_cleanup
+
+    check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
+    config, vault = _settled_vault(tmp_path)
+    plan = learnings_cleanup.plan_cleanup(vault, workspace="personal", config=config)
+    result = learnings_cleanup.apply_cleanup(
+        vault,
+        plan,
+        workspace="personal",
+        config=config,
+        actor="system",
+        today=date(2026, 9, 30),
+    )
+    assert result.applied is True
+    _record_receipt(config, result.receipt)
+
+    outcome = check(config=config, workspace="personal")
+
+    assert outcome.applicable is False
+    assert outcome.evidence["reason"] == "no_review_receipt"
+
+
+def test_a_receipt_whose_write_never_landed_does_not_complete_the_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt is written before the document, so a run that dies in between
+    leaves a record of a removal that never happened — naming the revision the
+    file still has, on the side that means "this is what it looked like before".
+
+    Accepting that side is how a run that removed no bytes at all comes to certify
+    a cleanup somebody never performed, and it is the same document a real review
+    would have been asked about. The window is closed at its source where the run
+    survives to close it, so the one left here is a process that actually died: the
+    readers have to be right about it, which is what this pins.
+    """
+    from ciao import learnings_cleanup
+    from ciao.memory_receipts import content_revision
+
+    check = update_tasks.COMPLETION_FUNCTIONS[SHIPPED["completion_check"]]
+    config, vault = _settled_vault(tmp_path)
+    document = vault / "Workspace" / "Learnings.md"
+    before = document.read_bytes()
+    plan = learnings_cleanup.plan_cleanup(vault, workspace="personal", config=config)
+
+    def _die(target: Path, text: str, *, expect: str = "") -> None:
+        raise KeyboardInterrupt("the process died between the two writes")
+
+    monkeypatch.setattr(learnings_cleanup, "_write_locked", _die)
+    with pytest.raises(KeyboardInterrupt):
+        learnings_cleanup.apply_cleanup(
+            vault,
+            plan,
+            workspace="personal",
+            config=config,
+            actor="operator",
+            today=date(2026, 9, 30),
+            reviewed=True,
+            receipt_path=learnings_cleanup.new_receipt_path(
+                Path(config.state_path).parent
+            ),
+        )
+    # The receipt is there and it is attended. What makes it a review of nothing
+    # is the side that names the untouched file — the side a removal has to stop
+    # counting on as soon as its write has landed.
+    migration = Path(config.state_path).parent / "migration"
+    orphans = [
+        found
+        for found in (
+            learnings_cleanup.read_receipt(candidate)
+            for candidate in sorted(migration.glob("learnings-cleanup-*.json"))
+        )
+        if found is not None
+    ]
+    assert document.read_bytes() == before
+    assert len(orphans) == 1
+    assert orphans[0]["entries_removed"] == 1
+    assert orphans[0]["reviewed"] is True
+    assert orphans[0]["revision_before"] == content_revision(before.decode("utf-8"))
+    assert orphans[0]["revision_after"] != orphans[0]["revision_before"]
+
+    outcome = check(config=config, workspace="personal")
+
+    assert outcome.applicable is False
+    assert outcome.evidence["reason"] == "no_review_receipt"

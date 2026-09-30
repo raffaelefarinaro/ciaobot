@@ -32,20 +32,39 @@ from ciao.update_task_catalog import (
 )
 
 
+#: The shipped registries, captured before any fixture touches them. A test that
+#: reads the packaged catalog has to see these and not the fixture's additions,
+#: because "the shipped catalog loads cleanly" is precisely a claim about the
+#: names this engine really implements.
+SHIPPED_DETECTORS = update_task_catalog.DETECTORS
+SHIPPED_COMPLETION_CHECKS = update_task_catalog.COMPLETION_CHECKS
+
+
 @pytest.fixture(autouse=True)
 def registered_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """Register the detector/completion-check names the fixtures below use.
 
-    The shipped registries are empty because no task definition ships yet, so
-    a test that wants a sound row registers its names first. A registered name
-    with no implementation behind it is a `not_implemented` warning, which is
-    exactly the state this child ships in.
+    Added to what the engine ships rather than replacing it, so a row the
+    fixtures build validates against the same vocabulary the packaged catalog
+    does. The two tests that assert about the packaged catalog put the shipped
+    sets back themselves.
     """
     monkeypatch.setattr(
-        update_task_catalog, "DETECTORS", frozenset({"has-legacy-rows"})
+        update_task_catalog, "DETECTORS", SHIPPED_DETECTORS | {"has-legacy-rows"}
     )
     monkeypatch.setattr(
-        update_task_catalog, "COMPLETION_CHECKS", frozenset({"no-legacy-rows"})
+        update_task_catalog,
+        "COMPLETION_CHECKS",
+        SHIPPED_COMPLETION_CHECKS | {"no-legacy-rows"},
+    )
+
+
+@pytest.fixture
+def shipped_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo the autouse additions, leaving only what the engine implements."""
+    monkeypatch.setattr(update_task_catalog, "DETECTORS", SHIPPED_DETECTORS)
+    monkeypatch.setattr(
+        update_task_catalog, "COMPLETION_CHECKS", SHIPPED_COMPLETION_CHECKS
     )
 
 
@@ -113,7 +132,7 @@ def _keys(diagnostics: Sequence[Diagnostic]) -> set[tuple[str, int]]:
 
 # The first-task child (the legacy Learnings cleanup of #728) adds the first
 # real definition, so nothing here may assume the shipped catalog is empty.
-def test_loads_shipped_catalog_cleanly() -> None:
+def test_loads_shipped_catalog_cleanly(shipped_names: None) -> None:
     catalog = load_catalog()
 
     assert not catalog.diagnostics, (
@@ -127,6 +146,11 @@ def test_loads_shipped_catalog_cleanly() -> None:
         assert read_prompt(task).strip()
         assert parse_version(task.since_version) is not None
         assert task.scope in ("workspace", "install")
+        # Every name it may use has code behind it: the registries are the
+        # implementation registry, so a name missing from one is a row the
+        # engine cannot act on and `load_catalog` would have dropped it.
+        assert task.detector in SHIPPED_DETECTORS
+        assert task.completion_check in SHIPPED_COMPLETION_CHECKS
 
 
 def test_unknown_detector_and_check_are_diagnostics_not_crashes(tmp_path: Path) -> None:
@@ -150,15 +174,16 @@ def test_unknown_detector_and_check_are_diagnostics_not_crashes(tmp_path: Path) 
         ("review-legacy-rows", 1)
     }
 
-    # A registered name with no implementation yet is a warning, not a load
-    # failure: the definition stays and the caller is told it cannot be applied.
+    # A registered name loads with no diagnostic at all. The registries are the
+    # implementation registry — a name in one is a name `update_tasks` can act on
+    # — so there is no half-shipped state left to report: a row that names
+    # something unimplemented is an error and the row is dropped, which is a
+    # better outcome than a definition that loads and then never applies.
     registered = _pack(tmp_path / "registered", [_row()])
 
     assert _error_codes(registered) == set()
+    assert registered.diagnostics == ()
     assert [task.id for task in registered.tasks] == ["review-legacy-rows"]
-    unimplemented = [d for d in registered.diagnostics if d.code == "not_implemented"]
-    assert _keys(unimplemented) == {("review-legacy-rows", 1)}
-    assert {d.severity for d in unimplemented} == {"warning"}
 
 
 def test_duplicate_ids_and_revisions_rejected(tmp_path: Path) -> None:
@@ -409,7 +434,7 @@ def test_kept_task_cannot_depend_on_a_task_that_was_dropped(tmp_path: Path) -> N
 
 
 def test_read_prompt_works_from_packaged_resources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shipped_names: None
 ) -> None:
     # The default root is installed package data, resolved through
     # importlib.resources rather than relative to this file.
@@ -419,6 +444,15 @@ def test_read_prompt_works_from_packaged_resources(
     assert (packaged_root() / CATALOG_FILENAME).is_file()
     assert load_catalog().diagnostics == ()
 
+    # Back to the fixture's vocabulary for the rest, which drives a temp root.
+    monkeypatch.setattr(
+        update_task_catalog, "DETECTORS", SHIPPED_DETECTORS | {"has-legacy-rows"}
+    )
+    monkeypatch.setattr(
+        update_task_catalog,
+        "COMPLETION_CHECKS",
+        SHIPPED_COMPLETION_CHECKS | {"no-legacy-rows"},
+    )
     root = tmp_path / "packaged"
     _write_catalog(root, [_row()])
     _write_prompt(root, "prompts/review-legacy-rows-1.md", "Packaged prompt.\n")

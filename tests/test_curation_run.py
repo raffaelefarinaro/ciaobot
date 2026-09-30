@@ -21,6 +21,14 @@ import pytest
 
 from ciao import curation_run as cr
 from ciao import memory_receipts as mr
+from ciao import skill_proposals
+from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.learning_records import (
+    LearningRecord,
+    allocate_learning_id,
+    entry_revision,
+    render_learning,
+)
 
 
 MEMORY_START = "<!-- ciao:memory:start -->"
@@ -1445,3 +1453,442 @@ def test_the_memory_skill_routes_note_verification_through_the_operation() -> No
     # The specific failure mode this replaces.
     assert "never a direct edit" in skill
     assert "leaves no receipt" in skill
+
+
+# ── The Learnings cleanup pass (#728-E) ──────────────────────────────────────
+
+
+def _cleanup_config(tmp_path: Path, vault: Path) -> CiaoConfig:
+    """A registry naming exactly the vault being planned for.
+
+    The pass folds the skill-proposal queue, which is addressed through the
+    workspace registry, so the worklist needs one and the CLI builds exactly this.
+    """
+    name = vault.name
+    return CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=vault,
+        workspaces={name: WorkspaceConfig(name=name, vault_root=str(vault))},
+    )
+
+
+def _settled_learning(
+    text: str, key: str, *, count: int | None = None
+) -> LearningRecord:
+    """One canonical learning, identified by the legacy line it was minted from.
+
+    ``count`` is here so a record that the promote pass will also act on can be
+    filed *in that shape* from the start: an origin records the entry's own line
+    revision, so a line edited after filing stops matching — which is the
+    behaviour under test everywhere else and would be noise here.
+    """
+    return LearningRecord(
+        learning_id=allocate_learning_id("personal", f"- {text}"),
+        key=key,
+        text=text,
+        count=count,
+        first_seen=None if count is None else date(2026, 1, 1),
+        last_seen=None if count is None else date(2026, 9, 1),
+    )
+
+
+def _settled_vault(tmp_path: Path, *records: LearningRecord) -> Path:
+    """A vault whose learnings are all settled, each by its own proposal."""
+    vault = _vault(tmp_path)
+    body = "".join(f"{render_learning(record)}\n" for record in records)
+    (vault / cr.LEARNINGS_RELATIVE).write_text(
+        f"---\ntags: [ciao, learnings]\n---\n# Learnings\n\n## Active\n\n{body}",
+        encoding="utf-8",
+    )
+    config = _cleanup_config(tmp_path, vault)
+    # The queue is addressed through the registry, and the registry is the vault
+    # being planned for — so the workspace name here is the vault directory's own.
+    workspace = vault.name
+    for record in records:
+        proposal = skill_proposals.SkillProposal(
+            id=skill_proposals.proposal_id(workspace, record.key),
+            workspace=workspace,
+            skill=record.key,
+            canonical_path=f"/agent/skills/{record.key}/SKILL.md",
+            reviewed_revision="a" * 64,
+            title=f"Skill reflection: {record.key}",
+            problem="Repeated failures.",
+            change="Add the step.",
+            rationale="It holds.",
+            sources=(
+                skill_proposals.SkillEvidence(
+                    chat_id="s", archive="2026-08-09T10:00:00Z", turn="", excerpt="e"
+                ),
+            ),
+            lifecycle=skill_proposals.PENDING,
+            chat_id="",
+            updated_at="2026-08-09T10:00:00Z",
+            origins=(
+                skill_proposals.SkillOrigin(
+                    workspace=workspace,
+                    learning_id=record.learning_id,
+                    source_revision=entry_revision(record),
+                    finding="add the step",
+                    state=skill_proposals.ORIGIN_APPLIED,
+                    verification="mrcpt_0123456789abcdef",
+                ),
+            ),
+        )
+        mr.write_queue_atomically(
+            skill_proposals.proposal_path(config, workspace, record.key),
+            skill_proposals.render_proposal(proposal),
+        )
+    return vault
+
+
+def test_a_settled_learning_becomes_a_cleanup_key(tmp_path: Path) -> None:
+    """The pass reports what the reconciliation would retire, one key each.
+
+    It plans rather than removes: deciding is a fold over the queue, and the
+    decision is recorded before anything is spliced, so the worklist names the
+    work and ``ciao learnings-cleanup`` performs it."""
+    vault = _settled_vault(tmp_path, _settled_learning("First lesson.", "first"))
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    by_pass = {item.pass_id: item for item in worklist.items}
+    assert cr.PASS_LEARNINGS_CLEANUP in by_pass
+    assert by_pass[cr.PASS_LEARNINGS_CLEANUP].keys == (
+        cr.item_key(cr.PASS_LEARNINGS_CLEANUP, "retire:" + _settled_learning("First lesson.", "first").learning_id),
+    )
+    assert "1 settled and removable" in by_pass[cr.PASS_LEARNINGS_CLEANUP].reason
+    assert "1 active entr(y/ies)" in by_pass[cr.PASS_LEARNINGS_CLEANUP].reason
+
+
+def test_the_cleanup_pass_runs_after_the_learnings_pass(tmp_path: Path) -> None:
+    """The ordering is the whole design: cleanup only removes an entry whose
+    findings are durably settled, so a run that reaches it has already passed the
+    pass that proposes and decides. Earlier would let it judge a proposal the same
+    run has not looked at yet."""
+    assert cr.PASS_ORDER.index(cr.PASS_LEARNINGS_CLEANUP) == (
+        cr.PASS_ORDER.index(cr.PASS_LEARNINGS) + 1
+    )
+    # And ahead of the required weekly keys, so a settled backlog cannot spend the
+    # budget that lets `last_full_pass` advance.
+    assert cr.PASS_ORDER.index(cr.PASS_LEARNINGS_CLEANUP) < cr.PASS_ORDER.index(
+        cr.PASS_HYGIENE
+    )
+    # The record carries a count of 3, so the promote pass has work too and both
+    # passes are in the plan at once.
+    vault = _settled_vault(
+        tmp_path, _settled_learning("Recurring lesson.", "recurring", count=3)
+    )
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 1).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    order = [item.pass_id for item in worklist.items]
+    assert order.index(cr.PASS_LEARNINGS) < order.index(cr.PASS_LEARNINGS_CLEANUP)
+
+
+def test_an_unproposed_learning_consumes_no_key(tmp_path: Path) -> None:
+    """The parent's rule, kept verbatim: an entry nothing has ever asked about is
+    not local work, and the unattended pass must not act on it.
+
+    It is also the row a person needs to see, which is why the worklist *note*
+    reports it — so the count is visible and the budget is not spent on it."""
+    vault = _vault(tmp_path)
+    record = _settled_learning("Nobody has proposed this.", "orphan")
+    (vault / cr.LEARNINGS_RELATIVE).write_text(
+        f"---\ntags: [ciao, learnings]\n---\n# Learnings\n\n## Active\n\n{render_learning(record)}\n",
+        encoding="utf-8",
+    )
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert cr.PASS_LEARNINGS_CLEANUP not in {item.pass_id for item in worklist.items}
+    assert worklist.as_dict()["items"] == [
+        item for item in worklist.as_dict()["items"] if item["pass"] != cr.PASS_LEARNINGS_CLEANUP
+    ]
+
+
+def test_a_worklist_without_a_registry_says_the_pass_did_not_run(
+    tmp_path: Path,
+) -> None:
+    """A pass that silently found nothing must never look like a pass that found
+    nothing to do. Without a registry there is no queue to fold, and the note says
+    so rather than reporting a clean workspace."""
+    vault = _settled_vault(tmp_path, _settled_learning("First lesson.", "first"))
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert cr.PASS_LEARNINGS_CLEANUP not in {item.pass_id for item in worklist.items}
+    assert any("without a workspace registry" in note for note in worklist.notes)
+
+
+def test_the_cleanup_backlog_is_capped_and_reported(tmp_path: Path) -> None:
+    """A backlog allowed to drain at full speed would take the whole night's
+    budget on pass seven of nine, and the required weekly keys would never be
+    reached — so the marker cannot advance and the backlog is still there
+    tomorrow."""
+    records = [
+        _settled_learning(f"Lesson {index} is settled.", f"lesson-{index}")
+        for index in range(cr.LEARNINGS_CLEANUP_MAX_ITEMS + 3)
+    ]
+    vault = _settled_vault(tmp_path, *records)
+    guide = _guide(tmp_path)
+    # The weekly pass is due here, so the required keys are in the plan: the whole
+    # claim is that the cleanup backlog does not stop them being reached.
+    _fresh_log(vault, last_full_pass=date(2026, 9, 1).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    item = next(i for i in worklist.items if i.pass_id == cr.PASS_LEARNINGS_CLEANUP)
+    assert item.count == cr.LEARNINGS_CLEANUP_MAX_ITEMS
+    assert any("wait for the next" in note for note in worklist.notes)
+    # And the other passes are still planned, which is the point of the cap.
+    assert {i.pass_id for i in worklist.items} >= {cr.PASS_HYGIENE, cr.PASS_GUIDE}
+
+
+def test_a_maximal_cleanup_backlog_leaves_the_required_hygiene_keys_planned(
+    tmp_path: Path,
+) -> None:
+    """The two keys ``last_full_pass`` may not advance without, named rather than
+    implied.
+
+    A cleanup backlog three times the cap is the shape that starves a run: the
+    cleanup pass sits seventh of nine, the budget is a whole-run allowance, and
+    ``last_full_pass`` is what tells the next week the workspace was actually
+    cared for. So the claim is not "the other passes appear" — it is that *these*
+    two keys are still in a plan that has a cleanup backlog in it.
+    """
+    records = [
+        _settled_learning(f"Lesson {index} is settled.", f"lesson-{index}")
+        for index in range(cr.LEARNINGS_CLEANUP_MAX_ITEMS * 3)
+    ]
+    vault = _settled_vault(tmp_path, *records)
+    guide = _guide(tmp_path)
+    # The weekly pass is due, which is the only way these keys exist at all.
+    _fresh_log(vault, last_full_pass=date(2026, 9, 1).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    keys = {key for item in worklist.items for key in item.keys}
+
+    assert {i.pass_id for i in worklist.items if i.pass_id == cr.PASS_LEARNINGS_CLEANUP}
+    assert cr.REQUIRED_HYGIENE_KEYS <= keys
+    # And they are planned, not merely present: the cap means the cleanup pass's
+    # own tail is what gets deferred, never the checks the marker depends on.
+    plan = cr.plan_run(worklist, cr.RunBudget())
+    assert cr.REQUIRED_HYGIENE_KEYS <= {key for item in plan.planned for key in item.keys}
+
+
+def test_the_cleanup_item_names_the_mode_that_performs_it(tmp_path: Path) -> None:
+    """A worklist that made the agent look up which flag retires a settled entry
+    is a worklist whose eligible rows stay eligible forever.
+
+    The pass plans and the command carries out the plan, so the command is in the
+    row the agent is reading — and the row says which rows are *not* its business,
+    because the attended rows still need a person and an approval file.
+    """
+    vault = _settled_vault(tmp_path, _settled_learning("First lesson.", "first"))
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    item = next(i for i in worklist.items if i.pass_id == cr.PASS_LEARNINGS_CLEANUP)
+    assert "ciao learnings-cleanup --apply-settled" in item.reason
+    assert "no approval file" in item.reason
+
+
+def test_the_pass_finds_nothing_after_the_unattended_mode_has_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """"A second run is a no-op", stated at the level the pass reads from.
+
+    ``test_a_settled_entry_already_removed_is_not_planned_again`` calls the apply
+    directly. This one goes through the mode the worklist names, with the mode's
+    own cap, so the pass's claim and the command it points at are pinned against
+    each other rather than against a hand-assembled call — and the pass stops
+    offering the work, which is the property the budget depends on.
+    """
+    from ciao import cli
+    from ciao import learnings_cleanup
+
+    records = [
+        _settled_learning(f"Lesson {index} is settled.", f"lesson-{index}")
+        for index in range(cr.LEARNINGS_CLEANUP_MAX_ITEMS)
+    ]
+    vault = _settled_vault(tmp_path, *records)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    config = _cleanup_config(tmp_path, vault)
+    mode = [
+        "learnings-cleanup",
+        "--apply-settled",
+        "--vault-root",
+        str(vault),
+        "--workspace",
+        vault.name,
+        "--runtime-root",
+        str(tmp_path / ".runtime"),
+    ]
+    assert cli.main(mode) == 0
+    assert f"Removed {cr.LEARNINGS_CLEANUP_MAX_ITEMS} entr(y/ies)." in capsys.readouterr().out
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=_guide(tmp_path),
+        category_registry=_categories(vault),
+        config=config,
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    after = learnings_cleanup.plan_cleanup(vault, workspace=vault.name, config=config)
+
+    assert after.removals == ()
+    assert cr.PASS_LEARNINGS_CLEANUP not in {i.pass_id for i in worklist.items}
+    assert all(
+        record.key not in (vault / cr.LEARNINGS_RELATIVE).read_text(encoding="utf-8")
+        for record in records
+    )
+    # And the mode itself, run again, retires nothing rather than re-reading the
+    # file and finding a reason to.
+    capsys.readouterr()
+    assert cli.main(mode) == 0
+    assert "Nothing to remove." in capsys.readouterr().out
+
+
+def test_the_cleanup_pass_does_not_starve_a_short_budget(tmp_path: Path) -> None:
+    """Splitting within a pass is what lets a queue of proposals drain every night
+    instead of being deferred whole forever. The cleanup keys are ordinary keys
+    here: they are planned in :data:`PASS_ORDER` and truncated like any others,
+    and the rest are deferred rather than dropped."""
+    records = [
+        _settled_learning(f"Lesson {index} is settled.", f"lesson-{index}")
+        for index in range(6)
+    ]
+    vault = _settled_vault(tmp_path, *records)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    plan = cr.plan_run(worklist, cr.RunBudget(max_items=1))
+
+    assert plan.planned_count == 1
+    assert plan.deferred_count == worklist.total_keys - 1
+    assert any(item.pass_id == cr.PASS_LEARNINGS_CLEANUP for item in plan.deferred)
+
+
+def test_a_settled_entry_already_removed_is_not_planned_again(tmp_path: Path) -> None:
+    """The suppression is what makes the pass idempotent: the entry is gone, and
+    the one an undo put back is recorded, so tonight's plan does not remove it a
+    second time. A new revision is what makes it eligible again."""
+    from ciao import learnings_cleanup
+
+    record = _settled_learning("First lesson.", "first")
+    vault = _settled_vault(tmp_path, record)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    config = _cleanup_config(tmp_path, vault)
+    plan = learnings_cleanup.plan_cleanup(vault, workspace=vault.name, config=config)
+    assert len(plan.removals) == 1
+    learnings_cleanup.apply_cleanup(
+        vault, plan, workspace=vault.name, config=config, today=date(2026, 9, 19)
+    )
+
+    after = learnings_cleanup.plan_cleanup(vault, workspace=vault.name, config=config)
+
+    assert after.removals == ()
+    # And the document no longer has the entry at all, which is the other half.
+    assert record.key not in (vault / cr.LEARNINGS_RELATIVE).read_text(encoding="utf-8")
+
+
+def test_an_unreadable_line_is_reported_in_the_notes(tmp_path: Path) -> None:
+    """Unresolved parsing issues are part of the output the plan owes the operator,
+    and a line nobody can read is not something the pass should quietly skip."""
+    record = _settled_learning("First lesson.", "first")
+    vault = _settled_vault(tmp_path, record)
+    body = (vault / cr.LEARNINGS_RELATIVE).read_text(encoding="utf-8")
+    (vault / cr.LEARNINGS_RELATIVE).write_text(
+        body.replace(
+            render_learning(record),
+            render_learning(record) + "\n- [broken] [2024-13-45 → nope] (x0) Bad.\n",
+        ),
+        encoding="utf-8",
+    )
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert any("could not be read" in note for note in worklist.notes)
+    assert any("parsing issue" in note for note in worklist.notes)
+    # And the readable entry is still planned: one broken line is not a reason to
+    # stop reconciling the rest.
+    assert cr.PASS_LEARNINGS_CLEANUP in {item.pass_id for item in worklist.items}

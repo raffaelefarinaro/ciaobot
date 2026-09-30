@@ -19,12 +19,17 @@ It is deliberately inert
   catalog must not crash a Home render or a startup path, and it must never be
   reported as "the tasks are done".
 * Names, not callables. ``DETECTORS`` and ``COMPLETION_CHECKS`` are the
-  allowed vocabulary, and a task row only ever names one. A registered name
-  with no implementation yet is a ``not_implemented`` warning rather than a
-  load failure, so a catalog and its prompts can ship before the code that acts
-  on them. Both registries are empty: no task definition ships with this
-  module, and inventing names for tasks nobody has written would be a
-  placeholder.
+  allowed vocabulary **and** the implementation registry: a name in one of them
+  is a name ``ciao.update_tasks`` has code for, and a task row may only name one
+  of those. A name with no code is an ``unknown_detector`` /
+  ``unknown_completion_check`` error, and the row is dropped — which is the right
+  answer now that the registries are not empty, because the provisional case they
+  were shaped for (a catalog and its prompts shipping ahead of the code that acts
+  on them) is over. The first task to ship here, ``learnings-cleanup`` (#728-E),
+  is implemented in the same change: a task that cannot be applied is a row
+  offering the operator follow-up work this engine has no way to do, and the
+  runtime already answers that case honestly as ``unknown`` with a
+  ``detector_not_implemented`` reason.
 
 What it does not do
 -------------------
@@ -91,15 +96,17 @@ TASK_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-#: Registered detector names. A task row names one; the implementation is what
-#: a later child adds, so a name registered here without one is a
-#: ``not_implemented`` warning rather than a load failure.
-DETECTORS: frozenset[str] = frozenset()
+#: The detector names this engine implements. A task row may only name one of
+#: these, and every name here has a function behind it in
+#: :data:`ciao.update_tasks.DETECTOR_FUNCTIONS` — see the module docstring for why
+#: "registered but not yet written" is not a state this catalog has.
+DETECTORS: frozenset[str] = frozenset({"learnings-cleanup-review-needed"})
 
-#: Registered completion-check names, same contract as ``DETECTORS``. Opening a
-#: chat is not completion: a check is a registered postcondition, evaluated
-#: apart from any chat the operator starts.
-COMPLETION_CHECKS: frozenset[str] = frozenset()
+#: The completion checks this engine implements, same contract as ``DETECTORS``.
+#: Opening a chat is not completion: a check is a registered postcondition,
+#: evaluated apart from any chat the operator starts, and the names here are the
+#: postconditions that engine can actually evaluate.
+COMPLETION_CHECKS: frozenset[str] = frozenset({"learnings-cleanup-review-recorded"})
 
 #: The documented spelling of a version. A leading ``v`` is tolerated;
 #: prerelease/dev suffixes and build metadata are tolerated, and a suffix may
@@ -358,17 +365,6 @@ def validate_catalog(
                         f"{_label(task)}: {kind} {name!r} is not registered in this module",
                         task_id=task.id,
                         revision=task.revision,
-                    )
-                )
-            else:
-                out.append(
-                    _diag(
-                        "not_implemented",
-                        f"{_label(task)}: {kind} {name!r} is registered but has no "
-                        "implementation yet, so this task cannot be applied yet",
-                        task_id=task.id,
-                        revision=task.revision,
-                        severity=_WARNING,
                     )
                 )
 

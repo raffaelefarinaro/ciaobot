@@ -15,7 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -1928,6 +1928,497 @@ def _learnings_migration_status(summary: dict[str, Any]) -> int:
     return 0
 
 
+# ── learnings-cleanup ───────────────────────────────────────────────────────
+
+#: The width of the two text columns that are allowed to be truncated. The key
+#: and the reason are what a reviewer reads across a row; the statement is what
+#: they read *below* it, in full, so it is never cut.
+_CLEANUP_KEY_WIDTH = 22
+_CLEANUP_REASON_WIDTH = 34
+
+
+def _shorten(value: str, width: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "…"
+
+
+def _print_cleanup_table(
+    plan: Any, *, stale: list[str], applied: bool
+) -> None:
+    """The whole Active list, one row per entry, with the decision beside it.
+
+    Every row, not just the removable ones. The rows this command refuses to act
+    on are the ones an operator most needs to see: an entry nothing has ever
+    asked about, an entry whose finding is still open, an entry this code cannot
+    read at all. A table of only the candidates would answer all of those by
+    omission, and "it isn't in the list" is not an answer a person can act on.
+    """
+    from ciao.learnings_cleanup import CONFLICT
+
+    counts = plan.counts
+    print(
+        f"{plan.active} Active entr(y/ies) in {plan.path} for workspace "
+        f"{plan.workspace}:"
+    )
+    if plan.blocked:
+        print(f"  nothing may be removed: {plan.blocked}")
+        return
+    header = (
+        f"  {'KEY':<{_CLEANUP_KEY_WIDTH}}  {'ID':<12}  {'STATE':<8}  "
+        f"{'REASON':<{_CLEANUP_REASON_WIDTH}}  EVIDENCE"
+    )
+    print(header)
+    for row in plan.rows:
+        state = "REMOVE" if row.action == "remove" else row.action.upper()
+        if row.action == "keep" and row.detail.startswith("eligible;"):
+            # Eligible, but not this run's — capped, or settled and not approved.
+            # Still real work, and printing it as `REMOVE` in a table whose apply
+            # left it in place would be a lie.
+            state = "LATER"
+        if row.action == CONFLICT:
+            # A conflict's detail is the parser's whole diagnostic, which is far
+            # too long for a column a reviewer scans across; it goes to stderr
+            # underneath in full, and the column says the one thing that matters.
+            reason = "this code cannot read it; kept as written"
+        else:
+            reason = row.detail or row.reason
+        print(
+            f"  {_shorten(row.key or '(no identity)', _CLEANUP_KEY_WIDTH):<{_CLEANUP_KEY_WIDTH}}  "
+            f"{_shorten(row.learning_id or '-', 12):<12}  {state:<8}  "
+            f"{_shorten(reason, _CLEANUP_REASON_WIDTH):<{_CLEANUP_REASON_WIDTH}}  "
+            f"{_shorten(row.evidence or row.destination, 60)}"
+        )
+        print(f"      {_shorten(row.line, 100)}")
+        if row.learning_id:
+            # The two values an approval names, in full and unabbreviated. An
+            # approval is bound to the exact bytes it was reviewed at, so a
+            # truncated id or a truncated revision would be an approval of nothing —
+            # which is why the scan-friendly columns above are abbreviated and this
+            # line is not.
+            print(f"      id {row.learning_id}")
+            print(f"      rev {row.entry_revision}")
+    print(
+        f"\n{counts['remove']} removable, {counts['keep']} kept, "
+        f"{counts['conflict']} unreadable, {counts['routes']} routed upstream "
+        f"(waiting on another maintainer), {counts['unmatched']} not linked to "
+        "anything yet."
+    )
+    if plan.over_cap:
+        print(
+            "More are settled than one run retires; the rest wait for the next "
+            "one."
+        )
+    spoken = " ".join(row.detail for row in plan.conflicts)
+    for row in plan.conflicts:
+        # The whole diagnostic, not the truncated reason column: this is the line a
+        # person has to go and look at, and the table's width is not enough to say
+        # why.
+        print(f"  kept as written: {row.line.strip()}", file=sys.stderr)
+        for problem in row.detail.split("; "):
+            print(f"    {problem}", file=sys.stderr)
+    for problem in plan.diagnostics:
+        # An Active problem is already spoken for by its conflict row; this loop is
+        # for the rest (a Promoted entry, say), so the two cannot print the same
+        # sentence twice.
+        if problem not in spoken:
+            print(f"  kept as written: {problem}", file=sys.stderr)
+    for note in stale:
+        print(f"  approval not used: {note}", file=sys.stderr)
+    if applied:
+        return
+    if counts["remove"]:
+        print(
+            "\nNothing was written. Copy the ID and entry revision of each row "
+            "you want retired into an approval file, then re-run with --apply."
+        )
+    else:
+        print("\nNothing to remove.")
+
+
+def _read_approval_file(path: Path) -> dict[str, dict[str, Any]]:
+    """The approved rows, keyed by ``learning_id``.
+
+    A JSON list of objects, each naming a ``learning_id``, the ``entry_revision``
+    it was reviewed at, and a ``reason`` and ``evidence``. Both words are
+    required: a removal decided by a tool rather than by a person is exactly the
+    thing the attended workflow exists to replace, and an approval file with an
+    empty reason is a removal nobody owned.
+
+    Returned whole or not at all. A partially-read approval file is an approval
+    of a subset nobody chose, so the file is refused rather than trimmed.
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot read the approval file: {exc}") from exc
+    if not isinstance(data, list):
+        raise ValueError("the approval file must hold a list of approved rows")
+    approved: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ValueError(f"approval {index} must be an object")
+        learning_id = str(item.get("learning_id") or "").strip()
+        revision = str(item.get("entry_revision") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        evidence = str(item.get("evidence") or "").strip()
+        missing = [
+            name
+            for name, value in (
+                ("learning_id", learning_id),
+                ("entry_revision", revision),
+                ("reason", reason),
+                ("evidence", evidence),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"approval {index} needs a non-empty "
+                + ", ".join(f'"{name}"' for name in missing)
+            )
+        if learning_id in approved:
+            raise ValueError(f"approval {index} names {learning_id} twice")
+        approved[learning_id] = {
+            "learning_id": learning_id,
+            "entry_revision": revision,
+            "reason": reason,
+            "evidence": evidence,
+            "reapprove": bool(item.get("reapprove")),
+        }
+    return approved
+
+
+def _apply_approvals(
+    plan: Any, approved: dict[str, dict[str, Any]]
+) -> tuple[list[Any], list[str]]:
+    """Narrow a plan to the approved rows, and say what was left out.
+
+    An approval is bound to the exact bytes it was reviewed against, so one that
+    no longer matches is not honoured — the entry moved, the settlement changed,
+    or the review was of a different document. That is the "stale decision"
+    case, and the answer is to re-run the dry run and approve again rather than
+    to apply the closest thing: the operator's judgement was about specific
+    text, and text that has since changed is not that text.
+
+    Both halves come back together because they are one answer: a row that is
+    not in the approved set has to say *why*, or a reviewer who approved three of
+    four rows cannot tell which one they forgot.
+    """
+    allowed: list[Any] = []
+    stale: list[str] = []
+    matched: set[str] = set()
+    for row in plan.rows:
+        approval = approved.get(row.learning_id)
+        if approval is None or not row.learning_id:
+            continue
+        matched.add(row.learning_id)
+        if approval["entry_revision"] != row.entry_revision:
+            stale.append(
+                f"{row.key or row.learning_id}: approved at revision "
+                f"{approval['entry_revision'][:12]}…, this entry is now "
+                f"{row.entry_revision[:12]}…"
+            )
+            continue
+        if not row.removable and not approval["reapprove"]:
+            stale.append(
+                f"{row.key or row.learning_id}: kept for {row.reason}, and an "
+                "approval to retire a kept entry has to say reapprove"
+            )
+            continue
+        allowed.append(row)
+    for learning_id in approved:
+        if learning_id not in matched:
+            stale.append(
+                f"{learning_id[:12]}…: no Active entry in this document has that "
+                "learning id any more"
+            )
+    return allowed, stale
+
+
+def _learnings_cleanup_command(args: argparse.Namespace) -> int:
+    """Retire settled ``Workspace/Learnings.md`` entries, one reviewed row at a time.
+
+    Dry-run by default, like ``learnings-migrate`` and for the same reason: this
+    removes lines the user wrote. The dry run is the same computation the apply
+    performs, and it lists **every** Active entry with the decision beside it, so
+    the thing being removed is a decision somebody saw rather than a diff they
+    were told about.
+
+    ``--apply`` refuses without ``--approval-file``. That is the whole attended
+    contract: a cleanup that runs because a flag was passed has had its judgement
+    from a flag, and the rows that matter — a legacy entry nothing has ever
+    proposed, an entry a person decided was obsolete — are exactly the rows a
+    flag cannot judge. The file names the entry, the exact revision it was
+    reviewed at, a reason and the evidence for it, and the receipt keeps all four
+    so the decision outlives the run.
+
+    ``--apply-settled`` is the other half, and it is the one the nightly pass
+    names. It removes only the rows the reconciliation *already* proposed —
+    ``actor="system"``, no approval file, no ``reapprove``, and the same
+    :data:`~ciao.curation_run.LEARNINGS_CLEANUP_MAX_ITEMS` cap the worklist
+    budget gives the pass — so what it can remove is exactly what a fold over the
+    proposal queue and the draft sidecar already answered, which is settlement
+    rather than judgement. It is a separate flag rather than a form of
+    ``--apply`` because it is a different decision: every row it removes is
+    reversible from a receipt, and none of them carries anybody's reason, so it
+    never produces the reviewed no-op receipt and never lifts a suppression.
+
+    ``--revert`` restores the removed bytes from a receipt. It does not lift the
+    suppression, so the next nightly pass does not undo the undo; the entry
+    becomes eligible again when it is edited, or when somebody approves it with
+    ``reapprove``.
+
+    The receipt is written by the apply, before the document, so a run whose
+    receipt could not be persisted removes nothing at all rather than printing
+    that the removals landed without a way back.
+
+    The exit code reports what a person has to look at rather than only what
+    failed: an unreadable line, an approval that was not used, or a removal that
+    was refused all exit 1, because in each case something is still outstanding
+    and a script told "0" would stop looking.
+    """
+    from ciao.curation_run import LEARNINGS_CLEANUP_MAX_ITEMS
+    from ciao.learnings_cleanup import (
+        KEEP,
+        apply_cleanup,
+        new_receipt_path,
+        plan_cleanup,
+        read_receipt,
+        unmigrate_cleanup,
+    )
+
+    vault_root = _resolve_vault_root(args.vault_root)
+    if not vault_root.is_dir():
+        print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
+        return 1
+    workspace = args.workspace or vault_root.name
+    config = _curation_config(vault_root.parent, vault_root)
+
+    # The three write flags are three different decisions, and a run may make one.
+    # Refused up here, before any of them does any work, because the point of
+    # refusing is that nothing happened — not that something happened and was then
+    # undone. (``--revert --apply`` is not a conflict: that pair is how an undo is
+    # written at all, and `--apply` is what tells it to write.)
+    if args.revert and args.apply_settled:
+        print(
+            "--revert restores a previous run from its receipt; it takes no "
+            "--apply-settled, and the two say opposite things about a removed "
+            "entry.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.apply_settled and args.approval_file:
+        print(
+            "--apply-settled retires the rows the reconciliation already proposed "
+            "and reads no approval file, so the two cannot be combined. Use "
+            "--apply --approval-file for the attended rows.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.apply_settled and args.apply:
+        print(
+            "--apply and --apply-settled are two different decisions in one run; "
+            "pick the one this run is making.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.revert:
+        receipt = read_receipt(Path(args.revert))
+        if receipt is None:
+            print(
+                f"Not a readable learnings-cleanup receipt: `{args.revert}`",
+                file=sys.stderr,
+            )
+            return 1
+        recorded = str(receipt.get("vault_root") or "")
+        if recorded and recorded != str(vault_root):
+            print(
+                f"Receipt records a cleanup of `{recorded}`, not `{vault_root}`. "
+                f"Re-run with `--vault-root {recorded}`.",
+                file=sys.stderr,
+            )
+            return 1
+        summary = unmigrate_cleanup(vault_root, receipt, apply=args.apply)
+        if args.json:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return 1 if summary.get("failed") else 0
+        _print_cleanup_revert(summary, apply=args.apply)
+        return 1 if summary.get("failed") else 0
+
+    approved: dict[str, dict[str, Any]] = {}
+    if args.approval_file:
+        try:
+            approved = _read_approval_file(Path(args.approval_file))
+        except ValueError as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 1
+    if args.apply and args.approval_file is None:
+        # The file's *presence* is the approval, not its contents: an empty list is
+        # a person saying "I read the whole table and nothing should go", which is
+        # a decision, and a decision that deserves a receipt.
+        print(
+            "--apply needs --approval-file. Run without it to see the table, "
+            "then approve the rows you want retired with their entry revision, "
+            "a reason and the evidence for it. An empty list records that you "
+            "reviewed the table and nothing should be removed. To retire only the "
+            "rows the reconciliation already proposed, unattended, use "
+            "--apply-settled instead.",
+            file=sys.stderr,
+        )
+        return 1
+
+    plan = plan_cleanup(
+        vault_root,
+        workspace=workspace,
+        config=config,
+        # The unattended mode is the nightly pass, and the pass is capped at the
+        # same number of removals. Capped on the *plan* as well as on the apply, so
+        # the table cannot print `REMOVE` beside a row this run will not remove —
+        # the capped rows become `LATER` here, and the run says a backlog exists.
+        max_removals=LEARNINGS_CLEANUP_MAX_ITEMS if args.apply_settled else None,
+    )
+    stale: list[str] = []
+    if args.approval_file:
+        allowed, stale = _apply_approvals(plan, approved)
+        permitted = {row.learning_id for row in allowed}
+        # An approval with ``reapprove`` on a row the planner kept makes it a
+        # candidate: the planner had no evidence for it, and a person with a reason
+        # and the evidence for it is exactly how an obsolete classification gets
+        # retired. The row keeps its span, so the splice and the receipt are the
+        # same shape as any other removal.
+        selected = list(allowed)
+        extra = {row.learning_id for row in allowed if row.action == KEEP}
+        deferred: list[Any] = []
+        for row in plan.removals:
+            if row.learning_id in permitted:
+                continue
+            # Settled and removable, but not approved. That is a decision the
+            # reviewer made, not an outstanding question, so it is neither a stale
+            # approval nor an error — but it must not print as `REMOVE` in a table
+            # whose apply left it in place.
+            deferred.append(
+                replace(
+                    row,
+                    action=KEEP,
+                    reason="pending",
+                    detail="eligible; not approved in this run",
+                )
+            )
+        plan = replace(
+            plan,
+            removals=tuple(selected),
+            kept=tuple(row for row in plan.kept if row.learning_id not in extra)
+            + tuple(deferred),
+        )
+
+    if not args.apply and not args.apply_settled:
+        # The dry run stops here. Not "apply and then describe it": a preview that
+        # has already written is not a preview, and the promise the command makes
+        # is that this computation is the same one the apply performs — not that
+        # it is performed.
+        if args.json:
+            print(json.dumps({"plan": plan.as_dict(), "result": None}, indent=2, sort_keys=True))
+            return 1 if stale or plan.diagnostics or plan.conflicts else 0
+        _print_cleanup_table(plan, stale=stale, applied=False)
+        return _cleanup_status(None, stale, plan)
+
+    # The receipt path is allocated here and handed to the apply, which writes it
+    # *before* the document. A run that cannot record the reverse map removes
+    # nothing, which is the whole point of having this be one call rather than a
+    # write the command does afterwards.
+    receipt_path = new_receipt_path(_resolve_runtime_root(args.runtime_root))
+    result = apply_cleanup(
+        vault_root,
+        plan,
+        workspace=workspace,
+        config=config,
+        actor="system" if args.apply_settled else "operator",
+        reapprove=not args.apply_settled,
+        approvals=approved,
+        # An approval file *was* supplied, even an empty one: that is a person
+        # saying they read the table, and the receipt is the only durable record
+        # of it. ``--apply-settled`` supplies none, and gets no such receipt.
+        reviewed=not args.apply_settled and args.approval_file is not None,
+        max_removals=LEARNINGS_CLEANUP_MAX_ITEMS if args.apply_settled else None,
+        receipt_path=receipt_path,
+    )
+    if args.json:
+        print(
+            json.dumps(
+                {"plan": plan.as_dict(), "result": result.as_dict()},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return _cleanup_status(result, stale, plan)
+
+    _print_cleanup_table(plan, stale=stale, applied=result.applied)
+    if result.applied:
+        print(f"\nRemoved {result.removed_count} entr(y/ies).")
+        if result.receipt_path:
+            print(f"Receipt: {result.receipt_path}")
+            print(
+                "Reverse it exactly with `ciao learnings-cleanup --revert "
+                f"{result.receipt_path} --apply`."
+            )
+    elif result.receipt is not None:
+        print("\nNothing was removed; the review itself is recorded.")
+        if result.receipt_path:
+            print(f"Receipt: {result.receipt_path}")
+    for note in result.conflicts:
+        print(f"  not removed: {note}", file=sys.stderr)
+    for failure in result.failed:
+        print(f"  failed: {failure}", file=sys.stderr)
+    if result.skipped:
+        print(f"Nothing was written: {result.skipped}")
+    return _cleanup_status(result, stale, plan)
+
+
+def _cleanup_status(result: Any, stale: list[str], plan: Any) -> int:
+    """1 while anything about this document still needs a person.
+
+    ``result`` is ``None`` for a dry run, which is the same question asked before
+    anything happened: a kept row is a question answered, an unreadable line and an
+    unused approval are not.
+    """
+    if plan.diagnostics or plan.conflicts or stale or plan.blocked:
+        return 1
+    if result is not None and (result.failed or result.conflicts):
+        return 1
+    return 0
+
+
+def _print_cleanup_revert(summary: dict[str, Any], *, apply: bool) -> None:
+    """What an undo did, or would do.
+
+    A failure is printed first whatever else came of it. An undo that restored the
+    file and could not record the restored line as removed has left the next pass
+    free to take it straight out again, and that is the one thing about the run
+    the operator has to read — so it is not swallowed by the success message.
+    """
+    for item in summary.get("failed") or []:
+        print(f"  {item.get('path')}: {item.get('error')}", file=sys.stderr)
+    if summary.get("entries_reverted"):
+        verb = "Restored" if apply else "Would restore"
+        print(f"{verb} {summary['entries_reverted']} learning entr(y/ies).")
+        for item in summary.get("suppressions_kept") or []:
+            print(
+                f"  still recorded as removed: {item['learning_id'][:12]}… — the "
+                "nightly pass will not remove it again until it changes or is "
+                "reapproved"
+            )
+        if not apply:
+            print("\nRe-run with --apply to write these changes.")
+        return
+    if summary.get("skipped"):
+        print(f"Nothing to restore: {summary['skipped']}.")
+    else:
+        print("Nothing to restore.")
+
+
 def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
     """Restore the wikilinks recorded in the migration receipt.
 
@@ -3490,6 +3981,30 @@ def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any, 
     return workspace, vault, guide, budget, registry_root
 
 
+def _curation_config(workspace: Path, vault: Path) -> Any:
+    """A one-workspace registry that resolves exactly the vault being planned.
+
+    The skill-proposal queue and the upstream draft sidecar are addressed through
+    ``config.workspace_vault_root(workspace)``, and the skills-cleanup fold needs
+    both — so the registry has to name *this* vault, not the install-wide one the
+    server would have loaded. The vault directory's own name is the workspace
+    name, which is the same identity ``_learning_items`` already parses with, so
+    the cleanup pass and the promote/prune pass cannot disagree about which
+    learning an id belongs to.
+    """
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    name = vault.name
+    return CiaoConfig(
+        pwa_auth_token="curation",
+        workspace_root=workspace,
+        state_path=workspace / ".runtime" / "state.json",
+        media_root=workspace / ".runtime" / "media",
+        vault_root=vault,
+        workspaces={name: WorkspaceConfig(name=name, vault_root=str(vault))},
+    )
+
+
 def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     from ciao.curation_run import build_worklist, load_state, plan_run
     from ciao.entity_types import load_entity_types
@@ -3503,6 +4018,10 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         workspace_dir=workspace,
         done_keys=frozenset(state.done_keys),
         category_registry=load_entity_types(registry_root),
+        # The one pass that folds the proposal queue needs the registry; every
+        # other pass reads files, and saying so is cheaper than making the whole
+        # planner conditional.
+        config=_curation_config(workspace, vault),
         # Named where `scan_vault` renders it rather than restated here: a
         # drifted prefix makes every mtime `stat` miss silently, which reads as
         # "no note is stale" rather than as an error.
@@ -5533,6 +6052,99 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the raw summary as JSON.",
     )
     learnings_parser.set_defaults(func=_learnings_migrate_command)
+
+    cleanup_parser = subparsers.add_parser(
+        "learnings-cleanup",
+        help="Retire Learnings.md entries whose findings are durably settled.",
+        description=(
+            "Reconciles one workspace's Workspace/Learnings.md against the "
+            "skill-proposal queue and the upstream draft sidecar, and lists "
+            "every Active entry with the decision beside it: settled and "
+            "removable, kept and why, or unreadable and untouched. Entries whose "
+            "findings are pending, implementing, never proposed, held back by an "
+            "unattributable finding, or routed only to an upstream issue are "
+            "never removed. The write is lock-serialized, revision-checked, and "
+            "reversible from a receipt under .runtime/migration/; every other "
+            "byte of the file, the `## Promoted / Resolved` section, the format "
+            "notes, the BOM and CRLF endings included, is preserved except the "
+            "frontmatter's `updated:`. Dry-run unless --apply or --apply-settled "
+            "is passed; --apply refuses without --approval-file, and "
+            "--apply-settled retires only the rows the reconciliation already "
+            "proposed."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+    )
+    cleanup_parser.add_argument(
+        "--workspace",
+        default=None,
+        help=(
+            "Workspace name whose queue is folded. Defaults to the vault "
+            "directory's own name, which is the identity its learning ids were "
+            "minted under."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Runtime root holding the cleanup receipt. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--approval-file",
+        type=Path,
+        default=None,
+        help=(
+            "JSON list of approved rows: a learning_id, the entry_revision it "
+            "was reviewed at, a reason and the evidence for retiring it. "
+            "Required by --apply; an approval naming a revision the entry no "
+            "longer has is not honoured."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Write the removals named in --approval-file. Without both flags "
+            "nothing is written."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--apply-settled",
+        action="store_true",
+        help=(
+            "Retire only the entries the reconciliation already proposed, "
+            "unattended and without an approval file: no reapproval, no judgement "
+            "of a kept row, and no more removals than "
+            "LEARNINGS_CLEANUP_MAX_ITEMS. This is what the nightly cleanup pass "
+            "names; everything that needs a person is still --apply "
+            "--approval-file. Cannot be combined with --apply or "
+            "--approval-file."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--revert",
+        type=Path,
+        default=None,
+        help=(
+            "Restore a previous run's removals from its receipt instead of "
+            "reconciling. The bytes come back exactly, and the suppression stays "
+            "recorded so the nightly pass does not remove them again."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the plan and the result as JSON.",
+    )
+    cleanup_parser.set_defaults(func=_learnings_cleanup_command)
 
     os_audit_parser = subparsers.add_parser(
         "os-audit",

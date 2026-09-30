@@ -496,6 +496,144 @@ the writer witnessed that sighting: it files the entry at today's date and `(x1)
 with no citation, and every source it is given from then on counts on top of that.
 The migration is what gives the read lines an identity to accumulate evidence against.
 
+### Learnings cleanup
+
+A learning is retired when every finding filed against it has been verified into
+a skill or rejected by a person — not when it ages out, and not when a proposal
+is accepted. `ciao/learnings_cleanup.py` is the reconciliation that acts on that
+answer, and `ciao learnings-cleanup` is the attended version of it.
+
+The unattended half is `PASS_LEARNINGS_CLEANUP` in the nightly worklist. It runs
+immediately after `PASS_LEARNINGS`, because cleanup only ever removes an entry
+whose findings are durably settled and a run that reaches it has therefore
+already passed the pass that proposes and decides. It holds no second scheduler
+and takes its keys from the same whole-run budget as everything else, capped at
+`LEARNINGS_CLEANUP_MAX_ITEMS` so a backlog cannot spend the budget the required
+weekly keys need. It plans, and the worklist row names the command that performs
+the plan: `ciao learnings-cleanup --apply-settled`, which retires only the rows
+the reconciliation itself proposed, never reapproves one, and is capped at the
+same number. A worklist whose eligible rows can only be acted on with a person
+holding an approval file is a worklist whose eligible rows never are.
+
+```bash
+# The table: every Active entry, with the decision and the evidence beside it.
+ciao learnings-cleanup --vault-root memory-vault/personal
+
+# Unattended: the settled entries, and only those. No approval file, no
+# reapproval, no more than LEARNINGS_CLEANUP_MAX_ITEMS. This is what the nightly
+# worklist item points at.
+ciao learnings-cleanup --vault-root memory-vault/personal --apply-settled
+
+# Retiring approved rows. The approval file names each learning_id, the exact
+# entry_revision it was reviewed at, a reason and the evidence for it.
+ciao learnings-cleanup --vault-root memory-vault/personal \
+  --apply --approval-file approved.json
+
+# A review that removes nothing is still a review, and says so:
+ciao learnings-cleanup --vault-root memory-vault/personal \
+  --apply --approval-file empty.json
+
+# Undo, exactly, from the receipt the run wrote.
+ciao learnings-cleanup --vault-root memory-vault/personal \
+  --revert .runtime/migration/learnings-cleanup-20260930-061804.json --apply
+```
+
+`--vault-root` is this *workspace's* vault root, exactly as it is for
+`learnings-migrate`, and the workspace name defaults to that directory's own
+name — which is the identity its learning ids were minted under.
+
+**Per-entry revision.** What "unchanged since this finding was filed" means is
+*this line has not been touched*, and it is hashed as such:
+`learning_records.entry_revision` is `content_revision(render_learning(record))`,
+the canonical line with its comment. It is not the whole file's revision, which
+is what 728-C recorded: any unrelated edit to the document — a new lesson filed
+below this one, the cleanup pass splicing out an unrelated line, a neighbour
+reworded — cancelled eligibility for every learning at once and made two findings
+filed at different moments unable to both match. `learnings_revision(config,
+workspace)` is kept for callers that genuinely want the file, which is the
+cleanup's own revision check on the write it is about to make.
+
+Already-filed origins hold whole-file hashes. Nothing backfills them: an origin
+whose recorded revision does not match its entry's line revision is reported as
+changed-since and **kept**, because rewriting it to match the present file would
+assert that the file was unchanged since filing when nothing established that.
+The affected learning becomes eligible again when the finding is re-filed against
+the entry as it now reads.
+
+Two consequences of hashing the whole canonical line, both in the safe direction
+and both worth knowing before you file a finding: a **merge** changes the
+revision, because `aliases` live in the comment, and a **new sighting** changes
+it too, because `observations` do. Neither backfills.
+
+**What is never removed.** An entry whose findings are pending, implementing,
+interrupted or failed; one that no proposal has ever linked; one held back by a
+finding on a linked proposal that names no learning (it might be this entry's
+other half); one whose own line moved after filing; and one whose only
+destination was an upstream issue. A filed issue is somebody being told, not the
+lesson landing anywhere this workspace can see; a *rejected* draft is a person's
+answer and does settle it. An entry under `## Promoted / Resolved` is not
+reconciled at all, and a line the parser cannot read is reported and left exactly
+as written.
+
+**Undo, and why it is not reversed.** Each removal's exact bytes, the gap they
+left, and the context either side of that gap go into a timestamped receipt under
+`<runtime>/migration/`, written **before** the document — a removal nobody can
+reverse is the one outcome the module does not have, and a receipt persisted
+after the bytes are gone could only report the gap rather than close it. So a
+receipt that cannot be written means nothing is removed, and a run that dies
+between the two writes leaves an *inert* receipt: the document still holds the
+entries, so no anchor in that receipt describes it and `--revert` refuses it. The
+two failures a run can catch — the document moving, or the write erroring — take
+that receipt back instead, because a run still alive knows the removals did not
+happen and should not leave a record saying they did. The
+retry needs no reconciliation at all, because the document's revision is still the
+one the plan was computed from.
+`--revert` fills the gaps from those bytes and refuses the whole file if the
+context no longer matches. Two entries removed side by side left one gap rather
+than two, and their offsets are equal because the second one's start is the first
+one's gap plus exactly the bytes the first one took — so the undo walks *gaps*,
+not spans, and fills each in a single insertion. It deliberately does **not** lift
+the suppression, or the next nightly pass would remove the line the operator just
+put back; the entry becomes eligible again when it is edited (a new revision) or
+when somebody reapproves it. It does **re-record** the receipt's pairs instead,
+because the apply writes the store after the document, and an undo that restored a
+line nothing holds would hand it straight back to the next pass. Removed pairs live in
+`Workspace/learnings-cleanup.json`, which is reserved bookkeeping and is kept out
+of recall indexing; it is a read-modify-write under its own queue lock, because
+two concurrent runs without one would drop each other's pairs and the next pass
+would remove the same entries again.
+
+**Legacy entries are an attended job.** Nothing in the unattended pass removes an
+entry no proposal has ever linked, and `ciao learnings-cleanup --apply
+--approval-file` is how a person judges those — which is also why
+`--apply-settled` refuses an approval file rather than honouring it: it retires
+rows a fold already answered, and a receipt holding somebody's reason and evidence
+for a row a flag chose cannot be read back afterwards.
+`--apply` refuses without `--approval-file`; the file binds each
+approval to the exact entry revision it was reviewed at, so a stale one is
+reported and re-confirmed rather than applied to the closest thing. Retiring a
+row the planner *kept* needs `"reapprove": true` on that row plus the reason and
+evidence — an obsolete classification has to be stated, not guessed.
+
+**As an update task.** The same workflow ships as the `learnings-cleanup` row in
+`ciao/stock/update-tasks/catalog.json` with its packaged prompt, and it is the
+first row the catalog carries. Its detector answers `applicable` when the
+reconciliation has rows it will not retire; its completion check requires a
+durable receipt that a **person** stands behind — `reviewed`, or approvals naming
+the rows they approved — so a table that was generated, an approval that is still
+waiting, or a receipt the unattended `--apply-settled` run wrote does not complete
+it. It also has to name the document as it stands *now*: a run that removed
+something is only a review of the present file if its write landed, so that
+receipt must carry the revision it left, while a fully reviewed no-op removed
+nothing and matches on the revision it read. A receipt persisted before a write
+that never happened names the untouched file on that first side, which is exactly
+why it does not count.
+
+`Learnings.md` is bookkeeping rather than an entity note here too, so this is
+deliberately *not* a `commit_note_change`; see `ciao/learnings_cleanup.py` for why
+it is a sibling of the migration rather than a mode of it, and for the lock and
+the two revision checks the write goes through.
+
 ### Lesson routing and skill drafts
 
 A reusable lesson in `Workspace/Learnings.md` has four possible destinations, and
