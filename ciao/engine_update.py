@@ -25,7 +25,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -37,7 +36,7 @@ from typing import IO, Any, Callable, Sequence
 
 from ciao import install_receipt, macos_service, package_version, release_manifest
 from ciao.os_support.locks import lock_exclusive, unlock
-from ciao.os_support.private import make_private, make_private_dir
+from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +230,7 @@ def write_operation(op: Operation, state_dir: Path | None = None) -> None:
     """
     target = _operation_path(state_dir or default_state_dir())
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    fd, tmp_name = mkstemp_private(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -714,7 +713,7 @@ def _write_plist(plist: dict[str, Any], target: Path) -> Path:
     loads with nothing in the record to explain it.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
+    fd, tmp_name = mkstemp_private(
         dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
     )
     tmp = Path(tmp_name)

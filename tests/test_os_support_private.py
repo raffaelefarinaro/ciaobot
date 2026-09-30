@@ -22,6 +22,7 @@ from ciao.os_support.private import (
     is_private,
     make_private,
     make_private_dir,
+    mkstemp_private,
     open_private,
 )
 
@@ -62,6 +63,44 @@ def test_open_private_creates_private_and_leaves_an_existing_file_alone(tmp_path
     os.close(fd)
     assert not is_private(shared)
     assert shared.read_bytes().endswith(b"new\n")
+
+
+def test_a_new_file_is_private_before_anything_is_written(tmp_path: Path) -> None:
+    """No gap: the file is owner-only the moment `open_private` returns."""
+    path = tmp_path / ".env"
+    fd = open_private(path, os.O_WRONLY | os.O_TRUNC)
+    try:
+        assert path.stat().st_size == 0
+        assert is_private(path)
+    finally:
+        os.close(fd)
+
+
+def test_mkstemp_private_creates_a_unique_private_temp(tmp_path: Path) -> None:
+    first_fd, first = mkstemp_private(dir=tmp_path, prefix=".receipt.", suffix=".tmp")
+    second_fd, second = mkstemp_private(dir=tmp_path, prefix=".receipt.", suffix=".tmp")
+    try:
+        assert first != second
+        for name in (first, second):
+            assert os.path.isabs(name)
+            assert Path(name).parent == tmp_path
+            assert Path(name).name.startswith(".receipt.") and name.endswith(".tmp")
+            assert is_private(name)
+        os.write(first_fd, b"a\nb\r\n")
+    finally:
+        os.close(first_fd)
+        os.close(second_fd)
+    assert Path(first).read_bytes() == b"a\nb\r\n"
+
+
+def test_truncating_an_existing_file_keeps_it_and_its_permissions(tmp_path: Path) -> None:
+    path = tmp_path / "shared.txt"
+    path.write_bytes(b"old contents")
+    fd = open_private(path, os.O_WRONLY | os.O_TRUNC)
+    os.write(fd, b"new")
+    os.close(fd)
+    assert path.read_bytes() == b"new"
+    assert not is_private(path)
 
 
 def test_open_private_with_o_excl_refuses_an_existing_name(tmp_path: Path) -> None:
@@ -158,3 +197,17 @@ def test_windows_notices_a_grant_to_anyone_else(tmp_path: Path) -> None:
     # S-1-5-32-545 is BUILTIN\\Users, whatever the display language.
     subprocess.run(["icacls", str(path), "/grant", "*S-1-5-32-545:R"], capture_output=True, check=True)
     assert not is_private(path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="DACLs are the Windows branch")
+def test_windows_counts_an_inherit_only_grant_on_a_directory(tmp_path: Path) -> None:
+    """It grants nothing on the directory itself, but every new child gets it."""
+    folder = tmp_path / "secrets"
+    folder.mkdir()
+    make_private_dir(folder)
+    subprocess.run(
+        ["icacls", str(folder), "/grant", "*S-1-5-32-545:(OI)(CI)(IO)R"],
+        capture_output=True,
+        check=True,
+    )
+    assert not is_private(folder)

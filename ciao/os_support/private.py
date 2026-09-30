@@ -17,12 +17,18 @@ Failing to set it raises ``OSError``: a file that cannot be made private
 must not be written as if it had been.
 
 ``open_private`` opens a descriptor, creating the file private when it does
-not exist yet; an existing file keeps its permissions. It opens through
-``files.open_fd``, so ``follow_symlinks`` and binary descriptors behave the
-same. POSIX is ``O_CREAT`` with mode ``0o600``, as before. Windows cannot attach a DACL to
-the create itself, so it creates with ``O_EXCL`` and makes the new, still empty
-file private before the descriptor is returned, so nothing is ever written to
-it while it is readable by anyone else.
+not exist yet; an existing file keeps its permissions. POSIX is ``open_fd``
+with ``O_CREAT`` and mode ``0o600``, as before. Windows passes the protected
+DACL to ``CreateFileW`` as the new file's security descriptor
+(``files.create_fd``), so the file is private from the instant it exists:
+there is no moment in which another account could open a handle to it, and
+Windows checks access only when a handle is opened. ``mkstemp_private`` is
+``tempfile.mkstemp`` on POSIX and the same create on Windows, for the
+temp-then-``os.replace`` writes of secrets.
+
+``make_private`` stays for directories and for tightening a file that already
+exists (the POSIX ``chmod`` repair); a new secret is created through
+``open_private`` or ``mkstemp_private`` before anything is written to it.
 
 ``carry_mode`` is the temp-file-then-``os.replace`` half: it gives a temp the
 permissions of the file it is about to replace. POSIX applies the caller's
@@ -36,13 +42,18 @@ from __future__ import annotations
 import os
 import stat
 import sys
+import tempfile
 from typing import Any
 
 from ciao.os_support.files import open_fd
 
 if sys.platform == "win32":
     import ctypes
+    import errno
+    import secrets
     from ctypes import wintypes
+
+    from ciao.os_support.files import create_fd
 
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -53,6 +64,11 @@ if sys.platform == "win32":
     _ACL_REVISION = 2
     _ACL_HEADER_SIZE = 8  # sizeof(ACL)
     _ACCESS_ALLOWED_ACE_TYPE = 0
+    _ACCESS_DENIED_ACE_TYPE = 1
+    _INHERIT_ONLY_ACE = 0x8
+    _SECURITY_DESCRIPTOR_REVISION = 1
+    _SECURITY_DESCRIPTOR_MIN_LENGTH = 64  # 40 on x64; generous is harmless
+    _SE_DACL_PROTECTED = 0x1000
     _OBJECT_INHERIT_ACE = 0x1
     _CONTAINER_INHERIT_ACE = 0x2
     _FILE_ALL_ACCESS = 0x1F01FF
@@ -135,7 +151,25 @@ if sys.platform == "win32":
         ctypes.POINTER(_PSID), ctypes.POINTER(_PSID), ctypes.POINTER(_PACL),
         ctypes.POINTER(_PACL), ctypes.POINTER(_PSECURITY_DESCRIPTOR),
     )
+    _InitializeSecurityDescriptor = _declare(
+        _advapi32, "InitializeSecurityDescriptor", wintypes.BOOL, ctypes.c_void_p, wintypes.DWORD
+    )
+    _SetSecurityDescriptorDacl = _declare(
+        _advapi32, "SetSecurityDescriptorDacl", wintypes.BOOL,
+        ctypes.c_void_p, wintypes.BOOL, ctypes.c_void_p, wintypes.BOOL,
+    )
+    _SetSecurityDescriptorControl = _declare(
+        _advapi32, "SetSecurityDescriptorControl", wintypes.BOOL,
+        ctypes.c_void_p, wintypes.WORD, wintypes.WORD,
+    )
     _ACL_SIZE_INFORMATION_CLASS = 2
+
+    class _SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("nLength", wintypes.DWORD),
+            ("lpSecurityDescriptor", ctypes.c_void_p),
+            ("bInheritHandle", wintypes.BOOL),
+        ]
 
     def _check(ok: object) -> None:
         if not ok:
@@ -174,7 +208,8 @@ if sys.platform == "win32":
             _owner_sids = (_current_user_sid(), _system_sid())
         return _owner_sids
 
-    def _protect(path: str | os.PathLike[str], ace_flags: int) -> None:
+    def _private_acl(ace_flags: int) -> Any:
+        """An ACL granting full control to the user and SYSTEM, and to nobody else."""
         sids = [ctypes.create_string_buffer(sid, len(sid)) for sid in _allowed_sids()]
         size = _ACL_HEADER_SIZE + sum(
             ctypes.sizeof(_AccessAllowedAce) - ctypes.sizeof(wintypes.DWORD) + len(sid.raw)
@@ -184,6 +219,29 @@ if sys.platform == "win32":
         _check(_InitializeAcl(acl, size, _ACL_REVISION))
         for sid in sids:
             _check(_AddAccessAllowedAceEx(acl, _ACL_REVISION, ace_flags, _FILE_ALL_ACCESS, sid))
+        return acl
+
+    class _PrivateCreate:
+        """``SECURITY_ATTRIBUTES`` for a new owner-only file, and the buffers it points into."""
+
+        def __init__(self) -> None:
+            self.acl = _private_acl(0)
+            self.descriptor = ctypes.create_string_buffer(_SECURITY_DESCRIPTOR_MIN_LENGTH)
+            _check(_InitializeSecurityDescriptor(self.descriptor, _SECURITY_DESCRIPTOR_REVISION))
+            _check(_SetSecurityDescriptorDacl(self.descriptor, True, self.acl, False))
+            _check(
+                _SetSecurityDescriptorControl(
+                    self.descriptor, _SE_DACL_PROTECTED, _SE_DACL_PROTECTED
+                )
+            )
+            self.attributes = _SecurityAttributes(
+                ctypes.sizeof(_SecurityAttributes),
+                ctypes.cast(self.descriptor, ctypes.c_void_p),
+                False,
+            )
+
+    def _protect(path: str | os.PathLike[str], ace_flags: int) -> None:
+        acl = _private_acl(ace_flags)
         error = _SetNamedSecurityInfoW(
             os.fspath(path),
             _SE_FILE_OBJECT,
@@ -205,7 +263,15 @@ if sys.platform == "win32":
         _protect(path, _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE)
 
     def is_private(path: str | os.PathLike[str]) -> bool:
-        """Whether the DACL grants nothing to anyone but the user and SYSTEM."""
+        """Whether the DACL grants nothing to anyone but the user and SYSTEM.
+
+        Only a deny entry can be passed over: every other entry type (object,
+        callback and compound allows included) may grant access, so one naming
+        anyone else makes the path not private. An inherit-only entry does not
+        apply to a file itself, but on a directory it is what the directory's
+        new children get, so there it counts too.
+        """
+        is_dir = os.path.isdir(path)
         dacl = _PACL()
         descriptor = _PSECURITY_DESCRIPTOR()
         error = _GetNamedSecurityInfoW(
@@ -228,8 +294,12 @@ if sys.platform == "win32":
                 ace = ctypes.c_void_p()
                 _check(_GetAce(dacl, index, ctypes.byref(ace)))
                 entry = _AccessAllowedAce.from_address(_address(ace))
+                if entry.Header.AceType == _ACCESS_DENIED_ACE_TYPE:
+                    continue  # a deny entry only takes access away
                 if entry.Header.AceType != _ACCESS_ALLOWED_ACE_TYPE:
-                    continue  # deny entries only take access away
+                    return False  # a type that may grant, to a principal not read here
+                if entry.Header.AceFlags & _INHERIT_ONLY_ACE and not is_dir:
+                    continue  # applies to children only, and a file has none
                 sid = _address(ace) + _AccessAllowedAce.SidStart.offset
                 if not any(_EqualSid(sid, known) for known in allowed):
                     return False
@@ -245,21 +315,35 @@ if sys.platform == "win32":
         follow_symlinks: bool = True,
     ) -> int:
         """``open_fd`` that creates ``path`` private; see the module docstring."""
-        try:
-            fd = open_fd(
-                path, flags | os.O_CREAT | os.O_EXCL, mode, follow_symlinks=follow_symlinks
-            )
-        except FileExistsError:
-            if flags & os.O_EXCL:
-                raise
-            return open_fd(path, flags, mode, follow_symlinks=follow_symlinks)
-        try:
-            make_private(path)
-        except BaseException:
-            os.close(fd)
-            os.unlink(path)
-            raise
-        return fd
+        create = _PrivateCreate()
+        return create_fd(
+            path,
+            flags | os.O_CREAT,
+            mode,
+            follow_symlinks=follow_symlinks,
+            security_attributes=create.attributes,
+        )
+
+    def mkstemp_private(
+        *, dir: str | os.PathLike[str], prefix: str = "tmp", suffix: str = ""
+    ) -> tuple[int, str]:
+        """``tempfile.mkstemp``, created private; see the module docstring."""
+        create = _PrivateCreate()
+        folder = os.path.abspath(dir)
+        for _ in range(tempfile.TMP_MAX):
+            name = os.path.join(folder, f"{prefix}{secrets.token_hex(4)}{suffix}")
+            try:
+                fd = create_fd(
+                    name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    follow_symlinks=False,
+                    security_attributes=create.attributes,
+                )
+            except FileExistsError:
+                continue
+            return fd, name
+        raise FileExistsError(errno.EEXIST, "no usable temporary file name found", folder)
 
     def carry_mode(
         fd: int, mode: int, *, temp: str | os.PathLike[str], original: str | os.PathLike[str]
@@ -292,6 +376,12 @@ else:
     ) -> int:
         """``open_fd`` that creates ``path`` private; see the module docstring."""
         return open_fd(path, flags | os.O_CREAT, mode, follow_symlinks=follow_symlinks)
+
+    def mkstemp_private(
+        *, dir: str | os.PathLike[str], prefix: str = "tmp", suffix: str = ""
+    ) -> tuple[int, str]:
+        """``tempfile.mkstemp``, created private; see the module docstring."""
+        return tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
 
     def carry_mode(
         fd: int, mode: int, *, temp: str | os.PathLike[str], original: str | os.PathLike[str]
