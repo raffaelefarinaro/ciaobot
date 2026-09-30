@@ -92,10 +92,8 @@ afterEach(() => {
 async function mountGroup(rows: UpdateTaskRow[]) {
   const store = useHousekeepingStore()
   store.updateTasks = rows
-  store.updateTasksLoaded = true
   // The rows are stamped with the workspace they were computed for, and a
-  // transition refuses without one — a nameless question is not sent. Both halves
-  // are set together so the store looks exactly as it does after a real fetch.
+  // transition refuses without one — a nameless question is not sent.
   store.updateTasksWorkspace = 'personal'
   const host = document.createElement('div')
   document.body.appendChild(host)
@@ -186,7 +184,7 @@ describe('the group itself', () => {
       blocking: true,
     }]
     store.updateTasks = [task()]
-    store.updateTasksLoaded = true
+    store.updateTasksWorkspace = 'personal'
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
@@ -210,7 +208,7 @@ describe('the group itself', () => {
       run_label: 'Fix now', chat_label: '', chat_prompt: '', blocking: true,
     }]
     store.updateTasks = [task()]
-    store.updateTasksLoaded = true
+    store.updateTasksWorkspace = 'personal'
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
@@ -662,6 +660,37 @@ describe('the workspace switch', () => {
     await nextTick()
 
     expect(wrapper.find('.update-tasks').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Hidden')
+    wrapper.unmount()
+  })
+
+  it('does not announce a press whose answer lands in another workspace', async () => {
+    // The press is real and the decision is recorded, but the sentence is about
+    // the workspace it was made in, and by the time the answer comes back the
+    // heading on screen names a different one. Clearing the status on the way to
+    // announcing it would also throw away whatever the new workspace has to say
+    // for itself, so the whole announcement is skipped — the effect (the chat it
+    // opened) still happens.
+    const { wrapper, store } = await mountGroup([task()])
+    vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(true)
+    // The dismiss is still in flight when the operator moves on.
+    const pending: { release: (() => void) | null } = { release: null }
+    vi.spyOn(store, 'dismissUpdateTask').mockImplementation(() => new Promise((resolve) => {
+      pending.release = () => resolve({ ok: true, chatId: '', resumed: false, error: '' })
+    }))
+    apiGet.mockResolvedValue({ tasks: [] })
+
+    await wrapper.findAll('button').find((b) => b.text() === 'Hide it')!.trigger('click')
+    await flushPromises()
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+    await nextTick()
+
+    pending.release?.()
+    await flushPromises()
+    await nextTick()
+
+    expect(store.dismissUpdateTask).toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('Hidden')
     wrapper.unmount()
   })

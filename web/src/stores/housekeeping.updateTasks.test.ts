@@ -17,7 +17,12 @@
 //  - a switch of workspace drops the previous workspace's rows rather than
 //    showing them under the new one, and a transition that lost the same race
 //    does not put the old workspace's rows back on its way out.
+//  - a listing still in flight when a decision lands is discarded. A poll that
+//    was opened before the dismiss must not answer with the pre-dismiss list and
+//    put the card back, with a Start button that 409s, until the next poll.
 //  - `tasks` absent from a reply is "unknown", never "empty".
+//  - a refused transition re-lists, so a card whose record has moved on stops
+//    offering the action that was just refused.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -162,6 +167,41 @@ describe('the second request', () => {
     pending.release?.()
     await slow
     expect(store.updateTasks.map((row) => row.id)).toEqual(['other'])
+  })
+
+  it('discards a poll that was already in flight when a decision landed', async () => {
+    // The workspace name cannot catch this one: both requests are about the same
+    // workspace, so the older one — a 60s poll or a window-focus refresh opened
+    // before the press — resolves *after* the dismiss and would answer with the
+    // pre-dismiss list. The card would come back with a Start button that 409s
+    // until the next poll, which is exactly the resurrection a dismissal is
+    // supposed to prevent.
+    const store = useHousekeepingStore()
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    await store.refreshUpdateTasks('personal')
+
+    const pending: { release: (() => void) | null } = { release: null }
+    vi.mocked(api.get).mockImplementationOnce(() => new Promise((resolve) => {
+      // The pre-dismiss answer, computed before the press.
+      pending.release = () => resolve(listing([task()]) as never)
+    }))
+    const slow = store.refreshUpdateTasks('personal')
+
+    vi.mocked(api.post).mockResolvedValueOnce({
+      ok: true,
+      task_id: 'review-legacy-rows',
+      tasks: [task({ status: 'dismissed', suppressed: true })],
+    } as never)
+    await store.dismissUpdateTask(task())
+    // The reply's own rows: hidden in this scope, and still in the list — Home
+    // is what decides a dismissed task is not a card.
+    expect(store.updateTasks.map((row) => row.status)).toEqual(['dismissed'])
+
+    pending.release?.()
+    await slow
+    // Still the post-dismiss answer. The poll that predates it is not allowed to
+    // put the card back with a Start button that will be refused.
+    expect(store.updateTasks.map((row) => row.status)).toEqual(['dismissed'])
   })
 })
 
@@ -345,33 +385,57 @@ describe('dismissing a task', () => {
   })
 })
 
-describe('reopening a task', () => {
-  it('re-offers it and reports the lifecycle it is actually in', async () => {
+describe('a transition the server refuses', () => {
+  it('re-lists, so the card stops offering the action that just failed', async () => {
+    // A refusal means the record and the card on screen disagree: a second tab
+    // completed the task, or the engine refuses what this copy still offers.
+    // Re-listing is the only thing that makes the card honest — otherwise the
+    // same Start button sits there, refusing again, until the next 60s poll.
+    // It is a re-read and nothing more: the reason stays attached, and nothing is
+    // cleared on the store's own account.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task({ status: 'dismissed', suppressed: true })]) as never)
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
-    vi.mocked(api.post).mockResolvedValue({
-      ok: true, task_id: 'review-legacy-rows', tasks: [task({ status: 'offered' })],
-    } as never)
 
-    const outcome = await store.reopenUpdateTask(task({ status: 'dismissed' }))
-    expect(outcome.ok).toBe(true)
-    expect(api.post).toHaveBeenCalledWith(
-      '/api/update-tasks/review-legacy-rows/reopen?workspace=personal',
-      undefined,
+    // The stale tab's answer: the task is completed, so the record has no card
+    // for Home to draw.
+    vi.mocked(api.get).mockResolvedValueOnce(listing([]) as never)
+    vi.mocked(api.post).mockRejectedValueOnce(
+      refused(409, {
+        error: "update task 'review-legacy-rows'@1 is already completed at this revision",
+      }),
     )
-    expect(store.updateTasks[0].status).toBe('offered')
+
+    const outcome = await store.startUpdateTask(task())
+    expect(outcome.ok).toBe(false)
+    expect(store.taskErrors['review-legacy-rows@1']).toContain('already marked done')
+    expect(store.updateTasks).toEqual([])
   })
 
-  it('keeps the row when the reopen is refused', async () => {
+  it('does not re-list the workspace the reader just left', async () => {
+    // The recovery asks by workspace name, and running it after a switch would
+    // set the store back to the old workspace and clear the new one's rows on the
+    // way — trading a stale card for an empty Home.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task({ status: 'dismissed' })]) as never)
+    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
-    vi.mocked(api.post).mockRejectedValueOnce(refused(409, { error: 'nope' }))
 
-    const outcome = await store.reopenUpdateTask(task({ status: 'dismissed' }))
-    expect(outcome.ok).toBe(false)
-    expect(store.updateTasks).toHaveLength(1)
+    const pending: { release: (() => void) | null } = { release: null }
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve, reject) => {
+      pending.release = () => reject(refused(409, { error: 'nope' }))
+    }))
+    const slow = store.startUpdateTask(task())
+
+    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
+    await store.refreshUpdateTasks('work')
+    vi.mocked(api.get).mockClear()
+
+    pending.release?.()
+    await slow
+
+    expect(api.get).not.toHaveBeenCalled()
+    expect(store.updateTasksWorkspace).toBe('work')
+    expect(store.updateTasks.map((row) => row.id)).toEqual(['other'])
   })
 })
 

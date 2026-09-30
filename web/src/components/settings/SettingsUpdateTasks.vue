@@ -2,17 +2,22 @@
 // Settings → Home → "Update task history".
 //
 // The Home group shows what an update left to do; this is the record of what
-// already happened to it, so it owns its own fetch rather than reading the
-// housekeeping store — Home may never have been opened in this session, and a
-// history that could only be filled by visiting another page is not a record.
+// already happened to it, so it owns its own listing rather than reading the
+// housekeeping store's rows — Home may never have been opened in this session,
+// and a history that could only be filled by visiting another page is not a
+// record. The one thing it does hand back is a refresh: a reopen is a decision
+// about a workspace, so the group Home draws has to hear about it (see
+// `reopenTask`).
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../lib/api'
 import { errorMessage, errorPayload } from '../../lib/errorMessage'
 import { formatRelative } from '../../lib/time'
+import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useProjectStore } from '../../stores/projects'
 import type { UpdateTaskRow, UpdateTasksResponse } from '../../lib/types'
 
 const projectStore = useProjectStore()
+const housekeeping = useHousekeepingStore()
 
 const rows = ref<UpdateTaskRow[]>([])
 const loaded = ref(false)
@@ -37,14 +42,16 @@ function keyOf(row: UpdateTaskRow): string {
 
 /** What belongs in a *history*.
  *
- * A task still on offer, started, or waiting for review is not history — the
- * Home group is showing it right now, and listing it here as well would put the
- * same live card in two places with two different sets of buttons. What is left
- * is the decided-and-finished end plus the genuinely uncertain: completed,
- * dismissed, failed, and anything whose applicability nobody could establish.
- * That last group is in on purpose. A task that answers `unknown` is not done
- * and not to-do, and the only place that can say so without nagging somebody on
- * Home every sixty seconds is a list they came to look at. */
+ * A task still on offer, started, or waiting for review is not history: Home is
+ * showing that card right now, with the buttons that move the work along, and a
+ * second copy here would offer a different set of them for the same live thing.
+ * What is left is the decided-and-finished end — completed and dismissed — plus
+ * the two ends Home cannot speak for: a `failed` attempt, which Home keeps
+ * visible only for as long as somebody might retry it, and anything whose
+ * applicability nobody could establish. Those two show on both surfaces on
+ * purpose. `unknown` is not done and not to-do, and it is not Home's job to nag
+ * about a detector that has not answered every sixty seconds; it belongs to a
+ * list somebody came to look at. */
 const historyRows = computed(() =>
   rows.value.filter(
     (row) =>
@@ -132,24 +139,43 @@ async function load(): Promise<void> {
   }
 }
 
-/** POST one reopen, then re-list.
+/** POST one reopen, then re-list — here *and* on Home.
  *
  * Read-mostly by design: a reopen is the only write this card offers, and the
  * route answers 409 rather than doing anything when one does not apply (a task
  * that is not dismissed has an attempt in flight or a verdict already reached,
  * and overriding either is a decision nobody asked for). A refusal is reported
- * in place; the row is never quietly dropped for having failed to change. */
+ * in place; the row is never quietly dropped for having failed to change.
+ *
+ * Re-listing only this panel is half a reopen. The records are the same ones
+ * Home's "After this update" group draws, and the store keeps its own copy of
+ * them: a task reopened here would stay hidden on Home until the next 60s poll
+ * or a window focus, and moving between pages in the app triggers neither. So a
+ * successful reopen refreshes that list too, named by the workspace the press
+ * was made in — a switch mid-reopen must not hand Home the new workspace's
+ * answer for a decision taken in the old one. */
 async function reopenTask(row: UpdateTaskRow): Promise<void> {
-  if (!workspace.value) return
+  const wanted = workspace.value
+  if (!wanted) return
   const key = keyOf(row)
   pending.value = new Set(pending.value).add(key)
   actionError.value = ''
   try {
     await api.post<{ ok: boolean; error?: string }>(
       `/api/update-tasks/${encodeURIComponent(row.id)}/reopen` +
-        `?workspace=${encodeURIComponent(workspace.value)}`,
+        `?workspace=${encodeURIComponent(wanted)}`,
     )
     await load()
+    // Best-effort by construction: the store swallows its own failures, so a Home
+    // that could not be refreshed never turns a reopen that worked into an error
+    // on this card. And only for the list Home is actually showing — a store
+    // holding another workspace's rows is not stale on this account, and asking
+    // it for this one behind the operator's back would put the workspace they
+    // just left back in front of them (the guard `transition` uses for the same
+    // reason).
+    if (housekeeping.updateTasksWorkspace === wanted) {
+      await housekeeping.refreshUpdateTasks(wanted)
+    }
   } catch (e) {
     actionError.value = 'Could not reopen it: ' + reason(e)
   } finally {
@@ -189,9 +215,21 @@ async function openChat(chatId: string): Promise<void> {
 }
 
 onMounted(load)
+// Everything the previous workspace said goes at once, and the panel says it is
+// checking again until the new answer lands. Clearing only the rows left `loaded`
+// true, which put "Nothing to show here yet." under the new workspace's name
+// before anybody had asked about it, and kept the previous workspace's "Could
+// not reopen it…" and read error on screen under the new heading — two
+// statements about a workspace this panel is no longer showing. `pending` goes
+// with them: a press on the old workspace's row is not this workspace's press,
+// and a button that reads "Reopening…" forever is worse than a live one.
 watch(workspace, (next, previous) => {
   if (next && next !== previous) {
     rows.value = []
+    loaded.value = false
+    loadError.value = ''
+    actionError.value = ''
+    pending.value = new Set()
     void load()
   }
 })

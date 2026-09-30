@@ -277,7 +277,9 @@ function taskStateLine(task: UpdateTaskRow): string {
     return 'The last attempt did not get going. Starting again reuses the same chat.'
   }
   if (task.status === 'in_progress') {
-    return 'Started. Its chat is on the left.'
+    // Not "on the left": the chat is a route, and on a phone the list is above
+    // the conversation. Where it opens is the layout's business.
+    return 'Started. Its chat is open.'
   }
   return 'New since this update.'
 }
@@ -343,7 +345,17 @@ async function keepFocus(): Promise<void> {
   }
 }
 
-async function report(text: string, after?: () => Promise<void>): Promise<void> {
+async function report(text: string, at: string, after?: () => Promise<void>): Promise<void> {
+  // A press belongs to the workspace it was made in, and this sentence is about
+  // that press. If the operator has moved on since, the group on screen is
+  // someone else's workspace: saying it there would attribute the decision to
+  // the wrong workspace, and clearing the status first would throw away whatever
+  // the new workspace has to say for itself. So the outcome goes unsaid and the
+  // effect — the chat it opened — still happens.
+  if (projectStore.activeWorkspace !== at) {
+    if (after) await after()
+    return
+  }
   clearGroupStatus()
   groupStatus.value = text
   groupStatusTimer = setTimeout(clearGroupStatus, GROUP_STATUS_TTL_MS)
@@ -365,17 +377,20 @@ async function openTaskChat(chatId: string): Promise<void> {
  * dropped response all land in one chat with the prompt dispatched once. The
  * label says which of the two is meant so nobody is surprised. */
 async function startTask(task: UpdateTaskRow): Promise<void> {
+  // Captured before the first await: the outcome is about the workspace the
+  // button was pressed in, wherever the reader has wandered to since.
+  const at = projectStore.activeWorkspace || ''
   const outcome = await housekeeping.startUpdateTask(task)
   if (!outcome.ok) {
     if (outcome.chatId) {
       // The chat exists and the prompt never reached it. Opening it rather than
       // throwing it away is the whole point of the server sending the id back.
-      await report('The chat was opened but the task could not be sent into it.', () =>
+      await report('The chat was opened but the task could not be sent into it.', at, () =>
         openTaskChat(outcome.chatId),
       )
       return
     }
-    await report(outcome.error)
+    await report(outcome.error, at)
     return
   }
   const title = task.title
@@ -383,6 +398,7 @@ async function startTask(task: UpdateTaskRow): Promise<void> {
     outcome.resumed
       ? `Reopened the existing chat for “${title}”.`
       : `Started “${title}” in a new chat.`,
+    at,
     () => openTaskChat(outcome.chatId),
   )
 }
@@ -395,6 +411,10 @@ async function startTask(task: UpdateTaskRow): Promise<void> {
  * that chat changes. It is not cancelled and it is not marked done; dismissing
  * records "not this one" and leaves the work exactly where it was. */
 async function dismissTask(task: UpdateTaskRow): Promise<void> {
+  // Same reasoning as `startTask`: the confirmation can be open for as long as it
+  // takes to read, and the press after it belongs to the workspace it was
+  // confirmed in.
+  const at = projectStore.activeWorkspace || ''
   const hasChat = task.status === 'in_progress' || task.status === 'waiting_review' || !!task.chat_id
   const message = hasChat
     ? 'Hide this task in this workspace? Its chat stays open and is not marked ' +
@@ -410,13 +430,14 @@ async function dismissTask(task: UpdateTaskRow): Promise<void> {
 
   const outcome = await housekeeping.dismissUpdateTask(task)
   if (!outcome.ok) {
-    await report(outcome.error)
+    await report(outcome.error, at)
     return
   }
   await report(
     hasChat
       ? `Hidden “${task.title}”. Its chat is untouched and still open.`
       : `Hidden “${task.title}” in this workspace. Reopen it from Settings.`,
+    at,
   )
 }
 

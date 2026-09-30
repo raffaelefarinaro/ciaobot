@@ -129,10 +129,20 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
   // absent.
   const updateTasks = ref<UpdateTaskRow[]>([])
   const updateTasksWorkspace = ref('')
-  const updateTasksLoaded = ref(false)
   const updateTasksCoverageGap = ref<UpdateTaskCoverageGap | null>(null)
   const pendingUpdateTaskIds = ref<Set<string>>(new Set())
   const taskErrors = ref<Record<string, string>>({})
+
+  /** How many listings have been asked for, and therefore which answers are
+   *  still current.
+   *
+   *  The workspace name is not enough on its own: two requests about the *same*
+   *  workspace can land in either order, and a 60s poll that was already in
+   *  flight when a dismiss landed would answer with the pre-dismiss list and put
+   *  the card back — with a Start button that 409s, until the next poll.
+   *  `adoptRows` counts as an answer too, so a listing is stale the moment a
+   *  decision newer than it lands. */
+  let requestSeq = 0
 
   async function refresh() {
     try {
@@ -156,14 +166,16 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       taskErrors.value = {}
     }
     updateTasksWorkspace.value = wanted
+    const seq = ++requestSeq
     try {
       const data = await api.get<UpdateTasksResponse>(`/api/update-tasks${query(wanted)}`)
-      // A switch may have landed while this was in flight; the older answer is
-      // about a workspace the reader is no longer in.
-      if (updateTasksWorkspace.value !== wanted) return
+      // Two ways to be stale, and both are checked: a switch may have landed
+      // while this was in flight, so the older answer is about a workspace the
+      // reader is no longer in; and a decision may have landed since, in which
+      // case this answer predates it and writing it would undo it.
+      if (updateTasksWorkspace.value !== wanted || seq !== requestSeq) return
       updateTasks.value = data.tasks ?? []
       updateTasksCoverageGap.value = data.coverage_gap ?? null
-      updateTasksLoaded.value = true
     } catch {
       // Best-effort, exactly like `refresh` above, and for the same reason: this
       // is a background poll on the home screen, and a red line here would nag
@@ -174,7 +186,6 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       //
       // Where a failed check *is* reported: Settings → Update task history, which
       // fetches for itself and owns the error, its retry and its empty state.
-      updateTasksLoaded.value = true
     }
   }
 
@@ -223,8 +234,10 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
    * silently cleared card. */
   function adoptRows(data: UpdateTaskActionResponse): boolean {
     if (!data.tasks) return false
+    // These rows are the server's answer *after* the decision, so every listing
+    // still in flight was asked before it and would put the old card back.
+    requestSeq += 1
     updateTasks.value = data.tasks
-    updateTasksLoaded.value = true
     return true
   }
 
@@ -246,11 +259,16 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     pendingUpdateTaskIds.value = next
   }
 
-  /** POST one transition. Shared by start/dismiss/reopen, which differ only in
-   *  the path and the verb the refusal copy uses. */
+  /** POST one transition. Shared by the two Home presses, start and dismiss,
+   *  which differ only in the path and the body the route takes.
+   *
+   *  There is deliberately no third one for reopen: only Settings reopens, it
+   *  posts for itself, and the one thing it needs from here is this list brought
+   *  up to date afterwards — so a `reopen` here would be a second, subtly
+   *  different way to reach the same records. */
   async function transition(
     row: UpdateTaskRow,
-    action: 'start' | 'dismiss' | 'reopen',
+    action: 'start' | 'dismiss',
   ): Promise<UpdateTaskOutcome> {
     const key = taskKey(row)
     const workspace = updateTasksWorkspace.value
@@ -276,6 +294,10 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
         await refreshUpdateTasks(workspace)
       }
       if (!data.ok) {
+        // A refusal that arrived as a 200 has just been re-listed by the branch
+        // above, the same way a refused one thrown by the route is re-listed
+        // below: a card whose record disagrees with the screen is a card that
+        // will be refused again.
         const error = data.error || `The engine declined to ${action} this task.`
         setTaskError(key, error)
         return { ok: false, chatId: '', resumed: false, error }
@@ -300,6 +322,15 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
           'now, and trying again, reuses that same chat.'
         : refusalCopy(action, e)
       setTaskError(key, error)
+      // A refusal means the record and this card disagree — a second tab can
+      // complete a task the copy on screen still offers, and the 409 says so.
+      // Re-list so the card stops offering the action that just failed, rather
+      // than leaving a Start button that will be refused again until the next
+      // poll. This re-reads the server's truth; it never clears anything on its
+      // own account, and the reason stays attached to whatever comes back.
+      if (updateTasksWorkspace.value === workspace) {
+        await refreshUpdateTasks(workspace)
+      }
       return {
         ok: false,
         chatId: payloadChatId,
@@ -317,10 +348,6 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
 
   function dismissUpdateTask(row: UpdateTaskRow): Promise<UpdateTaskOutcome> {
     return transition(row, 'dismiss')
-  }
-
-  function reopenUpdateTask(row: UpdateTaskRow): Promise<UpdateTaskOutcome> {
-    return transition(row, 'reopen')
   }
 
   /** Re-read a task's applicability and the record that goes with it.
@@ -360,14 +387,12 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     dismiss,
     updateTasks,
     updateTasksWorkspace,
-    updateTasksLoaded,
     updateTasksCoverageGap,
     pendingUpdateTaskIds,
     taskErrors,
     refreshUpdateTasks,
     startUpdateTask,
     dismissUpdateTask,
-    reopenUpdateTask,
     recheckUpdateTask,
     init,
   }

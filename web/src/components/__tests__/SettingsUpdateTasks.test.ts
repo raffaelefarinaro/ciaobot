@@ -17,7 +17,14 @@
 //    a `dismissed` one says it was hidden — never "done", and never the same
 //    timestamp printed twice under two names.
 //  - Reopen is the only write. A refused reopen leaves the row and says why
-//    rather than dropping it for having failed to change.
+//    rather than dropping it for having failed to change, and a successful one
+//    refreshes the list Home draws from as well — a reopen that only this panel
+//    sees is a task that stays hidden on the Home screen. It refreshes the list
+//    Home is actually showing, though, never one belonging to a workspace the
+//    operator has since left.
+//  - a workspace switch takes the previous workspace's *whole* answer with it —
+//    rows, the loaded flag, the errors and the pending presses — so the new
+//    workspace is never described before it has been asked about.
 //  - a failed read keeps the previous rows and shows the error, because an empty
 //    history would claim nothing ever happened.
 //  - the copy does not promise a fresh detector run: the engine reuses a cached
@@ -27,6 +34,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import SettingsUpdateTasks from '../settings/SettingsUpdateTasks.vue'
+import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useProjectStore } from '../../stores/projects'
 import type { UpdateTaskRow, UpdateTasksResponse } from '../../lib/types'
 
@@ -122,6 +130,64 @@ describe('reading the list', () => {
     useProjectStore().activeWorkspace = 'work'
     await flushPromises()
     expect(apiGet).toHaveBeenCalledWith('/api/update-tasks?workspace=work')
+    wrapper.unmount()
+  })
+
+  it('claims nothing about the new workspace while it is still asking', async () => {
+    // A switch has to take the previous workspace's whole answer with it, not
+    // just its rows. `loaded` still true meant the new workspace was told
+    // "Nothing to show here yet." before anyone had asked about it, and the old
+    // workspace's error stayed on screen under the new heading — a false empty
+    // history and a stale complaint, both about a workspace this panel is not
+    // showing.
+    apiGet.mockResolvedValueOnce(listing([task({ status: 'dismissed' })]))
+    apiPost.mockRejectedValueOnce(
+      refused(409, { error: 'update task review-legacy-rows@1 is already completed at this revision' }),
+    )
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    await button(wrapper, 'Reopen').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="alert"]').text()).toContain('already marked done')
+
+    // The new workspace's fetch, still open.
+    apiGet.mockReturnValueOnce(new Promise(() => {}))
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Checking the update task history')
+    expect(wrapper.text()).not.toContain('Nothing to show here yet')
+    expect(wrapper.findAll('.set-row')).toHaveLength(0)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('leaves no row stuck on Reopening… across a workspace switch', async () => {
+    // A press on the old workspace's row is not a press on the new one's. A
+    // pending flag that outlived the switch would leave a button on the new
+    // workspace's list that never comes back.
+    apiGet.mockResolvedValueOnce(listing([task({ status: 'dismissed' })]))
+    const pending: { release: (() => void) | null } = { release: null }
+    apiPost.mockImplementationOnce(() => new Promise((resolve) => {
+      pending.release = () => resolve({ ok: true, task_id: 'review-legacy-rows' })
+    }))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+
+    await button(wrapper, 'Reopen').trigger('click')
+    await flushPromises()
+    expect(buttonLabels(wrapper)).toContain('Reopening…')
+
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+    pending.release?.()
+    await flushPromises()
+
+    apiGet.mockResolvedValue(listing([task({ status: 'dismissed' })]))
+    await button(wrapper, 'Check again').trigger('click')
+    await flushPromises()
+    expect(buttonLabels(wrapper)).toContain('Reopen')
+    expect(buttonLabels(wrapper)).not.toContain('Reopening…')
     wrapper.unmount()
   })
 })
@@ -318,6 +384,70 @@ describe('reopening', () => {
     expect(apiPost).toHaveBeenCalledWith(
       '/api/update-tasks/review-legacy-rows/reopen?workspace=personal',
     )
+    wrapper.unmount()
+  })
+
+  it('brings the Home group up to date, so a reopened card is there again', async () => {
+    // Home draws the same records from the housekeeping store, which keeps its
+    // own copy of them. Re-listing only this panel leaves a reopened task hidden
+    // on Home until the next 60s poll or a window focus — and moving between
+    // pages in the app triggers neither, so a reopen that worked would look like
+    // it had done nothing. The store's rows are set directly, the way a fetched
+    // list arrives, so this asserts the refresh and not the initial state.
+    const housekeeping = useHousekeepingStore()
+    housekeeping.updateTasks = [task({ status: 'dismissed' })]
+    housekeeping.updateTasksWorkspace = 'personal'
+
+    apiGet.mockResolvedValueOnce(listing([task({ status: 'dismissed' })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    apiGet.mockClear()
+    // Every re-list from here answers with the reopened row.
+    apiGet.mockResolvedValue(
+      listing([task({ status: 'offered', offered: true, suppressed: false, applicability: 'applicable' })]),
+    )
+    apiPost.mockResolvedValueOnce({ ok: true, task_id: 'review-legacy-rows' })
+
+    await button(wrapper, 'Reopen').trigger('click')
+    await flushPromises()
+
+    expect(housekeeping.updateTasks.map((row) => row.status)).toEqual(['offered'])
+    // And this panel agrees: an offer that applies is not history, so the row
+    // leaves the history and goes back to being a Home card.
+    expect(wrapper.findAll('.set-row')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('does not drag Home back to the workspace a reopen was made in', async () => {
+    // A switch between the press and its answer changes nothing about the
+    // decision, but it changes what "the list Home is showing" is. Asking the
+    // store for the workspace the reader just left would replace the rows it
+    // legitimately holds for the new one with another workspace's answers.
+    const housekeeping = useHousekeepingStore()
+    housekeeping.updateTasks = [task({ id: 'work-row', status: 'dismissed' })]
+    housekeeping.updateTasksWorkspace = 'work'
+
+    apiGet.mockResolvedValueOnce(listing([task({ status: 'dismissed' })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    apiGet.mockClear()
+    apiGet.mockResolvedValue(
+      listing([task({ status: 'offered', offered: true, suppressed: false, applicability: 'applicable' })]),
+    )
+    // A reopen that lands after the switch.
+    const pending: { release: (() => void) | null } = { release: null }
+    apiPost.mockImplementationOnce(() => new Promise((resolve) => {
+      pending.release = () => resolve({ ok: true, task_id: 'review-legacy-rows' })
+    }))
+    await button(wrapper, 'Reopen').trigger('click')
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+    pending.release?.()
+    await flushPromises()
+
+    expect(apiGet).not.toHaveBeenCalledWith('/api/update-tasks?workspace=personal')
+    expect(housekeeping.updateTasksWorkspace).toBe('work')
+    expect(housekeeping.updateTasks.map((row) => row.id)).toEqual(['work-row'])
     wrapper.unmount()
   })
 
