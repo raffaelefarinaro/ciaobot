@@ -51,7 +51,6 @@ import {
 import {
   dropSupersededLiveTail,
   historySignature,
-  isLiveTraceRow,
   isSettledHistoryRow,
   mergeMessageFields,
   mergeMetadata,
@@ -2726,9 +2725,6 @@ export const useProjectStore = defineStore('projects', () => {
           local.forEach((row, pos) => {
             if (typeof row.i === 'number') posByIndex.set(row.i, pos)
           })
-          // Where the window's genuinely-new rows start once appended; -1 when
-          // the window brought nothing past the cached extent.
-          let firstAppendPos = -1
           const merged = local.slice()
           // Where the un-indexed live tail begins: everything the client
           // rendered from streaming events (optimistic user bubble, activity
@@ -2761,17 +2757,27 @@ export const useProjectStore = defineStore('projects', () => {
             }
             return false
           }
-          const followUpBoundary = (() => {
-            const users = merged
-              .map((row, pos) => row.role === 'user' && pos >= tailStart ? pos : -1)
-              .filter(pos => pos >= 0)
-            if (users.length > 1) return users[1]
-            if (users.length !== 1) return null
-            const pos = users[0]
-            if (typeof merged[pos].i === 'number') return pos
-            return merged.slice(tailStart, pos).some(isLiveTraceRow) ? pos : null
-          })()
-          let insertedBeforeFollowUp = 0
+          // Position of the last row the window has placed so far. Server rows
+          // are placed in window order, each after the one before it, and a
+          // new row goes at the END of the cursor's turn (just above the next
+          // user bubble), so each turn keeps its own rows. Inserting at one
+          // fixed boundary instead put a queued turn's activity and answer
+          // above its own user bubble whenever the turn before it was still
+          // un-indexed at reconcile time.
+          //
+          // Every splice below lands at or after tailStart, so the held rows'
+          // positions in posByIndex never shift.
+          let cursor = tailStart - 1
+          const nextUserAfter = (pos: number) => {
+            let p = pos + 1
+            while (p < merged.length && merged[p].role !== 'user') p++
+            return p
+          }
+          const turnStartOf = (pos: number) => {
+            let p = pos
+            while (p > tailStart && merged[p].role !== 'user') p--
+            return Math.max(p, tailStart)
+          }
           for (const item of windowRows) {
             const abs = item.i
             if (typeof abs !== 'number') continue
@@ -2782,6 +2788,7 @@ export const useProjectStore = defineStore('projects', () => {
               // durable transcript. Keep whatever the live stream already gave
               // us for the fields the row is still missing.
               merged[pos] = mergeMessageFields(item, merged[pos])
+              cursor = pos
               continue
             }
             if (abs < cachedEnd) {
@@ -2796,42 +2803,66 @@ export const useProjectStore = defineStore('projects', () => {
             // while the turn was live (WS reconnect, chat switch back, the
             // post-result reconcile) otherwise appended the server copy of
             // the whole turn — the reported "double message", on the user
-            // bubble first and then on the Activity group + answer. Scan the
-            // live tail in order so server rows pair with their own turn's
-            // copies; identical texts pair one-to-one, so a genuine repeat
-            // send keeps both copies countable.
-            let reconciled = false
-            for (let p = tailStart; p < merged.length; p++) {
-              const row = merged[p]
-              if (typeof row.i === 'number') continue
-              if (!sameRow(row, item)) continue
-              // The live copy is the richer one for streamed turns (usage,
-              // phase, duration); the server row contributes only its index.
-              // A user bubble is the exception: the server owns the canonical
-              // turn_index/sent_at, so merge onto the server row.
-              merged[p] = item.role === 'user'
-                ? mergeMessageFields(item, row)
-                : { ...row, i: item.i }
-              posByIndex.set(abs, p)
-              reconciled = true
-              break
+            // bubble first and then on the Activity group + answer. A server
+            // user row pairs with a later live bubble, by the server-assigned
+            // turn_index first and then by text; any other row only with a
+            // copy inside the cursor's own turn. Identical texts pair
+            // one-to-one, so a genuine repeat send keeps both copies countable.
+            // A new row always lands after every held row.
+            cursor = Math.max(cursor, tailStart - 1)
+            const end = nextUserAfter(cursor)
+            let match = -1
+            if (item.role === 'user') {
+              // The next bubble is normally this row's live copy, but an
+              // undelivered one (a failed send kept in the transcript) can sit
+              // ahead of it. Skipped bubbles stay above, in their own turn.
+              let byText = -1
+              for (let p = end; p < merged.length; p++) {
+                const row = merged[p]
+                if (row.role !== 'user' || typeof row.i === 'number') continue
+                if (item.turn_index != null && row.turn_index === item.turn_index) {
+                  match = p
+                  break
+                }
+                // A bubble the server already numbered as another turn is not
+                // this row's copy, however alike the text.
+                const otherTurn = item.turn_index != null && row.turn_index != null
+                if (byText < 0 && !otherTurn && sameRow(row, item)) byText = p
+              }
+              if (match < 0) match = byText
+            } else {
+              for (let p = turnStartOf(cursor); p < end; p++) {
+                const row = merged[p]
+                if (typeof row.i !== 'number' && sameRow(row, item)) {
+                  match = p
+                  break
+                }
+              }
             }
-            if (reconciled) continue
-            // Insert settled rows before a fast follow-up's live tail. Without
-            // this, the follow-up renders before the authoritative answer it
-            // followed, even though both turns are otherwise reconciled.
-            const insertionPos = followUpBoundary === null
-              ? merged.length
-              : followUpBoundary + insertedBeforeFollowUp
-            if (firstAppendPos < 0) firstAppendPos = insertionPos
-            for (const [index, position] of posByIndex) {
-              if (position >= insertionPos) posByIndex.set(index, position + 1)
+            if (match < 0) {
+              merged.splice(end, 0, item)
+              cursor = end
+              continue
             }
-            merged.splice(insertionPos, 0, item)
-            posByIndex.set(abs, insertionPos)
-            if (followUpBoundary !== null) insertedBeforeFollowUp++
+            // The live copy is the richer one for streamed turns (usage,
+            // phase, duration); the server row contributes only its index.
+            // A user bubble is the exception: the server owns the canonical
+            // turn_index/sent_at, so merge onto the server row.
+            const row = merged[match]
+            const placed = item.role === 'user'
+              ? mergeMessageFields(item, row)
+              : { ...row, i: item.i }
+            if (match < cursor) {
+              // Rows placed since sit above the live copy; move it after them
+              // so the turn reads in the server's order.
+              merged.splice(match, 1)
+              merged.splice(cursor, 0, placed)
+            } else {
+              merged[match] = placed
+              cursor = match
+            }
           }
-          messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, firstAppendPos)
+          messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, windowRows)
         }
         persistMessages()
         // Same rule the flat branch below applies, through the same predicate:
