@@ -12,12 +12,15 @@ would have to go through the manager this stands in for.
 The idempotency cases are the ones the plan names, one test each: a first start,
 a second start (the double click, the second tab, the retry after a dropped
 response), a restart (the record re-read from disk, nothing in process), a
-deleted chat, a new revision, and the routes. The two lifecycle cases ride on
-the same machinery and are pinned the same way: a dispatch that failed, where
-the point is that the *next* start sends the prompt rather than reporting a
-resume it never performed, and a start on a task the operator had dismissed,
-where the point is that the record stops saying ``dismissed`` while the chat it
-keeps is still the one that holds the work.
+deleted chat, a new revision, and the routes. The lifecycle cases ride on the
+same machinery and are pinned the same way: a dispatch that failed, where the
+point is that the *next* start sends the prompt rather than reporting a resume
+it never performed; a start on a task the operator had dismissed, where the
+point is that the record stops saying ``dismissed`` while the chat it keeps is
+still the one that holds the work; a dismissal of a *failed* record, which must
+not carry the empty chat forward, since that chat is the only other proof the
+prompt never left; and a record write that fails after the turn started, which
+must not turn a running chat into a refusal with no ``chat_id`` in it.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from starlette.testclient import TestClient
 from ciao import async_reads, update_task_catalog, update_tasks
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.update_task_catalog import CATALOG_FILENAME, UpdateTask
-from ciao.web import chat_service, update_task_launch
+from ciao.web import chat_service, routes_api, update_task_launch
 from ciao.web.routes_api import dismiss_update_task
 from ciao.web.routes_api import list_update_tasks
 from ciao.web.routes_api import reopen_update_task
@@ -590,9 +593,10 @@ def test_a_start_on_a_dismissed_task_reopens_it_in_the_same_chat(
     the reopen, so the record is written ``in_progress`` over the same chat and
     the reply says ``resumed``.
 
-    Nothing is dispatched. The chat a dismissal carried is a chat the task was
-    probably already running in, and this module's whole reason for existing is
-    that the packaged prompt does not get sent into it twice.
+    Nothing is dispatched. A chat a dismissal carried is a chat the prompt was
+    already sent into — ``dismiss_task`` drops the one exception, a chat whose
+    prompt never left — and this module's whole reason for existing is that the
+    packaged prompt does not get sent into it twice.
     """
     pcm = _FakePCM()
     first = _launch(tmp_path, pcm)
@@ -652,6 +656,190 @@ def test_a_dismissed_task_that_never_ran_starts_fresh(
     assert pcm.dispatched == [(pcm.created[0].chat_id, PROMPT_R1)]
 
 
+def test_a_dismissal_of_a_failed_attempt_drops_the_empty_chat(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """Fail, dismiss, start: the prompt goes out once, into a chat that ran it.
+
+    ``failed`` is the only thing in the file that says the prompt never left, and
+    a dismissal that carried that record's chat forward would discard it. The
+    empty chat is live, so the next start would take the reopen branch, write
+    ``in_progress`` over it and send nothing — a task reported as running that
+    no prompt was ever dispatched into, and with no ``failed`` left there is no
+    later start that would retry it. So the dismissal writes no chat, and the
+    start takes the ordinary path: a fresh chat and the packaged prompt.
+    """
+    pcm = _FakePCM()
+    pcm.fail_stream = True
+    with pytest.raises(update_task_launch.UpdateTaskLaunchError) as raised:
+        _launch(tmp_path, pcm)
+    empty_chat = raised.value.chat_id
+    assert pcm.dispatched == []
+
+    dismissed = update_task_launch.dismiss_task(
+        "review-legacy-rows",
+        config=_config(tmp_path),
+        workspace=WORKSPACE,
+        installed_version=VERSION,
+        reason="the bridge was down",
+    )
+
+    assert dismissed["lifecycle"] == "dismissed"
+    assert dismissed["chat_id"] == "", (
+        "a chat that never got the prompt must not be carried into a dismissal"
+    )
+    assert _state(tmp_path).chat_id == ""
+
+    pcm.fail_stream = False
+    outcome = _launch(tmp_path, pcm)
+
+    assert len(pcm.created) == 2
+    assert outcome["chat_id"] == pcm.created[1].chat_id != empty_chat
+    assert outcome["resumed"] is False
+    assert outcome["lifecycle"] == "in_progress"
+    assert pcm.dispatched == [(outcome["chat_id"], PROMPT_R1)], (
+        "the packaged prompt ran exactly once, into the chat that is reported"
+    )
+    state = _state(tmp_path)
+    assert state.lifecycle == "in_progress"
+    assert state.chat_id == outcome["chat_id"], (
+        "the empty chat is not the one the record says is running"
+    )
+
+
+def test_a_reopen_of_a_failed_attempt_carries_no_chat_either(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """Fail, dismiss, reopen, start: the same guarantee one decision further on.
+
+    A reopen is a decision about the dismissal, so it carries whatever the
+    dismissal carried — including its absence of a chat. The record is
+    ``offered`` again, and this is the branch that a start could not tell from
+    the reopen of a task that really did run: a live chat and a lifecycle that
+    promises nothing was dispatched. With no chat carried, the start creates one
+    and dispatches into it exactly once, and the empty chat the failed attempt
+    left behind is still nobody's running task.
+    """
+    pcm = _FakePCM()
+    pcm.fail_stream = True
+    with pytest.raises(update_task_launch.UpdateTaskLaunchError) as raised:
+        _launch(tmp_path, pcm)
+    empty_chat = raised.value.chat_id
+
+    update_task_launch.dismiss_task(
+        "review-legacy-rows",
+        config=_config(tmp_path),
+        workspace=WORKSPACE,
+        installed_version=VERSION,
+    )
+    reopened = update_task_launch.reopen_task(
+        "review-legacy-rows",
+        config=_config(tmp_path),
+        workspace=WORKSPACE,
+        installed_version=VERSION,
+    )
+    assert reopened["lifecycle"] == "offered"
+    assert reopened["chat_id"] == "", "a reopen cannot resurrect the dropped chat"
+
+    pcm.fail_stream = False
+    outcome = _launch(tmp_path, pcm)
+
+    assert len(pcm.created) == 2
+    assert outcome["chat_id"] == pcm.created[1].chat_id != empty_chat
+    assert outcome["resumed"] is False
+    assert outcome["lifecycle"] == "in_progress"
+    assert pcm.dispatched == [(outcome["chat_id"], PROMPT_R1)], (
+        "the prompt ran once across the failure, the dismissal and the reopen"
+    )
+    state = _state(tmp_path)
+    assert state.lifecycle == "in_progress"
+    assert state.chat_id == outcome["chat_id"]
+
+    # A start after that is a resume of a chat that did run it, and sends
+    # nothing into it a second time.
+    again = _launch(tmp_path, pcm)
+    assert again["chat_id"] == outcome["chat_id"]
+    assert again["resumed"] is True
+    assert pcm.dispatched == [(outcome["chat_id"], PROMPT_R1)]
+
+
+def _fail_the_nth_write(monkeypatch: pytest.MonkeyPatch, nth: int) -> list[str]:
+    """Make the ``nth`` record write of a launch fail, and log every lifecycle.
+
+    The first write in a launch is the pre-dispatch ``failed`` one, so the second
+    is exactly the write that records a prompt already running. A retry has no
+    pre-dispatch write, so its only write — the one that would record the prompt
+    it just sent — is the first.
+    """
+    real = update_tasks._write_record
+    lifecycles: list[str] = []
+
+    def write(path: Path, state: Any) -> None:
+        lifecycles.append(state.lifecycle)
+        if len(lifecycles) == nth:
+            raise update_tasks.UpdateTaskStateError("the state file said no")
+        real(path, state)
+
+    monkeypatch.setattr(update_tasks, "_write_record", write)
+    return lifecycles
+
+
+def test_a_record_that_will_not_take_the_started_write_still_returns_the_chat(
+    tmp_path: Path, packaged: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails after the turn started is logged, not refused.
+
+    ``UpdateTaskStateError`` is a ``ValueError``, so the write that records a
+    dispatched prompt used to be able to end a launch as a refusal: the reply
+    carried no ``chat_id`` and read "not started", which is the answer that
+    sends the operator back to press Start and dispatch the same task into the
+    same chat a second time. The chat is running either way, so the launch
+    answers with it — and the record keeps saying ``failed``, which is what a
+    crash in the same window leaves behind.
+    """
+    pcm = _FakePCM()
+    lifecycles = _fail_the_nth_write(monkeypatch, 2)
+
+    outcome = _launch(tmp_path, pcm)
+
+    assert lifecycles == ["failed", "in_progress"]
+    assert outcome["chat_id"] == pcm.created[0].chat_id
+    assert outcome["resumed"] is False
+    assert pcm.dispatched == [(outcome["chat_id"], PROMPT_R1)]
+    assert _state(tmp_path).lifecycle == "failed", (
+        "the file keeps the one marker a later start can act on"
+    )
+
+
+def test_the_same_holds_for_a_retry_that_cannot_record_its_dispatch(
+    tmp_path: Path, packaged: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry path has the same post-dispatch write, and the same answer.
+
+    A retry is the branch that matters most here: its record is ``failed``, its
+    prompt has just been sent into the chat the operator was already told about,
+    and a refusal would report no chat at all for a turn that is running. So it
+    answers ``resumed: true`` with that chat, and the record stays ``failed`` —
+    the state a later start retries from, which is the same one a crash between
+    ``start_stream`` and the write would leave.
+    """
+    pcm = _FakePCM()
+    pcm.fail_stream = True
+    with pytest.raises(update_task_launch.UpdateTaskLaunchError) as raised:
+        _launch(tmp_path, pcm)
+    chat_id = raised.value.chat_id
+    pcm.fail_stream = False
+    lifecycles = _fail_the_nth_write(monkeypatch, 1)
+
+    outcome = _launch(tmp_path, pcm)
+
+    assert lifecycles == ["in_progress"]
+    assert outcome["chat_id"] == chat_id
+    assert outcome["resumed"] is True
+    assert pcm.dispatched == [(chat_id, PROMPT_R1)]
+    assert _state(tmp_path).lifecycle == "failed"
+
+
 # ── Dismiss, reopen and the check ────────────────────────────────────────────
 
 
@@ -661,9 +849,10 @@ def test_dismiss_and_reopen_route_through_update_tasks(
     """The two decisions are ``update_tasks``' to record, and they round-trip.
 
     A dismissal suppresses the offer at this revision only and keeps the chat the
-    task was in; a reopen clears the attempt fingerprint and puts it back. Both
-    go through the ``update_tasks`` recorders, so a card and a direct call cannot
-    produce two different records for the same decision.
+    task was in — this one was launched, so that chat is one the prompt really
+    reached; a reopen clears the attempt fingerprint and puts it back. Both write
+    through ``update_tasks``' own record lock and primitives, so a card and a
+    direct call cannot produce two different records for the same decision.
     """
     config = _config(tmp_path)
     chat_id = _launch(tmp_path, _FakePCM())["chat_id"]
@@ -801,6 +990,37 @@ def test_start_route_answers_the_housekeeping_envelope(
     assert dismissed.json()["result"]["lifecycle"] == "dismissed"
     reopened = client.post(f"/api/update-tasks/review-legacy-rows/reopen?workspace={WORKSPACE}")
     assert reopened.json()["result"]["lifecycle"] == "offered"
+
+
+def test_the_start_route_answers_with_the_chat_even_when_the_listing_fails(
+    tmp_path: Path, packaged: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A detector pass that cannot be listed does not undo a launch that landed.
+
+    The fresh list is the last thing a state-changing reply computes, and a
+    failure there used to propagate out of the handler: a chat that existed with
+    the packaged prompt running in it became a bare 500 with no ``chat_id``,
+    which is the only answer that sends the operator back to press Start. The
+    key is left off instead, because ``[]`` would claim the workspace has no
+    tasks — a different statement, and the one a card would believe.
+    """
+
+    def rows(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the detector pass is unhappy")
+
+    monkeypatch.setattr(routes_api, "_update_task_rows", rows)
+    pcm = _FakePCM()
+    client = _client(_config(tmp_path), pcm)
+
+    started = client.post(f"/api/update-tasks/review-legacy-rows/start?workspace={WORKSPACE}")
+
+    assert started.status_code == 200
+    body = started.json()
+    assert body["ok"] is True
+    assert body["chat_id"] == pcm.created[0].chat_id
+    assert body["resumed"] is False
+    assert pcm.dispatched == [(body["chat_id"], PROMPT_R1)]
+    assert "tasks" not in body, "an unbuildable list is absent, not empty"
 
 
 def test_unknown_task_id_is_409_not_500(tmp_path: Path, packaged: Any) -> None:

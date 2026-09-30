@@ -41,9 +41,18 @@ same lock, and puts the record back to ``in_progress`` — no second chat, and
 ``resumed: true`` only ever paired with a prompt that actually went out. A
 ``dismissed`` record is an operator decision that a start explicitly reverses:
 the same chat is kept and the record is written ``in_progress``, but nothing is
-re-sent, because the chat a dismissal kept is a chat the prompt has usually
-already been sent to and running twice is the outcome this module exists to
-prevent. Every other lifecycle resumes as it is: nothing created, nothing sent.
+re-sent, because the chat a dismissal kept is a chat the prompt has already
+been sent to and running twice is the outcome this module exists to prevent.
+Every other lifecycle resumes as it is: nothing created, nothing sent.
+
+That last claim is only sound because ``dismiss_task`` keeps ``failed`` out of a
+dismissal. ``failed`` is the one lifecycle that means "this chat never got the
+prompt", and a dismissal that carried its chat forward would throw the only
+record of that away: the next start would find a live chat, send nothing into
+it, write ``in_progress`` and report a task as running that nothing was ever
+dispatched into — and a reopen of the same record would reach the same answer
+through the branch below. So a dismissal of a ``failed`` record writes no chat
+at all, and the next start mints a fresh one and dispatches into that.
 
 Why a revision change cannot resume
 ----------------------------------
@@ -73,6 +82,16 @@ prompt again. The trade is deliberate — a chat with no record at all is an
 orphan nothing points at, whereas a duplicate dispatch is a second turn an
 operator can see and close — and it is the same one
 ``proposal_service.accept_skill_proposal`` makes for the same reason.
+
+A write that *fails* where a process would have died leaves that same record,
+and is not answered as a refusal. ``_write_record`` raises
+``UpdateTaskStateError``, which is a ``ValueError``, and a route answers a
+``ValueError`` with 409 — dropping the ``chat_id`` from a reply whose prompt is
+already running, and inviting the retry that sends it a second time. So the
+post-dispatch write is logged and the launch answers with the chat: the record
+keeps saying ``failed`` (the state a crash there leaves, and one a later start
+can still act on) while the operator holds the chat that is doing the work.
+
 ``start_stream`` creates an asyncio task, so this function is called from the
 event loop (see the route) rather than from a worker thread.
 
@@ -97,7 +116,7 @@ from typing import Any
 
 from ciao import update_tasks
 from ciao.update_task_catalog import UpdateTask, load_catalog, read_prompt
-from ciao.update_tasks import TaskState
+from ciao.update_tasks import TaskState, UpdateTaskStateError
 
 logger = logging.getLogger(__name__)
 
@@ -222,9 +241,12 @@ def launch_task(
     not claim to have created anything; ``created`` is the same fact.
 
     Raises ``ValueError`` when the task is refused (unknown, unsupported by this
-    engine, no host workspace, no chat manager) and
-    :class:`UpdateTaskLaunchError` when the chat exists but the turn could not
-    be dispatched.
+    engine, no host workspace, no chat manager, a record that cannot be written
+    before the turn starts) and :class:`UpdateTaskLaunchError` when the chat
+    exists but the turn could not be dispatched. A record that cannot be written
+    *after* the turn started is not a refusal and is not raised: the launch
+    answers with the chat and the file keeps saying ``failed`` (see
+    :func:`_write_after_dispatch`).
     """
     task = resolve_task(task_id, installed_version=installed_version)
     _require_host_workspace(task, workspace)
@@ -278,8 +300,11 @@ def launch_task(
             ),
         )
         _dispatch(pcm, task, chat.chat_id, prompt)
-        started = _attempt(task, chat.chat_id, digest=digest, actor=actor, now=now)
-        update_tasks._write_record(path, started)
+        started = _write_after_dispatch(
+            path,
+            _attempt(task, chat.chat_id, digest=digest, actor=actor, now=now),
+            task=task,
+        )
     return _outcome(
         task,
         chat,
@@ -332,14 +357,48 @@ def dismiss_task(
 ) -> dict[str, Any]:
     """Decline this task at this revision, and return the record that stands.
 
-    A thin wrapper over ``update_tasks.record_dismissal`` so the route never
-    resolves a task itself: a dismissal recorded against a revision the catalog
-    has moved past would suppress nothing.
+    What ``update_tasks.record_dismissal`` writes, with the one thing it cannot
+    decide for itself, which is why this takes the record lock and writes the
+    record rather than delegating: a dismissal carries the chat forward, and
+    carrying the *wrong* one loses the only record of whether the prompt ever
+    went out.
+
+    A ``failed`` record is that record. Its chat exists, is live, and is empty —
+    the dispatch never reached it — and carrying it into the dismissal would
+    leave the next start with a live chat to write ``in_progress`` over while
+    sending nothing into it: a task reported as running that no prompt was ever
+    dispatched into, with nothing left in the file to retry from. So a dismissal
+    of a ``failed`` record writes no chat at all, and the next start mints a
+    fresh one and dispatches the prompt into that, exactly once. A reopen of
+    that record inherits the empty chat, so it cannot reintroduce the hole.
+
+    Every other lifecycle is unchanged, and in particular a dismissal of a task
+    that *was* launched keeps its chat: carrying a chat is how a reopen finds
+    the work again, and it is only wrong when nothing was ever put in it.
+
+    The read of what it replaces and the write that replaces it are one critical
+    section, as they are in the recorder, so a chat id stamped concurrently is
+    carried forward rather than lost, and a launch that took the lock first is
+    seen for what it did.
     """
     task = resolve_task(task_id, installed_version=installed_version)
-    state = update_tasks.record_dismissal(
-        task, config=config, workspace=workspace, now=now, reason=reason
-    )
+    with update_tasks._record_lock(task, config, workspace) as (path, previous):
+        carried = update_tasks._carried(previous)
+        if previous is not None and previous.lifecycle == "failed":
+            carried["chat_id"] = ""
+        evidence: dict[str, Any] = {}
+        if reason.strip():
+            evidence["dismiss_reason"] = reason.strip()
+        state = TaskState(
+            task_id=task.id,
+            revision=task.revision,
+            scope=task.scope,
+            lifecycle="dismissed",
+            updated_at=update_tasks._stamp(now),
+            evidence=evidence,
+            **carried,
+        )
+        update_tasks._write_record(path, state)
     return _state_outcome(task, state)
 
 
@@ -357,6 +416,13 @@ def reopen_task(
     reopened, so an offered or in-flight task comes back unchanged rather than
     being rewritten as ``offered`` — the operator's decision is the only thing
     this reverses.
+
+    A reopened record carries whatever chat its dismissal carried, and
+    :func:`dismiss_task` leaves a chat out of a dismissal whose prompt never
+    went out, so reopening one of those offers the task with no chat: the next
+    start takes the ordinary path and dispatches the packaged prompt into a
+    fresh one. Reopening a ``failed`` record itself writes nothing at all (only
+    a dismissal is reversed) and leaves the retry available.
     """
     task = resolve_task(task_id, installed_version=installed_version)
     state = update_tasks.reopen_task(
@@ -487,12 +553,13 @@ def _resumed(
       :class:`UpdateTaskLaunchError` names the same chat.
     * **``dismissed``** — an operator pressed Start on a task they had declined,
       which is a reopen, so the record is written ``in_progress`` and the chat
-      kept. Nothing is dispatched: a dismissal carries the chat forward but not
-      whether the turn is still in there, and a chat that may already have run
-      the task must not be told to run it again. The rejected
-      ``ValueError`` alternative was available and was not taken — a 409 that
-      tells the operator to press Reopen, when Reopen already exists and does
-      less, turns an explicit decision into a detour.
+      kept. Nothing is dispatched, and the reason it can be sure of that is
+      :func:`dismiss_task`: a dismissal only carries a chat whose prompt was
+      sent, so a chat reached here has already run the task and must not be
+      told to run it again. The rejected ``ValueError`` alternative was
+      available and was not taken — a 409 that tells the operator to press
+      Reopen, when Reopen already exists and does less, turns an explicit
+      decision into a detour.
     * **anything else** — nothing is created and nothing is sent: the turn
       belongs to the attempt this record already describes, and sending the
       prompt twice would run the same task in one chat twice. The digest
@@ -505,8 +572,11 @@ def _resumed(
     """
     if previous.lifecycle == "failed":
         _dispatch(pcm, task, chat.chat_id, prompt)
-        retried = _attempt(task, previous.chat_id, digest=digest, actor=actor, now=now)
-        update_tasks._write_record(path, retried)
+        retried = _write_after_dispatch(
+            path,
+            _attempt(task, previous.chat_id, digest=digest, actor=actor, now=now),
+            task=task,
+        )
         return _outcome(task, chat, digest=digest, resumed=True, state=retried)
     if previous.lifecycle == "dismissed":
         reopened = _attempt(task, previous.chat_id, digest=digest, actor=actor, now=now)
@@ -515,6 +585,35 @@ def _resumed(
     return _outcome(
         task, chat, digest=previous.prompt_digest, resumed=True, state=previous
     )
+
+
+def _write_after_dispatch(
+    path: Path, state: TaskState, *, task: UpdateTask
+) -> TaskState:
+    """Record the lifecycle a dispatched prompt earned, and return it either way.
+
+    The only write here that happens once the turn is already running, so it is
+    the one whose failure must not become a refusal. ``_write_record`` raises
+    ``UpdateTaskStateError`` — a ``ValueError``, so a route answers it 409 — and
+    by then the operator is holding a chat with the packaged prompt in it. A 409
+    carries no ``chat_id`` and reads as "not started", which is the answer that
+    sends them back to press Start and dispatch the same task twice.
+
+    So the failure is logged and the record this call built is returned: the
+    reply says what happened to the chat, and the file keeps saying ``failed``,
+    which is the state a crash in the same window leaves and one a later start
+    can still act on. That is the trade the ordering above already makes, taken
+    deliberately rather than by dying into it.
+    """
+    try:
+        update_tasks._write_record(path, state)
+    except (UpdateTaskStateError, OSError):
+        logger.exception(
+            "The prompt for %s@%s is running, but its record could not be written",
+            task.id,
+            task.revision,
+        )
+    return state
 
 
 def _dispatch(pcm: Any, task: UpdateTask, chat_id: str, prompt: str) -> None:

@@ -808,11 +808,23 @@ decides what a resume does with one (`_resumed`):
   fails again leaves the record `failed`, so the next start tries again.
 - `dismissed` — an operator pressing Start on a task they declined is a reopen,
   so the chat is kept and the record is written `in_progress`. Nothing is
-  dispatched: a dismissal carries the chat forward but not whether the turn is
-  still in there. (The 409 alternative — "reopen it first" — was available and
-  not taken; Reopen already exists and does strictly less.)
+  dispatched, because a chat reached here has already run the task. (The 409
+  alternative — "reopen it first" — was available and not taken; Reopen already
+  exists and does strictly less.)
 - anything else — nothing created, nothing sent, and the digest reported is the
   record's own rather than the one this call computed.
+
+The `dismissed` branch is only safe because `dismiss_task` keeps `failed` out of
+a dismissal. `failed` is the **only** thing in the file that says the prompt
+never went out, and a dismissal that carried that record's chat forward would
+throw it away: the empty chat is live, so the next start finds it, writes
+`in_progress` and sends nothing — a task reported as running that nothing was
+ever dispatched into, with no `failed` left to retry from. So `dismiss_task`
+takes the record lock itself (it cannot delegate: `keyed_lock` is not reentrant)
+and writes the `dismissed` record with `chat_id=""` when the record it replaces
+is `failed`. Every other lifecycle keeps its chat, which is how a reopen finds
+the work again. A reopen of such a dismissal inherits the empty chat, so the
+fail → dismiss → reopen → start history is safe as well.
 
 Two ordering rules fall out of that, and both are load-bearing. The record is
 written **before** the turn is dispatched, and it is written `failed` — the
@@ -825,9 +837,17 @@ the prompt into that same chat instead of reporting a resume that never ran. The
 window this cannot close is the one between `start_stream` returning and the
 `in_progress` write, where a dead process leaves `failed` for a turn that may
 already be running; an orphan chat is worse than a visible duplicate turn, and
-`proposal_service.accept_skill_proposal` makes the same trade. And `start_stream`
-creates an asyncio task, so `launch_task` is called **on the event loop**, not
-through `asyncio.to_thread` like the vault-scanning routes — the same split
+`proposal_service.accept_skill_proposal` makes the same trade.
+
+A write that *fails* in that window is the same state, and it is not raised:
+`UpdateTaskStateError` is a `ValueError`, so a route would answer it 409 with no
+`chat_id` — "not started" for a turn that is running, which is the answer that
+invites the duplicate prompt. `_write_after_dispatch` logs it and returns the
+record the launch built, so the reply names the chat and the file keeps saying
+`failed`. Keep 409 for pre-create and pre-dispatch refusals; nothing that happens
+after `start_stream` returns may become one. `start_stream` creates an asyncio
+task, so `launch_task` is called **on the event loop**, not through
+`asyncio.to_thread` like the vault-scanning routes — the same split
 `proposal_implement` documents for `accept_skill_proposal`.
 
 A launched chat carries `helper = {"kind": "update_task", "task_id", "revision",
@@ -842,10 +862,14 @@ The launch path runs no detector, no completion check, no model, no `eval`, no
 shell and no remote fetch. Applicability is a separate, TTL-cached answer
 (`update_tasks.evaluate`) that `GET /api/update-tasks` reports and a start does
 not re-ask for: a start is a decision the operator already made.
-`dismiss_task`/`reopen_task`/`record_check` are thin wrappers over the
-`update_tasks` recorders, so the card and a direct API call cannot produce two
-records for one decision. See `tests/test_update_task_launch.py` for the
-idempotency cases, each driven against a fake manager over a temp packaged root.
+`reopen_task`/`record_check` are thin wrappers over the `update_tasks`
+recorders, and `dismiss_task` is the same write with the failed-chat rule
+above, so the card and a direct API call cannot produce two records for one
+decision. The three state-changing routes carry the fresh task rows in their
+reply, through `_with_update_task_rows`, which drops the key rather than raising
+if the listing cannot be built: a launch that landed must not become a bare 500.
+See `tests/test_update_task_launch.py` for the idempotency cases, each driven
+against a fake manager over a temp packaged root.
 
 ## Change guidelines
 

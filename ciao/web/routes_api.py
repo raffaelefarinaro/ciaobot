@@ -8410,6 +8410,29 @@ async def _update_task_rows(request: Request, workspace: str) -> list[dict[str, 
     return [_update_task_row(status) for status in statuses]
 
 
+async def _with_update_task_rows(
+    request: Request, workspace: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Attach the freshly listed update tasks to a reply that changed one.
+
+    The rows travel with a state-changing answer so a client cannot render a
+    card for a decision this call just made. They are also the last thing
+    computed, and a detector pass that fails there would turn a decision that
+    landed — a chat that exists with the packaged prompt running in it — into a
+    bare 500 carrying no ``chat_id``, which is the one answer that sends the
+    operator back to press Start. So a failure to build them is logged and the
+    key is left off: the reply says what this route did, and
+    ``GET /api/update-tasks`` recomputes the list. Absent rather than empty on
+    purpose, because ``[]`` would claim the workspace has no tasks, which is a
+    different statement and the one a card would believe.
+    """
+    try:
+        payload["tasks"] = await _update_task_rows(request, workspace)
+    except Exception:  # noqa: BLE001 — the decision this route made has landed
+        logger.exception("Could not list the update tasks for %s", workspace)
+    return payload
+
+
 def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
     """One task, its lifecycle, and the chat its attempt is in.
 
@@ -8513,10 +8536,14 @@ async def start_update_task(request: Request) -> JSONResponse:
     to run the task a second time.
 
     A refused task — unknown id, one this engine version cannot support, no host
-    workspace, no chat manager — is 409, never 500; a chat that exists but whose
-    turn could not be dispatched is 500 *with* the ``chat_id``, because that is
-    the one case a retry must not turn into a second chat, and the retry sends
-    the prompt into it.
+    workspace, no chat manager, a state record that cannot be written before the
+    turn starts — is 409, never 500; a chat that exists but whose turn could not
+    be dispatched is 500 *with* the ``chat_id``, because that is the one case a
+    retry must not turn into a second chat, and the retry sends the prompt into
+    it. Nothing that happens after the turn started turns this into a refusal
+    or a bare 500: a record that will not take the ``in_progress`` write is
+    logged and still answered with the chat, and a detector pass that cannot
+    list the tasks leaves the reply without its ``tasks`` key.
 
     The prompt is the packaged one for this revision, read on the server. There
     is no request field for prompt text and there will not be one.
@@ -8550,14 +8577,17 @@ async def start_update_task(request: Request) -> JSONResponse:
             {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
         )
     return JSONResponse(
-        {
-            "ok": True,
-            "task_id": task_id,
-            "chat_id": outcome["chat_id"],
-            "resumed": outcome["resumed"],
-            "result": outcome,
-            "tasks": await _update_task_rows(request, workspace),
-        }
+        await _with_update_task_rows(
+            request,
+            workspace,
+            {
+                "ok": True,
+                "task_id": task_id,
+                "chat_id": outcome["chat_id"],
+                "resumed": outcome["resumed"],
+                "result": outcome,
+            },
+        )
     )
 
 
@@ -8570,6 +8600,13 @@ async def dismiss_update_task(request: Request) -> JSONResponse:
     unsupported id is 409: refusing to record a decision against a task this
     engine does not support is the honest answer, and it is a refusal rather
     than a failure.
+
+    The chat the task was in is carried into the record, with one exception: a
+    ``failed`` record's chat exists and is empty, because the dispatch never
+    reached it, and ``failed`` is the only thing saying so. Carrying that chat
+    would let a later start find it, send nothing into it and report the task as
+    running, so a dismissal of one drops it and the next start creates a fresh
+    chat and dispatches the packaged prompt into that.
     """
     from ciao import __version__
     from ciao.web import update_task_launch
@@ -8598,12 +8635,15 @@ async def dismiss_update_task(request: Request) -> JSONResponse:
             {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
         )
     return JSONResponse(
-        {
-            "ok": True,
-            "task_id": task_id,
-            "result": result,
-            "tasks": await _update_task_rows(request, workspace),
-        }
+        await _with_update_task_rows(
+            request,
+            workspace,
+            {
+                "ok": True,
+                "task_id": task_id,
+                "result": result,
+            },
+        )
     )
 
 
@@ -8634,12 +8674,15 @@ async def reopen_update_task(request: Request) -> JSONResponse:
             {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
         )
     return JSONResponse(
-        {
-            "ok": True,
-            "task_id": task_id,
-            "result": result,
-            "tasks": await _update_task_rows(request, workspace),
-        }
+        await _with_update_task_rows(
+            request,
+            workspace,
+            {
+                "ok": True,
+                "task_id": task_id,
+                "result": result,
+            },
+        )
     )
 
 
