@@ -3152,7 +3152,7 @@ def _collect_vault_markdown_paths(config) -> list[str]:
             except OSError:
                 continue
             try:
-                display = str(resolved.relative_to(workspace))
+                display = resolved.relative_to(workspace).as_posix()
             except ValueError:
                 display = str(resolved)
             if display in seen:
@@ -3173,7 +3173,7 @@ def _collect_vault_markdown_paths(config) -> list[str]:
             except OSError:
                 continue
             try:
-                display = str(resolved.relative_to(workspace))
+                display = resolved.relative_to(workspace).as_posix()
             except ValueError:
                 display = str(resolved)
             if display in seen:
