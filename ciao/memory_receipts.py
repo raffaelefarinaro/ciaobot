@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.users import user_key
 from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
@@ -226,8 +227,8 @@ def lock_path_for(resolved_key: str) -> Path:
     Uses ``CIAO_QUEUE_LOCK_DIR`` when set (tests pin it), else a per-user
     directory under the system temp root. Deterministic in the resolved
     guarded path so every process and thread guarding the same file picks the
-    same lock. The uid component keeps two local accounts from colliding on a
-    shared ``/tmp``.
+    same lock. The user component (the uid; the SID on Windows) keeps two local
+    accounts from colliding on a shared ``/tmp``.
 
     Public because the curation lease (``ciao/curation_run.py``) guards a
     different vault file and must not reinvent — or diverge from — where this
@@ -237,11 +238,7 @@ def lock_path_for(resolved_key: str) -> Path:
     if base:
         root = Path(base)
     else:
-        try:
-            uid = os.getuid()
-        except AttributeError:  # pragma: no cover - non-POSIX
-            uid = 0
-        root = Path(tempfile.gettempdir()) / f"ciao-queue-locks-{uid}"
+        root = Path(tempfile.gettempdir()) / f"ciao-queue-locks-{user_key()}"
     digest = hashlib.sha256(resolved_key.encode("utf-8")).hexdigest()[:32]
     return root / f"{digest}.lock"
 
