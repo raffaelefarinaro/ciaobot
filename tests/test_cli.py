@@ -18,10 +18,10 @@ from ciao import cli
 def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
-    monkeypatch.setattr(cli, "_run_server", lambda: called.append("run") or 0)
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: called.append(kwargs) or 0)
 
     assert cli.main(["run"]) == 0
-    assert called == ["run"]
+    assert called == [{"supervised": False}]
 
 
 def _raise_system_exit(code: int):
@@ -80,6 +80,43 @@ def test_run_propagates_other_exit_codes_without_relaunch(
     monkeypatch.setattr(cli.os, "execv", fail_execv)
 
     assert cli._run_server() == 3
+
+
+def test_run_supervised_returns_restart_code_without_execv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supervisor owns the relaunch, so the child only reports the code."""
+    import ciao.main
+
+    def fail_execv(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("execv must not be called under --supervised")
+
+    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(75))
+    monkeypatch.setattr(cli.os, "execv", fail_execv)
+
+    assert cli._run_server(supervised=True) == 75
+
+
+def test_run_parser_accepts_supervised_flag() -> None:
+    assert cli.build_parser().parse_args(["run", "--supervised"]).supervised is True
+
+
+def test_supervise_is_registered_and_help_exits_zero() -> None:
+    """Registered as a subparser too, so `ciao --help` discloses it."""
+    parser = cli.build_parser()
+    action = next(a for a in parser._subparsers._actions if hasattr(a, "choices") and a.choices)
+    assert "supervise" in action.choices
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["supervise", "--help"])
+    assert exc.value.code == 0
+
+
+def test_supervise_is_not_an_agent_command() -> None:
+    """`ciao supervise` is an operator launcher: the agent surface must not claim it."""
+    from ciao.agent_cli import is_agent_invocation
+
+    assert is_agent_invocation(["supervise"]) is False
 
 
 def test_cli_public_preflight_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
