@@ -1102,7 +1102,8 @@ class LocalSessionManager:
 
         for p in changed_paths:
             try:
-                rel_path = str(p.relative_to(self.workspace))
+                # `/` on every OS: the buckets below match `ciao/`, `web/`, ...
+                rel_path = p.relative_to(self.workspace).as_posix()
             except ValueError:
                 continue
 

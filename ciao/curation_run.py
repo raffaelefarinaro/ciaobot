@@ -560,7 +560,7 @@ def _stale_findings(
     }
     scanned: list[_ScannedNote] = []
     for entry in entries:
-        rendered = str(entry.path)
+        rendered = entry.path_key
         mtime = _mtime_of(root, rendered, prefix)
         note_type = (entry.type or "").strip()
         relative = _vault_relative(rendered, prefix)

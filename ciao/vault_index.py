@@ -304,6 +304,16 @@ class Entry:
     # says "touched", not "checked". See ciao.memory_audit for the consumer.
     updated: str = ""
 
+    @property
+    def path_key(self) -> str:
+        """``path`` as the note's id: spelled with ``/`` on every OS.
+
+        Every map, set, comparison and output that names a note uses this, never
+        ``str(path)``, which spells the separators with backslashes on Windows
+        and then matches no ``/``-spelled ref, link or client id.
+        """
+        return self.path.as_posix()
+
 
 def is_excluded(rel_path: Path) -> bool:
     parts = rel_path.parts
@@ -515,7 +525,7 @@ def build_filename_index(
     for e in entries:
         # key by vault-relative path without extension
         rel_from_vault = _strip_prefix(e.path, prefix)
-        stem_key = str(rel_from_vault.with_suffix(""))
+        stem_key = rel_from_vault.with_suffix("").as_posix()
         idx[stem_key].append(e.path)
         # also key by filename stem alone for bare references like "Mo"
         idx[e.path.stem].append(e.path)
@@ -660,7 +670,7 @@ def scan_vault(
                 if ref not in unresolved:
                     unresolved.append(ref)
                 continue
-            key = str(target)
+            key = target.as_posix()
             if key in seen or target == e.path:
                 continue
             seen.add(key)
@@ -675,7 +685,7 @@ def _build_graph(entries: list[Entry]) -> dict[str, set[str]]:
     """Undirected graph keyed by repo-relative path string."""
     graph: dict[str, set[str]] = defaultdict(set)
     for e in entries:
-        src = str(e.path)
+        src = e.path_key
         for tgt in e.related:
             graph[src].add(tgt)
             graph[tgt].add(src)
@@ -685,7 +695,7 @@ def _build_graph(entries: list[Entry]) -> dict[str, set[str]]:
 def _ref_matches(raw: str, filename_idx: dict[str, list[Path]], deleted_path: str) -> bool:
     """True if a raw related/link reference string resolves to deleted_path."""
     target = resolve_related(_normalize_related_value(raw), filename_idx)
-    return target is not None and str(target) == deleted_path
+    return target is not None and target.as_posix() == deleted_path
 
 
 def _strip_frontmatter_related(
@@ -913,7 +923,7 @@ def strip_references(
     edits: list[tuple[Path, str, str]] = []
     edited: list[str] = []
     for e in entries:
-        if str(e.path) == deleted_path or deleted_path not in e.related:
+        if e.path_key == deleted_path or deleted_path not in e.related:
             continue
         rel_from_vault = _strip_prefix(e.path, prefix)
         abs_path = vault_root / rel_from_vault
@@ -926,7 +936,7 @@ def strip_references(
         )
         if file_changed:
             edits.append((abs_path, text, new_text))
-            edited.append(str(e.path))
+            edited.append(e.path_key)
     # Phase 2: stage + swap everything in, or roll back to the original bytes.
     _commit_staged_edits(edits)
     if undo is not None:
@@ -935,13 +945,13 @@ def strip_references(
 
 
 def _normalize_path_arg(value: str) -> str:
-    """Normalize a user-supplied path to match entry.path string form."""
+    """Normalize a user-supplied path to match ``Entry.path_key``."""
     p = Path(value)
     try:
         p = p.resolve().relative_to(Path.cwd().resolve())
     except (ValueError, OSError):
         p = Path(value)
-    return str(p)
+    return p.as_posix()
 
 
 def filter_entries(
@@ -978,7 +988,7 @@ def neighbors(
     depth: int = 1,
 ) -> list[tuple[int, Entry]]:
     """BFS neighbors of start_path up to `depth` hops (excludes start)."""
-    by_path = {str(e.path): e for e in entries}
+    by_path = {e.path_key: e for e in entries}
     graph = _build_graph(entries)
     if start_path not in by_path:
         return []
@@ -999,7 +1009,7 @@ def neighbors(
         if d == 0 or p not in by_path:
             continue
         out.append((d, by_path[p]))
-    out.sort(key=lambda x: (x[0], str(x[1].path)))
+    out.sort(key=lambda x: (x[0], x[1].path_key))
     return out
 
 
@@ -1016,7 +1026,7 @@ def format_tsv(entries: list[Entry], include_hops: list[int] | None = None) -> s
             lines.append(
                 "\t".join(
                     [
-                        str(e.path),
+                        e.path_key,
                         e.workspace,
                         e.type,
                         e.title,
@@ -1033,7 +1043,7 @@ def format_tsv(entries: list[Entry], include_hops: list[int] | None = None) -> s
                 "\t".join(
                     [
                         str(hop),
-                        str(e.path),
+                        e.path_key,
                         e.workspace,
                         e.type,
                         e.title,
@@ -1049,7 +1059,7 @@ def format_tsv(entries: list[Entry], include_hops: list[int] | None = None) -> s
 def format_json(entries: list[Entry], hops: list[int] | None = None) -> str:
     def item(e: Entry, hop: int | None) -> dict:
         d: dict[str, Any] = {
-            "path": str(e.path),
+            "path": e.path_key,
             "workspace": e.workspace,
             "type": e.type,
             "title": e.title,
@@ -1117,7 +1127,7 @@ def format_md(entries: list[Entry]) -> str:
                 if e.aliases:
                     extras.append("aliases: " + ", ".join(e.aliases))
                 suffix = f" ({'; '.join(extras)})" if extras else ""
-                sections.append(f"- {_index_link(str(e.path))}{suffix}")
+                sections.append(f"- {_index_link(e.path_key)}{suffix}")
             sections.append("")
     return "\n".join(sections).rstrip() + "\n"
 
@@ -1170,7 +1180,7 @@ def scan_targets(
         scanned = scan_vault(root, workspace=workspace, path_prefix=prefix)
         prefixes[workspace] = Path(prefix)
         for entry in scanned:
-            rendered = str(entry.path)
+            rendered = entry.path_key
             try:
                 tail = entry.path.relative_to(prefix)
             except ValueError:
@@ -1198,7 +1208,7 @@ def _build_workspace_index(
         if not e.workspace:
             continue
         inside = _strip_prefix(e.path, prefixes.get(e.workspace, VAULT_RENDER_PREFIX))
-        idx[f"{e.workspace}/{inside.with_suffix('')}"].append(e.path)
+        idx[f"{e.workspace}/{inside.with_suffix('').as_posix()}"].append(e.path)
         idx[f"{e.workspace}/{e.path.stem}"].append(e.path)
     return idx
 
@@ -1214,7 +1224,7 @@ def _resolve_cross_workspace(entries: list[Entry], prefixes: dict[str, Path]) ->
         return
     idx = _build_workspace_index(entries, prefixes)
     workspaces = set(prefixes)
-    owner = {str(e.path): e.workspace for e in entries}
+    owner = {e.path_key: e.workspace for e in entries}
     for e in entries:
         if not e.related_unresolved:
             continue
@@ -1223,10 +1233,10 @@ def _resolve_cross_workspace(entries: list[Entry], prefixes: dict[str, Path]) ->
         seen = {*e.related}
         for ref in e.related_unresolved:
             target = _resolve_workspace_ref(ref, e.workspace, idx, workspaces)
-            if target is None or str(target) == str(e.path):
+            if target is None or target.as_posix() == e.path_key:
                 still_missing.append(ref)
                 continue
-            key = str(target)
+            key = target.as_posix()
             if key in seen:
                 continue
             seen.add(key)
@@ -1307,7 +1317,7 @@ def vocabulary_report(
                 record = drift.setdefault(
                     raw, {"suggested": canonical, "paths": []}
                 )
-                record["paths"].append(str(entry.path))
+                record["paths"].append(entry.path_key)
         # A tag repeated within one note's frontmatter list is the same note
         # using it, not independent usage: one note with
         # `tags: [research, research, research]` must not inflate the count to
@@ -1532,8 +1542,8 @@ def main(argv: list[str] | None = None) -> int:
             name=args.name,
         )
         # Preserve hop metadata only for entries that survived filtering
-        kept_paths = {str(e.path) for e in filtered}
-        hop_pairs = [(h, e) for h, e in hopped if str(e.path) in kept_paths]
+        kept_paths = {e.path_key for e in filtered}
+        hop_pairs = [(h, e) for h, e in hopped if e.path_key in kept_paths]
         ents = [e for _, e in hop_pairs]
         hops = [h for h, _ in hop_pairs]
     else:
