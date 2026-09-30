@@ -20,6 +20,15 @@ and events never go stale no matter how old they are. Age alone is never a
 defect — it is evidence for the curation routine to judge, which is why these
 findings are informational and do not raise audit status.
 
+It also decides how *age* is read one level in. A note has no single age: one
+list item in it can be two years out of date while its neighbours were checked
+last week, and a note-level verdict has nowhere to put that. So
+:func:`find_stale_notes` and :func:`find_stale_entries` are siblings rather than
+a detector and a special case — the same horizon, the same aliases, the same
+exempt event types, the same state/event rule — measured over notes and over the
+entries inside them. Both are built on :func:`note_verification`, so a surface
+cannot show a note fresh and its oldest bullet overdue.
+
 Deliberately model-free. A model asked to tally a few hundred entries returns a
 confident number, and a different one tomorrow. The detectors here count; the
 curation routine that consumes them judges. That means they are tuned for
@@ -34,6 +43,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from ciao import note_entries as ne
 
 if TYPE_CHECKING:
     # Type-only, so importing this module still costs no YAML: the registry's
@@ -676,3 +687,835 @@ def find_stale_notes(
         "notes_checked": checked,
         "notes_exempt": exempt,
     }
+
+
+# ---- Entry-level freshness -------------------------------------------------
+#
+# `find_stale_notes` above is the right question about a *file*: is the thing this
+# note asserts still true? It is the wrong question about a fact, because a note
+# has no single age. One list item in a person note can be two years out of date
+# while the bullet above it was re-checked last week, and a whole-note verdict
+# claims both or neither — so re-verifying the address silently re-certifies the
+# landlord's name from 2019 with it.
+#
+# What follows is the same verdict measured one bullet in, and it is deliberately
+# a *sibling* rather than a second implementation: the horizon, the type aliases,
+# the exempt event types and the state/event rule are the functions above, called
+# rather than restated, and the aging itself is `note_verification`'s. A surface
+# that disagrees with this one disagrees with the note-level verdict, not with
+# some third answer.
+#
+# Precision-first, like everything in this module, and it leans harder here
+# because a wrong finding at entry level points a person's attention at one
+# sentence they then have to go and check:
+#
+# * **Only old and undated entries are selected.** An entry with a valid
+#   `[verified:]` stamp inside its horizon is not a finding, whatever its note's
+#   own `updated:` says — a whole-note selection re-stamped yesterday would
+#   otherwise re-list a bullet from two years ago and a bullet checked this
+#   morning in the same list.
+# * **A missing or unusable stamp is `unverified` only once the horizon has
+#   passed.** `[verified: 2026-13-01]` and `[verified: yesterday]` are always
+#   findings: a stamp that cannot be believed is nobody having checked, and a
+#   *future* stamp is nobody having checked either. A bullet with no stamp at all
+#   **inherits the note's date**, so it is current exactly as far as the note is
+#   — selecting it unconditionally made every bullet written before `[verified:]`
+#   stamps existed read as never checked, and turned a nightly plan into a list
+#   of one-day-old entries in any vault that had been re-stamped. That is the
+#   failure the whole level was supposed to prevent, in a different costume.
+# * **Event-shaped entries and explicit event sections are exempt.** A log entry
+#   from 2019 is as true as the day it was written, and a heading that says
+#   `## Events` is a stronger signal than any guess made from the shape of a
+#   line. A calendar date on its own is *not* that signal: a lease that ends on
+#   the 30th is a current-state assertion that happens to carry a date, and
+#   exempting it would drop the one fact a person most needs to re-read.
+# * **What was not read is reported, not swallowed.** A paragraph, a table or an
+#   entry carrying a construct the entry model does not describe is `uncovered`:
+#   never verified, never counted as clean. That is what makes a coverage claim
+#   checkable — a note whose facts all live in a table cannot show a fresh badge
+#   just because the one bullet beside the table was checked this morning.
+
+# Why one entry was selected. Plain codes so a caller can count them without
+# parsing prose and a test can pin one; `EntryVerdict.reason` says the same
+# thing to a person, with the numbers beside it.
+STALE_ENTRY_AGED = "aged"
+"""Carries a valid `[verified:]` stamp and that day is past the horizon."""
+
+STALE_ENTRY_NO_STAMP = "no-stamp"
+"""No `[verified:]` stamp at all, so nobody has said this fact was checked."""
+
+STALE_ENTRY_BAD_STAMP = "unusable-stamp"
+"""A stamp that is malformed, an impossible day, or a day that has not come."""
+
+# Sections whose entries are records of things that happened. A heading is an
+# explicit statement of what the list beneath it is *for*, which is better
+# evidence than any inference from a line's shape — so it exempts, and nothing
+# softer does. Compared case-folded with whitespace collapsed; both numbers are
+# spelled out because a heading is written by a person, not generated.
+STALE_ENTRY_EXEMPT_SECTIONS = frozenset(
+    {
+        "event",
+        "events",
+        "event log",
+        "event logs",
+        "history",
+        "activity log",
+        "log",
+        "logs",
+        "journal",
+        "journals",
+        "diary",
+        "changelog",
+        "changelogs",
+        "timeline",
+        "meetings",
+        "sessions",
+        "visits",
+        "correspondence",
+    }
+)
+
+# A date in the leading position of an entry: `2026-03-04: signed the lease`,
+# `On 4 March 2026 …`, `March 4, 2026 — …`. Leading is load-bearing. A date
+# anywhere in the sentence is a date the fact *mentions*, and a lease that ends
+# on the 30th mentions one.
+_RECORD_LEADING_DATE_RE = re.compile(
+    r"^[\s>*#-]*(?:on|in|by)?[\s]*"
+    r"(?:\d{4}-\d{2}-\d{2}"
+    r"|\d{1,2}(?:st|nd|rd|th)?[\s]+[A-Za-z]{3,9}\.?[\s]+\d{4}"
+    r"|[A-Za-z]{3,9}\.?[\s]+\d{1,2}(?:st|nd|rd|th)?,?[\s]+\d{4})\b"
+)
+
+# A verb or auxiliary that can only be true of a finished thing. Deliberately
+# short and deliberately past: "will meet", "is meeting" and "meets" describe
+# something still to happen, which is a plan, and a plan in a state note is
+# worth re-reading like any other claim.
+_COMPLETED_TENSE_RE = re.compile(
+    r"\b(?:signed|launched|shipped|finished|completed|attended|booked|met|"
+    r"agreed|decided|closed|delivered|presented|resigned|hired|fired|joined|"
+    r"left|arrived|departed|relocated|took place|happened|occurred|ended|"
+    r"was|were|had|did)\b",
+    re.IGNORECASE,
+)
+
+# Present-tense state. The counterpart to the pattern above, and the reason a
+# past-tense verb alone exempts nothing: "the office moved to 12 Baker Street" is
+# a claim about where the office is *now*, written in the past tense because
+# people write about changes that way. A dated record that also says "is", "has"
+# or "currently" is asserting something now, so it is not exempt.
+_PRESENT_STATE_RE = re.compile(
+    r"\b(?:is|are|am|was\s+not|has|have|had\s+been|lives?|live|works?|working|"
+    r"prefers?|uses?|using|currently|now|still|owns?|runs?|remains?|"
+    r"until|as\s+of|expires?)\b",
+    re.IGNORECASE,
+)
+
+# One line's worth of "this is not an entry", for the coverage classifier.
+# The heading and rule cases are structure, not assertions: a note's own title
+# is not an unverified fact, and counting it would make every note in the vault
+# permanently incomplete. The shapes are restated rather than imported from
+# `note_entries` because that module's are private to its own line walk, and
+# reaching into another module's internals to classify its output is how two
+# definitions of the same markdown shape come to disagree.
+_UNCOVERED_HEADING_RE = re.compile(r"^[ ]{0,3}#{1,6}(?:[ \t]+|$)")
+_UNCOVERED_RULE_RE = re.compile(
+    r"^(?:[ ]{0,3}\*[ \t]*){3,}$"
+    r"|^(?:[ ]{0,3}-[ \t]*){3,}$"
+    r"|^(?:[ ]{0,3}_[ \t]*){3,}$"
+)
+_UNCOVERED_QUOTE_RE = re.compile(r"^[ ]{0,3}>")
+_UNCOVERED_FENCE_RE = re.compile(r"^[ ]{0,3}(?:`{3,}|~{3,})")
+_UNCOVERED_TABLE_RE = re.compile(r"^[ ]{0,3}\|")
+
+# A line of inline markdown, stripped to judge how much prose is under it. Links
+# and emphasis are not words, and a span of nothing but punctuation is not a
+# hidden assertion.
+_MARKUP_NOISE_RE = re.compile(r"[`*_{}\[\]()#!|>\-~]")
+
+_CONTEXT_LINE_CHARS = 120
+"""Width of one neighbouring line in an entry's context. Enough to recognise a
+sibling, short enough that a card showing three of them stays a card."""
+
+
+def _excerpt_line(value: str) -> str:
+    """One line, trimmed, for a neighbour's context slot."""
+    text = str(value or "").strip()
+    return text[:_CONTEXT_LINE_CHARS]
+
+
+def _context_for(text: str, entry: ne.NoteEntry) -> tuple[str, ...]:
+    """The physical lines either side of one entry, and nothing else.
+
+    Deliberately the file's own lines rather than the neighbouring *entries*: a
+    reader deciding whether a bullet is current needs the prose around it — a
+    heading that says which address this is, a stray sentence explaining the
+    move — and a context made of sibling bullets would hide exactly the case
+    that matters. Blank lines are dropped, because a gap is not context.
+    """
+    before = text[: entry.start].rstrip("\n").split("\n")
+    after = text[entry.end :].lstrip("\n").split("\n")
+    found: list[str] = []
+    for line in reversed(before):
+        shown = _excerpt_line(line)
+        if shown:
+            found.append(shown)
+            break
+    for line in after:
+        shown = _excerpt_line(line)
+        if shown:
+            found.append(shown)
+            break
+    return tuple(found)
+
+
+def _normalized_section(section: str) -> str:
+    """A heading's text, case-folded and whitespace-collapsed, for the exempt set."""
+    return " ".join(str(section or "").split()).casefold()
+
+
+def _entry_event_reason(entry: ne.NoteEntry) -> str:
+    """Why this entry is a record rather than a claim, or ``""``.
+
+    Three signals, in descending order of how much they are worth. An explicit
+    event section, because somebody wrote the heading saying so. The chat-event
+    markers this module has always used, unchanged — a transcript turn belongs in
+    a log whatever section it was pasted under. And a leading date beside a
+    completed verb with no present-tense state in it, which is a dated record
+    written the way a person writes one. That third rule is the narrow one, and
+    it is narrow on purpose: a date alone is a date the fact mentions, and a
+    past-tense verb alone is how people describe a change that is still the
+    current state.
+    """
+    if _normalized_section(entry.section) in STALE_ENTRY_EXEMPT_SECTIONS:
+        return "section"
+    markers = sorted(
+        {name for name, pattern in _EVENT_PATTERNS if pattern.search(entry.text)}
+    )
+    if markers:
+        return f"event-shaped ({', '.join(markers)})"
+    if (
+        _RECORD_LEADING_DATE_RE.match(entry.text)
+        and _COMPLETED_TENSE_RE.search(entry.text)
+        and not _PRESENT_STATE_RE.search(entry.text)
+    ):
+        return "dated record"
+    return ""
+
+
+@dataclass(frozen=True, slots=True)
+class EntryVerdict:
+    """One entry's age, and the evidence a reader needs to disagree with it.
+
+    Everything here is one entry's, never its note's. ``identity`` is
+    :func:`ciao.note_entries.entry_identity` — the key the check state, the
+    worklist and the proposal queue all use, and the one value a caller cannot
+    rederive without reimplementing a hash. ``start``/``end`` are the entry's own
+    character span, ``fingerprint`` is the text the verdict is about, and
+    ``revision`` is the note's :func:`ciao.memory_receipts.content_revision`, so
+    a caller can hand the whole thing to the managed operation without re-reading
+    anything.
+
+    ``last_verified`` is the *entry's* own date where it has one and the note's
+    where it does not, and which of those two it was is ``own_date``: a bullet
+    that inherited the note's date is exactly the case the whole level exists to
+    expose, and a reader told "unverified for 400d" without being told that the
+    400 days are the file's and not the fact's cannot act on it. ``age_days`` is
+    ``None`` when there is no date at all — unverifiable, which is not stale and
+    is not fresh either.
+    """
+
+    identity: str
+    note_path: str
+    path: str
+    title: str
+    note_type: str
+    start: int
+    end: int
+    line_number: int
+    section: str
+    fingerprint: str
+    revision: str
+    excerpt: str
+    context: tuple[str, ...]
+    last_verified: datetime.date | None
+    own_date: bool
+    age_days: int | None
+    threshold_days: int
+    reason_code: str
+    reason: str
+    exempt: bool
+    supported: bool
+
+    def as_finding(self) -> dict[str, Any]:
+        """The row every surface reads. Flat, JSON-safe, and self-describing."""
+        return {
+            "identity": self.identity,
+            "note_path": self.note_path,
+            "path": self.path,
+            "title": self.title,
+            "type": self.note_type,
+            "start": self.start,
+            "end": self.end,
+            "line_number": self.line_number,
+            "section": self.section,
+            "fingerprint": self.fingerprint,
+            "revision": self.revision,
+            "excerpt": self.excerpt,
+            "context": list(self.context),
+            "last_verified": (
+                self.last_verified.isoformat() if self.last_verified else None
+            ),
+            "own_date": self.own_date,
+            "age_days": self.age_days,
+            "threshold_days": self.threshold_days,
+            "reason": self.reason_code,
+            "detail": self.reason,
+            "exempt": self.exempt,
+            "supported": self.supported,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NoteEntryCoverage:
+    """What one note's entries look like, and how much of it was read at all.
+
+    The note-level answer, and the half the whole-note surfaces need: a note
+    with five fresh bullets and one stale is neither fresh nor stale, and only
+    these counts can say which. ``checked`` is the entries the detector judged,
+    ``exempt`` the ones it deliberately did not, ``unverified`` the judged ones
+    with no usable stamp, and ``uncovered`` the material that is not an entry at
+    all and therefore cannot be verified by anything — an unsupported entry, a
+    paragraph, a table. ``stale`` is the subset of ``checked`` whose own date is
+    past the horizon.
+
+    ``fully_verified`` is the property the surfaces actually want, and it is
+    deliberately stricter than "no stale entry". A note is fully verified only
+    when *every* in-scope assertion is covered: one fresh bullet must not put a
+    clean badge on a note whose second bullet is two years old, or whose facts
+    live in a table nobody has read since it was written.
+    """
+
+    path: str
+    relative: str
+    title: str
+    note_type: str
+    entries: int
+    checked: int
+    exempt: int
+    unverified: int
+    uncovered: int
+    stale: int
+    entry_chars: int
+    uncovered_chars: int
+    total_chars: int
+    age_days: int | None
+    threshold_days: int
+    last_verified: datetime.date | None
+    note_exempt: bool
+    diagnostics: tuple[str, ...]
+
+    @property
+    def coverage_ratio(self) -> float:
+        """Share of the note read as entries, ``0.0`` for an empty file."""
+        return self.entry_chars / self.total_chars if self.total_chars else 0.0
+
+    @property
+    def fully_verified(self) -> bool:
+        """Whether every in-scope assertion in this note is covered and current."""
+        return not (self.stale or self.unverified or self.uncovered)
+
+    def as_evidence(self) -> dict[str, Any]:
+        """The note-level row a surface merges into its own aging fields."""
+        return {
+            "path": self.path,
+            "relative_path": self.relative,
+            "title": self.title,
+            "type": self.note_type,
+            "entries": self.entries,
+            "entries_checked": self.checked,
+            "entries_exempt": self.exempt,
+            "entries_unverified": self.unverified,
+            "entries_uncovered": self.uncovered,
+            "entries_stale": self.stale,
+            "entry_chars": self.entry_chars,
+            "uncovered_chars": self.uncovered_chars,
+            "total_chars": self.total_chars,
+            "coverage_ratio": round(self.coverage_ratio, 4),
+            "fully_verified": self.fully_verified,
+            "age_days": self.age_days,
+            "threshold_days": self.threshold_days,
+            "last_verified": (
+                self.last_verified.isoformat() if self.last_verified else ""
+            ),
+            "note_exempt": self.note_exempt,
+        }
+
+
+def _prose_words(line: str) -> int:
+    """How many words of prose survive stripping a line's markdown punctuation."""
+    return len([word for word in _MARKUP_NOISE_RE.sub(" ", line).split() if word])
+
+
+def _line_asserts(bare: str) -> bool:
+    """Whether one non-entry line can be carrying an assertion.
+
+    Structure — a heading, a thematic break — is not an assertion, and counting
+    it would make every note in the vault permanently incomplete. A fence, a
+    table row, a quoted sentence and a line of three or more words of prose all
+    can be, and all are counted: a table of a person's phone numbers is a set of
+    facts about them that nothing here has read, and saying so is the point.
+    """
+    if _UNCOVERED_HEADING_RE.match(bare) or _UNCOVERED_RULE_RE.match(bare):
+        return False
+    if _UNCOVERED_FENCE_RE.match(bare) or _UNCOVERED_TABLE_RE.match(bare):
+        return True
+    if _UNCOVERED_QUOTE_RE.match(bare):
+        return _prose_words(bare) >= 2
+    return _prose_words(bare) >= 3
+
+
+def _uncovered_blocks(text: str, document: ne.EntryDocument) -> tuple[int, int]:
+    """Runs of material the parse did not read as entries, and their characters.
+
+    The complement :attr:`ciao.note_entries.EntryDocument.uncovered` is exact but
+    undifferentiated: it is a note's frontmatter, its headings, its blank lines
+    *and* the paragraph its facts are actually written in, and counting all four
+    as unverified would make every note in the vault permanently incomplete. So
+    each line is classified and the lines that can carry an assertion are grouped
+    into **runs** — a three-line paragraph is one place the detector did not look
+    even though it is three lines, and a paragraph with a table under it is two.
+
+    Frontmatter is skipped by *line* rather than by span, which matters because
+    frontmatter and the first heading almost always share one span: a span-level
+    skip would swallow the heading with it, and refusing to skip would count the
+    frontmatter as assertions. Its answer comes from
+    :func:`ciao.note_entries.frontmatter_span` — the parser's, not a second
+    frontmatter rule here.
+
+    Returns ``(runs, characters)``, the second counting only the assertion lines
+    rather than their surrounding blank lines, so a coverage figure is not
+    inflated by the newlines between them.
+    """
+    front = ne.frontmatter_span(text)
+    start_at, stop_at = front if front is not None else (0, 0)
+    runs = 0
+    characters = 0
+    open_run = False
+    for begin, finish in document.uncovered:
+        slice_ = text[begin:finish]
+        if not slice_.strip():
+            open_run = False
+            continue
+        offset = begin
+        for line in slice_.split("\n"):
+            position = offset
+            offset += len(line) + 1
+            bare = line.strip()
+            if not bare:
+                # A blank line ends a run without counting as one: a gap between
+                # two paragraphs is not a third place the detector failed.
+                open_run = False
+                continue
+            if front is not None and start_at <= position < stop_at:
+                continue
+            if _line_asserts(bare):
+                if not open_run:
+                    runs += 1
+                    open_run = True
+                characters += len(bare)
+            else:
+                open_run = False
+    return runs, characters
+
+
+def note_entry_coverage(
+    text: str,
+    *,
+    note_type: str = "",
+    updated: str = "",
+    mtime: float | None = None,
+    note_path: str = "",
+    path_prefix: Path | None = None,
+    rendered: str = "",
+    title: str = "",
+    workspace: str = "",
+    today: datetime.date | None = None,
+    registry: EntityTypeRegistry | None = None,
+) -> tuple[NoteEntryCoverage, tuple[EntryVerdict, ...], ne.EntryDocument]:
+    """One note's entries, aged on their own dates, and that note's coverage.
+
+    The per-note core of :func:`find_stale_entries`, and the same function the
+    curation worklist's entry pass calls — which is the whole point of it being
+    here rather than beside the detector: a plan that aged entries its own way
+    would list work the detector does not, and a detector that aged them its own
+    way would show a note the plan is not going to ask about. One function, so
+    the two cannot drift.
+
+    The note's own age comes from :func:`note_verification` — the shared
+    predicate, with the same aliases, exempt types and frontmatter-then-mtime
+    rule the whole-note surfaces use — and only acts as the *default* an entry
+    inherits. An entry with a valid `[verified:]` stamp is aged from that day
+    alone; the note's date is what an unstamped or unusable-stamp entry falls back
+    to, and ``EntryVerdict.own_date`` records which one it was.
+
+    Inheriting is what makes an unstamped entry *current* when the note is: the
+    two are the same claim at two widths, so a note re-stamped yesterday and its
+    unstamped bullets agree. A bullet that inherits a date inside the horizon is
+    counted as checked-and-current and selected for nothing; only an unstamped
+    bullet past the horizon, or one with no date anywhere to age it from, is
+    reported as unverified. An unusable stamp is always reported, whatever the
+    note's date says, because a stamp that cannot be read is a claim nobody can
+    act on and the note reads as verified anyway.
+
+    Returns the coverage, the entries that were **selected** — the ones whose
+    own date is past the horizon, plus the ones nobody ever verified — and the
+    parse itself. The document travels because a caller holding a check state has
+    to answer "does this check still describe an entry the note holds?", and the
+    identities and fingerprints that answers it with are in there; a second parse
+    to get them would be a second read of a body already in hand. Fresh entries,
+    exempt entries and notes of an exempt type contribute counts and no verdict,
+    which is what keeps a finding list short enough to read.
+    """
+    from ciao import memory_receipts as mr
+
+    current = today or datetime.date.today()
+    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
+    note_type = str(note_type or "").strip()
+    verification = note_verification(
+        note_type, updated, mtime, today=current, registry=registry
+    )
+    relative = note_path
+    if not relative:
+        try:
+            relative = Path(rendered).relative_to(prefix).as_posix()
+        except ValueError:
+            relative = Path(rendered or "").as_posix()
+    document = ne.parse_note_entries(
+        text, note_path=relative, workspace=workspace, today=current
+    )
+    threshold = (
+        verification.threshold_days
+        if verification is not None
+        else note_threshold_days(_stale_type_key(note_type, registry=registry), registry=registry)
+    )
+    note_exempt = verification.exempt if verification is not None else is_stale_exempt_type(
+        note_type, registry=registry
+    )
+    revision = mr.content_revision(text)
+    shown = title or relative
+
+    checked = exempt = unverified = stale = 0
+    unsupported = 0
+    selected: list[EntryVerdict] = []
+    for entry in document.entries:
+        if note_exempt:
+            exempt += 1
+            continue
+        if not entry.supported:
+            # Reported as uncovered rather than judged: a bullet carrying a
+            # nested code block or a second block is text this entry model does
+            # not describe, and hashing it would be a verdict about a shape the
+            # detector cannot describe. It is never counted as verified.
+            unsupported += 1
+            continue
+        event = _entry_event_reason(entry)
+        if event:
+            exempt += 1
+            continue
+        checked += 1
+        own = entry.verified
+        dated = own if own is not None else (
+            verification.last_verified if verification is not None else None
+        )
+        age = (current - dated).days if dated is not None else None
+        if entry.stamp is None:
+            code = STALE_ENTRY_NO_STAMP
+        elif not entry.stamp.valid:
+            code = STALE_ENTRY_BAD_STAMP
+        else:
+            code = STALE_ENTRY_AGED
+        if code == STALE_ENTRY_BAD_STAMP:
+            # Always selected. A stamp that cannot be believed is not an old
+            # check and not a fresh one — it is nobody having checked, and it is
+            # the one case a reader most needs told, because the note reads as
+            # verified and is not.
+            unverified += 1
+        elif age is None or age >= threshold:
+            # Past the horizon, or with no date anywhere to age it from. Both are
+            # real work; neither is an artefact of the note having been touched
+            # yesterday.
+            if code == STALE_ENTRY_NO_STAMP:
+                unverified += 1
+            else:
+                stale += 1
+        else:
+            # Inside the horizon. A stamped entry is genuinely current, and an
+            # unstamped one **inherits** the note's date — so it is current
+            # exactly as far as the note is, and counting it as `unverified`
+            # would make every bullet in a vault written before `[verified:]`
+            # stamps existed read as never checked. Selecting those regardless
+            # is what filled a nightly plan with one-day-old entries: the note
+            # was re-stamped, not the facts.
+            continue
+        selected.append(
+            _verdict_for(
+                entry,
+                document=document,
+                text=text,
+                code=code,
+                dated=dated,
+                own_date=own is not None,
+                age=age,
+                threshold=threshold,
+                note_type=note_type,
+                relative=relative,
+                rendered=rendered or relative,
+                title=shown,
+                revision=revision,
+            )
+        )
+    blocks, block_chars = _uncovered_blocks(text, document)
+    coverage = NoteEntryCoverage(
+        path=rendered or relative,
+        relative=relative,
+        title=shown,
+        note_type=note_type or "note",
+        entries=document.entry_count,
+        checked=checked,
+        exempt=exempt,
+        unverified=unverified,
+        uncovered=unsupported + blocks,
+        stale=stale,
+        entry_chars=document.entry_chars,
+        uncovered_chars=block_chars,
+        total_chars=document.total_chars,
+        age_days=verification.age_days if verification is not None else None,
+        threshold_days=threshold,
+        last_verified=verification.last_verified if verification is not None else None,
+        note_exempt=note_exempt,
+        diagnostics=document.diagnostics,
+    )
+    return coverage, tuple(selected), document
+
+
+def _verdict_for(
+    entry: ne.NoteEntry,
+    *,
+    document: ne.EntryDocument,
+    text: str,
+    code: str,
+    dated: datetime.date | None,
+    own_date: bool,
+    age: int | None,
+    threshold: int,
+    note_type: str,
+    relative: str,
+    rendered: str,
+    title: str,
+    revision: str,
+) -> EntryVerdict:
+    """One selected entry, with the sentence a reader needs beside the code."""
+    stamp = entry.stamp
+    if code == STALE_ENTRY_NO_STAMP:
+        reason = (
+            "nobody has recorded a [verified:] check on this entry"
+            + (
+                f"; it is unverified for {age}d on the note's own last-verified date"
+                if age is not None
+                else ", and the note has no usable verification date either"
+            )
+        )
+    elif code == STALE_ENTRY_BAD_STAMP:
+        why = stamp.reason if stamp is not None else "malformed"
+        reason = (
+            f"the [verified:] stamp on this entry is unusable ({why}), "
+            "so nobody has recorded a check on it"
+        )
+    elif age is None:
+        reason = "this entry carries a check but there is no date to age it from"
+    else:
+        reason = f"unverified for {age}d against a {threshold}d horizon"
+    return EntryVerdict(
+        identity=entry.identity,
+        note_path=relative,
+        path=rendered,
+        title=title,
+        note_type=note_type or "note",
+        start=entry.start,
+        end=entry.end,
+        line_number=entry.line_number,
+        section=entry.section,
+        fingerprint=entry.fingerprint,
+        revision=revision,
+        excerpt=_excerpt(entry.text),
+        context=_context_for(text, entry),
+        last_verified=dated,
+        own_date=own_date,
+        age_days=age,
+        threshold_days=threshold,
+        reason_code=code,
+        reason=reason,
+        exempt=False,
+        supported=True,
+    )
+
+
+def find_stale_entries(
+    entries: list[Any],
+    *,
+    vault_root: Path | None = None,
+    path_prefix: Path | None = None,
+    workspace: str = "",
+    mtimes: dict[str, float] | None = None,
+    texts: dict[str, str] | None = None,
+    today: datetime.date | None = None,
+    registry: EntityTypeRegistry | None = None,
+) -> dict[str, Any]:
+    """The entries in a vault whose facts have gone unverified past their horizon.
+
+    The entry-level sibling of :func:`find_stale_notes`, over the same
+    :class:`ciao.vault_index.Entry` list, and the function every entry-aware
+    surface should call: the curation worklist's ``stale_entry`` pass, the
+    memory-audit report, the Memory Map's per-node coverage and the review
+    queue's entry candidates. ``workspace`` is the *registered* workspace name,
+    and it is an argument rather than read off ``vault_root.name`` for the reason
+    :func:`ciao.note_entries.entry_identity` makes it one: the identity digests
+    it, every consumer resolves the vault through the registry, and a directory
+    name is not that name on every registered layout. An identity minted from the
+    wrong coordinate names nothing, and the failure is silent.
+
+    ``mtimes`` is the caller's own mtime map when it has one, because
+    :func:`ciao.vault_index.scan_vault` has already read every note and the
+    detector is the one place that needs the date. Left out, mtimes are probed
+    exactly as ``find_stale_notes`` probes them. ``texts`` is the same idea for
+    the bodies: a caller that has already read them (the entry pass, which reads
+    every note anyway) hands them over rather than paying a second decode, and a
+    caller with no vault at all can still use this as a pure seam over text it
+    built by hand.
+
+    The result carries the findings, the four counts that make an empty list
+    honest (``checked``/``exempt``/``unverified``/``uncovered``), the per-note
+    coverage rows, the parser's diagnostics, and the notes whose body could not
+    be read at all. A note whose body is one table appears with ``uncovered``
+    and no findings — which is the answer, and the only answer that does not read
+    as a clean note.
+    """
+    current = today or datetime.date.today()
+    if registry is None and vault_root is not None:
+        from ciao.entity_types import load_entity_types
+
+        registry = load_entity_types(Path(vault_root).resolve())
+    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
+    root = Path(vault_root) if vault_root is not None else None
+
+    def _body(rendered: str, relative: str) -> str | None:
+        """One note's text, from the caller's map or off the vault.
+
+        ``None`` when neither can produce it, and the caller reports that as
+        uncovered rather than as clean: a note this detector could not read is a
+        note it knows nothing about, and "no findings" is the one answer that
+        would read as a verdict.
+        """
+        if texts is not None:
+            found = texts.get(rendered, texts.get(relative))
+            if found is not None:
+                return found
+        if root is None:
+            return None
+        try:
+            return (root / relative).read_bytes().decode("utf-8")
+        except (OSError, UnicodeError):
+            return None
+
+    def _mtime(rendered: str, relative: str) -> float:
+        if mtimes is not None:
+            return mtimes.get(rendered, mtimes.get(relative, 0.0))
+        if root is None:
+            return 0.0
+        try:
+            return (root / relative).stat().st_mtime
+        except OSError:
+            return 0.0
+
+    findings: list[dict[str, Any]] = []
+    notes: list[dict[str, Any]] = []
+    unreadable: list[str] = []
+    checked = exempt = unverified = uncovered = 0
+    diagnostics: list[dict[str, str]] = []
+    for entry in entries:
+        rendered = str(entry.path)
+        relative = _vault_relative_to(rendered, prefix)
+        text = _body(rendered, relative)
+        if text is None:
+            # Unreadable is not clean. A note this detector could not read is
+            # reported as such and contributes no findings, which is the same
+            # recoverable direction as a note with no usable date: re-asking costs
+            # a pass, while inventing a verdict costs the reader their trust.
+            unreadable.append(rendered)
+            continue
+        coverage, selected, _document = note_entry_coverage(
+            text,
+            note_type=(entry.type or "").strip(),
+            updated=entry.updated or "",
+            mtime=_mtime(rendered, relative),
+            note_path=relative,
+            path_prefix=prefix,
+            rendered=rendered,
+            title=str(entry.title or "") or relative,
+            workspace=workspace,
+            today=current,
+            registry=registry,
+        )
+        checked += coverage.checked
+        exempt += coverage.exempt
+        unverified += coverage.unverified
+        uncovered += coverage.uncovered
+        for code in coverage.diagnostics:
+            diagnostics.append({"path": rendered, "diagnostic": code})
+        if not (coverage.checked or coverage.uncovered or coverage.entries):
+            continue
+        notes.append(coverage.as_evidence())
+        findings.extend(verdict.as_finding() for verdict in selected)
+
+    # Oldest first, then path, then the entry's own position: the note-level
+    # order with its tiebreak extended one level in, so two runs over the same
+    # vault produce the same list and a short budget drops the youngest fact
+    # rather than an arbitrary one. An entry with no date at all sorts after
+    # every dated one, because there is no claim about how old it is to violate.
+    findings.sort(
+        key=lambda row: (
+            -(row["age_days"] if row["age_days"] is not None else -1),
+            str(row["path"]),
+            int(row["start"]),
+        )
+    )
+    return {
+        "stale_entries": findings,
+        "entries_checked": checked,
+        "entries_exempt": exempt,
+        "entries_unverified": unverified,
+        "entries_uncovered": uncovered,
+        "entry_coverage": notes,
+        "entry_diagnostics": diagnostics,
+        # Reported rather than counted, because a note that could not be read
+        # has no entries to count and must not be folded into any of the four
+        # totals: a caller that wants "how much of this vault did the detector
+        # actually see" reads this list's length beside them.
+        "notes_unreadable": unreadable,
+    }
+
+
+def _vault_relative_to(rendered: str, prefix: Path) -> str:
+    """One rendered entry path as the vault-relative spelling, total.
+
+    The same answer :func:`ciao.vault_index._strip_prefix` gives, and the same
+    one :func:`find_stale_notes` reaches for: a rendered path under the prefix
+    loses it, and a path that is not under the prefix — a hand-built entry in a
+    test — is already relative. Refusing to report a note because its path was
+    spelled unusually would be a detector that finds nothing in exactly the
+    vaults a caller most needs it for.
+    """
+    try:
+        return Path(rendered).relative_to(prefix).as_posix()
+    except ValueError:
+        return Path(rendered).as_posix()

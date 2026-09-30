@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
-from ciao.memory_audit import audit_entries, find_stale_notes
+from ciao.memory_audit import audit_entries, find_stale_entries, find_stale_notes
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
@@ -727,17 +727,37 @@ def _scan_note_staleness(
     workspace_name: str,
     current: datetime.date,
 ) -> dict[str, Any]:
-    """Age the workspace's own notes, for the memory-hygiene section.
+    """Age the workspace's own notes, and the facts inside them, for the
+    memory-hygiene section.
 
     A separate pass from ``_vault_audit`` because it needs parsed frontmatter
     (``updated:``) rather than lint findings; ``scan_vault`` is the same walk
     the index rebuild already does routinely. Failures degrade to an empty
     result with a scan error, never to "checked and clean".
+
+    **The entry half is the same detector, not a second one.**
+    ``find_stale_entries`` measures a note the way ``find_stale_notes`` does and
+    then one bullet in, so a note whose ``updated:`` was re-stamped yesterday
+    cannot hide a fact from 2019 behind a fresh frontmatter date. Reporting the
+    whole-note count alone is what made this section able to say "0 of 214 dated
+    notes" for a vault holding a person note with a two-year-old address in it:
+    the note *is* current, and the fact is not. The four counts
+    (``entries_checked``/``exempt``/``unverified``/``uncovered``) and the
+    per-note coverage rows are informational for the same reason the note count
+    is — age is evidence for the curation routine, not a defect — and none of
+    them contributes to ``memory_actionable_count``.
     """
     empty: dict[str, Any] = {
         "stale_notes": [],
         "notes_checked": 0,
         "notes_exempt": 0,
+        "stale_entries": [],
+        "entries_checked": 0,
+        "entries_exempt": 0,
+        "entries_unverified": 0,
+        "entries_uncovered": 0,
+        "entry_coverage": [],
+        "notes_unreadable": [],
         "errors": [],
     }
     if not vault_root.is_dir():
@@ -759,6 +779,19 @@ def _scan_note_staleness(
             ],
         }
     result = find_stale_notes(entries, vault_root=vault_root, today=current)
+    # The registered workspace's name, for the same reason the entry pass needs
+    # it: the identity an entry finding carries digests it, and a directory name
+    # is not that name on every registered layout. An empty name mints
+    # identities nothing resolves, so a scan with no name reports the counts and
+    # no findings rather than findings that cannot be acted on.
+    result.update(
+        find_stale_entries(
+            entries,
+            vault_root=vault_root,
+            workspace=workspace_name,
+            today=current,
+        )
+    )
     result["errors"] = []
     return result
 
@@ -1726,6 +1759,16 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                     f"{len(memory.get('stale_notes', []))} of "
                     f"{memory.get('notes_checked', 0)} dated notes"
                 ),
+                (
+                    "- Facts inside those notes, on their own dates "
+                    "(informational): "
+                    f"{len(memory.get('stale_entries', []))} of "
+                    f"{memory.get('entries_checked', 0)} checked entries need "
+                    f"a check, {memory.get('entries_unverified', 0)} carry no "
+                    f"usable [verified:] stamp, and "
+                    f"{memory.get('entries_uncovered', 0)} block(s) of note text "
+                    "are not entries at all"
+                ),
             ]
         )
         # Over-cap is actionable only when the workspace is named: a global total
@@ -1763,6 +1806,24 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                 f"{finding['age_days']}d (horizon {finding['threshold_days']}d, "
                 f"last checked {finding['last_verified']} via {finding['source']})"
             )
+        # The entry findings are listed *after* the note ones, and beside them
+        # rather than merged into them, because the two are different claims: a
+        # note can be current and hold a fact from 2019. Merging them would make
+        # "unverified for 988d" about an entry that has no `[verified:]` stamp
+        # and merely inherited the note's date, which is not what the number
+        # means.
+        for finding in memory.get("stale_entries", [])[:8]:
+            when = (
+                f"{finding['age_days']}d"
+                if finding.get("age_days") is not None
+                else "no date"
+            )
+            lines.append(
+                f"  - ℹ️ [{finding['type']}] `{finding['path']}` entry "
+                f"{str(finding['identity'])[:12]}: {finding['detail']} "
+                f"(checked {when}, horizon {finding['threshold_days']}d)"
+            )
+            lines.append(f"      {finding['excerpt']}")
 
     if "job_runs_audit" in report:
         lines.extend(

@@ -50,12 +50,87 @@ export interface MemoryGraphNode {
    * waiting for a person, which is not the same as a note nobody looked at.
    */
   check?: MemoryGraphCheck | null
+  /**
+   * What the entry-level detector found inside this note's own list items, or
+   * null for a node whose body could not be read (and for a note the review
+   * queue would never show, which the map has always left unflagged).
+   *
+   * This is why the map cannot stop at `stale`: a note is not the unit a person
+   * keeps current. Re-stamping a person note last week clears `stale` while the
+   * employer's name in it was last checked in 2019, and a map that could only
+   * answer the file-level question would show that note as clean.
+   *
+   * It never *raises* `stale` — the flag is the whole-note verdict, and the
+   * nightly `stale_entry` worklist is where an overdue bullet becomes a plan.
+   * It reports beside it, so a mixed note is visibly mixed.
+   */
+  entryCoverage?: MemoryGraphEntryCoverage | null
   // simulation state, owned by the canvas but persisted here so the graph
   // does not re-scatter every time the sidebar touches the store.
   x: number
   y: number
   vx: number
   vy: number
+}
+
+/** One note's per-entry freshness and coverage, as the map reports it. */
+export interface MemoryGraphEntryCoverage {
+  /** List items the parse found in the note. */
+  entries: number
+  /** How many of them were judged (the rest are exempt event records). */
+  checked: number
+  /** Entries deliberately not judged: event records and event sections. */
+  exempt: number
+  /** Judged entries nobody ever stamped: no `[verified:]`, or an unusable one. */
+  unverified: number
+  /** Runs of note text that are not entries at all — prose, a table, a quote. */
+  uncovered: number
+  /**
+   * Whether this note's *type* never ages out — a `log`, a `journal`, a
+   * `Workspace/` queue.
+   *
+   * Carried so a client can say so, because `uncovered` on a journal is a
+   * different statement from `uncovered` on a person note: the first is a record
+   * of what happened and is not meant to be verified at all, the second is a
+   * fact nobody has read. Without it the only way to tell them apart is to keep
+   * a second copy of the exempt set in the browser, which is the one thing the
+   * server-side `never_queued`/`is_stale_exempt_type` pair exists to avoid.
+   *
+   * Optional because a server older than this client does not send it, and
+   * absent means "not exempt" — which is what such a server means, since every
+   * note it reports has a horizon.
+   */
+  note_exempt?: boolean
+  /** Judged entries whose own date is past the horizon. */
+  stale: number
+  /** Share of the note read as entries, 0–1. */
+  coverage_ratio: number
+  /**
+   * Every in-scope assertion is covered AND current.
+   *
+   * Deliberately stricter than "no stale entry": one fresh bullet must not put a
+   * clean badge on a note whose second bullet is two years old, or on a note
+   * whose facts live in a paragraph nothing here read.
+   */
+  fully_verified: boolean
+  /** The first few overdue entries, so a mixed note says which. */
+  stale_entries: MemoryGraphEntryFinding[]
+  /** How many further overdue entries the list left out. */
+  more_stale_entries: number
+}
+
+/** One overdue entry, named in a map node. */
+export interface MemoryGraphEntryFinding {
+  identity: string
+  excerpt: string
+  /** `aged` | `no-stamp` | `unusable-stamp`. */
+  reason: string
+  detail: string
+  age_days: number | null
+  /** `YYYY-MM-DD`, or '' when there is no date at all. */
+  last_verified: string
+  /** True when this is the entry's own date, false when it inherited the note's. */
+  own_date: boolean
 }
 
 /** One note's last verification, as the memory map reports it. */
@@ -299,6 +374,23 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
       .filter(n => n.stale && activeCats.has(catKeyFor(n)))
       .sort((a, b) => (b.ageDays ?? 0) - (a.ageDays ?? 0)),
   )
+  /**
+   * Notes holding at least one *fact* nobody has re-checked, which is not the
+   * same list and is the reason this view cannot stop at `staleNotes`.
+   *
+   * A person note re-stamped last week is absent from `staleNotes` and belongs
+   * here with a fact from 2019 in it. Listed rather than counted for the same
+   * reason orphans are: each one is a bullet somebody has to go and decide
+   * about, and the nightly `stale_entry` worklist is built from exactly these
+   * entries.
+   */
+  const entryStaleNotes = computed(() =>
+    nodes.value
+      .filter(
+        n => (n.entryCoverage?.stale_entries.length ?? 0) > 0 && activeCats.has(catKeyFor(n)),
+      )
+      .sort((a, b) => (b.entryCoverage?.stale ?? 0) - (a.entryCoverage?.stale ?? 0)),
+  )
   /** Entry points for the local view, most recently written first. */
   const recentNotes = computed(() => [...nodes.value].sort((a, b) => b.mtime - a.mtime).slice(0, 6))
   const selectedNode = computed(() => (selectedId.value ? nodesById.value.get(selectedId.value) || null : null))
@@ -356,9 +448,21 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
   }
 
   /** Cheap identity of a graph's content, to tell a no-op refresh from a real
-   * change without diffing every field. */
-  function signatureOf(ns: { id: string; updated: string; degree: number; stale: boolean }[], es: MemoryGraphEdge[]): string {
-    const nodePart = ns.map(n => `${n.id}|${n.updated}|${n.degree}|${n.stale ? 1 : 0}`).join('\n')
+   * change without diffing every field.
+   *
+   * Entry coverage is in the signature because a refresh that only changes it
+   * *is* a real change: a bullet was checked, or an un-stamped one was added,
+   * and the detail panel has to show it. Leaving it out is how "the same graph"
+   * would swallow a verification that just landed and leave the map calling a
+   * note current while the note holds a fact it does not. */
+  function signatureOf(ns: { id: string; updated: string; degree: number; stale: boolean; entryCoverage?: MemoryGraphEntryCoverage | null }[], es: MemoryGraphEdge[]): string {
+    const nodePart = ns.map(n => {
+      const cov = n.entryCoverage
+      const covPart = cov
+        ? `${cov.stale}/${cov.unverified}/${cov.uncovered}/${cov.fully_verified ? 1 : 0}`
+        : '-'
+      return `${n.id}|${n.updated}|${n.degree}|${n.stale ? 1 : 0}|${covPart}`
+    }).join('\n')
     return `${ns.length}:${es.length}\n${nodePart}`
   }
 
@@ -414,6 +518,13 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
         // server is older than this client" both read as absence and neither
         // puts a "checked" claim on a note nothing checked.
         check: (n.check && typeof n.check === 'object') ? n.check : null,
+        // Same contract as `check`: absent means absent. A node whose body could
+        // not be read carries no coverage, and a default object of zeroes would
+        // render as "read nothing, found nothing wrong" — a claim about the note
+        // rather than about this client's ability to see it.
+        entryCoverage: (n.entry_coverage && typeof n.entry_coverage === 'object')
+          ? { ...n.entry_coverage, stale_entries: n.entry_coverage.stale_entries || [] }
+          : null,
         x: seededOffset(n.id, 'x'),
         y: seededOffset(n.id, 'y'),
         vx: 0,
@@ -604,7 +715,7 @@ export const useMemoryMapStore = defineStore('memoryMap', () => {
     hideOrphans, orphanFilter, view, mapView, section, reviewFilter, setSection,
     nodesById, adjacency, categoryList, visibleNodes, visibleIds, visibleEdgeCount, orphanCount,
     mostConnected, selectedNode,
-    orphanNotes, recentNotes, staleNotes, ageLabelOf,
+    orphanNotes, recentNotes, staleNotes, entryStaleNotes, ageLabelOf,
     neighborsOf, loadGraph, toggleCategory, isolateCategory, resetCategories,
     toggleHideOrphans, toggleOnlyOrphans, setOrphanFilter,
     selectNode, requestFocus, requestFocusOnOpen, consumePendingFocus, resolveNodeId,

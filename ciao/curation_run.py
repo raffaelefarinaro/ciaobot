@@ -458,6 +458,25 @@ class _ScannedNote:
     yesterday can still be holding a bullet from two years ago — which is the
     whole reason the entry pass exists and the one thing a whole-note selection
     cannot see.
+
+    ``updated`` and ``mtime`` are the two raw inputs that verdict came from, kept
+    so the entry pass can hand the *same* pair straight back to
+    :func:`ciao.memory_audit.note_entry_coverage` instead of re-deriving a note
+    age from a flattened field. The detector then reaches the same
+    :func:`ciao.memory_audit.note_verification` verdict this row already holds, on
+    the same values, with no second stat and no second spelling of the date
+    rule.
+
+    ``dated`` is False for a note with no usable date at all, and those rows are
+    here for the **entry** pass alone: an entry that carries its own valid
+    `[verified:]` stamp is aged from that day whatever the note says, so a note
+    whose frontmatter has no `updated:` and whose file cannot be stat'ed can
+    still be holding a fact from 2019. Dropping the row — as this scan used to
+    — meant the audit and the map reported those entries as overdue while the
+    nightly plan said nothing, which is the disagreement the entry level is
+    supposed to have removed. ``age_days`` is ``None`` rather than zero for them,
+    because "no date" is not "verified today", and ``stale`` is necessarily False:
+    the note pass plans notes with a usable date and nothing else.
     """
 
     rendered: str
@@ -465,9 +484,13 @@ class _ScannedNote:
     title: str
     stale: bool
     exempt: bool
-    age_days: int
+    age_days: int | None
     threshold_days: int
     last_verified: date | None
+    note_type: str = ""
+    updated: str = ""
+    mtime: float = 0.0
+    dated: bool = True
 
 
 def _stale_findings(
@@ -488,9 +511,15 @@ def _stale_findings(
     frontmatter-then-mtime date rule are :mod:`ciao.memory_audit`'s, and are taken
     from it by calling it — once for the verdict it reports, and once per note for
     the ones it does not, so that the entry pass gets every note's horizon rather
-    than only the stale ones'. A note with no usable date at all is left out
-    entirely, for the audit's reason: "unverifiable" is not "stale", and guessing a
-    date for an entry inside such a note would be the same guess one level in.
+    than only the stale ones'.
+
+    **A note with no usable date is still returned**, flagged ``dated: False`` and
+    with ``age_days: None``. It cannot be planned by the *note* pass — that is
+    what "unverifiable is not stale" means, and it is right — but it can be
+    holding an entry that carries its own `[verified:]` stamp, and the entry
+    detector ages that from the stamp rather than from the note. Dropping the row
+    is what made ``os-audit`` and the Memory Map report an overdue fact in such a
+    note while this worklist reported nothing.
 
     The second element is why the scan was abandoned, or ``""``; a vault that is
     not there, and a scan that raised, both land there and both mean "this pass
@@ -498,7 +527,12 @@ def _stale_findings(
     worklist is computed on every ``curation-begin`` regardless of what any one
     pass found.
     """
-    from ciao.memory_audit import find_stale_notes, note_verification
+    from ciao.memory_audit import (
+        find_stale_notes,
+        is_stale_exempt_type,
+        note_threshold_days,
+        note_verification,
+    )
     from ciao.vault_index import VAULT_RENDER_PREFIX, scan_vault
 
     root = Path(vault_root)
@@ -526,25 +560,60 @@ def _stale_findings(
     scanned: list[_ScannedNote] = []
     for entry in entries:
         rendered = str(entry.path)
+        mtime = _mtime_of(root, rendered, prefix)
+        note_type = (entry.type or "").strip()
+        relative = _vault_relative(rendered, prefix)
         verification = note_verification(
-            (entry.type or "").strip(),
+            note_type,
             entry.updated,
-            _mtime_of(root, rendered, prefix),
+            mtime,
             today=today,
             registry=registry,
         )
         if verification is None:
+            # Kept for the **entry** pass, not the note one. "Unverifiable is not
+            # stale" is the note-level answer and it is right: calling a note
+            # with no usable date stale would be a guess. It is the wrong answer
+            # one bullet in, because an entry carrying its own `[verified:]`
+            # stamp is aged from that day and the note's date is only the
+            # fallback. Skipping the note here meant the audit and the map
+            # reported those entries as overdue while this plan said nothing —
+            # exactly the disagreement the entry level was built to remove, and
+            # it was still here, in the one place the two passes diverge.
+            #
+            # `stale` is False and `age_days` is None, so the note pass cannot
+            # plan it: `_stale_note_items` sorts on the age and reads the flag.
+            scanned.append(
+                _ScannedNote(
+                    rendered=rendered,
+                    relative=relative,
+                    title=str(entry.title or "") or relative,
+                    stale=False,
+                    exempt=is_stale_exempt_type(note_type, registry=registry),
+                    age_days=None,
+                    threshold_days=note_threshold_days(note_type, registry=registry),
+                    last_verified=None,
+                    note_type=note_type,
+                    updated=entry.updated or "",
+                    mtime=mtime,
+                    dated=False,
+                )
+            )
             continue
         scanned.append(
             _ScannedNote(
                 rendered=rendered,
-                relative=_vault_relative(rendered, prefix),
-                title=str(entry.title or "") or _vault_relative(rendered, prefix),
+                relative=relative,
+                title=str(entry.title or "") or relative,
                 stale=rendered in stale_paths,
                 exempt=verification.exempt,
                 age_days=verification.age_days,
                 threshold_days=verification.threshold_days,
                 last_verified=verification.last_verified,
+                note_type=note_type,
+                updated=entry.updated or "",
+                mtime=mtime,
+                dated=True,
             )
         )
     return scanned, ""
@@ -641,7 +710,10 @@ def _stale_note_items(
     # happening to agree.
     flagged = sorted(
         (note for note in scanned if note.stale),
-        key=lambda note: (-note.age_days, note.rendered),
+        # `age_days` is `None` for a note the scan could not date, and such a note
+        # is never `stale` — so the coalesce is unreachable, and states the
+        # invariant the type checker cannot.
+        key=lambda note: (-(note.age_days or 0), note.rendered),
     )
     items: list[WorklistItem] = []
     settled = 0
@@ -693,14 +765,29 @@ def _stale_note_items(
 
 @dataclass(frozen=True, slots=True)
 class _StaleEntry:
-    """One list item this pass found due, with everything a reason needs."""
+    """One list item this pass found due, with everything a reason needs.
+
+    The entry's own coordinates rather than a parsed
+    :class:`ciao.note_entries.NoteEntry`, because the detector already decided
+    and every value a caller could want — identity, fingerprint, span, excerpt,
+    the note's revision — is a field of its verdict. ``age`` is ``None`` only
+    for an entry with no usable date at all, which still gets planned (nobody has
+    checked it) but sorts after every dated one, because there is no claim about
+    how old it is for it to violate.
+    """
 
     relative: str
     label: str
-    entry: Any
-    age: int
+    identity: str
+    fingerprint: str
+    start: int
+    end: int
+    excerpt: str
+    age: int | None
+    undated: bool
     horizon: int
     revision: str
+    reason: str
 
 
 def _due_entries(
@@ -718,25 +805,26 @@ def _due_entries(
     whole-note check can only ever say the file is or is not current — and a
     person who re-verified the address last week has silently re-certified the
     landlord's name from 2019 with it. So **every** note is walked, not only the
-    stale ones, and each entry is aged on its own date where it has one:
+    stale ones.
 
-    * an entry with a valid ``[verified:]`` stamp is aged from that date and
-      compared against the same horizon the audit measured its note against — the
-      entity type's own ``stale_after_days``, including a custom category's. A
-      bullet stamped two years ago in a note somebody re-stamped yesterday is
-      therefore still work, which is precisely what a whole-note selection can
-      never see;
-    * an entry with no stamp of its own is aged from the note's own date, which is
-      what makes it the same work the note pass found. Its verdict is still a
-      separate one, because re-stamping the note did not verify this bullet in
-      particular;
-    * an entry carrying a stamp that is *not* usable — a typo, an impossible day, a
-      date that has not happened — has no verification date at all, so it ages from
-      the note and is the first thing a re-stamp should be pointed at.
+    **The selection itself is the audit's, not a second one.**
+    :func:`ciao.memory_audit.note_entry_coverage` is the detector, and this
+    function is the worklist's client of it rather than a reimplementation: the
+    entity-type horizon (a custom category's ``stale_after_days`` included), the
+    type aliases, the exempt event types, the frontmatter-then-mtime date rule,
+    the per-entry ``[verified:]`` stamp, the event-shaped exemptions, the
+    unsupported entries and the coverage accounting all come from there. An entry
+    with a valid stamp is aged from that day, an entry without one inherits the
+    note's own date (and says so), and an entry whose stamp is unusable — a typo,
+    an impossible day, a day that has not come — has no verification date at all
+    and is selected as the first thing a re-stamp should be pointed at.
 
-    A note whose type is exempt (a ``journal`` is as true the day it was written)
-    contributes nothing, for the audit's reason rather than a second copy of the
-    exempt set.
+    The duplication this removed is the point. A pass that aged entries its own
+    way would list work the detector does not, and a detector that aged them its
+    own way would show a note the pass is not going to ask about; the audit, the
+    Memory Map, the review queue and the nightly plan would then be four
+    surfaces with three answers, and the disagreement would be silent in the
+    direction that loses the reader's attention.
 
     ``workspace`` is the registered workspace's name, and it is passed in rather
     than read off ``vault_root.name`` because the entry identity digests it: the
@@ -750,19 +838,12 @@ def _due_entries(
     CONFLICT for work it planned itself. Guessing the name from the directory is
     the one thing that cannot be right in general, so the caller supplies it.
 
-    The note's own :func:`ciao.memory_receipts.content_revision` is computed here
-    rather than in the caller, because this is the one place the note's bytes are
-    already in hand; the reason has to state it (see
-    :func:`_stale_entry_items`) and re-reading the file to get it would double
-    the pass's only body read.
-
-    Order is by age descending, then the rendered path, then the entry's own
-    position: the audit's order for notes with its tiebreak extended one level
-    further, so the plan is reproducible and a short budget drops the youngest
-    rather than an arbitrary one.
+    Order is the detector's, restated rather than inherited: age descending (with
+    the undated ones last, having no age to violate), then the rendered path,
+    then the entry's own position, so the plan is reproducible and a short budget
+    drops the youngest rather than an arbitrary one.
     """
-    from ciao import memory_receipts as mr
-    from ciao import note_entries as ne
+    from ciao import memory_audit as ma
     from ciao.vault_review import never_queued
 
     root = Path(vault_root)
@@ -775,28 +856,41 @@ def _due_entries(
         except (OSError, UnicodeError):
             logger.debug("curation: stale note %s is not readable UTF-8", note.relative)
             continue
-        revision = mr.content_revision(text)
-        document = ne.parse_note_entries(
-            text, note_path=note.relative, workspace=workspace, today=today
+        _coverage, selected, _document = ma.note_entry_coverage(
+            text,
+            note_type=note.note_type,
+            updated=note.updated,
+            mtime=note.mtime,
+            note_path=note.relative,
+            rendered=note.rendered,
+            title=note.title,
+            workspace=workspace,
+            today=today,
         )
-        for entry in document.entries:
-            dated = entry.verified if entry.verified is not None else note.last_verified
-            if dated is None:  # pragma: no cover — a scanned note always has one
-                continue
-            age = (today - dated).days
-            if age < note.threshold_days:
-                continue
+        for verdict in selected:
             due.append(
                 _StaleEntry(
                     relative=note.relative,
                     label=note.title or note.relative,
-                    entry=entry,
-                    age=age,
-                    horizon=note.threshold_days,
-                    revision=revision,
+                    identity=verdict.identity,
+                    fingerprint=verdict.fingerprint,
+                    start=verdict.start,
+                    end=verdict.end,
+                    excerpt=verdict.excerpt,
+                    age=verdict.age_days if verdict.age_days is not None else 0,
+                    undated=verdict.age_days is None,
+                    horizon=verdict.threshold_days,
+                    revision=verdict.revision,
+                    reason=verdict.reason,
                 )
             )
-    due.sort(key=lambda item: (-item.age, item.relative, item.entry.start))
+    due.sort(
+        key=lambda item: (
+            -(item.age if item.age is not None else -1),
+            item.relative,
+            item.start,
+        )
+    )
     return due
 
 
@@ -847,6 +941,15 @@ def _stale_entry_items(
     entry's fingerprint (``entry_fingerprint``, compared in full — a truncated
     one is not a prefix match but a different string, so it comes back
     ``conflict`` for every entry, for ever), and the span the write lands at.
+
+    The *why* is the detector's sentence, not a template composed here. A reason
+    that said "unverified for 400d" about an entry that carries no ``[verified:]``
+    stamp at all — and therefore inherited the note's date — would be a lie
+    dressed as a number, and an agent reading it would go looking for a 400-day
+    gap that is not there. So the detector's own words ride along with the
+    numbers beside them, and the agent can disagree with the verdict without
+    losing the evidence.
+
     Reads bytes only to parse and state them; reaches no verdict and writes
     nothing.
     """
@@ -862,9 +965,8 @@ def _stale_entry_items(
     settled = 0
     checks = ev.read_entry_checks(root)
     for candidate in due:
-        entry = candidate.entry
         if ev.check_settles_entry(
-            checks, entry.identity, entry.fingerprint, today=today
+            checks, candidate.identity, candidate.fingerprint, today=today
         ):
             settled += 1
             continue
@@ -873,16 +975,15 @@ def _stale_entry_items(
         items.append(
             WorklistItem(
                 pass_id=PASS_STALE_ENTRY,
-                label=f"{candidate.label} — entry {entry.identity[:12]}",
+                label=f"{candidate.label} — entry {candidate.identity[:12]}",
                 reason=(
-                    f"entry unverified for {candidate.age}d against a "
-                    f"{candidate.horizon}d horizon; {candidate.relative} at "
+                    f"{candidate.reason}; {candidate.relative} at "
                     f"revision {candidate.revision}, entry identity "
-                    f"{entry.identity}, entry fingerprint "
-                    f"{entry.fingerprint} at characters "
-                    f"{entry.start}-{entry.end}"
+                    f"{candidate.identity}, entry fingerprint "
+                    f"{candidate.fingerprint} at characters "
+                    f"{candidate.start}-{candidate.end}"
                 ),
-                keys=(item_key(PASS_STALE_ENTRY, entry.identity),),
+                keys=(item_key(PASS_STALE_ENTRY, candidate.identity),),
             )
         )
     left_out = len(due) - len(items) - settled

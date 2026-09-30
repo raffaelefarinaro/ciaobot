@@ -2475,6 +2475,20 @@ def _base_preview(row: dict[str, Any]) -> dict[str, Any]:
         "truncated": False,
         "can_accept": False,
         "reason": "",
+        # `note` or `entry`: the unit the accept actually writes. Present on
+        # every preview so a client reads one field rather than inferring the
+        # scope from the operation, which is what made an entry edit render as
+        # "updates this whole note" — a claim that is false for all three entry
+        # operations and most false for the one that removes a line.
+        "scope": "note",
+        # The three entry operations, when the scope is `entry`. Empty otherwise.
+        "entry_operation": "",
+        # The entry's own text, before and after, for the same reason: a card
+        # that diffs two whole notes differing by one line is unreadable.
+        "entry_before": "",
+        "entry_after": "",
+        # An `entry`-scope retirement: this one line goes and the note stays.
+        "entry_removed": False,
         # What joins the destination's units, so the card diffs the same thing
         # the destination is made of. A bounded region's entries are separated
         # by "\n§\n"; diffed as lines, appending one entry showed a second
@@ -2870,6 +2884,23 @@ def _note_edit_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
     out["revision"] = content_revision(current)
     out["exact"] = True
     out["can_accept"] = not plan.reason
+    if proposal.operation in nep.ENTRY_OPERATIONS:
+        # The scope and the entry's own two images, so the card diffs the line
+        # the accept rewrites rather than two whole notes that differ by it.
+        # `entry_replacement` is the inverse of the splice the accept performs,
+        # so this is the entry's exact new text and not a guess at where in the
+        # note the entry sat. A retirement has no new text by construction, and
+        # `entry_removed` is what tells the card that apart from "we could not
+        # work it out".
+        out["scope"] = "entry"
+        out["entry_operation"] = proposal.operation
+        start, end = proposal.entry_span
+        out["entry_before"] = current[start:end]
+        try:
+            out["entry_after"] = nep.entry_replacement(proposal)
+        except NoteEditError:
+            out["entry_after"] = ""
+        out["entry_removed"] = proposal.operation == nep.RETIRE_ENTRY
     out["reason"] = plan.reason or (
         (
             "removes one entry from the note and nothing else; the change is "

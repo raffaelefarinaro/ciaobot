@@ -468,6 +468,110 @@ export const VERIFICATION_REVIEW = {
       retirement_offered: true,
     },
     {
+      // A note that is CURRENT and still holding a fact nobody has re-checked.
+      // The whole-note signal did not fire — the file's own `updated:` is a day
+      // old — which is the only reason the entry-level block has anything to
+      // add, and the only reason this row exists at all. It is a browser case
+      // because the block adds a quoted line, a context line and two links into
+      // a row whose path is an unbreakable token.
+      candidate_id: 'pend0000000000000000000e5',
+      workspace: 'alpha',
+      path: 'memory-vault/alpha/People/Nadia.md',
+      content_hash: 'hash-mixed',
+      signals: ['unverified_entries'],
+      priority: 0,
+      evidence: {
+        backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
+        last_update: '2026-09-29', type: 'person', age_days: 1,
+        unverified: null,
+        verification: null,
+        entry_verification: {
+          entries: 3,
+          checked: 3,
+          exempt: 0,
+          unverified: 1,
+          uncovered: 1,
+          stale: 1,
+          coverage_ratio: 0.62,
+          fully_verified: false,
+          stale_entries: [
+            {
+              identity: 'entry-identity-aged-000000000000000000000000000000000000000000000000000000',
+              line_number: 9,
+              section: 'Nadia',
+              excerpt: '- Reports to the CTO [verified: 2019-05-01]',
+              context: ['- Based in Lisbon [verified: 2026-09-28]'],
+              reason: 'aged',
+              detail: 'unverified for 2698d against a 90d horizon',
+              age_days: 2698,
+              last_verified: '2019-05-01',
+              own_date: true,
+              supported: true,
+            },
+            {
+              // A stamp the parser refuses: the note reads as verified and the
+              // bullet is not, which is the one entry kind a *current* note can
+              // still owe a check on. An **unstamped** bullet beside it would be
+              // the opposite — it inherits the note's fresh date, so the server
+              // selects nothing for it, and a card claiming otherwise would
+              // contradict the detector. The prose the note also carries is
+              // reported by the `uncovered` count instead: a paragraph is not an
+              // entry, and the server never puts one in this list.
+              identity: 'entry-identity-uncov-000000000000000000000000000000000000000000000000000000',
+              line_number: 11,
+              section: 'Nadia',
+              excerpt: '- Leads the platform team [verified: 2026-02-30]',
+              context: ['- Based in Lisbon [verified: 2026-09-28]'],
+              reason: 'unusable-stamp',
+              detail: 'the [verified:] stamp on this entry is unusable (impossible), so nobody has recorded a check on it',
+              age_days: 1,
+              last_verified: '2026-09-29',
+              own_date: false,
+              supported: true,
+            },
+          ],
+          more_stale_entries: 0,
+          proposals: [
+            {
+              identity: 'entry-identity-aged-000000000000000000000000000000000000000000000000000000',
+              proposal_id: 'proposal-verify-4',
+              operation: 'replace_entry',
+              outcome: 'update',
+              checked_at: '2026-09-28',
+              retry_after: '2026-10-28',
+              coverage: 'complete',
+              reason: 'the reorg moved her under the COO',
+              citations: 2,
+              receipt_id: '',
+              conflicted: false,
+            },
+            {
+              identity: 'entry-identity-dead-0000000000000000000000000000000000000000000000000000000',
+              proposal_id: 'proposal-verify-5',
+              operation: 'retire_entry',
+              outcome: 'retire',
+              checked_at: '2026-08-01',
+              retry_after: '2026-08-31',
+              coverage: 'partial',
+              reason: 'the old line no longer exists',
+              citations: 1,
+              receipt_id: '',
+              conflicted: true,
+            },
+          ],
+          more_proposals: 0,
+        },
+        superseded: null,
+        excerpt: 'Nadia leads the platform team.',
+      },
+      status: 'candidate', disposition: '', deferred_until: '',
+      completable: false, completion_moves_folder: false,
+      pending_verification: null,
+      // "Go and look again" is not a claim that a note is disposable, so a note
+      // whose ONLY finding is an overdue fact gets no Retire button.
+      retirement_offered: false,
+    },
+    {
       // Asked and answered: no proposal, and the check state says so in place
       // of the age flag the queue would otherwise raise.
       candidate_id: 'pend0000000000000000000d4',
@@ -535,9 +639,53 @@ export const VERIFICATION_PROPOSALS = [
       reason: 'the tracker moved to a new system',
     },
   },
+  {
+    id: 'proposal-verify-4',
+    kind: 'note_edit',
+    target: 'People/Nadia.md',
+    text: 'People/Nadia.md — replace_entry (entry a1b2c3): the reorg moved her under the COO',
+    source: 'note verification · replace_entry',
+    workspace: 'alpha',
+    line: 3,
+    note_edit: {
+      id: 'fixture0000000000e4',
+      operation: 'replace_entry',
+      outcome: 'update',
+      settled: '',
+      receipt_id: '',
+      can_accept: true,
+      reason: 'the reorg moved her under the COO',
+    },
+  },
+  {
+    id: 'proposal-verify-5',
+    kind: 'note_edit',
+    target: 'People/Nadia.md',
+    text: 'People/Nadia.md — retire_entry (entry d4e5f6): the old line no longer exists',
+    source: 'note verification · retire_entry',
+    workspace: 'alpha',
+    line: 4,
+    note_edit: {
+      id: 'fixture0000000000e5',
+      operation: 'retire_entry',
+      outcome: 'retire',
+      settled: '',
+      receipt_id: '',
+      can_accept: true,
+      reason: 'the old line no longer exists',
+    },
+  },
 ]
 
+
 /** The history rows a settled verification leaves behind. */
+/** The one line an entry-scope retirement removes, and the note around it. */
+const NADIA_ENTRY = '- Reports to the CTO [verified: 2019-05-01]\n'
+const NADIA_NOTE_BEFORE = '---\ntype: person\nupdated: 2026-09-29\n---\n\n# Nadia\n\n- Based in Lisbon [verified: 2026-09-28]\n- Leads the platform team [verified: 2026-02-30]\n- Reports to the CTO [verified: 2019-05-01]\n'
+const NADIA_NOTE_AFTER = '---\ntype: person\nupdated: 2026-09-29\n---\n\n# Nadia\n\n- Based in Lisbon [verified: 2026-09-28]\n- Leads the platform team [verified: 2026-02-30]\n'
+const NADIA_ENTRY_START = NADIA_NOTE_BEFORE.indexOf(NADIA_ENTRY)
+const NADIA_ENTRY_END = NADIA_ENTRY_START + NADIA_ENTRY.length
+
 export const VERIFICATION_HISTORY = {
   rows: [
     {
@@ -619,8 +767,62 @@ export const VERIFICATION_HISTORY = {
         pending: false,
       },
     },
+    {
+      // An entry-scope retirement: one line out of a note that keeps its other
+      // two facts. It is a browser case for the two halves that jsdom cannot
+      // judge — whether the card says the rest of the file is untouched, and
+      // whether the Undo affordance is real (a `note_apply` receipt, so it is).
+      id: 'hist-entry-retired',
+      ts: '2026-09-30T09:04:00+00:00',
+      action: 'accepted',
+      via: 'pwa',
+      kind: 'note_edit',
+      text: 'People/Nadia.md — retire_entry (entry a1b2c3): the reorg ended this reporting line',
+      source: 'note verification · retire_entry',
+      workspace: 'alpha',
+      destination: 'People/Nadia.md',
+      outcome: 'written',
+      proposal_id: 'proposal-verify-5',
+      note_edit: {
+        id: 'fixture0000000000e5',
+        relative_path: 'People/Nadia.md',
+        operation: 'retire_entry',
+        outcome: 'retire',
+        coverage: 'complete',
+        before: NADIA_NOTE_BEFORE,
+        after: NADIA_NOTE_AFTER,
+        reason: 'the reorg ended this reporting line',
+        evidence: [{
+          source_type: 'url',
+          source_ref: 'https://intranet.example.test/reorg',
+          quoted: 'Nadia now reports to the COO.',
+          supports: 'People/Nadia.md: who Nadia reports to',
+        }],
+        settled: '2026-09-30T09:04:00Z',
+        accepted: true,
+        receipt_id: 'mrcpt_fixture_entry',
+        pending: false,
+        scope: 'entry',
+        entry_identity: 'entry-identity-aged-000000000000000000000000000000000000000000000000000000',
+        entry_fingerprint: 'f'.repeat(64),
+        entry_span: [NADIA_ENTRY_START, NADIA_ENTRY_END],
+        entry_before: NADIA_ENTRY,
+        entry_after: '',
+        entry_removed: true,
+        entry_recovery_error: '',
+      },
+      change: {
+        receipt_id: 'mrcpt_fixture_entry',
+        kind: 'note_apply',
+        status: 'applied',
+        destination: 'People/Nadia.md',
+        undoable: true,
+        changed: true,
+        ts: '2026-09-30T09:03:59+00:00',
+      },
+    },
   ],
-  total: 2,
+  total: 3,
   truncated: false,
   limit: 200,
   at_max: false,
@@ -656,12 +858,73 @@ export const VERIFICATION_RECEIPT = {
 }
 
 /**
+ * The receipt behind an entry-scope accept. A `note_apply` carries the note's
+ * whole before/after pair, so an entry retirement is reversible the same way a
+ * whole-note one is — which is the claim the History card makes, and a browser
+ * test is the only place the Undo button can be shown to be real.
+ */
+export const VERIFICATION_ENTRY_RECEIPT = {
+  receipt_id: 'mrcpt_fixture_entry',
+  kind: 'note_apply',
+  status: 'applied',
+  destination: 'People/Nadia.md',
+  actor: 'operator',
+  source: 'curation',
+  ts: '2026-09-30T09:03:59+00:00',
+  undoable: true,
+  changed: true,
+  has_snapshot: true,
+  reason: '',
+  before_text: NADIA_NOTE_BEFORE,
+  after_text: NADIA_NOTE_AFTER,
+  diff: [
+    { op: 'removed', text: '- Reports to the CTO [verified: 2019-05-01]' },
+  ],
+  diff_truncated: false,
+}
+
+/**
  * The graph as the server sends it once the managed pass has been at this
  * vault: the same three notes, each carrying the check state for its CURRENT
  * revision. A settled check clears the node's `stale` flag, which is the whole
  * point — the map used to count these as unchecked and link onward to a queue
  * that had deliberately stopped asking.
  */
+/** One note's per-entry coverage, as the map reports it. */
+const entryCoverage = (over = {}) => ({
+  entries: 3, checked: 3, exempt: 0, unverified: 1, uncovered: 0, stale: 1,
+  coverage_ratio: 0.72, fully_verified: false,
+  // Both kinds the counts above name, so the tile's own numbers and its list
+  // agree: a server that reported `unverified: 1` and sent no such entry would
+  // be describing a fact the reader cannot see.
+  stale_entries: [
+    {
+      identity: 'entry-identity-aged-000000000000000000000000000000000000000000000000000000',
+      excerpt: '- Reports to the CTO [verified: 2019-05-01]',
+      reason: 'aged',
+      detail: 'unverified for 2698d against a 90d horizon',
+      age_days: 2698,
+      last_verified: '2019-05-01',
+      own_date: true,
+    },
+    {
+      // Unusable, not missing: see the review fixture's second entry. An
+      // unstamped bullet in a note dated yesterday inherits yesterday, so nothing
+      // is selected for it and a `no-stamp` finding here would be a claim the
+      // detector never makes.
+      identity: 'entry-identity-uncov-000000000000000000000000000000000000000000000000000000',
+      excerpt: '- Leads the platform team [verified: 2026-02-30]',
+      reason: 'unusable-stamp',
+      detail: 'the [verified:] stamp on this entry is unusable (impossible), so nobody has recorded a check on it',
+      age_days: 1,
+      last_verified: '2026-09-29',
+      own_date: false,
+    },
+  ],
+  more_stale_entries: 0,
+  ...over,
+})
+
 export const VERIFICATION_NODES = [
   {
     ...MEMORY_NODES[1],
@@ -683,5 +946,26 @@ export const VERIFICATION_NODES = [
     age_days: 900,
     threshold_days: 180,
     check: check({ outcome: 'retire', checked_at: '2026-08-01', retry_after: '2026-08-31', settled: false, pending: false, conflicted: true, proposal_id: 'proposal-verify-3', reason: 'folded into Atlas', citations: 1, receipt_id: '' }),
+  },  {
+    // A note whose own date is current and which still holds a fact from 2019.
+    // Absent from the `stale` count and present in the facts one, which is the
+    // whole reason the toolbar reports the two separately. A new node rather
+    // than a repurposed one: the three above are each already the subject of an
+    // assertion in note-verification.spec.ts.
+    id: 'memory-vault/alpha/People/Nadia.md',
+    title: 'Nadia',
+    type: 'person-colleague',
+    tags: ['team'],
+    aliases: [],
+    description: 'Who Nadia is, where she sits, and who she works with.',
+    workspace: 'alpha',
+    degree: 1,
+    mtime: 1780200000,
+    updated: '2026-09-29',
+    stale: false,
+    age_days: 1,
+    threshold_days: 90,
+    check: null,
+    entry_coverage: entryCoverage(),
   },
 ]

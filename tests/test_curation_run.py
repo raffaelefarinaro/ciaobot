@@ -2043,8 +2043,12 @@ def test_an_entry_is_work_keyed_by_its_identity_not_its_line(
         workspace=vault.name,
     ).entries[0]
     age = (TODAY_ENTRIES - date(2024, 1, 5)).days
+    # The "why" is the detector's own sentence, not a template this pass composes:
+    # an entry with a valid `[verified:]` stamp is aged from that day, and the age
+    # and horizon have to travel with the values below so a reader can disagree
+    # with the verdict without losing the evidence.
     assert items[0].reason == (
-        f"entry unverified for {age}d against a 90d horizon; "
+        f"unverified for {age}d against a 90d horizon; "
         f"People/Sofia.md at revision {mr.content_revision(note_text)}, "
         f"entry identity {entry.identity}, "
         f"entry fingerprint {entry.fingerprint} at characters "
@@ -2139,6 +2143,70 @@ def _entry_fingerprint(vault: Path, relative: str) -> str:
         note_path=relative,
         workspace=vault.name,
     ).entries[0].fingerprint
+
+
+def test_an_undated_note_is_still_scanned_for_its_entries(tmp_path: Path) -> None:
+    """The note pass cannot plan a note with no usable date; the entry pass can.
+
+    "Unverifiable is not stale" is right about a *file* and wrong one bullet in.
+    An entry carrying its own `[verified:]` stamp is aged from that day, and the
+    note's date is only the fallback — so a note with no `updated:` and an mtime
+    the scan cannot read can still be holding a fact from 2019. This scan used to
+    drop such a note entirely, which left `os-audit` and the Memory Map reporting
+    an overdue fact the nightly plan said nothing about: the exact disagreement
+    the entry level was built to remove, still present in the one place the two
+    passes diverge.
+    """
+    from ciao import memory_audit as ma
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    path = vault / "People/Sofia.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # No `updated:`, and an mtime far enough back that the fallback cannot
+    # rescue it either.
+    path.write_text(
+        "---\ntype: person\n---\n\n# Sofia\n\n- Speaks Greek [verified: 2020-01-01]\n",
+        encoding="utf-8",
+    )
+    import os
+
+    os.utime(path, (0, 0))
+
+    items = _entry_items(vault, guide)
+    assert len(items) == 1
+    assert "Speaks Greek" not in items[0].reason  # the reason states the numbers
+    assert "unverified for" in items[0].reason
+
+    # And the note pass still cannot plan it, because that is what
+    # "unverifiable is not stale" means at file width.
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace=vault.name,
+        workspace_dir=guide.parent,
+        today=TODAY_ENTRIES,
+    )
+    assert [i for i in worklist.items if i.pass_id == cr.PASS_STALE_NOTE] == []
+
+    # The detector agrees: the same entry is the same finding here as it is to
+    # the audit and the map, under the same identity.
+    from ciao.vault_index import scan_vault
+
+    entries = scan_vault(vault, registry=_categories(vault))
+    detected = ma.find_stale_entries(
+        entries,
+        vault_root=vault,
+        workspace=vault.name,
+        today=TODAY_ENTRIES,
+        registry=_categories(vault),
+    )
+    assert {i.keys[0] for i in items} == {
+        cr.item_key(cr.PASS_STALE_ENTRY, row["identity"])
+        for row in detected["stale_entries"]
+    }
 
 
 def test_a_settled_entry_is_not_planned_again(tmp_path: Path) -> None:

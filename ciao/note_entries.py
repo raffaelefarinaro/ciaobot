@@ -447,6 +447,132 @@ def parse_note_entries(
     )
 
 
+def invalidate_stale_stamps(before: str, after: str) -> tuple[str, int]:
+    """``after`` with every stamp change an ordinary save did not earn, undone.
+
+    A `[verified:]` stamp is a claim that **somebody went and checked that
+    fact**. A save is not a check: an editor that merges a new fact into a person
+    note rewrites the file, and a model handed "here is the note, here is the
+    approved fact" is entirely likely to carry today's date onto the bullet it
+    just touched — a date nobody verified anything on, attached to a sentence
+    that may well have changed. Leaving it there is the one failure this whole
+    entry model exists to prevent, and a prompt asking nicely is not a guarantee:
+    it is a suggestion the next writer, or the next rewrite from an older note,
+    is free to ignore.
+
+    So the rule is mechanical, and it has **two** halves rather than one. The
+    fingerprint deliberately ignores the stamp, which is what makes a re-stamp
+    invisible to it — so "the words are unchanged" cannot by itself mean "the
+    stamp is fine". Both halves are needed, and the second is the one a
+    fingerprint-only rule silently lacks:
+
+    * **The words changed, or the entry is new.** ``before`` never held this
+      fingerprint, so nothing was ever verified about it: the stamp is cut.
+    * **The words are unchanged and the stamp differs.** A stamp that was not
+      there before is cut, and a stamp that was there with a *different* value is
+      **restored to the one ``before`` carried** — down to the token, so the
+      result is the text the fact was actually verified on, not a date this save
+      happened to compute. This is the "the model carried today's date onto a
+      bullet" failure, and a fingerprint cannot see it at all, because the words
+      are byte-identical.
+
+    A pure re-stamp is therefore *not* an ordinary save's business: it is the
+    `still_valid` verdict's, and a save that happens to move a date on unchanged
+    text has this put it back. That is the same rule
+    :func:`ciao.entry_verification.stamp_entry` writes under, read from the other
+    side.
+
+    Returning the count matters as much as the text: a writer that silently
+    dropped or reverted nine stamps would leave a reader wondering why their
+    careful dates vanished, so the caller is expected to say so.
+
+    Deliberately **not** used by :mod:`ciao.note_receipts.apply_entry_edit` or by
+    the managed verification. A `still_valid` re-stamp and an accepted
+    `replace_entry` write a *new* fingerprint carrying a stamp on purpose, and
+    running them through this would delete the exact claim the operation exists
+    to record. This is for the writes nobody judged anything about.
+
+    Byte-exact apart from the tokens it edits: the returned text is ``after`` with
+    whole stamp tokens (and the whitespace they introduced) cut or swapped, never
+    re-rendered, so a caller comparing it against ``after`` sees only the
+    difference it asked about.
+    """
+    # What `before` actually carried, per fingerprint: the exact stamp tokens, in
+    # the order it held them. The list rather than a single value because two
+    # identical bullets in one section share a fingerprint and may not share a
+    # stamp, and the restore takes the first — the pair set below is what decides
+    # "unchanged", so an entry whose pair ``before`` held is never touched.
+    prior: dict[str, list[str]] = {}
+    for entry in parse_note_entries(before).entries:
+        raw = entry.stamp.raw if entry.stamp is not None else ""
+        prior.setdefault(entry.fingerprint, []).append(raw)
+    settled = {
+        (fingerprint, raw)
+        for fingerprint, raws in prior.items()
+        for raw in raws
+    }
+    document = parse_note_entries(after)
+    if not document.entries:
+        return after, 0
+    # (start, end, replacement) over `after`, cut later in one pass so the
+    # offsets stay valid while the list is being built.
+    edits: list[tuple[int, int, str]] = []
+    for entry in document.entries:
+        if entry.stamp is None:
+            continue
+        fingerprint = entry.fingerprint
+        if (fingerprint, entry.stamp.raw) in settled:
+            continue
+        opening = after[entry.opening_start : entry.opening_end]
+        span = _claim_stamp_span(opening)
+        if span is None:  # pragma: no cover — a stamp implies a claim span
+            continue
+        carried = prior.get(fingerprint)
+        # Unchanged words, a different token: put back what was really verified
+        # on. `fingerprint not in prior` is a changed or new entry, and an entry
+        # `before` held with no stamp at all is a stamp this save invented — both
+        # are a cut, which an empty replacement expresses.
+        replacement = f" {carried[0]}" if carried and carried[0] else ""
+        edits.append(
+            (entry.opening_start + span[0], entry.opening_start + span[1], replacement)
+        )
+    if not edits:
+        return after, 0
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, replacement in sorted(edits):
+        pieces.append(after[cursor:start])
+        pieces.append(replacement)
+        cursor = end
+    pieces.append(after[cursor:])
+    return "".join(pieces), len(edits)
+
+
+def frontmatter_span(text: str) -> tuple[int, int] | None:
+    """The exact character span of a note's YAML frontmatter, or ``None``.
+
+    Exposed for a consumer reporting **coverage**: a caller that says what it
+    did *not* read as an entry has to be able to tell a note's structure apart
+    from a note's unparsed assertions, and frontmatter is the largest block of
+    the first kind. Reading it here is what keeps that a second call into this
+    module's own answer rather than a second frontmatter rule in a detector —
+    a second rule is how "the frontmatter ended here" and "the first entry
+    starts here" come to disagree, and every entry below the line is then filed
+    under a section nobody wrote.
+
+    The span covers the opening ``---`` through the terminator line's own
+    newline, so it never leaves a half-line for a caller to classify.
+    ``None`` for a note with no frontmatter *and* for one that opened with a
+    ``---`` that turned out to be a thematic break: the unclosed case is a
+    diagnostic, not a block, and its lines are the note's body.
+    """
+    lines = _split_lines(text)
+    closing = _frontmatter_end(lines)
+    if closing is None:
+        return None
+    return lines[0].start, lines[closing].full_end
+
+
 def entry_identity(entry: NoteEntry) -> str:
     """The stable id of one entry: what it is, and where it lives.
 

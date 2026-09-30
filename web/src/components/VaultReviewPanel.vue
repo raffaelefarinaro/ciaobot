@@ -6,10 +6,10 @@ import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProposalsStore } from '../stores/proposals'
 import { reviewPath } from '../stores/memoryMap'
-import type { VaultReviewCandidate, VaultReviewCheck, VaultTrashedNote,
+import type { VaultReviewCandidate, VaultReviewCheck, VaultReviewEntryProposal, VaultTrashedNote,
   VaultClearedNote } from '../lib/types'
 import {
-  candidateLeaf, coverageLabel, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel, verdictLabel,
+  candidateLeaf, coverageLabel, coverageSummary, entryReasonLabel, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel, verdictLabel,
 } from '../lib/vaultReviewLabels'
 import { askConfirm } from '../lib/confirm'
 import { startFileDiscussion } from '../lib/fileDiscussion'
@@ -245,6 +245,87 @@ function checkOf(candidate: VaultReviewCandidate): VaultReviewCheck | null {
 /** Whether this row defers to a proposal rather than offering a second answer. */
 function hasPendingProposal(candidate: VaultReviewCandidate): boolean {
   return Boolean(candidate.pending_verification?.proposal_id)
+}
+
+/** What the entry-level detector found inside this note, or null.
+ *
+ * The same block the Memory Map node carries and the nightly `stale_entry` pass
+ * is built from, so a row here, a node there and tonight's plan cannot disagree
+ * about which fact is overdue. `null` for a note with nothing list-shaped in it
+ * and for a server older than this client, which are the same thing to render.
+ */
+function entryCoverageOf(candidate: VaultReviewCandidate) {
+  return candidate.evidence.entry_verification ?? null
+}
+
+/** The entry this pending proposal is about, so a link can name it.
+ *
+ * Matched by identity rather than by position: the proposal and the finding are
+ * two records of the same fact written by two passes, and the identity is the
+ * only thing they agree on.
+ */
+function entryForProposal(
+  candidate: VaultReviewCandidate,
+  proposal: VaultReviewEntryProposal,
+) {
+  return entryCoverageOf(candidate)?.stale_entries.find(e => e.identity === proposal.identity) ?? null
+}
+
+/** Pending entry proposals about a fact this note is not currently owing a
+ * check on.
+ *
+ * The complement of :func:`entryForProposal`, and the reason a decision is not
+ * only ever shown attached to an overdue finding. A `restamp_entry` filed last
+ * week whose entry has since been re-stamped by a whole-note verdict is real and
+ * still waiting for an answer — dropping it because the fact is no longer on the
+ * list would leave a question in the queue with nothing on this surface saying
+ * it is there, which is the one thing the "link the decision, do not duplicate
+ * it" rule is for.
+ */
+function unmatchedEntryProposals(candidate: VaultReviewCandidate): VaultReviewEntryProposal[] {
+  return (entryCoverageOf(candidate)?.proposals ?? []).filter(
+    link => !entryForProposal(candidate, link),
+  )
+}
+
+/** A label that opens a sentence, capitalised.
+ *
+ * `entryReasonLabel` is written in lower case because it is a noun phrase that
+ * also appears mid-sentence in the map; here it opens one, and a row that reads
+ * "never checked — nobody has recorded…" looks like a rendering bug rather than
+ * a claim.
+ */
+function sentenceCase(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+/** What accepting a linked entry proposal would do, in words. *
+ * Named by operation because the three do genuinely different things to the
+ * file: one rewrites a line, one stamps it, and one removes it while leaving
+ * every other fact in the note alone. "Updates the note" would be wrong for all
+ * three, and most wrong for the removal.
+ */
+function entryOperationLabel(operation: string): string {
+  if (operation === 'replace_entry') return 'Rewrites this one fact'
+  if (operation === 'restamp_entry') return 'Marks this one fact as checked again'
+  if (operation === 'retire_entry') return 'Removes this one fact; the note is kept'
+  return 'Decides this one fact'
+}
+
+/** Open a pending *entry* proposal in Suggested, where its accept lives.
+ *
+ * The same shape as the note-level link and for the same reason: the decision
+ * is already queued, with the entry's exact before/after and the evidence on the
+ * card. Offering a second accept on this row would answer one question twice,
+ * and the row's own buttons are about the whole file.
+ */
+async function openEntryProposal(
+  candidate: VaultReviewCandidate,
+  proposal: VaultReviewEntryProposal,
+) {
+  await proposals.ensureLoaded()
+  proposals.revealRow(proposal.proposal_id)
+  await viewRouter.push(reviewPath('suggested'))
 }
 
 /**
@@ -683,6 +764,16 @@ function clearedDate(note: VaultClearedNote): string {
                     </template>
                   </p>
 
+                  <p v-else-if="signal === 'unverified_entries' && entryCoverageOf(candidate)" class="mr-box-body">
+                    The note's own date is
+                    <template v-if="candidate.evidence.unverified">current, but its facts are not</template>
+                    <template v-else>not the whole story</template>.
+                    {{ coverageSummary(candidate.evidence) }}.
+                  </p>
+                  <p v-else-if="signal === 'unverified_entries'" class="mr-box-body">
+                    Some facts inside this note have gone unchecked.
+                  </p>
+
                   <p v-else-if="signal === 'possible_duplicate'" class="mr-box-body">
                     <template v-if="duplicatesOf(candidate).length">
                       Looks like
@@ -704,6 +795,137 @@ function clearedDate(note: VaultClearedNote): string {
                   <p v-else class="mr-box-body">Flagged because {{ signalLabel(signal) }}.</p>
                 </div>
               </template>
+
+              <!-- The facts inside the note, one bullet at a time.
+                   Always rendered when the detector ran, not only behind the
+                   signal's disclosure: an entry that is due and an entry nobody
+                   ever checked are different amounts of work, and a card that
+                   hides both behind one collapsed chevron makes the row say
+                   "3 facts" and leave the reader to guess which is which. The
+                   note's own buttons below act on the whole file; everything in
+                   here is about one line, and the action for a line is the
+                   proposal this block links to. -->
+              <div v-if="entryCoverageOf(candidate)" class="vr-entries">
+                <p class="vr-entries-head">
+                  <strong>Facts inside this note</strong> — {{ coverageSummary(candidate.evidence) }}.
+                  <template v-if="entryCoverageOf(candidate)!.uncovered">
+                    Some of the note is written as prose or a table, which this check
+                    cannot read as facts — so it is never counted as verified.
+                  </template>
+                </p>
+                <ul v-if="entryCoverageOf(candidate)!.stale_entries.length" class="vr-entries-list">
+                  <li
+                    v-for="entry in entryCoverageOf(candidate)!.stale_entries"
+                    :key="entry.identity"
+                    class="vr-entry"
+                  >
+                    <p class="vr-entry-why">
+                      <strong>{{ sentenceCase(entryReasonLabel(entry.reason)) }}</strong>
+                      <template v-if="entry.age_days !== null">
+                        — {{ entry.detail }}
+                      </template>
+                      <template v-else> — {{ entry.detail }}</template>
+                    </p>
+                    <!-- Last CHECKED and last VERIFIED are different dates and
+                         showing only the first is how "checked yesterday" and
+                         "never checked" read as a contradiction. For an entry
+                         with no stamp of its own the two are the same date, and
+                         that is the fact worth saying out loud: the row is
+                         carrying the file's date, not the fact's. -->
+                    <p class="vr-entry-dates">
+                      <template v-if="entry.own_date">
+                        Last checked <code>{{ entry.last_verified }}</code>, on the entry's own stamp.
+                      </template>
+                      <template v-else-if="entry.last_verified">
+                        Last checked <code>{{ entry.last_verified }}</code> — that is the
+                        <em>note's</em> date; this fact carries no stamp of its own.
+                      </template>
+                      <template v-else>No date to check it against, and no stamp on the fact.</template>
+                    </p>
+                    <blockquote v-if="entry.section" class="vr-entry-section">in “{{ entry.section }}”</blockquote>
+                    <pre class="vr-entry-text"><code>{{ entry.excerpt }}</code></pre>
+                    <p v-if="entry.context.length" class="vr-entry-context">
+                      <span v-for="(line, li) in entry.context" :key="li" class="vr-entry-context-line">{{ line }}</span>
+                    </p>
+                    <p
+                      v-for="link in entryCoverageOf(candidate)!.proposals.filter(p => p.identity === entry.identity)"
+                      :key="link.proposal_id"
+                      class="vr-entry-decision"
+                    >
+                      <template v-if="link.conflicted">
+                        <span class="vr-entry-conflict">
+                          A decision for this fact was filed against text the note no longer
+                          holds, so it cannot be applied — Ciaobot will file a new one.
+                        </span>
+                      </template>
+                      <template v-else>
+                        Waiting in Suggested: {{ entryOperationLabel(link.operation) }} —
+                        checked <code>{{ link.checked_at }}</code><template v-if="link.citations">
+                          , on {{ link.citations }} citation{{ link.citations === 1 ? '' : 's' }}</template>.
+                      </template>
+                      <button
+                        type="button"
+                        class="mr-link vr-pending-link"
+                        title="Open the proposal in Suggested, where the change and its evidence are"
+                        @click="openEntryProposal(candidate, link)"
+                      >Open the proposal</button>
+                    </p>
+                  </li>
+                </ul>
+                <p v-else-if="entryCoverageOf(candidate)!.checked" class="vr-hint">
+                  Every fact written as a list item in this note is current.
+                </p>
+                <p v-if="entryCoverageOf(candidate)!.more_stale_entries" class="vr-hint">
+                  And {{ entryCoverageOf(candidate)!.more_stale_entries }} more.
+                </p>
+
+                <!-- A decision waiting on somebody, about an entry this note
+                     does not currently owe a check on. A `restamp_entry` filed
+                     yesterday whose entry has since been re-stamped by a
+                     whole-note verdict is exactly this, and dropping it would
+                     leave a question in the queue with nothing on the surface
+                     that says it is there. Named by its own identity rather than
+                     shown against a finding, because the honest statement is
+                     "about a fact that is not on the overdue list" — not a
+                     fabricated row for a fact nobody has flagged. -->
+                <p
+                  v-if="unmatchedEntryProposals(candidate).length"
+                  class="vr-entries-head vr-entries-head--waiting"
+                >
+                  <strong>Decisions waiting on you</strong> — about
+                  {{ unmatchedEntryProposals(candidate).length }}
+                  {{ unmatchedEntryProposals(candidate).length === 1 ? 'fact' : 'facts' }}
+                  in this note that {{ unmatchedEntryProposals(candidate).length === 1 ? 'is' : 'are' }}
+                  not on the overdue list.
+                </p>
+                <p
+                  v-for="link in unmatchedEntryProposals(candidate)"
+                  :key="link.proposal_id"
+                  class="vr-entry-decision"
+                >
+                  <template v-if="link.conflicted">
+                    <span class="vr-entry-conflict">
+                      A decision for this fact was filed against text the note no longer
+                      holds, so it cannot be applied — Ciaobot will file a new one.
+                    </span>
+                  </template>
+                  <template v-else>
+                    Waiting in Suggested: {{ entryOperationLabel(link.operation) }} —
+                    checked <code>{{ link.checked_at }}</code><template v-if="link.citations">
+                      , on {{ link.citations }} citation{{ link.citations === 1 ? '' : 's' }}</template>.
+                  </template>
+                  <button
+                    type="button"
+                    class="mr-link vr-pending-link"
+                    title="Open the proposal in Suggested, where the change and its evidence are"
+                    @click="openEntryProposal(candidate, link)"
+                  >Open the proposal</button>
+                </p>
+
+                <p v-if="entryCoverageOf(candidate)!.more_proposals" class="vr-hint">
+                  {{ entryCoverageOf(candidate)!.more_proposals }} more decision(s) are queued in Suggested.
+                </p>
+              </div>
 
               <!-- A pending proposal, in place of this queue's own decision.
                    The link is the whole point: the question is already in the
@@ -1124,6 +1346,114 @@ function clearedDate(note: VaultClearedNote): string {
 
 @media (pointer: coarse) {
   .vr-pending-link { min-height: var(--touch); }
+}
+
+/* The facts inside a note. Its own border colour from the pending box, because
+   it is the same kind of thing: something decided elsewhere, shown here so the
+   row is not a bare verdict. Everything in it is one line of one file, so the
+   type is deliberately smaller and quieter than the row's own heading — a
+   fifty-bullet note must not read as fifty paragraphs of chrome. */
+.vr-entries {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg2);
+}
+
+.vr-entries-head {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.vr-entries-head strong { color: var(--fg); }
+
+/* The waiting sub-heading. Accent-edged rather than a second box, because it is
+   a continuation of the same list rather than a new fact about the note. */
+.vr-entries-head--waiting {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.vr-entries-list {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.vr-entry {
+  padding-left: var(--space-2);
+  border-left: 2px solid var(--border);
+}
+
+.vr-entry-why,
+.vr-entry-dates,
+.vr-entry-section,
+.vr-entry-context,
+.vr-entry-decision {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.vr-entry-why { color: var(--fg2); }
+.vr-entry-why strong { color: var(--fg); }
+.vr-entry-dates,
+.vr-entry-section { color: var(--fg3); }
+.vr-entry-section { font-style: italic; }
+
+.vr-entry-text {
+  margin: 4px 0 0;
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* The excerpt is capped server-side; this is belt and braces against a note
+     whose single bullet is a paragraph, which would otherwise be a wall. */
+  max-height: 9rem;
+  overflow-y: auto;
+}
+
+.vr-entry-context {
+  margin-top: 4px;
+  color: var(--fg3);
+  display: flex;
+  flex-direction: column;
+}
+
+.vr-entry-context-line {
+  font-size: var(--text-xs, 0.75rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vr-entry-decision {
+  margin-top: 4px;
+  color: var(--fg2);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1);
+}
+
+.vr-entry-conflict { color: var(--fg2); font-style: italic; }
+
+.vr-entry-decision .vr-pending-link { margin-top: 0; }
+
+@media (pointer: coarse) {
+  .vr-entry-decision .vr-pending-link { min-height: var(--touch); }
 }
 
 /* A proposal whose revision the note has left. Warning-coloured, because it
