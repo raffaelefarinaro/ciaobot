@@ -787,6 +787,32 @@ def test_setup_preserves_load_failure_status_and_stderr(
     assert capsys.readouterr().err == "launchctl: load failed\n"
 
 
+def test_setup_launchctl_failure_never_reads_as_the_memory_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """install-engine.sh reads setup's exit 3 as the tolerated memory warning
+    and carries on, so a launchctl load that happens to fail with 3 must not
+    be reported as one: the install would continue with the agent unloaded
+    (#790)."""
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "launchctl":
+            return real_run(command, *args, **kwargs)
+        return subprocess.CompletedProcess(command, 3 if command[1] == "load" else 0)
+
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = cli.main(
+        _launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents")
+    )
+
+    assert result == 1
+    assert result != cli.SETUP_MEMORY_FAILED_RC
+
+
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"

@@ -1338,11 +1338,16 @@ def _setup_command(args: argparse.Namespace) -> int:
                 stderr=subprocess.DEVNULL,
             )
             # Keep a real load failure visible to the installer and preserve
-            # its status as the setup result.
-            rc = subprocess.run(
+            # its status as the setup result - except that launchctl's own 3
+            # would be read as the tolerated memory warning, so the installer
+            # would continue with the agent never loaded. Anything load
+            # returns is a hard failure: report it as 1.
+            lrc = subprocess.run(
                 ["launchctl", "load", "-w", str(plist)],
                 check=False,
-            ).returncode or rc
+            ).returncode
+            if lrc:
+                rc = 1 if lrc == SETUP_MEMORY_FAILED_RC else lrc
         _print_setup_summary(root, _pwa_port_from_env(root, args.port))
         return rc
     for plist in plists:
