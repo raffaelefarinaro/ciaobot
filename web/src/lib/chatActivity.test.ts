@@ -10,6 +10,7 @@ import {
   buildTurnParts,
   collectTraceOutputs,
   findFinalAnswerIndex,
+  isInterruptedTail,
   formatTokenUsage,
   isAnswerBubble,
   isProgressCommentary,
@@ -244,6 +245,52 @@ describe('findFinalAnswerIndex', () => {
     expect(findFinalAnswerIndex(buffer)).toBe(2)
   })
 
+
+  it('keeps a short progress-shaped reply that closes the turn as the answer', () => {
+    const buffer = [
+      text('x'.repeat(220)),
+      activity('Edit a.vue'),
+      text('Good — updated both files.', { timestamp: '2026-01-01T09:50:20Z' }),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(2)
+  })
+})
+
+describe('findFinalAnswerIndex with a reasoning tail', () => {
+  it('does not let an unstamped trailing narration steal the answer', () => {
+    const buffer = [text('x'.repeat(220)), text('Now the docs:')]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+  })
+
+  it('keeps a short closing reply that is followed only by reasoning', () => {
+    const buffer = [
+      text('x'.repeat(220)),
+      activity('Edit a.vue'),
+      text('Good — updated both files.', { timestamp: '2026-01-01T09:50:20Z' }),
+      thinking('wrapping up'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(2)
+  })
+})
+
+describe('isInterruptedTail', () => {
+  it('folds narration cut off by reasoning', () => {
+    expect(isInterruptedTail(text('Let me check that.'), [thinking('hmm')])).toBe(true)
+  })
+
+  it('keeps a substantive reply followed by a reasoning-only step', () => {
+    expect(isInterruptedTail(text('Done. Both files are updated.'), [thinking('wrap up')])).toBe(false)
+    expect(isInterruptedTail(text('Now ok.', { phase: 'final_answer' }), [thinking('x')])).toBe(false)
+  })
+
+  it('keeps a progress-shaped reply the server stamped as delivered', () => {
+    const reply = text('Good — updated both files.', { timestamp: '2026-01-01T09:50:20Z' })
+    expect(isInterruptedTail(reply, [thinking('wrap up')])).toBe(false)
+  })
+
+  it('does nothing without trailing reasoning', () => {
+    expect(isInterruptedTail(text('Let me check that.'), [activity('Read x')])).toBe(false)
+  })
 })
 
 describe('isAnswerBubble', () => {
