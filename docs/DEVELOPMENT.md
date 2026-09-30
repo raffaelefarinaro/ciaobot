@@ -375,6 +375,21 @@ and the lane status sentence both ask), and that the pass never reappears in
 `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar or a schedule
 target. A pass's own archive is not a second row: `memoryInsights` skips any chat
 that is a pass when reading archive state.
+For **After this update** changes (Home's update-task group, or the Settings
+history), the separation is the thing to preserve: `HousekeepingStrip.vue` renders
+the operator-action tiles and the update-task group as two sibling sections, and a
+blocking tile must stay above both, unmissable, with no "hide it" button of its
+own. The group and Settings → Update task history read the same
+`GET /api/update-tasks?workspace=` rows, so a change to one state has to be checked
+in both: `offered` starts, `in_progress` resumes, `waiting_review` offers Review
+proposals (the real queue at `/memory/review?show=suggested`) *and* Resume,
+`failed` retries into the same chat, and `unknown` applicability gets a Check again
+and never a start button. Hiding a task records "not this one" for that
+`(id, revision)` in that scope — it does not cancel an open chat and does not
+complete anything, the confirmation says so, and the row stays reopenable in
+Settings. If you add a state, decide all four of those in the same change: what
+Home offers, what Settings lists, what a refusal says, and whether the outcome can
+be mistaken for "done".
 For Work details changes, verify the rail and the narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list, and the ⓘ toggle moves focus between the rail heading and the chat-body tab.
 For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return

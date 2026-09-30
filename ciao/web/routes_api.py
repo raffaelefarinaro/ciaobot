@@ -8441,6 +8441,14 @@ def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
     can be ``applicable`` and ``dismissed`` (the operator decided against work
     that does apply), or ``not_applicable`` and ``completed``. A row with no
     record at all reports ``offered``, which is also what an absent record means.
+
+    Two timestamps, deliberately not merged. ``applicability_checked_at`` is when
+    a detector last produced this row's answer, and inside the freshness window it
+    keeps the stamp of the call that computed it rather than the moment it was
+    served — so a client can say "nobody has looked since" honestly.
+    ``updated_at`` is when the *record* was written, which is a decision or an
+    attempt, not a check. A surface that rendered one of them under the other's
+    name would claim a task was re-checked when an operator merely declined it.
     """
     task = status.task
     state = status.state
@@ -8453,6 +8461,7 @@ def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
         "since_version": task.since_version,
         "status": state.lifecycle if state is not None else "offered",
         "applicability": status.applicability.status,
+        "applicability_checked_at": status.applicability.checked_at,
         "offered": status.offered,
         "suppressed": status.suppressed,
         "chat_id": state.chat_id if state is not None else "",
@@ -8505,10 +8514,10 @@ async def list_update_tasks(request: Request) -> JSONResponse:
 
     A detector pass, not a launch: nothing here creates a chat, writes state or
     sends a prompt. Every row carries the lifecycle a caller renders (``offered``
-    through ``dismissed``), the applicability answer behind it, and the chat an
-    earlier launch is in — so a card can offer "Resume" without the browser
-    holding the id. ``coverage_gap`` is present only when nothing is being
-    offered, and says which of the two reasons that is.
+    through ``dismissed``), the applicability answer behind it, when that answer
+    was last computed, and the chat an earlier launch is in — so a card can offer
+    "Resume" without the browser holding the id. ``coverage_gap`` is present only
+    when nothing is being offered, and says which of the two reasons that is.
     """
     workspace = _update_task_workspace(request)
     if not workspace:
