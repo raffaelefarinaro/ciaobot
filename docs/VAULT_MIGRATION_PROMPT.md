@@ -54,13 +54,37 @@ empty Home does not mean the audit is.
 | `vault-vocabulary` — some notes use a retired `type:` vocabulary | Yes | **No** | No | Step 5 |
 | `vault-location:<workspace>` — "The `<name>` vault is not in its standard folder" | Yes | Yes, as `vault_outside_vault_root` | No | Step 2 |
 | "The vault may still use the retired wikilink dialect" | Yes | Yes, as `unmigrated_vault_links` | No | Step 3 |
-| `unrehomed_people` — person notes may be in the wrong workspace | **No** | Yes | No | Step 4 |
+| `unrehomed_people` — no re-home has been recorded | **No** | Yes | No | Step 4 |
 
 Two consequences worth stating outright. The one **mandatory** notice
 (`workspace-unmigrated`) exists only on Home, so an audit cannot tell you
 whether the install still needs separating — check Home. And `unrehomed_people`
 exists only in the audit, so Home will never offer it; run `ciao os-audit` to
 find out whether Step 4 applies to you.
+
+**`unrehomed_people` is a receipt check, not a scan, and it can outlive Step 1.**
+The audit raises it when the install has **more than one registered workspace**
+and there is **no completed re-home receipt** — it does not walk the vault, so
+it cannot tell you whether anything is actually misfiled. That has two
+consequences. It stays silent on a single-workspace install, where every
+candidate comes back with no counterpart to move to and offering a move would be
+an unactionable tile. And it is **not** cleared by Step 1: the re-rooting writes
+no re-home receipt, so after separating your workspaces the notice is still
+there, while `ciao vault-rehome` now has nothing to move — the notes are already
+in per-workspace vaults and it plans `<vault>/<workspace>/People` only. What
+clears it is a completed receipt, and an honest no-op run writes one: after Step
+1, point the command at a root that exists and let it record that there was
+nothing to do.
+
+```bash
+ciao vault-rehome --vault-root <install>/<workspace>/memory-vault --apply
+```
+
+That is a real run, not a trick: it refuses on a dirty tree, reports "No
+tag-obvious misfiled people", and writes `vault-rehome.json` with
+`status: migrated`, which is exactly what the audit reads. If you would rather
+not run it, the notice is a pending action and never turns the audit red — it is
+informational, not a defect.
 
 `workspace-unmigrated` is a precondition this install cannot get past on its
 own, which is why it is prominent, permanent and retryable rather than
@@ -112,6 +136,12 @@ inside the running app, and reports back how many moves it made and how many
 chats will start a fresh session. Its chat button is for *asking what is
 blocking it* — it prints the plan, and the migration stays yours to press. The
 card's own prompt is explicit that the agent must not pass `--apply`.
+
+One caution about the live button: it runs while the server is up, and the
+migration writes the chat state file — the same thing the CLI path asks you to
+stop the app for, because a live server can overwrite the handover flags from
+its in-memory copy. Let the run finish before you touch anything else, and do
+not start another operation that writes chats until it has reported back.
 
 **From the terminal.** `ciao workspace-reroot --apply --workspace .`, with the
 app stopped, and from the engine that will serve the install. An older engine
@@ -352,32 +382,37 @@ the whole install converted and a second per-root vault is refused as
 "already migrated". Treat this as one conversion per install, not one per
 workspace.
 
-Three rails, and `--force` overrides all three:
+`--force` overrides exactly three rails, listed first because they are the
+things it trades away. Reversibility is a fourth thing and is **not** one of
+them — nothing you pass turns it off:
 
-- **Reversibility.** The receipt records every rewrite as an exact
-  `(offset, from, to)` triple in the *migrated* text, so `vault-unmigrate-links`
-  is an inverse rather than a re-derivation: it walks each file's edits back to
-  front, checks the text still reads as the receipt says, and restores the
-  original bytes. A file edited since the conversion is left entirely untouched.
-  The map may never narrow — a run that could not write some note records
-  `status: "partial"`, and each later run adds to the map, so every note an
-  earlier run converted stays restorable.
-- **Refusals on a write.** An existing receipt (moved aside, not overwritten) or
-  a dirty vault git tree. Neither gates the preview, because both protect a
-  write and gating the preview would mean reaching for `--force` just to look.
-- **The nesting rail, which does gate the preview.** A `--vault-root` that sits
-  *inside* the configured vault is refused even on a dry run: refs resolve
-  against the root passed here, so a too-narrow root makes the preview itself
-  wrong — working links listed as dead. That is a real rail and `--force` does
-  override it.
+- **An existing receipt** (moved aside, not overwritten). This one protects the
+  reverse map of an earlier run, so overriding it discards that undo.
+- **A dirty vault git tree.** `git checkout` is supposed to stay an undo that
+  needs nothing from the app, so overriding it gives up that.
+- **A `--vault-root` nested inside the configured vault.** This is the only rail
+  that gates the *preview* as well as the write, and deliberately so: refs
+  resolve against the root passed here, so a too-narrow root makes the preview
+  itself wrong — working links listed as dead. The other two protect a write, and
+  gating their preview would mean reaching for `--force` just to look.
 
-So `--force` is a decision, not a convenience. Reach for it only when the
-operator has decided the rail in front of you is wrong, and say which rail you
-are overriding. Two of the three lose real protection if you do. Note also that
-`ciao vault-unmigrate-links` accepts `--force` and **ignores** it — reversing
-deliberately has no dirty-vault or receipt rail, because a successful migration
-is what makes the vault dirty, and every span is re-checked before it is
-touched.
+So `--force` is a decision, not a convenience, and all three cost something real
+when you spend it. Reach for it only when the operator has decided the rail in
+front of you is wrong, and say which one you are overriding.
+
+**Reversibility is not a rail and `--force` cannot touch it.** The receipt
+records every rewrite as an exact `(offset, from, to)` triple in the *migrated*
+text, so `vault-unmigrate-links` is an inverse rather than a re-derivation: it
+walks each file's edits back to front, checks the text still reads as the
+receipt says, and restores the original bytes. A file edited since the
+conversion is left entirely untouched, and the map may never narrow — a run
+that could not write some note records `status: "partial"`, and each later run
+adds to the map, so every note an earlier run converted stays restorable.
+
+Note also that `ciao vault-unmigrate-links` accepts `--force` and **ignores**
+it — reversing deliberately has no dirty-vault or receipt rail, because a
+successful migration is what makes the vault dirty, and every span is
+re-checked before it is touched. `ciao vault-unrehome` does the same.
 
 `ciao vault-lint --migrate-links [--apply] [--force]` is the same conversion
 through the linter's entry point, so the receipt and all three rails behave
@@ -386,9 +421,13 @@ identically.
 ## Step 4 — optional: re-home person notes
 
 Optional, for an `unrehomed_people` notice — and note from the table above that
-this notice exists **only** in `ciao os-audit`, never as a Home card. Person
-notes that a global memory-curation run filed into one workspace's `People/`.
-The routing bug is fixed; this moves the backlog.
+this notice exists **only** in `ciao os-audit`, never as a Home card, and that
+it reports the *absence of a receipt* rather than scanning for misfiled notes.
+Read the section above first: after Step 1 the notice can be there with nothing
+for this command to move, and the honest no-op run is what clears it. Before
+Step 1 it does its real work: person notes that a global memory-curation run
+filed into one workspace's `People/`. The routing bug is fixed; this moves the
+backlog.
 
 ```bash
 ciao vault-rehome                                  # the plan; changes nothing
@@ -396,13 +435,14 @@ ciao vault-rehome --apply                          # move what is tag-obvious
 ciao vault-unrehome --apply                        # move it all back exactly
 ```
 
-**This is a shared-layout remedy, so run it before Step 1.** It plans
+**The moves are a shared-layout remedy, so run them before Step 1.** It plans
 `<vault>/<workspace>/People`: a note is only examined when it sits under a
 workspace segment for a *registered* workspace, because a root's own vault has
 no other workspace to be misfiled from. After Step 1 the notes are already in
 per-workspace vaults with no workspace segment, so the plan finds nothing —
 passing `--workspace-name` does not change that, and a per-root `--vault-root`
-is not a supported way to use this command.
+is not a supported way to move anything. What *is* left after Step 1 is the
+receipt, and the no-op run described in the section above is what writes it.
 
 A note whose tags name another workspace is a mechanical substitution with no
 decision in it, so it moves and every reference to it is repointed: wikilinks,
@@ -416,17 +456,20 @@ the roles its tags imply. A role that binds to no registered workspace is not a
 candidate at all: there is nowhere to move it, and inventing a directory is
 worse than leaving it where it is.
 
-`--force` here means what it means in Step 3 — a dirty vault tree, or an
-existing receipt, bypassed. `--json` outputs the raw summary. The receipt
+`--force` here overrides the same two write-time rails as in Step 3 — an
+existing receipt and a dirty vault tree — and this command has no nesting rail,
+because it plans a vault's own layout rather than a slice of one. `--json`
+outputs the raw summary. The receipt
 (`<runtime>/migration/vault-rehome.json`) is an exact reverse map — moves as
 `from`/`to` pairs, rewrites as `(offset, from, to)` triples in the rewritten
 text — so `vault-unrehome --apply` is an inverse that leaves a file alone on
-any mismatch. As in Step 3, `vault-unrehome` accepts `--force` and ignores it:
-it is deliberately *not* gated on a clean vault, because the re-homing is what
-made it dirty. Proposals already written to a review queue are not withdrawn;
-they are yours to resolve. A run that could not move everything says so and
-exits `1`, and the reverse map carries forward, so re-running loses nothing
-already done.
+any mismatch. Reversibility here is not a rail either: as in Step 3,
+`vault-unrehome` accepts `--force` and ignores it, because it is deliberately
+*not* gated on a clean vault (the re-homing is what made it dirty) and every
+span is re-checked before it is touched. Proposals already written to a review
+queue are not withdrawn; they are yours to resolve. A run that could not move
+everything says so and exits `1`, and the reverse map carries forward, so
+re-running loses nothing already done.
 
 ## Step 5 — optional: settle the frontmatter vocabulary
 
@@ -463,14 +506,30 @@ filters the types the retention is about to claim out of its `unresolved` list,
 because nothing has been written yet and those are not your decision to make;
 so the list a preview asks you to categorise is only the list it can see.
 
-**The receipt is not written by `--apply`.** `ciao vault-migrate --apply`
-renames the notes and keeps the retired categories, and records nothing. The
-receipt is written by the card's own **Apply mechanical renames** button and by
-`sync-skills`, both of which re-scan and rewrite the receipt so the next
-detection reflects what is actually there. So the card clears when one of those
-two runs finds an empty `unresolved` list — not when you run the CLI. If you
-rename the last unresolved type by hand, the card stays until you press the
-button or run `sync-skills`.
+**No receipt is written by `--apply`, and the card does not clear from a
+re-scan.** Three facts, each of which the card's own button runs into:
+
+- `ciao vault-migrate --apply` renames the notes, keeps the retired categories
+  and records nothing. It never touches `<runtime>/` at all, so the CLI cannot
+  change what the card says.
+- The card's **Apply mechanical renames** button does write a receipt — but the
+  **unkeyed** `vault-vocabulary.json`, the pre-keying name. The card reads the
+  install-wide view, which is built from the **keyed** per-vault receipts and
+  consults the unkeyed file only on an install with exactly one vault. On a
+  re-rooted install the button's write is written and then not read, so pressing
+  it does not clear the card.
+- `sync-skills` writes the keyed per-vault receipts, but it is gated on the
+  install-wide receipt being absent, and it skips any vault whose keyed receipt
+  already exists. Once every vault has one, it does not re-scan, so a note
+  written afterwards with a retired type is not picked up and the receipt is not
+  refreshed.
+
+So do not expect the card to clear because you resolved the types. What the card
+is really reporting is "some vault has types with no canonical equivalent", and
+the honest ways to deal with that are to fix the `type:` lines (which the audit
+then agrees with) and, if you want the receipt itself to say so, delete that
+vault's receipt and re-run the migration for it. Treat the card as a pointer to
+work, not as a status light you can switch off.
 
 Note what this command does **not** have: there is no `vault-unmigrate`. The
 renames are gated on an exact current value, so an unwanted one is a one-line
@@ -499,12 +558,16 @@ ciao sync-skills --workspace <root>
 mirrors the local catalog (`skills/`, `commands/`, `subagents/`) into each
 root's generated `.claude/` and `.agents/` trees, **prunes** generated assets
 that are no longer in the catalog, and re-mirrors the shared `skills-src/`
-skills. It also runs two vault migrations itself, each gated on its own receipt
-so the cost is paid once per vault rather than on every boot: the Step 5
-vocabulary migration, and the retention of retired stock categories. A receipt
-is what stops it repeating, so if you want to see what it did, read the receipt
-it wrote rather than expecting a preview. It is idempotent, and re-running it
-after editing a catalog is the intended use.
+skills. It also runs two vault migrations itself, each gated on a receipt so the
+cost is paid once rather than on every boot: the Step 5 vocabulary migration,
+and the retention of retired stock categories. "Gated on a receipt" is the whole
+of that guarantee, and it is worth being precise about what follows from it: once
+a vault has a vocabulary receipt, `sync-skills` does not re-scan that vault, so
+running it is not a way to make it notice a retired type someone reintroduced
+later. To re-scan one, delete its receipt and run the Step 5 command. Read the
+receipt rather than expecting a preview — `sync-skills` reports nothing about
+the scan it skipped. It is idempotent, and re-running it after editing a
+catalog is the intended use.
 
 Two more cards are about the catalog, and both are **chat-only** — there is no
 command that answers them:

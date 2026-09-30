@@ -212,6 +212,37 @@ def test_no_accepted_and_ignored_flag_is_suggested_as_protection() -> None:
     )
 
 
+def test_reversibility_is_not_described_as_an_overridable_rail() -> None:
+    """`--force` buys three things, and the receipt is not one of them.
+
+    The second version of the document listed reversibility as the first of
+    "three rails, and `--force` overrides all three", which reads as though
+    `--force` could trade the reverse map away. It cannot: the overridable rails
+    are the existing receipt, the dirty tree and the nested vault root, and the
+    reverse map is a property of every run rather than a check any flag turns
+    off. A reader who believed the earlier wording would either distrust the undo
+    or reach for `--force` expecting it to mean something it does not.
+    """
+    doc = _flat()
+
+    assert "Reversibility is a fourth thing and is **not** one of them" in doc
+    assert "**Reversibility is not a rail and `--force` cannot touch it.**" in doc
+    # The three overridable rails, named as the implementation names them.
+    for rail in (
+        "**An existing receipt**",
+        "**A dirty vault git tree.**",
+        "**A `--vault-root` nested inside the configured vault.**",
+    ):
+        assert rail in doc, (
+            f"docs/VAULT_MIGRATION_PROMPT.md no longer lists this overridable rail: {rail!r}"
+        )
+    # Only the nesting rail gates the preview; saying otherwise sends a reader
+    # to `--force` to look at a dirty vault, which the code allows without it.
+    assert "the only rail that gates the *preview*" in doc
+    # And the earlier heading, which bundled reversibility in, must be gone.
+    assert "Three rails, and `--force` overrides all three" not in doc
+
+
 def test_the_managed_entry_points_are_all_named() -> None:
     """Every remedy the plan's evidence table names has to be in the document.
 
@@ -301,6 +332,14 @@ def test_the_document_does_not_delegate_the_migration_to_a_chat() -> None:
     # And the difference between the live button and the stopped-service CLI
     # call has to be drawn, not assumed.
     assert "with the app stopped" in doc
+    # The live button runs against a live server, which is the one hazard the
+    # CLI path removes by asking for the app to be stopped. `apply` writes the
+    # chat state file and its own docstring says a live server "would both read
+    # a path that no longer exists and overwrite the handover flags from its
+    # in-memory copy", so a reader pressing the button deserves the caution.
+    assert "One caution about the live button" in doc
+    assert "Let the run finish before you touch anything else" in doc
+    assert "do not start another operation that writes chats until it has reported back" in doc
 
 
 def test_home_and_os_audit_are_not_described_as_the_same_set() -> None:
@@ -424,7 +463,7 @@ def test_the_per_root_vault_facts_are_stated_where_they_bite() -> None:
     for fragment in (
         "After Step 1 there is no install-root `memory-vault/` at all",
         "The receipt is **per install**",
-        "This is a shared-layout remedy, so run it before Step 1",
+        "The moves are a shared-layout remedy, so run them before Step 1",
         "passing `--workspace-name` does not change that",
         "one `vault-vocabulary.<label>-<digest>.json` per vault",
     ):
@@ -432,30 +471,49 @@ def test_the_per_root_vault_facts_are_stated_where_they_bite() -> None:
             "docs/VAULT_MIGRATION_PROMPT.md no longer states this per-root fact: "
             f"{fragment!r}"
         )
-    # The re-home step must not be offered a per-workspace invocation.
-    assert "a per-root `--vault-root` is not a supported way to use this command" in doc
+    # The re-home step must not be offered a per-workspace invocation for the
+    # moves — the no-op run that clears the notice is a different thing, and the
+    # document has to keep the two apart.
+    assert "a per-root `--vault-root` is not a supported way to move anything" in doc
+    assert "What *is* left after Step 1 is the receipt" in doc
 
 
-def test_the_vocabulary_receipt_is_attributed_to_the_writers() -> None:
-    """`vault-migrate --apply` renames and records nothing.
+def test_the_vocabulary_card_is_not_described_as_clearing() -> None:
+    """No action reliably clears it, and the document must not say one does.
 
-    The receipt is written by `vault_migration.migrate_if_needed` (which
-    `sync-skills` calls) and by the tile's run button, which rewrites it after a
-    fresh scan. A document that says the card clears from the CLI sends the
-    reader after a card that will not go.
+    The first version of this file asserted the opposite, from the plan's
+    evidence table rather than from the code, and the review caught it. The
+    truth is three separate facts: `--apply` writes no receipt at all; the card's
+    run button writes the *unkeyed* `vault-vocabulary.json`, which the
+    install-wide reader in `_install_receipt` consults only when the install has
+    exactly one vault; and `sync-skills` is gated on the install-wide receipt
+    being absent while `migrate_if_needed` skips any vault that already has a
+    keyed one, so it never re-scans. A document promising that a button press or
+    a `sync-skills` run clears the card sends the reader after a card that will
+    not go.
     """
     doc = _flat()
 
-    assert "**The receipt is not written by `--apply`.**" in doc
+    assert "**No receipt is written by `--apply`, and the card does not clear from a re-scan.**" in doc
     for fragment in (
-        "Apply mechanical renames",
-        "the card clears when one of those two runs finds an empty `unresolved` list",
-        "keeps the retired categories",
+        "the **unkeyed** `vault-vocabulary.json`, the pre-keying name",
+        "the button's write is written and then not read",
+        "it does not re-scan, so a note written afterwards with a retired type",
+        "do not expect the card to clear because you resolved the types",
+        "not as a status light you can switch off",
     ):
         assert fragment in doc, (
-            "docs/VAULT_MIGRATION_PROMPT.md no longer says which action writes "
-            f"the vocabulary receipt: {fragment!r}"
+            "docs/VAULT_MIGRATION_PROMPT.md no longer states this receipt fact: "
+            f"{fragment!r}"
         )
+    # The claim the first version made must be gone outright, and so must any
+    # surviving wording that offers `sync-skills` as a re-scan.
+    assert "the card clears when one of those two runs" not in doc
+    assert "both of which re-scan and rewrite the receipt" not in doc
+    assert "not a way to make it notice a retired type" in doc, (
+        "sync-skills is receipt-gated and does not re-scan; the document has to "
+        "say so rather than leave the earlier 're-scan' wording standing"
+    )
 
 
 def test_the_snapshot_gitignore_caveat_is_stated() -> None:
@@ -473,6 +531,42 @@ def test_the_snapshot_gitignore_caveat_is_stated() -> None:
             "docs/VAULT_MIGRATION_PROMPT.md no longer carries the snapshot "
             f"caveat: {fragment!r}"
         )
+
+
+def test_unrehomed_people_is_documented_as_a_receipt_check() -> None:
+    """The notice reports the absence of a receipt, not a scan of the vault.
+
+    `os_audit.audit_upgrade_notices` raises it from `read_receipt(runtime_dir)`
+    alone, and only when `len(names) > 1` — it never calls
+    `detect_misfiled_people`. So it can be present when there is nothing to move,
+    and Step 1 does not clear it (the re-rooting writes no re-home receipt). A
+    document that called it "person notes may be filed in the wrong workspace"
+    and pointed straight at the remedy would send a reader to a command that
+    finds nothing and leaves the notice up.
+    """
+    doc = _flat()
+
+    assert "**`unrehomed_people` is a receipt check, not a scan" in doc
+    for fragment in (
+        "there is **no completed re-home receipt**",
+        "it does not walk the vault, so it cannot tell you whether anything is actually misfiled",
+        "it is **not** cleared by Step 1",
+        "the re-rooting writes no re-home receipt",
+        "an honest no-op run writes one",
+        "status: migrated",
+    ):
+        assert fragment in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md no longer explains how this notice "
+            f"behaves: {fragment!r}"
+        )
+    # And the no-op run has to name the root it applies to, or it cannot be run.
+    assert (
+        "ciao vault-rehome --vault-root <install>/<workspace>/memory-vault --apply" in doc
+    ), "the clearing run must be spelled out, since the default vault root is gone after Step 1"
+    # The table row is a receipt condition, not a claim about the notes.
+    assert "| `unrehomed_people` — no re-home has been recorded |" in doc
+    # "informational, not a defect" is the answer for an operator who declines it.
+    assert "informational, not a defect" in doc
 
 
 def test_the_skill_triage_paths_are_not_described_as_meeting() -> None:

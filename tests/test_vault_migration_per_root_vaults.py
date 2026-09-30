@@ -80,10 +80,26 @@ def _re_rooted_install(root: Path, names: tuple[str, ...] = ("personal", "work")
     return install
 
 
-def test_the_install_root_has_no_vault_after_re_rooting(tmp_path: Path) -> None:
-    """The default every vault command resolves is gone once Step 1 has run."""
+def test_the_install_root_has_no_vault_after_re_rooting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default every vault command resolves is gone once Step 1 has run.
+
+    The environment is pinned because both halves of this depend on it.
+    `ciao.cli._resolve_vault_root` reads `CIAO_VAULT_ROOT` and resolves a
+    relative default against `CIAO_WORKSPACE`, and the repo's own
+    `tests/conftest.py` does not clear either — so an ambient value from a
+    developer's shell, or from a running Ciaobot chat, would decide what the
+    default resolves to and the assertion would be about the environment rather
+    than about the layout. `chdir` into the install root as well, since the
+    fallback for both roots is the cwd.
+    """
+    for name in ("CIAO_VAULT_ROOT", "CIAO_RUNTIME_ROOT", "CIAO_WORKSPACE"):
+        monkeypatch.delenv(name, raising=False)
+
     install = _re_rooted_install(tmp_path)
     runtime = install / ".runtime"
+    monkeypatch.chdir(install)
 
     assert read_reroot_receipt(runtime) is not None, (
         "the fixture is not a re-rooted install: the receipt is what makes "
@@ -96,8 +112,9 @@ def test_the_install_root_has_no_vault_after_re_rooting(tmp_path: Path) -> None:
         "whole reason the document orders Steps 3-5 before Step 1"
     )
 
-    # And the default a vault command falls back to resolves to that missing
-    # path, so a bare invocation is refused rather than quietly doing nothing.
+    # The cwd fallback resolves to that missing path, so a bare invocation is
+    # refused rather than quietly doing nothing.
+    assert (install / "memory-vault").exists() is False
     assert cli.main(["vault-migrate-links", "--runtime-root", str(runtime)]) == 1
 
 
@@ -244,22 +261,35 @@ def test_force_overrides_the_nesting_rail_and_the_inverse_ignores_it(
 
 
 def test_vault_migrate_applies_without_writing_the_vocabulary_receipt(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`vault-migrate --apply` renames; it does not record that it did.
+    """`vault-migrate --apply` renames and writes no receipt at all.
 
     `ciao/cli.py`'s handler calls `migrate_vault_vocabulary` and
-    `retain_retired_stock_types` and stops. The receipt is written by
-    `vault_migration.migrate_if_needed` (which `sync-skills` calls) and by the
-    tile's run button, both of which rewrite it after a fresh scan. So the card
-    cannot clear from a CLI run, and a document that says otherwise sends the
-    reader after a card that will not go.
+    `retain_retired_stock_types` and stops. Neither takes a runtime root, and
+    the handler never resolves one, so there is nothing for the CLI to write a
+    receipt into.
+
+    The runtime root is pinned by environment because the command has no
+    `--runtime-root` flag: `_resolve_runtime_root` would fall back to
+    `CIAO_RUNTIME_ROOT` or the cwd, and the first version of this test created a
+    `.runtime` by hand and asserted against that directory, which the CLI never
+    looks at — so it passed for the wrong reason and would have kept passing if
+    the CLI had started writing a receipt somewhere else entirely. The
+    assertion is now that **no** migration receipt exists anywhere under the
+    pinned root, which is the claim the document actually makes.
     """
     from ciao.vault_migration import read_receipt as read_vocab_receipt
+
+    for name in ("CIAO_VAULT_ROOT", "CIAO_RUNTIME_ROOT", "CIAO_WORKSPACE"):
+        monkeypatch.delenv(name, raising=False)
 
     vault = tmp_path / "vault"
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     _note(vault / "journal.md")
     (vault / "journal.md").write_text(
         "---\ntype: project-log\nupdated: 2026-01-01\n---\n\nMo.\n",
@@ -274,10 +304,15 @@ def test_vault_migrate_applies_without_writing_the_vocabulary_receipt(
     # The rename landed.
     assert summary["renamed"], "the fixture must actually rename something"
     assert "type: journal" in (vault / "journal.md").read_text(encoding="utf-8")
-    # The receipt did not.
-    assert read_vocab_receipt(runtime, vault) is None, (
-        "ciao vault-migrate --apply must not write the vocabulary receipt; "
-        "sync-skills and the card's own run button are what write it"
+    # No receipt did, anywhere the command could have written one.
+    assert not (runtime / "migration").exists(), (
+        f"vault-migrate --apply must not create a migration directory; found "
+        f"{sorted(p.name for p in (runtime / 'migration').iterdir())}"
+    )
+    assert read_vocab_receipt(runtime, vault) is None
+    assert read_vocab_receipt(runtime) is None, (
+        "no vocabulary receipt of any shape, keyed or unkeyed, may exist after "
+        "ciao vault-migrate --apply"
     )
 
 
