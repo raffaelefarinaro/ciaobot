@@ -88,6 +88,7 @@ from typing import Any
 
 from ciao import memory_receipts as mr
 from ciao import note_entries as ne
+from ciao.os_support.private import carry_mode
 from ciao.vault_index import is_reserved_bookkeeping, temp_prefix
 
 logger = logging.getLogger(__name__)
@@ -330,11 +331,11 @@ def _replace_note_bytes(
 
     A sibling temp file plus ``os.replace`` means a reader — or a crash — sees
     either the whole old note or the whole new one. The mode is carried across
-    with ``os.fchmod`` on the temp file's own descriptor, before the rename:
-    ``mkstemp`` creates it 0600, and restoring the mode *after* the replace
-    would leave the live note briefly 0600 — a private note for as long as the
-    process takes to chmod it — and would raise for a write that had already
-    landed. The revision is rechecked immediately before the rename: the lock
+    with ``carry_mode`` (``os.fchmod`` on POSIX) on the temp file's own
+    descriptor, before the rename: ``mkstemp`` creates it 0600, and restoring
+    the mode *after* the replace would leave the live note briefly 0600 — a
+    private note for as long as the process takes to chmod it — and would
+    raise for a write that had already landed. The revision is rechecked immediately before the rename: the lock
     only excludes other *managed* writers, and a direct edit that lands in the
     gap would otherwise be silently overwritten.
     """
@@ -345,7 +346,7 @@ def _replace_note_bytes(
     temporary = Path(raw_name)
     try:
         with os.fdopen(fd, "wb") as handle:
-            os.fchmod(handle.fileno(), mode)
+            carry_mode(handle.fileno(), mode, temp=temporary, original=target)
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())

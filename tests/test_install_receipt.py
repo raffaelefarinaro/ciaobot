@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -19,6 +18,7 @@ from ciao.install_receipt import (
     running_receipt,
     write_receipt,
 )
+from ciao.os_support.private import is_private
 
 
 def _receipt(**overrides: Any) -> InstallReceipt:
@@ -113,11 +113,12 @@ def test_write_is_private_and_atomic(tmp_path: Path) -> None:
     target.parent.chmod(0o755)
     _write_json(target, _payload())
     target.chmod(0o644)
+    assert not is_private(target)
 
     write_receipt(_receipt(), target)
 
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
-    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    assert is_private(target)
+    assert is_private(target.parent)
     assert list(target.parent.glob("*.tmp")) == []
 
 

@@ -25,6 +25,7 @@ import urllib.request
 from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
+from ciao.jsonio import write_private_text
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
@@ -886,11 +887,10 @@ def setup_workspace(
         ("PWA_PORT", str(port)),
     ])
     if not existing_env and not env_path.exists():
-        env_path.write_text(
-            "\n".join(f"{key}={value}" for key, value in desired_env) + "\n",
-            encoding="utf-8",
+        # The password is in here in clear text: owner-only from creation.
+        write_private_text(
+            env_path, "\n".join(f"{key}={value}" for key, value in desired_env) + "\n"
         )
-        env_path.chmod(0o600)
         written.append(env_path)
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace
