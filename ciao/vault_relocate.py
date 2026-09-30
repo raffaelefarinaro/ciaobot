@@ -309,7 +309,7 @@ def _write_receipt(runtime_root: Path, workspace: str, payload: dict[str, Any]) 
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
     return path
 

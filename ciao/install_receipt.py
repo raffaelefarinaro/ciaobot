@@ -152,7 +152,7 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
     fd, tmp_name = mkstemp_private(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n")
         make_private(tmp)
         os.replace(tmp, target)

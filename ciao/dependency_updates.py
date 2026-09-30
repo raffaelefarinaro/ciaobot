@@ -87,7 +87,7 @@ def update_pyproject_toml_dependency(
         pattern, lambda match: f"{match.group(1)}{new_version}{match.group(2)}", content
     )
     if count:
-        toml_path.write_text(new_content, encoding="utf-8")
+        toml_path.write_text(new_content, encoding="utf-8", newline="")
         return True
     return False
 
@@ -106,7 +106,7 @@ def update_npm_dependency(pkg_json_path: Path, package_name: str, new_version: s
             data[section][package_name] = f"{prefix}{new_version}"
             updated = True
         if updated:
-            pkg_json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            pkg_json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
         return updated
     except Exception:  # noqa: BLE001 - release checks must fail open
         return False
@@ -176,16 +176,16 @@ def _restore_dependency_files(
         original_package_lock,
         original_uv_lock,
     ) = originals
-    pyproject_path.write_text(original_pyproject, encoding="utf-8")
-    package_json_path.write_text(original_package_json, encoding="utf-8")
+    pyproject_path.write_text(original_pyproject, encoding="utf-8", newline="")
+    package_json_path.write_text(original_package_json, encoding="utf-8", newline="")
     if original_package_lock is None:
         package_lock_path.unlink(missing_ok=True)
     else:
-        package_lock_path.write_text(original_package_lock, encoding="utf-8")
+        package_lock_path.write_text(original_package_lock, encoding="utf-8", newline="")
     if original_uv_lock is None:
         uv_lock_path.unlink(missing_ok=True)
     else:
-        uv_lock_path.write_text(original_uv_lock, encoding="utf-8")
+        uv_lock_path.write_text(original_uv_lock, encoding="utf-8", newline="")
 
 
 def get_latest_pypi_version(package_name: str) -> str | None:

@@ -333,7 +333,7 @@ def queue_lock(
     lock_path = _queue_lock_path(key)
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = lock_path.open("a+", encoding="utf-8")
+        handle = lock_path.open("a+", encoding="utf-8", newline="")
     except OSError as exc:
         raise QueueLockError(f"could not open queue lock {lock_path}: {exc}") from exc
     deadline = time.monotonic() + max(0.0, timeout_s)
@@ -424,11 +424,11 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
     line = json.dumps(row, ensure_ascii=False) + "\n"
     lock = journal.with_name(journal.name + ".lock")
     lock_fd = _open_private(lock, flags=os.O_RDWR | os.O_APPEND)
-    handle = os.fdopen(lock_fd, "a+", encoding="utf-8")
+    handle = os.fdopen(lock_fd, "a+", encoding="utf-8", newline="")
     try:
         lock_exclusive(handle.fileno())
         journal_fd = _open_private(journal, flags=os.O_WRONLY | os.O_APPEND)
-        with os.fdopen(journal_fd, "a", encoding="utf-8") as f:
+        with os.fdopen(journal_fd, "a", encoding="utf-8", newline="") as f:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
@@ -548,7 +548,7 @@ def _trim_if_large(journal: Path) -> None:
         tmp_fd = _open_private(
             tmp, flags=os.O_WRONLY | os.O_EXCL, mode=mode, follow_symlinks=False
         )
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
@@ -1873,7 +1873,7 @@ def _undo_queue(
                 "the queue changed after this operation; undo was refused"
             )
         tmp = path.with_name(f".{path.name}.undo.tmp")
-        tmp.write_text(str(before), encoding="utf-8")
+        tmp.write_text(str(before), encoding="utf-8", newline="")
         os.replace(tmp, path)
     undone = {
         **{k: v for k, v in receipt.items() if k != "v"},

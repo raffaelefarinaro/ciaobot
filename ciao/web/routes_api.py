@@ -838,7 +838,7 @@ def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
         "echo\n"
         "echo 'Authentication finished. You can close this window.'\n"
         "exit $status\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     script.chmod(0o700)
     subprocess.Popen(
@@ -4597,7 +4597,7 @@ async def workspace_file_write(request: Request) -> Response:
 
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
+        resolved.write_text(content, encoding="utf-8", newline="")
     except OSError as exc:
         return JSONResponse({"error": f"write failed: {exc}"}, status_code=500)
 

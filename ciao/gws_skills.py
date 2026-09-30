@@ -306,6 +306,6 @@ def regenerate_stock_gws_skills(
             updated.append(name)
             if write:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(new_text, encoding="utf-8")
+                target.write_text(new_text, encoding="utf-8", newline="")
 
     return RegenResult(updated=updated, unchanged=unchanged, missing=missing)

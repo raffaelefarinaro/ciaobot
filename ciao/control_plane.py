@@ -2640,7 +2640,7 @@ class CiaoControlPlane:
         if len(content.encode("utf-8")) > 2 * 1024 * 1024:
             raise ControlPlaneError("file_too_large", "File exceeds the 2 MiB MCP write limit.")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="")
         return _ok({"path": target.relative_to(root).as_posix(), "size": len(content.encode('utf-8'))})
 
     def file_surface(self, principal: AgentPrincipal, path: str) -> dict[str, Any]:

@@ -218,7 +218,7 @@ def _new_archive_dir(config: Any, name: str, now: datetime) -> Path:
 def _write_metadata(folder: Path, metadata: dict[str, Any]) -> None:
     path = folder / METADATA_FILE
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
 
 

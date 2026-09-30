@@ -386,7 +386,7 @@ def write_region(guide: Path, region: str, entries: list[str]) -> None:
     canonical = resolve_region(region)
     text = guide.read_text(encoding="utf-8")
     updated = replace_region_body(text, canonical, entries)
-    guide.write_text(updated, encoding="utf-8")
+    guide.write_text(updated, encoding="utf-8", newline="")
 
 
 def _write_text_atomically(path: Path, text: str) -> None:
@@ -429,7 +429,7 @@ def _guide_lock(guide: Path):
     """Return a best-effort process lock for read/merge/write operations."""
     lock = guide.with_name(f"{guide.name}.lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock.open("a+", encoding="utf-8")
+    handle = lock.open("a+", encoding="utf-8", newline="")
     lock_exclusive(handle.fileno())
     return handle
 
@@ -467,7 +467,7 @@ def guide_lock(guide: Path, *, timeout_s: float = DEFAULT_LOCK_TIMEOUT_S):
     lock = guide.with_name(f"{guide.name}.lock")
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
-        handle = lock.open("a+", encoding="utf-8")
+        handle = lock.open("a+", encoding="utf-8", newline="")
     except OSError as exc:
         raise MemoryLockError(f"could not open guide lock {lock}: {exc}") from exc
     deadline = time.monotonic() + max(0.0, timeout_s)
@@ -728,7 +728,7 @@ def ensure_regions(guide: Path) -> list[str]:
             + _empty_region_block("memory")
             + "\n"
             + _empty_region_block("profile"),
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         return list(REGIONS)
 
@@ -745,7 +745,7 @@ def ensure_regions(guide: Path) -> list[str]:
         suffix = "\n\n" + "\n".join(append_parts)
         if not text.endswith("\n"):
             suffix = "\n" + suffix
-        guide.write_text(text + suffix, encoding="utf-8")
+        guide.write_text(text + suffix, encoding="utf-8", newline="")
     return added
 
 

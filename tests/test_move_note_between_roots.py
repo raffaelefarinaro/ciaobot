@@ -28,7 +28,8 @@ MD_LINK = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)]+)\)")
 
 def _note(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    # As written, not line-translated: the note has the same bytes on every OS.
+    path.write_text(body, encoding="utf-8", newline="")
 
 
 def _install(tmp_path: Path, *, git: bool = True) -> tuple[Path, list]:
@@ -305,6 +306,7 @@ def test_a_link_that_cannot_be_resolved_is_left_alone(tmp_path: Path) -> None:
     path.write_text(
         path.read_text(encoding="utf-8") + "\nAlso [X](work/People/Nobody.md).\n",
         encoding="utf-8",
+        newline="",
     )
 
     _move(root, targets, "personal/memory-vault/People/Mo.md", "work", apply=True)
