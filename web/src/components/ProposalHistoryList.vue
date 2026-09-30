@@ -29,16 +29,29 @@ const openChangeIds = ref<Set<string>>(new Set())
  *
  * `retire` is the one whose name is a lie on its own: the operation moved the
  * note and wrote no text, so calling it "retire" without saying so reads as a
- * rewrite. The rest are close enough to their wire names to show them. */
+ * rewrite. The rest are close enough to their wire names to show them.
+ *
+ * The three entry operations are all past tense here, unlike the note ones,
+ * because a history row records a decision that already happened — and each
+ * one names the *unit*, since "would rewrite the whole note" about an accept
+ * that changes a single bullet is the exact claim this table exists to avoid. */
 const OPERATION_WORDS: Record<string, string> = {
   replace: 'would rewrite the whole note',
   restamp: 'would re-stamp the verification date',
   retire: 'would move the note to Retired',
+  replace_entry: 'rewrote one fact inside the note',
+  restamp_entry: 're-stamped one fact inside the note',
+  retire_entry: 'removed one fact from the note',
 }
 
 function operationLabel(row: ProposalHistoryRow): string {
   const op = row.note_edit?.operation || ''
   return OPERATION_WORDS[op] || op
+}
+
+/** Whether this decision wrote one list item rather than the whole note. */
+function isEntryScope(row: ProposalHistoryRow): boolean {
+  return row.note_edit?.scope === 'entry'
 }
 
 /** How much of a note a check covered, in words.
@@ -306,7 +319,8 @@ const filtersHideEverything = computed(
                   <code>{{ row.note_edit.relative_path }}</code>
                 </p>
                 <p class="ph-verify-facts">
-                  Covering {{ coverageWord(row.note_edit.coverage) }} of the note<template
+                  Covering {{ coverageWord(row.note_edit.coverage) }} of
+                  <template v-if="isEntryScope(row)">the fact</template><template v-else>the note</template><template
                     v-if="row.note_edit.evidence.length"
                   >, on {{ row.note_edit.evidence.length }} citation{{ row.note_edit.evidence.length === 1 ? '' : 's' }}</template>.
                 </p>
@@ -320,11 +334,42 @@ const filtersHideEverything = computed(
                     <span v-if="citation.quoted" class="ph-verify-quoted">{{ citation.quoted }}</span>
                   </li>
                 </ul>
-                <p v-if="row.note_edit.operation !== 'retire'" class="ph-verify-label">Before</p>
-                <pre v-if="row.note_edit.operation !== 'retire'" class="ph-verify-text">{{ row.note_edit.before }}</pre>
-                <p v-if="row.note_edit.operation !== 'retire'" class="ph-verify-label">After</p>
-                <pre v-if="row.note_edit.operation !== 'retire'" class="ph-verify-text">{{ row.note_edit.after }}</pre>
-                <p v-else class="ph-verify-none">
+
+                <!-- The entry, at the entry's own scale. Two whole-note images
+                     that differ by one line are unreadable, and on a retirement
+                     they differ by a line that is simply gone — so the fact
+                     itself is shown, with its before and its after, and the rest
+                     of the file is described rather than reprinted. The whole
+                     note stays one disclosure away under "Changes", which is
+                     where the undo lives. -->
+                <template v-if="isEntryScope(row)">
+                  <p class="ph-verify-label">The fact, before</p>
+                  <pre class="ph-verify-text ph-verify-text--entry">{{ row.note_edit.entry_before || row.note_edit.before }}</pre>
+                  <template v-if="row.note_edit.entry_removed">
+                    <p class="ph-verify-none">
+                      Removed. This one line is gone and every other fact in the
+                      note is untouched — and it is reversible: Undo below restores
+                      the file exactly as it was.
+                    </p>
+                  </template>
+                  <template v-else-if="row.note_edit.entry_recovery_error">
+                    <p class="ph-verify-none">
+                      The recorded change could not be read back, so the new text is
+                      not shown here rather than guessed at. Changes below still
+                      holds the whole note as it was written.
+                    </p>
+                  </template>
+                  <template v-else>
+                    <p class="ph-verify-label">The fact, after</p>
+                    <pre class="ph-verify-text ph-verify-text--entry">{{ row.note_edit.entry_after }}</pre>
+                  </template>
+                </template>
+
+                <p v-else-if="row.note_edit.operation !== 'retire'" class="ph-verify-label">Before</p>
+                <pre v-if="!isEntryScope(row) && row.note_edit.operation !== 'retire'" class="ph-verify-text">{{ row.note_edit.before }}</pre>
+                <p v-if="!isEntryScope(row) && row.note_edit.operation !== 'retire'" class="ph-verify-label">After</p>
+                <pre v-if="!isEntryScope(row) && row.note_edit.operation !== 'retire'" class="ph-verify-text">{{ row.note_edit.after }}</pre>
+                <p v-if="!isEntryScope(row) && row.note_edit.operation === 'retire'" class="ph-verify-none">
                   A retirement carries no new text: the note was moved, and it is
                   {{ row.reversible_by === 'restore' ? 'in Retired, where Restore puts it back' : 'recoverable from the review trash' }}.
                 </p>
@@ -687,6 +732,15 @@ const filtersHideEverything = computed(
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* One list item, not a whole file. A whole note's images are for the Changes
+   disclosure; here the point is that the reader can see the one line that
+   changed without scrolling, so the box is as short as the fact and the fact
+   always fits. */
+.ph-verify-text--entry {
+  max-height: none;
+  border-left: 3px solid var(--accent);
 }
 
 .ph-verify-none {

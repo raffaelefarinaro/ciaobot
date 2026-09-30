@@ -12,6 +12,11 @@ import type { VaultReviewEvidence } from './types'
 /** The clause form, for sentences ("Curation flagged it because …"). */
 const SIGNAL_LABELS: Record<string, string> = {
   unverified: 'it has gone too long without being checked',
+  // A note can be current and still be holding a fact nobody has checked: the
+  // note's own date is one date for every bullet in it, so re-checking the
+  // address last week silently re-certified the rest of the file with it. This
+  // is the signal for the bullets, and it is why the word says "inside".
+  unverified_entries: 'facts inside it have gone unchecked',
   unlinked: 'no other note links to it',
   possible_duplicate: 'it may duplicate another note',
   superseded_language: 'its wording says it was superseded',
@@ -21,6 +26,7 @@ const SIGNAL_LABELS: Record<string, string> = {
 /** The filter-chip form: a short noun phrase per reason. */
 const SIGNAL_CHIP_LABELS: Record<string, string> = {
   unverified: 'Unchecked too long',
+  unverified_entries: 'Facts unchecked inside',
   superseded_language: 'Says it was superseded',
   unlinked: 'Nothing links to it',
   possible_duplicate: 'Possible duplicate',
@@ -29,7 +35,59 @@ const SIGNAL_CHIP_LABELS: Record<string, string> = {
 
 /** The order reasons are shown and filtered in: the ones that most often mean
  * "retire it" first. Unknown signals sort after, alphabetically. */
-const SIGNAL_ORDER = ['superseded_language', 'unverified', 'possible_duplicate', 'unlinked', 'weak_provenance']
+const SIGNAL_ORDER = [
+  'superseded_language',
+  'unverified',
+  'unverified_entries',
+  'possible_duplicate',
+  'unlinked',
+  'weak_provenance',
+]
+
+/** Why an *entry* was selected, in words. A row that showed only the code would
+ * leave a reader unable to tell "nobody ever checked this bullet" from "the
+ * last check is two years old" — two different amounts of work. */
+const ENTRY_REASON_WORDS: Record<string, string> = {
+  aged: 'last checked too long ago',
+  'no-stamp': 'never checked',
+  'unusable-stamp': 'the check on it is not a usable date',
+}
+
+/** One entry reason, in the panel's own words. */
+export function entryReasonLabel(reason: string): string {
+  return ENTRY_REASON_WORDS[reason] || reason || 'needs a check'
+}
+
+/** `2 blocks`, `1 block` — a count with its noun agreeing, for a sentence a
+ * person reads rather than a table. */
+function plural(count: number, singular: string, plural_?: string): string {
+  return `${count} ${count === 1 ? singular : (plural_ ?? `${singular}s`)}`
+}
+
+/** One note's facts, counted in words.
+ *
+ * The number is a share of the note's characters, and a note is mostly
+ * frontmatter, headings and blank lines — so a low share is normal and saying
+ * "12% covered" for a perfectly well-kept note would be alarm. What matters is
+ * whether the *assertions* were read, which is what `uncovered` counts: prose
+ * paragraphs, tables and quotes are assertions nothing here checked, and one is
+ * enough to stop the note being called fully verified. */
+export function coverageSummary(evidence: VaultReviewEvidence): string {
+  const cov = evidence.entry_verification
+  if (!cov) return ''
+  const facts = cov.checked + cov.exempt
+  if (!facts) {
+    return cov.uncovered
+      ? `No facts written as list items — ${plural(cov.uncovered, 'block')} of prose this check could not read`
+      : 'No facts in this note to check'
+  }
+  const parts = [`${plural(cov.entries, 'fact')} in the note`]
+  if (cov.stale) parts.push(`${cov.stale} past due`)
+  if (cov.unverified) parts.push(`${cov.unverified} never checked`)
+  if (cov.exempt) parts.push(`${cov.exempt} recorded as events`)
+  if (cov.uncovered) parts.push(`${plural(cov.uncovered, 'block')} of prose not read as facts`)
+  return parts.join(' · ')
+}
 
 /** What a verification's `outcome` verdict was, in the pass's own words.
  *
@@ -116,6 +174,11 @@ export function signalRowLabel(signal: string, evidence: VaultReviewEvidence): s
       return `unchecked ${ageInWords(u.age_days)} (limit ${u.threshold_days} days)`
     }
     return 'unchecked too long'
+  }
+  if (signal === 'unverified_entries') {
+    const cov = evidence.entry_verification
+    const due = cov ? cov.stale + cov.unverified : 0
+    return due ? `${plural(due, 'fact')} inside unchecked` : 'facts inside unchecked'
   }
   const chip = SIGNAL_CHIP_LABELS[signal]
   return chip ? chip.charAt(0).toLowerCase() + chip.slice(1) : humanize(signal)

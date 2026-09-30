@@ -447,6 +447,91 @@ def parse_note_entries(
     )
 
 
+def invalidate_stale_stamps(before: str, after: str) -> tuple[str, int]:
+    """``after`` with the stamps an ordinary save must not carry, removed.
+
+    A `[verified:]` stamp is a claim that **somebody went and checked that
+    fact**. A save is not a check: an editor that merges a new fact into a person
+    note rewrites the file, and a model handed "here is the note, here is the
+    approved fact" is entirely likely to carry the file's own `updated:` forward
+    onto the bullet it just touched — which is a date nobody verified anything
+    on, attached to a sentence that may well have changed. Leaving it there is
+    the one failure this whole entry model exists to prevent, and a prompt
+    asking nicely is not a guarantee: it is a suggestion the next writer, or the
+    next rewrite from an older note, is free to ignore.
+
+    So the rule is mechanical and fingerprint-based. A stamp is *kept* when the
+    entry carrying it has a fingerprint ``before`` already held — the entry's own
+    words are byte-identical, so whatever was verified then is still verified
+    now, and a pure re-stamp or a reordering is untouched. A stamp is *removed*
+    when the entry's fingerprint is not one ``before`` held: the words changed,
+    the entry is new, or it is the one a save just rewrote. In all three the
+    stamp is a claim about text that is not there any more.
+
+    Returning the count matters as much as the text: a writer that silently
+    dropped nine stamps would leave a reader wondering why their careful dates
+    vanished, so the caller is expected to say so.
+
+    Deliberately **not** used by :mod:`ciao.note_receipts.apply_entry_edit` or by
+    the managed verification. A `still_valid` re-stamp and an accepted
+    `replace_entry` write a *new* fingerprint carrying a stamp on purpose, and
+    running them through this would delete the exact claim the operation exists
+    to record. This is for the writes nobody judged anything about.
+
+    Byte-exact apart from the removed tokens: the returned text is ``after`` with
+    whole stamp tokens (and the whitespace they introduced) cut, never
+    re-rendered, so a caller comparing it against ``after`` sees only the
+    difference it asked about.
+    """
+    known = {entry.fingerprint for entry in parse_note_entries(before).entries}
+    document = parse_note_entries(after)
+    if not document.entries:
+        return after, 0
+    cut: list[tuple[int, int]] = []
+    for entry in document.entries:
+        if entry.fingerprint in known or entry.stamp is None:
+            continue
+        opening = after[entry.opening_start : entry.opening_end]
+        span = _claim_stamp_span(opening)
+        if span is None:  # pragma: no cover — a stamp implies a claim span
+            continue
+        cut.append((entry.opening_start + span[0], entry.opening_start + span[1]))
+    if not cut:
+        return after, 0
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in sorted(cut):
+        pieces.append(after[cursor:start])
+        cursor = end
+    pieces.append(after[cursor:])
+    return "".join(pieces), len(cut)
+
+
+def frontmatter_span(text: str) -> tuple[int, int] | None:
+    """The exact character span of a note's YAML frontmatter, or ``None``.
+
+    Exposed for a consumer reporting **coverage**: a caller that says what it
+    did *not* read as an entry has to be able to tell a note's structure apart
+    from a note's unparsed assertions, and frontmatter is the largest block of
+    the first kind. Reading it here is what keeps that a second call into this
+    module's own answer rather than a second frontmatter rule in a detector —
+    a second rule is how "the frontmatter ended here" and "the first entry
+    starts here" come to disagree, and every entry below the line is then filed
+    under a section nobody wrote.
+
+    The span covers the opening ``---`` through the terminator line's own
+    newline, so it never leaves a half-line for a caller to classify.
+    ``None`` for a note with no frontmatter *and* for one that opened with a
+    ``---`` that turned out to be a thematic break: the unclosed case is a
+    diagnostic, not a block, and its lines are the note's body.
+    """
+    lines = _split_lines(text)
+    closing = _frontmatter_end(lines)
+    if closing is None:
+        return None
+    return lines[0].start, lines[closing].full_end
+
+
 def entry_identity(entry: NoteEntry) -> str:
     """The stable id of one entry: what it is, and where it lives.
 

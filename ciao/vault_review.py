@@ -21,7 +21,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from urllib.parse import quote
 
-from ciao.memory_audit import NoteVerification, note_verification
+from ciao.memory_audit import (
+    EntryVerdict,
+    NoteEntryCoverage,
+    NoteVerification,
+    note_verification,
+)
+from ciao.note_entries import EntryDocument
 from ciao.vault_index import build_filename_index, canonical_type, scan_vault, temp_prefix
 from ciao.vault_lint import is_template_stem, run_validation
 
@@ -329,8 +335,16 @@ def _pending_proposal_payload(
     }
 
 
+# Signals that mean "somebody should re-read this", never "this may be
+# disposable". A set rather than one hard-coded name, because a ``signal !=
+# "unverified"`` test is exactly the bug this replaces: a new "check this" signal
+# arrives, it is compared against one name, and the queue starts offering Retire
+# on a note whose only finding is that nobody has read one of its bullets.
+CHECK_ONLY_SIGNALS = frozenset({"unverified", "unverified_entries"})
+
+
 def _retirement_offered(signals: list[str] | tuple[str, ...]) -> bool:
-    """Whether some signal other than ``unverified`` justifies retiring this note.
+    """Whether some signal other than a re-read justifies retiring this note.
 
     The question behind "suppress the duplicate candidate". A note whose only
     reason for being here is that it has gone unchecked is not a retirement
@@ -341,10 +355,160 @@ def _retirement_offered(signals: list[str] | tuple[str, ...]) -> bool:
     same note first would be the pipeline removing the queue's own strongest
     signal.
 
+    The check-only signals are a set rather than one name, and each earns its
+    place: a stale whole note, and a stale *fact* inside a note whose own date is
+    current, are both "go and look again" — never "this is disposable". The
+    entry one matters most, because it is the one a note re-stamped last week
+    trips.
+
     Decided here, on the same list the priority and the signals are computed
     from, so a client cannot answer it differently from the panel's own reasons.
     """
-    return any(signal != "unverified" for signal in signals)
+    return any(signal not in CHECK_ONLY_SIGNALS for signal in signals)
+
+
+# How many overdue entries one review row names inline. The counts beside them
+# are uncapped, so a note with fifty due bullets still reports fifty — the cap
+# only bounds how many sentences a card asks anybody to read.
+_ENTRY_FINDINGS_PER_ROW = 5
+
+# How many pending entry proposals one review row links. Each link is a card in
+# its own right in the Review tab, and a row that listed thirty of them would be
+# a second, worse version of the queue it is pointing at.
+_ENTRY_PROPOSALS_PER_ROW = 5
+
+
+def _entry_evidence(
+    coverage: NoteEntryCoverage,
+    selected: tuple[EntryVerdict, ...],
+    document: EntryDocument,
+    *,
+    relative: str,
+    root: Path,
+) -> dict[str, Any]:
+    """What the queue shows about one note's *facts*, and what it can act on.
+
+    The note-level ``unverified`` signal above answers "has this file gone too
+    long without being read". This answers the question one level in, which is
+    the one a whole-note answer cannot: a person re-verified the address last
+    week and silently re-certified the landlord's name from 2019 with it. So the
+    row carries the exact entries, their own ages, and how much of the note was
+    read as entries at all — the last of which is what stops a note whose facts
+    live in a paragraph from reading as clean.
+
+    ``proposals`` is the half that makes this actionable. An entry that came back
+    ``needs_review`` has a ``note_edit`` proposal filed against it, keyed by the
+    same identity this row is showing, and that proposal's accept rewrites or
+    removes **that one bullet** and nothing else. The row links it rather than
+    offering a second accept of its own: two accepts for one finding is how a
+    person ends up deciding the same question twice, and the note-level buttons
+    on this row are about the whole file, which is not what the finding is about.
+
+    A proposal id the sidecar no longer holds is still reported, with an empty
+    ``operation``. The check state is the authority on "this entry is being
+    decided"; the sidecar is only consulted for which of the three entry
+    operations it would be, and a store that cannot be read must not take the
+    note's coverage down with it.
+    """
+    from ciao import entry_verification as ev
+
+    # What the note holds right now, keyed by identity: the only honest way to
+    # say a pending entry proposal is still live. The document came out of the
+    # same parse the coverage did, so this costs no second read.
+    present = {entry.identity: entry.fingerprint for entry in document.entries}
+    operations = _entry_proposal_operations(root)
+    pending: list[dict[str, Any]] = []
+    for check in ev.read_entry_checks(root).values():
+        if check.note_path != relative or not check.proposal_id:
+            continue
+        pending.append(
+            {
+                "identity": check.identity,
+                "proposal_id": check.proposal_id,
+                "operation": operations.get(check.proposal_id, ""),
+                "outcome": check.outcome,
+                "checked_at": check.checked_at.isoformat(),
+                "retry_after": check.retry_after.isoformat(),
+                "coverage": check.coverage,
+                "reason": check.reason,
+                "citations": len(check.evidence),
+                "receipt_id": check.receipt_id,
+                # Whether the accept would still find the entry it was filed
+                # against. A check whose fingerprint the note no longer carries
+                # describes a proposal the accept refuses as a conflict, so the
+                # entry is due again — reported, not hidden, because a row that
+                # offered a button that can only fail is worse than one that
+                # says what went wrong.
+                "conflicted": present.get(check.identity) != check.content_fingerprint,
+            }
+        )
+    return {
+        "entries": coverage.entries,
+        "checked": coverage.checked,
+        "exempt": coverage.exempt,
+        "unverified": coverage.unverified,
+        "uncovered": coverage.uncovered,
+        "stale": coverage.stale,
+        "coverage_ratio": round(coverage.coverage_ratio, 4),
+        "fully_verified": coverage.fully_verified,
+        "stale_entries": [
+            {
+                "identity": verdict.identity,
+                "line_number": verdict.line_number,
+                "section": verdict.section,
+                "excerpt": verdict.excerpt,
+                "context": list(verdict.context),
+                "reason": verdict.reason_code,
+                "detail": verdict.reason,
+                "age_days": verdict.age_days,
+                "last_verified": (
+                    verdict.last_verified.isoformat() if verdict.last_verified else ""
+                ),
+                "own_date": verdict.own_date,
+                "supported": verdict.supported,
+            }
+            for verdict in selected[:_ENTRY_FINDINGS_PER_ROW]
+        ],
+        "more_stale_entries": max(0, len(selected) - _ENTRY_FINDINGS_PER_ROW),
+        "proposals": pending[:_ENTRY_PROPOSALS_PER_ROW],
+        "more_proposals": max(0, len(pending) - _ENTRY_PROPOSALS_PER_ROW),
+    }
+
+
+def _entry_proposal_operations(root: Path) -> dict[str, str]:
+    """``proposal_id`` → the operation its filed record would perform.
+
+    Read straight out of the sidecar directory rather than through
+    :func:`ciao.note_edit_proposals.list_sidecars`, which wants a ``config`` this
+    queue was not given — it is handed a vault root and a workspace name. The
+    directory is the module's own public :data:`ciao.note_edit_proposals.SIDECAR_RELATIVE`
+    under that same root, so there is one place the location is written down.
+
+    Total by design, like every other reader of that store: a sidecar that is
+    missing, unreadable or mid-write leaves the links without an operation rather
+    than failing the queue. The check state beside it still says the entry is
+    being decided, which is the fact the row exists to show.
+    """
+    from ciao import entry_verification as ev
+    from ciao import note_edit_proposals as nep
+
+    operations: dict[str, str] = {}
+    try:
+        directory = Path(root).joinpath(*nep.SIDECAR_RELATIVE)
+        for record in directory.glob("*.json"):
+            try:
+                payload = json.loads(record.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            proposal_id = str(payload.get("proposal_id") or "")
+            operation = str(payload.get("operation") or "")
+            if proposal_id and operation:
+                operations.setdefault(proposal_id, operation)
+    except OSError:
+        return operations
+    return operations
 
 
 def _append(root: Path, payload: dict[str, Any]) -> None:
@@ -743,6 +907,51 @@ def _generate_candidates(
             unverified = None
         if unverified is not None:
             signals.append("unverified")
+        # The same question one bullet in, from the same detector the nightly
+        # entry pass and `os-audit` call. A note can be current and still be
+        # holding a fact from 2019, and a queue that could only see the note
+        # would show that note as clean — which is the whole reason the entry
+        # level exists. Both entry signals are check-only (`_retirement_offered`
+        # reads them out of one set), so a note whose *only* finding is an
+        # overdue fact never gets a Retire button it did not earn.
+        entry_coverage: dict[str, Any] | None = None
+        entry_state: dict[str, Any] | None = None
+        if verification is not None:
+            from ciao.memory_audit import note_entry_coverage
+
+            coverage, selected, document = note_entry_coverage(
+                text,
+                note_type=note_type,
+                updated=entry.updated or "",
+                mtime=mtime,
+                note_path=relative,
+                rendered=path,
+                title=str(entry.title or "") or relative,
+                # The registered workspace name, and load-bearing rather than
+                # decorative: `entry_identity` digests it, so an empty string
+                # mints identities that no check state, worklist key or proposal
+                # resolves — and the row's own "is this entry still the one that
+                # proposal is about?" test would then report every live proposal
+                # as a conflict, which is the same silent failure as the one the
+                # worklist's `workspace` argument exists to prevent.
+                workspace=workspace,
+                today=today,
+            )
+            entry_state = _entry_evidence(
+                coverage, selected, document, relative=relative, root=root
+            )
+            if selected:
+                signals.append("unverified_entries")
+            # `coverage.uncovered` is deliberately **not** a signal. A note
+            # whose facts live in a paragraph is not a note with something wrong
+            # in it; it is a note this queue cannot measure, and turning that
+            # into a row would fill a queue whose terminal action is deletion
+            # with every short note in the vault. It is reported in
+            # `entry_verification` beside the row — and on the Memory Map's
+            # node, where "we could not read all of this" is the useful thing to
+            # say — and the nightly `stale_entry` pass is where a fact with no
+            # stamp becomes a plan.
+            entry_coverage = entry_state
         if not signals:
             continue
         # `unlinked` on a lookup type describes the directory, not the note, so
@@ -770,6 +979,14 @@ def _generate_candidates(
             # and the proposal it is holding the note for. `None` for a note
             # nobody has checked, which is the ordinary case.
             "verification": check_state,
+            # What the entry-level detector found in the note's own list items,
+            # and the pending `note_edit` proposals that will change them. This
+            # is the block that makes a mixed note legible: a person note whose
+            # address was checked last month and whose employer's name was never
+            # checked at all reads as one current fact and one unknown one,
+            # rather than as the single "unverified" the note-level predicate
+            # could offer.
+            "entry_verification": entry_coverage,
             # Where the note says it was superseded, so the row can quote the
             # line instead of asking the user to go and find it.
             "superseded": superseded,

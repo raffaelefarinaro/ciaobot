@@ -866,15 +866,32 @@ Three properties are worth preserving before changing any of it.
 **The selection walks every note, and ages each entry on its own date.** The
 audit selected *notes*; a bullet stamped in 2024 inside a note re-stamped
 yesterday is not in that list at all, which is the whole point. So the pass calls
-`memory_audit.note_verification` per note for the entity type's horizon (a custom
-category's `stale_after_days` included) and compares each entry's own
-`[verified: YYYY-MM-DD]` against it. An entry with no stamp — or a stamp that is
-malformed, an impossible day, or a date that has not happened, and therefore is
-not a verification — inherits the note's date, so it stays the same work the note
-pass found. Exempt types and `vault_review.never_queued` are the audit's and the
-queue's, not second copies, and the two stale passes share one `scan_vault` walk
-(`_stale_findings`), because scanning a vault twice in one worklist is twice the
-frontmatter parsing for a selection that cannot differ.
+`memory_audit.note_entry_coverage` — the detector — once per note, with the note's
+own `updated:`/mtime handed back from `_stale_findings` so the detector reaches the
+same `memory_audit.note_verification` verdict on the same values with no second
+`stat`. That one function owns the entity type's horizon (a custom category's
+`stale_after_days` included), the type aliases, the exempt event types, the
+per-entry `[verified: YYYY-MM-DD]` stamp, the event-shaped exemptions, the
+unsupported entries and the coverage accounting. An entry with no stamp — or a
+stamp that is malformed, an impossible day, or a date that has not happened, and
+therefore is not a verification — inherits the note's date, so it stays the same
+work the note pass found. Exempt types and `vault_review.never_queued` are the
+audit's and the queue's, not second copies, and the two stale passes share one
+`scan_vault` walk (`_stale_findings`), because scanning a vault twice in one
+worklist is twice the frontmatter parsing for a selection that cannot differ.
+
+**The pass used to age entries its own way, and that was the bug this removed.**
+`curation_run._due_entries` was a second implementation of the same rule: it parsed
+the note, took `entry.verified or note.last_verified`, and compared the age
+against `note.threshold_days`. It agreed with the detector by coincidence, and
+coincidence is not a contract — the two had different exemptions, different
+stamp handling and no coverage accounting at all, so a divergence would have been
+a plan listing work no surface could show. The pass is now a *client* of
+`note_entry_coverage` and holds no rule of its own. Same for the surfaces: the
+Memory Map node's `entry_coverage`, the review row's `entry_verification` and
+`os-audit`'s entry lines all read the detector's own counts, and the map's
+`signatureOf` includes the coverage so a verification that just landed is not
+swallowed by a "nothing changed" comparison.
 
 **The key is the identity, not a path and not a line.** `entry_identity` digests
 the workspace, note path, nearest heading, the entry's own fingerprint and a
@@ -924,6 +941,102 @@ whole-note replacement in an entry payload is the caller rewriting every other
 fact in the file to correct one. The reply carries `scope: "entry"` so a caller
 reading both shapes is never guessing which one it got. The judgement itself is
 `ciao/entry_verification.py`, called rather than reimplemented.
+
+### The entry-level detector, and what every surface reads from it
+
+`memory_audit.find_stale_entries` is the entry-level sibling of
+`find_stale_notes`, and `memory_audit.note_entry_coverage` is its per-note core —
+the one function the worklist, `os-audit`, the Memory Map and the review queue all
+call. It is deliberately not four callers sharing a convention:
+
+```python
+coverage, selected, document = note_entry_coverage(
+    text, note_type=..., updated=..., mtime=..., note_path=...,
+    rendered=..., title=..., workspace=..., today=...,
+)
+```
+
+`coverage` is the counts, `selected` the entries that were picked out, and
+`document` the parse itself — returned because a caller holding a check state has
+to answer "does this check still describe an entry the note holds?", and the
+identities and fingerprints for that are already in hand. A second parse to get
+them would be a second read of a body the detector just read.
+
+Four properties are load-bearing and each has a test.
+
+**Only old and undated entries are selected.** An entry with a valid stamp inside
+its horizon is never a finding, whatever the note's own `updated:` says — the whole
+reason the level exists is that a re-stamped note must not re-list a bullet from
+two years ago *and* a bullet checked this morning in the same list. The three
+selections are `aged`, `no-stamp` and `unusable-stamp`, and the reason string says
+which, because "unverified for 400d" about a bullet nobody ever stamped is a lie
+dressed as a number: the 400 days are the *file's*. `EntryVerdict.own_date` and the
+review panel's "that is the note's date, this fact carries no stamp of its own"
+exist for the same reason.
+
+**A missing or unusable stamp is `unverified`, never fresh.**
+`[verified: 2026-13-01]`, `[verified: yesterday]` and no stamp at all are three
+spellings of one absence. A *future* stamp joins them: nobody verified a fact on a
+day that has not come.
+
+**Exemptions are explicit, and a date is not one.** An entry in an explicit event
+section (`## Events`, `## History`, `## Log`, `## Journal`, `## Changelog`, …) is
+exempt because somebody wrote the heading saying so; an entry matching this
+module's existing chat-event patterns is exempt because a transcript turn belongs
+in a log; and a *leading* date beside a completed-past-tense verb with no
+present-tense state in it is exempt as a dated record. All three are narrow on
+purpose. "The office moved to 12 Baker Street" is a claim about where the office
+is *now*, written in the past tense because people write about changes that way,
+and "Contract ends 2026-03-01" is a current-state assertion that happens to carry
+a date. A calendar date alone exempts nothing, and the test pins both.
+
+**Coverage is reported, never swallowed.** `EntryDocument.uncovered` is the exact
+complement of the entries, but undifferentiated: a note's frontmatter, its
+headings, its blank lines *and* the paragraph its facts are written in. Counting
+all four as unverified would make every note in the vault permanently incomplete,
+so each line is classified and only the ones that can carry an assertion are
+counted — grouped into runs, with a blank line ending a run without counting as
+one. A table, a quote, a fence and three or more words of prose count; a heading, a
+thematic break and a frontmatter key line do not. `NoteEntryCoverage.fully_verified`
+is the property the surfaces actually want, and it is deliberately stricter than
+"no stale entry": **a note is fully verified only when every in-scope assertion is
+covered**, so one fresh bullet cannot put a clean badge on a note whose second
+bullet is two years old or whose facts live in a table nobody has read. The
+frontmatter test reads `note_entries.frontmatter_span` rather than re-deriving it,
+because a second frontmatter rule is how "the frontmatter ended here" and "the
+first entry starts here" come to disagree, and every entry below the line is then
+filed under a heading nobody wrote.
+
+**Where the surfaces get it.** The Memory Map's `vault_graph` node carries an
+`entry_coverage` block and never *raises* `stale` from it — the flag is the
+whole-note verdict and the nightly worklist is where a stale bullet becomes a
+plan; it reports beside it, so a mixed note is visibly mixed. It is `None` for a
+node the queue would never show and for a body that could not be read, because a
+default object of zeroes would read as "read nothing, found nothing wrong".
+`vault_review` adds a `unverified_entries` signal, which is in
+`CHECK_ONLY_SIGNALS` so a note whose only finding is an overdue fact never gets a
+Retire button it did not earn, and an `entry_verification` evidence block naming
+the entries with their context and linking the pending `note_edit` proposals
+rather than offering a second accept. Coverage is deliberately **not** a signal: a
+note whose facts live in prose is not a note with something wrong in it, and
+turning "we cannot measure this" into a row in a queue whose terminal action is
+deletion fills the queue with every short note in the vault. `os_audit`'s
+memory-hygiene section reports the same counts, and the entry findings are listed
+beside the note ones rather than merged into them.
+
+**Authoring is the other half, and it is enforced in code.** The accept path for
+`[people]` and `[project]` rows folds a fact in with a model that rewrites the
+whole file, and a whole-file rewrite is exactly how a `[verified: today]` ends up
+on the sentence most likely to have changed. The prompts ask the model to leave
+the stamps alone; `project_doc_update._invalidate_stamps` is what makes it true.
+`note_entries.invalidate_stale_stamps(before, after)` keeps a stamp only when the
+bullet carrying it has a fingerprint `before` already held — so a pure re-stamp, a
+reordering and an untouched neighbour all survive, and only the changed or new
+bullets lose theirs, which makes them read as *unverified* on the next scan. It is
+**not** used by `note_receipts.apply_entry_edit` or by the managed verification: a
+`still_valid` re-stamp and an accepted `replace_entry` write a new fingerprint
+carrying a stamp on purpose, and running them through this would delete the exact
+claim the operation exists to record.
 
 ### Note-edit proposals
 

@@ -1362,6 +1362,30 @@ export interface ProposalPreview {
    * replacement, and `retire_note` is the one operation that removes it — it
    * moves the note to the reversible review trash and writes no body at all. */
   operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | ''
+  /**
+   * `note` or `entry` — the unit the accept writes.
+   *
+   * Separate from `operation` because all three entry operations report
+   * `note_edit`: `replace_entry`, `restamp_entry` and `retire_entry` share the
+   * note's operation word and differ in scope, and a card that read the
+   * operation alone would promise a whole-file rewrite for an accept that
+   * changes one line.
+   *
+   * Optional because a server older than this client does not send it, and
+   * absent means `note` — which is exactly what such a server means, since it
+   * has no entry operations to describe.
+   */
+  scope?: 'note' | 'entry'
+  /** The entry operation, when `scope` is `entry`. */
+  entry_operation?: string
+  /** The entry's own text before the accept; the whole-note `before` is the
+   * other half and is unchanged apart from this one span. */
+  entry_before?: string
+  /** The entry's own new text. Empty for an entry retirement, and for a record
+   * whose splice could not be inverted. */
+  entry_after?: string
+  /** An entry retirement: this one line is removed and the note is kept. */
+  entry_removed?: boolean
   destination: string
   destination_path: string
   revision: string
@@ -1463,7 +1487,8 @@ export interface ProposalHistoryNoteEdit {
   id: string
   /** The vault-relative note this edit is about. */
   relative_path: string
-  /** `replace` | `restamp` | `retire`. */
+  /** `replace` | `restamp` | `retire`, or `replace_entry` | `restamp_entry` |
+   * `retire_entry` for the three that change one list item and nothing else. */
   operation: string
   outcome: string
   /** `complete` | `partial`. */
@@ -1481,6 +1506,35 @@ export interface ProposalHistoryNoteEdit {
   receipt_id: string
   /** The decision has not been made yet. */
   pending: boolean
+  /**
+   * `note` or `entry` — the unit the accept actually writes.
+   *
+   * The whole point of the three `*_entry` operations: a `retire_entry` removes
+   * one bullet and leaves every other fact in the file, so a history row that
+   * said "this note was rewritten" would overstate what happened, and one that
+   * showed only the whole-note before/after would differ by a single line with
+   * no way to see which.
+   *
+   * Optional, absent meaning `note`: a server older than this client has no
+   * entry operations to have recorded.
+   */
+  scope?: 'note' | 'entry'
+  /** The entry's identity, for an `entry`-scope decision. */
+  entry_identity?: string
+  /** The entry's fingerprint as the verdict was reached about it. */
+  entry_fingerprint?: string
+  /** The `[start, end]` character span the entry occupied in `before`. */
+  entry_span?: [number, number]
+  /** The entry's own text, exactly as the note held it. */
+  entry_before?: string
+  /** The entry's own new text; empty for a retirement, and for a record whose
+   * splice could not be inverted — `entry_removed` tells the two apart. */
+  entry_after?: string
+  /** An `entry`-scope retirement: this one line was removed and nothing else. */
+  entry_removed?: boolean
+  /** Set when the recorded splice could not be inverted, so the entry diff is
+   * withheld rather than guessed at. */
+  entry_recovery_error?: string
 }
 
 /** The receipt behind one history row, from `GET /api/proposals/history`. */
@@ -1574,6 +1628,95 @@ export interface VaultReviewEvidence {
   /** Where a `superseded_language` candidate says so: the 1-based line, the
    * line itself, the phrase that matched, and the nearest line either side. */
   superseded?: VaultReviewSuperseded | null
+  /** What the entry-level detector found inside this note's own list items, and
+   * the pending entry proposals that will change them.
+   *
+   * Absent (or null) when the note has no usable date to age entries from, or
+   * when the server is older than this client. `unverified` is the file-level
+   * question; this is the same question one bullet in, and it is the one a
+   * re-stamped note cannot answer. A note can sit here with `stale: 0` because
+   * its own `updated:` is current and still show three facts nobody has checked
+   * — which is the whole reason it exists. */
+  entry_verification?: VaultReviewEntryCoverage | null
+}
+
+/** One note's per-entry freshness, as the review queue reports it. */
+export interface VaultReviewEntryCoverage {
+  /** List items the parse found in the note. */
+  entries: number
+  /** How many were judged; the rest are exempt event records. */
+  checked: number
+  /** Deliberately not judged: event-shaped entries and event sections. */
+  exempt: number
+  /** Judged entries nobody ever stamped — no `[verified:]`, or an unusable one. */
+  unverified: number
+  /** Runs of note text that are not entries at all: a paragraph, a table, a
+   * quote. Never verified, and never counted as clean. */
+  uncovered: number
+  /** Judged entries whose own date is past the horizon. */
+  stale: number
+  /** Share of the note read as entries, 0–1. */
+  coverage_ratio: number
+  /** Every in-scope assertion is covered AND current. */
+  fully_verified: boolean
+  /** The first few overdue entries, named in full so a row can show them. */
+  stale_entries: VaultReviewEntryFinding[]
+  /** How many further overdue entries the list left out. */
+  more_stale_entries: number
+  /** Pending `note_edit` proposals, one per entry that came back `needs_review`.
+   *
+   * These are the row's actionable links, and they are deliberately *links*:
+   * each accept rewrites or removes exactly one bullet, so the row points at
+   * the decision rather than offering a second whole-note button for a finding
+   * that is about a single line. */
+  proposals: VaultReviewEntryProposal[]
+  /** How many further pending entry proposals the list left out. */
+  more_proposals: number
+}
+
+/** One overdue entry, named in a review row. */
+export interface VaultReviewEntryFinding {
+  identity: string
+  /** 0-based line index the entry opens on, for "line 42" in the disclosure. */
+  line_number: number
+  /** The nearest preceding heading's text — which list this bullet is in. */
+  section: string
+  /** The entry's own text, exactly as the note holds it. */
+  excerpt: string
+  /** The physical lines either side of it, so a row can show the context. */
+  context: string[]
+  /** `aged` | `no-stamp` | `unusable-stamp`. */
+  reason: string
+  /** The same thing in a sentence, with the numbers beside it. */
+  detail: string
+  age_days: number | null
+  /** `YYYY-MM-DD`, or '' when there is no date at all. */
+  last_verified: string
+  /** True when this is the entry's own `[verified:]` day; false when the entry
+   * has no usable stamp and inherited the note's date instead. */
+  own_date: boolean
+  supported: boolean
+}
+
+/** A pending decision about one entry, linked rather than duplicated. */
+export interface VaultReviewEntryProposal {
+  identity: string
+  /** The queue row the decision is filed under — the thing to link to. */
+  proposal_id: string
+  /** `replace_entry` | `restamp_entry` | `retire_entry`, or '' when the
+   * filed record could not be read. */
+  operation: string
+  outcome: string
+  checked_at: string
+  retry_after: string
+  coverage: string
+  reason: string
+  citations: number
+  receipt_id: string
+  /** The accept will be refused: the note no longer holds the entry this was
+   * filed against, so the entry is due again and the row must say so rather
+   * than offering a button that can only fail. */
+  conflicted: boolean
 }
 
 /** One note's last verification, as the review queue reports it. */

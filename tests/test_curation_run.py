@@ -2043,8 +2043,12 @@ def test_an_entry_is_work_keyed_by_its_identity_not_its_line(
         workspace=vault.name,
     ).entries[0]
     age = (TODAY_ENTRIES - date(2024, 1, 5)).days
+    # The "why" is the detector's own sentence, not a template this pass composes:
+    # an entry with a valid `[verified:]` stamp is aged from that day, and the age
+    # and horizon have to travel with the values below so a reader can disagree
+    # with the verdict without losing the evidence.
     assert items[0].reason == (
-        f"entry unverified for {age}d against a 90d horizon; "
+        f"unverified for {age}d against a 90d horizon; "
         f"People/Sofia.md at revision {mr.content_revision(note_text)}, "
         f"entry identity {entry.identity}, "
         f"entry fingerprint {entry.fingerprint} at characters "

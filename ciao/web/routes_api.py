@@ -3406,6 +3406,13 @@ async def vault_backlinks(request: Request) -> JSONResponse:
     return JSONResponse({"backlinks": backlinks})
 
 
+# How many overdue entries one Memory Map node names inline. The counts beside
+# them are uncapped, so the cap costs the reader nothing but a "+N more" — and
+# the alternative is a node card the height of a note with fifty overdue
+# bullets, inside a graph that is a picture of the whole vault.
+_MAP_ENTRY_FINDINGS = 3
+
+
 async def vault_graph(request: Request) -> JSONResponse:
     """Return the vault as a note graph for the Memory Map page.
 
@@ -3414,6 +3421,12 @@ async def vault_graph(request: Request) -> JSONResponse:
     already merged and resolved to real paths by ``vault_index.scan_vault``.
     Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
     edges are dropped rather than left dangling.
+
+    Each node also carries ``entry_coverage``: what
+    :func:`ciao.memory_audit.note_entry_coverage` found inside it, one level in
+    from the node's own age. A note is not the unit a person keeps current, and
+    a map that could only say "this note is current" would show a re-stamped
+    person note as clean while it held an address from 2019.
     """
     config = request.app.state.config
     workspace = request.query_params.get("workspace", "").strip() or None
@@ -3541,6 +3554,81 @@ async def vault_graph(request: Request) -> JSONResponse:
             return check, relative, ""
         return check, relative, mr.content_revision(text)
 
+    def _entry_coverage_for(e) -> dict[str, Any] | None:
+        """One node's per-entry freshness, from the audit's own detector.
+
+        ``None`` for a node whose body could not be read, which is the honest
+        answer: this node cannot say what is inside the note, and a coverage
+        figure of zero would read as "nothing to check".
+
+        The counts come from :func:`ciao.memory_audit.note_entry_coverage`, the
+        same function the nightly ``stale_entry`` pass and ``os-audit`` call, so
+        the map, the audit and the plan cannot disagree about which bullet is
+        overdue. A node whose note is exempt (a journal is as true as the day it
+        was written) or one the review queue would never show still reports its
+        counts — the map has always shown an exempt note's age — but the map's
+        own "unchecked" flag stays off it, exactly as it does for notes.
+
+        The findings list is capped: the map is a picture of the whole vault, and
+        a note with fifty overdue bullets must not become a fifty-row card. The
+        counts beside it are the uncapped truth.
+        """
+        from ciao.memory_audit import note_entry_coverage
+
+        target = absolute.get(str(e.path))
+        if target is None:
+            return None
+        try:
+            text = target.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        try:
+            relative = target.relative_to(
+                Path(config.workspace_vault_root(str(e.workspace or ""))).resolve()
+            ).as_posix()
+        except (AttributeError, ValueError, OSError):
+            relative = Path(str(e.path)).as_posix()
+        coverage, selected, _document = note_entry_coverage(
+            text,
+            note_type=e.type or "",
+            updated=e.updated or "",
+            mtime=_mtime(str(e.path)),
+            note_path=relative,
+            rendered=str(e.path),
+            title=e.title,
+            workspace=str(e.workspace or ""),
+            today=current_date,
+        )
+        if never_queued(str(e.path)):
+            return None
+        return {
+            "entries": coverage.entries,
+            "checked": coverage.checked,
+            "exempt": coverage.exempt,
+            "unverified": coverage.unverified,
+            "uncovered": coverage.uncovered,
+            "stale": coverage.stale,
+            "coverage_ratio": round(coverage.coverage_ratio, 4),
+            "fully_verified": coverage.fully_verified,
+            "stale_entries": [
+                {
+                    "identity": verdict.identity,
+                    "excerpt": verdict.excerpt,
+                    "reason": verdict.reason_code,
+                    "detail": verdict.reason,
+                    "age_days": verdict.age_days,
+                    "last_verified": (
+                        verdict.last_verified.isoformat()
+                        if verdict.last_verified
+                        else ""
+                    ),
+                    "own_date": verdict.own_date,
+                }
+                for verdict in selected[:_MAP_ENTRY_FINDINGS]
+            ],
+            "more_stale_entries": max(0, len(selected) - _MAP_ENTRY_FINDINGS),
+        }
+
     def _staleness_fields(e) -> dict[str, Any]:
         """One node's aging, and what the managed pass concluded about it.
 
@@ -3555,6 +3643,15 @@ async def vault_graph(request: Request) -> JSONResponse:
         The check rides along either way, so the map can say *why* a note is not
         being asked about again rather than silently dropping it off the
         "unchecked" count.
+
+        ``entry_coverage`` is the same honesty one level in, and the reason a
+        ``stale`` note is not the only thing this route can say. A note whose
+        ``updated:`` was re-stamped yesterday clears the flag above while still
+        holding a fact from two years ago; without this block the map would show
+        that note as clean, and the reader would have no way to learn otherwise
+        from the surface that sent them there. It never *raises* the flag — the
+        flag is the whole-note verdict, and the entry worklist is where a stale
+        bullet becomes a plan — it reports beside it.
         """
         verification = note_verification(
             e.type or "", e.updated or "", _mtime(str(e.path)), today=current_date
@@ -3565,6 +3662,12 @@ async def vault_graph(request: Request) -> JSONResponse:
                 "age_days": None,
                 "threshold_days": None,
                 "check": None,
+                # Reported even here. A note with no usable date has no age to
+                # show, but its *entries* can each carry their own `[verified:]`
+                # stamp and be current or not on that — the one case where the
+                # whole-note answer is "I cannot tell" and the entry answer is
+                # not.
+                "entry_coverage": _entry_coverage_for(e),
             }
         check, relative, revision = _check_for(e)
         state = (
@@ -3602,6 +3705,7 @@ async def vault_graph(request: Request) -> JSONResponse:
             "age_days": verification.age_days,
             "threshold_days": verification.threshold_days,
             "check": node_check,
+            "entry_coverage": _entry_coverage_for(e),
         }
 
     nodes = [
@@ -6999,6 +7103,21 @@ def _attach_note_edit_detail(
     about to be written, what it was written on the strength of, or that a
     conflict was recorded as a conflict rather than as an applied change.
 
+    **An entry operation is shown at the entry's own scale.** Its `scope` is
+    ``entry``, and ``entry_before``/``entry_after`` are the exact text of the one
+    list item the accept replaced or removed — recovered from the recorded splice
+    by :func:`ciao.note_edit_proposals.entry_replacement`, so it is the entry
+    and not a guess about where in the note the entry was. Without them a
+    `retire_entry` would show as a whole-note before/after pair that differs only
+    by one line, and a reader could not see what was actually removed.
+
+    The undo is unchanged and deliberately so: an entry write goes through the
+    same whole-note ``note_apply`` receipt transaction as any other managed
+    write, so restoring the receipt restores the file byte for byte — including a
+    retirement, which is therefore reversible here even though it removed
+    something. A record whose replacement cannot be recovered keeps the note-level
+    before/after and says so, rather than showing an entry diff it cannot trust.
+
     A row whose sidecar cannot be read is left exactly as it is, with no
     ``note_edit`` key. That is the same contract as a missing receipt: History
     renders "no snapshot available" rather than inventing one, and a corrupt
@@ -7006,7 +7125,12 @@ def _attach_note_edit_detail(
     """
     if not any(str(row.get("kind") or "") == "note_edit" for row in rows):
         return
-    from ciao.note_edit_proposals import NoteEditError, list_sidecars
+    from ciao.note_edit_proposals import (
+        ENTRY_OPERATIONS,
+        NoteEditError,
+        entry_replacement,
+        list_sidecars,
+    )
 
     try:
         records = {
@@ -7025,6 +7149,18 @@ def _attach_note_edit_detail(
         record = records.get(str(row.get("proposal_id") or ""))
         if record is None:
             continue
+        entry_scope = record.operation in ENTRY_OPERATIONS
+        before = entry_after = ""
+        recovery_error = ""
+        if entry_scope:
+            start, end = record.entry_span
+            before = record.before[start:end]
+            try:
+                after = entry_replacement(record)
+            except NoteEditError as exc:
+                after = ""
+                recovery_error = str(exc)
+            entry_after = after
         row["note_edit"] = {
             "id": record.id,
             "relative_path": record.relative_path,
@@ -7038,6 +7174,23 @@ def _attach_note_edit_detail(
             "settled": record.settled,
             "accepted": record.accepted,
             "receipt_id": record.receipt_id,
+            # `note` or `entry`. The unit is the whole point: a `retire_entry`
+            # leaves every other fact in the file, and calling it a note edit
+            # would overstate what was written.
+            "scope": "entry" if entry_scope else "note",
+            "entry_identity": record.entry_identity,
+            "entry_fingerprint": record.entry_fingerprint,
+            "entry_span": [record.entry_span[0], record.entry_span[1]],
+            "entry_before": before,
+            # Empty for a retirement *and* for a record whose splice could not
+            # be inverted. The two are told apart by `entry_removed`, because
+            # "removed" and "we could not work out what it would have been" are
+            # very different things to show where a diff would be.
+            "entry_after": entry_after,
+            "entry_removed": entry_scope
+            and not recovery_error
+            and record.operation == "retire_entry",
+            "entry_recovery_error": recovery_error,
             # A record the owner decided reads differently from one still open,
             # and the two must not be confusable: a settled accept is what
             # History links an undo to, a settled dismissal is why nothing
