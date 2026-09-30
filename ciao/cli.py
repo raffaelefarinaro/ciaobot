@@ -128,7 +128,7 @@ def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]
 def _write_if_missing(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8", newline="")
 
 
 def _launchd_program_arguments(executable: str) -> str:
@@ -232,7 +232,7 @@ def _write_launchd_plist(
             path=path,
             template_name=f"{plist_name}.tmpl",
             ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     return plist
 
@@ -263,7 +263,7 @@ def _rotate_setup_token(workspace: Path) -> str:
     path = _setup_token_path(workspace)
     token = secrets.token_urlsafe(24)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token + "\n", encoding="utf-8")
+    path.write_text(token + "\n", encoding="utf-8", newline="")
     return token
 
 
@@ -620,7 +620,7 @@ def _ensure_vault_gitignore(root: Path) -> None:
         text = existing if existing.endswith("\n") else existing + "\n"
     else:
         text = "# Ciaobot: keep OS and editor litter out of vault snapshots\n"
-    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8")
+    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8", newline="")
 
 
 def ensure_vault_git(root: Path) -> None:
@@ -888,7 +888,7 @@ def setup_workspace(
     if not existing_env and not env_path.exists():
         env_path.write_text(
             "\n".join(f"{key}={value}" for key, value in desired_env) + "\n",
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         env_path.chmod(0o600)
         written.append(env_path)
@@ -919,7 +919,7 @@ def setup_workspace(
                 + "# Added by Ciaobot setup\n"
                 + "\n".join(additions)
                 + "\n",
-                encoding="utf-8",
+                encoding="utf-8", newline="",
             )
             written.append(env_path)
 

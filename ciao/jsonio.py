@@ -31,6 +31,6 @@ def write_private_text(path: Path, text: str) -> None:
     repair a pre-existing file that was made looser by an older version.
     """
     fd = open_fd(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
         f.write(text)
     os.chmod(path, 0o600)

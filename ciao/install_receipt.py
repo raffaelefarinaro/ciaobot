@@ -151,7 +151,7 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
     fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n")
         os.chmod(tmp, 0o600)
         os.replace(tmp, target)

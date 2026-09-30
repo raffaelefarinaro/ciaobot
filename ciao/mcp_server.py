@@ -1408,7 +1408,7 @@ class CiaoMcpService:
 
     def _write_mcp_json(self, path: Path, data: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
 
     def _mcp_servers_dict(self, data: dict[str, Any]) -> dict[str, Any]:
         raw = data.get("mcpServers")
@@ -1789,9 +1789,9 @@ class CiaoMcpService:
             staged = self._telemetry_totals_path.with_name(
                 self._telemetry_totals_path.name + ".tmp"
             )
-            staged.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            staged.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8", newline="")
             staged.replace(self._telemetry_totals_path)
-            self._telemetry_path.write_text("".join(kept), encoding="utf-8")
+            self._telemetry_path.write_text("".join(kept), encoding="utf-8", newline="")
         except OSError:
             logger.debug("Failed to trim the MCP telemetry log", exc_info=True)
 
@@ -1901,7 +1901,7 @@ class CiaoMcpService:
         try:
             self._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
             self._trim_telemetry_if_large()
-            with self._telemetry_path.open("a", encoding="utf-8") as handle:
+            with self._telemetry_path.open("a", encoding="utf-8", newline="") as handle:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
         except (OSError, TypeError, ValueError):
             logger.debug("Failed to record MCP tool telemetry", exc_info=True)
@@ -1931,4 +1931,4 @@ def _write_mcp_env_values(path: Path, updates: dict[str, str]) -> None:
         if value:
             out.append(f"{key}={value}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8", newline="")

@@ -285,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
             artifacts,
             created=datetime.now(UTC).isoformat(timespec="seconds"),
         )
-        out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="")
         print(out)
         return 0
 

@@ -233,7 +233,7 @@ def write_operation(op: Operation, state_dir: Path | None = None) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(json.dumps(asdict(op), indent=2, sort_keys=True) + "\n")
         os.chmod(tmp, 0o600)
         os.replace(tmp, target)
@@ -251,7 +251,7 @@ def acquire_lock(state_dir: Path | None = None) -> IO[str]:
     """
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
-    handle = open(root / LOCK_NAME, "a+", encoding="utf-8")
+    handle = open(root / LOCK_NAME, "a+", encoding="utf-8", newline="")
     try:
         lock_exclusive(handle.fileno(), blocking=False)
     except OSError as exc:
@@ -1141,7 +1141,7 @@ def _relocate_shebang(path: Path, staged_prefix: str, live_prefix: str) -> None:
         return
     _, newline, rest = path.read_text(encoding="utf-8").partition("\n")
     path.write_text(
-        first.replace(staged_prefix, live_prefix) + newline + rest, encoding="utf-8"
+        first.replace(staged_prefix, live_prefix) + newline + rest, encoding="utf-8", newline=""
     )
 
 

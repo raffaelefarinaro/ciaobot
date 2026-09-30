@@ -731,7 +731,7 @@ def write_sidecar(config: Any, proposal: NoteEditProposal) -> Path:
                 tmp.write_text(
                     json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True)
                     + "\n",
-                    encoding="utf-8",
+                    encoding="utf-8", newline="",
                 )
                 os.replace(tmp, path)
             except OSError:

@@ -176,7 +176,7 @@ class SnapshotStore:
                 truncated=truncated,
             )
             metas.append(meta.to_dict())
-            meta_path.write_text(json.dumps(metas, indent=2), encoding="utf-8")
+            meta_path.write_text(json.dumps(metas, indent=2), encoding="utf-8", newline="")
             return meta
 
     def schedule_capture(

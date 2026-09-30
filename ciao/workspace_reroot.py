@@ -320,7 +320,7 @@ def write_receipt(runtime_root: Path, payload: dict[str, Any]) -> Path:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
     return path
 
@@ -1096,7 +1096,7 @@ def _write_registry(runtime_root: Path, entries: list[dict[str, Any]]) -> None:
     path = registry_file(runtime_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
 
 
@@ -1327,7 +1327,7 @@ def flag_stranded_sessions(runtime_root: Path) -> dict[str, Any]:
 
     if flagged:
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
     return {"flagged": flagged}
 
@@ -1352,7 +1352,7 @@ def clear_stranded_sessions(runtime_root: Path, chat_ids: list[str]) -> int:
             cleared += 1
     if cleared:
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
     return cleared
 
@@ -1422,7 +1422,7 @@ def write_guide_split(
         root.mkdir(parents=True, exist_ok=True)
         guide = root / GUIDE_NAME
         if not guide.exists():
-            guide.write_text(text, encoding="utf-8")
+            guide.write_text(text, encoding="utf-8", newline="")
             # Record what was actually written: undo removes created files by
             # this path, so a stale name here leaves the guide behind and the
             # install no longer round-trips.
@@ -1649,7 +1649,7 @@ def _write_snapshot_gitignore(root: Path) -> None:
         "# Ciaobot: credentials and volatile state stay out of snapshots\n"
     )
     body = existing if not existing or existing.endswith("\n") else existing + "\n"
-    path.write_text(header + body + "\n".join(missing) + "\n", encoding="utf-8")
+    path.write_text(header + body + "\n".join(missing) + "\n", encoding="utf-8", newline="")
 
 
 # -- P10.6: rebuild the derived artefacts per root ---------------------------
@@ -1691,7 +1691,7 @@ def rebuild_indexes(
             entries = scan_vault(vault)
             write_index_file(entries, vault / "INDEX.md")
             (vault / "VOCABULARY.md").write_text(
-                format_vocabulary(entries), encoding="utf-8"
+                format_vocabulary(entries), encoding="utf-8", newline=""
             )
         except Exception as exc:  # noqa: BLE001 — reported per root, never fatal
             out["errors"].append({"workspace": name, "error": str(exc)})
@@ -2079,7 +2079,7 @@ def write_skills_triage(
     source_dir.mkdir(parents=True, exist_ok=True)
     readme = source_dir / "README.md"
     if not readme.exists():
-        readme.write_text(_SKILLS_SRC_README, encoding="utf-8")
+        readme.write_text(_SKILLS_SRC_README, encoding="utf-8", newline="")
         created.append(f"{_SKILLS_SRC}/README.md")
 
     # No catalog means no sheet. A triage document listing nothing is noise in a
@@ -2088,7 +2088,7 @@ def write_skills_triage(
         doc = install_root / primary_vault / _SKILL_TRIAGE_RELATIVE
         if not doc.exists():
             doc.parent.mkdir(parents=True, exist_ok=True)
-            doc.write_text(format_skill_triage(triage, workspaces), encoding="utf-8")
+            doc.write_text(format_skill_triage(triage, workspaces), encoding="utf-8", newline="")
             created.append(f"{primary_vault}/{_SKILL_TRIAGE_RELATIVE}")
     return created
 

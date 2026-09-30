@@ -228,7 +228,7 @@ def _write_backup(path: Path, text: str) -> bool:
         )
         return False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
     except OSError:
         logger.exception("could not write %s", path)
@@ -442,7 +442,7 @@ def migrate_root(root: Path | str) -> str:
         # filesystem, and the temp file lives beside the target so it is.
         tmp = base / f"{LEGACY_GUIDE_NAME}.merge.tmp"
         try:
-            tmp.write_text(merged, encoding="utf-8")
+            tmp.write_text(merged, encoding="utf-8", newline="")
             os.replace(tmp, legacy)
         except OSError:
             try:

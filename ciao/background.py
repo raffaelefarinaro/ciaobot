@@ -471,7 +471,7 @@ class BackgroundRunStore:
     def _save(self, payload: dict[str, Any]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
         tmp.replace(self._path)
 
     @staticmethod
@@ -696,7 +696,7 @@ class BackgroundRunner:
             f"[ciaobot] run {run_id} :: {' '.join(argv)}\n"
             f"[ciaobot] cwd {run_dir}\n"
         )
-        log_path.write_text(header, encoding="utf-8")
+        log_path.write_text(header, encoding="utf-8", newline="")
 
         run = BackgroundRun(
             run_id=run_id,

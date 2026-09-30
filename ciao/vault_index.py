@@ -854,7 +854,7 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
                 # name near NAME_MAX plus ".", 8 random chars and ".tmp"
                 # raises ENAMETOOLONG, which no caller here catches.
                 prefix=temp_prefix(abs_path.name),
-                suffix=".tmp",
+                suffix=".tmp", newline="",
             ) as handle:
                 handle.write(new_text)
                 temp = Path(handle.name)
@@ -870,7 +870,7 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
             replaced.append((target, original))
     except OSError:
         for target, original in reversed(replaced):
-            target.write_text(original, encoding="utf-8")
+            target.write_text(original, encoding="utf-8", newline="")
         for _, temp in staged:
             try:
                 temp.unlink(missing_ok=True)
@@ -1151,7 +1151,7 @@ def write_index_file(entries: list[Entry], dest: Path) -> None:
         f"{memory}"
         "For filtered queries run `ciao vault-index --help`.\n\n"
     )
-    dest.write_text(header + format_md(entries), encoding="utf-8")
+    dest.write_text(header + format_md(entries), encoding="utf-8", newline="")
 
 
 def scan_targets(
@@ -1469,7 +1469,7 @@ def write_vocabulary_file(
     sections = [format_vocabulary(entries, registry=registry)]
     if registry is not None:
         sections.insert(0, entity_types_section(registry))
-    dest.write_text(header + "\n".join(sections), encoding="utf-8")
+    dest.write_text(header + "\n".join(sections), encoding="utf-8", newline="")
 
 
 # ---- CLI -------------------------------------------------------------------

@@ -118,6 +118,6 @@ def scaffold_subagent(workspace: Path, name: str) -> Path:
             f"# {name.capitalize()} Subagent Role\n\n"
             "Describe the background, instructions, and rules for this subagent.\n"
         )
-        skill_file.write_text(content, encoding="utf-8")
+        skill_file.write_text(content, encoding="utf-8", newline="")
 
     return folder

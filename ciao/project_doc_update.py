@@ -205,7 +205,7 @@ async def update_project_doc(
             updated = _strip_code_fence(output)
             if not _is_safe_rewrite(current, updated):
                 return False
-            doc_path.write_text(_invalidate_stamps(current, updated) + "\n", encoding="utf-8")
+            doc_path.write_text(_invalidate_stamps(current, updated) + "\n", encoding="utf-8", newline="")
             logger.info("project doc updated from insights: %s", doc_path)
             return True
     except Exception as exc:  # noqa: BLE001 — fire-and-forget, never crash the pipeline
@@ -306,7 +306,7 @@ async def fold_fact_into_person_note(
                     error_out.append(f"{note_path.name} changed during the fold; nothing was written")
                 return False
             updated = _invalidate_stamps(current, updated)
-            note_path.write_text(updated + "\n", encoding="utf-8")
+            note_path.write_text(updated + "\n", encoding="utf-8", newline="")
             logger.info("person note updated from an accepted proposal: %s", note_path)
             return True
     except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row queued

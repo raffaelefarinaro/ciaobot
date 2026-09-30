@@ -1268,7 +1268,7 @@ class ScheduleStore:
     def _save(self, payload: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
         tmp.replace(self._path)
 
     def _runtime_items(self) -> list[dict]:
@@ -1475,7 +1475,7 @@ class ScheduleStore:
         tmp = self._system_state_path.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps(data, indent=2, sort_keys=True),
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         tmp.replace(self._system_state_path)
 

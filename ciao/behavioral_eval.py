@@ -1937,10 +1937,10 @@ def _check_isolation(tmp_root: Path, scenario_set: ScenarioSet) -> list[Contract
     (personal / "People").mkdir(parents=True)
     (work / "People").mkdir(parents=True)
     (personal / "People" / "Dario.md").write_text(
-        "# Dario\nElena's brother.\n", encoding="utf-8"
+        "# Dario\nElena's brother.\n", encoding="utf-8", newline=""
     )
     (work / "People" / "Kestrel.md").write_text(
-        "# Kestrel\nProject Kestrel launch window.\n", encoding="utf-8"
+        "# Kestrel\nProject Kestrel launch window.\n", encoding="utf-8", newline=""
     )
     conn = sqlite_connect()
     fts_search.init_db(conn)
@@ -2077,13 +2077,13 @@ def _check_recall_expansion(tmp_root: Path) -> list[ContractCheck]:
     (personal / "projects").mkdir(parents=True, exist_ok=True)
     (work / "projects").mkdir(parents=True, exist_ok=True)
     (personal / "projects" / "Northwind.md").write_text(
-        _EXPANSION_NOTE, encoding="utf-8"
+        _EXPANSION_NOTE, encoding="utf-8", newline=""
     )
     (work / "projects" / "Northwind.md").write_text(
-        _EXPANSION_NOTE, encoding="utf-8"
+        _EXPANSION_NOTE, encoding="utf-8", newline=""
     )
     (personal / "projects" / "Onboarding.md").write_text(
-        _NEGATION_NOTE, encoding="utf-8"
+        _NEGATION_NOTE, encoding="utf-8", newline=""
     )
     conn = sqlite_connect()
     fts_search.init_db(conn)
@@ -2623,7 +2623,7 @@ def write_report(report: EvalReport, path: Path) -> Path:
     """Write a report atomically so a concurrent reader never sees a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(report.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps(report.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8", newline="")
     tmp.replace(path)
     return path
 

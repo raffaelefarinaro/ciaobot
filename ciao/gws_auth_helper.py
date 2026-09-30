@@ -72,7 +72,7 @@ def _store_pending_verifier(config_dir, code_verifier: str) -> None:
     # Create with 0600 rather than writing then chmod-ing: the verifier must
     # never exist group/world-readable, even briefly.
     fd = open_fd(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
         fh.write(code_verifier)
     os.chmod(path, 0o600)
 

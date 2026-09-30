@@ -478,7 +478,7 @@ def _read_or_create_secret(path: Path) -> str:
         pass
     token = secrets.token_urlsafe(32)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token + "\n", encoding="utf-8")
+    path.write_text(token + "\n", encoding="utf-8", newline="")
     return token
 
 
@@ -991,7 +991,7 @@ class CiaoConfig:
             for workspace in self.workspaces.values()
         ]
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
         self._workspace_registry_changed = False
 
@@ -1100,7 +1100,7 @@ class CiaoConfig:
                 indent=2,
             )
             + "\n",
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         logger.warning(
             "CIAO_WORKSPACES is no longer read; imported %s into %s once. "
@@ -1150,7 +1150,7 @@ class CiaoConfig:
         if imported:
             tmp = registry_path.with_suffix(".json.tmp")
             try:
-                tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+                tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
                 tmp.replace(registry_path)
             except OSError:
                 logger.warning("Could not migrate the legacy GWS profile", exc_info=True)
@@ -1168,7 +1168,7 @@ class CiaoConfig:
                     indent=2,
                 )
                 + "\n",
-                encoding="utf-8",
+                encoding="utf-8", newline="",
             )
         except OSError:
             logger.warning("Could not record the legacy GWS profile migration", exc_info=True)
@@ -1504,7 +1504,7 @@ class CiaoConfig:
         if not changed:
             return
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
 
     @classmethod

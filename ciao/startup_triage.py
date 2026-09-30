@@ -134,7 +134,7 @@ def _record_triage(runtime_dir: Path, now: datetime) -> None:
     try:
         _marker_path(runtime_dir).write_text(
             json.dumps({"last_dispatched_at": now.isoformat()}),
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
     except OSError:
         logger.warning("Could not write startup-triage marker", exc_info=True)
