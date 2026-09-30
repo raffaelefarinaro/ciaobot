@@ -428,7 +428,7 @@ def test_stale_notes_exempts_event_and_queue_types() -> None:
         _entry("memory-vault/Workspace/Learnings.md", "workspace"),
     ]
 
-    report = find_stale_notes(entries, mtimes={str(e.path): old for e in entries}, today=today)
+    report = find_stale_notes(entries, mtimes={e.path_key: old for e in entries}, today=today)
 
     assert report["stale_notes"] == []
     assert report["notes_checked"] == 0
@@ -444,7 +444,7 @@ def test_stale_notes_thresholds_vary_by_type() -> None:
         _entry("memory-vault/Idea/shower-thought.md", "idea"),
     ]
 
-    report = find_stale_notes(entries, mtimes={str(e.path): mtime for e in entries}, today=today)
+    report = find_stale_notes(entries, mtimes={e.path_key: mtime for e in entries}, today=today)
 
     flagged = {f["type"]: f for f in report["stale_notes"]}
     assert set(flagged) == {"project"}
@@ -763,7 +763,7 @@ def test_find_stale_notes_uses_the_shared_predicate_for_aliased_exempt_types() -
         _entry("memory-vault/People/Mo.md", "Person"),
     ]
     report = find_stale_notes(
-        entries, mtimes={str(e.path): _days_ago(120, today=today) for e in entries}, today=today
+        entries, mtimes={e.path_key: _days_ago(120, today=today) for e in entries}, today=today
     )
 
     assert [f["path"] for f in report["stale_notes"]] == ["memory-vault/People/Mo.md"]
@@ -864,7 +864,7 @@ def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
         _entry("memory-vault/Clients/Beta.md", "client"),
         _entry("memory-vault/Journal/day.md", "journal"),
     ]
-    mtimes = {str(e.path): _days_ago(20, today=today) for e in entries}
+    mtimes = {e.path_key: _days_ago(20, today=today) for e in entries}
 
     categories.write_text(customer, encoding="utf-8")
     entity_types.clear_entity_types_cache()

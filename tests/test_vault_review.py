@@ -108,7 +108,7 @@ def test_the_queue_projection_is_not_itself_a_note(tmp_path: Path) -> None:
     queue = tmp_path / "Workspace" / "Vault-Review.md"
     assert queue.is_file()
 
-    scanned = {str(entry.path) for entry in scan_vault(tmp_path, workspace="personal")}
+    scanned = {entry.path_key for entry in scan_vault(tmp_path, workspace="personal")}
     assert "memory-vault/Workspace/Vault-Review.md" not in scanned
     assert "Workspace/Vault-Review.md" not in run_validation(tmp_path).get("orphans", [])
 
