@@ -8530,20 +8530,21 @@ async def start_update_task(request: Request) -> JSONResponse:
     live chat is not the same as a dispatched prompt, and the record is what says
     which one this is: a ``failed`` attempt is retried by sending the packaged
     prompt into that same chat (still ``resumed``, because nothing was minted),
-    and a ``dismissed`` one is reopened in place — the chat is kept, the record
-    is written ``in_progress``, and nothing is re-sent, because an operator
-    pressing Start on a task they declined is a decision to un-decline it, not
-    to run the task a second time.
+    and a ``dismissed`` or reopened-``offered`` one is un-declined in place — the
+    chat is kept, the record is written ``in_progress``, and nothing is re-sent,
+    because an operator pressing Start on a task they declined is a decision to
+    un-decline it, not to run the task a second time.
 
     A refused task — unknown id, one this engine version cannot support, no host
     workspace, no chat manager, a state record that cannot be written before the
-    turn starts — is 409, never 500; a chat that exists but whose turn could not
-    be dispatched is 500 *with* the ``chat_id``, because that is the one case a
-    retry must not turn into a second chat, and the retry sends the prompt into
-    it. Nothing that happens after the turn started turns this into a refusal
-    or a bare 500: a record that will not take the ``in_progress`` write is
-    logged and still answered with the chat, and a detector pass that cannot
-    list the tasks leaves the reply without its ``tasks`` key.
+    turn starts, or a record that already says ``completed`` at this revision — is
+    409, never 500; a chat that exists but whose turn could not be dispatched is
+    500 *with* the ``chat_id``, because that is the one case a retry must not turn
+    into a second chat, and the retry sends the prompt into it. Nothing that
+    happens after the turn started turns this into a refusal or a bare 500: a
+    record that will not take the ``in_progress`` write is logged and still
+    answered with the chat, and a detector pass that cannot list the tasks leaves
+    the reply without its ``tasks`` key.
 
     The prompt is the packaged one for this revision, read on the server. There
     is no request field for prompt text and there will not be one.

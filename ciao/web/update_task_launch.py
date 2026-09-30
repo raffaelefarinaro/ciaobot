@@ -39,20 +39,31 @@ decides what a resume does with it. A ``failed`` attempt names a chat the turn
 never reached: the next start sends the prompt into that same chat, under the
 same lock, and puts the record back to ``in_progress`` — no second chat, and
 ``resumed: true`` only ever paired with a prompt that actually went out. A
-``dismissed`` record is an operator decision that a start explicitly reverses:
-the same chat is kept and the record is written ``in_progress``, but nothing is
-re-sent, because the chat a dismissal kept is a chat the prompt has already
-been sent to and running twice is the outcome this module exists to prevent.
-Every other lifecycle resumes as it is: nothing created, nothing sent.
+``dismissed`` or ``offered`` record is an operator decision that a start
+explicitly reverses: the same chat is kept and the record is written
+``in_progress``, but nothing is re-sent, because a chat either of those carried
+is a chat the prompt has already been sent to, and running it twice is the
+outcome this module exists to prevent. Every other lifecycle resumes as it is:
+nothing created, nothing sent.
+
+A ``completed`` record is not a resume at all and never becomes one. It is the
+verdict a named, registered check reached, so a start is refused with the same
+``ValueError`` an unsupported task gets: the work belongs to the next revision,
+which is a different record and a different piece of work. The refusal is
+decided from the record and not from the chat, so it holds whether the chat is
+still there or not — chats get archived and deleted routinely, and a stale tab
+or a retry must not turn ``completed`` back into ``in_progress`` and re-run
+work a check already judged done.
 
 That last claim is only sound because ``dismiss_task`` keeps ``failed`` out of a
 dismissal. ``failed`` is the one lifecycle that means "this chat never got the
 prompt", and a dismissal that carried its chat forward would throw the only
 record of that away: the next start would find a live chat, send nothing into
 it, write ``in_progress`` and report a task as running that nothing was ever
-dispatched into — and a reopen of the same record would reach the same answer
-through the branch below. So a dismissal of a ``failed`` record writes no chat
-at all, and the next start mints a fresh one and dispatches into that.
+dispatched into — and a reopen of the same record, which writes ``offered`` and
+carries the same chat, would reach the same answer through the branch below. So
+a dismissal of a ``failed`` record writes no chat at all, and the next start
+mints a fresh one and dispatches into that.
 
 Why a revision change cannot resume
 ----------------------------------
@@ -139,6 +150,14 @@ PROMPT_DIGEST_CHARS = 16
 
 #: The actor recorded with an attempt, when the caller does not name another.
 DEFAULT_ACTOR = "operator"
+
+#: The lifecycles a start reverses in place, keeping the chat. Both say the work
+#: is not running while naming a chat that did run it: ``dismissed`` because the
+#: operator declined it and is now pressing Start anyway, ``offered`` because a
+#: reopen put it back on offer without giving up the chat the dismissal carried.
+#: Either way the record is written ``in_progress`` over the same chat and
+#: nothing is dispatched, so the two ways of undoing a dismissal answer alike.
+REOPENED_BY_START: frozenset[str] = frozenset({"dismissed", "offered"})
 
 #: An actor is a short token, not a sentence. It goes into a portable evidence
 #: entry, and a state file travels between machines, so a caller cannot smuggle
@@ -242,11 +261,11 @@ def launch_task(
 
     Raises ``ValueError`` when the task is refused (unknown, unsupported by this
     engine, no host workspace, no chat manager, a record that cannot be written
-    before the turn starts) and :class:`UpdateTaskLaunchError` when the chat
-    exists but the turn could not be dispatched. A record that cannot be written
-    *after* the turn started is not a refusal and is not raised: the launch
-    answers with the chat and the file keeps saying ``failed`` (see
-    :func:`_write_after_dispatch`).
+    before the turn starts, or a record that already says ``completed`` at this
+    revision) and :class:`UpdateTaskLaunchError` when the chat exists but the
+    turn could not be dispatched. A record that cannot be written *after* the
+    turn started is not a refusal and is not raised: the launch answers with the
+    chat and the file keeps saying ``failed`` (see :func:`_write_after_dispatch`).
     """
     task = resolve_task(task_id, installed_version=installed_version)
     _require_host_workspace(task, workspace)
@@ -261,6 +280,18 @@ def launch_task(
     digest = prompt_digest(prompt)
 
     with update_tasks._record_lock(task, config, workspace) as (path, previous):
+        if previous is not None and previous.lifecycle == "completed":
+            # Asked of the record, before the chat is even looked up: a verdict is
+            # a check's conclusion, not an operator's decision, and a launch is a
+            # new attempt. Whether the chat is still there is not part of the
+            # question — and it is the archived-or-deleted case that matters,
+            # because without this the create-fresh recovery below would replace
+            # `completed` with `in_progress` and re-run work already judged done.
+            raise ValueError(
+                f"update task {task.id}@{task.revision} is already completed at "
+                "this revision; the work belongs to the next revision, which is a "
+                "different record"
+            )
         live = _live_chat(pcm, previous)
         if previous is not None and live is not None:
             # The record already names this chat, so nothing is created — but
@@ -315,35 +346,7 @@ def launch_task(
     )
 
 
-def resume_task(
-    task_id: str,
-    *,
-    config: Any,
-    pcm: Any,
-    workspace: str = "",
-    installed_version: str,
-) -> dict[str, Any]:
-    """The chat this task's attempt is already in, without starting anything.
-
-    The other half of :func:`launch_task` for a caller that wants to *open* the
-    work rather than begin it: it creates nothing and dispatches nothing, so a
-    task with no live chat is a refusal rather than a new chat. The record is
-    read lock-free (``read_task_state`` does not take the lock, and the document
-    is replaced atomically, so a reader sees a whole one).
-    """
-    task = resolve_task(task_id, installed_version=installed_version)
-    if pcm is None:
-        raise ValueError("the chat manager is not running")
-    state = update_tasks.read_task_state(task, config=config, workspace=workspace)
-    chat = _live_chat(pcm, state)
-    if state is None or chat is None:
-        raise ValueError(
-            f"update task {task.id}@{task.revision} has no live chat to resume"
-        )
-    return _outcome(task, chat, digest=state.prompt_digest, resumed=True, state=state)
-
-
-# ── Dismiss, reopen, and the check ──────────────────────────────────────────
+# ── Dismiss and reopen ──────────────────────────────────────────────────────
 
 
 def dismiss_task(
@@ -423,36 +426,17 @@ def reopen_task(
     start takes the ordinary path and dispatches the packaged prompt into a
     fresh one. Reopening a ``failed`` record itself writes nothing at all (only
     a dismissal is reversed) and leaves the retry available.
+
+    A record that comes back ``offered`` *with* a chat is the one a start has to
+    read carefully, and that is why ``offered`` sits beside ``dismissed`` in
+    ``REOPENED_BY_START``: this route is the second half of the same decision
+    Start's own branch is the first half of, and the two must leave the same
+    record behind.
     """
     task = resolve_task(task_id, installed_version=installed_version)
     state = update_tasks.reopen_task(
         task, config=config, workspace=workspace, now=now
     )
-    return _state_outcome(task, state)
-
-
-def record_check(
-    task_id: str,
-    *,
-    config: Any,
-    workspace: str = "",
-    installed_version: str,
-    now: datetime | None = None,
-) -> dict[str, Any] | None:
-    """Run this task's registered completion check and record a verdict.
-
-    A thin wrapper over ``update_tasks.record_completion``, returning ``None``
-    when nothing was recorded — the check name has no implementation, it raised,
-    it returned the wrong shape, or the postcondition does not hold. ``None`` is
-    the honest answer and not an error: opening a chat is not completion, so a
-    launch must never come through here to make a task look done.
-    """
-    task = resolve_task(task_id, installed_version=installed_version)
-    state = update_tasks.record_completion(
-        task, config=config, workspace=workspace, now=now
-    )
-    if state is None:
-        return None
     return _state_outcome(task, state)
 
 
@@ -514,7 +498,9 @@ def _live_chat(pcm: Any, state: TaskState | None) -> Any | None:
     archived) the chat the task was in, so the record is stale and the next start
     creates a fresh one. A lookup that raises is answered the same way, because a
     chat store that cannot be asked must not be the reason a task cannot be
-    started.
+    started. A ``completed`` record never reaches this at all:
+    :func:`launch_task` refuses it first, since a verdict is not something a
+    fresh chat can recover.
     """
     if state is None or not state.chat_id:
         return None
@@ -551,15 +537,19 @@ def _resumed(
       actually left. A retry that fails again is the same recoverable answer as
       the first attempt, so the record stays ``failed`` and
       :class:`UpdateTaskLaunchError` names the same chat.
-    * **``dismissed``** — an operator pressed Start on a task they had declined,
-      which is a reopen, so the record is written ``in_progress`` and the chat
-      kept. Nothing is dispatched, and the reason it can be sure of that is
-      :func:`dismiss_task`: a dismissal only carries a chat whose prompt was
-      sent, so a chat reached here has already run the task and must not be
-      told to run it again. The rejected ``ValueError`` alternative was
-      available and was not taken — a 409 that tells the operator to press
-      Reopen, when Reopen already exists and does less, turns an explicit
-      decision into a detour.
+    * **``dismissed`` or ``offered``** (``REOPENED_BY_START``) — an operator
+      pressed Start on a task that is not running: a task they had declined, or
+      one a reopen put back on offer while carrying the chat that dismissal kept.
+      Either way the record is written ``in_progress`` and the chat kept. Nothing
+      is dispatched, and the reason it can be sure of that is :func:`dismiss_task`:
+      a dismissal only carries a chat whose prompt was sent, so a chat reached
+      here has already run the task and must not be told to run it again. The
+      rejected ``ValueError`` alternative was available and was not taken — a 409
+      that tells the operator to press Reopen, when Reopen already exists and
+      does less, turns an explicit decision into a detour. The two lifecycles
+      share the branch because the second is what the first becomes: leaving
+      ``offered`` as it is would report a resume while the row still offers Start
+      on a chat that has already run the task.
     * **anything else** — nothing is created and nothing is sent: the turn
       belongs to the attempt this record already describes, and sending the
       prompt twice would run the same task in one chat twice. The digest
@@ -578,7 +568,7 @@ def _resumed(
             task=task,
         )
         return _outcome(task, chat, digest=digest, resumed=True, state=retried)
-    if previous.lifecycle == "dismissed":
+    if previous.lifecycle in REOPENED_BY_START:
         reopened = _attempt(task, previous.chat_id, digest=digest, actor=actor, now=now)
         update_tasks._write_record(path, reopened)
         return _outcome(task, chat, digest=digest, resumed=True, state=reopened)

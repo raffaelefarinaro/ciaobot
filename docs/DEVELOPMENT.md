@@ -806,13 +806,28 @@ decides what a resume does with one (`_resumed`):
   same chat** under the lock and the record goes back to `in_progress`. Still one
   chat, still `resumed: true`, and now a prompt that actually left. A retry that
   fails again leaves the record `failed`, so the next start tries again.
-- `dismissed` — an operator pressing Start on a task they declined is a reopen,
-  so the chat is kept and the record is written `in_progress`. Nothing is
-  dispatched, because a chat reached here has already run the task. (The 409
-  alternative — "reopen it first" — was available and not taken; Reopen already
-  exists and does strictly less.)
+- `dismissed` or `offered` (`REOPENED_BY_START`) — an operator pressing Start on
+  a task that is not running: one they declined, or one `reopen_task` put back on
+  offer while carrying the chat that dismissal kept. Either way the chat is kept
+  and the record is written `in_progress`. Nothing is dispatched, because a chat
+  reached here has already run the task. (The 409 alternative — "reopen it first" —
+  was available and not taken; Reopen already exists and does strictly less.) The
+  second lifecycle belongs to the same branch because it is what the first becomes
+  a step later: `dismiss → reopen → start` must land exactly where `dismiss →
+  start` lands, and leaving the record `offered` there would report a resume while
+  the row still offers Start on a chat that has already run the task.
 - anything else — nothing created, nothing sent, and the digest reported is the
   record's own rather than the one this call computed.
+
+`completed` never reaches `_resumed` at all: `launch_task` refuses it with a
+`ValueError` (a 409) *before* the chat lookup, because a `completed` record is a
+registered check's verdict rather than an operator's decision, and a launch is a
+new attempt. That ordering is the fix for the duplicate-prompt path an archived
+chat used to open: chats are archived and deleted routinely, so a stale tab or a
+retry against a finished task used to fall through the create-fresh recovery and
+replace `completed` with `in_progress`, re-running work that was already judged
+done. The create-fresh recovery itself is unchanged for `offered`, `in_progress`,
+`failed` and `waiting_review`, whose record is stale rather than final.
 
 The `dismissed` branch is only safe because `dismiss_task` keeps `failed` out of
 a dismissal. `failed` is the **only** thing in the file that says the prompt
@@ -862,12 +877,19 @@ The launch path runs no detector, no completion check, no model, no `eval`, no
 shell and no remote fetch. Applicability is a separate, TTL-cached answer
 (`update_tasks.evaluate`) that `GET /api/update-tasks` reports and a start does
 not re-ask for: a start is a decision the operator already made.
-`reopen_task`/`record_check` are thin wrappers over the `update_tasks`
-recorders, and `dismiss_task` is the same write with the failed-chat rule
-above, so the card and a direct API call cannot produce two records for one
-decision. The three state-changing routes carry the fresh task rows in their
-reply, through `_with_update_task_rows`, which drops the key rather than raising
-if the listing cannot be built: a launch that landed must not become a bare 500.
+`reopen_task` is a thin wrapper over `update_tasks.reopen_task`, and
+`dismiss_task` is the same write with the failed-chat rule above, so the card and
+a direct API call cannot produce two records for one decision. The rule stays on
+the launch side on purpose: `update_tasks` never opens a chat, and "the chat
+behind a `failed` record is empty because the dispatch never reached it" is a fact
+about the launch path that the state layer cannot check. (`resume_task` and
+`record_check` lived here in round 1 and were deleted in round 3: no route, no
+CLI and no test called them, and the routes report an attempt's chat in their
+`result` anyway. `update_tasks.record_completion` stays — it is that module's
+recorder, with its own tests.) The three state-changing routes carry the fresh
+task rows in their reply, through `_with_update_task_rows`, which drops the key
+rather than raising if the listing cannot be built: a launch that landed must not
+become a bare 500.
 See `tests/test_update_task_launch.py` for the idempotency cases, each driven
 against a fake manager over a temp packaged root.
 

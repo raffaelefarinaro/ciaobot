@@ -17,10 +17,12 @@ same machinery and are pinned the same way: a dispatch that failed, where the
 point is that the *next* start sends the prompt rather than reporting a resume
 it never performed; a start on a task the operator had dismissed, where the
 point is that the record stops saying ``dismissed`` while the chat it keeps is
-still the one that holds the work; a dismissal of a *failed* record, which must
-not carry the empty chat forward, since that chat is the only other proof the
-prompt never left; and a record write that fails after the turn started, which
-must not turn a running chat into a refusal with no ``chat_id`` in it.
+still the one that holds the work; the same start after a *reopen*, which has to
+land in the same place; a dismissal of a *failed* record, which must not carry
+the empty chat forward, since that chat is the only other proof the prompt never
+left; a *completed* record, which no start may re-run however its chat went
+away; and a record write that fails after the turn started, which must not turn
+a running chat into a refusal with no ``chat_id`` in it.
 """
 
 from __future__ import annotations
@@ -330,17 +332,18 @@ def test_second_start_resumes_the_same_chat(tmp_path: Path, packaged: Any) -> No
     assert first["chat_id"] == second["chat_id"] == third["chat_id"]
     assert first["resumed"] is False
     assert second["resumed"] is third["resumed"] is True
-    # `resume_task` is the same read without the create, and it is what a
-    # client asking "open the work" rather than "start it" uses.
-    resumed = update_task_launch.resume_task(
-        "review-legacy-rows",
-        config=_config(tmp_path),
-        pcm=pcm,
-        workspace=WORKSPACE,
-        installed_version=VERSION,
+    # And a start from a manager that has to be told about the chat, the way a
+    # restarted engine reloads it, is the same answer from the same one chat:
+    # the record on disk is the whole of the state a launch keeps.
+    rebuilt = _FakePCM()
+    rebuilt.chats[first["chat_id"]] = _Chat(
+        first["chat_id"], "proj-general", "Review legacy rows", {"kind": UPDATE_TASK_KIND}
     )
-    assert resumed["chat_id"] == first["chat_id"]
-    assert resumed["resumed"] is True
+    after_restart = _launch(tmp_path, rebuilt)
+    assert after_restart["chat_id"] == first["chat_id"]
+    assert after_restart["resumed"] is True
+    assert rebuilt.created == []
+    assert rebuilt.dispatched == [], "a resume sends nothing into the chat"
 
 
 def test_concurrent_starts_create_exactly_one_chat(
@@ -437,6 +440,65 @@ def test_a_deleted_chat_is_recoverable(tmp_path: Path, packaged: Any) -> None:
         first["chat_id"],
         second["chat_id"],
     ], "the new chat got the prompt; the deleted one is not touched again"
+
+
+@pytest.mark.parametrize("what_happened_to_the_chat", ["archived", "deleted"])
+def test_a_completed_task_is_never_re_run(
+    tmp_path: Path,
+    packaged: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    what_happened_to_the_chat: str,
+) -> None:
+    """A verdict survives its chat, and is the one thing a start cannot undo.
+
+    The recovery above is right for a record that is merely stale. A
+    ``completed`` record is not stale, it is *final*: it is what a named,
+    registered check concluded, and a launch is a new attempt. But ``_live_chat``
+    cannot tell an archived chat from a deleted one, so it answered ``None`` for
+    both and the create-fresh recovery below it ran for this lifecycle too — a
+    fresh chat, the packaged prompt dispatched a second time, and ``completed``
+    overwritten with ``in_progress``. Chats get archived and deleted routinely, so
+    a stale tab or a retry against finished work re-ran the task and threw the
+    verdict away.
+
+    The refusal is therefore read from the record *before* the chat is looked at,
+    which is why it holds in both parameterised cases: whether the chat is still
+    there is not part of the question. Nothing is minted, nothing is sent, and
+    the verdict stays.
+    """
+    monkeypatch.setattr(
+        update_tasks,
+        "COMPLETION_FUNCTIONS",
+        {CHECK: lambda **_: update_tasks.Detection(True, {"rows": 0})},
+    )
+    pcm = _FakePCM()
+    first = _launch(tmp_path, pcm)
+    done = update_tasks.record_completion(
+        _task(), config=_config(tmp_path), workspace=WORKSPACE
+    )
+    assert done is not None and done.lifecycle == "completed"
+    assert done.chat_id == first["chat_id"], "a completion keeps the attempt's chat"
+
+    if what_happened_to_the_chat == "archived":
+        pcm.chats[first["chat_id"]].archived = True
+    else:
+        pcm.delete_chat(first["chat_id"])
+
+    with pytest.raises(ValueError, match="already completed at this revision"):
+        _launch(tmp_path, pcm)
+
+    assert len(pcm.created) == 1, "a refused launch mints nothing"
+    assert pcm.dispatched == [(first["chat_id"], PROMPT_R1)], "the prompt ran once"
+    state = _state(tmp_path)
+    assert state.lifecycle == "completed", "the verdict is still the record"
+    assert state.chat_id == first["chat_id"]
+    # The refusal is not a dead end: the next revision is a different record, so
+    # it is a different piece of work and starts in a chat of its own.
+    packaged(2)
+    second = _launch(tmp_path, pcm)
+    assert second["resumed"] is False
+    assert second["chat_id"] == pcm.created[1].chat_id
+    assert pcm.dispatched[-1] == (second["chat_id"], PROMPT_R2)
 
 
 def test_a_new_revision_does_not_reuse_the_old_chat(
@@ -625,6 +687,59 @@ def test_a_start_on_a_dismissed_task_reopens_it_in_the_same_chat(
     assert state.lifecycle == "in_progress"
     assert state.chat_id == first["chat_id"]
     assert state.evidence == {"actor": "operator"}, "the launch is a new attempt"
+
+
+def test_a_reopen_and_a_start_land_where_a_start_after_a_dismissal_lands(
+    tmp_path: Path, packaged: Any
+) -> None:
+    """Launch, dismiss, reopen, start: the record a direct start would have left.
+
+    ``reopen_task`` reverses the *dismissal*, so it writes ``offered`` and
+    carries whatever chat the dismissal carried — here a chat that already ran the
+    packaged prompt. A start from there used to fall into the "anything else"
+    resume branch: ``resumed: true``, nothing written, and the row still
+    ``offered``, so the card went on offering Start for work already under way
+    while the reply claimed the task was resumed. Start straight after a
+    dismissal wrote ``in_progress`` instead, so the two ways of undoing one
+    decision disagreed about what the record said.
+
+    ``offered`` with a live chat is now the same branch as ``dismissed``: the same
+    chat, the record written ``in_progress``, nothing dispatched. The prompt ran
+    once across the whole history, which is the promise every path here keeps.
+    """
+    pcm = _FakePCM()
+    first = _launch(tmp_path, pcm)
+    update_task_launch.dismiss_task(
+        "review-legacy-rows",
+        config=_config(tmp_path),
+        workspace=WORKSPACE,
+        installed_version=VERSION,
+        reason="looked at them",
+    )
+    reopened = update_task_launch.reopen_task(
+        "review-legacy-rows",
+        config=_config(tmp_path),
+        workspace=WORKSPACE,
+        installed_version=VERSION,
+    )
+    assert reopened["lifecycle"] == "offered"
+    assert reopened["chat_id"] == first["chat_id"], "a reopen carries the chat"
+    assert _state(tmp_path).lifecycle == "offered"
+
+    outcome = _launch(tmp_path, pcm)
+
+    assert outcome["chat_id"] == first["chat_id"]
+    assert outcome["resumed"] is True
+    assert outcome["lifecycle"] == "in_progress", (
+        "a start undoes the reopen too, not just the dismissal"
+    )
+    state = _state(tmp_path)
+    assert state.lifecycle == "in_progress"
+    assert state.chat_id == first["chat_id"]
+    assert len(pcm.created) == 1, "still the one chat the first start made"
+    assert pcm.dispatched == [(first["chat_id"], PROMPT_R1)], (
+        "the prompt ran once across the dismissal and the reopen"
+    )
 
 
 def test_a_dismissed_task_that_never_ran_starts_fresh(
@@ -883,28 +998,6 @@ def test_dismiss_and_reopen_route_through_update_tasks(
     assert after.lifecycle == "offered"
     assert after.chat_id == chat_id
     assert after.attempted_fingerprint == ""
-
-
-def test_record_check_proves_nothing_without_a_registered_check(
-    tmp_path: Path, packaged: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A launch is not completion, and a check nobody implemented proves nothing.
-
-    The check name is registered — so the catalog row loads — but has no
-    implementation, so the wrapper reports ``None`` rather than marking the task
-    done. This is the rule that keeps "the chat was opened" from ever reading as
-    "the work was finished".
-    """
-    monkeypatch.setattr(update_tasks, "COMPLETION_FUNCTIONS", {})
-    assert (
-        update_task_launch.record_check(
-            "review-legacy-rows",
-            config=_config(tmp_path),
-            workspace=WORKSPACE,
-            installed_version=VERSION,
-        )
-        is None
-    )
 
 
 # ── The routes ───────────────────────────────────────────────────────────────
