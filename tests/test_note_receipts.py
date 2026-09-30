@@ -9,17 +9,27 @@ region does not:
   apply and come back byte-identical through an undo, and a note's permissions
   are carried across the replacement;
 * confinement: a caller names a vault-relative path, and an absolute, ``..``,
-  symlinked, missing, non-Markdown or non-file target is refused — as is a
-  *receipt* whose recorded target does not resolve inside the vault the journal
-  is actually found in;
+  symlinked, missing, non-Markdown or non-file target is refused, as is the app's
+  own bookkeeping under ``Workspace/`` and a spelling no on-disk entry answers
+  to (on a case-sensitive filesystem ``notes/a.md`` is refused when only
+  ``Notes/A.md`` exists, rather than redirecting the write there); both spellings
+  of a name on a case-insensitive one resolve to a single file, so two writers
+  cannot reach one note through two locks. A *receipt* whose recorded target does
+  not resolve inside the vault the journal is actually found in is refused just
+  the same;
 * never view-only: content that is not UTF-8, or whose image is larger than a
   receipt can hold, is refused before the mutation rather than applied and left
-  un-undoable;
+  un-undoable; a write that changed nothing is not offered an undo, and the undo
+  primitive refuses such a row itself rather than trusting the caller to ask
+  first;
 * honest settlement: a journal that cannot record the prepared row aborts the
   write; a write that replaced the note but could not confirm it leaves a
   recoverable row, never a terminal one that would hide the mutation; and an
   interrupted undo, including the window between its reverse rename and the
-  original's own settlement, recovers to one consistent result.
+  original's own settlement, recovers to one consistent result. An undo whose
+  final settlement row could not be appended says the undo *landed* instead of
+  reporting a write error, and an undo refuses a before image that no longer
+  hashes to the revision its receipt records;
 
 Every test uses a temporary synthetic vault. Nothing here reads or writes a
 real install's notes, and no engine, service or scheduler is started.
@@ -197,6 +207,86 @@ def test_note_apply_noop(tmp_path, monkeypatch):
     assert mr.find_receipt(_journal(vault), receipt["id"])["changed"] is False
 
 
+def test_note_noop_apply_offers_no_undo(tmp_path):
+    """A write that changed nothing must not be offered an undo.
+
+    The no-op row carries the note's own text as both images, so it passed
+    every "is this reversible?" test and History offered an Undo that rewrote the
+    file with the bytes it already held. It stays a real record — a caller can
+    still tell "already satisfied" from "wrote something" — it just has nothing
+    to reverse.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "already correct\n")
+
+    noop = _apply(vault, after="already correct\n")
+
+    assert noop["status"] == mr.APPLIED
+    assert noop["changed"] is False
+    assert noop["undoable"] is False
+    assert mr.is_undoable(noop) is False
+    row = mr.find_receipt(_journal(vault), noop["id"])
+    assert row is not None and row["changed"] is False
+    assert mr.is_undoable(row) is False
+    # History reads the flag off the same predicate, so the affordance is gone
+    # there too.
+    listed = {r["id"]: r for r in mr.list_receipts(vault)}
+    assert listed[noop["id"]]["undoable"] is False
+    with pytest.raises(mr.UndoUnsupported):
+        mr.undo_receipt(noop["id"], vault_root=vault)
+    assert path.read_bytes() == b"already correct\n"
+
+    # A real change to the same note is untouched by that, and still reverses.
+    changed = _apply(vault, after="now different\n")
+    assert changed["changed"] is True
+    assert "undoable" not in changed
+    assert mr.is_undoable(changed) is True
+    mr.undo_receipt(changed["id"], vault_root=vault)
+    assert path.read_bytes() == b"already correct\n"
+
+
+def test_note_undo_primitive_refuses_a_noop_row_itself(tmp_path):
+    """The undo primitive refuses a no-op row, not only its caller.
+
+    The no-op row carries the note's own text as both images, so it passes
+    every image and revision check inside the undo primitive, and the reverse
+    write puts the file's current bytes back over themselves — a locked,
+    journaled, recoverable write of nothing, plus a ``note_undo`` row recording
+    it. Only ``undo_receipt`` asked ``is_undoable`` first, so a direct call to
+    the primitive could reverse a write that changed nothing. The refusal
+    belongs at the boundary, not to one caller.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "already correct\n")
+    noop = _apply(vault, after="already correct\n")
+    journal = _journal(vault)
+
+    with pytest.raises(mr.UndoUnsupported):
+        nr.undo_note_receipt(
+            noop, journal, vault_root=vault, actor="operator", source="pwa"
+        )
+
+    # Refused before the reverse write: the note is untouched, no `note_undo`
+    # row was journaled, and there is nothing half-done to settle.
+    assert path.read_bytes() == b"already correct\n"
+    assert [row["kind"] for row in _rows(vault)] == ["note_apply"]
+    assert mr.find_receipt(journal, noop["id"])["status"] == mr.APPLIED
+    assert mr.recover_pending(journal=journal).reconciled == []
+
+    # Either flag alone is enough, so a row carrying only the other spelling of
+    # "this changed nothing" is refused just the same.
+    for flag in ("undoable", "changed"):
+        with pytest.raises(mr.UndoUnsupported):
+            nr.undo_note_receipt(
+                {**noop, flag: True},
+                journal,
+                vault_root=vault,
+                actor="operator",
+                source="pwa",
+            )
+    assert path.read_bytes() == b"already correct\n"
+
+
 def test_note_revision_conflict_preserves_external_edit(tmp_path):
     """A stale expectation refuses; the hand edit that made it stale survives."""
     vault = _vault(tmp_path)
@@ -276,6 +366,205 @@ def test_note_target_confinement(tmp_path, relative_path, why):
     assert (vault / NOTE).read_bytes() == inside_before
     assert secret.read_bytes() == secret_before, f"nothing may be written for {why}"
     assert _rows(vault) == []
+
+
+def _case_insensitive_filesystem(tmp_path: Path) -> bool:
+    """Whether this tmp filesystem resolves two spellings of one name together.
+
+    Probed rather than assumed: the same suite runs on a case-sensitive CI
+    filesystem, where the two spellings really are two paths and there is
+    nothing to canonicalize.
+    """
+    probe = tmp_path / "CaseProbe"
+    probe.write_text("x", encoding="utf-8")
+    return (tmp_path / "caseprobe").exists()
+
+
+def test_note_both_spellings_of_a_name_are_one_file_one_lock(tmp_path):
+    """`Notes/A.md` and `notes/a.md` are one note, so they are one lock.
+
+    On a case-insensitive filesystem both spellings open the same file while the
+    two *strings* stay different, and the per-file lock is keyed on the resolved
+    path string. Two writers naming the note differently therefore took two
+    locks, both read the same bytes, both compared equal to the same expected
+    revision, and both landed — one write silently discarded, and two
+    ``relative_path`` spellings in history for one file. Resolving the name from
+    the directory listing fixes the lock key and the recorded path at once.
+    """
+    if not _case_insensitive_filesystem(tmp_path):
+        pytest.skip("a case-sensitive filesystem has two genuinely different names")
+    vault = _vault(tmp_path)
+    # A directory the fixture does not already create, so the on-disk spelling
+    # here is the one this test writes.
+    path = _write(vault, "Topics/Alpha.md", "base\n")
+    root = nr.canonical_vault(vault)
+
+    canonical = nr.resolve_note_path(vault, "Topics/Alpha.md")
+    other = nr.resolve_note_path(vault, "topics/alpha.md")
+
+    assert canonical == root / "Topics" / "Alpha.md"
+    assert other == canonical, "both spellings must name one file"
+    assert other.relative_to(root).as_posix() == "Topics/Alpha.md"
+    # The lock is keyed on this string, so this is the whole of the fix.
+    assert str(canonical.resolve()) == str(other.resolve())
+
+    # One stored spelling in history, whichever the caller used.
+    first = _apply(vault, after="one\n", relative="Topics/Alpha.md")
+    second = _apply(vault, after="two\n", relative="topics/alpha.md")
+    assert first["relative_path"] == second["relative_path"] == "Topics/Alpha.md"
+    assert {row["relative_path"] for row in _rows(vault)} == {"Topics/Alpha.md"}
+
+    # And one lock, proven the only way it shows: two writers, one expected
+    # revision, two spellings. Exactly one may land.
+    path.write_bytes(b"base\n")
+    expected = _revision(path)
+    barrier = threading.Barrier(2)
+    outcomes: dict[str, str] = {}
+
+    def writer(name: str, relative: str, text: str) -> None:
+        barrier.wait()
+        try:
+            _apply(vault, after=text, expected=expected, relative=relative)
+        except mr.RevisionConflict:
+            outcomes[name] = "conflict"
+        except Exception as exc:  # noqa: BLE001 — surfaced by the assertion below
+            outcomes[name] = f"unexpected: {exc!r}"
+        else:
+            outcomes[name] = "applied"
+
+    threads = [
+        threading.Thread(target=writer, args=("upper", "Topics/Alpha.md", "upper\n")),
+        threading.Thread(target=writer, args=("lower", "topics/alpha.md", "lower\n")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+
+    assert sorted(outcomes.values()) == ["applied", "conflict"], outcomes
+    assert path.read_bytes().decode("utf-8") in {"upper\n", "lower\n"}
+    assert {row["relative_path"] for row in _rows(vault)} == {"Topics/Alpha.md"}
+
+
+def test_note_refuses_a_name_two_files_claim(tmp_path):
+    """A name no on-disk entry answers to is not a name to write through.
+
+    ``Topics/Alpha.md`` and ``Topics/alpha.md`` both exist and the caller asks
+    for ``Topics/ALPHA.md``, a third spelling that is neither. The walk only
+    canonicalizes a name the filesystem itself resolved, so a spelling that
+    names nothing is refused as the missing note it is. Picking one of the two
+    would be a coin flip the caller cannot see, and a write to a file they never
+    named is worse than a refusal.
+    """
+    if _case_insensitive_filesystem(tmp_path):
+        pytest.skip("a case-insensitive filesystem cannot hold both spellings")
+    vault = _vault(tmp_path)
+    upper = _write(vault, "Topics/Alpha.md", "the upper one\n")
+    lower = _write(vault, "Topics/alpha.md", "the lower one\n")
+
+    with pytest.raises(nr.NoteTargetRefused, match="no such note"):
+        nr.resolve_note_path(vault, "Topics/ALPHA.md")
+
+    # The exact spellings are still fine — one of them is what the caller named
+    # — and neither file was redirected onto the other.
+    assert nr.resolve_note_path(vault, "Topics/Alpha.md") == upper
+    assert nr.resolve_note_path(vault, "Topics/alpha.md") == lower
+    assert upper.read_bytes() == b"the upper one\n"
+    assert lower.read_bytes() == b"the lower one\n"
+
+
+def test_note_refuses_a_spelling_the_filesystem_does_not_resolve(tmp_path):
+    """A case-folded match must not stand in for a name that is not there.
+
+    ``Notes/Alpha.md`` exists and the caller asks for ``notes/alpha.md``. On a
+    case-sensitive filesystem that path is simply not there, and the protocol
+    has to say so: resolving it onto ``Notes/Alpha.md`` answers a question the
+    caller did not ask, and their write lands on a file they never named — the
+    "no such note" refusal simply disappears. So the case-insensitive match
+    runs only where the caller's own spelling resolved, which is the
+    case-insensitive case, and this test is the case-sensitive one. (Where the
+    filesystem resolves both spellings to one file, they are one note: see
+    ``test_note_both_spellings_of_a_name_are_one_file_one_lock``.)
+    """
+    if _case_insensitive_filesystem(tmp_path):
+        pytest.skip("a case-insensitive filesystem resolves both spellings to one file")
+    vault = _vault(tmp_path)
+    path = _write(vault, "Notes/Alpha.md", "the note as it stands\n")
+    before = path.read_bytes()
+
+    # Both components are wrong-cased: the folder and the file.
+    with pytest.raises(nr.NoteTargetRefused, match="no such note"):
+        nr.resolve_note_path(vault, "notes/alpha.md")
+    # Only the file is: the folder resolves, the name under it does not.
+    with pytest.raises(nr.NoteTargetRefused, match="no such note"):
+        nr.resolve_note_path(vault, "Notes/ALPHA.md")
+
+    # The refusal is the whole answer: the file that is there is untouched, and
+    # it is still reachable under the spelling it actually has.
+    assert path.read_bytes() == before
+    assert nr.resolve_note_path(vault, "Notes/Alpha.md") == path
+
+    # And the write path refuses the same way, before the prepared row, so a
+    # caller cannot land a write on a file it spelled differently.
+    with pytest.raises(nr.NoteTargetRefused, match="no such note"):
+        _apply(
+            vault,
+            after="written to a file the caller never named\n",
+            path=path,
+            relative="notes/alpha.md",
+        )
+    assert path.read_bytes() == before
+    assert _rows(vault) == []
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "Workspace/Memory-Proposals.md",
+        "Workspace/Curation-Log.md",
+        "workspace/memory-consolidations.md",
+    ],
+)
+def test_note_target_refuses_vault_bookkeeping(tmp_path, relative_path):
+    """The app's own bookkeeping is written by the pipeline that owns it.
+
+    Every ``.md`` in the vault used to be writable through this protocol,
+    including the proposal queue and the curation logs the memory pipeline
+    maintains with their own atomic writes. A note edit there bypasses every
+    guard those writers rely on, and History would offer an ordinary-looking undo
+    of a file the user never edited. A note that merely *shares* a name outside
+    ``Workspace/`` — and a note at the vault root — stays writable.
+    """
+    vault = _vault(tmp_path)
+    body = "- a queue bullet the pipeline owns\n"
+    target = _write(vault, relative_path, body)
+    root = nr.canonical_vault(vault)
+    _write(vault, NOTE, "inside\n")
+    _write(vault, "projects/acme/workspace/Curation-Log.md", "a real note\n")
+    _write(vault, "Top-Level.md", "a real note at the root\n")
+
+    with pytest.raises(nr.NoteTargetRefused):
+        nr.resolve_note_path(vault, relative_path)
+
+    # The write path refuses before a byte is read, and journals nothing.
+    with pytest.raises(nr.NoteTargetRefused):
+        nr.commit_note_change(
+            vault_root=vault,
+            relative_path=relative_path,
+            expected_revision=mr.content_revision(body),
+            after_text="overwritten\n",
+            actor="agent",
+            source="cli",
+        )
+    assert target.read_bytes() == body.encode("utf-8")
+    assert _rows(vault) == []
+
+    # Everything else in the vault is still writable, including the same
+    # filename one directory away from where the app writes it.
+    for allowed in (NOTE, "projects/acme/workspace/Curation-Log.md", "Top-Level.md"):
+        assert nr.resolve_note_path(vault, allowed).is_file()
+    assert nr.resolve_note_path(vault, NOTE).relative_to(root).as_posix() == NOTE
 
 
 def test_note_forged_receipt_target_is_refused(tmp_path):
@@ -561,6 +850,105 @@ def test_note_undo_refuses_later_edit(tmp_path):
     assert mr.is_undoable(mr.find_receipt(_journal(vault), third["id"]) or {})
     mr.undo_receipt(third["id"], vault_root=vault)
     assert path.read_bytes() == b"second\n"
+
+
+def test_note_undo_that_cannot_settle_reports_that_it_landed(tmp_path, monkeypatch):
+    """The reverse write is done; losing the settlement row is not a failed undo.
+
+    An undo writes the note back and *then* marks the original ``undone``. When
+    that final append fails the note is already restored and the reverse write
+    is already journaled in full, so a raw ``OSError`` told the caller the undo
+    had failed — and the retry it invites cannot succeed: the note no longer
+    matches the after image, so the second attempt is a revision conflict raised
+    against a note that is already exactly where the user asked for it.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "first\n")
+    receipt = _apply(vault, after="second\n")
+    journal = _journal(vault)
+    real_append = mr._append
+
+    def flaky(journal_path: Path, payload: dict[str, Any]) -> None:
+        if str(payload.get("status")) == mr.UNDONE:
+            raise OSError("journal momentarily unwritable")
+        real_append(journal_path, payload)
+
+    monkeypatch.setattr(mr, "_append", flaky)
+    with pytest.raises(mr.MemoryReceiptError) as failure:
+        mr.undo_receipt(receipt["id"], vault_root=vault)
+    monkeypatch.undo()
+
+    assert not isinstance(failure.value, OSError), "a raw write error escaped"
+    message = str(failure.value)
+    assert "the undo landed" in message
+    assert "unwritable" in message, "the underlying write error belongs there too"
+
+    # The note is restored and the reverse write is journaled; only the
+    # original's own settlement is missing, so history still offers an undo that
+    # can only fail.
+    assert path.read_bytes() == b"first\n"
+    assert (mr.find_receipt(journal, receipt["id"]) or {})["status"] == mr.APPLIED
+    reverse = [row for row in _rows(vault) if row["kind"] == "note_undo"]
+    assert len(reverse) == 1 and reverse[0]["status"] == mr.APPLIED
+
+    # Which is what the next recovery pass is for: it settles the original from
+    # the reverse row, and does not replay a write that already landed.
+    result = mr.recover_pending(journal=journal)
+    assert [row["id"] for row in result.reconciled] == [receipt["id"]]
+    settled = mr.find_receipt(journal, receipt["id"])
+    assert settled is not None and settled["status"] == mr.UNDONE
+    assert settled["undo_receipt"] == reverse[0]["id"]
+    assert path.read_bytes() == b"first\n"
+    assert mr.recover_pending(journal=journal).reconciled == []
+
+
+def test_note_undo_refuses_a_before_image_that_does_not_hash_to_its_revision(tmp_path):
+    """The reverse write replaces the note with the row's own before image.
+
+    The revision guard proves the note still holds this operation's *after* image
+    and says nothing at all about the image being written back, so a journal row
+    that was edited, truncated or forged in place passes every other check and
+    installs content the receipt never recorded. The image must still hash to
+    the ``before_revision`` the row carries, or there is nothing trustworthy to
+    restore and the note stays as it stands.
+    """
+    vault = _vault(tmp_path)
+    path = _write(vault, NOTE, "first\n")
+    receipt = _apply(vault, after="second\n")
+    journal = _journal(vault)
+    # The fold takes an id's last row, so this doctored row is the receipt undo
+    # reads: the revisions still describe the real write, the image does not.
+    mr._append(
+        journal,
+        {**receipt, "before_text": "an unrelated body\n", "status": mr.APPLIED},
+    )
+    tampered = mr.find_receipt(journal, receipt["id"])
+    assert tampered is not None
+    assert tampered["before_revision"] == receipt["before_revision"]
+    assert mr.is_undoable(tampered), "the row is still offered an undo"
+
+    with pytest.raises(mr.UndoUnsupported):
+        mr.undo_receipt(receipt["id"], vault_root=vault)
+
+    # Refused before the reverse write: the note is untouched and no `note_undo`
+    # row was journaled, so nothing is left half-done.
+    assert path.read_bytes() == b"second\n"
+    assert [row["kind"] for row in _rows(vault)] == ["note_apply"]
+    assert mr.find_receipt(journal, receipt["id"])["status"] == mr.APPLIED
+
+    # A missing image is refused the same way — which also means the hash check
+    # above it must never be handed a non-string — and an intact one reverses.
+    mr._append(journal, {**tampered, "before_text": None, "status": mr.APPLIED})
+    missing = mr.find_receipt(journal, receipt["id"])
+    assert missing is not None and missing["before_text"] is None
+    with pytest.raises(mr.UndoUnsupported):
+        nr.undo_note_receipt(
+            missing, journal, vault_root=vault, actor="operator", source="pwa"
+        )
+    assert path.read_bytes() == b"second\n"
+    mr._append(journal, receipt)
+    mr.undo_receipt(receipt["id"], vault_root=vault)
+    assert path.read_bytes() == b"first\n"
 
 
 def test_note_concurrent_writers_have_one_winner(tmp_path):

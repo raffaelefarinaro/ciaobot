@@ -52,6 +52,7 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -398,6 +399,23 @@ def journal_writable(journal: Path) -> bool:
         return False
 
 
+def _open_private(path: Path, *, flags: int, mode: int = 0o600) -> int:
+    """Open *path* for append/create, 0600 when this call has to create it.
+
+    `os.open`'s mode applies only to a file it actually creates, and it is
+    masked by the umask, which is exactly the behaviour wanted here: a journal,
+    its lock and the trim temp all hold the note bodies receipts image, so a new
+    one must not appear group- or world-readable under a permissive umask — and
+    an *existing* file keeps whatever mode its owner chose rather than being
+    silently re-chmod'ed by a background append.
+
+    Previously these were opened with `Path.open("a")`, which creates 0666
+    minus the umask: a 0600 note's own before/after images ended up readable by
+    every local account on the machine.
+    """
+    return os.open(path, flags | os.O_CREAT, mode)
+
+
 def _append(journal: Path, payload: dict[str, Any]) -> None:
     """Append one receipt row, serialized across processes and fsynced."""
     journal.parent.mkdir(parents=True, exist_ok=True)
@@ -408,11 +426,13 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
         import fcntl
     except ImportError:  # pragma: no cover - non-POSIX
         fcntl = None  # type: ignore[assignment]
-    handle = lock.open("a+", encoding="utf-8")
+    lock_fd = _open_private(lock, flags=os.O_RDWR | os.O_APPEND)
+    handle = os.fdopen(lock_fd, "a+", encoding="utf-8")
     try:
         if fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        with journal.open("a", encoding="utf-8") as f:
+        journal_fd = _open_private(journal, flags=os.O_WRONLY | os.O_APPEND)
+        with os.fdopen(journal_fd, "a", encoding="utf-8") as f:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
@@ -479,11 +499,77 @@ def _trim_if_large(journal: Path) -> None:
         }
         if dropped_ids & pending_ids:
             return
+        # Byte-aware, after the row-count cut: `KEEP_LINES` is a budget of rows,
+        # not of bytes, and a row can carry a whole note's before *and* after
+        # image. A handful of big receipts therefore kept the journal far above
+        # `MAX_BYTES` — the size this function is called to bound — and every
+        # later append re-ran the whole read-and-rewrite over the same
+        # over-long file. Whole rows are dropped from the front until what is
+        # left serializes within the cap.
+        #
+        # Whole rows, and never a pending one. The head of the list is the only
+        # candidate, and dropping from the front can only pass over it, so an
+        # unresolved receipt either keeps everything after it or stops the trim
+        # entirely. The newest row is never dropped either: a journal is kept
+        # because it records something.
+        #
+        # Sizes are computed once and subtracted as the head advances, and the
+        # rows are serialized once at the end. Re-joining and re-encoding the
+        # whole remainder per popped row was quadratic — thousands of rows each
+        # rebuilding megabytes under the journal lock, on the append path of
+        # every write. `len(line) + 1` is the row plus the newline that follows
+        # it, which is one byte more than the joined file can ever be, so the
+        # budget below is an upper bound and the cap still holds.
+        sizes = [len(line.encode("utf-8")) + 1 for line in kept]
+        total = sum(sizes)
+        head = 0
+        while head < len(kept) - 1 and total > MAX_BYTES:
+            first = _safe_row(kept[head]) or {}
+            if str(first.get("id", "")) in pending_ids:
+                break
+            total -= sizes[head]
+            head += 1
+        payload = _serialize_rows(kept[head:])
         tmp = journal.with_name(f".{journal.name}.trim.tmp")
-        tmp.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
+        # The temp holds the whole retained journal, note bodies included, so it
+        # is created 0600 — carrying the journal's own mode when there is one, so
+        # the `os.replace` never silently re-modes a file its owner set a mode
+        # on. `os.open`'s mode applies only to the file it creates, so a temp
+        # left behind by a trim that died mid-write is removed first rather
+        # than reused under whatever mode it happened to get, and `O_EXCL` with
+        # it means the open can only ever create: a temp that appeared in the
+        # window between the unlink and the open — or a link planted in its
+        # place — fails the open instead of being written through, and the
+        # best-effort trim is skipped rather than following a link out of the
+        # vault with the whole journal in its hands.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        try:
+            mode = stat.S_IMODE(journal.stat().st_mode)
+        except OSError:
+            mode = 0o600
+        tmp_fd = _open_private(
+            tmp, flags=os.O_WRONLY | os.O_EXCL | os.O_NOFOLLOW, mode=mode
+        )
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, journal)
     except Exception:  # noqa: BLE001 — trimming is best-effort
         logger.debug("memory receipts: trim failed", exc_info=True)
+
+
+def _serialize_rows(lines: list[str]) -> str:
+    """The exact bytes one journal is written as, from its lines.
+
+    Split and joined in the same place, on ``"\\n"`` only (see `_trim_if_large`
+    for why never `splitlines()`), so the size the trim measures is the size the
+    file will have.
+    """
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _safe_row(line: str) -> dict[str, Any] | None:
