@@ -195,6 +195,13 @@ class ReviewCandidate:
         # disagree, and the failure is a Complete button the engine then
         # refuses — the worst kind, because the row still looks actionable.
         payload["completable"] = _is_completable(self)
+        # Whether that completion takes a whole project folder with it. A bool
+        # beside `completable` and never a path, for the reason `vault_root` is
+        # dropped above: a row that dragged its folder says so, and a client
+        # that re-derived the layout from the path would put a second
+        # definition of "is this a folder project" next to the one that decides
+        # what the move does.
+        payload["completion_moves_folder"] = _completion_moves_folder(self)
         return payload
 
 
@@ -750,6 +757,31 @@ def _is_completable(candidate: ReviewCandidate) -> bool:
         return False
     move_to = _completion_move_to(candidate.vault_root, candidate.path, completed_path)
     return move_to is not None and not move_to.exists()
+
+
+def _completion_moves_folder(candidate: ReviewCandidate) -> bool:
+    """Whether completing this candidate moves a project FOLDER, not just the note.
+
+    The button on a completable row says "Complete" either way, but the two
+    moves are not the same act: a folder project's plan, meeting notes and
+    attachments travel with it, while a flat ``projects/<name>.md`` is the
+    whole project and moves alone. The panel has to be able to say which,
+    because it is the difference between closing one file and closing a
+    directory.
+
+    Gated on ``_is_completable`` for the same reason the flag beside it is: a
+    row whose Complete would be refused must not also describe what the
+    refused move would have done.
+
+    ``_project_folder`` answers the question on its own and is the helper
+    ``complete_project_note`` moves on — it returns a directory holding the
+    note, never the note itself, and ``""`` for the flat form, which is exactly
+    "this candidate drags nothing but itself".
+    """
+    if not _is_completable(candidate):
+        return False
+    folder = _project_folder(candidate.path)
+    return bool(folder) and folder != candidate.path
 
 
 def _record_vanished(

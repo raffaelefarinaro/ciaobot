@@ -133,7 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_parser("list")
     show = review.add_parser("show")
     show.add_argument("path")
-    for verb in ("keep", "trash", "restore", "delete"):
+    # `restore-completed` is hyphenated like the rest of the verb surface; the
+    # action it maps to is the review module's own `restore_completed`.
+    for verb in ("keep", "trash", "restore", "complete", "restore-completed", "delete"):
         sub = review.add_parser(verb)
         sub.add_argument("--candidate", required=True)
         if verb == "delete":
@@ -324,7 +326,13 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             return "vault_review", {"action": "decide", "candidate_id": args.candidate, "disposition": "keep"}
         if action == "delete":
             return "vault_review", {"action": "delete", "candidate_id": args.candidate, "confirm": args.confirm}
-        return "vault_review", {"action": action, "candidate_id": args.candidate}
+        # Every remaining verb is its own action, and one is not spelled the same
+        # way: the CLI surface is hyphenated (`restore-completed`) while the
+        # review module's action is `restore_completed`. The verb stays as typed
+        # in `args.action`, so the translation belongs here rather than in the
+        # parser.
+        wire = "restore_completed" if action == "restore-completed" else action
+        return "vault_review", {"action": wire, "candidate_id": args.candidate}
     if noun == "file":
         return "file_surface", {"path": args.path}
     if noun == "chat":
