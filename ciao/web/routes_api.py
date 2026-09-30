@@ -7481,11 +7481,22 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 # before the bullet goes. A refusal that could not be written
                 # aborts the batch whole rather than half-resolving it.
                 for row in entry["rows"]:
-                    if row.get("kind") != "category":
+                    if row.get("kind") not in {"category", "note_edit"}:
                         continue
-                    refusal = await asyncio.to_thread(
-                        proposal_service.decline_category_row, config, row
-                    )
+                    if row["kind"] == "category":
+                        refusal = await asyncio.to_thread(
+                            proposal_service.decline_category_row, config, row
+                        )
+                    else:
+                        # A settled note edit, not a permanent one: the check's
+                        # cooldown is what holds the note, and it expires. See
+                        # `ciao.note_edit_proposals.settle_note_edit`.
+                        refusal = await asyncio.to_thread(
+                            proposal_service._settle_note_edit,
+                            config,
+                            row,
+                            accepted=False,
+                        )
                     if refusal:
                         return JSONResponse(
                             {
@@ -7561,6 +7572,17 @@ async def proposals_batch(request: Request) -> JSONResponse:
                             promotion = proposal_service._accept_category_row(config, row)
                         except entity_types.EntityTypeFileError as exc:
                             promotion = proposal_service.AcceptOutcome(ok=False, error=str(exc))
+                    elif accept.action == "note_edit":
+                        # An explicit branch, not a fall-through: this accept
+                        # rewrites one note through the revision-checked
+                        # note-receipt transaction (or trashes it), so a row it
+                        # cannot perform has to say so. Left to the branch below
+                        # it reported "no destination yet", which is the
+                        # `[review]` answer and describes nothing about a
+                        # proposal whose destination is the note the row names.
+                        promotion = await asyncio.to_thread(
+                            proposal_service._accept_note_edit_row, config, row
+                        )
                     else:
                         # route_manually: nothing to perform, and the row stays.
                         promotion = proposal_service.AcceptOutcome(
@@ -7861,6 +7883,19 @@ async def proposal_action(request: Request) -> JSONResponse:
         if decline_error:
             return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
 
+    if action == "dismiss" and row.get("kind") == "note_edit":
+        # The same rule, and for the same reason: the queue row IS the proposal,
+        # so the settlement has to be on record before the bullet goes. Without
+        # it the check would keep holding the note for a month with nothing in
+        # the queue to settle, and the sidecar would still read as pending. It is
+        # NOT a permanent refusal, though — the settled record leaves the check's
+        # own cooldown running, so an edited note is proposed again.
+        decline_error = await asyncio.to_thread(
+            proposal_service._settle_note_edit, config, row, accepted=False
+        )
+        if decline_error:
+            return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
+
     if ctx.get("file"):
         # A whole file, not a bullet in a queue: the line-removal path below
         # would read it and delete line -1 of it.
@@ -8075,6 +8110,25 @@ async def proposal_action(request: Request) -> JSONResponse:
                         {
                             "error": promoted.error or "could not add the category",
                             "id": pid,
+                        },
+                        status_code=409,
+                    )
+            elif accept.action == "note_edit":
+                # Off the event loop: the accept reads a note, takes the
+                # per-file receipt lock and, for a retirement, moves the file
+                # and appends the review ledger — several hundred file reads
+                # inside one request on a large vault. A conflict is a 409 with
+                # the row untouched, so the owner can re-read the note the
+                # preview now names and decide again.
+                promoted = await asyncio.to_thread(
+                    proposal_service._accept_note_edit_row, config, promote_row
+                )
+                if not promoted.ok:
+                    return JSONResponse(
+                        {
+                            "error": promoted.error or "could not apply the note edit",
+                            "id": pid,
+                            "conflict": bool(promoted.conflict),
                         },
                         status_code=409,
                     )

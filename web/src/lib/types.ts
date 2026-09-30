@@ -1075,6 +1075,24 @@ export interface ProposalRow {
   leak_warning?: boolean
   rehome?: RehomeSignal
   target?: string
+  /** A `note_edit` row: a note verification the autonomy rule would not apply,
+   * queued for a person to decide. `target` is the note it is about (the queue
+   * bullet's own payload is a sidecar id), and this is what the accept needs
+   * beyond it — the operation, and whether the accept can do what a button
+   * saying so would claim. */
+  note_edit?: {
+    id: string
+    /** `replace` | `restamp` | `retire`. */
+    operation: string
+    /** The verification outcome this was filed from. */
+    outcome: string
+    /** When it was decided, or empty while it is still queued. */
+    settled: string
+    /** The note receipt the accept's write handed back. */
+    receipt_id: string
+    can_accept: boolean
+    reason: string
+  }
   /** A `skill` row: the versioned record the queue owns, not a bullet.
    *
    * `chat_id` is the server's own record of which chat is implementing it and
@@ -1255,8 +1273,11 @@ export interface ProposalPreview {
   action?: string
   /** What the accept does to one destination. `add_category` is its own value
    * because it writes no file body: it appends a category to the registry and
-   * retypes the notes the proposal was filed with, moving nothing. */
-  operation: 'add' | 'update' | 'move' | 'add_category' | 'none' | ''
+   * retypes the notes the proposal was filed with, moving nothing.
+   * `note_edit` rewrites a whole vault note from the verification's exact
+   * replacement, and `retire_note` is the one operation that removes it — it
+   * moves the note to the reversible review trash and writes no body at all. */
+  operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | ''
   destination: string
   destination_path: string
   revision: string

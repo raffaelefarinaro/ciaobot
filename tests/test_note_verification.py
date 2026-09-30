@@ -787,7 +787,7 @@ def test_a_pending_proposal_suppresses_beyond_the_cooldown(tmp_path: Path) -> No
         vault,
         revision=revision,
         retry_after=TODAY + timedelta(days=30),
-        proposal_id="note_edit_7",  # set by #726-C, the proposal writer
+        proposal_id="note_edit_7",  # what #726-C's proposer writes
     )
 
     # The proposal is waiting to be settled, so the note is not asked about
@@ -795,6 +795,78 @@ def test_a_pending_proposal_suppresses_beyond_the_cooldown(tmp_path: Path) -> No
     assert not nv.should_check(vault, NOTE, revision, today=later)
     # And it is still only about this revision.
     assert nv.should_check(vault, NOTE, "e" * 64, today=later)
+
+
+def test_a_filed_proposal_is_what_suppresses_beyond_the_cooldown(
+    tmp_path: Path,
+) -> None:
+    """The same suppression, through the real filing path.
+
+    The test above writes the `proposal_id` a proposer would write. This one
+    files the proposal, so the whole chain is pinned: the check the verification
+    recorded, the check the filing replaced with one naming the queue row, and
+    the suppression that row buys — and its release again when the row is
+    settled, so the note is not suppressed by a proposal that is no longer there.
+    """
+    from ciao import note_edit_proposals as nep
+
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    note = _write(vault, NOTE, PLAIN)
+    revision = _revision(note)
+    later = TODAY + timedelta(days=365)
+
+    # What the verifier recorded: a verdict, with nothing waiting on it yet, so
+    # the note is still due.
+    result = _verify(
+        vault,
+        _request(
+            note,
+            outcome=nv.UPDATE,
+            evidence=(UNCITED,),
+            edit=nv.NoteEdit(
+                before=PLAIN, after=PLAIN.replace("third", "fourth")
+            ),
+        ),
+    )
+    assert result.status == nv.NEEDS_REVIEW, result.message
+    assert result.check is not None
+    assert result.check.proposal_id == ""
+    assert nv.should_check(vault, NOTE, revision, today=later), (
+        "an unanswered verdict is not a settled one"
+    )
+
+    proposal = nep.file_note_edit(
+        config,
+        workspace="personal",
+        relative_path=NOTE,
+        expected_revision=revision,
+        operation=nep.REPLACE,
+        before=PLAIN,
+        after=PLAIN.replace("third", "fourth"),
+        outcome=nv.UPDATE,
+        coverage=nv.COVERAGE_COMPLETE,
+        evidence=(UNCITED,),
+        reason=result.check.reason,
+        today=TODAY,
+    )
+
+    filed = _checks(vault)[NOTE]
+    assert filed.proposal_id == proposal.proposal_id != ""
+    assert not nv.should_check(vault, NOTE, revision, today=later), (
+        "a proposal in the queue is the reason not to file a second one"
+    )
+
+    nep.settle_note_edit(config, "personal", proposal.id, accepted=False)
+
+    settled = _checks(vault)[NOTE]
+    assert settled.proposal_id == ""
+    # The cooldown the check carried is what holds the note now, and it expires.
+    assert settled.retry_after == TODAY + timedelta(days=nv.CHECK_COOLDOWN_DAYS)
+    assert not nv.should_check(vault, NOTE, revision, today=TODAY)
+    assert nv.should_check(vault, NOTE, revision, today=later)
+    # And an edited note is due again immediately, whichever side settled it.
+    assert nv.should_check(vault, NOTE, "e" * 64, today=TODAY)
 
 
 def test_the_check_state_is_a_versioned_relative_path_sidecar(

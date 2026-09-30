@@ -282,6 +282,37 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
     discussLabel: () => 'a `learnings` proposal',
   },
 
+  // A note the verification pass could not settle on its own. The accept
+  // rewrites ONE whole note through the revision-checked note-receipt
+  // transaction, or — for a retirement, which is the one operation that removes
+  // something — moves it to the reversible review trash. `target` is that note,
+  // because the row a person reads has to name the file they are being asked
+  // about; the bullet's own payload is a sidecar id, resolved server-side.
+  //
+  // `canAccept` is gated on the server's own `can_accept`, which asks the same
+  // question the accept does: a note that moved since the proposal was filed,
+  // or a re-stamp with no frontmatter to stamp, has a button that could only
+  // ever refuse. A row whose record is missing or unreadable answers false too.
+  //
+  // No merge chat. The replacement text is the verification's exact verdict —
+  // a chat asked to "merge" a whole-note rewrite would have to invent one, and
+  // the accept's two real refusals (a conflict, an unreadable record) are not
+  // things a chat can resolve either.
+  note_edit: {
+    label: 'note edit',
+    destination: (row) => row.target || 'no note named',
+    consequence: (row) => {
+      const operation = row.note_edit?.operation
+      if (operation === 'retire') return 'Moves this note to the review trash, where it can be restored'
+      if (operation === 'restamp') return 'Marks this note as checked again today'
+      if (operation === 'replace') return 'Rewrites this whole note with the verified text'
+      return 'Rewrites this whole note once you have checked the evidence'
+    },
+    canAccept: (row) => row.note_edit?.can_accept !== false,
+    fallback: null,
+    discussLabel: () => 'a note edit a verification could not settle',
+  },
+
   // A review row has no known destination at all, so accepting one would be a
   // guess wearing a button.
   review: {

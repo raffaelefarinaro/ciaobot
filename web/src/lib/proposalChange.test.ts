@@ -79,6 +79,48 @@ describe('changeFor', () => {
     })
   })
 
+  it('reads a whole-note rewrite as its own change, not as a line update', () => {
+    // `update` says "Update a line" and a note edit rewrites the whole note, so
+    // borrowing it would understate the change the operator is approving.
+    const c = changeFor(
+      row({ kind: 'note_edit', target: 'notes/office.md' }),
+      preview({
+        action: 'note_edit', operation: 'note_edit', destination: 'notes/office.md',
+        before: 'third floor', after: 'fourth floor', separator: '\n',
+      }),
+    )
+    expect(c).toMatchObject({
+      type: 'edit', label: 'Update a note', verb: 'Update note',
+      destination: 'notes/office.md', qualifier: 'the whole note; undoable from History',
+    })
+  })
+
+  it('reads a retirement as a reversible move, not a workspace move', () => {
+    // The copy has to carry the two facts that make this safe: it goes to a
+    // trash, and it comes back. `move` says "to the X workspace", which is a
+    // different operation entirely.
+    const c = changeFor(
+      row({ kind: 'note_edit', target: 'notes/office.md' }),
+      preview({
+        action: 'note_edit', operation: 'retire_note', destination: 'notes/office.md',
+        before: 'third floor', after: '', exact: true, separator: '\n',
+      }),
+    )
+    expect(c).toMatchObject({
+      type: 'retire', label: 'Retire a note', verb: 'Retire note',
+      destination: 'notes/office.md',
+      qualifier: 'moved to the review trash, where it can be restored',
+    })
+  })
+
+  it('blocks a note edit the server says cannot be applied', () => {
+    // A note that moved since the proposal was filed, or a re-stamp with no
+    // frontmatter to stamp: the row stays queued and the button is not offered.
+    expect(changeFor(row({ kind: 'note_edit' }), preview({
+      action: 'note_edit', operation: 'note_edit', destination: 'notes/office.md', can_accept: false,
+    }))).toMatchObject({ type: 'blocked', label: 'Cannot save yet', verb: '' })
+  })
+
   it('gives rows with no preview their own types', () => {
     expect(changeFor(row({ kind: 'skill', path: 'Workspace/skill-proposals/x.md' }), undefined).type).toBe('skill')
     expect(changeFor(row({ kind: 'review' }), undefined, { canAccept: false, fallbackQualifier: 'Needs you' }))

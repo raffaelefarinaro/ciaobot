@@ -17,8 +17,16 @@
  *   update     not exact (a model folds it in on accept) merge    Merge into a note
  *   move       —                                         move     Move a note
  *   add_category a new category for a note cluster       category New category
+ *   note_edit  a whole note rewritten by its verification edit     Update a note
+ *   retire_note the note moved to the review trash       retire   Retire a note
  *   none       can_accept                                none     Already saved
  *   none / ''  cannot be accepted as it stands           blocked  Cannot save yet
+ *
+ * `note_edit` and `retire_note` are separate types, and not `update`/`move`,
+ * because both of those borrowed words mean something narrower here: this is the
+ * WHOLE note, not a line, and a retirement is a move to a trash somebody can
+ * restore from, not a move between workspaces. A row whose accept would rewrite
+ * a note must not read as a region edit.
  *
  * Rows that never get a preview have their own types: a skill proposal is
  * built in a chat (`skill`), a row with nowhere to go yet needs a decision
@@ -29,8 +37,8 @@
 import type { ProposalPreview, ProposalRow } from './types'
 
 export type ProposalChangeType =
-  | 'new' | 'add' | 'update' | 'merge' | 'move' | 'category' | 'none' | 'blocked'
-  | 'skill' | 'decide' | 'pending'
+  | 'new' | 'add' | 'update' | 'merge' | 'move' | 'category' | 'edit' | 'retire'
+  | 'none' | 'blocked' | 'skill' | 'decide' | 'pending'
 
 export interface ProposalChange {
   type: ProposalChangeType
@@ -53,6 +61,8 @@ export const CHANGE_FILTERS: { type: ProposalChangeType; label: string }[] = [
   { type: 'update', label: 'Update a line' },
   { type: 'move', label: 'Move' },
   { type: 'category', label: 'New category' },
+  { type: 'edit', label: 'Update a note' },
+  { type: 'retire', label: 'Retire a note' },
   { type: 'none', label: 'Already saved' },
   { type: 'blocked', label: 'Cannot save yet' },
   { type: 'skill', label: 'Skill' },
@@ -169,6 +179,30 @@ export function changeFor(
       verb: 'Add category',
       destination,
       qualifier: 'retypes the notes it came from',
+    }
+  }
+  if (op === 'note_edit') {
+    // A whole note, rewritten from the verification's exact replacement — so the
+    // qualifier carries the two facts the verb does not: the change is the whole
+    // file rather than an entry in it, and it is reversible.
+    return {
+      type: 'edit',
+      label: 'Update a note',
+      verb: 'Update note',
+      destination,
+      qualifier: 'the whole note; undoable from History',
+    }
+  }
+  if (op === 'retire_note') {
+    // A retirement is the one accept that removes something, so the copy says
+    // the two things that make it safe: it is a move into a trash, and it can
+    // be put back.
+    return {
+      type: 'retire',
+      label: 'Retire a note',
+      verb: 'Retire note',
+      destination,
+      qualifier: 'moved to the review trash, where it can be restored',
     }
   }
   if (op === 'none') {

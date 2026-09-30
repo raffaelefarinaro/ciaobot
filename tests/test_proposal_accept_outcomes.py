@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from ciao import memory_proposals, memory_tool, project_doc_update
+from ciao import memory_proposals, memory_receipts as mr, memory_tool, project_doc_update
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web import proposal_service
 from ciao.web.proposal_service import AcceptOutcome
@@ -61,6 +61,15 @@ EXPECTED_KEYS: dict[str, list[str]] = {
     "project_folded": ["destination", "ok"],
     "project_no_changes": ["error", "ok"],
     "project_fold_raised": ["error", "ok"],
+    "note_edit_no_sidecar": ["error", "ok"],
+    "note_edit_vault_refused": ["error", "ok"],
+    "note_edit_conflict": ["conflict", "destination", "error", "ok"],
+    "note_edit_no_frontmatter": ["destination", "error", "ok"],
+    "note_edit_unreadable": ["destination", "error", "ok"],
+    "note_edit_replaced": ["destination", "ok", "receipt_id"],
+    "note_edit_written_raised": ["destination", "error", "ok", "receipt_id"],
+    "note_edit_trashed": ["destination", "ok"],
+    "note_edit_trash_raised": ["error", "ok"],
 }
 
 ROW = {"id": "p1", "workspace": "personal", "kind": "memory", "text": "a fact"}
@@ -369,6 +378,255 @@ def test_project_keys(tmp_path, monkeypatch):
     _assert_keys("project_no_changes", run(proposal_service._accept_project_row(config, row)))
     monkeypatch.setattr(project_doc_update, "update_project_doc", boom)
     _assert_keys("project_fold_raised", run(proposal_service._accept_project_row(config, row)))
+
+
+# ---- note_edit: a whole-note write, and an attended retirement --------------
+
+
+NOTE = "notes/office.md"
+
+PLAIN = (
+    "---\ntype: note\nupdated: 2024-01-05\n---\n\n"
+    "# Office\n\nThe office is on Via Verdi 12, third floor.\n"
+)
+FOURTH = PLAIN.replace("third", "fourth")
+NO_FRONTMATTER = "# Office\n\nThe office is on Via Verdi 12, third floor.\n"
+
+
+def _note_edit_fixture(
+    config: CiaoConfig, tmp_path: Path, **over: Any
+) -> tuple[Path, Any, dict[str, Any]]:
+    """A filed `note_edit` row against a note on disk, plus the note itself.
+
+    Filed through the proposer rather than hand-written, so the row's
+    ``note_edit.id`` is the id the accept resolves and the whole test is the real
+    path from a `needs_review` verdict to a click.
+    """
+    from ciao import note_edit_proposals as nep
+    from ciao import note_verification as nv
+
+    vault = Path(config.workspace_vault_root("personal"))
+    note = vault / NOTE
+    note.parent.mkdir(parents=True, exist_ok=True)
+    before_text = str(over.get("before", PLAIN))
+    note.write_bytes(before_text.encode("utf-8"))
+    fields: dict[str, Any] = {
+        "workspace": "personal",
+        "relative_path": NOTE,
+        "expected_revision": mr.content_revision(before_text),
+        "operation": nep.REPLACE,
+        "before": PLAIN,
+        "after": FOURTH,
+        "outcome": nv.UPDATE,
+        "coverage": nv.COVERAGE_COMPLETE,
+        "evidence": (),
+        "reason": "the third floor no longer exists",
+    }
+    fields.update(over)
+    proposal = nep.file_note_edit(config, **fields)
+    row = {**ROW, "kind": "note_edit", "note_edit": {"id": proposal.id}}
+    return vault, proposal, row
+
+
+def test_note_edit_keys(tmp_path: Path) -> None:
+    """Every accept outcome the `note_edit` handler can produce.
+
+    The refusals that carry a `destination` are the ones worth naming: they say
+    WHICH note could not be written, which is the whole of what a person needs
+    to go and look at the note themselves.
+    """
+    from ciao import note_edit_proposals as nep
+
+    config = _config(tmp_path)
+    # No sidecar at all: the row is a bullet whose record is gone.
+    _assert_keys(
+        "note_edit_no_sidecar",
+        proposal_service._accept_note_edit_row(
+            config, {**ROW, "kind": "note_edit", "note_edit": {"id": "0" * 16}}
+        ),
+    )
+    _assert_keys(
+        "note_edit_no_sidecar",
+        proposal_service._accept_note_edit_row(
+            config, {**ROW, "kind": "note_edit", "note_edit": {"id": ""}}
+        ),
+    )
+
+    vault, _proposal, row = _note_edit_fixture(config, tmp_path)
+    # A note the record does not describe any more: a conflict, never an
+    # overwrite. The note is byte-identical afterwards.
+    (vault / NOTE).write_bytes(FOURTH.encode("utf-8"))
+    payload = _assert_keys(
+        "note_edit_conflict",
+        proposal_service._accept_note_edit_row(config, row),
+    )
+    assert payload["destination"] == NOTE
+    assert (vault / NOTE).read_bytes() == FOURTH.encode("utf-8")
+
+    # A re-stamp of a note with no frontmatter to stamp: the same refusal, and
+    # for the same reason — adding the key would restructure a file that was
+    # only asked to be verified.
+    vault, _proposal, row = _note_edit_fixture(
+        config,
+        tmp_path / "no-frontmatter",
+        operation=nep.RESTAMP,
+        outcome="still_valid",
+        before=NO_FRONTMATTER,
+        after="",
+    )
+    payload = _assert_keys(
+        "note_edit_no_frontmatter",
+        proposal_service._accept_note_edit_row(config, row),
+    )
+    assert payload["destination"] == NOTE
+
+    # A note that is not there at all.
+    vault, _proposal, row = _note_edit_fixture(
+        config, tmp_path / "unreadable"
+    )
+    (vault / NOTE).unlink()
+    _assert_keys(
+        "note_edit_unreadable", proposal_service._accept_note_edit_row(config, row)
+    )
+
+    # A config that cannot say where the workspace's notes live. Refused rather
+    # than written somewhere a caller chose.
+    _vault, _proposal, row = _note_edit_fixture(
+        config, tmp_path / "no-vault"
+    )
+
+    class _NoVault:
+        def workspace_vault_root(self, _name: str) -> Path:
+            raise ValueError("this workspace has no vault")
+
+    payload = _assert_keys(
+        "note_edit_vault_refused",
+        proposal_service._accept_note_edit_row(_NoVault(), row),
+    )
+    assert "workspace 'personal'" in payload["error"]
+
+    vault, proposal, row = _note_edit_fixture(config, tmp_path / "written")
+    payload = _assert_keys(
+        "note_edit_replaced", proposal_service._accept_note_edit_row(config, row)
+    )
+    assert payload["destination"] == NOTE
+    assert payload["receipt_id"], "an applied edit must name its receipt"
+    assert (vault / NOTE).read_bytes() == FOURTH.encode("utf-8")
+    assert mr.read_receipts(mr.journal_path(vault, None)), "journaled and undoable"
+    settled = nep.read_sidecar(config, "personal", proposal.id)
+    assert settled is not None and settled.settled != ""
+    assert settled.accepted is True
+    assert settled.receipt_id == payload["receipt_id"]
+
+    # A write that lands and then cannot be recorded as settled is reported as
+    # what it is: the note really was written, with the receipt to prove it, and
+    # a row to dismiss by hand. Never as a failed accept.
+    vault, _proposal, row = _note_edit_fixture(config, tmp_path / "unsettleable")
+    monkey = proposal_service._settle_note_edit
+    try:
+        proposal_service._settle_note_edit = (  # type: ignore[assignment]
+            lambda *a, **k: "the sidecar is read-only"
+        )
+        payload = _assert_keys(
+            "note_edit_written_raised",
+            proposal_service._accept_note_edit_row(config, row),
+        )
+    finally:
+        proposal_service._settle_note_edit = monkey  # type: ignore[assignment]
+    assert payload["receipt_id"] != ""
+    assert "could not be settled" in payload["error"]
+
+
+def test_note_edit_trash_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retirement is attended-only and reversible: it moves the note into the
+    review trash through ``vault_review.trash_note`` and nothing else."""
+    from ciao import note_edit_proposals as nep
+    from ciao import vault_review as review
+
+    config = _config(tmp_path)
+    vault, _proposal, row = _note_edit_fixture(
+        config, tmp_path, operation=nep.RETIRE, outcome="retire", after=""
+    )
+
+    payload = _assert_keys(
+        "note_edit_trashed", proposal_service._accept_note_edit_row(config, row)
+    )
+
+    assert (vault / NOTE).exists() is False, "the note left the vault"
+    trashed = vault / payload["destination"]
+    assert trashed.is_file(), payload["destination"]
+    assert trashed.read_text(encoding="utf-8") == PLAIN
+    # Restore is the review panel's own primitive, and it puts the note back:
+    # a retirement is a move, not a deletion.
+    review.restore_note(vault, trashed.stem)
+    assert (vault / NOTE).read_text(encoding="utf-8") == PLAIN
+
+    # A trash that cannot happen is a refusal, and the note is still there.
+    vault, _proposal, row = _note_edit_fixture(
+        config, tmp_path / "refused", operation=nep.RETIRE, outcome="retire", after=""
+    )
+
+    def _boom(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise ValueError("candidate changed or no longer exists")
+
+    monkeypatch.setattr(review, "trash_note", _boom)
+    payload = _assert_keys(
+        "note_edit_trash_raised",
+        proposal_service._accept_note_edit_row(config, row),
+    )
+    assert "could not retire" in payload["error"]
+    assert (vault / NOTE).is_file()
+
+
+def test_note_edit_reaches_its_own_branch_in_the_result_builder(
+    tmp_path: Path,
+) -> None:
+    """`note_edit` is not a destination action and not a region edit.
+
+    An action missing from `build_accept_result` falls through to the re-home
+    branch and reports `promoted=False` for a write that succeeded, and a
+    conflict would be reported as a destination write rather than as a
+    conflict. This asserts both, because both are the failure this branch
+    exists to prevent.
+    """
+    from ciao import proposal_actions, proposal_kinds
+
+    accept = proposal_kinds.accept_for("note_edit")
+    assert accept.action == "note_edit"
+    assert accept.action not in proposal_actions._DESTINATION_ACTIONS
+
+    result = proposal_actions.build_accept_result(
+        "p1",
+        accept,
+        {"id": "p1", "kind": "note_edit", "text": "notes/office.md — replace"},
+        {"ok": True, "destination": "notes/office.md", "receipt_id": "mrcpt_abc"},
+        include_usage=True,
+    ).as_dict()
+    assert result["action"] == "note_edit"
+    assert result["promoted"] is True
+    assert result["dismissed"] is True
+    assert result["destination"] == "notes/office.md"
+    assert "justified" not in result, "the re-home shape must not be reached"
+    assert "region" not in result, "a note edit is not a region write"
+
+    # A conflict reads as a conflict: the row is still promotable, just not
+    # against the text the operator read, so the client reopens its preview.
+    conflicted = proposal_actions.build_accept_result(
+        "p1",
+        accept,
+        {"id": "p1", "kind": "note_edit", "text": "notes/office.md — replace"},
+        {
+            "ok": False,
+            "conflict": True,
+            "destination": "notes/office.md",
+            "error": "this note changed since the proposal was filed",
+        },
+        include_usage=True,
+    ).as_dict()
+    assert conflicted["conflict"] is True
+    assert conflicted["dismissed"] is False
+    assert conflicted["promoted"] is False
+    assert "changed since" in conflicted["error"]
 
 
 def test_every_captured_branch_is_asserted():

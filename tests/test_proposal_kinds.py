@@ -135,6 +135,52 @@ def test_category_accept_is_not_a_region_edit_or_a_move() -> None:
     assert not isinstance(accept, pk.RehomeAccept)
 
 
+def test_note_edit_parses_with_its_sidecar_id_as_the_payload() -> None:
+    """`[note_edit <id>]` is the shape the proposer writes.
+
+    The payload is the sidecar id and NOT the note: the operation, the exact
+    replacement text and the citations behind it are not one line, which is why
+    they live beside the queue the way a category's note list does. The note is
+    on the wire instead — `proposal_service._scan_proposal_rows` resolves the
+    sidecar and sets the row's `target` to it.
+    """
+    bullet = pk.parse_bullet(
+        "- [note_edit 4f2a91c0b7d3e6a5] notes/office.md — restamp: checked  "
+        "_(from: note verification · restamp · rev 1a2b3c4d)_"
+    )
+    assert bullet is not None
+    assert bullet.kind == "note_edit"
+    assert bullet.target == "4f2a91c0b7d3e6a5"
+    assert bullet.text == "notes/office.md — restamp: checked"
+    assert bullet.source == "note verification · restamp · rev 1a2b3c4d"
+
+
+def test_note_edit_accept_is_not_a_region_edit() -> None:
+    """A whole-note rewrite is neither a bounded-region edit nor a file move.
+
+    `RegionAccept` is the descriptor every branch that writes into the workspace
+    guide matches on, and a note edit writes into a vault note. Sharing the
+    descriptor would let a caller route "replace this note" into a region and
+    the note would go untouched while the row reported success — so this is its
+    own type, with the two things it acts on named rather than guessed.
+    """
+    accept = pk.accept_for("note_edit")
+    assert isinstance(accept, pk.NoteEditAccept)
+    assert accept.action == "note_edit"
+    assert not isinstance(accept, pk.RegionAccept)
+    assert not isinstance(accept, pk.RehomeAccept)
+    assert not isinstance(accept, pk.CategoryAccept)
+    # The registry entry is a blank template: the note path and the sidecar id
+    # are resolved from the row at accept time, exactly as `DocFoldAccept`'s
+    # `doc_path` comes from the bullet.
+    assert (accept.relative_path, accept.sidecar_id) == ("", "")
+    # And a caller CAN carry them, so a branching caller is told which is which.
+    resolved = pk.NoteEditAccept(relative_path="notes/office.md", sidecar_id="abc123")
+    assert resolved.relative_path == "notes/office.md"
+    assert resolved.sidecar_id == "abc123"
+    assert resolved.action == "note_edit"
+
+
 def test_stale_header_rewritten_bullets_untouched(tmp_path: Path) -> None:
     """The old header naming ~/.ciao/memory.md is refreshed in place.
 

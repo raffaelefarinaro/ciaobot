@@ -26,6 +26,14 @@ The id is the bullet's payload, the way ``[people]``'s name is; the label,
 folder, description and the note list itself live in a sidecar beside the
 queue, because a queue bullet is one line and a list of paths is not.
 
+``[note_edit <id>]`` is the eighth and follows the same shape: a note
+verification that could not be applied unattended (#726-B) is queued as a row a
+person decides, and the operation — a whole-note replacement, a verification
+re-stamp, or a retirement — plus the before/after images and the evidence live
+in a sidecar, because none of that is one line. Its accept is its own
+descriptor rather than a region edit or a file move, so a caller branching on
+the descriptor cannot route a whole-note rewrite into the workspace guide.
+
 Kinds may carry a payload inside the brackets (``[people Mo]``,
 ``[project ./projects/x/doc.md]``, ``[category recipe-book]``). The payload is
 exposed as :attr:`ProposalBullet.target`; legacy bullets without one parse
@@ -48,6 +56,7 @@ KINDS: tuple[str, ...] = (
     "learnings",
     "review",
     "category",
+    "note_edit",
 )
 """Ordered registry of proposal kinds. Adding a kind here is the only edit a
 new producer needs; the regex below derives from this table."""
@@ -205,6 +214,29 @@ class CategoryAccept:
     paths: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class NoteEditAccept:
+    """Accept a `[note_edit]` proposal by rewriting or retiring ONE note.
+
+    A note verification that the autonomy rule would not apply unattended comes
+    back as a decision for a person, and this is the shape of that decision. The
+    fields name what the accept acts on and nothing else, for the reason
+    :class:`CategoryAccept` names its set: a queued bullet is one line, so the
+    operation, the exact replacement text and the evidence behind it are in a
+    sidecar keyed by ``sidecar_id``, resolved at accept time.
+
+    The two names are deliberately different. ``relative_path`` is the
+    vault-relative note the row is about — what a reader needs to see on the row
+    — and ``sidecar_id`` is the only thing that names the operation. A caller
+    that reached for a note without a sidecar id would have a file and no
+    instruction, which is how a whole-note rewrite becomes a guess.
+    """
+
+    action: Literal["note_edit"] = "note_edit"
+    relative_path: str = ""
+    sidecar_id: str = ""
+
+
 AcceptDescriptor = (
     RegionAccept
     | RehomeAccept
@@ -213,6 +245,7 @@ AcceptDescriptor = (
     | LearningsAccept
     | ReviewAccept
     | CategoryAccept
+    | NoteEditAccept
 )
 
 _ACCEPT: dict[str, AcceptDescriptor] = {
@@ -229,6 +262,7 @@ _ACCEPT: dict[str, AcceptDescriptor] = {
     "learnings": LearningsAccept(),
     "review": ReviewAccept(),
     "category": CategoryAccept(),
+    "note_edit": NoteEditAccept(),
 }
 
 
