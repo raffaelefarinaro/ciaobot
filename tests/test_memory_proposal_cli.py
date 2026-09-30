@@ -679,3 +679,96 @@ def test_cli_dismiss_still_refuses_an_ambiguous_needle(
 
     assert rc != 0
     assert queue.read_text(encoding="utf-8").count("- [memory]") == 2
+
+
+# ── `/remember` provenance (--request) ─────────────────────────────────────
+
+
+def test_cli_request_records_the_lesson_provenance(tmp_path: Path) -> None:
+    """`/remember` in an unarchived chat files with a request, not a chat.
+
+    The two are separate fields on the bullet and separate arguments here,
+    because a request id folded into `--source` would read back as a chat id —
+    the invented citation the field exists to remove.
+    """
+    from ciao import cli
+    from ciao.memory_proposals import list_proposals
+
+    vault = tmp_path / "memory-vault"
+    fact = tmp_path / "fact.md"
+    fact.write_text("Pin the Node version before running the suite.", encoding="utf-8")
+
+    rc = cli.main([
+        "memory-proposal-add",
+        "--kind", "learnings",
+        "--source", "/remember",
+        "--request", "req-7",
+        "--text-file", str(fact),
+        "--json",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+    ])
+
+    assert rc == 0
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    row = next(row for row in list_proposals(queue) if row["kind"] == "learnings")
+    assert row["source"] == "/remember"
+    assert row["request"] == "req-7"
+    # The citation a person reads on the queue line is the request, not prose.
+    assert "_(request: req-7)_" in queue.read_text(encoding="utf-8")
+
+
+def test_cli_request_is_refused_on_a_kind_that_never_records_it(tmp_path: Path) -> None:
+    """Only the `[learnings]` accept hands a request to the writer.
+
+    Storing one anywhere else would be a field no accept reads, which is a
+    citation that looks real and is not — so it is refused by name rather than
+    quietly written where nothing consumes it.
+    """
+    from ciao import cli
+
+    fact = tmp_path / "fact.md"
+    fact.write_text("Prefers short answers.", encoding="utf-8")
+
+    rc = cli.main([
+        "memory-proposal-add",
+        "--kind", "memory",
+        "--request", "req-7",
+        "--text-file", str(fact),
+        "--workspace", str(tmp_path),
+        "--vault-root", str(tmp_path / "memory-vault"),
+    ])
+
+    assert rc == 2
+    assert not (tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md").exists()
+
+
+def test_cli_request_must_be_a_plain_identifier(tmp_path: Path) -> None:
+    """It is cited on a one-line bullet, so a delimiter in it would break parsing.
+
+    `)` closes the `_(request: …)_` tail, so a request carrying one would make
+    the rest of the line read as body text — a row that stops parsing without
+    anything looking wrong.
+    """
+    from ciao import cli
+
+    fact = tmp_path / "fact.md"
+    fact.write_text("Pin the Node version before running the suite.", encoding="utf-8")
+
+    for bad in ("req) prose", "a b", "req\n7", "", "x" * 65):
+        rc = cli.main([
+            "memory-proposal-add",
+            "--kind", "learnings",
+            "--request", bad,
+            "--text-file", str(fact),
+            "--workspace", str(tmp_path),
+            "--vault-root", str(tmp_path / "memory-vault"),
+        ])
+        # An empty request is simply absent, so it is accepted with no tail.
+        assert rc == (0 if not bad else 2), bad
+
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    from ciao.memory_proposals import list_proposals
+
+    rows = [row for row in list_proposals(queue) if row["kind"] == "learnings"]
+    assert len(rows) == 1 and rows[0]["request"] == ""

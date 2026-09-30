@@ -326,6 +326,259 @@ def test_the_skill_review_section_documents_the_learning_link_without_requiring_
     assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
 
 
+# ── Lesson routing (#728-D) ─────────────────────────────────────────────────
+#
+# The correction path above can only ever propose against a skill the
+# conversation loaded, because a `sources` entry has to name a `turn` the
+# transcript really contained. A lesson is not like that: it applies to a skill
+# whether or not the conversation that produced it ever loaded that skill, and
+# the only honest record of such a finding is the structured `origins` link.
+# These tests pin the second candidate path, its gate, and the two destinations
+# that are not an edit to a file this workspace owns.
+
+
+def _write_learnings(tmp_path: Path, text: str = "## Active\n") -> Path:
+    """A ``Workspace/Learnings.md`` in the vault, which is the lesson route's gate."""
+    path = tmp_path / "memory-vault" / "work" / "Workspace" / "Learnings.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_lesson_routing_section_formats_every_placeholder() -> None:
+    """Same contract as the correction section: no stray braces.
+
+    A JSON example spelled out here would be read as a field and raise on the
+    first turn of every pass that reaches this path.
+    """
+    rendered = memory_pass.LESSON_ROUTING_PROMPT.format(
+        inventory="notes, web-research", routing=memory_pass.DRAFT_COMMAND
+    )
+    assert "notes, web-research" in rendered
+    assert memory_pass.DRAFT_COMMAND in rendered
+    assert "{" not in rendered and "}" not in rendered
+
+
+def test_the_lesson_path_is_a_separate_candidate_set_not_a_relaxed_one() -> None:
+    """Two sentences that only make sense together.
+
+    "A catalog match is a candidate, not proof" is what keeps the inventory from
+    becoming a suggestion that every skill wants the same edit; "never record it
+    as a `sources` entry or a `turn`" is what keeps the finding honest about
+    the conversation it came from. Dropping either turns this into the failure
+    the change was made to fix.
+    """
+    prompt = memory_pass.LESSON_ROUTING_PROMPT
+    assert "CANDIDATE, never proof" in prompt
+    assert "whether or not this conversation happened to load it" in prompt
+    assert "Never record it as a `sources` entry or a `turn`" in prompt
+    assert "fabricated source is worse than an unlinked finding" in prompt
+    # And an already-covered lesson is not a finding, which is the other half.
+    assert "the skill already says it" in prompt
+    assert "file nothing" in prompt
+    # "A separate path" rather than "the one above": this section renders with no
+    # correction section beside it, so a back-reference names nothing.
+    assert "a path of its own" in prompt
+    assert "above" not in prompt
+
+
+def test_the_lesson_path_names_both_non_owned_destinations() -> None:
+    """A pass that only knows the owned path files against the wrong thing.
+
+    A packaged copy is installed under `.claude/skills` and refreshed on every
+    sync, so a local edit there is discarded; and the edit-only filer cannot
+    name a target that does not exist. Both need a destination and both are
+    `[review]` drafts a person acts on.
+    """
+    prompt = memory_pass.LESSON_ROUTING_PROMPT
+    assert "NOT this workspace's own" in prompt
+    assert "discarded by the next sync" in prompt
+    assert "`[review]` draft" in prompt
+    assert "When no skill fits at all" in prompt
+    assert "a stranger could reproduce it" in prompt
+    assert "No transcript excerpt, no chat or vault path, no name, no credential" in prompt
+    # The command is named the way the parser takes it: no positional skill,
+    # because the draft's own JSON already names one.
+    assert memory_pass.DRAFT_COMMAND == "`ciao skill-draft-add --input-file FILE`"
+    # And the two attended actions are named as attended.
+    assert "the draft is where your turn ends" in prompt
+    assert "neither may the nightly Workspace care run" in prompt
+
+
+def test_a_lesson_with_an_applicable_but_unused_skill_reaches_the_pass(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """The finding the old gate could not represent.
+
+    The conversation loaded `notes`; the lesson is about `unused-skill`, which
+    the workspace owns and the conversation never touched. Without the lesson
+    path there is no way to file that: the correction path would need a
+    `sources` entry naming a `turn` the transcript does not contain, and
+    `ciao skill-proposal-add` would file a proposal whose evidence is fiction.
+    """
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
+    _write_owned_skill(tmp_path, "unused-skill")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_using(tmp_path, "notes")
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    # The correction path is unchanged, and still only names what was used.
+    assert "own skills in use: notes." in prompt
+    # The lesson path is separate, and names the whole owned catalog as the
+    # candidate set — a backend answer, because deciding which skill a lesson
+    # applies to is the judgement the section then asks the model to make.
+    assert "These are the skills this workspace owns" in prompt
+    assert "unused-skill" in prompt
+    assert "An inventory match is a CANDIDATE, never proof" in prompt
+    assert "`origins`" in prompt
+
+
+def test_the_lesson_path_needs_a_learnings_document_to_route_out_of(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """No `Learnings.md` means nothing to route, and no catalog to be handed.
+
+    The gate is the workspace's own file, not a flag: a pass handed a catalog it
+    was told not to walk spends turns walking it, and a workspace that keeps no
+    lessons has no lesson for an inventory match to be a candidate *for*.
+    """
+    _register_work_workspace(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_using(tmp_path, "notes")
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    assert "own skills in use: notes." in prompt
+    assert "These are the skills this workspace owns" not in prompt
+    assert memory_pass.DRAFT_COMMAND not in prompt
+
+
+def test_a_workspace_with_no_owned_skills_still_gets_the_two_draft_paths(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """A workspace that owns nothing still has lessons with somewhere to go.
+
+    Both remaining destinations are drafts, so the pass is asked to prepare
+    rather than edit — and it is told plainly that there is nothing local to
+    edit, instead of being handed an empty candidate list and left to guess.
+    """
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    _installed_stock_copy(tmp_path, "web-research")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_using(tmp_path, "web-research")
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    # No correction path: the used skill is a stock copy no pass may edit. The
+    # lesson section is self-contained now, so it names the owned-skill command
+    # as well; what it must not do is hand this workspace a skill to edit, which
+    # is what the inventory sentence says instead of a list.
+    assert "own skills in use" not in prompt
+    assert "This workspace owns no skills of its own" in prompt
+    assert "do not aim the edit-only" in prompt
+    # The lesson path, saying so rather than listing nothing.
+    assert memory_pass.DRAFT_COMMAND in prompt
+    # And still no stock catalog to walk: the installed copy is named nowhere.
+    assert "web-research" not in prompt
+
+
+def test_the_lesson_path_renders_on_its_own_with_no_used_skill(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """A conversation that used no skill can still have produced a lesson.
+
+    The old gate tied the whole section to used skills, which meant a workspace
+    whose conversations never load a skill never saw the lesson route at all.
+    """
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_file(tmp_path)
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    assert "own skills in use" not in prompt
+    assert "These are the skills this workspace owns" in prompt
+    assert "notes" in prompt
+    # Actionable on its own: the command and the field shape are in *this*
+    # section, not in a section that did not render. The old prompt said "the
+    # `origins` list described above" and pointed at a correction section that
+    # is absent here, so the pass was told to file a proposal it had never been
+    # given the syntax for.
+    assert "skill-proposal-add NAME --input-file" in prompt
+    assert "`learning_id`" in prompt
+    for field in ("`finding`", "`source_revision`", "`summary`"):
+        assert field in prompt
+    assert "described above" not in prompt
+    # The memory half of the pass is untouched by either section.
+    assert "Finish with a short list of what you changed." in prompt
+
+
+def test_a_remember_sighting_counts_as_something_to_route(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """A `/remember` of a lesson lands in the same document, so the same gate holds.
+
+    The lesson route is keyed on `Workspace/Learnings.md` precisely because that
+    is where both producers put the lesson, so a workspace whose only lessons
+    came from a `/remember` is routed, not skipped.
+    """
+    _register_work_workspace(tmp_path)
+    from ciao.memory_proposals import append_learning
+
+    vault = tmp_path / "memory-vault" / "work"
+    vault.mkdir(parents=True, exist_ok=True)
+    assert append_learning(
+        vault, "Pin the Node version before running the suite.", request="req-7"
+    )
+    _write_owned_skill(tmp_path, "notes")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_using(tmp_path, "notes")
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    assert "These are the skills this workspace owns" in prompt
+    assert "req:req-7" in upstream_drafts_prompt_citation(
+        tmp_path, "Pin the Node version before running the suite."
+    )
+
+
+def upstream_drafts_prompt_citation(tmp_path: Path, statement: str) -> str:
+    """The learnings line a statement was written as, for the citation assertion."""
+    from ciao.memory_proposals import read_learnings
+
+    text = read_learnings(tmp_path / "memory-vault" / "work")
+    return next(
+        line for line in text.splitlines() if statement[:30] in line
+    )
+
+
 def test_pass_reviews_the_owned_skills_the_conversation_used(
     tmp_path: Path, passes_enabled: None, streams: _FakeStreams
 ) -> None:

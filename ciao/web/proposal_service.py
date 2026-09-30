@@ -900,6 +900,13 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # for [people], the doc path for [project]. Region kinds
                     # and rehome carry none.
                     row["target"] = bullet.target
+                if bullet.request:
+                    # The user-request id a `/remember` of a lesson carries. It
+                    # rides on the row because the `[learnings]` accept and its
+                    # preview both need it, and they must be given the same one:
+                    # a preview rendered without the request shows a line with no
+                    # citation that the accept then writes with one.
+                    row["request"] = bullet.request
                 accept = proposal_kinds.accept_for(bullet.kind)
                 if accept.action == "edit_region":
                     row["region"] = resolve_region(bullet.kind)
@@ -1640,13 +1647,21 @@ def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
     except (AttributeError, ValueError) as exc:
         return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
     try:
-        # The source goes in. `_learnings_preview` renders the replacement with
-        # it, and the whole point of the card is that the preview and the write
-        # cannot disagree — dropping it here made an accepted recurrence bump
-        # land with a shorter sources list than the card had just shown, and
-        # left a review-accepted learning with no provenance at all, which the
-        # archive path has always recorded.
-        append_learning(Path(vault), row["text"], source=str(row.get("source") or ""))
+        # The source and the request go in. `_learnings_preview` renders the
+        # replacement with them, and the whole point of the card is that the
+        # preview and the write cannot disagree — dropping the source here made
+        # an accepted recurrence bump land with a shorter sources list than the
+        # card had just shown, and left a review-accepted learning with no
+        # provenance at all, which the archive path has always recorded. The
+        # request is the same argument for a `/remember` that has no archived
+        # turn: it is the only honest citation that sighting can carry, so the
+        # write has to keep it and the card has to show it.
+        append_learning(
+            Path(vault),
+            row["text"],
+            source=str(row.get("source") or ""),
+            request=str(row.get("request") or ""),
+        )
     except (OSError, QueueLockError) as exc:
         return AcceptOutcome(ok=False, error=f"could not append the learning: {exc}")
     return AcceptOutcome(ok=True, destination="Workspace/Learnings.md")
@@ -2377,6 +2392,12 @@ def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
         text,
         workspace=vault.name,
         source=str(row.get("source") or ""),
+        # A `/remember` of a lesson carries a user-request id rather than an
+        # archive turn, and the preview has to render the replacement with
+        # exactly the provenance the accept will write — otherwise the card shows
+        # a shorter sources list than the line it is about to produce, which is
+        # the same preview/write disagreement the source itself was fixed for.
+        request=str(row.get("request") or ""),
     )
     before_clip, before_cut = _clip(before)
     after_clip, after_cut = _clip(after)

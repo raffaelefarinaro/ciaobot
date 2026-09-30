@@ -28,6 +28,7 @@ from ciao.macos_service import default_launch_agents_dir
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
+    from ciao.config import CiaoConfig
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -2950,6 +2951,15 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     return 0
 
 
+#: What a ``--request`` identifier may contain. Narrow on purpose: it is cited on
+#: a ``Workspace/Learnings.md`` line as ``req:<id>`` and has to survive a round
+#: trip through a one-line Markdown bullet and back, so anything that would end
+#: the bullet's ``_(request: …)_`` tail — a newline, a ``)``, a backtick — is
+#: refused at the door rather than mangled into a citation that names something
+#: else.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
 def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     """File a fact into a workspace's memory-proposal review queue.
 
@@ -2959,6 +2969,15 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     where it can be promoted or dismissed like any queued item, instead of
     surviving only as prose in one nightly report. Re-filing an identical fact
     is a no-op; the queue dedupes by text.
+
+    ``--kind learnings --request ID`` is how a ``/remember`` of a reusable
+    lesson keeps its provenance. A ``/remember`` usually happens in a chat that
+    is never archived, so there is no transcript turn to cite — and the two ways
+    out are not equivalent: citing a fabricated turn is a reference to a
+    conversation that never happened, whereas the request id is the real,
+    re-readable origin of the sighting. The accepted line renders ``req:<id>``
+    and the learning model deduplicates on it, so a retry of the same
+    ``/remember`` cannot inflate the recurrence count.
     """
     from ciao.memory_proposals import (
         DESTINATIONS,
@@ -3026,11 +3045,33 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # `--request` is lesson provenance: it is what a `[learnings]` accept hands
+    # to `append_learning` so the line can cite the user request the sighting
+    # came from instead of an archive turn that does not exist. A request on any
+    # other kind would be a field the accept cannot act on, so it is refused by
+    # name rather than stored where nothing reads it.
+    request = (getattr(args, "request", "") or "").strip()
+    if request and kind != "learnings":
+        print(
+            f"--request is provenance for a [learnings] fact, not kind {kind!r}: "
+            "the only accept that records one is the learnings append",
+            file=sys.stderr,
+        )
+        return 2
+    if request and not _REQUEST_ID_RE.match(request):
+        print(
+            f"--request {request!r} is not a plain request identifier (letters, "
+            "digits, dot, dash and underscore only): it is cited on a learnings "
+            "line, so it has to survive a round trip through the queue",
+            file=sys.stderr,
+        )
+        return 2
     proposal = MemoryProposal(
         target=kind,
         text=text,
         source_section=args.source.strip() or "curation",
         payload=payload,
+        request=request,
     )
     path = append_proposals(
         [proposal], vault, allow_dismissed=bool(getattr(args, "allow_dismissed", False))
@@ -3051,6 +3092,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
                 "promoted_before": promoted,
                 "path": str(path) if path else None,
                 "text": text,
+                "request": request,
                 # argparse supplies a Path when --workspace is explicit, and
                 # json.dump cannot serialize one; report the resolved root.
                 "workspace": str(workspace),
@@ -3661,32 +3703,14 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     queued, which is the point: a record is one row per skill, so a person who
     dealt with one of its findings has not dealt with the rest.
     """
-    from ciao.config import CiaoConfig
-
-    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
-    workspace = Path(workspace_raw).expanduser().resolve()
-    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
-    vault = Path(vault_raw).expanduser()
-    if not vault.is_absolute():
-        vault = workspace / vault
-    vault = vault.resolve()
-
-    config_source = dict(os.environ)
-    config_source.update({
-        "CIAO_WORKSPACE": str(workspace),
-        "CIAO_VAULT_ROOT": str(vault),
-        # Deleting a proposal file is a review decision, not a session write;
-        # loading config outside the server env must not mint a session secret.
-        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "skill-proposal-remove",
-    })
-    config = CiaoConfig.from_env(config_source)
+    # Deleting a proposal file is a review decision, not a session write;
+    # loading config outside the server env must not mint a session secret.
+    config = _proposal_config(args, "skill-proposal-remove")
 
     # Which workspace the proposal lives in: the active one, falling back to the
     # primary, so the decision lands in the same queue the proposal was filed
     # into.
-    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
-    if config.workspace(name) is None:
-        name = config.primary_workspace()
+    name = _active_workspace_name(config)
 
     needle = args.name.strip()
     if not needle:
@@ -3833,6 +3857,14 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
     findings are a correction the user made, and only a routed learning gets a
     link. An entry that carries a ``state`` or a ``verification`` is refused too,
     because a filing is a question and only a settlement answers one.
+
+    **``sources`` may be absent when ``origins`` is present**, and that is the
+    lesson-routing path rather than a loosened check. A lesson can apply to a
+    skill the conversation never loaded, and the honest record of that finding is
+    the link to the learning — a ``sources`` entry would have to name a ``turn``
+    the transcript never contained, which is a fabricated source. So the
+    requirement is *one or the other*: a payload carrying neither is a finding
+    nobody can check, and is refused by name.
     """
     try:
         raw = Path(path).read_text(encoding="utf-8")
@@ -3848,11 +3880,21 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
         value = payload.get(field)
         if not isinstance(value, str) or not value.strip():
             return None, f'{path} needs a non-empty "{field}"'
+    problem = _origin_input_problem(payload.get("origins"), path)
+    if problem:
+        return None, problem
     sources = payload.get("sources")
+    if sources is None and payload.get("origins"):
+        # A routed lesson is its evidence. The absence of `sources` here says
+        # "this finding came from Workspace/Learnings.md, not from a turn of this
+        # conversation", which is exactly what it is.
+        return payload, ""
     if not isinstance(sources, list) or not sources:
         return None, (
-            f'{path} needs a non-empty "sources" list: a proposal with no '
-            "evidence is not reviewable"
+            f'{path} needs a non-empty "sources" list — every entry carrying the '
+            "chat_id, archive, turn and a short verbatim excerpt — or a non-empty "
+            '"origins" list linking the learning it came from. A finding with '
+            "neither is not reviewable"
         )
     for index, item in enumerate(sources):
         if not isinstance(item, dict):
@@ -3861,9 +3903,6 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
             return None, (
                 f'{path} sources[{index}] needs a non-empty "excerpt"'
             )
-    problem = _origin_input_problem(payload.get("origins"), path)
-    if problem:
-        return None, problem
     return payload, ""
 
 
@@ -3981,7 +4020,6 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
     Settling stays out of here: this proposes, and ``skill-proposal-remove``
     decides.
     """
-    from ciao.config import CiaoConfig
     from ciao.skill_proposals import (
         PENDING,
         SkillEvidence,
@@ -3997,30 +4035,14 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
         print(problem, file=sys.stderr)
         return 2
 
-    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
-    workspace = Path(workspace_raw).expanduser().resolve()
-    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
-    vault = Path(vault_raw).expanduser()
-    if not vault.is_absolute():
-        vault = workspace / vault
-    vault = vault.resolve()
-
-    config_source = dict(os.environ)
-    config_source.update({
-        "CIAO_WORKSPACE": str(workspace),
-        "CIAO_VAULT_ROOT": str(vault),
-        # Filing a proposal is a review-queue write, not a session write;
-        # loading config outside the server env must not mint a session secret.
-        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "skill-proposal-add",
-    })
-    config = CiaoConfig.from_env(config_source)
+    # Filing a proposal is a review-queue write, not a session write; loading
+    # config outside the server env must not mint a session secret.
+    config = _proposal_config(args, "skill-proposal-add")
 
     # Which workspace the proposal belongs to: the active one, falling back to
     # the primary, matching `skill-proposal-remove`'s routing so both ends of a
     # proposal's life land in the same queue.
-    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
-    if config.workspace(name) is None:
-        name = config.primary_workspace()
+    name = _active_workspace_name(config)
 
     skill = args.skill.strip()
     try:
@@ -4041,7 +4063,7 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
             turn=str(item.get("turn") or "").strip(),
             excerpt=str(item.get("excerpt") or "").strip(),
         )
-        for item in payload["sources"]
+        for item in (payload.get("sources") or [])
     )
     stored = upsert_proposal(
         config,
@@ -4111,6 +4133,422 @@ def _skills_list_command(args: argparse.Namespace) -> int:
     inventory = build_skill_inventory(workspace_root)
     json.dump(inventory, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
+    return 0
+
+
+def _proposal_config(args: argparse.Namespace, purpose: str) -> CiaoConfig:
+    """The config a queue-writing review command runs against.
+
+    One function for every command that writes a workspace's review queue,
+    because the workspace/vault/env resolution and the ``PWA_AUTH_TOKEN``
+    stand-in are all the same and two copies of that resolution is how a CLI
+    write ends up in a different vault than the surface that reads it. The token
+    stand-in is what keeps a review-queue write from minting a session secret
+    outside the server env.
+    """
+    from ciao.config import CiaoConfig as _CiaoConfig
+
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    vault = vault.resolve()
+
+    config_source = dict(os.environ)
+    config_source.update({
+        "CIAO_WORKSPACE": str(workspace),
+        "CIAO_VAULT_ROOT": str(vault),
+        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or purpose,
+    })
+    return _CiaoConfig.from_env(config_source)
+
+
+def _active_workspace_name(config: CiaoConfig) -> str:
+    """Which workspace a review command is about, matching the proposal CLI.
+
+    The active one, falling back to the primary, so both ends of a record's life
+    land in the same vault.
+    """
+    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if config.workspace(name) is None:
+        name = config.primary_workspace()
+    return name
+
+
+def _skill_draft_add_command(args: argparse.Namespace) -> int:
+    """File one ``[review]`` draft for a lesson this workspace cannot edit in place.
+
+    The two destinations a routing pass has when the skill a lesson applies to is
+    not an owned source: an upstream issue for somebody else's packaged skill,
+    and a new skill for a workflow no skill covers. Both are drafts for a person,
+    because filing an issue is a public action and creating a skill writes a file
+    every session of the workspace will load.
+
+    Nothing here reaches GitHub and nothing here creates a skill. ``--input-file``
+    holds a JSON object — ``target`` (``upstream_issue`` or ``new_skill``),
+    ``skill``, ``title``, ``change``, and for an issue a ``body`` that is the
+    sanitized lesson plus the optional ``repository`` and ``version``. Private
+    evidence goes in ``private_evidence`` and stays in this workspace; ``body`` is
+    refused if it carries a transcript excerpt, a path, a name or a credential,
+    because a public issue is public.
+    """
+    from ciao.upstream_drafts import DraftError, file_draft
+
+    payload, problem = _read_skill_draft_input(args.input_file)
+    if payload is None:
+        print(problem, file=sys.stderr)
+        return 2
+    config = _proposal_config(args, "skill-draft-add")
+    name = _active_workspace_name(config)
+    origins, problem = _draft_origins(payload, name)
+    if origins is None:
+        print(problem, file=sys.stderr)
+        return 2
+    try:
+        stored = file_draft(
+            config,
+            name,
+            target=str(payload["target"]),
+            skill=str(payload["skill"]),
+            title=str(payload["title"]),
+            change=str(payload["change"]),
+            body=str(payload.get("body") or ""),
+            repository=str(payload.get("repository") or ""),
+            version=str(payload.get("version") or ""),
+            private_evidence=str(payload.get("private_evidence") or ""),
+            origins=origins,
+        )
+    except DraftError as exc:
+        print(f"cannot file the draft: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        json.dump(
+            {
+                "filed": True,
+                "id": stored.id,
+                "target": stored.target,
+                "skill": stored.skill,
+                "workspace": name,
+                "lifecycle": stored.lifecycle,
+                "origins": len(stored.origins),
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+    else:
+        print(f"Filed {stored.target} draft {stored.id} for {stored.skill} in {name}.")
+        _print_route_note(config, name, stored)
+        if stored.lifecycle != "pending":
+            print(
+                f"Note: this change is already {stored.lifecycle}; the evidence "
+                "was added to the settled record and nothing was re-queued."
+            )
+    return 0
+
+
+def _print_route_note(config: CiaoConfig, workspace: str, draft) -> None:
+    """Say so when the filed target disagrees with where the name actually lives.
+
+    Advisory rather than a refusal, because both mismatches have a legitimate
+    reading: a workspace that forked a packaged skill owns the fork and may
+    still want the change reported upstream, and a name a pass believes is new
+    may be a typo of one that exists. What is not legitimate is filing blind, so
+    the note names the real answer and the command that acts on it.
+    """
+    from ciao.upstream_drafts import NEW_SKILL, route_for_skill
+
+    try:
+        actual = route_for_skill(config, workspace, draft.skill)
+    except Exception:  # noqa: BLE001 — a note is never a reason to lose the filing
+        return
+    if actual == "owned" and draft.target == NEW_SKILL:
+        print(
+            f"Note: skills/{draft.skill}/SKILL.md already exists here, so this is "
+            "not a new skill. `ciao skill-draft-approve` will refuse the "
+            "creation; an improvement to the existing source is a skill "
+            "proposal (ciao skill-proposal-add)."
+        )
+    elif actual == "owned":
+        print(
+            f"Note: {draft.skill} is a source this workspace owns under skills/, "
+            "so an improvement to it can be made here directly with "
+            "`ciao skill-proposal-add` rather than filed upstream. Keep this "
+            "draft if the change belongs to whoever maintains the packaged copy."
+        )
+    elif actual == "new" and draft.target != NEW_SKILL:
+        print(
+            f"Note: there is no skill called {draft.skill} in this workspace or "
+            "in its installed catalog, so there is no packaged copy to report "
+            "upstream either. If this is a reusable workflow with no skill yet, "
+            'file it with "target": "new_skill".'
+        )
+
+
+def _read_skill_draft_input(path: str) -> tuple[dict[str, Any] | None, str]:
+    """The draft in *path* as ``(payload, "")``, or ``(None, why)`` if unusable.
+
+    The same structured reader the skill-proposal filer uses, and for the same
+    reason: a draft is a target, a title, a change and (for an issue) a body
+    somebody has to read before approving it, so its boundaries cannot be
+    delimiters a model has to reproduce. Every complaint names the field, because
+    the caller is a model that can only fix what it is told.
+    """
+    from ciao.upstream_drafts import DRAFT_KIND, TARGETS
+
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return None, f"could not read {path}: {exc}"
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        return None, f"{path} is not valid JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"{path} must hold one JSON object, not a {type(payload).__name__}"
+    for field in ("target", "skill", "title", "change"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return None, f'{path} needs a non-empty "{field}"'
+    if payload["target"].strip() not in TARGETS:
+        return None, (
+            f'{path} "target" must be one of: {", ".join(TARGETS)} — the draft '
+            f"is filed as a [{DRAFT_KIND}] row a person routes, not as a new queue kind"
+        )
+    for field in ("body", "repository", "version", "private_evidence", "rationale"):
+        if field in payload and not isinstance(payload[field], str):
+            return None, f'{path} "{field}" must be a string'
+    return payload, ""
+
+
+def _draft_origins(
+    payload: dict[str, Any], workspace: str
+) -> tuple[list[dict[str, str]] | None, str]:
+    """The draft's learning links, or ``(None, why)`` if one cannot be honoured.
+
+    The workspace is decided here rather than taken from the payload, for the
+    reason the skill-proposal filer gives: a learning id only means something in
+    the workspace that minted it, so a payload naming a different one is a link
+    this queue cannot hold and is refused by name rather than rewritten.
+    """
+    raw = payload.get("origins") or []
+    if not isinstance(raw, list):
+        return None, f'{payload.get("skill")!r}: "origins" must be a list of objects'
+    links: list[dict[str, str]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None, f"origins[{index}] must be an object"
+        stated = str(item.get("workspace") or "").strip()
+        if stated and stated != workspace:
+            return None, (
+                f"origins[{index}] names the {stated} workspace, but this draft is "
+                f"filed in {workspace}; a learning id only means something in the "
+                "workspace that minted it"
+            )
+        links.append({k: v for k, v in item.items() if k != "workspace"})
+    return links, ""
+
+
+#: A draft decision an unattended run asked for. Distinct from 1 ("the command
+#: could not do it") because nothing failed: the request was well-formed, the
+#: draft exists, and the answer is that this run has no reviewer. 4 is EPERM,
+#: and a scheduled agent that sees it can report the item as deferred rather than
+#: retrying an action it is not allowed to take.
+UNATTENDED_REFUSED_EXIT = 4
+
+
+def _refuse_unattended_draft(
+    config: CiaoConfig, workspace: str, action: str
+) -> int | None:
+    """Refuse ``action`` when a run holds this vault's curation lease.
+
+    The check lives here as well as inside the decision helpers so the CLI fails
+    *before* it reads ``--content-file`` or reports a draft nobody may act on,
+    and so a caller can tell "you are not allowed" from "this draft could not be
+    acted on" by the exit code alone. The signal is the run's own lease — see
+    :func:`ciao.upstream_drafts.unattended_run` — and there is no flag that turns
+    it off, which is the whole point: the unattended Workspace care run shells
+    this same command a person would.
+    """
+    from ciao.upstream_drafts import UnattendedRefused, _refuse_if_unattended
+
+    try:
+        _refuse_if_unattended(config, workspace, action)
+    except UnattendedRefused as exc:
+        print(f"refused unattended: {exc}", file=sys.stderr)
+        return UNATTENDED_REFUSED_EXIT
+    return None
+
+
+def _skill_draft_approve_command(args: argparse.Namespace) -> int:
+    """Approve one draft: link a matching upstream issue, or create a new skill.
+
+    Two operations behind one verb, because both are "a person approved this
+    draft" and the draft says which one it is. The upstream path searches before
+    it creates and records the URL it linked or filed; the new-skill path creates
+    the owned source, reads it back, checks its frontmatter and syncs, and only
+    settles the row once the file exists and the sync finished.
+
+    Attended only, and read from the run rather than from a flag: there is
+    deliberately no ``--unattended` here, and no argument the caller could set to
+    override :func:`ciao.upstream_drafts.unattended_run`. An automation that
+    shells this command while it holds the vault's curation lease is refused with
+    :data:`UNATTENDED_REFUSED_EXIT`, so it can only prepare the draft and report
+    it.
+    """
+    from ciao.upstream_drafts import (
+        DraftError,
+        UnattendedRefused,
+        approve_draft,
+        create_new_skill,
+        find_draft,
+    )
+
+    config = _proposal_config(args, "skill-draft-approve")
+    name = _active_workspace_name(config)
+    refused = _refuse_unattended_draft(config, name, "approving a skill draft")
+    if refused is not None:
+        return refused
+    draft_id = args.draft_id.strip()
+    draft = find_draft(config, draft_id)
+    if draft is None:
+        print(f"no open draft has id {draft_id!r}", file=sys.stderr)
+        return 1
+    content = ""
+    if draft.target == "new_skill":
+        content, problem = _read_skill_file(args.content_file)
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
+    try:
+        stored = (
+            create_new_skill(config, draft_id, content=content)
+            if draft.target == "new_skill"
+            else approve_draft(config, draft_id, reason=args.reason or "")
+        )
+    except UnattendedRefused as exc:
+        # The run context is re-read inside the decision helper, so a lease taken
+        # between the check above and this call is caught here rather than acted
+        # on. Same answer, same code, from whichever side sees it first.
+        print(f"cannot act on draft {draft_id}: {exc}", file=sys.stderr)
+        return UNATTENDED_REFUSED_EXIT
+    except DraftError as exc:
+        print(f"cannot act on draft {draft_id}: {exc}", file=sys.stderr)
+        return 1
+    if stored is None:
+        print(f"no open draft has id {draft_id!r}", file=sys.stderr)
+        return 1
+    _report_draft(stored, name, args)
+    return 0
+
+
+def _read_skill_file(path: str) -> tuple[str, str]:
+    """The new skill's own text, or ``("", why)`` if it cannot be read."""
+    if not path.strip():
+        return "", (
+            "a new-skill draft needs --content-file holding the SKILL.md text: "
+            "the file is created from exactly those bytes, so a creation with no "
+            "content would write an empty skill"
+        )
+    try:
+        return Path(path).read_text(encoding="utf-8"), ""
+    except (OSError, UnicodeError) as exc:
+        return "", f"could not read {path}: {exc}"
+
+
+def _report_draft(stored, workspace: str, args: argparse.Namespace) -> None:
+    """Print what a decision did, in the form each reader needs."""
+    if args.json:
+        json.dump(
+            {
+                "id": stored.id,
+                "target": stored.target,
+                "skill": stored.skill,
+                "workspace": workspace,
+                "lifecycle": stored.lifecycle,
+                "issue_url": stored.issue_url,
+                "reason": stored.reason,
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return
+    if stored.lifecycle == "filed":
+        print(f"Draft {stored.id} is filed: {stored.issue_url or stored.skill}")
+        if stored.reason:
+            print(stored.reason)
+        if stored.target == "upstream_issue":
+            print(
+                "That is a report upstream, not a local change: nothing in this "
+                "workspace changed, and the lesson is still not in any skill here."
+            )
+    elif stored.lifecycle == "rejected":
+        print(f"Draft {stored.id} rejected. It will not be offered again.")
+    else:
+        print(f"Draft {stored.id} is still {stored.lifecycle}.")
+        if stored.reason:
+            print(stored.reason)
+
+
+def _skill_draft_reject_command(args: argparse.Namespace) -> int:
+    """Turn one draft down, so the next pass does not offer it again.
+
+    A rejection settles exactly as an approval does, so it is refused in an
+    unattended run for the same reason: the draft's own ground rules say
+    settlement follows a person, and a run that could reject would archive an
+    unanswered question as an answer.
+    """
+    from ciao.upstream_drafts import reject_draft
+
+    config = _proposal_config(args, "skill-draft-reject")
+    name = _active_workspace_name(config)
+    refused = _refuse_unattended_draft(config, name, "rejecting a skill draft")
+    if refused is not None:
+        return refused
+    stored = reject_draft(config, args.draft_id.strip(), reason=args.reason or "")
+    if stored is None:
+        print(f"no open draft has id {args.draft_id!r}", file=sys.stderr)
+        return 1
+    _report_draft(stored, name, args)
+    return 0
+
+
+def _skill_drafts_command(args: argparse.Namespace) -> int:
+    """List the workspace's open drafts, settled ones included under ``--all``."""
+    from ciao.upstream_drafts import read_queue, read_records
+
+    config = _proposal_config(args, "skill-drafts")
+    name = _active_workspace_name(config)
+    drafts = read_records(config, name) if args.all else read_queue(config, name)
+    rows = [
+        {
+            "id": draft.id,
+            "target": draft.target,
+            "skill": draft.skill,
+            "title": draft.title,
+            "lifecycle": draft.lifecycle,
+            "repository": draft.repository,
+            "version": draft.version,
+            "issue_url": draft.issue_url,
+            "origins": len(draft.origins),
+        }
+        for draft in drafts
+    ]
+    if args.json:
+        json.dump(
+            {"workspace": name, "drafts": rows}, sys.stdout, indent=2, ensure_ascii=False
+        )
+        sys.stdout.write("\n")
+        return 0
+    if not rows:
+        print(f"No {'' if args.all else 'open '}skill drafts in {name}.")
+        return 0
+    for row in rows:
+        where = f" → {row['issue_url']}" if row["issue_url"] else ""
+        print(f"[{row['lifecycle']}] {row['id']} {row['target']} {row['skill']}: {row['title']}{where}")
     return 0
 
 
@@ -5379,6 +5817,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Provenance label recorded on the bullet. Defaults to curation.",
     )
     memory_proposal_add_parser.add_argument(
+        "--request",
+        default="",
+        help=(
+            "The user-request identifier this fact was asked for under. "
+            "Learnings only: it is what the accepted line cites as `req:<id>` "
+            "when the `/remember` has no archived turn behind it, so the "
+            "sighting keeps a real origin instead of a manufactured transcript "
+            "one. Plain letters, digits, dot, dash and underscore."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
         "--workspace",
         type=Path,
         default=None,
@@ -5603,6 +6052,153 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit the structured result as JSON instead of text.",
     )
     skill_proposal_add_parser.set_defaults(func=_skill_proposal_add_command)
+
+    def _add_queue_workspace_arguments(parser: argparse.ArgumentParser) -> None:
+        """The workspace/vault pair every review-queue command resolves the same way.
+
+        One helper, because :func:`_proposal_config` reads both of these and two
+        commands spelling them differently is how a CLI write lands in a
+        different vault than the surface that reads it.
+        """
+        parser.add_argument(
+            "--workspace",
+            type=Path,
+            default=None,
+            help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+        )
+        parser.add_argument(
+            "--vault-root",
+            type=Path,
+            default=None,
+            help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Emit the structured result as JSON instead of text.",
+        )
+
+    skill_draft_add_parser = subparsers.add_parser(
+        "skill-draft-add",
+        help="File one [review] draft for a lesson this workspace cannot edit in place.",
+        description=(
+            "Files one deduplicated [review] draft in a workspace's review queue "
+            "for a reusable lesson whose target is not a source this workspace "
+            "owns. `target` is `upstream_issue` for a packaged, mirrored or "
+            "shared skill — the change belongs to whoever maintains it — or "
+            "`new_skill` for a workflow no existing skill covers.\n\n"
+            "This files and nothing more: no issue is opened and no skill is "
+            "created. `ciao skill-draft-approve` is the attended step, and it "
+            "searches GitHub for a matching issue before it creates one.\n\n"
+            "--input-file holds a JSON object with `target`, `skill`, `title` and "
+            "`change`, plus for an issue a `body` — the sanitized lesson a "
+            "stranger could reproduce — and optionally `repository`, `version`, "
+            "private_evidence` and `origins`. `title`, `skill` and `version` reach "
+            "`gh` too, so they go through the same gate as the body: any of them "
+            "carrying a transcript excerpt, a path, a name or a credential is "
+            "refused. `repository` must be `owner/name` when given, and an issue "
+            "whose draft names none stays pending rather than guessing a public "
+            "target. The private evidence stays in `private_evidence` and never "
+            "leaves the vault."
+        ),
+    )
+    skill_draft_add_parser.add_argument(
+        "--input-file",
+        required=True,
+        help=(
+            "Read the draft from this file as JSON. Never pass the draft as an "
+            "argument: it is lesson-derived prose."
+        ),
+    )
+    _add_queue_workspace_arguments(skill_draft_add_parser)
+    skill_draft_add_parser.set_defaults(func=_skill_draft_add_command)
+
+    skill_draft_approve_parser = subparsers.add_parser(
+        "skill-draft-approve",
+        help="Act on an approved skill draft: file its issue, or create its skill.",
+        description=(
+            "Approves one draft in a workspace's queue. An `upstream_issue` draft "
+            "is searched for in the repository the draft names, linked to a "
+            "matching open issue when the search finds one and filed as a new "
+            "issue when it does not; the URL is recorded on the record either "
+            "way. A `new_skill` draft is created under this workspace's own "
+            "`skills/` directory — refusing a name that already exists — then read "
+            "back, checked and synced, and the row is settled only once the file is "
+            "there and the sync finished.\n\n"
+            "Attended only, and read from the run rather than from a flag. There is "
+            "no unattended mode to turn off: while a run holds this vault's "
+            "curation lease the command exits 4 without filing, creating or "
+            "settling anything, so the nightly Workspace care run can only report "
+            "the draft. Opening a public issue is a deferred action, and creating a "
+            "skill writes a file every session of this workspace loads.\n\n"
+            "A failed or ambiguous GitHub request, an issue whose draft names no "
+            "owning repository, and a sync that did not finish all leave the draft "
+            "pending with the reason recorded, and a retry resumes rather than "
+            "starting over."
+        ),
+    )
+    skill_draft_approve_parser.add_argument(
+        "draft_id",
+        help="The draft id `ciao skill-drafts` printed.",
+    )
+    skill_draft_approve_parser.add_argument(
+        "--content-file",
+        default="",
+        help=(
+            "A new-skill draft only: the SKILL.md text to create, read from this "
+            "file. Required for `new_skill` and ignored for an upstream issue."
+        ),
+    )
+    skill_draft_approve_parser.add_argument(
+        "--reason",
+        default="",
+        help="Why you approved it, in your own words. Recorded on the draft.",
+    )
+    _add_queue_workspace_arguments(skill_draft_approve_parser)
+    skill_draft_approve_parser.set_defaults(func=_skill_draft_approve_command)
+
+    skill_draft_reject_parser = subparsers.add_parser(
+        "skill-draft-reject",
+        help="Turn one skill draft down, so it is not offered again.",
+        description=(
+            "Records an attended decision against one skill draft, takes it out "
+            "of the review queue and keeps the record on disk. A rejected change "
+            "is not re-filed: the next pass that reaches the same conclusion adds "
+            "its evidence to the settled record instead of opening a second row.\n\n"
+            "A rejection settles exactly as an approval does, so it is refused the "
+            "same way: while a run holds this vault's curation lease the command "
+            "exits 4 and the draft stays queued for a person."
+        ),
+    )
+    skill_draft_reject_parser.add_argument(
+        "draft_id",
+        help="The draft id `ciao skill-drafts` printed.",
+    )
+    skill_draft_reject_parser.add_argument(
+        "--reason",
+        default="",
+        help="Why you rejected it, in your own words. Recorded on the draft.",
+    )
+    _add_queue_workspace_arguments(skill_draft_reject_parser)
+    skill_draft_reject_parser.set_defaults(func=_skill_draft_reject_command)
+
+    skill_drafts_parser = subparsers.add_parser(
+        "skill-drafts",
+        help="List a workspace's skill drafts.",
+        description=(
+            "Lists the [review] drafts a routing pass filed in one workspace: the "
+            "upstream-issue and new-skill proposals for lessons this workspace "
+            "cannot apply by editing one of its own skills. Open ones by default, "
+            "settled ones with --all."
+        ),
+    )
+    skill_drafts_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Include settled drafts, which stay on disk as decision records.",
+    )
+    _add_queue_workspace_arguments(skill_drafts_parser)
+    skill_drafts_parser.set_defaults(func=_skill_drafts_command)
 
     skill_proposal_parser = subparsers.add_parser(
         "skill-proposal-remove",

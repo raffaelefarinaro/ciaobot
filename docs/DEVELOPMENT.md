@@ -496,6 +496,63 @@ the writer witnessed that sighting: it files the entry at today's date and `(x1)
 with no citation, and every source it is given from then on counts on top of that.
 The migration is what gives the read lines an identity to accumulate evidence against.
 
+### Lesson routing and skill drafts
+
+A reusable lesson in `Workspace/Learnings.md` has four possible destinations, and
+the routing contract in `docs/ARCHITECTURE.md` says which. Two of them are not an
+edit to a file the workspace owns, and those live in `ciao/upstream_drafts.py`.
+
+```bash
+# A packaged/mirrored/shared skill: a [review] draft for an upstream issue.
+ciao skill-draft-add --input-file draft.json
+# A workflow no skill covers: a [review] draft for a new skill.
+ciao skill-draft-add --input-file draft.json
+ciao skill-drafts                    # list this workspace's open drafts
+ciao skill-drafts --all              # settled ones stay on disk as records
+ciao skill-draft-approve <id>                      # search, then link or file
+ciao skill-draft-approve <id> --content-file f.md  # create the new skill, sync it
+ciao skill-draft-reject <id> --reason "..."
+```
+
+Three things to know before writing anything against it.
+
+**The draft is a `[review]` row, not a new kind.** The queue bullet is one line
+carrying the record id — `- [review <id>] …` — and the record behind it
+(`<vault>/Workspace/Skill-Drafts/<id>.json`) holds the target, the repository and
+version, the sanitized public body and the local private provenance. One record
+per `(target, skill, change)` per workspace, so a second pass that reaches the same
+conclusion adds its evidence to the row already queued instead of opening a second
+one for a person to reject twice.
+
+**Sanitizing is a gate, not a filter.** `sanitize_lesson` refuses a public body
+carrying a transcript excerpt, a chat or vault path, an absolute home path, a
+credential or an email address, and it names the pattern rather than redacting it:
+a partially redacted issue is one whose author no longer knows what they published.
+The private text goes in `private_evidence` and never leaves the vault, so a refusal
+is never a lost finding.
+
+**The attended step is the only step.** `approve_draft` raises
+`UnattendedRefused` when the caller says it is unattended, before anything is read
+or written — that is the enforcement for the deferral
+`memory_policy.UNATTENDED_DEFERRED_ACTIONS` already states. It searches before it
+creates, so a lesson somebody already reported upstream is *linked* rather than
+duplicated; more than one match holds the draft pending rather than guessing at
+which thread is the right one; and a `gh` failure returns the draft unchanged with
+the reason recorded, so the retry searches again instead of filing a second issue.
+The new-skill route refuses a name that already exists as a directory, a symlink or
+an installed copy, and settles its row only after `skills/<name>/SKILL.md` has been
+written, read back through `resolve_owned_skill` and synced. That is why the
+new-skill path does not go through `ciao skill-proposal-add`: that filer resolves
+an *existing* owned source, and pointing it at a name that does not exist yet would
+mean taking that check away from every other caller.
+
+**The skill-proposal filer accepts a lesson with no `sources`.** A finding whose
+target the conversation never loaded is real, and the honest record of it is the
+`origins` link to the learning — a `sources` entry would have to name a `turn` the
+transcript never contained. So `ciao skill-proposal-add` requires *one or the
+other*: a payload with neither is refused by name, and one with `origins` and no
+`sources` is the lesson-routing path, not a loosened check.
+
 ### AI OS audit
 
 `ciao os-audit` checks required workspace roots, vault frontmatter, relative
