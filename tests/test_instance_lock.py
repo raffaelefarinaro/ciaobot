@@ -77,7 +77,7 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     config.import_legacy_gws_profile_env = import_legacy_gws
 
-    async def run_server_locked(_config) -> int:
+    async def run_server_locked(_config, *, supervised: bool = False) -> int:
         events.append("run")
         return 0
 

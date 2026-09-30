@@ -25,7 +25,7 @@ def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _raise_system_exit(code: int):
-    def _main() -> None:
+    def _main(*, supervised: bool = False) -> None:
         raise SystemExit(code)
 
     return _main
@@ -99,6 +99,23 @@ def test_run_supervised_returns_restart_code_without_execv(
 
 def test_run_parser_accepts_supervised_flag() -> None:
     assert cli.build_parser().parse_args(["run", "--supervised"]).supervised is True
+
+
+def test_run_server_passes_supervised_to_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine's restart watchdog has to know it is supervised too, or a
+    wedged cleanup re-execs and bypasses the supervisor's relaunch."""
+    import ciao.main
+
+    seen: list[dict[str, object]] = []
+
+    def _fake_main(**kwargs: object) -> None:
+        seen.append(kwargs)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(ciao.main, "main", _fake_main)
+
+    assert cli._run_server(supervised=True) == 0
+    assert seen == [{"supervised": True}]
 
 
 def test_supervise_is_registered_and_help_exits_zero() -> None:
