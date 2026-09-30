@@ -55,7 +55,7 @@ browser are rejected as cross-origin.
 Keep the generated `PWA_AUTH_TOKEN`. Authenticate provider CLIs as `ciaobot`,
 not root. The Claude SDK includes a Claude binary; `ciao auth claude --print-only`
 prints the login command. Run it from an interactive SSH session as that account.
-Install OpenCode separately if using that provider, then run `ciao auth opencode`.
+Install OpenCode 2 separately if using that provider (`npm install -g @opencode/cli`, see [INTEGRATIONS.md](../INTEGRATIONS.md#opencode)), then run `ciao auth opencode`.
 Provider OAuth may require completing a browser flow on your own computer.
 
 The service account also needs a Git author identity for automatic workspace
