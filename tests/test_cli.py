@@ -576,6 +576,57 @@ def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
     assert "PWA_AUTH_REQUIRED=true" not in env_lines
 
 
+def _setup_cli_args(tmp_path: Path) -> list[str]:
+    return [
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--auth-token",
+        "test-token",
+        "--no-auth",
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+    ]
+
+
+def test_setup_exits_nonzero_and_warns_when_memory_regions_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The memory step never blocks skill sync, but setup must say it failed
+    and exit non-zero instead of reporting success (#790). The code is the
+    one install-engine.sh tolerates, so a good install is not rolled back."""
+    workspace = tmp_path / "workspace"
+
+    def _boom(*a, **k):
+        raise RuntimeError("guide unwritable")
+
+    monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom)
+    rc = cli.main(_setup_cli_args(tmp_path))
+
+    assert rc == cli.SETUP_MEMORY_FAILED_RC
+    err = capsys.readouterr().err
+    assert "memory regions not set up for" in err
+    assert "guide unwritable" in err
+    # Skills were still synced before the failure was reported. A fresh setup
+    # scaffolds assets per agent root, so that is `workspace/personal`.
+    skills = workspace / "personal" / ".claude" / "skills"
+    assert skills.is_dir()
+    assert any(skills.iterdir())
+
+
+def test_setup_exits_zero_without_warning_on_the_normal_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    rc = cli.main(_setup_cli_args(tmp_path))
+
+    assert rc == 0
+    assert "memory regions not set up" not in capsys.readouterr().err
+
+
 def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -773,6 +824,32 @@ def test_setup_preserves_load_failure_status_and_stderr(
     assert result == 5
     assert calls[1][1] == {"check": False}
     assert capsys.readouterr().err == "launchctl: load failed\n"
+
+
+def test_setup_launchctl_failure_never_reads_as_the_memory_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """install-engine.sh reads setup's exit 3 as the tolerated memory warning
+    and carries on, so a launchctl load that happens to fail with 3 must not
+    be reported as one: the install would continue with the agent unloaded
+    (#790)."""
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "launchctl":
+            return real_run(command, *args, **kwargs)
+        return subprocess.CompletedProcess(command, 3 if command[1] == "load" else 0)
+
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = cli.main(
+        _launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents")
+    )
+
+    assert result == 1
+    assert result != cli.SETUP_MEMORY_FAILED_RC
 
 
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:

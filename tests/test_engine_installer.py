@@ -337,6 +337,13 @@ case "${1:-}" in
             exit 143
         fi
         if [ -f "$HOME/fail-ciao-setup" ]; then exit 1; fi
+        # `ciao setup` reporting a workspace whose memory regions could not be
+        # set up: its own exit code, with the warning on stderr, and every other
+        # step of the workspace in place.
+        if [ -f "$HOME/fail-ciao-setup-memory" ]; then
+            printf 'Warning: memory regions not set up for %s: RuntimeError: guide unwritable\\n' "$HOME/Ciaobot" >&2
+            exit 3
+        fi
         # `ciao setup` repoints the engine LaunchAgent at the engine this run
         # installed, and several checks read that plist back as the truth about
         # what is installed on this Mac, so the stub writes a real one instead of
@@ -2086,6 +2093,26 @@ def test_migrate_host_success_orders_start_health_retirement(
     assert not _app_bundle(tmp_path).exists()
     assert "Removed the retired Ciaobot.app." in result.stdout
     assert "ciao desktop uninstall" not in result.stdout
+
+
+@needs_local_tools
+def test_install_keeps_going_when_setup_skips_memory_regions(tmp_path: Path) -> None:
+    # #790. `ciao setup` reports a workspace whose memory regions could not be
+    # set up with its own exit code, after everything else it scaffolds has
+    # landed. Treating that like any other setup failure would roll back an
+    # install that works, so that one code is tolerated and the install goes on.
+    harness = _harness(tmp_path)
+    _knob(harness, "fail-ciao-setup-memory")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    # Setup's own warning is not swallowed by the redirect, and the install says
+    # why it is continuing.
+    assert "memory regions not set up for" in result.stderr
+    assert "continuing install" in result.stderr
+    assert f"Ciaobot engine {VERSION} installed." in result.stdout
+    assert _install_receipt(harness)["version"] == VERSION
 
 
 @needs_local_tools
