@@ -63,6 +63,19 @@ const TRANSCRIPT = [
   },
 ]
 
+/**
+ * One OpenCode-shaped turn as the server replays it: a phase-less text row per
+ * part, then tool work, then a short reply that opens like narration, then a
+ * reasoning-only step. Guards the reply against being folded into Activity.
+ */
+const FOLD_TRANSCRIPT = [
+  { role: 'user', content: 'Update both files.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  { role: 'assistant', content: `Both files need the same change. ${'Detail. '.repeat(30)}` },
+  { role: 'system', content: 'Edit a.vue', tool_name: '_activity' },
+  { role: 'assistant', content: 'Good — updated both files.', sent_at: '2026-01-01T09:50:20Z', turn_index: 0 },
+  { role: 'system', content: 'wrapping up', tool_name: '_thinking' },
+]
+
 const sessions = new Map()
 
 function sessionOf(req) {
@@ -297,8 +310,9 @@ const server = http.createServer(async (req, res) => {
       // empty history so the other specs see the same chat they saw before; the
       // action-footer journey needs real turns to select, ending at the bottom
       // of the transcript, to reproduce a footer falling under the composer.
-      state.transcript = TRANSCRIPT
-      return sendJson(res, { ok: true, turns: TRANSCRIPT.length })
+      const body = await readBody(req)
+      state.transcript = body?.shape === 'opencode-fold' ? FOLD_TRANSCRIPT : TRANSCRIPT
+      return sendJson(res, { ok: true, turns: state.transcript.length })
     }
     return sendJson(res, { error: 'unknown fixture route' }, 404)
   }
