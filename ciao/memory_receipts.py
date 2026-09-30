@@ -61,6 +61,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.workspace_guide import guide_path
 
@@ -400,7 +401,9 @@ def journal_writable(journal: Path) -> bool:
         return False
 
 
-def _open_private(path: Path, *, flags: int, mode: int = 0o600) -> int:
+def _open_private(
+    path: Path, *, flags: int, mode: int = 0o600, follow_symlinks: bool = True
+) -> int:
     """Open *path* for append/create, 0600 when this call has to create it.
 
     `os.open`'s mode applies only to a file it actually creates, and it is
@@ -414,7 +417,7 @@ def _open_private(path: Path, *, flags: int, mode: int = 0o600) -> int:
     minus the umask: a 0600 note's own before/after images ended up readable by
     every local account on the machine.
     """
-    return os.open(path, flags | os.O_CREAT, mode)
+    return open_fd(path, flags | os.O_CREAT, mode, follow_symlinks=follow_symlinks)
 
 
 def _append(journal: Path, payload: dict[str, Any]) -> None:
@@ -546,7 +549,7 @@ def _trim_if_large(journal: Path) -> None:
         except OSError:
             mode = 0o600
         tmp_fd = _open_private(
-            tmp, flags=os.O_WRONLY | os.O_EXCL | os.O_NOFOLLOW, mode=mode
+            tmp, flags=os.O_WRONLY | os.O_EXCL, mode=mode, follow_symlinks=False
         )
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
