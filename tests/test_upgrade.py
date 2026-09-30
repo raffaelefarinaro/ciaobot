@@ -37,7 +37,7 @@ def test_update_skills_handles_subprocess_exception_cleanly(monkeypatch, caplog,
 
 
 def test_install_custom_skills_does_not_raise_when_memory_step_fails(
-    monkeypatch, tmp_path
+    monkeypatch, caplog, tmp_path
 ) -> None:
     """Server startup must keep going when the memory step fails (#790): the
     failure is reported by the terminal callers, not raised here."""
@@ -48,7 +48,13 @@ def test_install_custom_skills_does_not_raise_when_memory_step_fails(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    result = install_custom_skills(str(workspace))
+    with caplog.at_level(logging.ERROR):
+        result = install_custom_skills(str(workspace))
 
-    assert isinstance(result, int)
-    assert result >= 0
+    assert result == 0
+    # The sync itself logged the memory failure and carried on, so nothing
+    # reached the catch here: an outer failure would have swallowed the whole
+    # skill sync and left the workspace with no skills at all.
+    assert "memory region ensure/migrate failed" in caplog.text
+    assert "Custom skills install failed" not in caplog.text
+    assert (workspace / ".claude" / "skills").is_dir()

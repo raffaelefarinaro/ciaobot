@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao import sync_skills
+from ciao import cli, sync_skills
 
 
 def _write(path: Path, text: str = "content\n") -> None:
@@ -676,7 +676,7 @@ def test_main_returns_nonzero_and_warns_when_memory_step_fails(
 
     rc = sync_skills.main(["--workspace", str(workspace)])
 
-    assert rc == 1
+    assert rc == cli.SETUP_MEMORY_FAILED_RC
     err = capsys.readouterr().err
     assert "memory regions not set up" in err
     assert "guide unwritable" in err

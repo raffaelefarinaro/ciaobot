@@ -558,7 +558,8 @@ def test_setup_exits_nonzero_and_warns_when_memory_regions_fail(
     capsys: pytest.CaptureFixture,
 ) -> None:
     """The memory step never blocks skill sync, but setup must say it failed
-    and exit non-zero instead of reporting success (#790)."""
+    and exit non-zero instead of reporting success (#790). The code is the
+    one install-engine.sh tolerates, so a good install is not rolled back."""
     workspace = tmp_path / "workspace"
 
     def _boom(*a, **k):
@@ -567,7 +568,7 @@ def test_setup_exits_nonzero_and_warns_when_memory_regions_fail(
     monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom)
     rc = cli.main(_setup_cli_args(tmp_path))
 
-    assert rc == 1
+    assert rc == cli.SETUP_MEMORY_FAILED_RC
     err = capsys.readouterr().err
     assert "memory regions not set up for" in err
     assert "guide unwritable" in err

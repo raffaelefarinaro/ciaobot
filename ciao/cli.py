@@ -33,6 +33,9 @@ if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
+# The memory regions were not set up; the installer tolerates exactly this code.
+SETUP_MEMORY_FAILED_RC = 3
+
 
 def _workspace_name_arg(value: str) -> str:
     name = value.strip()
@@ -1307,7 +1310,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             "re-run `ciao setup`.",
             file=sys.stderr,
         )
-    setup_rc = 1 if sync_failures else 0
+    setup_rc = SETUP_MEMORY_FAILED_RC if sync_failures else 0
     if auth_required and not args.auth_token and not had_token:
         print(
             "\nPassword protection is on. No --auth-token was given, so a random "
