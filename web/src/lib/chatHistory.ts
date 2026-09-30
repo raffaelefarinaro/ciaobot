@@ -317,6 +317,16 @@ export function dropSupersededLiveTail(
     ) settledIndices.add(row.i)
   }
   if (!settledIndices.size) return merged
+  // An earlier refresh can index an answer before its completion overlay
+  // arrives, leaving unmatched live activity ABOVE the indexed extent. Once
+  // that answer settles, those copies belong to the same pruning pass too.
+  // Keep the merge cursor's tail boundary separate from this trace boundary.
+  for (let p = 0; p < tailStart; p++) {
+    if (typeof merged[p].i !== 'number' && isLiveTraceRow(merged[p])) {
+      tailStart = p
+      break
+    }
+  }
   const kept = merged.slice(0, tailStart)
   let changed = false
   let start = tailStart

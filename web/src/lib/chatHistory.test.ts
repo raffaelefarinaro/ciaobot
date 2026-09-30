@@ -316,6 +316,27 @@ describe('dropSupersededLiveTail', () => {
     const rows = [msg({ role: 'assistant', content: 'a', i: 0 })]
     expect(dropSupersededLiveTail(rows, 1, [])).toBe(rows)
   })
+
+  test('delayed completion prunes earlier traces without mixing turn footers or dropping a live turn', () => {
+    const first = msg({ role: 'assistant', content: 'answer 1', i: 2, timestamp: 'T' })
+    const second = msg({ role: 'assistant', content: 'answer 2', i: 4, timestamp: 'T', usage: { input: '99' } })
+    const rows = [
+      msg({ role: 'user', content: 'q1', i: 0 }),
+      msg({ role: 'assistant', content: 'live 1', usage: { input: '11' }, effective_model: 'm1' }),
+      first,
+      msg({ role: 'user', content: 'q2', i: 3 }),
+      msg({ role: 'assistant', content: 'live 2', usage: { input: '22' }, effective_model: 'm2' }),
+      second,
+      msg({ role: 'user', content: 'q3', i: 5 }),
+      msg({ role: 'system', content: 'working', tool_name: '_activity' }),
+    ]
+    const out = dropSupersededLiveTail(rows, 7, [first, second])
+    expect(out.map(m => m.content)).toEqual(['q1', 'answer 1', 'q2', 'answer 2', 'q3', 'working'])
+    expect(out[1].usage).toEqual({ input: '11' })
+    expect(out[1].effective_model).toBe('m1')
+    expect(out[3].usage).toEqual({ input: '99' })
+    expect(out[3].effective_model).toBe('m2')
+  })
 })
 
 describe('toolIcon', () => {

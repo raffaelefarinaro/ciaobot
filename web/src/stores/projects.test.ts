@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
 import { createPinia as newPinia, setActivePinia } from 'pinia'
 import type { ProjectInfo, ChatInfo, ChatMessage } from '../lib/types'
+import type { ServerRow } from '../lib/chatHistory'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
@@ -5441,7 +5442,7 @@ describe('envelope history window', () => {
       { role: 'system', tool_name: '_activity', content: '📖 Read b.png', i: 6 },
       { role: 'assistant', content: 'moved it', i: 7, sent_at: T },
     ]
-    const envelopeOf = (items: typeof serverRows) => (path: string) =>
+    const envelopeOf = (items: ServerRow[]) => (path: string) =>
       path.includes('/messages')
         ? Promise.resolve({ items, total: items.length, offset: 0, limit: 50, hasMore: false, nextOffset: null })
         : Promise.resolve([])
@@ -5454,6 +5455,49 @@ describe('envelope history window', () => {
     ]
     const rendered = (chatId: string) => useProjectStore().messages[chatId].map(m => m.content)
     const expected = serverRows.map(r => r.content)
+
+    test('identical queued sends remain separate turns on repeated refreshes', async () => {
+      const store = useProjectStore()
+      const chatId = 'c-identical-queued'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        ...liveTurn('repeat', 0, 'live tools 1', 'done'),
+        ...liveTurn('repeat', 1, 'live tools 2', 'done'),
+      ]
+      const items = [
+        { role: 'assistant', content: 'older', i: 0, sent_at: T },
+        ...serverRows.map(r => ({
+          ...r,
+          i: r.i + 1,
+          content: r.role === 'user' ? 'repeat' : r.role === 'assistant' ? 'done' : r.content,
+        })),
+      ]
+      apiGet.mockImplementation(envelopeOf(items))
+      await store.loadMessages(chatId)
+      await store.loadMessages(chatId)
+      expect(rendered(chatId)).toEqual(items.map(r => r.content))
+      expect(store.messages[chatId].map(r => r.i)).toEqual(items.map(r => r.i))
+    })
+
+    test('a later completion overlay prunes trace before an already indexed answer', async () => {
+      const store = useProjectStore()
+      const chatId = 'c-delayed-completion'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        ...liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it'),
+      ]
+      const items = [
+        { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+        ...serverRows.slice(0, 4).map(r => ({ ...r, i: r.i + 1, sent_at: '' })),
+      ]
+      // The provider file is visible before record_turn adds completion times.
+      apiGet.mockImplementation(envelopeOf(items))
+      await store.loadMessages(chatId)
+      expect(rendered(chatId)).toContain('$ Bash rename\n📖 Read a.png')
+      apiGet.mockImplementation(envelopeOf(items.map(r => r.i === 4 ? { ...r, sent_at: T } : r)))
+      await store.loadMessages(chatId)
+      expect(rendered(chatId)).toEqual(['older', ...expected.slice(0, 4)])
+    })
 
     for (const firstTurnIndexed of [false, true]) {
       test(`each turn keeps its own rows (first turn ${firstTurnIndexed ? 'indexed' : 'still live'})`, async () => {
