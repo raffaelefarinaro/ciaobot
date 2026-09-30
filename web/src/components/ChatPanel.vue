@@ -1308,6 +1308,7 @@ import {
   fileCardDirname,
   fileCardIcon,
   findFinalAnswerIndex,
+  isInterruptedTail,
   formatTokenUsage,
   isImageFilePath,
   isScratchPath,
@@ -3716,9 +3717,10 @@ const renderData = computed<{
     const finalMsg = finalIdx >= 0 ? buffer[finalIdx] : null
     const trailing = finalIdx >= 0 ? buffer.slice(finalIdx + 1) : []
 
-    // If the last assistant text is followed by `_thinking` blocks, the turn
-    // was interrupted mid-thought. Fold everything into a trace so the user
-    // doesn't see a standalone bubble that's actually mid-reasoning.
+    // If narration is followed by `_thinking` blocks, the turn was interrupted
+    // mid-thought. Fold everything into a trace so the user doesn't see a
+    // standalone bubble that's actually mid-reasoning. A substantive reply
+    // followed by a reasoning-only step is still the answer.
     //
     // BUT: trailing-only `_activity` (tool calls) does NOT mean the turn was
     // interrupted. A model commonly emits its final answer text and then runs
@@ -3726,8 +3728,7 @@ const renderData = computed<{
     // text. In that case the answer text is the real reply and must render as
     // a normal assistant bubble; the trailing tools just join the trace.
 
-    const trailingHasThinking = trailing.some(m => m.tool_name === '_thinking')
-    if (trailingHasThinking && finalMsg) {
+    if (finalMsg && isInterruptedTail(finalMsg, trailing)) {
       const traceSubs = takeForegroundSubs(currentTurnIndex)
       items.push(withKey({
         kind: 'trace',

@@ -39,14 +39,13 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
 
 
 class _EventCapture:
-    """Test helper: registers itself as an EventsHub subscriber by inserting
-    a plain asyncio.Queue into the hub's `_subs` set, so synchronous publishes
-    land directly in `events` for assertion."""
+    """Test helper: attaches an EventsHub subscription so synchronous
+    publishes land directly in its queue for assertion."""
 
     def __init__(self, pcm: ProjectChatManager) -> None:
         self._pcm = pcm
-        self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
-        pcm._events._subs.add(self.queue)
+        self._subscription = pcm._events.attach()
+        self.queue = self._subscription._queue
 
     def drain(self) -> list[dict]:
         out: list[dict] = []
