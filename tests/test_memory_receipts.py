@@ -476,8 +476,9 @@ def test_trim_temp_is_created_not_reused(tmp_path, monkeypatch):
     hands the contents of an arbitrary file to anyone who can read it, and one
     that truncates it destroys a file the vault did not lose. The stale temp is
     therefore unlinked explicitly first, and the open that follows is
-    `O_EXCL | O_NOFOLLOW`: it can only create, never open what is already there
-    and never write through a link planted in the window between the two.
+    `O_EXCL` and refuses links (`follow_symlinks=False`): it can only create,
+    never open what is already there, and never write through a link planted
+    in the window between the two.
     """
     monkeypatch.setattr(mr, "MAX_BYTES", 1)  # every append trims
     monkeypatch.setattr(mr, "KEEP_LINES", 50)  # ...but drops nothing
@@ -487,21 +488,25 @@ def test_trim_temp_is_created_not_reused(tmp_path, monkeypatch):
             journal, {"id": f"mrcpt_flag_{i}", "status": mr.APPLIED, "ts": f"t{i}"}
         )
 
-    opened: list[tuple[Path, int]] = []
+    opened: list[tuple[Path, int, bool]] = []
     real_open_private = mr._open_private
 
-    def record(path: Path, *, flags: int, mode: int = 0o600) -> int:
-        opened.append((path, flags))
-        return real_open_private(path, flags=flags, mode=mode)
+    def record(
+        path: Path, *, flags: int, mode: int = 0o600, follow_symlinks: bool = True
+    ) -> int:
+        opened.append((path, flags, follow_symlinks))
+        return real_open_private(
+            path, flags=flags, mode=mode, follow_symlinks=follow_symlinks
+        )
 
     monkeypatch.setattr(mr, "_open_private", record)
     mr._append(journal, {"id": "mrcpt_flag_3", "status": mr.APPLIED, "ts": "t3"})
 
-    temps = [(path, flags) for path, flags in opened if path.name.endswith(".trim.tmp")]
+    temps = [entry for entry in opened if entry[0].name.endswith(".trim.tmp")]
     assert temps, "the trim never opened its temp"
-    for _path, flags in temps:
+    for _path, flags, follow_symlinks in temps:
         assert flags & os.O_EXCL, "the temp open must fail on an existing name"
-        assert flags & os.O_NOFOLLOW, "the temp open must refuse a symlink"
+        assert not follow_symlinks, "the temp open must refuse a symlink"
         assert not flags & os.O_TRUNC, "an existing file is unlinked, not truncated"
     # The trim still did its job through those flags.
     assert {r["id"] for r in mr.read_receipts(journal)} == {"mrcpt_flag_3"}

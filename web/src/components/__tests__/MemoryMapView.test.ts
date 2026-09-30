@@ -721,6 +721,14 @@ describe('MemoryMapView sections', () => {
         ? { ok: true, status: 200, text: async () => guide } as unknown as Response
         : { ok: false, status: 404, text: async () => '' } as unknown as Response
     }))
+    // The count uses the viewer's locale (`toLocaleString()`), so pin one here:
+    // otherwise the machine's decides, and en-CH renders 3000 as `3'000`.
+    const toLocaleString = Number.prototype.toLocaleString
+    vi.spyOn(Number.prototype, 'toLocaleString').mockImplementation(
+      function (this: number, locales?: Intl.LocalesArgument, options?: Intl.NumberFormatOptions) {
+        return toLocaleString.call(this, locales ?? 'en-US', options)
+      },
+    )
     const { wrapper } = await mountSection('review')
     await flushPromises()
 

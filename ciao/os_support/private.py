@@ -17,8 +17,9 @@ Failing to set it raises ``OSError``: a file that cannot be made private
 must not be written as if it had been.
 
 ``open_private`` opens a descriptor, creating the file private when it does
-not exist yet; an existing file keeps its permissions. POSIX is ``os.open``
-with ``O_CREAT`` and mode ``0o600``, as before. Windows cannot attach a DACL to
+not exist yet; an existing file keeps its permissions. It opens through
+``files.open_fd``, so ``follow_symlinks`` and binary descriptors behave the
+same. POSIX is ``O_CREAT`` with mode ``0o600``, as before. Windows cannot attach a DACL to
 the create itself, so it creates with ``O_EXCL`` and makes the new, still empty
 file private before the descriptor is returned, so nothing is ever written to
 it while it is readable by anyone else.
@@ -36,6 +37,8 @@ import os
 import stat
 import sys
 from typing import Any
+
+from ciao.os_support.files import open_fd
 
 if sys.platform == "win32":
     import ctypes
@@ -234,14 +237,22 @@ if sys.platform == "win32":
         finally:
             _LocalFree(descriptor)
 
-    def open_private(path: str | os.PathLike[str], flags: int, mode: int = 0o600) -> int:
-        """``os.open`` that creates ``path`` private; see the module docstring."""
+    def open_private(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o600,
+        *,
+        follow_symlinks: bool = True,
+    ) -> int:
+        """``open_fd`` that creates ``path`` private; see the module docstring."""
         try:
-            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, mode)
+            fd = open_fd(
+                path, flags | os.O_CREAT | os.O_EXCL, mode, follow_symlinks=follow_symlinks
+            )
         except FileExistsError:
             if flags & os.O_EXCL:
                 raise
-            return os.open(path, flags, mode)
+            return open_fd(path, flags, mode, follow_symlinks=follow_symlinks)
         try:
             make_private(path)
         except BaseException:
@@ -272,9 +283,15 @@ else:
         st = os.stat(path)
         return stat.S_IMODE(st.st_mode) == (0o700 if stat.S_ISDIR(st.st_mode) else 0o600)
 
-    def open_private(path: str | os.PathLike[str], flags: int, mode: int = 0o600) -> int:
-        """``os.open`` that creates ``path`` private; see the module docstring."""
-        return os.open(path, flags | os.O_CREAT, mode)
+    def open_private(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o600,
+        *,
+        follow_symlinks: bool = True,
+    ) -> int:
+        """``open_fd`` that creates ``path`` private; see the module docstring."""
+        return open_fd(path, flags | os.O_CREAT, mode, follow_symlinks=follow_symlinks)
 
     def carry_mode(
         fd: int, mode: int, *, temp: str | os.PathLike[str], original: str | os.PathLike[str]

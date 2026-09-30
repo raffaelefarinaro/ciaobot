@@ -23,6 +23,9 @@ dependencies = [
   # `websockets` is already pulled in transitively by uvicorn[standard].
   "httpx==0.28.1",
   "firecrawl-anydoc>=0.2.4,<0.3.0",
+  # Windows has no system tz database, so without this `zoneinfo.ZoneInfo`
+  # (schedules, operator actions) cannot find any zone, not even UTC.
+  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
