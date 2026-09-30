@@ -1127,6 +1127,32 @@ def _linked(
     )
 
 
+def _decided(
+    config: CiaoConfig,
+    *origins: sp.SkillOrigin,
+    skill: str = "web-research",
+    workspace: str = "personal",
+) -> sp.SkillProposal:
+    """Write a record whose findings already carry a state, as a settled one is.
+
+    Straight to the queue rather than through ``upsert_proposal``, which files
+    every origin it is handed as ``pending``: a pass that routed a learning into
+    a finding cannot know whether the lesson landed or whether anybody rejected
+    the finding, so a filing cannot answer one. These states are what a decision
+    leaves behind.
+    """
+    record = _proposal(
+        workspace=workspace,
+        skill=skill,
+        origins=tuple(
+            replace(origin, workspace=origin.workspace or workspace)
+            for origin in origins
+        ),
+    )
+    _write(sp.proposal_path(config, workspace, skill), sp.render_proposal(record))
+    return record
+
+
 def test_origins_round_trip_through_render_and_parse(tmp_path: Path) -> None:
     """The link is the whole point, so the file has to hold it in a shape that
     reads back identically: the no-op merge compares rendered bytes with the
@@ -1312,6 +1338,149 @@ def test_settling_one_finding_leaves_its_siblings_asking(tmp_path: Path) -> None
     assert [item.skill for item in sp.read_queue(config, "personal")] == ["web-research"]
 
 
+def test_a_settled_finding_does_not_strand_its_siblings_on_the_next_pass(
+    tmp_path: Path,
+) -> None:
+    """The bug this per-finding shape existed to prevent, arriving by the back
+    door. A settlement writes one sidecar row per finding it answered, keyed by
+    the whole skill — the same synthetic text a whole-record settlement writes —
+    so the next pass found that row, read it as a decision about the *record*, and
+    closed it: one finding applied, one still pending, and a row that had left
+    the review queue with an unanswered finding nobody could reach.
+
+    A record that links learnings takes its lifecycle from its findings, so a
+    decision row speaks only for a record that has no findings to speak of.
+    """
+    config = _config(tmp_path)
+    stored = _linked(
+        config,
+        _origin(),
+        _origin(finding="read the file back after editing"),
+    )
+    sp.settle_proposal(
+        config,
+        stored.id,
+        sp.APPLIED,
+        selectors=[sp.OriginRef(LEARNING_ID, "add a defuddle fallback")],
+        verification="mrcpt_abc123",
+    )
+    # The decision row is on disk, keyed by the whole skill. That it is there is
+    # correct: it is the history. What it must not be is the record's lifecycle.
+    assert [
+        row["text"] for row in read_decisions(
+            tmp_path / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+        )
+    ] == [sp.decision_text("web-research")]
+
+    merged = sp.upsert_proposal(
+        config,
+        _proposal(
+            origins=(
+                _origin(),
+                _origin(finding="read the file back after editing"),
+            )
+        ),
+    )
+
+    assert merged.lifecycle == sp.PENDING
+    assert [origin.state for origin in merged.origins] == [
+        sp.ORIGIN_APPLIED,
+        sp.ORIGIN_PENDING,
+    ]
+    # Still on the review surface, which is the only place the outstanding
+    # finding can be answered at all.
+    assert [item.id for item in sp.read_queue(config, "personal")] == [stored.id]
+
+
+def test_a_settled_record_a_new_finding_reaches_reopens(tmp_path: Path) -> None:
+    """The same read from the other side. A record whose every finding has been
+    answered is settled, and a later pass linking one more finding to it has
+    produced something nobody has looked at — so the record is asking again
+    rather than carrying an unanswered question out of the queue. This is the
+    eligibility rule's other half: an origin back in ``pending`` is a question
+    being asked again, and the learning behind it stays Active."""
+    config = _config(tmp_path)
+    stored = _linked(config, _origin())
+    sp.settle_proposal(config, stored.id, sp.APPLIED, verification="mrcpt_abc123")
+    assert sp.read_queue(config, "personal") == []
+    assert _eligible(config, _learning())
+
+    merged = sp.upsert_proposal(
+        config,
+        _proposal(origins=(_origin(), _origin(finding="read the file back"))),
+    )
+
+    assert merged.lifecycle == sp.PENDING
+    assert [item.id for item in sp.read_queue(config, "personal")] == [stored.id]
+    assert not _eligible(config, _learning())
+
+
+def test_a_filing_cannot_file_a_finding_as_already_answered(tmp_path: Path) -> None:
+    """A payload is model-authored prose, so a ``state`` in one is a claim rather
+    than a fact, and the two claims that matter both retire a lesson: ``applied``
+    skips the verification that makes it mean anything, and ``dismissed`` stands
+    in for a rejection nobody made. The merge therefore files every incoming
+    origin ``pending`` with no verification, whatever it was handed, so the only
+    way a learning clears is somebody settling the finding."""
+    config = _config(tmp_path)
+
+    merged = sp.upsert_proposal(
+        config,
+        _proposal(
+            origins=(
+                _origin(state=sp.ORIGIN_APPLIED, verification="mrcpt_forged"),
+                _origin(finding="and this one is rejected", state=sp.ORIGIN_DISMISSED),
+            )
+        ),
+    )
+
+    assert [(origin.state, origin.verification) for origin in merged.origins] == [
+        (sp.ORIGIN_PENDING, ""),
+        (sp.ORIGIN_PENDING, ""),
+    ]
+    assert sp.learning_settlement(config, "personal", _learning()).settled is False
+    assert not _eligible(config, _learning())
+
+
+def test_a_finding_selector_cannot_reverse_a_settlement(tmp_path: Path) -> None:
+    """A selector says *which* finding a decision is about, so naming one that
+    has already been answered is a caller bug rather than a decision worth
+    recording — silently flipping ``applied`` to ``dismissed`` would turn a
+    lesson somebody verified into the target into a finding a person is supposed
+    to have rejected on its own. Refused by name, the way a selector matching
+    nothing is."""
+    config = _config(tmp_path)
+    stored = _linked(
+        config,
+        _origin(),
+        _origin(finding="read the file back after editing"),
+    )
+    sp.settle_proposal(
+        config,
+        stored.id,
+        sp.APPLIED,
+        selectors=[sp.OriginRef(LEARNING_ID, "add a defuddle fallback")],
+        verification="mrcpt_abc123",
+    )
+
+    with pytest.raises(ValueError, match="not a way to un-decide it"):
+        sp.settle_proposal(
+            config,
+            stored.id,
+            sp.DISMISSED,
+            selectors=[sp.OriginRef(LEARNING_ID, "add a defuddle fallback")],
+        )
+
+    on_disk = sp.parse_proposal(
+        sp.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert on_disk is not None
+    assert [(origin.finding, origin.state) for origin in on_disk.origins] == [
+        ("add a defuddle fallback", sp.ORIGIN_APPLIED),
+        ("read the file back after editing", sp.ORIGIN_PENDING),
+    ]
+
+
 def test_a_learning_with_one_applied_and_one_pending_finding_is_not_settled(
     tmp_path: Path,
 ) -> None:
@@ -1411,10 +1580,7 @@ def test_no_state_but_applied_or_dismissed_settles_a_learning(
     all leave the learning Active, which is the only safe default for a lesson
     somebody is relying on."""
     config = _config(tmp_path)
-    stored = _linked(
-        config,
-        _origin(finding="add a defuddle fallback", state=state),
-    )
+    stored = _decided(config, _origin(finding="add a defuddle fallback", state=state))
 
     settlement = sp.learning_settlement(config, "personal", _learning())
 
@@ -1468,9 +1634,10 @@ def test_interrupting_one_finding_leaves_the_others_in_flight(tmp_path: Path) ->
     config = _config(tmp_path)
     stored = _linked(
         config,
-        _origin(finding="add a defuddle fallback", state=sp.ORIGIN_IMPLEMENTING),
-        _origin(finding="read the file back", state=sp.ORIGIN_IMPLEMENTING),
+        _origin(finding="add a defuddle fallback"),
+        _origin(finding="read the file back"),
     )
+    sp.mark_implementing(config, stored.id, "chat-42")
 
     stopped = sp.mark_outcome(
         config,

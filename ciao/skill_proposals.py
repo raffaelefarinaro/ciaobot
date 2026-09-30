@@ -650,6 +650,9 @@ def upsert_proposal(config: CiaoConfig, proposal: SkillProposal) -> SkillProposa
       record a chat is mid-way through implementing back to pending;
     * a field the incoming record leaves empty does not blank the stored one, so
       a stub write cannot erase a good finding;
+    * an origin a filing brings is filed ``pending``, never with the state or the
+      verification it claims, because a pass that routed a learning cannot know
+      whether the lesson landed;
     * ``updated_at`` moves only when something else did, which is what makes an
       unchanged re-run a true no-op rather than a rewrite that only differs by
       its clock.
@@ -657,7 +660,11 @@ def upsert_proposal(config: CiaoConfig, proposal: SkillProposal) -> SkillProposa
     A record whose skill has already been decided stays decided, whether that is
     visible in the file or only in the decision sidecar (a file deleted by the
     CLI still has its decision on record), and a settled record keeps
-    accumulating evidence without re-entering the queue.
+    accumulating evidence without re-entering the queue. A record that links
+    learnings is the exception, and deliberately so: its lifecycle comes from
+    its findings (:func:`_merged_lifecycle`), so a settled one whose siblings are
+    still outstanding — or which has just been linked to a new finding — reopens
+    instead of stranding them.
     """
     path = proposal_path(config, proposal.workspace, proposal.skill)
     with queue_lock(path):
@@ -721,8 +728,8 @@ def settle_proposal(
 
     Raises ``ValueError`` for a lifecycle that is not a decision; a caller that
     invents one would otherwise write a record no reader can place. Also for a
-    selector that matches no origin, and for an ``applied`` that arrives with no
-    verification.
+    selector that matches no origin, for one naming a finding that has already
+    been answered, and for an ``applied`` that arrives with no verification.
     """
     if lifecycle not in SETTLED_LIFECYCLES:
         raise ValueError(
@@ -807,6 +814,10 @@ def _apply_outcome(
     origins takes the outcome as the record's own lifecycle, which is what every
     proposal filed before origins existed has always done — and is why an
     unlinked proposal cannot retire anything: there is no learning for it to fold.
+
+    A selector that names a finding which has already been answered is refused
+    (:data:`CLEARED_ORIGINS` never moves): naming a finding says which decision
+    this is about, and a decision is not something a second decision undoes.
     """
     if outcome not in ORIGIN_STATES:
         raise ValueError(
@@ -840,6 +851,23 @@ def _apply_outcome(
             f"skill proposal {proposal.id} has no origin for "
             + ", ".join(sorted({ref.learning_id for ref in selectors}))
         )
+    if selectors:
+        settled_already = [origin for origin in named if origin.clears]
+        if settled_already:
+            # A selector says which finding this decision is about, so it cannot
+            # be read as permission to decide it differently: it would turn a
+            # verified lesson into a rejected finding on the strength of a
+            # learning id and a sentence, with nobody having looked at the
+            # target. Refused rather than overridden, and the caller is told
+            # which finding is already answered.
+            raise ValueError(
+                f"skill proposal {proposal.id} already answers "
+                + ", ".join(
+                    f"{origin.finding!r} as {origin.state}"
+                    for origin in settled_already
+                )
+                + "; a finding selector is not a way to un-decide it"
+            )
     targets = named if selectors else list(proposal.origins)
     # Identity, not equality: two origins that happen to carry the same fields
     # are still two entries in the list, and only the one the selector named may
@@ -1445,6 +1473,7 @@ def _merge(
 ) -> SkillProposal:
     """What the queue holds after ``incoming`` is merged into ``existing``."""
     skill = incoming.skill or (existing.skill if existing else "")
+    origins = _merge_origins(existing.origins if existing else (), incoming.origins)
     merged = SkillProposal(
         id=proposal_id(incoming.workspace, skill),
         workspace=incoming.workspace,
@@ -1460,12 +1489,10 @@ def _merge(
         sources=_merge_sources(
             existing.sources if existing else (), incoming.sources
         ),
-        lifecycle=_merged_lifecycle(config, existing, incoming),
+        lifecycle=_merged_lifecycle(config, existing, incoming, origins),
         chat_id=incoming.chat_id or (existing.chat_id if existing else ""),
         updated_at=incoming.updated_at or _now(),
-        origins=_merge_origins(
-            existing.origins if existing else (), incoming.origins
-        ),
+        origins=origins,
     )
     if existing is not None and _same_record(existing, merged):
         # Nothing about the finding changed, so the record's own clock must not
@@ -1476,15 +1503,32 @@ def _merge(
 
 
 def _merged_lifecycle(
-    config: CiaoConfig, existing: SkillProposal | None, incoming: SkillProposal
+    config: CiaoConfig,
+    existing: SkillProposal | None,
+    incoming: SkillProposal,
+    origins: Sequence[SkillOrigin],
 ) -> str:
     """The lifecycle the merged record carries.
 
-    A decision wins, wherever it is recorded: in the file, or only in the sidecar
-    for a record whose file was deleted afterwards. An incoming record never
-    reopens a settled one, because nothing in the queue's vocabulary can say a
-    decision was wrong — reopening is a change to that vocabulary, not a value
-    this writer invents.
+    **A record that links learnings answers per finding, and the merged origins
+    are what it answers from.** The whole-skill decision row cannot say that: one
+    settlement of one finding writes the same ``skill:<name>`` row a settlement
+    of the record would, so reading it back would settle every sibling with it —
+    and the record would leave the queue with a finding nobody had answered still
+    on it, stranded where no review can reach it. So a record carrying origins
+    takes its lifecycle from those origins and from nothing else: all of them
+    answered closes it, and anything outstanding leaves it asking, whether what
+    is outstanding is the sibling of a decision just made or a finding this pass
+    has only just linked. A new pending origin on a settled record therefore
+    reopens it, which is what puts the finding back in front of somebody.
+
+    Without origins the decision wins wherever it is recorded: in the file, or
+    only in the sidecar for a record whose file was deleted afterwards. An
+    incoming record never reopens a settled one, because nothing in the queue's
+    vocabulary can say a decision was wrong — reopening is a change to that
+    vocabulary, not a value this writer invents. (A record whose file is gone has
+    lost its origins too, so the sidecar is all that is left of its findings, and
+    honouring it is the only reading left.)
 
     Work in flight is protected the same way. A pass that re-derives the same
     finding while a chat is implementing it arrives as ``pending``, and taking
@@ -1493,6 +1537,17 @@ def _merged_lifecycle(
     would re-ask a question that is already being answered. A pass files
     findings; only the accept path and the resolution move this record on.
     """
+    if origins:
+        closed = _closed_lifecycle(origins)
+        if closed:
+            return closed
+        if (
+            existing is not None
+            and existing.lifecycle in {IMPLEMENTING, INTERRUPTED}
+            and incoming.lifecycle == PENDING
+        ):
+            return existing.lifecycle
+        return incoming.lifecycle
     recorded = _recorded_lifecycle(config, incoming.workspace, incoming.skill)
     if recorded:
         return recorded
@@ -1560,20 +1615,29 @@ def _merge_origins(
     origin whose ``source_revision`` was never recorded has it filled in from the
     incoming one, so a filing that only learned the revision on a later run
     still ends up able to prove which bytes it was written against.
+
+    **No incoming origin brings a state or a verification.** A filing is a
+    question: whoever routes a learning into a finding cannot know whether the
+    lesson landed or whether a person rejected the finding, and an ``applied``
+    that arrived without a receipt — or a ``dismissed`` without anybody having
+    said no — would clear a learning nothing had been done about. So every
+    origin a merge adds is filed ``pending``, whatever the caller asked for, and
+    only a settlement (:func:`_apply_outcome`) writes a decision.
     """
     seen = {item.key for item in stored}
     merged = list(stored)
     for item in incoming:
-        if item.key not in seen:
-            seen.add(item.key)
-            merged.append(item)
+        filed = replace(item, state=ORIGIN_PENDING, verification="")
+        if filed.key not in seen:
+            seen.add(filed.key)
+            merged.append(filed)
             continue
         position = next(
-            index for index, kept in enumerate(merged) if kept.key == item.key
+            index for index, kept in enumerate(merged) if kept.key == filed.key
         )
         kept = merged[position]
-        if not kept.source_revision and item.source_revision:
-            merged[position] = replace(kept, source_revision=item.source_revision)
+        if not kept.source_revision and filed.source_revision:
+            merged[position] = replace(kept, source_revision=filed.source_revision)
     return tuple(merged)
 
 

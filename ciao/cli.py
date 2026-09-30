@@ -3826,7 +3826,8 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
     so a malformed one is refused rather than dropped, since a half-read link is
     a learning that looks settled and is not. Its absence is not an error: most
     findings are a correction the user made, and only a routed learning gets a
-    link.
+    link. An entry that carries a ``state`` or a ``verification`` is refused too,
+    because a filing is a question and only a settlement answers one.
     """
     try:
         raw = Path(path).read_text(encoding="utf-8")
@@ -3868,10 +3869,9 @@ def _origin_input_problem(origins: Any, path: str) -> str:
     of this reader does: the caller is a model that can only fix what it is told.
     An unknown key fails the entry rather than being ignored, because a key this
     code does not understand is a field whose loss nobody would notice until a
-    learning had been declared settled on a partial read.
+    learning had been declared settled on a partial read — which is also why
+    ``state`` and ``verification`` are unknown here (:data:`_ORIGIN_INPUT_FIELDS`).
     """
-    from ciao import skill_proposals
-
     if origins is None:
         return ""
     if not isinstance(origins, list):
@@ -3883,7 +3883,7 @@ def _origin_input_problem(origins: Any, path: str) -> str:
         unknown = sorted(set(item) - _ORIGIN_INPUT_FIELDS)
         if unknown:
             return f"{where} has unknown field(s) {', '.join(unknown)}"
-        for field in ("workspace", "source_revision", "summary", "verification"):
+        for field in ("workspace", "source_revision", "summary"):
             if field in item and not isinstance(item[field], str):
                 return f'{where} "{field}" must be a string'
         for field in ("learning_id", "finding"):
@@ -3894,20 +3894,18 @@ def _origin_input_problem(origins: Any, path: str) -> str:
                 return f'{where} "{field}" must be a string'
             if not value.strip():
                 return f'{where} needs a non-empty "{field}"'
-        state = item.get("state", "")
-        if state and (
-            not isinstance(state, str) or state not in skill_proposals.ORIGIN_STATES
-        ):
-            return (
-                f"{where} has state {state!r}, which is not one of "
-                f"{', '.join(skill_proposals.ORIGIN_STATES)}"
-            )
     return ""
 
 
-#: The keys one ``origins`` entry in a filed finding may carry. The same set
-#: :func:`ciao.skill_proposals.parse_origins` reads out of a queue file, named
-#: here because the CLI cannot import the model it hands the payload to.
+#: The keys one ``origins`` entry in a filed finding may carry. Deliberately
+#: fewer than :data:`ciao.skill_proposals.SkillOrigin` holds: a ``state`` and a
+#: ``verification`` are a decision, and a finding filed by a model or by hand is a
+#: question. Accepting them here would let a payload declare its own finding
+#: ``applied`` — skipping the verification that an applied needs and the explicit
+#: rejection a dismissed needs — and
+#: :func:`ciao.skill_proposals.learning_cleanup_eligibility` would then retire a
+#: lesson nobody applied or rejected. So they are unknown fields here, refused by
+#: name, and only ``ciao skill-proposal-remove`` writes a state.
 _ORIGIN_INPUT_FIELDS = frozenset({
     "schema",
     "workspace",
@@ -3915,8 +3913,6 @@ _ORIGIN_INPUT_FIELDS = frozenset({
     "source_revision",
     "finding",
     "summary",
-    "state",
-    "verification",
 })
 
 
@@ -3931,6 +3927,10 @@ def _filing_origins(
     honour — refused by name rather than rewritten, because silently filing it
     under this workspace would make an id from somewhere else look like a link
     this queue had verified.
+
+    Every link is filed ``pending`` with no verification, and the reader above is
+    what enforces it: a filing is a question, so there is nothing here to set a
+    state from even if a caller reached past the reader and tried.
     """
     from ciao import skill_proposals
 
@@ -3951,9 +3951,6 @@ def _filing_origins(
                 source_revision=str(item.get("source_revision") or "").strip(),
                 finding=" ".join(str(item.get("finding") or "").split()),
                 summary=" ".join(str(item.get("summary") or "").split()),
-                state=str(item.get("state") or "").strip()
-                or skill_proposals.ORIGIN_PENDING,
-                verification=str(item.get("verification") or "").strip(),
             )
         )
     return tuple(origins), ""

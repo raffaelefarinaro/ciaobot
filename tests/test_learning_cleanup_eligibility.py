@@ -27,7 +27,7 @@ from ciao.learning_records import (
     allocate_learning_id,
 )
 from ciao.memory_proposals import dismissed_log_path
-from ciao.memory_receipts import content_revision
+from ciao.memory_receipts import content_revision, write_queue_atomically
 
 RECEIPT = "mrcpt_0123456789abcdef"
 
@@ -118,7 +118,20 @@ def _proposal(
 
 
 def _file(config: CiaoConfig, proposal: sp.SkillProposal) -> sp.SkillProposal:
-    return sp.upsert_proposal(config, proposal)
+    """Put this record in the queue, decisions and all.
+
+    Written rather than merged, because ``upsert_proposal`` files every origin it
+    is handed as ``pending`` — a finding is a question, and only a settlement
+    writes a state. The states below are the ones a settlement produces
+    (``already_covered``, ``failed``, a receipt-carrying ``applied``), so this is
+    the shape a settled record reaches disk in, and it leaves every assertion
+    here about the fold rather than about how the record got there.
+    """
+    write_queue_atomically(
+        sp.proposal_path(config, proposal.workspace, proposal.skill),
+        sp.render_proposal(proposal),
+    )
+    return proposal
 
 
 def _applied(

@@ -1814,7 +1814,8 @@ def test_cli_skill_proposal_add_files_a_finding_with_no_link(
         ([_origin_input(learning_id=7)], '"learning_id" must be a string'),
         ([_origin_input(source_revision=["x"])], '"source_revision" must be a string'),
         ([_origin_input(nonsense="x")], "unknown field"),
-        ([_origin_input(state="done")], "which is not one of"),
+        ([_origin_input(state="applied")], "unknown field"),
+        ([_origin_input(verification="read it back and it is there")], "unknown field"),
     ],
 )
 def test_cli_skill_proposal_add_fails_closed_on_a_malformed_link(
@@ -1860,6 +1861,40 @@ def test_cli_skill_proposal_add_refuses_a_link_from_another_workspace(
     assert "work" in err and "personal" in err
     queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
     assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_refuses_a_finding_that_claims_to_be_answered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A finding is filed as a question, so a payload that arrives declaring its
+    own finding ``applied`` is asserting a decision nobody made. Stored as filed,
+    that would clear the learning behind it — skipping the verification an
+    applied needs to mean anything, and standing in for a rejection a dismissed
+    needs — and let the cleanup path retire a lesson nobody applied or rejected.
+    Refused by name, and both fields named so the filer can fix the payload."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(
+        tmp_path,
+        origins=[
+            _origin_input(state="applied", verification="read it back and it is there")
+        ],
+    )
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    err = capsys.readouterr().err
+    assert "state" in err and "verification" in err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+    # The vocabulary still exists — this is a refusal, not a field the queue
+    # stopped speaking: `skill-proposal-remove` is what writes a state.
+    assert "applied" in skill_proposals.ORIGIN_STATES
 
 
 def test_cli_skill_proposal_add_tells_the_filer_the_links_landed(
