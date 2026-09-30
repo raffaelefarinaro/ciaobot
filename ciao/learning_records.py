@@ -91,6 +91,8 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
 
+from ciao.memory_receipts import content_revision
+
 # ── Constants ──────────────────────────────────────────────────────────────
 
 SCHEMA_VERSION = 1
@@ -1263,6 +1265,46 @@ def render_learning(record: LearningRecord) -> str:
     if cited:
         line += f" — sources: {', '.join(cited)}"
     return f"{line} {METADATA_MARKER}{_metadata_json(record)}{METADATA_SUFFIX}"
+
+
+def entry_revision(record: LearningRecord) -> str:
+    """The revision of *this* learning — the hash of its own canonical line.
+
+    Not the revision of the file it lives in. A learnings document is one
+    workspace's running notes: appending a new lesson, re-reading a neighbour's
+    entry, or the cleanup pass itself splicing out an unrelated line all rewrite
+    it, so a whole-file hash cancels eligibility for every learning at once and
+    two findings filed at different moments can never both match. What "unchanged
+    since this finding was filed" actually has to mean is *this line has not been
+    touched*, and that is what this hashes.
+
+    The bytes are :func:`render_learning`'s — the canonical line, comment
+    included — so the value is the same whether it is computed from a record
+    parsed out of the file or from one the caller is about to write. A
+    whitespace-only difference is a difference, deliberately: an entry somebody
+    typed a space into is a line that changed, and the reading of it has to
+    happen again before anything is removed on the strength of what it said
+    before.
+
+    Two consequences of hashing the *whole* canonical line, both in the safe
+    direction. A **merge** changes the revision, because ``aliases`` are carried
+    in the comment: a learning that absorbed another one is not the line the
+    finding was written against, and re-reading it before anything is removed is
+    exactly right. And a **new sighting** changes it too, because ``observations``
+    are carried there — which is the difference between a whole-file hash and this
+    one, and the reason a learning with a ninth sighting is not a learning whose
+    line was rewritten behind a decision.
+
+    :func:`ciao.memory_receipts.content_revision` is used rather than a second
+    hash so one revision is one digest everywhere in the app: a caller that
+    already holds ``content_revision`` of some text gets the same answer here
+    that it would have computed itself, and no two surfaces can disagree about
+    what a revision *is*.
+
+    Raises ``ValueError`` for a record :func:`render_learning` refuses, because a
+    revision of a line that cannot be written back is a revision of nothing.
+    """
+    return content_revision(render_learning(record))
 
 
 def migrate_learnings(text: str, *, workspace: str) -> tuple[str, list[str]]:

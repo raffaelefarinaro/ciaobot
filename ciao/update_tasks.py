@@ -64,11 +64,11 @@ probe failed is not an answer about the workspace, so it is never cached.
 Two consequences stated rather than hidden. The freshness window is a *named
 constant*, not a setting and not an env var: a per-install knob for "how stale may
 an answer be" is not a decision an operator has ever asked to make, and
-``AGENTS.md`` forbids a new env var where a constant does. And the shipped
-registries are empty — no task definition ships yet (the first real one needs
-#728's Learnings cleanup), so there is no name for which an implementation could
-be written honestly. The layer is proved end to end by a test-injected catalog;
-a task whose detector is ``not_implemented`` is not shipped.
+``AGENTS.md`` forbids a new env var where a constant does. And the registries
+hold exactly one name each — #728-E's ``learnings-cleanup``, the first real task —
+so every name a catalog row may use is a name this engine can act on; the catalog
+loader refuses anything else, and a probe with no implementation behind it still
+answers ``unknown`` rather than ``applicable``.
 """
 
 from __future__ import annotations
@@ -89,6 +89,8 @@ from pathlib import Path
 from typing import Any
 
 from ciao.async_reads import keyed_lock, run_read
+from ciao.learning_records import LEARNINGS_RELATIVE
+from ciao.memory_receipts import content_revision
 from ciao.update_task_catalog import TaskCatalog, UpdateTask, load_catalog
 
 logger = logging.getLogger(__name__)
@@ -200,16 +202,178 @@ class Detection:
 #: later is a deliberate change every implementation sees.
 Probe = Callable[..., Detection]
 
-#: Registered detector implementations, by the name a catalog row carries. Empty
-#: on purpose: no task definition ships yet, and a name with no implementation
-#: would load as ``not_implemented`` in the catalog and resolve to ``unknown``
-#: here. A later child adds an entry when it adds a task.
-DETECTOR_FUNCTIONS: dict[str, Probe] = {}
+#: The registries live at the foot of the probe section below, next to the
+#: functions they name.
+
+
+# ── The Learnings cleanup probes (#728-E) ───────────────────────────────────
+
+
+def _learnings_cleanup_review_needed(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether this workspace has learnings entries only a person can judge.
+
+    Applicable exactly when the reconciliation has rows it will *not* retire —
+    an entry nothing has ever proposed, one whose finding is still open, one
+    routed only to an upstream issue, or a line the parser cannot read. Those are
+    the rows the attended ``ciao learnings-cleanup`` workflow exists for, and an
+    empty set of them means the unattended pass is already doing everything this
+    engine can do on its own, so there is nothing to offer.
+
+    The evidence is the counts, not a boolean, so the fingerprint changes when a
+    new entry appears and the task comes back — which is the behaviour a person
+    wants: a document that gained a lesson is a document that has not been
+    reviewed.
+
+    Never a false negative that hides a row: an exception becomes
+    ``Detection(applicable=False, …)`` only where the underlying planner has
+    already refused to act (:attr:`~ciao.learnings_cleanup.CleanupPlan.blocked`),
+    and a genuine failure raises so :func:`apply_detector` records ``unknown``.
+    """
+    from ciao import learnings_cleanup
+
+    vault_root = _workspace_vault(config, workspace)
+    if vault_root is None:
+        raise ValueError("no workspace vault is registered for this task")
+    plan = learnings_cleanup.plan_cleanup(
+        vault_root, workspace=workspace, config=config, today=today
+    )
+    if plan.blocked:
+        return Detection(False, {"blocked": plan.blocked})
+    counts = plan.counts
+    outstanding = counts["keep"] + counts["conflict"]
+    return Detection(
+        outstanding > 0,
+        {
+            "active": counts["active"],
+            "removable": counts["remove"],
+            "kept": counts["keep"],
+            "unreadable": counts["conflict"],
+            "unmatched": counts["unmatched"],
+            "reasons": sorted({row.reason for row in plan.kept}),
+            "revision": plan.revision,
+        },
+    )
+
+
+def _learnings_cleanup_review_recorded(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether a durable cleanup receipt exists for the document as it stands.
+
+    A receipt, not a chat. The postcondition is "a person looked at this file as
+    it is now and said what should go", and the only durable record of that is the
+    receipt ``ciao learnings-cleanup --apply`` writes — including when it removed
+    nothing, which is why a fully reviewed no-op completes and generating the
+    table does not.
+
+    "As it stands" is checked, not assumed: the receipt must name the current
+    document revision, on either side of its own write (``revision_before`` for a
+    reviewed no-op, ``revision_after`` for one that removed something). A receipt
+    for a document that has since been edited is not a review of this document,
+    and treating it as one is how a stale cleanup comes to certify itself.
+    """
+    from ciao.learnings_cleanup import read_receipt
+
+    del today  # the check is about the file, not about a date
+    vault_root = _workspace_vault(config, workspace)
+    if vault_root is None:
+        raise ValueError("no workspace vault is registered for this task")
+    current = _learnings_revision(vault_root)
+    if current is None:
+        return Detection(False, {"reason": "no_learnings_document"})
+
+    directory = _runtime_root(config) / "migration"
+    if not directory.is_dir():
+        return Detection(False, {"reason": "no_review_receipt", "revision": current})
+    newest: dict[str, Any] | None = None
+    for path in sorted(directory.glob("learnings-cleanup-*.json")):
+        receipt = read_receipt(path)
+        if receipt is None or str(receipt.get("workspace") or "") != workspace:
+            continue
+        if current not in (
+            str(receipt.get("revision_before") or ""),
+            str(receipt.get("revision_after") or ""),
+        ):
+            continue
+        if newest is None or str(receipt.get("removed_at") or "") > str(
+            newest.get("removed_at") or ""
+        ):
+            newest = receipt
+    if newest is None:
+        return Detection(False, {"reason": "no_review_receipt", "revision": current})
+    return Detection(
+        True,
+        {
+            "receipt": newest.get("removed_at", ""),
+            "removed": int(newest.get("entries_removed") or 0),
+            "approvals": len(newest.get("approvals") or {}),
+            "revision": current,
+        },
+    )
+
+
+def _workspace_vault(config: Any, workspace: str) -> Path | None:
+    """The vault root of one workspace, or ``None`` when nothing resolves it.
+
+    Raised-through rather than substituted: every caller here would otherwise
+    have to decide what an unresolvable workspace means, and the two honest
+    answers — ``not_applicable`` for a task with nothing to review, ``unknown``
+    for one whose input could not be read — are different. A workspace that is
+    not registered is a fault in the caller, not a state of the vault.
+    """
+    try:
+        return Path(config.workspace_vault_root(workspace))
+    except Exception:  # noqa: BLE001 — a registry that cannot answer is a fault
+        return None
+
+
+def _runtime_root(config: Any) -> Path:
+    """The install's runtime directory, taken from the state file beside it.
+
+    ``config.state_path`` is ``<runtime>/state.json`` on every layout this ships,
+    so its parent is the runtime root without this module having to know where
+    the runtime root is configured — which is exactly the kind of knowledge that
+    goes stale.
+    """
+    return Path(config.state_path).parent
+
+
+def _learnings_revision(vault_root: Path) -> str | None:
+    """The document's whole-file revision, or ``None`` when there is no file.
+
+    Decoded from bytes for the same reason every other read of this file is: a
+    CRLF document hashed through ``read_text`` would not match the revision the
+    cleanup receipt recorded, and the check would then never be satisfied for a
+    Windows-authored vault.
+    """
+    path = vault_root / LEARNINGS_RELATIVE
+    if not path.is_file():
+        return None
+    try:
+        return content_revision(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+#: The one detector this engine ships, and the one completion check. Both are
+#: #728-E's, both are read-only, and both are registered in
+#: :data:`ciao.update_task_catalog.DETECTORS` / ``COMPLETION_CHECKS``, so a
+#: catalog row cannot name anything this engine has no code for. The functions
+#: live here rather than in the module they are about, so the registry is
+#: readable in one place; their bodies import lazily, because a Home render that
+#: does not touch Learnings should not pay for the module.
+DETECTOR_FUNCTIONS: dict[str, Probe] = {
+    "learnings-cleanup-review-needed": _learnings_cleanup_review_needed,
+}
 
 #: Registered completion checks, same contract. A name with no implementation
 #: means :func:`record_completion` records nothing, which is the point: a task is
 #: never marked done because nobody wrote the check that would prove it.
-COMPLETION_FUNCTIONS: dict[str, Probe] = {}
+COMPLETION_FUNCTIONS: dict[str, Probe] = {
+    "learnings-cleanup-review-recorded": _learnings_cleanup_review_recorded,
+}
 
 
 @dataclass(frozen=True, slots=True)

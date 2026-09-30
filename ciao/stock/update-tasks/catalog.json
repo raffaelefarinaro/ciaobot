@@ -1,1 +1,14 @@
-[]
+[
+  {
+    "id": "learnings-cleanup",
+    "revision": 1,
+    "since_version": "0.0.0",
+    "scope": "workspace",
+    "title": "Review this workspace's Learnings.md entries",
+    "why": "An entry only retires when a finding filed against it has been verified into a skill or rejected by a person. The entries no proposal has ever linked are exactly the ones nothing is watching, and they can only be judged by reading them.",
+    "detector": "learnings-cleanup-review-needed",
+    "completion_check": "learnings-cleanup-review-recorded",
+    "prompt_resource": "prompts/learnings-cleanup-1.md",
+    "depends_on": []
+  }
+]

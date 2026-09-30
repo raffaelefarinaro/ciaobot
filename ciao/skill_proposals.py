@@ -87,6 +87,7 @@ from typing import TYPE_CHECKING, Any
 from ciao.learning_records import (
     LEARNINGS_RELATIVE,
     LearningRecord,
+    entry_revision,
     normalized_statement,
 )
 from ciao.memory_proposals import read_decisions, record_dismissal, record_promotion
@@ -1107,11 +1108,18 @@ def _fold_reason(
 
 
 def learnings_revision(config: CiaoConfig, workspace: str) -> str:
-    """The revision of ``workspace``'s ``Learnings.md`` right now.
+    """The revision of ``workspace``'s whole ``Learnings.md`` right now.
 
     ``content_revision("")`` when the workspace has no learnings document, which
     is the same answer a vault that has never recorded a learning deserves: a
     revision nobody filed an origin against.
+
+    Kept for callers that genuinely want the file — the cleanup pass, which
+    revision-checks the write it is about to make. It is **not** what
+    :func:`learning_cleanup_eligibility` compares origins against: any unrelated
+    edit to the document cancels eligibility for every learning at once, and the
+    cleanup write that removes an entry is itself such an edit. That is
+    :func:`ciao.learning_records.entry_revision`'s job.
     """
     path = Path(config.workspace_vault_root(workspace)).joinpath(LEARNINGS_RELATIVE)
     try:
@@ -1141,15 +1149,31 @@ def learning_cleanup_eligibility(
       by an explicit rejection (:func:`learning_settlement`);
     * no finding on those proposals is unattributable, because it might be this
       learning's other half;
-    * the ``Workspace/Learnings.md`` the origins were filed against still has the
-      revision they recorded, so a learning edited since is re-read before
-      anything is done about it;
+    * the learning's own line still reads the way it did when those findings were
+      filed against it, so an entry edited since is re-read before anything is
+      done about it. The compare is per entry, not per file
+      (:func:`ciao.learning_records.entry_revision`): the caller already holds
+      the record it parsed out of the current file, so a neighbour's edit, a new
+      lesson appended below it, or the cleanup pass splicing out an unrelated
+      line leaves this learning exactly as eligible as it was;
     * nothing was reopened: an origin back in ``pending``, ``implementing``,
       ``interrupted`` or ``failed`` is a question being asked again, and the
       reason says so by name.
 
-    ``current_revision`` lets a caller that has already read the document pass
-    the revision it saw; it is read from the vault when empty.
+    ``current_revision`` lets a caller that has already read the bytes pass the
+    revision it saw — :func:`ciao.learnings_cleanup.apply_cleanup` does, so its
+    re-check is against the file as it is under the write lock rather than
+    against a record it parsed before taking it. Left empty, the record handed in
+    is the current one, so its own line revision *is* the current revision and
+    nothing has to be read.
+
+    An origin whose recorded revision does not match is **kept**, not migrated.
+    That is what makes the move from whole-file to per-entry safe for an install
+    that already filed links: the values it holds are whole-file hashes, they
+    cannot match any entry, and every such learning is reported as changed-since
+    until a person re-files. No backfill is attempted, because rewriting a
+    recorded revision to match the present file would assert that the file was
+    unchanged since filing when nothing established that.
     """
     settlement = learning_settlement(config, workspace, learning)
     origins = [link.to_dict() for link in settlement.origins]
@@ -1162,12 +1186,12 @@ def learning_cleanup_eligibility(
     }
     if not settlement.settled:
         return report
-    revision = current_revision or learnings_revision(config, workspace)
+    revision = current_revision or entry_revision(learning)
     unrecorded = [link for link in settlement.origins if not link.source_revision]
     if unrecorded:
         report["reason"] = (
-            f"{len(unrecorded)} finding(s) recorded no revision of the learnings "
-            "document, so nothing can show what was filed against is unchanged"
+            f"{len(unrecorded)} finding(s) recorded no revision of the learning "
+            "itself, so nothing can show what was filed against is unchanged"
         )
         return report
     stale = [
@@ -1177,8 +1201,8 @@ def learning_cleanup_eligibility(
     ]
     if stale:
         report["reason"] = (
-            f"the learnings document changed since {len(stale)} finding(s) were "
-            f"filed against it ({', '.join(sorted(link.finding for link in stale)[:3])})"
+            f"this learning changed since {len(stale)} finding(s) were filed "
+            f"against it ({', '.join(sorted(link.finding for link in stale)[:3])})"
         )
         return report
     report["eligible"] = True

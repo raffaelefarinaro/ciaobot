@@ -144,6 +144,12 @@ RESERVED_UNINDEXED_FILES = frozenset(
         # becoming an index row and a recall hit.
         "update-tasks.json",
         "note-checks.json",
+        # The Learnings cleanup suppression store (`ciao/learnings_cleanup.py`):
+        # which `(learning_id, entry_revision)` pairs have already been retired,
+        # so an undo is not reversed by the next nightly pass. A guard with a
+        # machine identity in it, and indexed JSON would put a raw uuid in the
+        # middle of an ordinary recall result.
+        "learnings-cleanup.json",
     }
 )
 
