@@ -1051,7 +1051,7 @@ def setup_workspace(
             nested_vault = vault_path / ws_name
             scaffold_vaults.append((ws_name, nested_vault))
             try:
-                stored_root = str(nested_vault.relative_to(root))
+                stored_root = nested_vault.relative_to(root).as_posix()
             except ValueError:
                 stored_root = str(nested_vault)
             entries.append(
@@ -1086,7 +1086,7 @@ def setup_workspace(
             scaffold_vault_path = vault_path / name
         scaffold_vaults.append((name, scaffold_vault_path))
         try:
-            stored_root = str(scaffold_vault_path.relative_to(root))
+            stored_root = scaffold_vault_path.relative_to(root).as_posix()
         except ValueError:
             stored_root = str(scaffold_vault_path)
         _write_if_missing(

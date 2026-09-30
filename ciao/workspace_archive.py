@@ -101,7 +101,7 @@ def _rerooted(config: Any) -> bool:
 
 def _display(config: Any, path: Path) -> str:
     try:
-        return str(path.relative_to(Path(config.workspace_root)))
+        return path.relative_to(Path(config.workspace_root)).as_posix()
     except ValueError:
         return str(path)
 
@@ -609,7 +609,7 @@ def _restored_vault_root(
                 )
     stored = str(candidate)
     if candidate.is_relative_to(install) and len(candidate.relative_to(install).parts) > 1:
-        stored = str(candidate.relative_to(install))
+        stored = candidate.relative_to(install).as_posix()
     from ciao.workspaces import vault_root_owner  # noqa: PLC0415
 
     owner = vault_root_owner(config, candidate)

@@ -195,7 +195,7 @@ def _clean_relative_path(raw: str) -> str:
     parts = [part for part in path.parts if part not in {".", ""}]
     if ".." in parts:
         raise ValueError("relative vault_root must not contain '..'")
-    return str(Path(*parts)) if parts else ""
+    return Path(*parts).as_posix() if parts else ""
 
 
 def _looks_like_vault(path: Path) -> bool:
@@ -669,7 +669,7 @@ class CiaoConfig:
         """Portable registry value for a workspace's standard vault folder."""
         root = self.canonical_workspace_vault_root(workspace)
         try:
-            return str(root.relative_to(self.workspace_root))
+            return root.relative_to(self.workspace_root).as_posix()
         except ValueError:
             return str(root)
 
