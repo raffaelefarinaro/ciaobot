@@ -104,20 +104,29 @@ jobs:
         printf '%s\n' "$T/ws plain" "$T/a.b/c_d" "$T/Mixed-Case" > "$T/workspaces.txt"
         cat "$T/workspaces.txt"
 
-    - name: Run one tiny real turn per workspace
-      timeout-minutes: 25
+    - name: Detect the Claude key
+      # The only step that ever sees the secret, and it runs nothing but the
+      # shell. It publishes a yes/no flag, so the step that runs the unpinned
+      # opencode binary needs no secret in its environment at all.
       env:
-        # Not ANTHROPIC_API_KEY: the step also runs the unpinned opencode
-        # binary, which must never see the Claude secret. It is handed to
-        # claude alone, below.
-        ANTHROPIC_KEY_SRC: ${{ secrets.ANTHROPIC_API_KEY }}
+        K: ${{ secrets.ANTHROPIC_API_KEY }}
+      run: |
+        if [ -n "${K:-}" ]; then
+          echo "HAS_ANTHROPIC_KEY=true" >> "$GITHUB_ENV"
+        else
+          echo "HAS_ANTHROPIC_KEY=false" >> "$GITHUB_ENV"
+        fi
+
+    - name: Run one tiny real OpenCode turn per workspace
+      timeout-minutes: 25
+      # No env on purpose: the Claude secret lives only in the step below, so
+      # opencode cannot read it, not even renamed.
       run: |
         set +e
         T="$RUNNER_TEMP"; if command -v cygpath >/dev/null 2>&1; then T="$(cygpath -u "$RUNNER_TEMP")"; fi
         OUT="$T/agent-discovery"; mkdir -p "$OUT"
         TURNS="$OUT/turns-$LABEL.txt"
         CPROJ="$OUT/claude-projects-$LABEL.txt"
-        CLAUDE_DIR="$HOME/.claude/projects"
 
         # run_timed SECONDS LOGFILE CMD... : stdin closed (opencode run hangs
         # with stdin open), stdout+stderr to LOGFILE, killed after SECONDS.
@@ -135,7 +144,8 @@ jobs:
           return "$rc"
         }
 
-        # The marker is taken before any turn; the file dump lists what is newer.
+        # The marker is taken before any turn (the Claude step runs after this
+        # one); the file dump lists what is newer.
         touch "$T/marker"
         sleep 2
         date -u +%Y-%m-%dT%H:%M:%SZ > "$OUT/marker-time-$LABEL.txt"
@@ -143,7 +153,8 @@ jobs:
         printf '# provider\tworkspace\texit\treply_contains_OK\n' > "$TURNS"
         printf '# folder\tworkspace (pwd)\tworkspace (pwd -W, Windows only)\n' > "$CPROJ"
 
-        if [ -z "${ANTHROPIC_KEY_SRC:-}" ]; then
+        # HAS_ANTHROPIC_KEY is a flag, not a key: written by the step above.
+        if [ "${HAS_ANTHROPIC_KEY:-false}" != "true" ]; then
           echo "::notice::ANTHROPIC_API_KEY is not set; skipping the Claude turns"
           printf 'claude\t-\tskipped\t-\n' >> "$TURNS"
           printf '# skipped: ANTHROPIC_API_KEY is not set\n' >> "$CPROJ"
@@ -152,8 +163,6 @@ jobs:
         n=0
         while IFS= read -r ws; do
           n=$((n + 1))
-          abs="$(cd "$ws" && pwd)"
-          winabs="$(cd "$ws" && pwd -W 2>/dev/null || true)"
 
           log="$OUT/turn-opencode-$n-$LABEL.log"
           ( cd "$ws" && run_timed 240 "$log" opencode run -m opencode/big-pickle "Reply with exactly: OK" )
@@ -161,29 +170,65 @@ jobs:
           ok=no; grep -q 'OK' "$log" && ok=yes
           printf 'opencode\t%s\t%s\t%s\n' "$ws" "$rc" "$ok" >> "$TURNS"
           echo "opencode turn $n ($ws): exit $rc, OK=$ok"
+        done < "$T/workspaces.txt"
 
-          if [ -n "${ANTHROPIC_KEY_SRC:-}" ]; then
-            ls -1 "$CLAUDE_DIR" 2>/dev/null | sort > "$T/cp-before.txt"
-            log="$OUT/turn-claude-$n-$LABEL.log"
-            ( cd "$ws" && ANTHROPIC_API_KEY="$ANTHROPIC_KEY_SRC" run_timed 240 "$log" claude -p "Reply with exactly: OK" --max-turns 1 )
-            rc=$?
-            ok=no; grep -q 'OK' "$log" && ok=yes
-            printf 'claude\t%s\t%s\t%s\n' "$ws" "$rc" "$ok" >> "$TURNS"
-            echo "claude turn $n ($ws): exit $rc, OK=$ok"
-            ls -1 "$CLAUDE_DIR" 2>/dev/null | sort > "$T/cp-after.txt"
-            comm -13 "$T/cp-before.txt" "$T/cp-after.txt" | while IFS= read -r folder; do
-              printf '%s\t%s\t%s\n' "$folder" "$abs" "$winabs" >> "$CPROJ"
-            done
-          fi
+        # Each tool's own path report, if it has one. Output is informational.
+        run_timed 60 "$OUT/opencode-paths-$LABEL.txt" opencode debug paths
+
+        cat "$TURNS"
+
+    - name: Run one tiny real Claude turn per workspace
+      # The only step that runs claude, and the only one holding the secret.
+      if: ${{ env.HAS_ANTHROPIC_KEY == 'true' }}
+      timeout-minutes: 25
+      env:
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      run: |
+        set +e
+        T="$RUNNER_TEMP"; if command -v cygpath >/dev/null 2>&1; then T="$(cygpath -u "$RUNNER_TEMP")"; fi
+        OUT="$T/agent-discovery"; mkdir -p "$OUT"
+        TURNS="$OUT/turns-$LABEL.txt"
+        CPROJ="$OUT/claude-projects-$LABEL.txt"
+        CLAUDE_DIR="$HOME/.claude/projects"
+
+        # Same helper as the OpenCode step, redeclared: each step is a fresh
+        # shell. The workspace list is the file that step wrote.
+        run_timed() {
+          local secs="$1" log="$2"
+          shift 2
+          "$@" < /dev/null > "$log" 2>&1 &
+          local pid=$!
+          ( sleep "$secs"; kill "$pid" 2>/dev/null ) > /dev/null 2>&1 &
+          local killer=$!
+          local rc=0
+          wait "$pid" || rc=$?
+          kill "$killer" 2>/dev/null
+          return "$rc"
+        }
+
+        n=0
+        while IFS= read -r ws; do
+          n=$((n + 1))
+          abs="$(cd "$ws" && pwd)"
+          winabs="$(cd "$ws" && pwd -W 2>/dev/null || true)"
+
+          ls -1 "$CLAUDE_DIR" 2>/dev/null | sort > "$T/cp-before.txt"
+          log="$OUT/turn-claude-$n-$LABEL.log"
+          ( cd "$ws" && run_timed 240 "$log" claude -p "Reply with exactly: OK" --max-turns 1 )
+          rc=$?
+          ok=no; grep -q 'OK' "$log" && ok=yes
+          printf 'claude\t%s\t%s\t%s\n' "$ws" "$rc" "$ok" >> "$TURNS"
+          echo "claude turn $n ($ws): exit $rc, OK=$ok"
+          ls -1 "$CLAUDE_DIR" 2>/dev/null | sort > "$T/cp-after.txt"
+          comm -13 "$T/cp-before.txt" "$T/cp-after.txt" | while IFS= read -r folder; do
+            printf '%s\t%s\t%s\n' "$folder" "$abs" "$winabs" >> "$CPROJ"
+          done
         done < "$T/workspaces.txt"
 
         {
           echo "# all folders now under ~/.claude/projects:"
           ls -1 "$CLAUDE_DIR" 2>/dev/null | sed 's/^/# /'
         } >> "$CPROJ"
-
-        # Each tool's own path report, if it has one. Output is informational.
-        run_timed 60 "$OUT/opencode-paths-$LABEL.txt" opencode debug paths
 
         cat "$TURNS"
 
