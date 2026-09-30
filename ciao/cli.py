@@ -55,7 +55,7 @@ def _run_server(*, supervised: bool = False) -> int:
     from ciao.main import main as server_main
 
     try:
-        server_main()
+        server_main(supervised=supervised)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
