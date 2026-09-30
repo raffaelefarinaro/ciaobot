@@ -40,7 +40,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -50,6 +49,7 @@ from typing import Any, Callable
 
 from ciao import job_runs
 from ciao.jsonio import read_json_dict
+from ciao.os_support.processes import ProcessTree, tree_spawn_options
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +506,7 @@ class BackgroundRunner:
         self._on_finish = on_finish
         self._record_job_runs = record_job_runs
         self._procs: dict[str, asyncio.subprocess.Process] = {}
+        self._trees: dict[str, ProcessTree] = {}
         self._supervisors: dict[str, asyncio.Task[None]] = {}
         self._cancelling: set[str] = set()
         self._janitor: asyncio.Task[None] | None = None
@@ -547,9 +548,14 @@ class BackgroundRunner:
                 live_processes.append((run_id, proc))
         if live_processes:
             results = await asyncio.gather(
-                *(self._terminate(proc) for _run_id, proc in live_processes),
+                *(
+                    self._terminate(proc, self._trees[run_id])
+                    for run_id, proc in live_processes
+                ),
                 return_exceptions=True,
             )
+            for run_id, _proc in live_processes:
+                self._close_tree(run_id)
             for (run_id, _proc), result in zip(live_processes, results):
                 if isinstance(result, Exception):
                     logger.warning(
@@ -715,10 +721,17 @@ class BackgroundRunner:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                # Own session/process group: cancel and timeout can then take
-                # down the whole tree the command spawned, not just argv[0].
-                start_new_session=True,
+                # Own process tree: cancel and timeout can then take down
+                # everything the command spawned, not just argv[0].
+                **tree_spawn_options(),
             )
+            try:
+                tree = ProcessTree(proc.pid)
+            except OSError:
+                # An untracked tree could never be cancelled; do not run it.
+                proc.kill()
+                await proc.wait()
+                raise
         except OSError as exc:
             run.status = "error"
             run.error = f"failed to start: {exc}"
@@ -731,6 +744,7 @@ class BackgroundRunner:
         run.status = "running"
         self._store.replace(run)
         self._procs[run_id] = proc
+        self._trees[run_id] = tree
         self._supervisors[run_id] = asyncio.create_task(
             self._supervise(run_id, proc, log_path, timeout),
             name=f"background-run-{run_id}",
@@ -760,7 +774,8 @@ class BackgroundRunner:
             # has not resolved yet. Resolve it here rather than hanging.
             return self._resolve_orphan(run)
         self._cancelling.add(run_id)
-        await self._terminate(proc)
+        await self._terminate(proc, self._trees[run_id])
+        self._close_tree(run_id)
         supervisor = self._supervisors.get(run_id)
         if supervisor is not None and not supervisor.done():
             with contextlib.suppress(Exception):
@@ -789,7 +804,7 @@ class BackgroundRunner:
                 exit_code = await asyncio.wait_for(proc.wait(), timeout=timeout_s)
             except TimeoutError:
                 timed_out = True
-                await self._terminate(proc)
+                await self._terminate(proc, self._trees[run_id])
                 exit_code = await proc.wait()
             if pump is not None:
                 if run_id in self._cancelling:
@@ -816,6 +831,10 @@ class BackgroundRunner:
             return
         finally:
             self._procs.pop(run_id, None)
+            # A cancel or a shutdown is still ending this tree after its
+            # grace period, and closes it itself once that kill has gone out.
+            if run_id not in self._cancelling:
+                self._close_tree(run_id)
             # The process registry is for live supervision only. Keeping the
             # completed asyncio.Task here retains one task object per run for
             # the lifetime of a long-running server.
@@ -854,10 +873,10 @@ class BackgroundRunner:
                 return
             trim_log(log_path)
 
-    async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
-        """SIGTERM the run's process group, then SIGKILL after the grace."""
+    async def _terminate(self, proc: asyncio.subprocess.Process, tree: ProcessTree) -> None:
+        """Terminate the run's process tree, then kill it after the grace."""
         deadline = asyncio.get_running_loop().time() + CANCEL_GRACE_SECONDS
-        self._signal_group(proc, signal.SIGTERM)
+        self._stop_tree(proc, tree, kill=False)
         try:
             await asyncio.wait_for(proc.wait(), CANCEL_GRACE_SECONDS)
         except TimeoutError:
@@ -867,22 +886,35 @@ class BackgroundRunner:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining > 0:
             await asyncio.sleep(remaining)
-        # The process-group leader may already have exited. The descendants
-        # still share its group, so signal the group independently of the
-        # leader's return code before declaring the run terminated.
-        self._signal_group(proc, signal.SIGKILL)
+        # The tree's leader may already have exited. The descendants are
+        # still in its tree, so kill the tree independently of the leader's
+        # return code before declaring the run terminated.
+        self._stop_tree(proc, tree, kill=True)
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), CANCEL_GRACE_SECONDS)
 
     @staticmethod
-    def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
+    def _stop_tree(
+        proc: asyncio.subprocess.Process, tree: ProcessTree, *, kill: bool
+    ) -> None:
         try:
-            # start_new_session made the child a process-group leader, so its
-            # pid is the pgid: this reaches the whole tree it spawned.
-            os.killpg(proc.pid, sig)
+            # tree_spawn_options() gave the child its own tree: this reaches
+            # everything it spawned.
+            if kill:
+                tree.kill()
+            else:
+                tree.terminate()
         except (ProcessLookupError, PermissionError, OSError):
             with contextlib.suppress(ProcessLookupError, OSError):
-                proc.send_signal(sig)
+                if kill:
+                    proc.kill()
+                else:
+                    proc.terminate()
+
+    def _close_tree(self, run_id: str) -> None:
+        tree = self._trees.pop(run_id, None)
+        if tree is not None:
+            tree.close()
 
     # ── finalization ──────────────────────────────────────────────────
 
