@@ -26,15 +26,13 @@ from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
 from ciao.jsonio import write_private_text
+from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
     from ciao.config import CiaoConfig
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-
-# The memory regions were not set up; the installer tolerates exactly this code.
-SETUP_MEMORY_FAILED_RC = 3
 
 
 def _workspace_name_arg(value: str) -> str:

@@ -14,10 +14,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
-from ciao.cli import SETUP_MEMORY_FAILED_RC
 from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
+
+# The memory regions were not set up; the installer tolerates exactly this code.
+SETUP_MEMORY_FAILED_RC = 3
 
 
 @dataclass(frozen=True)
