@@ -268,18 +268,22 @@ export function isProgressCommentary(content: string): boolean {
  *  steal the final bubble); falls back to the last assistant text so a
  *  short clarifying question still surfaces. Returns -1 when none. */
 export function findFinalAnswerIndex(
-  buffer: Array<Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content'>>,
+  buffer: Array<Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content' | 'timestamp'>>,
 ): number {
   let fallback = -1
   for (let k = buffer.length - 1; k >= 0; k--) {
     const m = buffer[k]
     if (!isAssistantTextStep(m)) continue
     if (m.phase === 'commentary') continue
-    // Narration announces work, so it is always followed by a tool call. The
-    // last text row with no tool call after it is the reply even when it opens
-    // like narration ("Good — updated both files."). History rows carry no
-    // `phase`, so this is the only signal once the live copy is replaced.
-    if (fallback < 0 && !buffer.slice(k + 1).some(r => r.tool_name === '_activity')) return k
+    // History rows carry no `phase`, but the server stamps a timestamp on the
+    // closing row of a completed turn. A stamped row with no tool call after
+    // it is the delivered reply even when it opens like narration ("Good —
+    // updated both files."); an unstamped trailing "Now the docs:" is not.
+    if (
+      fallback < 0
+      && m.timestamp
+      && !buffer.slice(k + 1).some(r => r.tool_name === '_activity')
+    ) return k
     if (fallback < 0) fallback = k
     if (m.phase === 'final_answer') return k
     if (!isProgressCommentary(m.content || '')) return k
