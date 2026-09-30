@@ -568,3 +568,157 @@ describe('ProposalHistoryList changes and undo', () => {
     wrapper.unmount()
   })
 })
+
+// ── A settled verification, judgeable months later ─────────────────────────
+//
+// The decision sidecar keeps the bullet's one line — that text is the dedupe
+// key and the queue needs nothing more — so without the record a settled
+// verification reads as an opaque sentence with a destination attached.
+
+function verifiedRow(overrides: Partial<ProposalHistoryRow> = {}): ProposalHistoryRow {
+  return historyRow({
+    kind: 'note_edit',
+    text: 'notes/office.md — replace (rev ab12cd34): the third floor no longer exists',
+    destination: 'notes/office.md',
+    note_edit: {
+      id: 'side-1',
+      relative_path: 'notes/office.md',
+      operation: 'replace',
+      outcome: 'update',
+      coverage: 'complete',
+      before: '---\ntype: note\n---\n\nThe office is on Via Verdi 12, third floor.\n',
+      after: '---\ntype: note\n---\n\nThe office is on Via Verdi 12, fourth floor.\n',
+      reason: 'the third floor no longer exists',
+      evidence: [{
+        source_type: 'url',
+        source_ref: 'https://example.test/office-move',
+        quoted: 'The office is now on the fourth floor.',
+        supports: 'notes/office.md',
+      }],
+      settled: '2026-09-01T10:00:00Z',
+      accepted: true,
+      receipt_id: 'mrcpt_abc',
+      pending: false,
+    },
+    ...overrides,
+  })
+}
+
+describe('a settled note verification in History', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  async function show(row: ProposalHistoryRow) {
+    apiGet.mockResolvedValue({ rows: [row], total: 1, truncated: false })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('names the operation in words, not as an opaque wire value', async () => {
+    const wrapper = await show(verifiedRow())
+
+    const summary = wrapper.get('.ph-verify-summary').text()
+    expect(summary).toContain('would rewrite the whole note')
+    expect(summary).toContain('update')
+    wrapper.unmount()
+  })
+
+  it('shows the note, the coverage, the reason and the citations', async () => {
+    const wrapper = await show(verifiedRow())
+    // Closed by default: two notes' worth of text on an open page is a wall,
+    // and 200 decisions' worth is a page nobody scrolls to the end of.
+    expect(wrapper.get('details.ph-verify').attributes('open')).toBeUndefined()
+
+    await wrapper.get('.ph-verify-summary').trigger('click')
+
+    const body = wrapper.get('.ph-verify-body').text()
+    expect(body).toContain('notes/office.md')
+    expect(body).toContain('Covering all of the note')
+    expect(body).toContain('on 1 citation')
+    expect(body).toContain('the third floor no longer exists')
+    expect(body).toContain('https://example.test/office-move')
+    expect(body).toContain('The office is now on the fourth floor.')
+    // The exact before and after, not a summary of them.
+    const images = wrapper.findAll('.ph-verify-text').map(p => p.text())
+    expect(images[0]).toContain('third floor')
+    expect(images[1]).toContain('fourth floor')
+    wrapper.unmount()
+  })
+
+  it('says a partial check covered part of the note', async () => {
+    const row = verifiedRow()
+    row.note_edit!.coverage = 'partial'
+    const wrapper = await show(row)
+
+    await wrapper.get('.ph-verify-summary').trigger('click')
+
+    // "coverage: partial" says nothing to somebody deciding whether to trust the
+    // verdict; the words do.
+    expect(wrapper.get('.ph-verify-body').text()).toContain('Covering part of the note')
+    wrapper.unmount()
+  })
+
+  it('shows a retirement as a move, with no after-image to diff', async () => {
+    const row = verifiedRow({
+      destination: 'Workspace/.vault-trash/abc.md',
+      reversible_by: 'restore',
+      note_edit: {
+        ...verifiedRow().note_edit!,
+        operation: 'retire',
+        outcome: 'retire',
+        after: '',
+      },
+    })
+    const wrapper = await show(row)
+
+    expect(wrapper.get('.ph-restore').text())
+      .toContain('Reversible: this note is in Retired')
+    // The operation is named on the summary, where it is read before opening.
+    expect(wrapper.get('.ph-verify-summary').text())
+      .toContain('would move the note to Retired')
+    await wrapper.get('.ph-verify-summary').trigger('click')
+    const body = wrapper.get('.ph-verify-body').text()
+    // A retirement writes no text, so a before/after pair would be a lie about
+    // what changed.
+    expect(wrapper.findAll('.ph-verify-text')).toHaveLength(0)
+    expect(body).toContain('in Retired, where Restore puts it back')
+    wrapper.unmount()
+  })
+
+  it('shows a still-open decision as open, and no change under Changes', async () => {
+    const row = verifiedRow({
+      note_edit: { ...verifiedRow().note_edit!, settled: '', pending: true, accepted: false },
+    })
+    const wrapper = await show(row)
+
+    expect(wrapper.get('.ph-verify-summary').text()).toContain('The proposal behind this')
+    await wrapper.get('.ph-verify-summary').trigger('click')
+    expect(wrapper.get('.ph-verify-body').text()).toContain('Still open')
+
+    // "Nothing was written" rather than "no snapshot available": a different
+    // claim, beside a decision that has not happened.
+    await wrapper.get('.ph-change-toggle').trigger('click')
+    expect(wrapper.get('.ph-change').text()).toContain('Nothing was written')
+    wrapper.unmount()
+  })
+
+  it('leaves an ordinary row exactly as it was', async () => {
+    const wrapper = await show(historyRow())
+
+    expect(wrapper.find('.ph-verify').exists()).toBe(false)
+    expect(wrapper.find('.ph-restore').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})

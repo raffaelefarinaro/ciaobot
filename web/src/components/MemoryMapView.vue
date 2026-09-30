@@ -264,7 +264,40 @@
           @close="closeDetail"
         >
           <template #lead>
-            <div v-if="mm.selectedNode.stale" class="mm-tile-stale" role="note">
+            <!-- Two states, and the order matters. A note somebody is being
+                 asked about RIGHT NOW is not unchecked — the question is in
+                 flight — so the pending proposal is named first and the stale
+                 callout is suppressed. Otherwise a note whose verdict is
+                 sitting in a queue would show "Unchecked for 4 months, review
+                 this" beside a link to a proposal already filed about it. -->
+            <div v-if="mm.selectedNode.check?.pending" class="mm-tile-pending" role="note">
+              <p>
+                <strong>Being checked.</strong>
+                Ciaobot checked this version on {{ mm.selectedNode.check.checked_at }} and filed a
+                proposal about it. The note's own date still reads
+                {{ staleAgeWords(mm.selectedNode) }} old, which is why it is not being asked again
+                on top of that.
+              </p>
+              <router-link class="mm-tile-stale-link" :to="reviewPath('suggested')">Open the proposal</router-link>
+            </div>
+            <div v-else-if="mm.selectedNode.check?.settled" class="mm-tile-checked" role="note">
+              <p>
+                <strong>Checked {{ mm.selectedNode.check.checked_at }}.</strong>
+                The verdict was {{ verdictWords(mm.selectedNode.check.outcome) }}<template
+                  v-if="mm.selectedNode.check.coverage"
+                >, covering {{ coverageWords(mm.selectedNode.check.coverage) }}</template>.
+                It will be checked again after {{ mm.selectedNode.check.retry_after }}.
+              </p>
+            </div>
+            <div v-else-if="mm.selectedNode.check?.conflicted" class="mm-tile-stale" role="note">
+              <p>
+                <strong>A verification is out of date for this note.</strong>
+                It was checked against an earlier version, so that verdict can no longer be applied.
+                Ciaobot will check the current text and file a new proposal if it needs one.
+              </p>
+              <router-link class="mm-tile-stale-link" :to="reviewPath('revisit')">Review in To decide</router-link>
+            </div>
+            <div v-else-if="mm.selectedNode.stale" class="mm-tile-stale" role="note">
               <p>
                 <strong>Unchecked for {{ staleAgeWords(mm.selectedNode) }}.</strong>
                 {{ staleRuleWords(mm.selectedNode) }}
@@ -315,7 +348,7 @@ import {
   memorySectionPath, reviewPath, type MemoryGraphNode, type MemorySection, type ReviewFilter,
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
-import { ageInWords } from '../lib/vaultReviewLabels'
+import { ageInWords, coverageLabel, verdictLabel } from '../lib/vaultReviewLabels'
 import { useModalFocus } from '../composables/useModalFocus'
 import { isLightTheme } from '../lib/theme'
 import PinnedFilePanel from './PinnedFilePanel.vue'
@@ -1326,6 +1359,22 @@ watch(() => mm.section, (section) => {
 function staleAgeWords(n: MemoryGraphNode): string {
   return ageInWords(n.ageDays ?? 0)
 }
+
+/** What a verification's verdict was, in words.
+ *
+ * Shared with the review panel rather than re-spelled here: two surfaces
+ * describing the same verdict two ways is how "still_valid" ends up reading as
+ * a problem somewhere and as good news somewhere else. */
+function verdictWords(outcome: string): string {
+  return verdictLabel(outcome)
+}
+
+/** How much of a note a check covered, in words. `partial` is the one that
+ * matters: a re-stamp claims the whole note, so the pass only applies one from
+ * complete coverage, and a half-checked note is asked again. */
+function coverageWords(coverage: string): string {
+  return coverageLabel(coverage)
+}
 /** The rule the note broke. The horizon comes from the server, which resolves
  * the type through the vault's alias table; the map keeps no copy of it. */
 function staleRuleWords(n: MemoryGraphNode): string {
@@ -1606,6 +1655,22 @@ onBeforeUnmount(() => {
 }
 @keyframes mm-tile-sheet-in {
   from { opacity: 0; transform: translateY(18px); }
+}
+
+/* The two states the stale callout's absence would otherwise leave unexplained:
+   a note with a verdict against it, and one being asked about right now. Same
+   box and same type scale as `.mm-tile-stale` so the tile does not change shape
+   depending on which state the note is in — the accent edge, not a warning
+   colour, is what separates them, because neither of these is a problem. */
+.mm-tile-pending,
+.mm-tile-checked {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--fg);
 }
 
 /* What the tile adds around the note: a stale callout above it, the note's

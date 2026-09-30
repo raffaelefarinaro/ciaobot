@@ -30,7 +30,7 @@ install's notes, and no engine, service or scheduler is started.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1024,3 +1024,125 @@ def test_verify_note_refuses_what_it_cannot_verify_or_must_not_write(
     assert other_note.read_bytes() == before_bytes
     assert _checks(other) == {}
     assert _rows(other) == []
+
+# ---- The one predicate the surfaces share ----------------------------------
+#
+# The review queue and the memory map both ask whether a recorded check already
+# answers the note in front of them. They must ask the SAME question as
+# `should_check` and `verify_note`, or the map flags a note as unchecked and
+# links onward to a queue that has deliberately stopped asking about it.
+
+# A note the queue can hold for a second, independent reason, so a suppressed
+# `unverified` shows up as a change to the row rather than as a note that
+# vanished from the list. The lead paragraph announces its own retirement,
+# which is the one signal a note can raise about itself.
+ANNOUNCED = PLAIN.replace(
+    "# Office\n\n", "# Office\n\nSuperseded by the new reception page.\n\n"
+)
+
+
+def _queue(vault: Path, day: datetime) -> list[review.ReviewCandidate]:
+    """The candidate list as of *day*, at full size, without writing to the vault."""
+    return review.generate_candidates(
+        vault, workspace="personal", max_candidates=50, now=day, write_queue=False
+    )
+
+
+def _row(candidates: list[review.ReviewCandidate]) -> review.ReviewCandidate:
+    row = next((c for c in candidates if c.path.endswith(NOTE)), None)
+    assert row is not None, f"{NOTE} is not in the queue at all"
+    return row
+
+
+def test_a_settled_check_stops_the_queue_asking_again(tmp_path: Path) -> None:
+    """`unverified` is a question, and a recorded verdict is the answer.
+
+    A verdict that came back `unverified` writes nothing, so the note's
+    `updated:` stays exactly where it was and the age rule fires on every scan.
+    Without the check state the queue asked the same note nightly, was told
+    `already_checked`, and asked again the night after.
+    """
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, ANNOUNCED)
+    on_the_day = datetime(2026, 3, 14, 12, 0, tzinfo=UTC)
+
+    assert "unverified" in _row(_queue(vault, on_the_day)).signals
+
+    _recorded_check(
+        vault, revision=_revision(note), retry_after=TODAY + timedelta(days=30)
+    )
+
+    inside = _row(_queue(vault, on_the_day))
+    assert "unverified" not in inside.signals
+    # Still queued for the other reason, and carrying the verdict that answered
+    # the age question — which is what the row shows in place of the signal.
+    assert "superseded_language" in inside.signals
+    state = inside.evidence["verification"]
+    assert state is not None
+    assert state["checked_at"] == TODAY.isoformat()
+    assert state["retry_after"] == "2026-04-13"
+    assert state["citations"] == 1
+    assert inside.as_dict()["pending_verification"] is None
+
+    # The cooldown is an end, and past it the question is open again.
+    assert "unverified" in _row(
+        _queue(vault, datetime(2026, 4, 20, tzinfo=UTC))
+    ).signals
+
+
+def test_a_note_held_for_a_proposal_is_asked_no_further(tmp_path: Path) -> None:
+    """The proposal answers the question, whatever the cooldown says.
+
+    Two surfaces reading one predicate: `should_check` is False, and the queue
+    has nothing to ask. A queue that ignored the check would file the same
+    verdict twice — and the note_edit id is derived from (note, revision), so a
+    second filing would land on the record a person is already deciding.
+    """
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, ANNOUNCED)
+    revision = _revision(note)
+    _recorded_check(
+        vault, revision=revision, retry_after=TODAY, proposal_id="note_edit_7"
+    )
+    long_after = TODAY + timedelta(days=365)
+
+    assert not nv.should_check(vault, NOTE, revision, today=long_after)
+
+    row = _row(_queue(vault, datetime(2026, 3, 14, 12, 0, tzinfo=UTC)))
+    assert "unverified" not in row.signals
+    # Still discoverable, and the row names the proposal holding it rather than
+    # offering a second decision on the same revision.
+    pending = row.as_dict()["pending_verification"]
+    assert pending is not None
+    assert pending["proposal_id"] == "note_edit_7"
+    assert pending["coverage"] == nv.COVERAGE_COMPLETE
+    # `superseded_language` is an independent finding, so the queue keeps its
+    # own terminal action: the pass reaching this note first must not take the
+    # queue's own strongest signal away.
+    assert row.as_dict()["retirement_offered"] is True
+
+
+def test_a_proposal_pinned_to_text_the_note_has_left_asks_again(
+    tmp_path: Path,
+) -> None:
+    """A dead proposal holds nothing, and the row says so.
+
+    Its accept would refuse as a conflict, so treating it as a live question
+    would leave the note with nobody asking about it: the proposal cannot be
+    applied and the queue had stepped aside.
+    """
+    vault = _vault(tmp_path)
+    note = _write(vault, NOTE, ANNOUNCED)
+    _recorded_check(
+        vault, revision=_revision(note), retry_after=TODAY, proposal_id="note_edit_7"
+    )
+    note.write_text(
+        ANNOUNCED + "\nA line somebody added by hand.\n", encoding="utf-8"
+    )
+
+    row = _row(_queue(vault, datetime(2026, 3, 14, 12, 0, tzinfo=UTC)))
+    state = row.evidence["verification"]
+    assert state["conflicted"] is True
+    assert state["pending"] is False
+    assert "unverified" in row.signals
+    assert row.as_dict()["pending_verification"] is None

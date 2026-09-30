@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
-import type { VaultReviewCandidate, VaultTrashedNote,
+import { useProposalsStore } from '../stores/proposals'
+import { reviewPath } from '../stores/memoryMap'
+import type { VaultReviewCandidate, VaultReviewCheck, VaultTrashedNote,
   VaultClearedNote } from '../lib/types'
 import {
-  candidateLeaf, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel,
+  candidateLeaf, coverageLabel, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel, verdictLabel,
 } from '../lib/vaultReviewLabels'
 import { askConfirm } from '../lib/confirm'
 import { startFileDiscussion } from '../lib/fileDiscussion'
@@ -26,6 +29,8 @@ const props = withDefaults(defineProps<{ section?: 'candidates' | 'trash' }>(), 
 const store = useVaultReviewStore()
 const projectStore = useProjectStore()
 const fileViewer = useFileViewerStore()
+const proposals = useProposalsStore()
+const viewRouter = useRouter()
 
 const workspace = computed(() => projectStore.activeWorkspace)
 const hasCurrentSnapshot = computed(() =>
@@ -213,6 +218,77 @@ async function openNote(path: string) {
 
 function verifyLabelOf(candidate: VaultReviewCandidate): string {
   return verificationLabel(candidate.evidence.age_days, candidate.evidence.last_update)
+}
+
+// ── The managed verification ───────────────────────────────────────────────
+//
+// A note the verification pass has already looked at is not the same kind of
+// row as one nobody has touched, and the panel has to be able to say which.
+// Three states, all decided on the server from the note's CURRENT revision:
+//
+// * a proposal is waiting for this exact revision → link to it, and take away
+//   this queue's own retirement offer. Two buttons asking the same question in
+//   two places, able to disagree, is the thing this replaces.
+// * a proposal is pinned to a revision the note has left → it can no longer be
+//   applied, so the row's own actions come back and the panel says why the
+//   proposal is dead.
+// * a verdict was recorded with nothing pending → the check state, in full:
+//   when it ran, what it concluded, how much of the note it covered, and when
+//   the note may be asked about again.
+
+/** The check state, or null when nobody has checked this revision. */
+function checkOf(candidate: VaultReviewCandidate): VaultReviewCheck | null {
+  const v = candidate.evidence.verification
+  return v && typeof v === 'object' ? v : null
+}
+
+/** Whether this row defers to a proposal rather than offering a second answer. */
+function hasPendingProposal(candidate: VaultReviewCandidate): boolean {
+  return Boolean(candidate.pending_verification?.proposal_id)
+}
+
+/**
+ * Whether the row still offers Retire / Complete.
+ *
+ * The server's answer, read off the payload. A client that re-derived it from
+ * the signal list could disagree with the engine about what a note's only
+ * reason for being here is, and the failure is a row that is either stuck or
+ * still asking a question the queue has already handed to somebody.
+ */
+function offersRetirement(candidate: VaultReviewCandidate): boolean {
+  // Absent means an older server, which never suppressed anything. Defaulting to
+  // "yes" keeps that server's behaviour exactly as it was.
+  return candidate.retirement_offered !== false
+}
+
+/** Whether the row offers "Still true" — the pass's own re-stamp.
+ *
+ * Never while a proposal is pending: it would stamp `updated: today` onto a note
+ * somebody was about to rewrite, and the stamp would claim a verification of
+ * text the pass had already said was wrong. Still offered on a CONFLICTED row,
+ * because there the proposal is dead and this is the only way back.
+ */
+function offersReverify(candidate: VaultReviewCandidate): boolean {
+  return !hasPendingProposal(candidate)
+}
+
+/** Open the proposal a row points at, in the queue it lives in.
+ *
+ * A link rather than an inline duplicate of the card: the proposal carries the
+ * before/after, the evidence and the accept button, and a second rendering of
+ * it here would be a second copy free to fall out of step with the one that
+ * actually applies the change.
+ *
+ * The queue is loaded *before* the navigation, not alongside it. The reveal
+ * waits for the row element to exist, and starting the fetch here would race
+ * the route change for no benefit.
+ */
+async function openPendingProposal(candidate: VaultReviewCandidate) {
+  const pending = candidate.pending_verification
+  if (!pending?.proposal_id) return
+  await proposals.ensureLoaded()
+  proposals.revealRow(pending.proposal_id)
+  await viewRouter.push(reviewPath('suggested'))
 }
 
 // One chat at a time: the button is on every row, and a double-click used to
@@ -455,7 +531,8 @@ function clearedDate(note: VaultClearedNote): string {
         checked today. A project offers <strong>Complete</strong> in its place, which moves it
         to <code>projects/completed/</code> and repoints what links to it;
         <strong>Retire</strong> covers every other note, moving it to Retired, where it can be
-        restored.
+        restored. Where the nightly pass has already filed a proposal about a note, this list
+        links to it instead of asking the same question again.
       </p>
       <p v-else class="mr-lede vr-lede">
         Notes you retired. They stay here until you say otherwise — nothing is removed
@@ -579,6 +656,31 @@ function clearedDate(note: VaultClearedNote): string {
                     <template v-if="candidate.evidence.unverified">
                       {{ typePlural(candidate) }} are due every {{ candidate.evidence.unverified.threshold_days }} days.
                     </template>
+                    <!-- The last recorded check, when there is one. It is NOT the
+                         date above: that is the note's own `updated:`, and a
+                         check that came back unverified wrote nothing, so the
+                         two say different things. Showing only the newer one
+                         would let "checked yesterday" and "unchecked for a
+                         year" read as a contradiction instead of a verdict
+                         nobody could support.
+
+                         Skipped where a pending card below already says all of
+                         it: two boxes on one row repeating the same verdict,
+                         coverage, citations and reason is a wall, and the one
+                         that matters is the card that carries the decision. -->
+                    <template v-if="checkOf(candidate) && !hasPendingProposal(candidate)">
+                      Ciaobot last checked it on <code>{{ checkOf(candidate)!.checked_at }}</code>:
+                      {{ verdictLabel(checkOf(candidate)!.outcome) }}<template
+                        v-if="checkOf(candidate)!.coverage"
+                      >, covering {{ coverageLabel(checkOf(candidate)!.coverage) }}</template>.<template
+                        v-if="checkOf(candidate)!.citations"
+                      > Backed by {{ checkOf(candidate)!.citations }} citation{{ checkOf(candidate)!.citations === 1 ? '' : 's' }}.</template>
+                      <template v-if="checkOf(candidate)!.reason">{{ checkOf(candidate)!.reason }}</template>
+                    </template>
+                    <template v-else-if="checkOf(candidate)">
+                      Ciaobot has since checked this exact text; the verdict is on
+                      the proposal below.
+                    </template>
                   </p>
 
                   <p v-else-if="signal === 'possible_duplicate'" class="mr-box-body">
@@ -603,6 +705,47 @@ function clearedDate(note: VaultClearedNote): string {
                 </div>
               </template>
 
+              <!-- A pending proposal, in place of this queue's own decision.
+                   The link is the whole point: the question is already in the
+                   Suggested queue, with the before/after and the evidence on
+                   the card, and answering it here as well would be two answers
+                   to one revision. -->
+              <div v-if="hasPendingProposal(candidate)" class="vr-pending">
+                <p class="vr-pending-head">
+                  <strong>Verification proposal pending</strong> — Ciaobot checked this
+                  revision on <code>{{ candidate.pending_verification!.checked_at }}</code> and
+                  concluded {{ verdictLabel(candidate.pending_verification!.outcome) }}<template
+                    v-if="candidate.pending_verification!.coverage"
+                  >, covering {{ coverageLabel(candidate.pending_verification!.coverage) }}</template>.<template
+                    v-if="candidate.pending_verification!.citations"
+                  > Backed by {{ candidate.pending_verification!.citations }} citation{{ candidate.pending_verification!.citations === 1 ? '' : 's' }}.</template>
+                </p>
+                <p v-if="candidate.pending_verification!.reason" class="vr-pending-reason">
+                  {{ candidate.pending_verification!.reason }}
+                </p>
+                <button
+                  type="button"
+                  class="mr-link vr-pending-link"
+                  title="Open the proposal in Suggested, where the change and its evidence are"
+                  @click="openPendingProposal(candidate)"
+                >Open the proposal</button>
+                <p class="vr-hint vr-pending-hint">
+                  The decision is on the proposal, not here — accepting or dismissing it
+                  applies or declines the change. This note stays in the list until that
+                  happens.
+                </p>
+              </div>
+
+              <!-- A proposal pinned to text this note no longer holds. The
+                   proposal cannot be applied (its accept refuses as a conflict),
+                   so this row's own actions are the only route left, and the
+                   panel says which revision they are looking at. -->
+              <p v-else-if="checkOf(candidate)?.conflicted" class="vr-conflict">
+                A verification proposal was filed for an earlier version of this note, so it
+                can no longer be applied — Ciaobot will file a new one. Until then the note
+                is yours to decide here.
+              </p>
+
               <p v-if="inlineExcerpt(candidate)" class="vr-excerpt-inline">{{ inlineExcerpt(candidate) }}</p>
               <button
                 type="button"
@@ -613,7 +756,13 @@ function clearedDate(note: VaultClearedNote): string {
             </div>
 
             <div class="mr-actions vr-actions">
+              <!-- Two offers that vanish together on a pending row, and only on
+                   one. `Still true` would stamp the note as verified today,
+                   which is a claim about text the pass has already said is
+                   wrong; `Retire` would answer, in a second place, the question
+                   the proposal is holding. -->
               <button
+                v-if="offersReverify(candidate)"
                 type="button"
                 class="mr-btn"
                 :disabled="store.isBusy(candidate.candidate_id)"
@@ -624,21 +773,23 @@ function clearedDate(note: VaultClearedNote): string {
                    Retire is deliberately unreachable on a project row: it replaces
                    the trash, and a project is closed out rather than hidden, so
                    the confirm is where the weight sits instead. -->
-              <button
-                v-if="isCompletable(candidate)"
-                type="button"
-                class="mr-btn"
-                :disabled="store.isBusy(candidate.candidate_id)"
-                title="Close this project out: move it to projects/completed/ and repoint every note that links to it"
-                @click="completeRow(candidate)"
-              >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Complete' }}</button>
-              <button
-                v-else
-                type="button"
-                class="mr-btn mr-btn--quiet"
-                :disabled="store.isBusy(candidate.candidate_id)"
-                @click="trashRow(candidate)"
-              >Retire</button>
+              <template v-if="offersRetirement(candidate)">
+                <button
+                  v-if="isCompletable(candidate)"
+                  type="button"
+                  class="mr-btn"
+                  :disabled="store.isBusy(candidate.candidate_id)"
+                  title="Close this project out: move it to projects/completed/ and repoint every note that links to it"
+                  @click="completeRow(candidate)"
+                >{{ store.isBusy(candidate.candidate_id) ? 'working…' : 'Complete' }}</button>
+                <button
+                  v-else
+                  type="button"
+                  class="mr-btn mr-btn--quiet"
+                  :disabled="store.isBusy(candidate.candidate_id)"
+                  @click="trashRow(candidate)"
+                >Retire</button>
+              </template>
               <button
                 type="button"
                 class="mr-link"
@@ -929,6 +1080,62 @@ function clearedDate(note: VaultClearedNote): string {
 .vr-badge.--warn {
   background: color-mix(in srgb, var(--warning) 18%, transparent);
   color: var(--fg);
+}
+
+/* A note the pass is holding for a person. The box is the row's reason for
+   being here now, so it takes the same quiet treatment as the evidence boxes
+   above — a rule and a tinted ground, not a second card. */
+.vr-pending {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg2);
+}
+
+.vr-pending-head {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.vr-pending-head strong { color: var(--fg); }
+
+.vr-pending-reason {
+  margin: 0.35rem 0 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* The whole point of the box: a link, not a button styled like one. */
+.vr-pending-link {
+  margin-top: var(--space-2);
+  min-height: 24px;
+}
+
+.vr-pending-hint {
+  margin-top: 4px;
+  max-width: 60ch;
+}
+
+@media (pointer: coarse) {
+  .vr-pending-link { min-height: var(--touch); }
+}
+
+/* A proposal whose revision the note has left. Warning-coloured, because it
+   explains why the pipeline stopped and the row is actionable again — which is
+   the opposite of a row that is merely busy. */
+.vr-conflict {
+  margin: var(--space-2) 0 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  padding-left: var(--space-2);
+  border-left: 3px solid color-mix(in srgb, var(--warning) 70%, transparent);
 }
 
 /* The note's own words, visible without a click, clamped to two lines. */

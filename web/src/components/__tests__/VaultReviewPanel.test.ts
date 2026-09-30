@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import VaultReviewPanel from '../VaultReviewPanel.vue'
 import { useVaultReviewStore } from '../../stores/vaultReview'
+import { useProposalsStore } from '../../stores/proposals'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { pendingConfirm } from '../../lib/confirm'
@@ -836,6 +837,233 @@ describe('VaultReviewPanel', () => {
     expect(seed).toContain('I will pick Still true or Retire myself')
     expect(seed).toContain('that is an argument for retiring it')
     expect(seed).not.toContain('Complete')
+    wrapper.unmount()
+  })
+})
+
+// ── A note the verification pass is holding for a person ───────────────────
+//
+// The queue used to offer a second, independent Still true / Retire on the very
+// revision a proposal was already filed about. One question, asked in two
+// places, with the two answers free to disagree.
+
+function check(overrides: Record<string, unknown> = {}) {
+  return {
+    outcome: 'retire',
+    checked_at: '2026-09-28',
+    retry_after: '2026-10-28',
+    coverage: 'complete',
+    reason: 'the office moved to a new site',
+    citations: 2,
+    receipt_id: '',
+    revision: 'rev-1',
+    pending: true,
+    conflicted: false,
+    proposal_id: 'p-9',
+    ...overrides,
+  }
+}
+
+function pendingCandidate(overrides: Partial<VaultReviewCandidate> = {}): VaultReviewCandidate {
+  const state = check(overrides.evidence?.verification ? {} : {})
+  return candidate({
+    signals: ['unverified'],
+    retirement_offered: false,
+    evidence: { ...candidate().evidence, verification: state as never },
+    pending_verification: {
+      proposal_id: 'p-9',
+      note_edit_id: 'side-9',
+      outcome: state.outcome,
+      checked_at: state.checked_at,
+      retry_after: state.retry_after,
+      coverage: state.coverage,
+      reason: state.reason,
+      citations: state.citations,
+    },
+    ...overrides,
+  })
+}
+
+/** A note checked and settled with nothing pending — the "asked, and here is
+ * the answer" state, which is not the same as "never looked at". */
+function checkedCandidate(overrides: Partial<VaultReviewCandidate> = {}): VaultReviewCandidate {
+  return candidate({
+    signals: ['unlinked'],
+    evidence: {
+      ...candidate().evidence,
+      unverified: { age_days: 640, threshold_days: 180, last_verified: '2024-11-02', source: 'frontmatter' },
+      verification: check({ outcome: 'unverified', pending: false, proposal_id: '', citations: 0, reason: 'no source this pass reached could support it' }) as never,
+    },
+    ...overrides,
+  })
+}
+
+async function mountWithRouter(c: VaultReviewCandidate, pinia: ReturnType<typeof createPinia>) {
+  const { createMemoryHistory, createRouter } = await import('vue-router')
+  apiGet.mockResolvedValue({ candidates: [c], trashed: [] })
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', component: { template: '<div />' } },
+      { path: '/memory/:section', component: { template: '<div />' } },
+    ],
+  })
+  await router.push('/')
+  await router.isReady()
+  const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia, router] } })
+  await flushPromises()
+  return { wrapper, router }
+}
+
+describe('a pending verification proposal', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+    apiPost.mockResolvedValue({ ok: true })
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    pendingConfirm.value?.resolve(false)
+    vi.restoreAllMocks()
+  })
+
+  it('links the proposal instead of asking the same question again', async () => {
+    const { wrapper } = await mountWithRouter(pendingCandidate(), pinia)
+
+    const text = wrapper.get('.vr-pending').text()
+    expect(text).toContain('Verification proposal pending')
+    expect(text).toContain('2026-09-28')
+    expect(text).toContain('the note should be retired')
+    expect(text).toContain('covering the whole note')
+    expect(text).toContain('2 citations')
+    // The reason is the pass's own, quoted: it is why the question exists.
+    expect(text).toContain('the office moved to a new site')
+    // The note stays in the list; the row says the decision lives elsewhere.
+    expect(wrapper.find('.vr-row').exists()).toBe(true)
+    expect(wrapper.get('.vr-pending-hint').text())
+      .toContain('The decision is on the proposal, not here')
+    wrapper.unmount()
+  })
+
+  it('withdraws the queue’s own Still true and Retire on that revision', async () => {
+    const { wrapper } = await mountWithRouter(pendingCandidate(), pinia)
+
+    // Only Discuss. Still true would stamp the note "verified today" — a claim
+    // about text the pass has already said is wrong.
+    expect(wrapper.findAll('.vr-actions button').map(b => b.text())).toEqual(['Discuss'])
+    wrapper.unmount()
+  })
+
+  it('keeps Retire when another signal is an independent finding', async () => {
+    // Unlinked is a real reason to retire the note, and the pass reaching the
+    // same note first must not take the queue's own strongest signal away.
+    const { wrapper } = await mountWithRouter(pendingCandidate({
+      signals: ['unlinked', 'unverified'],
+      retirement_offered: true,
+    }), pinia)
+
+    expect(wrapper.findAll('.vr-actions button').map(b => b.text())).toEqual(['Retire', 'Discuss'])
+    expect(wrapper.find('.vr-pending').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('says a partial check covered part of the note, not all of it', async () => {
+    // A re-stamp claims the WHOLE note is still true, so the pass only applies
+    // one from complete coverage. "Checked" alone would overclaim.
+    const { wrapper } = await mountWithRouter(pendingCandidate({
+      evidence: { ...pendingCandidate().evidence, verification: check({ coverage: 'partial' }) as never },
+      pending_verification: { ...pendingCandidate().pending_verification!, coverage: 'partial' },
+    }), pinia)
+
+    expect(wrapper.get('.vr-pending').text()).toContain('covering part of the note')
+    wrapper.unmount()
+  })
+
+  it('navigates to the queue and names the row when the link is followed', async () => {
+    const { wrapper, router } = await mountWithRouter(pendingCandidate(), pinia)
+
+    await wrapper.get('.vr-pending-link').trigger('click')
+    await flushPromises()
+
+    expect(useProposalsStore().revealedRowId).toBe('p-9')
+    expect(router.currentRoute.value.fullPath).toContain('show=suggested')
+    wrapper.unmount()
+  })
+
+  it('clears a filter that would have hidden the linked row', async () => {
+    const { wrapper } = await mountWithRouter(pendingCandidate(), pinia)
+    const store = useProposalsStore()
+    store.kindFilter = 'skill'
+    store.search = 'nothing matches this'
+
+    await wrapper.get('.vr-pending-link').trigger('click')
+    await flushPromises()
+
+    // A link that lands on a list the row is not in is the one thing it must
+    // not do, and the kind chip and search box are the two things that hide it.
+    expect(store.kindFilter).toBe('all')
+    expect(store.search).toBe('')
+    wrapper.unmount()
+  })
+})
+
+describe('a settled check with nothing pending', () => {
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    pinia = createPinia()
+    setActivePinia(pinia)
+    apiGet.mockReset()
+    apiPost.mockReset()
+    apiPost.mockResolvedValue({ ok: true })
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    pendingConfirm.value?.resolve(false)
+    vi.restoreAllMocks()
+  })
+
+  it('reports the verdict inside the unchecked evidence box', async () => {
+    // A verdict that came back unverified writes nothing, so the note keeps an
+    // old `updated:` while the check is recent. Both dates are shown, because
+    // one date for two claims reads as a contradiction rather than a verdict.
+    const row = checkedCandidate({ signals: ['unlinked', 'unverified'] })
+    const { wrapper } = await mountWithRouter(row, pinia)
+
+    const box = wrapper.get('.vr-evidence--unverified').text()
+    expect(box).toContain('2024-11-02')
+    expect(box).toContain('2026-09-28')
+    expect(box).toContain('could not be confirmed')
+    expect(box).toContain('no source this pass reached could support it')
+    // No proposal, so the row's own actions are untouched.
+    expect(wrapper.find('.vr-pending').exists()).toBe(false)
+    expect(wrapper.findAll('.vr-actions button').map(b => b.text()))
+      .toEqual(['Still true', 'Retire', 'Discuss'])
+    wrapper.unmount()
+  })
+
+  it('says a proposal pinned to an older revision is dead, and acts', async () => {
+    // Its accept would refuse as a conflict, so withdrawing this row would leave
+    // the note with nobody asking about it: the proposal cannot be applied and
+    // the queue had stepped aside.
+    const { wrapper } = await mountWithRouter(candidate({
+      signals: ['unverified'],
+      evidence: {
+        ...candidate().evidence,
+        verification: check({ pending: false, conflicted: true }) as never,
+      },
+    }), pinia)
+
+    expect(wrapper.get('.vr-conflict').text())
+      .toContain('filed for an earlier version of this note')
+    expect(wrapper.findAll('.vr-actions button').map(b => b.text()))
+      .toEqual(['Still true', 'Retire', 'Discuss'])
     wrapper.unmount()
   })
 })

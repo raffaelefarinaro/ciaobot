@@ -16,14 +16,17 @@ import shutil
 import threading
 import tempfile
 from dataclasses import dataclass, asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from urllib.parse import quote
 
 from ciao.memory_audit import NoteVerification, note_verification
 from ciao.vault_index import build_filename_index, canonical_type, scan_vault, temp_prefix
 from ciao.vault_lint import is_template_stem, run_validation
+
+if TYPE_CHECKING:  # the runtime import lives in the functions, to avoid the cycle
+    from ciao.note_verification import NoteCheck
 
 # No retention window. A `RETENTION_DAYS = 30` constant sat here unread while
 # three strings in the panel promised a note would be restorable "for 30 days"
@@ -202,11 +205,146 @@ class ReviewCandidate:
         # definition of "is this a folder project" next to the one that decides
         # what the move does.
         payload["completion_moves_folder"] = _completion_moves_folder(self)
+        # The managed verification's state for this note's current revision, and
+        # the proposal it is holding the note for. Decided here for the same
+        # reason as the two flags above: the row's actions are a promise, and a
+        # client that re-derived "is a proposal still pending?" from a date would
+        # offer a second decision on a question already sitting in the queue.
+        verification = self.evidence.get("verification")
+        state = dict(verification) if isinstance(verification, dict) else None
+        payload["verification"] = state
+        payload["pending_verification"] = (
+            _pending_proposal_payload(
+                state,
+                workspace=self.workspace,
+                relative=str(state.get("relative_path", "")),
+            )
+            if state is not None and state.get("pending")
+            else None
+        )
+        payload["retirement_offered"] = _retirement_offered(self.signals)
         return payload
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+# ── The managed verification check, as the queue sees it ───────────────────
+#
+# `note_verification` owns the check state; the queue only reads it. Its imports
+# are inside the functions because `ciao.note_verification` imports
+# `_stamp_updated` from this module, so a module-level import here would close
+# the cycle. `memory_receipts` is taken the same way rather than hoisted: it is
+# imported at module level by `note_verification`, so following it in is
+# guaranteed to terminate, and inventing a cycle nobody has is how one gets made.
+
+
+def verification_evidence(
+    check: NoteCheck, current_revision: str, relative: str
+) -> dict[str, Any]:
+    """One check, as the queue's evidence block for the note it describes.
+
+    The state a human needs before deciding a row: when the note was last
+    *checked* (not the same date as the note's own ``updated:``, and the two are
+    what "checked" versus "verified" means), what the check concluded, how much
+    of the note it covered, when it may be asked again, the citations it rested
+    on, and the receipt an applied verdict wrote.
+
+    ``pending`` is the load-bearing half. A check whose ``proposal_id`` is set is
+    holding the note for a proposal nobody has decided yet, and
+    ``note_verification._check_settles`` suppresses the note whatever its
+    cooldown says — so a row that offered a second, independent *Still true* /
+    *Retire* on the same revision would be asking for a decision already sitting
+    in the queue.
+
+    ``conflicted`` is the other half, and it is why a stale proposal id does not
+    suppress anything. A check pinned to a revision the note is no longer in
+    describes a proposal the accept will refuse as a conflict, and the note is
+    due to be checked again — so the queue keeps its own actions and says what
+    went wrong instead. A proposal id is only evidence of a live question while
+    the revision it names is the revision on disk.
+
+    ``relative_path`` is the vault-relative key the check state itself uses, and
+    it is carried so :func:`_pending_proposal_payload` can derive the sidecar id
+    without a second way of turning this row's path into one.
+    """
+    current = check.content_revision == current_revision
+    return {
+        "outcome": check.outcome,
+        "checked_at": check.checked_at.isoformat(),
+        "retry_after": check.retry_after.isoformat(),
+        "coverage": check.coverage,
+        "reason": check.reason,
+        "citations": len(check.evidence),
+        "receipt_id": check.receipt_id,
+        "relative_path": relative,
+        "revision": check.content_revision,
+        "pending": bool(check.proposal_id) and current,
+        "conflicted": bool(check.proposal_id) and not current,
+        "proposal_id": check.proposal_id if current else "",
+    }
+
+
+def _settles(check: NoteCheck, current_revision: str, *, today: date) -> bool:
+    """Whether this check already answers the question about the note as it stands.
+
+    :func:`ciao.note_verification._check_settles` itself, rather than a third
+    copy of its rule. That private name is imported for the same reason
+    ``_stamp_updated`` is over there: the predicate decides whether a note is
+    asked about again, and two definitions of it are two answers, one of which
+    will be the permissive one. A note the pass already checked, and a note
+    waiting on a proposal, both stop being queued as unchecked — while a check
+    about text that has since changed answers nothing and the note is due.
+    """
+    from ciao.note_verification import _check_settles
+
+    return _check_settles(check, current_revision, today=today)
+
+
+def _pending_proposal_payload(
+    verification: dict[str, Any], *, workspace: str, relative: str
+) -> dict[str, Any]:
+    """The linked proposal a row points at, in the shape a client links with.
+
+    ``proposal_id`` is the queue row the review card is keyed by, which is the
+    one thing a client can act on. ``note_edit_id`` is the sidecar the accept
+    resolves, derived the one way ``note_edit_proposals.file_note_edit`` derives
+    it — from the workspace, the vault-relative path and the revision — so the
+    reader of this payload and the writer of the sidecar cannot disagree about
+    which record it is.
+    """
+    from ciao.note_edit_proposals import note_edit_id
+
+    revision = str(verification.get("revision") or "")
+    return {
+        "proposal_id": str(verification.get("proposal_id") or ""),
+        "note_edit_id": note_edit_id(workspace, relative, revision) if revision else "",
+        "outcome": str(verification.get("outcome") or ""),
+        "checked_at": str(verification.get("checked_at") or ""),
+        "retry_after": str(verification.get("retry_after") or ""),
+        "coverage": str(verification.get("coverage") or ""),
+        "reason": str(verification.get("reason") or ""),
+        "citations": int(verification.get("citations") or 0),
+    }
+
+
+def _retirement_offered(signals: list[str] | tuple[str, ...]) -> bool:
+    """Whether some signal other than ``unverified`` justifies retiring this note.
+
+    The question behind "suppress the duplicate candidate". A note whose only
+    reason for being here is that it has gone unchecked is not a retirement
+    finding at all — it is a note somebody was asked about, and the answer is
+    waiting in the proposal queue. But a note that is *also* unlinked, duplicated
+    or announcing its own supersession is a genuine retirement candidate, and
+    taking its Retire button away because a verification happened to reach the
+    same note first would be the pipeline removing the queue's own strongest
+    signal.
+
+    Decided here, on the same list the priority and the signals are computed
+    from, so a client cannot answer it differently from the panel's own reasons.
+    """
+    return any(signal != "unverified" for signal in signals)
 
 
 def _append(root: Path, payload: dict[str, Any]) -> None:
@@ -494,6 +632,15 @@ def _generate_candidates(
                 incoming[target_path].append(source)
     today = (now or datetime.now(UTC)).date()
     candidates: list[ReviewCandidate] = []
+    # The managed verification state, read once for the whole scan. It is keyed
+    # by the same vault-relative path `note_receipts` journals a write under,
+    # and every row below is compared against the note's *current* revision — so
+    # a check about text that has since been replaced is reported as a conflict
+    # rather than as a pending question.
+    from ciao import memory_receipts as mr
+    from ciao.note_verification import read_note_checks
+
+    note_checks = read_note_checks(root)
     # What the vault actually holds right now, by path and by content. A note
     # renamed in an editor leaves its old path but never left the vault, and
     # `_record_vanished` must not say otherwise.
@@ -560,7 +707,40 @@ def _generate_candidates(
         verification: NoteVerification | None = note_verification(
             entry.type or "", entry.updated or "", mtime, today=today
         )
+        # The managed verification's own record of this note, when it has one.
+        # Read against the note's CURRENT revision, so a check about superseded
+        # text reads as a conflict rather than as a live question: the proposal
+        # it pinned would be refused on accept, and the note is due again.
+        #
+        # Read here, above the `unverified` decision below, because this is the
+        # one input to that decision the ledger cannot supply. The other half of
+        # the policy is in `note_verification.plan_note_verification` and is
+        # deliberately NOT re-derived here: what may be written unattended is a
+        # rule about claims and their citations, and a second copy of it in the
+        # queue could only ever be a looser one. So a note whose check is still
+        # in cooldown is not asked here, and a note whose check came back
+        # `applied` has already had its `updated:` re-stamped by the very write
+        # that recorded it — which is why `unverified` did not fire for it
+        # either.
+        relative = Path(path).relative_to("memory-vault").as_posix()
+        revision = mr.content_revision(text)
+        check = note_checks.get(relative)
+        check_state = (
+            verification_evidence(check, revision, relative)
+            if check is not None
+            else None
+        )
         unverified = verification if verification is not None and verification.stale else None
+        # A check inside its cooldown has already answered this revision, so the
+        # note is not queued as unchecked again. This is `note_verification`'s
+        # own predicate — the very one `verify_note` short-circuits on and the
+        # curation worklist filters its plan by — asked here so the queue, the
+        # Memory Map and the nightly pass cannot disagree about which notes are
+        # still due. A PENDING proposal counts as answered whatever the cooldown
+        # says, because it is waiting to be settled and asking again would only
+        # produce a second one.
+        if unverified is not None and check is not None and _settles(check, revision, today=today):
+            unverified = None
         if unverified is not None:
             signals.append("unverified")
         if not signals:
@@ -585,6 +765,11 @@ def _generate_candidates(
             # Why `unverified` fired, with the horizon beside the age so a
             # reader can disagree with the verdict without losing the evidence.
             "unverified": unverified.as_evidence() if unverified is not None else None,
+            # What the managed pass already concluded about this exact revision:
+            # when it checked, what it found, how much of the note it covered,
+            # and the proposal it is holding the note for. `None` for a note
+            # nobody has checked, which is the ordinary case.
+            "verification": check_state,
             # Where the note says it was superseded, so the row can quote the
             # line instead of asking the user to go and find it.
             "superseded": superseded,

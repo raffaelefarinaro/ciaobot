@@ -316,3 +316,350 @@ export function snapshotFrame(activeStreams) {
     restarting: false,
   }
 }
+
+// ── The managed note-verification pipeline, as the surfaces receive it ──────
+//
+// Four notes, one per state the review queue and the memory map have to tell
+// apart. They are the states a browser cannot be asked about in jsdom: a link
+// that has to take focus, a card whose copy changes shape, and a set of
+// controls whose touch height only a real layout engine reports.
+
+/** The check state the engine stores for one note's current revision. */
+const check = (over = {}) => ({
+  outcome: 'still_valid',
+  checked_at: '2026-09-28',
+  retry_after: '2026-10-28',
+  coverage: 'complete',
+  reason: 'the March release notes still name her',
+  citations: 3,
+  receipt_id: 'mrcpt_fixture_1',
+  settled: true,
+  pending: false,
+  proposal_id: '',
+  conflicted: false,
+  ...over,
+})
+
+export const VERIFICATION_REVIEW = {
+  candidates: [
+    {
+      // The row this child is about: a note the pass is holding for a person.
+      // The queue links the proposal instead of offering Still true / Retire on
+      // the same revision, and `unlinked` keeps Retire — a second, independent
+      // finding about the note.
+      candidate_id: 'pend0000000000000000000a1',
+      workspace: 'alpha',
+      path: 'memory-vault/alpha/People/Team.md',
+      content_hash: 'hash-pending',
+      signals: ['unlinked', 'unverified'],
+      priority: 0,
+      evidence: {
+        backlinks: [],
+        outbound_links: [],
+        bridge: false,
+        duplicate_group: [],
+        last_update: '2024-01-05',
+        type: 'person',
+        age_days: 999,
+        unverified: { age_days: 999, threshold_days: 90, last_verified: '2024-01-05', source: 'frontmatter' },
+        verification: check({
+          outcome: 'retire',
+          reason: 'the team page was replaced by the org chart',
+          citations: 2,
+          receipt_id: '',
+          pending: true,
+          proposal_id: 'proposal-verify-1',
+        }),
+        superseded: null,
+        excerpt: 'Working agreements for the release team.',
+      },
+      status: 'candidate',
+      disposition: '',
+      deferred_until: '',
+      completable: false,
+      completion_moves_folder: false,
+      pending_verification: {
+        proposal_id: 'proposal-verify-1',
+        note_edit_id: 'fixture0000000000a1',
+        outcome: 'retire',
+        checked_at: '2026-09-28',
+        retry_after: '2026-10-28',
+        coverage: 'complete',
+        reason: 'the team page was replaced by the org chart',
+        citations: 2,
+      },
+      retirement_offered: true,
+    },
+    {
+      // Held for a proposal and flagged for NOTHING else: the queue has no
+      // second decision of its own to offer at all.
+      candidate_id: 'pend0000000000000000000b2',
+      workspace: 'alpha',
+      path: 'memory-vault/alpha/Projects/Atlas.md',
+      content_hash: 'hash-sole',
+      signals: ['unverified'],
+      priority: 0,
+      evidence: {
+        backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
+        last_update: '2024-01-05', type: 'project', age_days: 999,
+        unverified: { age_days: 999, threshold_days: 30, last_verified: '2024-01-05', source: 'frontmatter' },
+        verification: check({
+          outcome: 'update', coverage: 'partial', reason: 'the tracker moved to a new system',
+          citations: 1, receipt_id: '', pending: true, proposal_id: 'proposal-verify-2',
+        }),
+        superseded: null,
+        excerpt: 'Atlas ships on the last Friday of the month.',
+      },
+      status: 'candidate', disposition: '', deferred_until: '',
+      completable: false, completion_moves_folder: false,
+      pending_verification: {
+        proposal_id: 'proposal-verify-2',
+        note_edit_id: 'fixture0000000000b2',
+        outcome: 'update', checked_at: '2026-09-28', retry_after: '2026-10-28',
+        coverage: 'partial', reason: 'the tracker moved to a new system', citations: 1,
+      },
+      retirement_offered: false,
+    },
+    {
+      // A proposal pinned to a revision the note has left: it can no longer be
+      // applied, so the queue hands the decision back and says why.
+      candidate_id: 'pend0000000000000000000c3',
+      workspace: 'alpha',
+      path: 'memory-vault/alpha/Projects/Borealis.md',
+      content_hash: 'hash-conflicted',
+      signals: ['unverified'],
+      priority: 0,
+      evidence: {
+        backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
+        last_update: '2024-01-05', type: 'project', age_days: 999,
+        unverified: { age_days: 999, threshold_days: 30, last_verified: '2024-01-05', source: 'frontmatter' },
+        verification: check({
+          outcome: 'retire', settled: false, pending: false, conflicted: true,
+          proposal_id: 'proposal-verify-3', reason: 'folded into Atlas', citations: 1, receipt_id: '',
+        }),
+        superseded: null,
+        excerpt: 'Borealis is superseded by Atlas.',
+      },
+      status: 'candidate', disposition: '', deferred_until: '',
+      completable: false, completion_moves_folder: false,
+      pending_verification: null,
+      retirement_offered: true,
+    },
+    {
+      // Asked and answered: no proposal, and the check state says so in place
+      // of the age flag the queue would otherwise raise.
+      candidate_id: 'pend0000000000000000000d4',
+      workspace: 'alpha',
+      path: 'memory-vault/alpha/Projects/Cassiopeia.md',
+      content_hash: 'hash-settled',
+      signals: ['unverified'],
+      priority: 0,
+      evidence: {
+        backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
+        last_update: '2024-01-05', type: 'project', age_days: 999,
+        unverified: { age_days: 999, threshold_days: 30, last_verified: '2024-01-05', source: 'frontmatter' },
+        verification: check({
+          outcome: 'unverified', coverage: 'partial', citations: 0, receipt_id: '',
+          reason: 'the tracker connector was down', pending: false, proposal_id: '',
+        }),
+        superseded: null,
+        excerpt: 'Cassiopeia ships quarterly.',
+      },
+      status: 'candidate', disposition: '', deferred_until: '',
+      completable: false, completion_moves_folder: false,
+      pending_verification: null,
+      retirement_offered: true,
+    },
+  ],
+  trashed: [],
+  cleared: [],
+}
+
+/** The note-edit proposals the review rows link to. */
+export const VERIFICATION_PROPOSALS = [
+  {
+    id: 'proposal-verify-1',
+    kind: 'note_edit',
+    target: 'People/Team.md',
+    text: 'People/Team.md — retire (rev 3f9a1c02): the team page was replaced by the org chart',
+    source: 'note verification · retire',
+    workspace: 'alpha',
+    line: 1,
+    note_edit: {
+      id: 'fixture0000000000a1',
+      operation: 'retire',
+      outcome: 'retire',
+      settled: '',
+      receipt_id: '',
+      can_accept: true,
+      reason: 'the team page was replaced by the org chart',
+    },
+  },
+  {
+    id: 'proposal-verify-2',
+    kind: 'note_edit',
+    target: 'Projects/Atlas.md',
+    text: 'Projects/Atlas.md — replace (rev 88c0de55): the tracker moved to a new system',
+    source: 'note verification · replace',
+    workspace: 'alpha',
+    line: 2,
+    note_edit: {
+      id: 'fixture0000000000b2',
+      operation: 'replace',
+      outcome: 'update',
+      settled: '',
+      receipt_id: '',
+      can_accept: true,
+      reason: 'the tracker moved to a new system',
+    },
+  },
+]
+
+/** The history rows a settled verification leaves behind. */
+export const VERIFICATION_HISTORY = {
+  rows: [
+    {
+      id: 'hist-accepted',
+      ts: '2026-09-28T10:12:00+00:00',
+      action: 'accepted',
+      via: 'pwa',
+      kind: 'note_edit',
+      text: 'Projects/Atlas.md — replace (rev 88c0de55): the tracker moved to a new system',
+      source: 'note verification · replace',
+      workspace: 'alpha',
+      destination: 'Projects/Atlas.md',
+      outcome: 'written',
+      proposal_id: 'proposal-verify-9',
+      note_edit: {
+        id: 'fixture0000000000b9',
+        relative_path: 'Projects/Atlas.md',
+        operation: 'replace',
+        outcome: 'update',
+        coverage: 'complete',
+        before: '---\ntype: project\nupdated: 2024-01-05\n---\n\nAtlas ships on the last Friday of the month.\n',
+        after: '---\ntype: project\nupdated: 2026-09-28\n---\n\nAtlas ships on the last Thursday of the month.\n',
+        reason: 'the tracker moved to a new system',
+        evidence: [{
+          source_type: 'url',
+          source_ref: 'https://tracker.example.test/atlas',
+          quoted: 'Atlas moved to the last Thursday of the month',
+          supports: 'Projects/Atlas.md: when Atlas ships',
+        }],
+        settled: '2026-09-28T10:12:00Z',
+        accepted: true,
+        receipt_id: 'mrcpt_fixture_2',
+        pending: false,
+      },
+      change: {
+        receipt_id: 'mrcpt_fixture_2',
+        kind: 'note_apply',
+        status: 'applied',
+        destination: 'Projects/Atlas.md',
+        undoable: true,
+        changed: true,
+        ts: '2026-09-28T10:11:59+00:00',
+      },
+    },
+    {
+      id: 'hist-retired',
+      ts: '2026-09-27T18:03:00+00:00',
+      action: 'accepted',
+      via: 'pwa',
+      kind: 'note_edit',
+      text: 'Projects/Borealis.md — retire (rev 21bd77c0): folded into Atlas',
+      source: 'note verification · retire',
+      workspace: 'alpha',
+      // A retirement moved the note to the review trash and journalled no memory
+      // receipt, so it is reversible through Vault Review's restore rather than
+      // reported as a change with no snapshot.
+      destination: 'Workspace/.vault-trash/fixture0000000000c3.md',
+      outcome: 'written',
+      proposal_id: 'proposal-verify-8',
+      reversible_by: 'restore',
+      note_edit: {
+        id: 'fixture0000000000c3',
+        relative_path: 'Projects/Borealis.md',
+        operation: 'retire',
+        outcome: 'retire',
+        coverage: 'complete',
+        before: '---\ntype: project\nupdated: 2024-01-05\n---\n\nBorealis is superseded by Atlas.\n',
+        after: '',
+        reason: 'folded into Atlas',
+        evidence: [{
+          source_type: 'chat',
+          source_ref: 'chat-2026-09-20',
+          quoted: 'Borealis is now part of Atlas',
+          supports: 'Projects/Borealis.md: what Borealis is',
+        }],
+        settled: '2026-09-27T18:03:00Z',
+        accepted: true,
+        receipt_id: '',
+        pending: false,
+      },
+    },
+  ],
+  total: 2,
+  truncated: false,
+  limit: 200,
+  at_max: false,
+}
+
+/**
+ * The note receipt a settled verification's accept left behind, in the shape
+ * `GET /api/memory/receipts/{id}` serves. A `note_apply` carries the note's own
+ * before/after pair, so it is both viewable and undoable — which is the whole
+ * difference between an applied verdict and a dismissal.
+ */
+export const VERIFICATION_RECEIPT = {
+  receipt_id: 'mrcpt_fixture_2',
+  kind: 'note_apply',
+  status: 'applied',
+  destination: 'Projects/Atlas.md',
+  actor: 'operator',
+  source: 'curation',
+  ts: '2026-09-28T10:11:59+00:00',
+  undoable: true,
+  changed: true,
+  has_snapshot: true,
+  reason: '',
+  before_text: '---\ntype: project\nupdated: 2024-01-05\n---\n\nAtlas ships on the last Friday of the month.\n',
+  after_text: '---\ntype: project\nupdated: 2026-09-28\n---\n\nAtlas ships on the last Thursday of the month.\n',
+  diff: [
+    { op: 'removed', text: 'updated: 2024-01-05' },
+    { op: 'added', text: 'updated: 2026-09-28' },
+    { op: 'removed', text: 'Atlas ships on the last Friday of the month.' },
+    { op: 'added', text: 'Atlas ships on the last Thursday of the month.' },
+  ],
+  diff_truncated: false,
+}
+
+/**
+ * The graph as the server sends it once the managed pass has been at this
+ * vault: the same three notes, each carrying the check state for its CURRENT
+ * revision. A settled check clears the node's `stale` flag, which is the whole
+ * point — the map used to count these as unchecked and link onward to a queue
+ * that had deliberately stopped asking.
+ */
+export const VERIFICATION_NODES = [
+  {
+    ...MEMORY_NODES[1],
+    stale: false,
+    age_days: 999,
+    threshold_days: 90,
+    check: check({ outcome: 'retire', reason: 'the team page was replaced by the org chart', citations: 2, receipt_id: '', pending: true, proposal_id: 'proposal-verify-1' }),
+  },
+  {
+    ...MEMORY_NODES[0],
+    stale: false,
+    age_days: 4,
+    threshold_days: 30,
+    check: check({ outcome: 'unverified', coverage: 'partial', reason: 'the tracker connector was down', citations: 0, pending: false, proposal_id: '' }),
+  },
+  {
+    ...MEMORY_NODES[2],
+    stale: true,
+    age_days: 900,
+    threshold_days: 180,
+    check: check({ outcome: 'retire', checked_at: '2026-08-01', retry_after: '2026-08-31', settled: false, pending: false, conflicted: true, proposal_id: 'proposal-verify-3', reason: 'folded into Atlas', citations: 1, receipt_id: '' }),
+  },
+]

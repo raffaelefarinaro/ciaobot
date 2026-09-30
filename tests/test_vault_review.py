@@ -2358,3 +2358,222 @@ def test_a_note_that_stopped_being_utf8_mid_completion_is_rolled_back(tmp_path: 
     assert other.read_text(encoding="utf-8") == "---\ntype: note\n---\n# Other\n"
     assert hub.read_bytes() == b"---\ntype: note\n---\n# Hub\n\nSee [[caf\xe9]].\n"
     assert list(tmp_path.glob(".Hub.md.*")) == []
+
+
+# ── The managed verification, as the queue sees it ─────────────────────────
+#
+# A note the nightly pass has already checked is not the same kind of row as one
+# nobody has touched, and a note it has filed a proposal about is not a question
+# this queue may ask a second time.
+
+
+def _stale_note(root: Path, name: str = "People/Old.md", body: str = "An old claim.") -> Path:
+    """A note whose `updated:` is old enough to be flagged, and that is unlinked."""
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: note\nupdated: 2025-01-01\n---\n" + body, encoding="utf-8"
+    )
+    return path
+
+
+def _queue(root: Path) -> list:
+    """The candidate list as of the pinned clock, at full size.
+
+    The clock matters: a check recorded on `_PINNED` is inside its 30-day
+    cooldown *then*, and a queue generated against the real today would find the
+    cooldown long expired and ask the note again — which is the bug, not the
+    behaviour under test.
+    """
+    return generate_candidates(
+        root, workspace="personal", max_candidates=50, now=_PINNED
+    )
+
+
+def _check(root: Path, relative: str, text: str, **fields):
+    """Record one check against the note's CURRENT text, and return it."""
+    from datetime import timedelta
+
+    from ciao import memory_receipts as mr
+    from ciao import note_verification as nv
+
+    check = nv.NoteCheck(
+        relative_path=relative,
+        content_revision=mr.content_revision(text),
+        outcome=fields.pop("outcome", "unverified"),
+        checked_at=fields.pop("checked_at", _PINNED.date()),
+        retry_after=fields.pop(
+            "retry_after", _PINNED.date() + timedelta(days=30)
+        ),
+        **fields,
+    )
+    nv.record_note_check(root, check)
+    return check
+
+
+def test_a_check_in_cooldown_stops_the_queue_asking_again(tmp_path: Path) -> None:
+    """`unverified` is a question; a recorded verdict is the answer to it.
+
+    A verdict that came back `unverified` writes nothing, so the note's
+    `updated:` stays exactly where it was and the age rule fires every single
+    scan. Without the check state the queue asked the same note nightly, got
+    `already_checked` back, and asked again the night after.
+    """
+    note = _stale_note(tmp_path)
+    text = note.read_text(encoding="utf-8")
+    _check(tmp_path, "People/Old.md", text, outcome="unverified", coverage="partial")
+
+    rows = _queue(tmp_path)
+    row = next(
+        c for c in _queue(tmp_path)
+        if c.path.endswith("People/Old.md")
+    )
+    assert "unverified" not in row.signals
+    assert row.evidence["verification"]["outcome"] == "unverified"
+    assert row.evidence["verification"]["checked_at"] == _PINNED.date().isoformat()
+    # It is still in the queue for the other reason it was flagged, and the
+    # check state explains why it is not also being nagged about its age.
+    assert "unlinked" in row.signals
+    assert row.as_dict()["pending_verification"] is None
+
+
+def test_a_pending_proposal_is_linked_rather_than_duplicated(tmp_path: Path) -> None:
+    """One revision, one question — the queue points at the proposal."""
+    note = _stale_note(tmp_path)
+    text = note.read_text(encoding="utf-8")
+    _check(
+        tmp_path,
+        "People/Old.md",
+        text,
+        outcome="update",
+        coverage="complete",
+        proposal_id="b7",
+    )
+    row = next(
+        c for c in _queue(tmp_path)
+        if c.path.endswith("People/Old.md")
+    )
+    payload = row.as_dict()
+    pending = payload["pending_verification"]
+    assert pending is not None
+    assert pending["proposal_id"] == "b7"
+    assert pending["outcome"] == "update"
+    assert pending["coverage"] == "complete"
+    # The sidecar id is derived the one way the proposer derives it, so a client
+    # reading the row and an accept resolving it cannot name different records.
+    from ciao.note_edit_proposals import note_edit_id
+
+    assert pending["note_edit_id"] == note_edit_id(
+        "personal", "People/Old.md", row.evidence["verification"]["revision"]
+    )
+    # The note is still queued for the unlinked signal, and still offers Retire:
+    # an unlinked note is a real finding the queue must not lose.
+    assert "unlinked" in row.signals
+    assert payload["retirement_offered"] is True
+    # And the check itself is honest about waiting rather than claiming a
+    # question is open when it is not.
+    assert row.evidence["verification"]["pending"] is True
+    assert row.evidence["verification"]["conflicted"] is False
+
+
+def test_a_proposal_is_the_sole_reason_suppresses_the_duplicate_candidate(
+    tmp_path: Path,
+) -> None:
+    """A note held only for a proposal offers no second decision.
+
+    Nothing else about this note is a finding, so its only way into the queue
+    was the age rule — and the age rule is exactly what the proposal answers.
+    Offering Still true and Retire here would ask the same question twice, in
+    two places, with the two answers free to disagree.
+    """
+    path = tmp_path / "Notes/Lonely.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: note\nupdated: 2025-01-01\n---\nClaimed fact.\n", encoding="utf-8"
+    )
+    # Linked from elsewhere, so `unlinked` cannot fire, and it carries
+    # frontmatter, so `weak_provenance` cannot either.
+    (tmp_path / "Notes/Hub.md").write_text(
+        "---\ntype: note\nupdated: 2026-01-10\n---\nSee [[Lonely]].\n", encoding="utf-8"
+    )
+    before = [
+        c.path
+        for c in _queue(tmp_path)
+        if c.path.endswith("Lonely.md")
+    ]
+    assert before, "the age rule alone must queue an isolated note"
+
+    text = path.read_text(encoding="utf-8")
+    _check(
+        tmp_path, "Notes/Lonely.md", text, outcome="retire", coverage="complete",
+        proposal_id="c3",
+    )
+    rows = _queue(tmp_path)
+    row = next((c for c in rows if c.path.endswith("Lonely.md")), None)
+    # The `unverified` signal is gone, so with no other signal the note is no
+    # longer a candidate at all — and the check holds it off a second proposal.
+    assert row is None
+    # The note is still discoverable where it is being decided: the check names
+    # the queue row, and nothing was written to the note.
+    from ciao import memory_receipts as mr
+    from ciao.note_verification import should_check
+
+    assert not should_check(
+        tmp_path, "Notes/Lonely.md", mr.content_revision(text), today=_PINNED.date()
+    )
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_a_conflicted_proposal_gives_the_queue_its_actions_back(tmp_path: Path) -> None:
+    """A proposal pinned to text the note has left is dead, and says so.
+
+    Its accept would refuse as a conflict, so suppressing this row would leave
+    the note with nobody asking about it at all: the proposal cannot be applied
+    and the queue had withdrawn. The row comes back, labelled.
+    """
+    note = _stale_note(tmp_path)
+    stale_text = note.read_text(encoding="utf-8")
+    _check(
+        tmp_path, "People/Old.md", stale_text, outcome="retire", coverage="complete",
+        proposal_id="d4",
+    )
+    # The note is edited, so the check describes a revision that no longer exists.
+    note.write_text(
+        "---\ntype: note\nupdated: 2025-01-01\n---\nA different claim entirely.\n",
+        encoding="utf-8",
+    )
+    rows = _queue(tmp_path)
+    row = next(c for c in rows if c.path.endswith("People/Old.md"))
+    payload = row.as_dict()
+    state = row.evidence["verification"]
+    assert state["conflicted"] is True
+    assert state["pending"] is False
+    # A dead proposal is not a live question, so nothing is linked and the
+    # queue's own offer is untouched.
+    assert payload["pending_verification"] is None
+    assert payload["retirement_offered"] is True
+    assert "unverified" in row.signals
+    # And the note is due to be checked again.
+    from ciao import memory_receipts as mr
+    from ciao.note_verification import should_check
+
+    assert should_check(
+        tmp_path,
+        "People/Old.md",
+        mr.content_revision(note.read_text(encoding="utf-8")),
+        today=_PINNED.date(),
+    )
+
+
+def test_an_unchecked_note_carries_no_verification_state(tmp_path: Path) -> None:
+    """`None` means nobody checked it — not a default object claiming otherwise."""
+    _stale_note(tmp_path)
+    row = next(
+        c for c in _queue(tmp_path)
+        if c.path.endswith("People/Old.md")
+    )
+    payload = row.as_dict()
+    assert row.evidence["verification"] is None
+    assert payload["verification"] is None
+    assert payload["pending_verification"] is None
+    assert payload["retirement_offered"] is True

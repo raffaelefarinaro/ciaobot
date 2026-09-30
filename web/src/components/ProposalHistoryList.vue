@@ -25,6 +25,34 @@ const fileViewer = useFileViewerStore()
 // is reversible would be a lie the undo path then has to refuse.
 const openChangeIds = ref<Set<string>>(new Set())
 
+/** What a filed note edit would have done, in words.
+ *
+ * `retire` is the one whose name is a lie on its own: the operation moved the
+ * note and wrote no text, so calling it "retire" without saying so reads as a
+ * rewrite. The rest are close enough to their wire names to show them. */
+const OPERATION_WORDS: Record<string, string> = {
+  replace: 'would rewrite the whole note',
+  restamp: 'would re-stamp the verification date',
+  retire: 'would move the note to Retired',
+}
+
+function operationLabel(row: ProposalHistoryRow): string {
+  const op = row.note_edit?.operation || ''
+  return OPERATION_WORDS[op] || op
+}
+
+/** How much of a note a check covered, in words.
+ *
+ * `partial` is the honest one and the reason this is a sentence rather than the
+ * wire value: a re-stamp claims the WHOLE note is still true, so the pass only
+ * applies one from complete coverage — "coverage: partial" says none of that to
+ * somebody deciding whether to trust the verdict. */
+function coverageWord(coverage: string): string {
+  if (coverage === 'complete') return 'all'
+  if (coverage === 'partial') return 'part'
+  return 'an unstated amount'
+}
+
 function isChangeOpen(row: ProposalHistoryRow): boolean {
   return openChangeIds.value.has(row.id)
 }
@@ -238,6 +266,14 @@ const filtersHideEverything = computed(
             </div>
             <p class="ph-text">{{ row.text }}</p>
             <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
+            <!-- A retirement went to the review trash, not through a memory
+                 receipt, so the Changes box below says there is no snapshot.
+                 Saying so alone would read as "nothing happened" beside a note
+                 that really was moved; the trash is where it went and Restore
+                 is the way back. -->
+            <p v-if="row.reversible_by === 'restore'" class="ph-restore">
+              Reversible: this note is in Retired, where <strong>Restore</strong> puts it back.
+            </p>
             <p v-if="row.source" class="ph-source-line">
               from
               <button
@@ -249,6 +285,54 @@ const filtersHideEverything = computed(
               >{{ row.source }}</button>
               <span v-else class="ph-source-name">{{ row.source }}</span>
             </p>
+
+            <!-- A verified note edit, in full: the note it was about, the exact
+                 text before and after, the evidence the verdict rested on and
+                 how much of the note the check covered. The decision sidecar
+                 keeps only the bullet's one line, so without this a settled
+                 verification reads as a bare sentence with a destination and
+                 nothing a reader could check it against.
+                 Collapsed by default for the same reason as Changes: two
+                 decisions' worth of note text on an open page is a wall, and
+                 nobody scrolls to the bottom of a history to read it. -->
+            <details v-if="row.note_edit" class="ph-verify">
+              <summary class="ph-verify-summary">
+                {{ row.note_edit.pending ? 'The proposal behind this' : 'What was checked' }}
+                <span class="ph-verify-op">{{ operationLabel(row) }}</span>
+                <span class="ph-verify-outcome">{{ row.note_edit.outcome }}</span>
+              </summary>
+              <div class="ph-verify-body">
+                <p class="ph-verify-path">
+                  <code>{{ row.note_edit.relative_path }}</code>
+                </p>
+                <p class="ph-verify-facts">
+                  Covering {{ coverageWord(row.note_edit.coverage) }} of the note<template
+                    v-if="row.note_edit.evidence.length"
+                  >, on {{ row.note_edit.evidence.length }} citation{{ row.note_edit.evidence.length === 1 ? '' : 's' }}</template>.
+                </p>
+                <p v-if="row.note_edit.reason" class="ph-verify-reason">
+                  {{ row.note_edit.reason }}
+                </p>
+                <ul v-if="row.note_edit.evidence.length" class="ph-verify-evidence">
+                  <li v-for="(citation, ci) in row.note_edit.evidence" :key="ci">
+                    <span class="ph-verify-source">{{ citation.source_type }} {{ citation.source_ref }}</span>
+                    <span class="ph-verify-supports">supports: {{ citation.supports }}</span>
+                    <span v-if="citation.quoted" class="ph-verify-quoted">{{ citation.quoted }}</span>
+                  </li>
+                </ul>
+                <p v-if="row.note_edit.operation !== 'retire'" class="ph-verify-label">Before</p>
+                <pre v-if="row.note_edit.operation !== 'retire'" class="ph-verify-text">{{ row.note_edit.before }}</pre>
+                <p v-if="row.note_edit.operation !== 'retire'" class="ph-verify-label">After</p>
+                <pre v-if="row.note_edit.operation !== 'retire'" class="ph-verify-text">{{ row.note_edit.after }}</pre>
+                <p v-else class="ph-verify-none">
+                  A retirement carries no new text: the note was moved, and it is
+                  {{ row.reversible_by === 'restore' ? 'in Retired, where Restore puts it back' : 'recoverable from the review trash' }}.
+                </p>
+                <p v-if="row.note_edit.pending" class="ph-verify-none">
+                  Still open — this decision has not been made.
+                </p>
+              </div>
+            </details>
 
             <!-- Changes. A button rather than <details> because opening it
                  fetches the images, and the expanded state has to drive that. -->
@@ -262,7 +346,14 @@ const filtersHideEverything = computed(
               {{ isChangeOpen(row) ? 'Hide changes' : 'Changes' }}
             </button>
             <div v-if="isChangeOpen(row)" :id="`ph-change-${row.id}`" class="ph-change">
-              <p v-if="!row.change" class="ph-change-none">
+              <!-- A conflict is a conflict, never an applied change. A
+                   refused accept leaves no receipt, so a row showing one here
+                   is either mid-flight or settled; the two are told apart by
+                   what the row itself records. -->
+              <p v-if="!row.change && row.note_edit?.pending" class="ph-change-none">
+                Nothing was written. This decision is still open.
+              </p>
+              <p v-else-if="!row.change" class="ph-change-none">
                 No change snapshot available. This decision was recorded before
                 changes were tracked, so what it wrote cannot be shown or undone.
               </p>
@@ -469,6 +560,142 @@ const filtersHideEverything = computed(
   overflow-wrap: anywhere;
 }
 
+.ph-restore {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.78rem;
+}
+
+/* The filed verification behind a `note_edit` decision. Closed by default: the
+   full before/after is two notes' worth of text, and a page of 200 decisions
+   that rendered it all would be unusable. */
+.ph-verify {
+  margin-top: 0.2rem;
+  align-self: flex-start;
+}
+
+.ph-verify-summary {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--accent);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.ph-verify-op {
+  color: var(--fg2);
+}
+
+.ph-verify-outcome {
+  color: var(--fg3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+}
+
+.ph-verify-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.ph-verify-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg2);
+}
+
+.ph-verify-path {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  color: var(--fg2);
+  overflow-wrap: anywhere;
+}
+
+.ph-verify-facts,
+.ph-verify-reason {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.ph-verify-evidence {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ph-verify-evidence li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1) var(--space-2);
+  border-left: 3px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.ph-verify-source {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--fg2);
+  overflow-wrap: anywhere;
+}
+
+.ph-verify-supports { color: var(--fg3); }
+
+.ph-verify-quoted {
+  color: var(--fg3);
+  overflow-wrap: anywhere;
+}
+
+.ph-verify-label {
+  margin: 0;
+  color: var(--fg3);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* The note's own text, exactly as it was filed. Wrapped and scrollable rather
+   than clipped: this is the evidence the whole disclosure exists to show, and a
+   silently truncated after-image would be the same claim the review card's
+   `exact` label refuses to make. */
+.ph-verify-text {
+  margin: 0;
+  max-height: 16em;
+  overflow: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ph-verify-none {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
 /* A link, not a chip: it sits inline in a sentence. The touch rule below is
    the same one .ph-clear-filter uses. */
 .ph-source-link {
@@ -630,13 +857,19 @@ const filtersHideEverything = computed(
     margin-left: calc(var(--space-2) - var(--ph-clear-pad));
   }
 
-  /* Same trick for the source link and the Changes toggle: both are
-     glyph-height inline controls, well under the 44px minimum. */
+  /* Same trick for the source link, the Changes toggle and the verification
+     summary: all glyph-height inline controls, well under the 44px minimum.
+     `min-height` rather than padding alone: the summary is an `inline-flex`
+     row of three spans, and adding equal padding to each side of it measured
+     41px in a real 390px browser — a control the rule is about, under the
+     number the rule names. */
   .ph-source-link,
-  .ph-change-toggle {
+  .ph-change-toggle,
+  .ph-verify-summary {
     --ph-hit-visual: 1.1rem;
     --ph-hit-pad: calc((var(--touch, 44px) - var(--ph-hit-visual)) / 2);
     display: inline-block;
+    min-height: var(--touch, 44px);
     padding: var(--ph-hit-pad) var(--space-1);
     margin: calc(-1 * var(--ph-hit-pad)) 0;
   }
