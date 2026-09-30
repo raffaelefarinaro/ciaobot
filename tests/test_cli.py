@@ -1468,30 +1468,29 @@ def _finding(
     *,
     name: str = "finding",
     sources: list[dict] | None = None,
+    origins: list[dict] | None = None,
 ) -> str:
     """Write one structured finding, as a pass or a person would, and return it."""
     path = tmp_path / f"{name}.json"
-    path.write_text(
-        json.dumps(
+    payload: dict = {
+        "title": "notes: read the categories block first",
+        "problem": "The user corrected the note type twice.",
+        "change": "Add a step: read the Categories block before a type.",
+        "rationale": "The correction repeated, so it is reusable.",
+        "sources": sources
+        if sources is not None
+        else [
             {
-                "title": "notes: read the categories block first",
-                "problem": "The user corrected the note type twice.",
-                "change": "Add a step: read the Categories block before a type.",
-                "rationale": "The correction repeated, so it is reusable.",
-                "sources": sources
-                if sources is not None
-                else [
-                    {
-                        "chat_id": "chat-7",
-                        "archive": "memory-vault/personal/logs/x.md",
-                        "turn": "3",
-                        "excerpt": "no, that's a person, not a project",
-                    }
-                ],
+                "chat_id": "chat-7",
+                "archive": "memory-vault/personal/logs/x.md",
+                "turn": "3",
+                "excerpt": "no, that's a person, not a project",
             }
-        ),
-        encoding="utf-8",
-    )
+        ],
+    }
+    if origins is not None:
+        payload["origins"] = origins
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return str(path)
 
 
@@ -1725,6 +1724,334 @@ def test_cli_skill_proposal_add_requires_the_input_file(
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["skill-proposal-add", "notes"])
     assert excinfo.value.code == 2
+
+
+# -- skill-proposal origins -------------------------------------------------
+
+
+def _origin_input(**overrides: object) -> dict:
+    """One learning link in a filed finding, as a routed pass would write it."""
+    entry: dict = {
+        "learning_id": "5d6b0a1e-6f4a-5b1c-9d2e-3a4b5c6d7e8f",
+        "finding": "read the Categories block before a type",
+        "source_revision": "c" * 64,
+        "summary": "Add the Categories step.",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_cli_skill_proposal_add_accepts_a_learning_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A finding that came from a learnings entry says so, and the link is what
+    a later settlement folds — so it has to reach the record, in the workspace
+    that minted the id, or the learning behind it can never be retired."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, origins=[_origin_input()])
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding, "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["origins"] == 1
+    record = skill_proposals.parse_proposal(
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "notes.md",
+        "personal",
+    )
+    assert record is not None
+    assert len(record.origins) == 1
+    # The workspace is this queue's, decided here rather than taken from the
+    # payload: an id only means something where it was minted.
+    assert record.origins[0].workspace == "personal"
+    assert record.origins[0].state == skill_proposals.ORIGIN_PENDING
+
+
+def test_cli_skill_proposal_add_files_a_finding_with_no_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Most findings are a correction the user made, with no learning behind them.
+    Omitting the links entirely is the normal case and must stay cheap."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", _finding(tmp_path)]) == 0
+
+    record = skill_proposals.parse_proposal(
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "notes.md",
+        "personal",
+    )
+    assert record is not None and record.origins == ()
+
+
+@pytest.mark.parametrize(
+    ("origins", "because"),
+    [
+        ("not a list", "must be a list"),
+        (["not an object"], "must be an object"),
+        ([{"finding": "x"}], 'needs a non-empty "learning_id"'),
+        ([{"learning_id": "x"}], 'needs a non-empty "finding"'),
+        ([_origin_input(learning_id=7)], '"learning_id" must be a string'),
+        ([_origin_input(source_revision=["x"])], '"source_revision" must be a string'),
+        ([_origin_input(nonsense="x")], "unknown field"),
+        ([_origin_input(state="done")], "which is not one of"),
+    ],
+)
+def test_cli_skill_proposal_add_fails_closed_on_a_malformed_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    origins: object,
+    because: str,
+) -> None:
+    """A half-read link is a learning that looks settled and is not. Refusing the
+    whole finding is the honest answer: the caller is told which entry is wrong
+    and nothing lands on disk for it to be half-attributed later."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, origins=origins)
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    assert because in capsys.readouterr().err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_refuses_a_link_from_another_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A learning id is minted inside a workspace, so an id from another one says
+    nothing here. Filing it anyway would make a foreign id look like a link this
+    queue had verified — and that link is what retires a learning."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, origins=[_origin_input(workspace="work")])
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    err = capsys.readouterr().err
+    assert "work" in err and "personal" in err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_tells_the_filer_the_links_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A link nobody knows landed is a learning that never goes quiet and nobody
+    can say why. The person filing gets to see it."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, origins=[_origin_input()])
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+
+    assert "Linked 1 learning finding" in capsys.readouterr().out
+
+
+# -- skill-proposal-remove: settling a linked finding -----------------------
+
+
+LEARNING_ID = "5d6b0a1e-6f4a-5b1c-9d2e-3a4b5c6d7e8f"
+
+
+def _linked_workspace(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
+    """An install owning one skill, filed against two findings of one learning."""
+    workspace = root / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(
+        root,
+        origins=[
+            _origin_input(learning_id=LEARNING_ID, finding="read the Categories block"),
+            _origin_input(learning_id=LEARNING_ID, finding="read it back afterwards"),
+        ],
+    )
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+    return workspace
+
+
+def _stored_record(workspace: Path):
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "notes.md",
+        "personal",
+    )
+    assert record is not None
+    return record
+
+
+def test_cli_skill_proposal_remove_applied_needs_a_verification_on_a_linked_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command the implementation prompt already names must not quietly
+    retire a lesson. A finished chat and a row leaving the queue are the two
+    things the CLI can see for itself, and neither is the lesson being in the
+    skill — so the command says what is missing and settles nothing."""
+    from ciao import skill_proposals
+
+    workspace = _linked_workspace(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    assert cli.main(["skill-proposal-remove", "notes", "--applied"]) == 1
+
+    assert "needs a verification" in capsys.readouterr().err
+    record = _stored_record(workspace)
+    assert record.lifecycle == skill_proposals.PENDING
+    assert [origin.state for origin in record.origins] == [
+        skill_proposals.ORIGIN_PENDING
+    ] * 2
+
+
+def test_cli_skill_proposal_remove_records_a_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The way out, on the command the prompt already spells: name the receipt or
+    the readback, and the linked finding is applied with its proof on record."""
+    from ciao import skill_proposals
+
+    workspace = _linked_workspace(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    assert (
+        cli.main(
+            [
+                "skill-proposal-remove",
+                "notes",
+                "--applied",
+                "--verification",
+                "read SKILL.md back: the Categories step is there",
+            ]
+        )
+        == 0
+    )
+
+    record = _stored_record(workspace)
+    assert record.lifecycle == skill_proposals.APPLIED
+    assert [origin.state for origin in record.origins] == [
+        skill_proposals.ORIGIN_APPLIED
+    ] * 2
+    assert record.origins[0].verification == (
+        "read SKILL.md back: the Categories step is there"
+    )
+
+
+def test_cli_skill_proposal_remove_settles_one_linked_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A record is one row per skill, so a chat that dealt with one of its
+    findings has not dealt with the rest. The CLI can say which, and reports
+    what is still outstanding."""
+    from ciao import skill_proposals
+
+    workspace = _linked_workspace(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    assert (
+        cli.main(
+            [
+                "skill-proposal-remove",
+                "notes",
+                "--applied",
+                "--learning-id",
+                LEARNING_ID,
+                "--finding",
+                "read the Categories block",
+                "--verification",
+                "mrcpt_abc123",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["lifecycle"] == "pending"
+    assert [origin["state"] for origin in result["origins"]] == [
+        skill_proposals.ORIGIN_APPLIED,
+        skill_proposals.ORIGIN_PENDING,
+    ]
+    assert _stored_record(workspace).lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_refuses_a_finding_without_a_learning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A finding text on its own names nothing, and guessing which learning it
+    belonged to is exactly the kind of silent link this shape exists to stop."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path)
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+    capsys.readouterr()
+
+    assert (
+        cli.main(["skill-proposal-remove", "notes", "--applied", "--finding", "x"]) == 2
+    )
+
+    assert "--learning-id" in capsys.readouterr().err
+
+
+def test_cli_skill_proposal_remove_reports_a_learning_it_does_not_carry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Naming a learning this proposal does not link is a bug worth hearing
+    about, not a decision worth recording."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path)
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+    capsys.readouterr()
+
+    assert (
+        cli.main(["skill-proposal-remove", "notes", "--learning-id", LEARNING_ID]) == 1
+    )
+
+    assert "links no learning" in capsys.readouterr().err
 
 
 def _search_note(vault: Path, name: str) -> None:

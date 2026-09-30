@@ -18,13 +18,16 @@ import sys
 from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
+
+if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
+    from ciao import skill_proposals
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -3644,6 +3647,14 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     those: the record stays QUEUED and its chat stays bound to it, because an
     unfinished edit is not an answer and must not archive an open question as
     though a person had rejected it.
+
+    ``--verification`` and ``--learning-id``/``--finding`` are how a record that
+    links learnings is settled honestly. ``--applied`` on such a record is
+    refused without a verification, because the two things this command can see
+    for itself — the chat finished, the row left the queue — are not the lesson
+    being in the skill. A selector settles one finding and leaves its siblings
+    queued, which is the point: a record is one row per skill, so a person who
+    dealt with one of its findings has not dealt with the rest.
     """
     from ciao.config import CiaoConfig
 
@@ -3725,6 +3736,18 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
         if args.not_applicable
         else skill_proposals.DISMISSED
     )
+    if args.finding and not args.learning_id:
+        print(
+            "--finding names one finding of a learning, so it needs --learning-id "
+            "with it.",
+            file=sys.stderr,
+        )
+        return 2
+    selectors = (
+        [skill_proposals.OriginRef(args.learning_id.strip(), args.finding.strip())]
+        if args.learning_id.strip()
+        else None
+    )
     try:
         settled = skill_proposals.mark_outcome(
             config,
@@ -3732,6 +3755,8 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
             lifecycle,
             args.reason.strip(),
             via="cli",
+            selectors=selectors,
+            verification=args.verification.strip(),
         )
     except (OSError, ValueError) as exc:
         print(f"could not settle {target.skill}: {exc}", file=sys.stderr)
@@ -3741,24 +3766,45 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
         return 1
 
     if args.json:
-        json.dump(
-            {
-                "settled": True,
-                "name": target.skill,
-                "workspace": name,
-                # Which outcome this was, because the command now records three
-                # and only one of them closes the question: `--interrupted`
-                # leaves the proposal queued.
-                "lifecycle": settled.lifecycle,
-            },
-            sys.stdout,
-            indent=2,
-        )
+        payload: dict[str, Any] = {
+            "settled": True,
+            "name": target.skill,
+            "workspace": name,
+            # Which outcome this was, because the command now records three
+            # and only one of them closes the question: `--interrupted`
+            # leaves the proposal queued.
+            "lifecycle": settled.lifecycle,
+        }
+        if settled.origins:
+            # What each linked finding now says, because a per-finding
+            # settlement leaves the record queued and the caller needs to see
+            # which part is still outstanding. Omitted rather than emitted
+            # empty: a record filed before origins existed must keep producing
+            # the payload it always produced.
+            payload["origins"] = [
+                {
+                    "learning_id": origin.learning_id,
+                    "finding": origin.finding,
+                    "state": origin.state,
+                }
+                for origin in settled.origins
+            ]
+        json.dump(payload, sys.stdout, indent=2)
         sys.stdout.write("\n")
     elif settled.lifecycle == skill_proposals.INTERRUPTED:
         print(
             f"Recorded {settled.skill} in {name} as interrupted; it stays queued "
             "so the work can be picked up again."
+        )
+    elif selectors and settled.lifecycle not in skill_proposals.SETTLED_LIFECYCLES:
+        outstanding = [
+            origin.finding
+            for origin in settled.origins
+            if origin.state not in skill_proposals.CLEARED_ORIGINS
+        ]
+        print(
+            f"Settled one finding of {settled.skill} in {name}; it stays queued "
+            f"for {len(outstanding)} more."
         )
     else:
         print(f"Settled skill proposal {settled.skill} in {name}.")
@@ -3773,6 +3819,14 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
     boundaries are a model has to reproduce exactly is a format that will
     eventually be reproduced slightly wrong. Every complaint names the field it
     is about, because the caller is a model that can only fix what it is told.
+
+    ``origins`` is optional and validated strictly when present. A finding may
+    have come from one entry in ``Workspace/Learnings.md``, and the link to it is
+    the only thing that will later let a settlement say *which* lesson landed —
+    so a malformed one is refused rather than dropped, since a half-read link is
+    a learning that looks settled and is not. Its absence is not an error: most
+    findings are a correction the user made, and only a routed learning gets a
+    link.
     """
     try:
         raw = Path(path).read_text(encoding="utf-8")
@@ -3787,11 +3841,11 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
     for field in ("title", "problem", "change"):
         value = payload.get(field)
         if not isinstance(value, str) or not value.strip():
-            return None, f"{path} needs a non-empty \"{field}\""
+            return None, f'{path} needs a non-empty "{field}"'
     sources = payload.get("sources")
     if not isinstance(sources, list) or not sources:
         return None, (
-            f"{path} needs a non-empty \"sources\" list: a proposal with no "
+            f'{path} needs a non-empty "sources" list: a proposal with no '
             "evidence is not reviewable"
         )
     for index, item in enumerate(sources):
@@ -3799,9 +3853,110 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
             return None, f"{path} sources[{index}] must be an object"
         if not isinstance(item.get("excerpt"), str) or not item["excerpt"].strip():
             return None, (
-                f"{path} sources[{index}] needs a non-empty \"excerpt\""
+                f'{path} sources[{index}] needs a non-empty "excerpt"'
             )
+    problem = _origin_input_problem(payload.get("origins"), path)
+    if problem:
+        return None, problem
     return payload, ""
+
+
+def _origin_input_problem(origins: Any, path: str) -> str:
+    """What is wrong with the ``origins`` list in a filed finding, or ``""``.
+
+    One complaint at a time and it names the entry, for the same reason the rest
+    of this reader does: the caller is a model that can only fix what it is told.
+    An unknown key fails the entry rather than being ignored, because a key this
+    code does not understand is a field whose loss nobody would notice until a
+    learning had been declared settled on a partial read.
+    """
+    from ciao import skill_proposals
+
+    if origins is None:
+        return ""
+    if not isinstance(origins, list):
+        return f'{path} "origins" must be a list of objects'
+    for index, item in enumerate(origins):
+        where = f'{path} origins[{index}]'
+        if not isinstance(item, dict):
+            return f"{where} must be an object"
+        unknown = sorted(set(item) - _ORIGIN_INPUT_FIELDS)
+        if unknown:
+            return f"{where} has unknown field(s) {', '.join(unknown)}"
+        for field in ("workspace", "source_revision", "summary", "verification"):
+            if field in item and not isinstance(item[field], str):
+                return f'{where} "{field}" must be a string'
+        for field in ("learning_id", "finding"):
+            value = item.get(field)
+            if value is None:
+                return f'{where} needs a non-empty "{field}"'
+            if not isinstance(value, str):
+                return f'{where} "{field}" must be a string'
+            if not value.strip():
+                return f'{where} needs a non-empty "{field}"'
+        state = item.get("state", "")
+        if state and (
+            not isinstance(state, str) or state not in skill_proposals.ORIGIN_STATES
+        ):
+            return (
+                f"{where} has state {state!r}, which is not one of "
+                f"{', '.join(skill_proposals.ORIGIN_STATES)}"
+            )
+    return ""
+
+
+#: The keys one ``origins`` entry in a filed finding may carry. The same set
+#: :func:`ciao.skill_proposals.parse_origins` reads out of a queue file, named
+#: here because the CLI cannot import the model it hands the payload to.
+_ORIGIN_INPUT_FIELDS = frozenset({
+    "schema",
+    "workspace",
+    "learning_id",
+    "source_revision",
+    "finding",
+    "summary",
+    "state",
+    "verification",
+})
+
+
+def _filing_origins(
+    payload: dict[str, Any], workspace: str
+) -> tuple[tuple["skill_proposals.SkillOrigin", ...] | None, str]:
+    """The finding's learning links as records, or ``(None, why)`` if unusable.
+
+    The workspace is decided here, not taken from the payload. The finding names
+    a learning by its id, and an id is only meaningful inside the workspace that
+    minted it, so a payload naming a different one is a link this queue cannot
+    honour — refused by name rather than rewritten, because silently filing it
+    under this workspace would make an id from somewhere else look like a link
+    this queue had verified.
+    """
+    from ciao import skill_proposals
+
+    raw = payload.get("origins") or []
+    origins: list[skill_proposals.SkillOrigin] = []
+    for index, item in enumerate(raw):
+        stated = str(item.get("workspace") or "").strip()
+        if stated and stated != workspace:
+            return None, (
+                f'origins[{index}] names the {stated} workspace, but this finding '
+                f"is filed in {workspace}; a learning id only means something in "
+                "the workspace that minted it"
+            )
+        origins.append(
+            skill_proposals.SkillOrigin(
+                workspace=workspace,
+                learning_id=str(item.get("learning_id") or "").strip(),
+                source_revision=str(item.get("source_revision") or "").strip(),
+                finding=" ".join(str(item.get("finding") or "").split()),
+                summary=" ".join(str(item.get("summary") or "").split()),
+                state=str(item.get("state") or "").strip()
+                or skill_proposals.ORIGIN_PENDING,
+                verification=str(item.get("verification") or "").strip(),
+            )
+        )
+    return tuple(origins), ""
 
 
 def _skill_proposal_add_command(args: argparse.Namespace) -> int:
@@ -3872,6 +4027,11 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
         print(f"cannot file a proposal for {skill!r}: {exc}", file=sys.stderr)
         return 1
 
+    origins, problem = _filing_origins(payload, name)
+    if origins is None:
+        print(problem, file=sys.stderr)
+        return 2
+
     sources = tuple(
         SkillEvidence(
             chat_id=str(item.get("chat_id") or "").strip(),
@@ -3901,6 +4061,7 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
             # The conversation that justified it is in the evidence.
             chat_id="",
             updated_at="",
+            origins=origins,
         ),
     )
     path = proposal_path(config, name, stored.skill)
@@ -3914,6 +4075,7 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
                 "lifecycle": stored.lifecycle,
                 "path": str(path),
                 "evidence": len(stored.sources),
+                "origins": len(stored.origins),
             },
             sys.stdout,
             indent=2,
@@ -3921,6 +4083,14 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
         sys.stdout.write("\n")
     else:
         print(f"Filed skill proposal for {stored.skill} in {name}: {path}")
+        if stored.origins:
+            # The links are what a later settlement folds, so the person filing
+            # gets to see that they landed rather than discovering a missing
+            # one when a learning never goes quiet.
+            print(
+                f"Linked {len(stored.origins)} learning finding(s); they stay "
+                "Active until each one is applied or rejected."
+            )
         if stored.lifecycle != PENDING:
             # A decision already stands for this skill. The merge keeps it
             # settled and only adds the evidence, so the pass is told the
@@ -5494,6 +5664,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--reason",
         default="",
         help="Free-text note recorded with the outcome (the History 'outcome' field).",
+    )
+    skill_proposal_parser.add_argument(
+        "--verification",
+        default="",
+        help=(
+            "What proves the lesson is in the skill: a managed write receipt id, or "
+            "the readback you recorded of the file. Required by --applied when the "
+            "proposal links a learning, because a finished chat and a row leaving "
+            "the queue are not evidence that anything landed."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--learning-id",
+        default="",
+        help=(
+            "Settle only the finding linked to this learning id, leaving the "
+            "proposal's other findings queued. Implies a per-finding settlement."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--finding",
+        default="",
+        help=(
+            "Narrow --learning-id to one finding. Needs --learning-id: a finding "
+            "text on its own names nothing."
+        ),
     )
     skill_proposal_parser.set_defaults(func=_skill_proposal_remove_command)
 

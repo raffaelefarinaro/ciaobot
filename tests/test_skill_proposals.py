@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,30 @@ import pytest
 from ciao import skill_proposals
 from ciao import skill_proposals as sp
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.learning_records import LearningRecord, allocate_learning_id
 from ciao.memory_proposals import read_decisions
+
+#: Two real minted ids rather than two made-up strings: the point of the
+#: workspace scoping is that ``allocate_learning_id`` puts the workspace in the
+#: name, and a hand-written uuid would not test that.
+STATEMENT = "Blocked pages need a defuddle fallback."
+LEARNING_ID = allocate_learning_id("personal", STATEMENT)
+OTHER_LEARNING_ID = allocate_learning_id("personal", "Read it back after editing.")
+WORK_LEARNING_ID = allocate_learning_id("work", STATEMENT)
+
+#: The revision ``Workspace/Learnings.md`` had when these findings were filed.
+LEARNINGS_REVISION = "b" * 64
+
+
+def _learning(learning_id: str = LEARNING_ID) -> LearningRecord:
+    """The learning these findings were filed against."""
+    return LearningRecord(
+        learning_id=learning_id, key="blocked-pages", text=STATEMENT
+    )
+
+
+def _work_learning() -> LearningRecord:
+    return _learning(WORK_LEARNING_ID)
 
 
 def _config(tmp_path: Path, *names: str) -> CiaoConfig:
@@ -1046,3 +1070,524 @@ def test_split_findings_keeps_an_answer_with_no_headings() -> None:
     problem, change, rationale = sp.split_findings("Suggested edit: explain defuddle.")
     assert (problem, change) == ("", "")
     assert rationale == "Suggested edit: explain defuddle."
+
+
+def _eligible(config: CiaoConfig, learning: LearningRecord) -> bool:
+    """Whether the cleanup hook would clear this learning, revision unchanged."""
+    return bool(
+        sp.learning_cleanup_eligibility(
+            config, "personal", learning, current_revision=LEARNINGS_REVISION
+        )["eligible"]
+    )
+
+
+# -- origins ----------------------------------------------------------------
+
+
+def _origin(
+    learning_id: str = LEARNING_ID,
+    finding: str = "add a defuddle fallback",
+    **overrides: object,
+) -> sp.SkillOrigin:
+    """One learning link, as a pass that routed a finding would file it."""
+    fields: dict[str, object] = {
+        "workspace": "personal",
+        "learning_id": learning_id,
+        "source_revision": LEARNINGS_REVISION,
+        "finding": finding,
+        "summary": "Add the defuddle fallback step.",
+        "state": sp.ORIGIN_PENDING,
+        "verification": "",
+    }
+    fields.update(overrides)
+    return sp.SkillOrigin(**fields)  # type: ignore[arg-type]
+
+
+def _linked(
+    config: CiaoConfig,
+    *origins: sp.SkillOrigin,
+    skill: str = "web-research",
+    workspace: str = "personal",
+) -> sp.SkillProposal:
+    """File a record whose findings are linked to learnings.
+
+    The links are written into one workspace's queue, so an origin filed
+    without naming one belongs to the workspace being written to.
+    """
+    return sp.upsert_proposal(
+        config,
+        _proposal(
+            workspace=workspace,
+            skill=skill,
+            origins=tuple(
+                replace(origin, workspace=origin.workspace or workspace)
+                for origin in origins
+            ),
+        ),
+    )
+
+
+def test_origins_round_trip_through_render_and_parse(tmp_path: Path) -> None:
+    """The link is the whole point, so the file has to hold it in a shape that
+    reads back identically: the no-op merge compares rendered bytes with the
+    stored file, and a lost field here would make every re-run look like a
+    change while quietly unlinking the learning."""
+    config = _config(tmp_path)
+    path = sp.proposal_path(config, "personal", "web-research")
+    record = _proposal(
+        origins=(
+            _origin(),
+            _origin(
+                learning_id=OTHER_LEARNING_ID,
+                finding="name the source revision in the readback",
+            ),
+        )
+    )
+
+    _write(path, sp.render_proposal(record))
+    back = sp.parse_proposal(path, "personal")
+
+    assert back == record
+    assert "## Origins" in path.read_text(encoding="utf-8")
+    assert back is not None and back.origins[0].learning_id == LEARNING_ID
+
+
+def test_an_origin_survives_a_rewrite_of_the_file_it_lives_in(tmp_path: Path) -> None:
+    """Two full round trips produce identical bytes. A renderer that reordered
+    keys, or a parser that filled a blank in, would make the queue churn on
+    every pass even though nothing about the finding changed."""
+    config = _config(tmp_path)
+    path = sp.proposal_path(config, "personal", "web-research")
+    record = _proposal(origins=(_origin(),))
+
+    first = sp.render_proposal(record)
+    _write(path, first)
+    parsed = sp.parse_proposal(path, "personal")
+    assert parsed is not None
+    second = sp.render_proposal(parsed)
+
+    assert second == first
+    assert sp.upsert_proposal(config, parsed) == parsed
+
+
+def test_upsert_merges_a_new_origin_and_keeps_the_one_it_had(tmp_path: Path) -> None:
+    """A re-observation of the same finding is the same origin and adds nothing;
+    a finding on a second learning is a second origin even though the record is
+    still one row for the skill. Replacing the list instead of merging it is how
+    the previous run's links used to disappear."""
+    config = _config(tmp_path)
+    _linked(config, _origin())
+    merged = sp.upsert_proposal(
+        config,
+        _proposal(
+            origins=(
+                _origin(),
+                _origin(
+                    learning_id=OTHER_LEARNING_ID,
+                    finding="name the source revision in the readback",
+                ),
+            )
+        ),
+    )
+
+    assert [origin.learning_id for origin in merged.origins] == [
+        LEARNING_ID,
+        OTHER_LEARNING_ID,
+    ]
+
+
+def test_a_reworded_finding_is_the_same_origin_not_a_second_one(tmp_path: Path) -> None:
+    """The dedupe key is the normalized finding, so a pass that re-words the same
+    finding on its next run does not split one finding in two — which would leave
+    a learning half-settled for ever, with no row saying the other half existed."""
+    config = _config(tmp_path)
+    _linked(config, _origin())
+    merged = sp.upsert_proposal(
+        config, _proposal(origins=(_origin(finding="Add a defuddle fallback!"),))
+    )
+
+    assert len(merged.origins) == 1
+    assert merged.origins[0].finding == "add a defuddle fallback"
+
+
+def test_a_merge_does_not_take_a_decision_back(tmp_path: Path) -> None:
+    """First-seen wins, exactly as the evidence merge does. A later pass
+    re-deriving the same finding arrives as pending, and taking that would
+    silently reopen a finding a person had already rejected."""
+    config = _config(tmp_path)
+    _linked(config, _origin())
+    sp.settle_proposal(
+        config,
+        sp.find_proposal(config, sp.proposal_id("personal", "web-research")).id,
+        sp.DISMISSED,
+    )
+
+    merged = sp.upsert_proposal(config, _proposal(origins=(_origin(),)))
+
+    assert [origin.state for origin in merged.origins] == [sp.ORIGIN_DISMISSED]
+
+
+def test_a_legacy_proposal_without_origins_parses_and_links_nothing(
+    tmp_path: Path,
+) -> None:
+    """Backward compatibility, and the reason it is safe: an empty tuple is not
+    the same as a settled learning. A record filed before origins existed has
+    nothing to fold, so every learning it might have covered stays exactly as
+    Active as it was."""
+    config = _config(tmp_path)
+    path = sp.proposal_path(config, "personal", "web-research")
+    _write(path, LEGACY_FILE)
+
+    record = sp.parse_proposal(path, "personal")
+    assert record is not None
+    assert record.origins == ()
+
+    # Rewriting it must not invent a link, and must not lose a word either.
+    stored = sp.upsert_proposal(config, record)
+    assert stored.origins == ()
+    rewritten = sp.parse_proposal(
+        sp.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert rewritten is not None and rewritten.origins == ()
+    assert "reviewable suggestion" in rewritten.rationale
+
+
+def test_an_origin_line_this_cannot_read_is_kept_and_names_no_learning(
+    tmp_path: Path,
+) -> None:
+    """Fail closed. An origin nobody can attribute could be the other half of a
+    learning somebody is about to declare dealt with, so a line in a shape this
+    parser refuses becomes an unlinked origin rather than being dropped — and an
+    unlinked origin is kept as text, because the record must not lose a finding
+    because it was formatted differently than expected."""
+    config = _config(tmp_path)
+    path = sp.proposal_path(config, "personal", "web-research")
+    _write(
+        path,
+        sp.render_proposal(_proposal())
+        + "\n## Origins\n\n```json\n"
+        + "not json at all\n"
+        + '{"schema":1,"workspace":"personal","learning_id":"'
+        + LEARNING_ID
+        + '","source_revision":"'
+        + LEARNINGS_REVISION
+        + '","finding":"read it back","state":"pending"}\n```\n',
+    )
+
+    record = sp.parse_proposal(path, "personal")
+    assert record is not None
+    assert [origin.linked for origin in record.origins] == [False, True]
+    assert record.origins[0].finding == "not json at all"
+
+
+# -- per-finding settlement -------------------------------------------------
+
+
+def test_settling_one_finding_leaves_its_siblings_asking(tmp_path: Path) -> None:
+    """The failure this whole shape exists to prevent. A record is one row per
+    skill, so accepting the row used to accept every finding on it — and a person
+    who agreed with one of them had no way to say they did not agree with the
+    other two."""
+    config = _config(tmp_path)
+    stored = _linked(
+        config,
+        _origin(),
+        _origin(finding="read the file back after editing"),
+    )
+
+    settled = sp.settle_proposal(
+        config,
+        stored.id,
+        sp.DISMISSED,
+        selectors=[sp.OriginRef(LEARNING_ID, "add a defuddle fallback")],
+    )
+
+    assert settled is not None
+    assert [(origin.finding, origin.state) for origin in settled.origins] == [
+        ("add a defuddle fallback", sp.ORIGIN_DISMISSED),
+        ("read the file back after editing", sp.ORIGIN_PENDING),
+    ]
+    # The record is still asking, so the row is still on the review surface.
+    assert settled.lifecycle == sp.PENDING
+    assert [item.skill for item in sp.read_queue(config, "personal")] == ["web-research"]
+
+
+def test_a_learning_with_one_applied_and_one_pending_finding_is_not_settled(
+    tmp_path: Path,
+) -> None:
+    """A learning split across two findings is dealt with only when both are.
+    Anything else retires a lesson on the strength of half the evidence."""
+    config = _config(tmp_path)
+    stored = _linked(
+        config,
+        _origin(),
+        _origin(finding="read the file back after editing"),
+    )
+    sp.settle_proposal(
+        config,
+        stored.id,
+        sp.APPLIED,
+        selectors=[sp.OriginRef(LEARNING_ID, "add a defuddle fallback")],
+        verification="mrcpt_abc123",
+    )
+
+    settlement = sp.learning_settlement(config, "personal", _learning())
+    assert settlement.settled is False
+    assert "not settled" in settlement.reason
+    assert not _eligible(config, _learning())
+
+
+def test_applying_a_linked_finding_needs_a_verification(tmp_path: Path) -> None:
+    """"Chat started" and "the queue row is gone" are the two things this queue
+    can see for itself, and neither is the lesson being in the target. So an
+    applied with no receipt and no readback is refused rather than recorded."""
+    config = _config(tmp_path)
+    stored = _linked(config, _origin())
+
+    with pytest.raises(ValueError, match="needs a verification"):
+        sp.settle_proposal(config, stored.id, sp.APPLIED)
+
+    on_disk = sp.parse_proposal(
+        sp.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert on_disk is not None
+    assert [origin.state for origin in on_disk.origins] == [sp.ORIGIN_PENDING]
+    assert sp.read_queue(config, "personal") != []
+
+
+def test_a_verified_finding_and_a_rejected_one_settle_the_learning(
+    tmp_path: Path,
+) -> None:
+    """The two answers that do clear a learning: the lesson is in the target and
+    somebody proved it, or a person rejected that finding outright."""
+    config = _config(tmp_path)
+    stored = _linked(
+        config,
+        _origin(),
+        _origin(finding="read the file back after editing"),
+    )
+    sp.settle_proposal(
+        config,
+        stored.id,
+        sp.APPLIED,
+        selectors=[sp.OriginRef(LEARNING_ID, "add a defuddle fallback")],
+        verification="read SKILL.md back: the fallback step is there",
+    )
+    settled = sp.settle_proposal(
+        config,
+        stored.id,
+        sp.DISMISSED,
+        selectors=[sp.OriginRef(LEARNING_ID, "read the file back after editing")],
+    )
+
+    assert settled is not None
+    assert settled.lifecycle == sp.APPLIED
+    assert settled.origins[0].verification == (
+        "read SKILL.md back: the fallback step is there"
+    )
+    settlement = sp.learning_settlement(config, "personal", _learning())
+    assert settlement.settled is True
+    assert len(settlement.origins) == 2
+    assert _eligible(config, _learning())
+
+
+@pytest.mark.parametrize(
+    ("state", "because"),
+    [
+        (sp.ORIGIN_ALREADY_COVERED, "needs the target confirmed"),
+        (sp.ORIGIN_NOT_APPLICABLE, "needs a person to judge it"),
+        (sp.ORIGIN_UNCLEAR, "needs a person to judge it"),
+        (sp.ORIGIN_INTERRUPTED, "the run stopped"),
+        (sp.ORIGIN_FAILED, "the run broke"),
+        (sp.ORIGIN_IMPLEMENTING, "a chat is working on it"),
+        (sp.ORIGIN_PENDING, "nobody has looked at it"),
+    ],
+)
+def test_no_state_but_applied_or_dismissed_settles_a_learning(
+    tmp_path: Path, state: str, because: str
+) -> None:
+    """Each of these is an answer-shaped string that is not an answer. Applied
+    means the lesson is in the target; dismissed means a person said no. The rest
+    all leave the learning Active, which is the only safe default for a lesson
+    somebody is relying on."""
+    config = _config(tmp_path)
+    stored = _linked(
+        config,
+        _origin(finding="add a defuddle fallback", state=state),
+    )
+
+    settlement = sp.learning_settlement(config, "personal", _learning())
+
+    assert settlement.settled is False, because
+    assert settlement.origins[0].proposal_id == stored.id
+    assert settlement.origins[0].state == state
+    assert not _eligible(config, _learning())
+
+
+def test_interrupting_a_run_leaves_the_finding_and_the_learning_alone(
+    tmp_path: Path,
+) -> None:
+    """The absence of an answer is not an answer, so an interrupted run writes no
+    decision, re-opens nothing, and leaves the learning Active — which is the
+    whole reason the origin states are not booleans."""
+    config = _config(tmp_path)
+    stored = _linked(config, _origin())
+    sp.mark_implementing(config, stored.id, "chat-42")
+    assert sp.learning_settlement(config, "personal", _learning()).settled is False
+
+    stopped = sp.mark_outcome(config, stored.id, sp.INTERRUPTED, "ran out of context")
+
+    assert stopped is not None
+    assert [origin.state for origin in stopped.origins] == [sp.ORIGIN_INTERRUPTED]
+    decisions = read_decisions(
+        tmp_path / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    assert decisions == []
+
+
+def test_accepting_moves_the_findings_to_implementing_without_deciding_them(
+    tmp_path: Path,
+) -> None:
+    """Accepting a row starts one chat over all of its findings. Recording that
+    as a decision is exactly the bug: the lesson is in the skill only once
+    somebody reads the skill back."""
+    config = _config(tmp_path)
+    stored = _linked(config, _origin())
+
+    accepted = sp.mark_implementing(config, stored.id, "chat-42")
+
+    assert accepted is not None
+    assert accepted.lifecycle == sp.IMPLEMENTING
+    assert [origin.state for origin in accepted.origins] == [sp.ORIGIN_IMPLEMENTING]
+    assert sp.learning_settlement(config, "personal", _learning()).settled is False
+
+
+def test_interrupting_one_finding_leaves_the_others_in_flight(tmp_path: Path) -> None:
+    """A selector narrows an interrupt exactly as it narrows a settlement: a run
+    that fell over on one finding did not decide the ones beside it."""
+    config = _config(tmp_path)
+    stored = _linked(
+        config,
+        _origin(finding="add a defuddle fallback", state=sp.ORIGIN_IMPLEMENTING),
+        _origin(finding="read the file back", state=sp.ORIGIN_IMPLEMENTING),
+    )
+
+    stopped = sp.mark_outcome(
+        config,
+        stored.id,
+        sp.INTERRUPTED,
+        "ran out of context on the first one",
+        selectors=[sp.OriginRef(LEARNING_ID, "add a defuddle fallback")],
+    )
+
+    assert stopped is not None
+    assert [(origin.finding, origin.state) for origin in stopped.origins] == [
+        ("add a defuddle fallback", sp.ORIGIN_INTERRUPTED),
+        ("read the file back", sp.ORIGIN_IMPLEMENTING),
+    ]
+    assert sp.learning_settlement(config, "personal", _learning()).settled is False
+
+
+def test_a_settlement_names_the_finding_it_was_about(tmp_path: Path) -> None:
+    """One sidecar row per finding, so the decision history can say which lesson
+    was answered. A single row keyed only by ``skill:<name>`` reads as "the skill
+    was dealt with", which is the claim that was never true."""
+    config = _config(tmp_path)
+    stored = _linked(
+        config,
+        _origin(),
+        _origin(finding="read the file back after editing"),
+    )
+
+    sp.settle_proposal(
+        config,
+        stored.id,
+        sp.APPLIED,
+        selectors=[sp.OriginRef(LEARNING_ID, "read the file back after editing")],
+        verification="mrcpt_abc123",
+    )
+
+    rows = read_decisions(
+        tmp_path / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    assert [(row["action"], row["finding"], row["learning_id"]) for row in rows] == [
+        ("accepted", "read the file back after editing", LEARNING_ID)
+    ]
+    # Still the synthetic skill text, so a skill decision can never be read as a
+    # memory fact with the same wording.
+    assert {row["text"] for row in rows} == {"skill:web-research"}
+
+
+def test_a_selector_naming_no_finding_is_refused(tmp_path: Path) -> None:
+    """A caller settling a finding this record does not carry has a bug, and the
+    bug is worth hearing about rather than quietly settling the whole record."""
+    config = _config(tmp_path)
+    stored = _linked(config, _origin())
+
+    with pytest.raises(ValueError, match="has no origin for"):
+        sp.settle_proposal(
+            config, stored.id, sp.DISMISSED, selectors=[sp.OriginRef("nonesuch")]
+        )
+
+    on_disk = sp.parse_proposal(
+        sp.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert on_disk is not None
+    assert on_disk.origins[0].state == sp.ORIGIN_PENDING
+
+
+def test_a_selector_on_a_record_with_no_links_is_refused(tmp_path: Path) -> None:
+    """A legacy record links nothing, so there is no finding to settle and no
+    learning that could be retired by pretending otherwise."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+
+    with pytest.raises(ValueError, match="links no learning"):
+        sp.settle_proposal(
+            config, stored.id, sp.DISMISSED, selectors=[sp.OriginRef(LEARNING_ID)]
+        )
+    # The same decision without a selector is the ordinary whole-row one and
+    # still works, because a person dismissing a row has answered it.
+    assert sp.settle_proposal(config, stored.id, sp.DISMISSED) is not None
+
+
+def test_two_workspaces_with_the_same_key_cannot_clear_each_other(
+    tmp_path: Path,
+) -> None:
+    """A learning id is minted from the workspace, so the same statement in two
+    workspaces is two learnings. The fold reads one workspace's queue and matches
+    only that workspace's ids, so applying the first one says nothing about the
+    second — which is the same rule that keeps a ``key`` from being an identity."""
+    config = _config(tmp_path, "personal", "work")
+    personal = _linked(config, _origin(), skill="web-research")
+    _linked(
+        config,
+        _origin(
+            learning_id=WORK_LEARNING_ID,
+            workspace="work",
+            finding="the same sentence",
+        ),
+        skill="web-research",
+        workspace="work",
+    )
+    work = sp.find_proposal(config, sp.proposal_id("work", "web-research"))
+    assert work is not None
+    sp.settle_proposal(config, personal.id, sp.APPLIED, verification="mrcpt_abc123")
+
+    assert sp.learning_settlement(config, "personal", _learning()).settled is True
+    assert sp.learning_settlement(config, "work", _work_learning()).settled is False
+    assert len(sp.learning_settlement(config, "work", _work_learning()).origins) == 1
+
+
+def test_a_link_pointing_out_of_its_workspace_is_not_a_link(tmp_path: Path) -> None:
+    """A queue is one workspace's, so a link naming another workspace is a claim
+    this queue cannot make. Counting it would let a workspace retire a learning
+    by asserting a finding on someone else's."""
+    config = _config(tmp_path)
+    _linked(config, _origin(workspace="work"))
+
+    settlement = sp.learning_settlement(config, "personal", _learning())
+
+    assert settlement.origins == ()
+    assert settlement.settled is False
+

@@ -1092,6 +1092,11 @@ export interface ProposalRow {
   chat_id?: string
   lifecycle?: SkillProposalLifecycle
   sources?: SkillEvidenceRow[]
+  /** The learnings this finding was derived from, one entry per finding, and
+   * the state of each. EMPTY on a proposal filed before origins existed, which
+   * is not the same as settled: an empty list means the record links nothing,
+   * so no learning behind it can be retired by settling the row. */
+  origins?: SkillOriginRow[]
 }
 
 /** Where a skill proposal is in the server-owned accept lifecycle.
@@ -1113,6 +1118,40 @@ export interface SkillEvidenceRow {
   archive: string
   turn: string
   excerpt: string
+}
+
+/** What became of one finding on one learning.
+ *
+ * `applied` is the only state that says the lesson is in the target AND
+ * `verification` names the receipt or readback that proves it. `dismissed` is a
+ * person rejecting that finding. `already_covered`, `not_applicable` and
+ * `unclear` are answers that still need somebody to look at the skill, and
+ * `failed` is the absence of one — none of them retire a learning.
+ */
+export type SkillOriginState =
+  | 'pending'
+  | 'implementing'
+  | 'interrupted'
+  | 'applied'
+  | 'dismissed'
+  | 'not_applicable'
+  | 'already_covered'
+  | 'unclear'
+  | 'failed'
+
+/** One finding's link back to the learning it came from. */
+export interface SkillOriginRow {
+  workspace: string
+  /** EMPTY for an origin the record could not read: unattributable, and a
+   * reason to leave every learning on that record alone. */
+  learning_id: string
+  /** The `content_revision` of `Workspace/Learnings.md` at filing, so a later
+   * read can tell whether the learning moved under the finding. */
+  source_revision: string
+  finding: string
+  summary: string
+  state: SkillOriginState
+  verification: string
 }
 
 /** `POST /api/proposals/{id}/implement` — accept a skill proposal into a chat.
@@ -1279,6 +1318,12 @@ export interface ProposalHistoryRow {
   destination: string
   outcome: string
   proposal_id: string
+  /** The learning a derived finding was filed against, when this decision was
+   * about one finding rather than a whole row. EMPTY for every decision about a
+   * row, and for every row written before the field existed. */
+  learning_id?: string
+  /** Which finding within that learning, when the decision named one. */
+  finding?: string
   /** The archive transcript this fact came from, when one is still on disk. */
   source_path?: string
   /** The receipt that performed this decision. ABSENT — not falsy — for every

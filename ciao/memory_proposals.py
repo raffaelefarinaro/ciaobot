@@ -1644,6 +1644,8 @@ def record_dismissal(
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
+    learning_id: str = "",
+    finding: str = "",
     once: bool = False,
 ) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
@@ -1659,6 +1661,13 @@ def record_dismissal(
     curator dedupes against the live queue and this sidecar, never against
     the promoted destination, so a promotion must record the text too or the
     same fact comes back the next time the transcript is re-read.
+
+    ``learning_id`` and ``finding`` name the one finding a decision was about,
+    for the writer that settles a derived finding per finding rather than a
+    whole row: the skill-proposal queue, whose record links back to the
+    learnings it came from. Both are optional and omitted when blank, so a row
+    written without them is indistinguishable from one written before the
+    fields existed.
 
     The extra fields (``via``, ``source``, ``destination``, ``outcome``,
     ``proposal_id``) turn this dedupe sidecar into the decision history the
@@ -1677,6 +1686,8 @@ def record_dismissal(
         outcome=outcome,
         proposal_id=proposal_id,
         receipt_id=receipt_id,
+        learning_id=learning_id,
+        finding=finding,
         once=once,
     )
 
@@ -1692,6 +1703,8 @@ def record_promotion(
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
+    learning_id: str = "",
+    finding: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1715,6 +1728,8 @@ def record_promotion(
         outcome=outcome,
         proposal_id=proposal_id,
         receipt_id=receipt_id,
+        learning_id=learning_id,
+        finding=finding,
         once=once,
         history_only=history_only,
     )
@@ -1732,6 +1747,8 @@ def _record_decision(
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
+    learning_id: str = "",
+    finding: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1775,6 +1792,13 @@ def _record_decision(
         # offer an undo. Rows written before this existed carry no id and are
         # joined heuristically instead.
         entry["receipt_id"] = receipt_id
+    if learning_id:
+        # Which learning a derived finding was filed against, for the writers
+        # that settle one finding at a time. Empty for every decision that is
+        # about a whole row, and for every row written before the field existed.
+        entry["learning_id"] = learning_id
+    if finding:
+        entry["finding"] = finding
     if history_only:
         # Ledger-only row: it records that a pass ran and decided nothing new,
         # so the dedupe readers must not treat it as a decision. Without this
@@ -1922,10 +1946,12 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
 
     Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
     text-only rows into one shape: ``{ts, action, via, kind, text, source,
-    destination, outcome, proposal_id, receipt_id, log, seq}``. ``receipt_id``
-    is empty for every row written before it was recorded, and for every
-    decision made outside the receipt protocol. This is the read side of the
-    decision history the review page's History tab renders; :func:`record_dismissal`
+    destination, outcome, proposal_id, receipt_id, learning_id, finding, log,
+    seq}``. ``receipt_id`` is empty for every row written before it was
+    recorded, and for every decision made outside the receipt protocol, and
+    ``learning_id``/``finding`` are empty for every decision about a whole row
+    rather than one derived finding. This is the read side of the decision
+    history the review page's History tab renders; :func:`record_dismissal`
     and :func:`record_promotion` are the write side.
 
     ``seq`` is the row's position *within its own* append-only sidecar, and
@@ -1964,6 +1990,8 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
                     "outcome": str(entry.get("outcome", "")),
                     "proposal_id": str(entry.get("proposal_id", "")),
                     "receipt_id": str(entry.get("receipt_id", "")),
+                    "learning_id": str(entry.get("learning_id", "")),
+                    "finding": str(entry.get("finding", "")),
                     "log": suffix,
                     "seq": seq,
                 }
