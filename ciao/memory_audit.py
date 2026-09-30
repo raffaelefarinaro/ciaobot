@@ -648,7 +648,7 @@ def find_stale_notes(
         if is_stale_exempt_type(note_type, registry=registry):
             exempt += 1
             continue
-        rendered = str(entry.path)
+        rendered = entry.path_key
         if mtimes is not None:
             mtime = mtimes.get(rendered, 0.0)
         elif vault_root is not None:
@@ -1443,7 +1443,7 @@ def find_stale_entries(
     checked = exempt = unverified = uncovered = 0
     diagnostics: list[dict[str, str]] = []
     for entry in entries:
-        rendered = str(entry.path)
+        rendered = entry.path_key
         relative = _vault_relative_to(rendered, prefix)
         text = _body(rendered, relative)
         if text is None:

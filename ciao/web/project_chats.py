@@ -1156,7 +1156,7 @@ class ProjectChatManager:
         except ValueError:
             return ""
         try:
-            return str(root.relative_to(Path(self._config.workspace_root)))
+            return root.relative_to(Path(self._config.workspace_root)).as_posix()
         except ValueError:
             return str(root)
 
@@ -1362,7 +1362,7 @@ class ProjectChatManager:
     def _display_path(self, path: Path) -> str:
         """Return a UI/file-viewer path for workspace or external vault files."""
         try:
-            return str(path.relative_to(self._config.workspace_root))
+            return path.relative_to(self._config.workspace_root).as_posix()
         except ValueError:
             return str(path)
 
@@ -1741,7 +1741,7 @@ class ProjectChatManager:
 
             # Reconstruct archive path relative to workspace root
             try:
-                rel_archive_path = str(transcript_path.relative_to(self._config.workspace_root))
+                rel_archive_path = transcript_path.relative_to(self._config.workspace_root).as_posix()
             except ValueError:
                 rel_archive_path = str(transcript_path)
 
@@ -1935,9 +1935,9 @@ class ProjectChatManager:
                 )
                 if latest is not None:
                     try:
-                        chat.archive_path = str(
-                            latest.relative_to(self._config.workspace_root)
-                        )
+                        chat.archive_path = latest.relative_to(
+                            self._config.workspace_root
+                        ).as_posix()
                     except ValueError:
                         chat.archive_path = str(latest)
             healed += 1
@@ -3362,7 +3362,7 @@ class ProjectChatManager:
         chat.archived = True
         if result is not None:
             try:
-                chat.archive_path = str(result.relative_to(self._config.workspace_root))
+                chat.archive_path = result.relative_to(self._config.workspace_root).as_posix()
             except ValueError:
                 chat.archive_path = str(result)
         self._save()

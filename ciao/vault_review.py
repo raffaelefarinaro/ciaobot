@@ -826,8 +826,8 @@ def _generate_candidates(
     orphans = {rendered(path) for path in validation.get("orphans", [])}
     duplicate_groups = [[rendered(path) for path in group] for group in validation.get("duplicates", [])]
     duplicate_by_path = {path: group for group in duplicate_groups for path in group}
-    incoming: dict[str, list[str]] = {str(entry.path): [] for entry in entries}
-    outbound: dict[str, list[str]] = {str(entry.path): [] for entry in entries}
+    incoming: dict[str, list[str]] = {entry.path_key: [] for entry in entries}
+    outbound: dict[str, list[str]] = {entry.path_key: [] for entry in entries}
     # ``entry.related`` already carries both the frontmatter refs and the body's
     # markdown links — `scan_vault` extends it with `_extract_body_links` — so
     # one pass over it is the whole graph. An earlier revision re-read every
@@ -835,7 +835,7 @@ def _generate_candidates(
     # against `.md`-suffixed keys, so it never matched, and only cost a second
     # full read of the vault.
     for entry in entries:
-        source = str(entry.path)
+        source = entry.path_key
         for target in entry.related:
             target_path = str(target)
             if target_path in incoming:
@@ -866,7 +866,7 @@ def _generate_candidates(
     present_paths: set[str] = set()
     present_digests: set[str] = set()
     for entry in entries:
-        path = str(entry.path)
+        path = entry.path_key
         if _is_workspace_path(path):
             continue
         # A template is not a stale note: it has no facts to verify and nothing
@@ -1109,7 +1109,7 @@ def _completed_counterpart(path: str) -> str:
     for index in range(len(parts) - 1):
         if parts[index].casefold() == "projects" and parts[index + 1].casefold() == "active":
             parts[index + 1] = "completed"
-            return str(Path(*parts))
+            return Path(*parts).as_posix()
     return ""
 
 
@@ -1143,7 +1143,7 @@ def _completed_path_for(path: str) -> str:
         if part.casefold() == "projects":
             # A flat project: the note sits directly in `projects/`, so the
             # destination is one segment deeper rather than a sibling rename.
-            return str(Path(*parts[: index + 1], "completed", *parts[index + 1:]))
+            return Path(*parts[: index + 1], "completed", *parts[index + 1:]).as_posix()
     return ""
 
 
@@ -1165,7 +1165,7 @@ def _project_folder(path: str) -> str:
     for index in range(len(parts) - 3):
         if parts[index].casefold() != "projects" or parts[index + 1].casefold() != "active":
             continue
-        return str(Path(*parts[: index + 3]))
+        return Path(*parts[: index + 3]).as_posix()
     return ""
 
 
@@ -1813,7 +1813,7 @@ def _unwrite_texts(swapped: list[tuple[Path, str]]) -> None:
 
 def _vault_ref(path: str) -> str:
     """A note's path as a vault-relative ref: no ``memory-vault/`` prefix, no extension."""
-    return str(Path(path).relative_to("memory-vault").with_suffix(""))
+    return Path(path).relative_to("memory-vault").with_suffix("").as_posix()
 
 
 def _vault_path(root: Path, path: Path) -> str:
@@ -1823,7 +1823,7 @@ def _vault_path(root: Path, path: Path) -> str:
     namespace, so anything read off disk has to be rendered into it before it can
     be compared with a recorded key.
     """
-    return str(Path("memory-vault") / path.relative_to(root))
+    return (Path("memory-vault") / path.relative_to(root)).as_posix()
 
 
 def _missing_ancestors(path: Path, stop: Path) -> list[Path]:
@@ -2019,7 +2019,7 @@ def _repoint_project_references(
     if folder:
         completed_folder = _completed_counterpart(folder)
         for entry in entries:
-            rel = str(entry.path)
+            rel = entry.path_key
             if rel == previous_path or not rel.startswith(f"{folder}/"):
                 continue
             # The suffix carries the note's place inside the folder, which is
@@ -2032,15 +2032,16 @@ def _repoint_project_references(
     # it, so both sides keep the `memory-vault/` prefix and drop the extension,
     # while a frontmatter ref and a wikilink are vault-relative and drop both.
     moved_by_ref = {
-        str(Path(old).with_suffix("")): str(Path(new).with_suffix("")) for old, new in moves
+        Path(old).with_suffix("").as_posix(): Path(new).with_suffix("").as_posix()
+        for old, new in moves
     }
     moved_by_resolved = {old: _vault_ref(new) for old, new in moves}
-    known = {str(Path(str(entry.path)).with_suffix("")) for entry in entries}
+    known = {entry.path.with_suffix("").as_posix() for entry in entries}
     needles = _ref_needles(moves)
     edited: list[str] = []
     rewrites: list[_Rewrite] = []
     for entry in entries:
-        rel = str(entry.path)
+        rel = entry.path_key
         try:
             note = (root / Path(rel).relative_to("memory-vault")).resolve()
         except ValueError:
@@ -2190,7 +2191,7 @@ def complete_project_note(root: Path, candidate: ReviewCandidate, *, actor: str 
     # that no longer has the notes it named.
     pending = [(r.path_before, r.before, r.after) for r in rewrites]
     rollback = [(r.path_before, r.before) for r in rewrites]
-    undo = {str(r.path_after): {"before": r.before, "after": r.after} for r in rewrites}
+    undo = {r.path_after.as_posix(): {"before": r.before, "after": r.after} for r in rewrites}
     try:
         _write_texts(pending)
     except OSError as exc:
