@@ -69,6 +69,11 @@ jobs:
       with:
         python-version: '3.12'
         cache: 'pip'
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: web/package-lock.json
     - name: Install Python dependencies
       run: python -m pip install -e '.[test]'
     # Every step below records its result and carries on: the job is a
@@ -93,16 +98,24 @@ jobs:
       run: python -m mypy ciao > windows-mypy.txt 2>&1 || true
     - name: Windows backend tests
       run: python -m pytest -n auto -q -rfE tests/ > windows-pytest.txt 2>&1 || true
+    - name: Windows frontend tests
+      working-directory: web
+      env:
+        NO_COLOR: '1'
+      run: |
+        { npm ci && npm test; } > ../windows-vitest.txt 2>&1 || true
     - name: Summarize
       if: always()
       run: |
-        grep -E '^(FAILED|ERROR) ' windows-pytest.txt | sed -E 's/ - .*//' | sort -u > windows-failures.txt || true
+        # `tests/` keeps captured log lines that also start with ERROR out.
+        grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt | sed -E 's/ - .*//' | sort -u > windows-failures.txt || true
         {
           echo "### Windows (advisory, #696)"
           echo
           echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
           echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
+          echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
           echo
           echo "Full logs and the failing-test list are in the \`windows-results\` artifact."
         } >> "$GITHUB_STEP_SUMMARY"
