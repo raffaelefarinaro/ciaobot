@@ -2,25 +2,27 @@
 
 Why this exists
 ---------------
-At the time this module was written, ``ciao/memory_proposals.py`` owned the one
-regex that reads a learnings entry, minted a four-word key from the statement,
-truncated the cited sources to eight, and counted recurrence by comparing
-normalized prose. ``ciao/curation_run.py`` imports that same regex to decide
-what to promote. Both are the shape a retry grew: re-filing the same fact twice
-inflates a count, rewording a statement mints a different key, and a promoted
-entry cannot be traced back to the episode that produced it because the prose
-itself is the only identity there is.
+``ciao/memory_proposals.py`` used to own the one regex that reads a learnings
+entry, mint a four-word key from the statement, truncate the cited sources to
+eight, and count recurrence by comparing normalized prose, and
+``ciao/curation_run.py`` imported that same regex to decide what to promote.
+That was the shape a retry grew: re-filing the same fact twice inflated a
+count, rewording a statement minted a different key, and a promoted entry could
+not be traced back to the episode that produced it because the prose itself was
+the only identity there is. Both readers are gone; this model is what reads a
+learnings document now, and the private writer that shadowed it was deleted.
 
-This module is the pure half of the fix. It defines what a learning *is* — a
+This module is the pure half of that. It defines what a learning *is* — a
 record with a stable identifier, a statement, honest recurrence bookkeeping and
 a deduplicated set of observations — and it reads and writes the
 ``Workspace/Learnings.md`` shapes that already exist in installed vaults
 without losing a byte of anything it does not understand.
 
 Nothing here touches disk, the network, or a model. :func:`migrate_learnings`
-returns text; a caller decides whether to write it. The production writer, the
-curation worklist and the migration command are a separate child: this module
-is installed by nothing, and no existing code path routes through it yet.
+returns text; a caller decides whether to write it. The production writer
+(``memory_proposals.append_learning``), the curation worklist
+(``curation_run._learning_items``) and the migration command
+(``ciao learnings-migrate``) are all callers of this module, not copies of it.
 
 The four rules everything else follows from
 -------------------------------------------
@@ -140,6 +142,17 @@ ID_NAME_VERSION = "ciaobot/learning-record/v1"
 SECTION_ACTIVE = "active"
 SECTION_PROMOTED = "promoted"
 
+SECTION_HEADINGS = {
+    SECTION_ACTIVE: "Active",
+    SECTION_PROMOTED: "Promoted / Resolved",
+}
+"""The heading text each recognized section is written under.
+
+Public because the writer creates the ``## Active`` section when a file has
+none, and a heading spelled here rather than in the caller is what keeps the
+section the writer opens and the section the parser reads the same one.
+"""
+
 FORMAT_CANONICAL = "canonical"
 """A current ``- [key] [first → last] (xN) statement`` line."""
 
@@ -154,6 +167,26 @@ FORMAT_MALFORMED = "malformed"
 
 FORMAT_CONFLICT = "conflict"
 """A canonical line whose stored identifier another line in this document already used."""
+
+LEARNINGS_RELATIVE = "Workspace/Learnings.md"
+"""Where a learnings document lives inside a vault, as a vault-relative path."""
+
+LEARNINGS_STUB = (
+    "---\n"
+    "tags: [ciao, learnings]\n"
+    "---\n"
+    "# Learnings\n\n"
+    "Reusable cross-project knowledge. Active entries are candidates "
+    "for promotion into canonical guidance once they recur (x3 or "
+    "more).\n"
+)
+"""The body a first write starts from.
+
+Owned here rather than by the writer because the writer, the migration command
+and the reader all need it to be the same text: two stubs would mean the first
+:func:`ciao.memory_proposals.append_learning` into one vault and the first read
+of another disagree about what an empty learnings file says.
+"""
 
 
 # ── The record ─────────────────────────────────────────────────────────────
@@ -338,7 +371,7 @@ _CONFIDENCE_RE = re.compile(r" *(?:—|–|--) +confidence: *(?P<confidence>.*)$
 _TURN_CITATION_RE = re.compile(r"^(?P<source>.+)#(?P<turn>[1-9]\d*)$")
 _REQUEST_CITATION_RE = re.compile(r"^req:(?P<request>.+)$")
 
-_SECTION_LABELS = {SECTION_ACTIVE: "Active", SECTION_PROMOTED: "Promoted / Resolved"}
+_SECTION_LABELS = dict(SECTION_HEADINGS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -732,16 +765,63 @@ def _parse_metadata(payload: str) -> _Metadata:
 # ── Entry parsing ──────────────────────────────────────────────────────────
 
 
-def _learning_key(text: str) -> str:
+def learning_key(text: str) -> str:
     """A short kebab identifier from the statement's first distinctive words.
 
     The shape the existing writer produces, so a migrated key is
     indistinguishable from one written by hand. It is a display label, not an
     identity: a reworded statement gets a different key and the same
     ``learning_id``.
+
+    Public because the canonical writer has to label a learning it is filing for
+    the first time, and a second implementation of the same four-word rule is
+    how the two stopped agreeing.
     """
     words = re.findall(r"[a-z0-9]+", text.lower())
     return "-".join(words[:KEY_WORDS]) or FALLBACK_KEY
+
+
+def normalized_statement(text: str) -> str:
+    """The comparison form of a statement: lowercase, unpunctuated, one space.
+
+    Identity is persisted, so this is *not* how a learning is identified — it is
+    the read a caller has to make in the one case the persisted identity cannot
+    answer. A statement filed for the first time has no comment yet, and the
+    legacy bullets an installed vault still holds have none either, so matching
+    a new sighting against them has to compare prose. Comparing the normalized
+    form rather than the raw one is what keeps ``Airtable sort param returns
+    400.`` and ``AIRTABLE  sort, param returns 400`` one learning instead of
+    two, and what stops a retry that re-quotes the episode from filing it again.
+
+    Lowercased and stripped of every non-alphanumeric character, so two
+    spellings of one sentence collide, and two genuinely different sentences do
+    not. Whitespace is collapsed by :func:`_flatten` in the parsed record, so
+    callers may pass either raw or parsed text.
+    """
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def allocate_learning_id(workspace: str, text: str) -> str:
+    """The deterministic identifier for *text*, which carries none yet.
+
+    Same derivation :func:`parse_learnings` uses for a legacy entry, so a
+    statement filed by the writer and the same statement read back out of the
+    file are one learning. Determinism is what makes the review card's preview
+    and the accept that follows it land on identical bytes: the preview mints the
+    identifier, and so does the write, and neither is told what the other chose.
+
+    The name is built from the *statement*, not from the line that will carry
+    the comment, so a writer's own entry and the legacy bullet a migration later
+    finds under the same statement get different names and therefore different
+    identifiers. That is the safe direction: they are two lines until something
+    merges them, and the parser reports a duplicate identifier rather than
+    silently letting one record's evidence overwrite the other's.
+
+    The ordinal is always ``0`` here because a statement being filed is one
+    entry, and the ordinal exists only to keep two byte-identical legacy bullets
+    two entries.
+    """
+    return _allocate_id(workspace, _flatten(text), 0)
 
 
 def _allocate_id(workspace: str, entry_text: str, occurrence: int) -> str:
@@ -909,7 +989,7 @@ def _parse_legacy(
     return (
         LearningRecord(
             learning_id="",
-            key=_learning_key(text),
+            key=learning_key(text),
             text=text,
             first_seen=seen,
             last_seen=seen,
@@ -1025,7 +1105,7 @@ def _parse_bullet(line: _Line, source_text: str) -> _Read | None:
         shape = FORMAT_PLAIN
         text = _flatten(body)
         record, problems = (
-            (LearningRecord(learning_id="", key=_learning_key(text), text=text), [])
+            (LearningRecord(learning_id="", key=learning_key(text), text=text), [])
             if text
             else (None, [f"{_where(line)}: bullet has no text"])
         )

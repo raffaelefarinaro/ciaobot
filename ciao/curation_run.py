@@ -353,34 +353,33 @@ def _audit_items(guide_path: Path, *, workspace_dir: Path, today: date) -> list[
 
 
 def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
-    from ciao.memory_proposals import _LEARNING_LINE_RE
+    from ciao.learning_records import SECTION_ACTIVE, parse_learnings
 
     text = _read_text(vault_root / LEARNINGS_RELATIVE)
     if not text:
         return []
-    # Only the Active section is work. Entries already under
-    # `## Promoted / Resolved` are decided, and re-planning them every night is
-    # how a promoted learning gets promoted twice.
-    active = text.partition("\n## Promoted")[0]
+    # Read through the canonical model, not a second regex: the writer mints the
+    # lines this pass counts, so a pass that read them its own way would be
+    # reasoning about a shape nothing produces. Only the Active section is work —
+    # entries already under `## Promoted / Resolved` are decided, and re-planning
+    # them every night is how a promoted learning gets promoted twice. The parser
+    # says which section an entry is in, so that no longer depends on a heading
+    # being spelled exactly `## Promoted`.
+    document = parse_learnings(text, workspace=vault_root.name)
     subjects: list[str] = []
     reasons: list[str] = []
     promote = prune = 0
-    for line in active.splitlines():
-        match = _LEARNING_LINE_RE.match(line)
-        if match is None:
+    for entry in document.entries:
+        record = entry.record
+        if record is None or entry.section != SECTION_ACTIVE or record.count is None:
             continue
-        count = int(match.group("count"))
-        if count >= LEARNING_PROMOTE_COUNT:
-            subjects.append(f"promote:{match.group('key')}")
+        if record.count >= LEARNING_PROMOTE_COUNT:
+            subjects.append(f"promote:{record.key}")
             promote += 1
             continue
-        if count == 1:
-            try:
-                last_seen = date.fromisoformat(match.group("last"))
-            except ValueError:
-                continue
-            if (today - last_seen) > timedelta(days=LEARNING_PRUNE_DAYS):
-                subjects.append(f"prune:{match.group('key')}")
+        if record.count == 1 and record.last_seen is not None:
+            if (today - record.last_seen) > timedelta(days=LEARNING_PRUNE_DAYS):
+                subjects.append(f"prune:{record.key}")
                 prune += 1
     if not subjects:
         return []
