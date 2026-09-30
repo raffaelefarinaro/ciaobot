@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import json
 import logging
 import os
 import sqlite3
@@ -17,7 +18,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -176,6 +177,294 @@ def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
         payload["data"] = data
     payload.update(extra)
     return payload
+
+
+# ---- Note verification (#726-D) --------------------------------------------
+#
+# The `verify_note` operation is the one managed path from a stale note to a
+# verdict, so its boundaries are stated once here rather than re-derived at each
+# call site.
+
+
+MAX_VERIFY_PAYLOAD_BYTES = 512 * 1024
+"""Largest payload document one verification will read.
+
+A bound on work one agent call can ask of the server, not a statement about how
+big a note may be: the payload carries a verdict's text and its citations, and
+an agent that has none should be told to cite a source rather than allowed to
+paste a vault into an argument.
+"""
+
+MAX_VERIFY_NOTE_BYTES = 512 * 1024
+"""Largest note body one verification will judge.
+
+The same ceiling as the payload, and for the same reason: a note nobody could
+read in full has not been verified by anyone, so a verdict about it is not a
+verdict. A note over it is reported ``unverified`` — the honest ``unknown`` —
+rather than applied, which is the direction the parent's contract requires and
+the one that leaves the note itself untouched.
+"""
+
+
+def _payload_text(raw: Any, field: str) -> str:
+    """One payload field as text, or ``""`` when it is absent or not a string.
+
+    Total on purpose: the fields a verdict does not need (``before``/``after``
+    for a re-stamp, say) are legitimately absent, and a payload that omits one
+    is a request whose outcome the service already knows how to refuse. What is
+    **not** tolerated is a field of the wrong *type* carrying prose: that reads
+    as an empty field here and would be a silent substitution at the write, so
+    a non-string where text belongs is refused by the callers below rather than
+    coerced.
+    """
+    if field not in raw:
+        return ""
+    value = raw[field]
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ControlPlaneError(
+            "payload_invalid", f"'{field}' must be a string, not {type(value).__name__}."
+        )
+    return value
+
+
+def _verification_request(raw: dict[str, Any], *, nv: Any, workspace: str) -> Any:
+    """One payload document as a :class:`ciao.note_verification.VerificationRequest`.
+
+    The request's own fields are the contract; this maps the wire spelling onto
+    them and refuses the three things a payload could ask for that the service
+    has no business being asked: another workspace, a verdict outside the
+    service's four outcomes, and a coverage value it does not have. The
+    remaining judgement — whether complete coverage plus a citation naming the
+    note may re-stamp it, whether every evidence row carries a source — belongs
+    to :func:`ciao.note_verification.plan_note_verification` and is not
+    duplicated here.
+    """
+    named = _payload_text(raw, "workspace")
+    if named and named != workspace:
+        # The same refusal shape `schedule` uses for a cross-workspace
+        # `workspace` argument: the check state and the note-edit sidecar are
+        # filed per workspace, so pairing one workspace's name with another
+        # workspace's vault records a verdict in a vault nobody claimed and
+        # pins the wrong note's cooldown.
+        raise ControlPlaneError(
+            "workspace_forbidden",
+            f"This provider process is scoped to workspace '{workspace}'; a "
+            "verification payload may not name another.",
+        )
+    outcome = _payload_text(raw, "outcome").strip()
+    if not outcome:
+        raise ControlPlaneError(
+            "payload_invalid",
+            "'outcome' is required: one of "
+            f"{', '.join(nv.OUTCOMES)}.",
+        )
+    if outcome not in nv.OUTCOMES:
+        # Refused before the service rather than by it, so the caller is told
+        # the payload is wrong instead of receiving a verdict-shaped `failed`
+        # it would reasonably record as "this note could not be checked".
+        raise ControlPlaneError(
+            "payload_invalid",
+            f"unknown verification outcome {outcome!r}; expected one of "
+            f"{', '.join(nv.OUTCOMES)}.",
+        )
+    coverage = _payload_text(raw, "coverage").strip() or nv.COVERAGE_PARTIAL
+    if coverage not in (nv.COVERAGE_COMPLETE, nv.COVERAGE_PARTIAL):
+        raise ControlPlaneError(
+            "payload_invalid",
+            f"unknown coverage {coverage!r}; expected "
+            f"{nv.COVERAGE_COMPLETE!r} or {nv.COVERAGE_PARTIAL!r}.",
+        )
+    before = _payload_text(raw, "before")
+    after = _payload_text(raw, "after")
+    evidence = nv.Evidence.from_mappings(raw.get("evidence"))
+    edit = None
+    if before or after:
+        # Only a payload that actually carries a replacement is an edit. A
+        # `still_valid` re-stamp derives its text from the note itself, and
+        # passing an empty `NoteEdit` there would be a request to replace the
+        # note with nothing, which is a deletion the service refuses — for a
+        # verdict that never asked for one.
+        edit = nv.NoteEdit(before=before, after=after)
+    return nv.VerificationRequest(
+        workspace=workspace,
+        relative_path=_payload_text(raw, "relative_path").strip(),
+        expected_revision=_payload_text(raw, "expected_revision").strip(),
+        outcome=outcome,
+        edit=edit,
+        evidence=evidence,
+        coverage=coverage,
+        reason=_payload_text(raw, "reason").strip(),
+    )
+
+
+def _oversized_note(vault_root: Path, request: Any, *, nr: Any, mr: Any) -> dict[str, Any] | None:
+    """The ``unverified`` report for a note too large to judge, else ``None``.
+
+    A size, not a read: the point is to refuse *before* pulling a multi-megabyte
+    body into a worker, and ``stat`` is the only way to know. The path is
+    resolved through ``note_receipts`` first so the size checked is a file
+    inside this vault, not whatever a ``..`` in the payload would have named.
+    """
+    from ciao import note_verification as nv
+
+    try:
+        target = nr.resolve_note_path(vault_root, request.relative_path)
+    except mr.MemoryReceiptError:
+        # `verify_note` reports an unresolvable path precisely; leave that
+        # verdict to it rather than answering the same question worse here.
+        return None
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        return _verification_reply(nv.FAILED, f"the note could not be measured: {exc}")
+    if size <= MAX_VERIFY_NOTE_BYTES:
+        return None
+    return _verification_reply(
+        nv.UNVERIFIED,
+        f"the note is {size} bytes, over the {MAX_VERIFY_NOTE_BYTES}-byte cap "
+        "for one verification, so this pass cannot say whether it is still true; "
+        "nothing was written and no check was recorded",
+    )
+
+
+def _file_review_proposal(
+    result: Any,
+    *,
+    request: Any,
+    config: Any,
+    workspace: str,
+    today: date,
+    nv: Any,
+    nep: Any,
+    mr: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """File the one ``note_edit`` proposal a ``needs_review`` verdict becomes.
+
+    This is the wiring #726-C was written for and could not have: the kind was
+    complete and nothing in production produced one, so a refused verdict
+    recorded a check and asked nobody. The operation carried on the record is
+    the *plan's*, not the caller's request — a payload asking to retire a note
+    reaches ``needs_review`` under the outcome the rule actually reached, and
+    filing that as anything else would queue an operation nobody decided on.
+
+    The before/after images are the caller's own exact text, which is what a
+    reviewer is entitled to see; a re-stamp's date is today's, fixed here rather
+    than read off the clock at accept time, so a card previewed before midnight
+    and clicked after it applies the same bytes it advertised.
+
+    Nothing is applied. A retirement is a human click all the way down, and this
+    module cannot reach a delete primitive any more than the service can.
+
+    Returns the filed record and the reason it could not be filed (empty on
+    success). The verdict stands and its check is recorded either way, so a
+    failure has to reach the caller: the note was judged, and nobody was asked.
+    """
+    operation = {
+        nv.RETIRE: nep.RETIRE,
+        nv.STILL_VALID: nep.RESTAMP,
+        nv.UPDATE: nep.REPLACE,
+    }.get(str(request.outcome or "").strip(), "")
+    if not operation:
+        # Unreachable through `verify_note` (a `needs_review` is one of those
+        # three outcomes) and refused rather than filed as something plausible.
+        return None, (
+            f"a needs_review verdict with outcome {request.outcome!r} has no "
+            "note-edit operation to file; nothing was queued"
+        )
+    before = request.edit.before if request.edit is not None else ""
+    after = request.edit.after if request.edit is not None else ""
+    try:
+        proposal = nep.file_note_edit(
+            config,
+            workspace=workspace,
+            relative_path=request.relative_path,
+            expected_revision=request.expected_revision,
+            operation=operation,
+            before=before,
+            after=after,
+            outcome=str(request.outcome).strip(),
+            coverage=request.coverage,
+            evidence=request.evidence,
+            # The rule's own reason when it gave one: it says which gap sent
+            # this to a person, and the reviewer's card carries it verbatim.
+            reason=result.message or request.reason,
+            today=today,
+        )
+    except (nep.NoteEditError, nv.NoteCheckRefused, mr.MemoryReceiptError) as exc:
+        return None, (
+            f"the note-edit proposal could not be filed: {exc}. The verdict is "
+            f"recorded, but nobody has been asked about {request.relative_path}."
+        )
+    return {
+        "id": proposal.id,
+        "relative_path": proposal.relative_path,
+        "operation": proposal.operation,
+        "proposal_id": proposal.proposal_id,
+        # A sidecar with no queue row is litter the next pass overwrites: the
+        # proposal is on file but nothing is asking the owner, and reporting
+        # that as a working row would be the one wrong answer here.
+        "queued": bool(proposal.proposal_id),
+    }, ""
+
+
+def _verification_reply(
+    status: str,
+    message: str,
+    *,
+    receipt_id: str = "",
+    check: Any = None,
+    proposal: dict[str, Any] | None = None,
+    proposal_error: str = "",
+) -> dict[str, Any]:
+    """One verification's whole report, in the shape every exit shares.
+
+    Flat on purpose: the caller is an agent deciding what to do next, and the
+    distinction it must not get wrong is ``applied`` (the note was written) from
+    ``needs_review`` (a human now has a row) from ``unverified`` (nobody could
+    tell). Every key is always present, because an agent reading a missing
+    ``proposal`` cannot tell "nothing was filed" from "the reply was cut off".
+    The check's evidence travels too: the run's log needs the citations, and the
+    check state is where they survive the turn.
+    """
+    from ciao import note_verification as nv
+
+    return {
+        "status": status,
+        "receipt_id": receipt_id,
+        "message": message,
+        "check": (
+            None
+            if check is None
+            else {
+                "relative_path": check.relative_path,
+                "content_revision": check.content_revision,
+                "outcome": check.outcome,
+                "checked_at": check.checked_at.isoformat(),
+                "retry_after": check.retry_after.isoformat(),
+                "coverage": check.coverage,
+                "reason": check.reason,
+                "proposal_id": check.proposal_id,
+                "evidence": [row.as_dict() for row in check.evidence],
+            }
+        ),
+        "proposal": proposal,
+        "proposal_error": proposal_error,
+        "auto_applied": status == nv.APPLIED,
+    }
+
+
+def _verification_payload_out(
+    result: Any, *, nv: Any
+) -> dict[str, Any]:
+    """One :class:`ciao.note_verification.VerificationResult` as the reply."""
+    return _verification_reply(
+        result.status,
+        result.message,
+        receipt_id=result.receipt_id,
+        check=result.check,
+    )
 
 
 class CiaoControlPlane:
@@ -640,6 +929,199 @@ class CiaoControlPlane:
         except ValueError as exc:
             raise ControlPlaneError("memory_update_invalid", str(exc)) from exc
         return _ok(result)
+
+    # ---- note verification ---------------------------------------------
+
+    async def verify_note(self, principal: AgentPrincipal, *, payload_file: str = "") -> dict[str, Any]:
+        """Record one stale note's verdict through the managed verification service.
+
+        The attended/scoped operation #726-D exists so the nightly run stops
+        hand-editing notes. Every argument arrives as a **payload file** inside
+        the caller's workspace, never as argv prose: a verification carries a
+        note's full before/after text and a list of citations, all of it
+        arbitrary user prose that a shell would mangle (``$()``, backticks,
+        quotes) or expose in the process table. The document is the same shape
+        :class:`ciao.note_verification.VerificationRequest` already defines, so
+        nothing here re-decides what a verdict means.
+
+        What this method adds is scoping, and the one write #726-C was waiting
+        for:
+
+        * the payload path is resolved **inside this caller's workspace root**
+          and refused if it escapes, so an agent cannot read a document belonging
+          to another workspace to fabricate a verdict about this one;
+        * a ``workspace`` in the payload naming anything but the caller's own is
+          refused, because the check state and the note-edit sidecar are filed
+          per workspace and a cross-workspace pair would record a verdict about
+          the wrong vault;
+        * the service's own vault, path, revision and symlink confinement
+          applies unchanged (:func:`ciao.note_verification.verify_note` is
+          called, not reimplemented);
+        * a ``needs_review`` verdict is filed as exactly one typed ``note_edit``
+          proposal, which pins the check to the queue row's id. Before this
+          wiring, that verdict recorded a check and asked nobody.
+
+        Retirement is **not** applied here and cannot be: it reaches the same
+        ``needs_review`` a note with no frontmatter reaches, and its proposal is
+        a human click all the way down.
+
+        The verification and the filing are one bounded off-loop read
+        (:func:`ciao.async_reads.run_read`), coalesced by workspace, note and
+        expected revision — two agents judging the same revision of the same
+        note in the same workspace share one read rather than racing each other
+        to write it.
+
+        The caps are refusals shaped as ``unverified``, not as ``applied``: a
+        payload or a note too large to be the thing the caller says it read is
+        an input we cannot settle, and reporting it as a completed verification
+        would pin a verdict about text nobody showed the service.
+        """
+        from ciao import memory_receipts as mr
+        from ciao import note_edit_proposals as nep
+        from ciao import note_receipts as nr
+        from ciao import note_verification as nv
+
+        workspace = self._workspace(principal)
+        raw_payload = self._verification_payload(principal, payload_file, workspace=workspace)
+        request = _verification_request(raw_payload, nv=nv, workspace=workspace)
+        vault_root = self._workspace_vault(principal, workspace)
+        today = date.today()
+
+        def _run() -> dict[str, Any]:
+            """Verify, then file the proposal a refused verdict becomes.
+
+            Nested rather than split so the check state and the sidecar that
+            pins it are written under one bounded read: a caller that filed
+            outside the read could interleave a second verdict for the same
+            revision between the two writes.
+            """
+            oversized = _oversized_note(vault_root, request, nr=nr, mr=mr)
+            if oversized is not None:
+                return oversized
+            result = nv.verify_note(
+                request,
+                vault_root=vault_root,
+                config=self.config,
+                actor="agent",
+                source="curation",
+                today=today,
+            )
+            if result.status != nv.NEEDS_REVIEW:
+                return _verification_reply(
+                    result.status,
+                    result.message,
+                    receipt_id=result.receipt_id,
+                    check=result.check,
+                )
+            filed, filing_error = _file_review_proposal(
+                result,
+                request=request,
+                config=self.config,
+                workspace=workspace,
+                today=today,
+                nv=nv,
+                nep=nep,
+                mr=mr,
+            )
+            # The check the reply carries is re-read, not the row
+            # `verify_note` returned: filing is what pins it, so the
+            # `proposal_id` holding this note off a second proposal is written
+            # after that result was built, and reporting the pre-filing row
+            # would tell the agent a verdict nobody is waiting on.
+            pinned = (
+                nv.read_note_checks(vault_root).get(result.check.relative_path)
+                if result.check is not None
+                else None
+            )
+            return _verification_reply(
+                result.status,
+                result.message,
+                receipt_id=result.receipt_id,
+                check=result.check if pinned is None else pinned,
+                proposal=filed,
+                proposal_error=filing_error,
+            )
+
+        # Same key shape as `update_tasks`: the install's runtime directory is
+        # the one part of an identity a workspace, a note and a revision cannot
+        # supply, so two installs in one process never share a read.
+        key = (
+            f"verify-note:{self._search_runtime_dir()}:"
+            f"{workspace}:{request.relative_path}:{request.expected_revision}"
+        )
+        reported: dict[str, Any] = await run_read(key, _run, coalesce=True)
+        return _ok(reported)
+
+    def _verification_payload(
+        self, principal: AgentPrincipal, payload_file: str, *, workspace: str
+    ) -> dict[str, Any]:
+        """The one JSON document this call carries its verdict in, or a refusal.
+
+        Confined to the caller's own workspace root, the same root
+        :meth:`file_surface` validates against, and capped before the bytes are
+        read. The cap is a bound on work an agent can ask the server to do with
+        one call, not a bound on note size: it is here because the payload
+        arrives as an arbitrary document and nothing else bounds it.
+        """
+        if not payload_file.strip():
+            raise ControlPlaneError(
+                "payload_required",
+                "A verification needs a payload file: --payload-file <file>. "
+                "The verdict's text and citations never travel as arguments.",
+            )
+        root = Path(self.config.agent_root(workspace)).resolve()
+        target = self._safe_relative(root, payload_file, must_exist=True)
+        if not target.is_file():
+            raise ControlPlaneError("payload_invalid", "The payload must be a file.")
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            raise ControlPlaneError(
+                "payload_unreadable", f"The payload file could not be read: {exc}"
+            ) from exc
+        if size > MAX_VERIFY_PAYLOAD_BYTES:
+            raise ControlPlaneError(
+                "payload_too_large",
+                f"The payload is {size} bytes, over the {MAX_VERIFY_PAYLOAD_BYTES}-byte "
+                "cap for one verification. Put the evidence in the vault and cite it.",
+            )
+        try:
+            raw = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ControlPlaneError(
+                "payload_unreadable", f"The payload file is not readable UTF-8: {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise ControlPlaneError(
+                "payload_invalid", f"The payload is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise ControlPlaneError(
+                "payload_invalid", "The payload must be a JSON object."
+            )
+        return raw
+
+    def _workspace_vault(self, principal: AgentPrincipal, workspace: str) -> Path:
+        """The vault this principal's notes live in, resolved through the config.
+
+        The same answer :mod:`ciao.note_verification` and
+        :mod:`ciao.note_edit_proposals` resolve it through, so the service, the
+        check state and the sidecar cannot end up describing three different
+        vaults.
+        """
+        resolver = getattr(self.config, "workspace_vault_root", None)
+        if not callable(resolver):
+            raise ControlPlaneError(
+                "vault_unavailable",
+                "This install does not answer where a workspace keeps its notes, so "
+                "no verification can be confirmed as being about this workspace's vault.",
+            )
+        try:
+            return Path(resolver(workspace))
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "vault_unavailable", f"The vault for workspace '{workspace}' is unusable: {exc}"
+            ) from exc
 
     # ---- memory proposals ----------------------------------------------
 

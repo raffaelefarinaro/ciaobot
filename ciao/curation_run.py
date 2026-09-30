@@ -76,6 +76,7 @@ LEARNING_PRUNE_DAYS = 30
 PASS_PROPOSALS = "proposals"
 PASS_REGIONS = "regions"
 PASS_AUDIT = "audit"
+PASS_STALE_NOTE = "stale_note"
 PASS_CATEGORIES = "categories"
 PASS_LEARNINGS = "learnings"
 PASS_HYGIENE = "hygiene"
@@ -87,6 +88,12 @@ PASS_ORDER: tuple[str, ...] = (
     PASS_PROPOSALS,
     PASS_REGIONS,
     PASS_AUDIT,
+    # Right after the region audit and for the same reason: both are "verify,
+    # don't guess" work over facts somebody has been asserting, so a run that
+    # reaches one of them has budget left for the other. Nothing about the
+    # stale pass is weekly — a note goes stale on a clock of its own, and the
+    # marker gates only the two hygiene checks and the guide review.
+    PASS_STALE_NOTE,
     PASS_CATEGORIES,
     PASS_LEARNINGS,
     PASS_HYGIENE,
@@ -352,6 +359,116 @@ def _audit_items(guide_path: Path, *, workspace_dir: Path, today: date) -> list[
     ]
 
 
+def _vault_relative(rendered: str, prefix: Path) -> str:
+    """One rendered entry path as the vault-relative spelling everything keys on.
+
+    :func:`ciao.memory_audit.find_stale_notes` reports the path
+    :func:`ciao.vault_index.scan_vault` rendered, which carries the render
+    prefix; the worklist key, :mod:`ciao.note_verification`'s check state and the
+    note-edit sidecar all key on the vault-relative POSIX path instead. A
+    rendered path that is not under the prefix (a hand-built entry in a test) is
+    taken as already relative — the same total answer
+    :func:`ciao.vault_index._strip_prefix` gives, rather than refusing a
+    selection because a path was spelled unusually.
+    """
+    try:
+        return Path(rendered).relative_to(prefix).as_posix()
+    except ValueError:
+        return Path(rendered).as_posix()
+
+
+def _stale_note_items(
+    *,
+    vault_root: Path,
+    registry: EntityTypeRegistry,
+    path_prefix: Path | None = None,
+    mtimes: dict[str, float] | None = None,
+    today: date,
+    done_keys: frozenset[str] | set[str] = frozenset(),
+) -> list[WorklistItem]:
+    """One item per vault note whose facts have gone unverified past its horizon.
+
+    The selection is the audit's, not a second one:
+    :func:`ciao.memory_audit.find_stale_notes` already owns the thresholds, the
+    exempt event types, the alias resolution and the frontmatter-then-mtime date
+    rule, and three other surfaces (memory-audit, the Memory Map, the review
+    queue's ``unverified`` signal) call it. A fourth copy here would be a fourth
+    thing to keep in agreement, so this pass *calls* it — including with
+    ``registry``, so a custom category's own ``stale_after_days`` reaches the
+    verdict exactly as it reaches the map's flag.
+
+    What this adds is the two filters the queue adds and the audit does not, and
+    the worklist's own bookkeeping:
+
+    * :func:`ciao.vault_review.never_queued` — a note the review queue would
+      never show a person (``Workspace/`` files, templates, completed projects)
+      is not a question to put in tonight's worklist, for the same reason the
+      Memory Map leaves its ``stale`` flag off it: a list that counts a note as
+      unchecked while the surface it sends you to can never show it is two lists
+      disagreeing.
+    * the run's ``done_keys``, so a night that verified a note does not plan it
+      again, and the reason it reports counts only what is actually left.
+
+    Oldest first, because that is the order
+    :func:`ciao.memory_audit.find_stale_notes` already sorts in (``age``
+    descending, then path), and inheriting it rather than re-sorting is what
+    makes the plan reproducible: two runs over the same vault produce the same
+    list in the same order, and a short budget drops the *youngest* stale note
+    rather than an arbitrary one.
+
+    No note body is read here and no judgement is made. Deciding what a stale
+    note's facts actually say is the managed ``verify_note`` operation's work
+    (#726-D), and this pass exists so the nightly run knows which notes to hand
+    it without spending a model turn on the selection.
+    """
+    from ciao.memory_audit import find_stale_notes
+    from ciao.vault_index import scan_vault
+
+    root = Path(vault_root)
+    if not root.is_dir():
+        return []
+    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
+    done = frozenset(done_keys or ())
+    try:
+        entries = scan_vault(root, path_prefix=prefix, registry=registry)
+        findings = find_stale_notes(
+            entries,
+            vault_root=root,
+            # The same prefix `scan_vault` rendered, passed on rather than left
+            # to the default: a drifted prefix makes every mtime stat miss
+            # silently, which reads as "no note is stale" instead of an error.
+            path_prefix=prefix,
+            mtimes=mtimes,
+            today=today,
+            registry=registry,
+        )
+    except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
+        logger.warning("curation: stale-note scan failed", exc_info=True)
+        return []
+    from ciao.vault_review import never_queued
+
+    items: list[WorklistItem] = []
+    for finding in findings.get("stale_notes") or []:
+        rendered = str(finding.get("path") or "")
+        if not rendered or never_queued(rendered):
+            continue
+        relative = _vault_relative(rendered, prefix)
+        key = item_key(PASS_STALE_NOTE, relative)
+        if key in done:
+            continue
+        age = int(finding.get("age_days") or 0)
+        horizon = int(finding.get("threshold_days") or 0)
+        items.append(
+            WorklistItem(
+                pass_id=PASS_STALE_NOTE,
+                label=str(finding.get("title") or "") or relative,
+                reason=f"unverified for {age}d against a {horizon}d horizon",
+                keys=(key,),
+            )
+        )
+    return items
+
+
 def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
     from ciao.learning_records import SECTION_ACTIVE, parse_learnings
 
@@ -537,6 +654,8 @@ def build_worklist(
     guide_path: Path,
     category_registry: EntityTypeRegistry,
     workspace_dir: Path | None = None,
+    mtimes: dict[str, float] | None = None,
+    path_prefix: Path | None = None,
     today: date | None = None,
     done_keys: frozenset[str] | set[str] | None = None,
     memory_char_limit: int | None = None,
@@ -555,6 +674,16 @@ def build_worklist(
     finished; they are removed here rather than at plan time so a pass whose
     every item is done disappears from the worklist entirely, and a workspace
     whose remaining work is all done reports ``empty``.
+
+    ``mtimes`` and ``path_prefix`` are the stale-note pass's inputs and are
+    optional for every other pass, which is why they default rather than being
+    required: ``mtimes`` lets a caller that already has the file times skip the
+    per-note ``stat`` inside :func:`ciao.memory_audit.find_stale_notes`, and
+    ``path_prefix`` must be the prefix
+    :func:`ciao.vault_index.scan_vault` rendered the note paths under — the same
+    value has to reach both, or every mtime probe misses silently and the vault
+    reports nothing stale. Left unset, both take the render prefix
+    :func:`ciao.vault_index.scan_vault` defaults to.
     """
     from ciao.memory_tool import DEFAULT_MEMORY_CHAR_LIMIT, DEFAULT_USER_CHAR_LIMIT
 
@@ -588,6 +717,19 @@ def build_worklist(
         )
     )
     collected.extend(_audit_items(guide_path, workspace_dir=workspace_dir, today=today))
+    # The stale pass is given the done keys itself as well as having them
+    # filtered below, so the age it reports is the age of what is *left* to do
+    # rather than of a queue this run has already worked.
+    collected.extend(
+        _stale_note_items(
+            vault_root=vault_root,
+            registry=category_registry,
+            path_prefix=path_prefix,
+            mtimes=mtimes,
+            today=today,
+            done_keys=done,
+        )
+    )
     collected.extend(_learning_items(vault_root, today=today))
     collected.extend(_hygiene_items(weekly_due=weekly_due))
     collected.extend(_guide_items(weekly_due=weekly_due))

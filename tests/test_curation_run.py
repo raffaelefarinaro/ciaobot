@@ -480,6 +480,237 @@ def test_resolved_learnings_are_not_replanned(tmp_path: Path) -> None:
     assert worklist.empty
 
 
+# ── The stale-note pass ────────────────────────────────────────────────────
+
+
+def _note(vault: Path, relative: str, *, updated: str = "2024-01-05", type_: str = "person") -> Path:
+    """One content note in the vault, with the frontmatter the detector reads."""
+    path = vault / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: {type_}\nupdated: {updated}\n---\n\n# {path.stem}\n\nSomething durable.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _stale_items(vault: Path, guide: Path, today: date = date(2026, 9, 19), **kwargs) -> list[cr.WorklistItem]:
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=today,
+        **kwargs,
+    )
+    return [item for item in worklist.items if item.pass_id == cr.PASS_STALE_NOTE]
+
+
+def test_a_stale_note_is_work_keyed_by_its_vault_relative_path(tmp_path: Path) -> None:
+    """Acceptance: the selection is deterministic and keyed by the path the
+    check state, the receipts and the note-edit sidecar all key on.
+
+    Not the rendered `memory-vault/…` path the scan produces: a key that carried
+    the render prefix would not match the `relative_path` every reader of a note
+    uses, so finishing the item would not suppress it.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Sofia.md", updated="2024-01-05")
+
+    items = _stale_items(vault, guide)
+
+    assert len(items) == 1
+    assert items[0].keys == (cr.item_key(cr.PASS_STALE_NOTE, "People/Sofia.md"),)
+    assert items[0].weekly is False
+    assert items[0].label == "Sofia"
+    # The reason names the age and the horizon it was measured against, so a
+    # reader can disagree with the verdict without losing the evidence.
+    age = (date(2026, 9, 19) - date(2024, 1, 5)).days
+    assert items[0].reason == f"unverified for {age}d against a 90d horizon"
+
+
+def test_the_stale_pass_uses_the_shared_audit_predicate(tmp_path: Path) -> None:
+    """Exempt types, notes with no usable date, and the queue's own exclusions
+    are NOT work — and they are not work because `find_stale_notes` and
+    `vault_review.never_queued` said so, not because this pass re-decided.
+
+    An exempt `journal` is the case worth pinning: a log from two years ago is
+    exactly as true as the day it was written, and a pass that flagged it would
+    send the nightly run to re-verify a record that cannot go stale. `Workspace/`
+    is the other: a note the review queue would never show a person is not a
+    question to put in tonight's plan, and a list that counts it while the
+    surface it sends you to can never show it is two lists disagreeing.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "journal/2024-01-05-standup.md", type_="journal")
+    _note(vault, "Workspace/Notes.md", type_="workspace")
+    _note(vault, "projects/completed/old.md", type_="project")
+    _note(vault, "People/NoDate.md", updated="not-a-date")
+    _note(vault, "People/Fresh.md", updated="2026-09-18")
+
+    assert _stale_items(vault, guide) == []
+
+    _note(vault, "People/Sofia.md", updated="2024-01-05")
+    planned = {item.keys[0] for item in _stale_items(vault, guide)}
+    assert planned == {cr.item_key(cr.PASS_STALE_NOTE, "People/Sofia.md")}
+
+
+def test_a_custom_category_threshold_is_honoured(tmp_path: Path) -> None:
+    """The registry is threaded into the detector, not just the cluster pass.
+
+    A category with its own `stale_after_days` must reach the nightly plan or a
+    vault whose categories were retuned would keep re-verifying notes the owner
+    said age slowly — and, worse, keep quiet about the ones they said age fast.
+
+    Written through the vault's own `entity-types.yaml`, which is where a real
+    owner's threshold lives, so the test exercises the same load path the plan
+    does rather than a hand-built registry.
+    """
+    from ciao import entity_types
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    # `person` ages at 90 days by default, so 2026-06-01 is stale today. A vault
+    # that says its people age at 1000 days says the opposite.
+    _note(vault, "People/Sofia.md", updated="2026-06-01")
+    assert len(_stale_items(vault, guide)) == 1
+
+    (vault / entity_types.VAULT_FILENAME).write_text(
+        "- id: person\n"
+        "  label: Person\n"
+        "  kind: entity\n"
+        "  folder: People\n"
+        "  stale_after_days: 1000\n",
+        encoding="utf-8",
+    )
+    entity_types.clear_entity_types_cache()
+    try:
+        assert _stale_items(vault, guide) == []
+    finally:
+        entity_types.clear_entity_types_cache()
+
+
+def test_stale_notes_are_planned_oldest_first(tmp_path: Path) -> None:
+    """Acceptance: a short budget must drop the youngest stale note, not an
+    arbitrary one.
+
+    Deterministic because the order is inherited from `find_stale_notes` (age
+    descending, then path) rather than re-sorted: the note that has gone longest
+    without a check is the one whose facts are most likely to have changed.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Youngest.md", updated="2026-06-01")
+    _note(vault, "People/Middle.md", updated="2025-06-01")
+    _note(vault, "People/Oldest.md", updated="2024-01-05")
+
+    items = _stale_items(vault, guide)
+
+    assert [item.label for item in items] == ["Oldest", "Middle", "Youngest"]
+    assert [item.keys[0] for item in items] == [
+        cr.item_key(cr.PASS_STALE_NOTE, f"People/{name}.md")
+        for name in ("Oldest", "Middle", "Youngest")
+    ]
+    # And a budget of two takes the two oldest, deferring the rest whole.
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=date(2026, 9, 19),
+    )
+    plan = cr.plan_run(worklist, cr.RunBudget(max_items=2))
+    planned = [key for item in plan.planned for key in item.keys]
+    assert planned == [
+        cr.item_key(cr.PASS_STALE_NOTE, "People/Oldest.md"),
+        cr.item_key(cr.PASS_STALE_NOTE, "People/Middle.md"),
+    ]
+
+
+def test_a_settled_stale_note_is_not_planned_again(tmp_path: Path) -> None:
+    """The run cursor applies to this pass like every other.
+
+    A `still_valid` re-stamp moves the note's `updated:` to today, so the next
+    night's scan would not list it anyway — but an `unverified` verdict leaves
+    the note exactly as it was, and without the cursor every following night
+    would re-ask the same question the cooldown had already answered.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Sofia.md", updated="2024-01-05")
+    key = cr.item_key(cr.PASS_STALE_NOTE, "People/Sofia.md")
+
+    assert _stale_items(vault, guide)
+    assert _stale_items(vault, guide, done_keys=frozenset({key})) == []
+    # A key from another pass does not suppress this one.
+    assert len(_stale_items(vault, guide, done_keys=frozenset({"audit:x"}))) == 1
+
+
+def test_the_stale_pass_is_not_a_weekly_hygiene_key(tmp_path: Path) -> None:
+    """A note goes stale on its own clock, not the marker's.
+
+    Putting `PASS_STALE_NOTE` in `REQUIRED_HYGIENE_KEYS` would make a nightly
+    run that skipped it block `last_full_pass` for a week, and a run that
+    completed it advance a marker that gates the index refresh and the audit
+    instead. It sits after `PASS_AUDIT` — the same "verify, don't guess" family —
+    and is due whenever a note is.
+    """
+    assert cr.PASS_STALE_NOTE in cr.PASS_ORDER
+    assert cr.PASS_ORDER.index(cr.PASS_STALE_NOTE) == cr.PASS_ORDER.index(cr.PASS_AUDIT) + 1
+    assert cr.PASS_STALE_NOTE not in cr.REQUIRED_HYGIENE_KEYS
+    assert all(
+        not key.startswith(f"{cr.PASS_STALE_NOTE}:") for key in cr.REQUIRED_HYGIENE_KEYS
+    )
+
+
+def test_the_stale_pass_reads_no_note_body_and_makes_no_verdict(tmp_path: Path) -> None:
+    """The cheap, model-free half.
+
+    The pass is a selection, so it must be computable without a model turn and
+    must not decide anything: selecting a note says its facts have gone
+    unverified, nothing about whether they still hold. The verdict belongs to
+    the managed `verify_note` operation, which writes a receipt, a check and —
+    when the rule refuses — a proposal.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Sofia.md", updated="2024-01-05")
+
+    items = _stale_items(vault, guide)
+
+    assert len(items) == 1
+    # Nothing was written: no check state, no queue row, no sidecar.
+    assert not (vault / "Workspace" / "Note-Checks.json").exists()
+    assert not (vault / cr.PROPOSALS_RELATIVE).exists()
+    assert not (vault / "Workspace" / "Memory-Note-Edit-Proposals").exists()
+
+
+def test_a_missing_vault_is_not_a_failed_plan(tmp_path: Path) -> None:
+    """The pass is advisory: a vault that is not there plans nothing rather
+    than raising out of `curation-begin` and costing the run its other passes."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=tmp_path / "no-such-vault",
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert cr.PASS_STALE_NOTE not in {item.pass_id for item in worklist.items}
+
+
 # ── Budget and cursor ─────────────────────────────────────────────────────
 
 
@@ -992,3 +1223,56 @@ def test_the_schedule_prompt_points_at_the_worklist_first() -> None:
     # The lease only serializes anything if the follow-up commands carry it.
     assert "`lease.holder`" in prompt and "--holder" in prompt
     assert "## 1. Process the proposals queue" in prompt
+
+
+def test_the_schedule_verifies_stale_notes_through_the_managed_operation() -> None:
+    """Acceptance: the agent no longer hand-edits stale notes.
+
+    The prompt used to say "open each note and set frontmatter `updated:` to
+    today" — a direct Markdown edit, with no receipt, no check state and no
+    record of who decided, and no way to tell afterwards whether a note was
+    verified or merely touched. The managed `verify_note` operation replaced it,
+    and the prompt has to name the operation rather than the edit.
+    """
+    prompt = next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+    stale = prompt[prompt.index("**`stale_notes`**") : prompt.index("## 4.")]
+
+    # The managed pass, and the operation that is the only way to settle a note.
+    assert "`note verify`" in stale
+    assert "stale_note" in stale
+    assert "never by editing Markdown" in stale
+    # The old instruction, in every wording it took, is gone.
+    assert "set frontmatter `updated:` to today" not in prompt
+    assert "open each note and re-verify its facts" not in stale
+    # The verdict's outcomes are named, because the words decide what happens.
+    for status in ("`applied`", "`needs_review`", "`unverified`", "`conflict`"):
+        assert status in stale
+    # A refused verdict is a proposal for a person, and the run says so rather
+    # than routing around it.
+    assert "note_edit` proposal" in stale
+    assert "**What needs you**" in stale
+    # Retirement is a human decision all the way down.
+    assert "Never delete it unattended" in stale
+    assert "a retirement is never applied by this pass at all" in stale
+    # The pass's keys are recorded, so the next run resumes rather than re-asks.
+    assert "ciao curation-progress --holder <lease.holder> --key" in stale
+    # The queue's own signals still point at the managed pass rather than at a
+    # hand edit.
+    assert "`unverified` (facts unchecked past the type's horizon" in prompt
+    assert "re-verify rather than retire" in prompt
+
+
+def test_the_memory_skill_routes_note_verification_through_the_operation() -> None:
+    """The skill is what a curation run loads for durable-vault guidance, so
+    leaving the direct-edit instruction there would undo the schedule's own."""
+    skill = _stock("skills/ciao-memory/SKILL.md")
+
+    assert "ciao note verify --payload-file" in skill
+    assert "managed operation" in skill
+    # The specific failure mode this replaces.
+    assert "never a direct edit" in skill
+    assert "leaves no receipt" in skill
