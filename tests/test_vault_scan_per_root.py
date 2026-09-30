@@ -103,7 +103,7 @@ def test_two_roots_holding_the_same_note_name_do_not_collide(tmp_path: Path) -> 
 
     entries, absolute = scan_targets(config.vault_scan_targets())
 
-    ids = [str(e.path) for e in entries]
+    ids = [e.path_key for e in entries]
     assert len(set(ids)) == len(ids) == 2, ids
     assert set(ids) == {
         "personal/memory-vault/People/User.md",
@@ -150,7 +150,7 @@ def test_a_single_vault_scan_is_unchanged(tmp_path: Path) -> None:
 
     entries = scan_vault(vault)
 
-    assert [str(e.path) for e in entries] == ["memory-vault/People/Mo.md"]
+    assert [e.path_key for e in entries] == ["memory-vault/People/Mo.md"]
     assert entries[0].workspace == "personal"
 
 
@@ -407,7 +407,7 @@ def _two_roots(tmp_path: Path) -> CiaoConfig:
 
 
 def _by_path(entries: list) -> dict[str, object]:
-    return {str(e.path): e for e in entries}
+    return {e.path_key: e for e in entries}
 
 
 def test_a_ref_naming_another_workspace_is_kept_out_of_the_graph_but_recorded(

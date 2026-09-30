@@ -131,7 +131,7 @@ def test_scan_vault_picks_up_body_markdown_links_as_edges(tmp_path: Path):
     )
 
     entries = _scan(tmp_path)
-    by_path = {str(e.path): e for e in entries}
+    by_path = {e.path_key: e for e in entries}
 
     foo = by_path["memory-vault/Projects/Foo.md"]
     mo_path = "memory-vault/People/Mo.md"
@@ -149,7 +149,7 @@ def test_scan_vault_captures_frontmatter_description(tmp_path: Path):
     )
 
     entries = _scan(tmp_path)
-    by_path = {str(e.path): e for e in entries}
+    by_path = {e.path_key: e for e in entries}
 
     assert by_path["memory-vault/Projects/Bar.md"].description == "A short blurb."
     assert by_path["memory-vault/Projects/Baz.md"].description == ""
@@ -166,7 +166,7 @@ def test_scan_vault_assigns_workspace_from_first_path_segment(tmp_path: Path):
     )
 
     entries = _scan(tmp_path)
-    by_path = {str(e.path): e for e in entries}
+    by_path = {e.path_key: e for e in entries}
     assert by_path["memory-vault/client/projects/active/Apollo.md"].workspace == "client"
     assert by_path["memory-vault/shared/People/Alba.md"].workspace == "shared"
 
@@ -272,7 +272,7 @@ def test_scan_vault_neighbors_walk_uses_body_edges(tmp_path: Path):
 
     entries = _scan(tmp_path)
     hops = vi.neighbors(entries, "memory-vault/Projects/Foo.md", depth=1)
-    paths = [str(e.path) for _, e in hops]
+    paths = [e.path_key for _, e in hops]
     assert "memory-vault/People/Mo.md" in paths
 
 

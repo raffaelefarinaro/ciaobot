@@ -500,13 +500,17 @@ def test_a_custom_category_horizon_reaches_the_entry_level(tmp_path: Path) -> No
 
 
 class _Entry:
-    """The four fields `find_stale_entries` reads off a `vault_index.Entry`."""
+    """The fields `find_stale_entries` reads off a `vault_index.Entry`."""
 
     def __init__(self, path: str, title: str, type_: str, updated: str) -> None:
         self.path = Path(path)
         self.title = title
         self.type = type_
         self.updated = updated
+
+    @property
+    def path_key(self) -> str:
+        return self.path.as_posix()
 
 
 def test_find_stale_entries_reports_counts_coverage_and_diagnostics(
