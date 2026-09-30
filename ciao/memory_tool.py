@@ -401,7 +401,7 @@ def _write_text_atomically(path: Path, text: str) -> None:
     )
     temporary = Path(raw_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
