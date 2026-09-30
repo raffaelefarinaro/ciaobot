@@ -47,6 +47,7 @@ from typing import Any, Iterator
 
 from ciao import skill_proposals
 from ciao.entity_types import EntityTypeRegistry
+from ciao.os_support.locks import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -1513,8 +1514,6 @@ def _state_lock(vault_root: Path) -> Iterator[None]:
     lease" and both write their own would each believe they hold it — so every
     mutation below happens inside this, not merely the file replacement.
     """
-    import fcntl
-
     from ciao.memory_receipts import lock_path_for
 
     path = state_path(vault_root)
@@ -1526,11 +1525,11 @@ def _state_lock(vault_root: Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+", encoding="utf-8")
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        lock_exclusive(handle.fileno())
         yield
     finally:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle.fileno())
         except OSError:
             pass
         handle.close()

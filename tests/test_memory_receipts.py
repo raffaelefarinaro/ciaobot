@@ -96,17 +96,17 @@ def test_update_region_lock_failure_raises_and_leaves_the_region(tmp_path, monke
 
 def test_guide_lock_is_reportable_not_unbounded(tmp_path):
     """A held lock times out into MemoryLockError rather than hanging."""
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive, unlock
 
     guide = _guide(tmp_path)
     lock_path = guide.with_name(f"{guide.name}.lock")
     holder = lock_path.open("a+", encoding="utf-8")
-    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    lock_exclusive(holder.fileno())
     try:
         with pytest.raises(mt.MemoryLockError):
             mt.guide_lock(guide, timeout_s=0.2)
     finally:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        unlock(holder.fileno())
         holder.close()
 
 
@@ -260,7 +260,7 @@ def test_trim_runs_while_holding_the_journal_lock(tmp_path, monkeypatch):
     The probe: intercept `_trim_if_large` and confirm the journal lock is still
     held at that moment (a non-blocking exclusive flock must fail).
     """
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive, unlock
 
     journal = _journal(tmp_path)
     lock = journal.with_name(journal.name + ".lock")
@@ -271,11 +271,11 @@ def test_trim_runs_while_holding_the_journal_lock(tmp_path, monkeypatch):
     def probe(path: Path) -> None:
         with lock.open("a+", encoding="utf-8") as handle:
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_exclusive(handle.fileno(), blocking=False)
             except BlockingIOError:
                 observed.append(True)
                 return
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle.fileno())
         observed.append(False)
 
     monkeypatch.setattr(mr, "_trim_if_large", probe)
@@ -301,7 +301,7 @@ def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monke
     The sibling test proves the lock is *held* during the trim; this one
     proves what that buys, by racing a real appender against it.
     """
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive, unlock
     import time
 
     monkeypatch.setattr(mr, "MAX_BYTES", 1)  # every append trims
@@ -320,7 +320,7 @@ def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monke
         # the race under test rather than exercise it.
         lock = journal.with_name(journal.name + ".lock")
         with lock.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            lock_exclusive(handle.fileno())
             try:
                 with journal.open("a", encoding="utf-8") as fh:
                     fh.write(
@@ -330,7 +330,7 @@ def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monke
                         + "\n"
                     )
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                unlock(handle.fileno())
 
     real_replace = os.replace
     started: list[threading.Thread] = []
@@ -1054,7 +1054,7 @@ def test_undo_holds_the_queue_lock_across_read_and_replace(tmp_path):
 
 def test_queue_lock_refuses_to_write_when_held(tmp_path):
     """A held lock is reportable, not silently ignored."""
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive, unlock
     import threading
     import time
 
@@ -1064,7 +1064,7 @@ def test_queue_lock_refuses_to_write_when_held(tmp_path):
     lock_path = mr._queue_lock_path(str(queue.resolve()))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+", encoding="utf-8")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    lock_exclusive(handle.fileno())
     acquired = threading.Event()
 
     def contender() -> None:
@@ -1077,7 +1077,7 @@ def test_queue_lock_refuses_to_write_when_held(tmp_path):
     t = threading.Thread(target=contender)
     t.start()
     t.join(timeout=10)
-    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    unlock(handle.fileno())
     handle.close()
     assert not acquired.is_set()
     time.sleep(0)
