@@ -61,6 +61,19 @@ made must not wait out a TTL — while the detectors, which are the part that ca
 expensive, run at most once per fresh window. An answer that exists only because a
 probe failed is not an answer about the workspace, so it is never cached.
 
+**A started task settles from evidence, not from prose.** A record in
+:data:`SETTLING_LIFECYCLES` is an attempt nobody has judged yet, and judging it
+is this layer's job rather than the chat's: :func:`evaluate` asks the row's
+registered completion check, through :func:`record_completion`, once per fresh
+window per task, and writes ``completed`` when the check's own postcondition
+holds. Nothing else may write that lifecycle — not the agent, not a ``done=true``,
+not the closure of a chat — and that is the whole reason a reviewed no-op is a
+finished task instead of an offer that never goes away. The settlement rides the
+*same* window as the detector rather than adding a second clock, on purpose: a
+task whose evidence lands mid-window is noticed within
+:data:`APPLICABILITY_TTL_S`, which is the answer this module is willing to give
+about how quickly it looks at the world, and no faster claim is made anywhere.
+
 Two consequences stated rather than hidden. The freshness window is a *named
 constant*, not a setting and not an env var: a per-install knob for "how stale may
 an answer be" is not a decision an operator has ever asked to make, and
@@ -135,6 +148,27 @@ LIFECYCLES: frozenset[str] = frozenset(
 #: another lifecycle is an unfinished attempt, not a decision, and is offered
 #: again.
 SUPPRESSING_LIFECYCLES: frozenset[str] = frozenset({"completed", "dismissed"})
+
+#: The lifecycles whose record is an attempt that may already have produced its
+#: evidence. These are the ones :func:`_settle` asks the completion check about.
+#:
+#: * ``in_progress`` — the prompt is in a chat and the chat may have done the
+#:   work by now.
+#: * ``waiting_review`` — the chat is parked on a decision, and that decision
+#:   has since been made.
+#: * ``failed`` — the turn never reached its chat, so the answer here is
+#:   "nothing to settle" rather than a verdict, and the record keeps saying the
+#:   task failed. Including it is what stops a retry from being needed just to
+#:   find out whether the earlier attempt finished after all.
+#:
+#: ``offered`` is absent because there is nothing to judge: no chat was ever
+#: opened, so no evidence can exist. ``completed`` and ``dismissed`` are absent
+#: because they are decisions already — a dismissal is the operator's, and a
+#: verdict is a check's, and re-asking a check whether its own verdict still
+#: holds would reopen a decision on a timer.
+SETTLING_LIFECYCLES: frozenset[str] = frozenset(
+    {"in_progress", "waiting_review", "failed"}
+)
 
 # ── Applicability ───────────────────────────────────────────────────────────
 
@@ -1321,10 +1355,19 @@ def _evaluate_off_loop(
     ``offered`` on the strength of an answer the install can no longer stand
     behind. Reading the record on every call means the record is what decides
     whether an answer may be used at all.
+
+    A last pass settles whatever the detectors found, before the statuses are
+    built, so the row a caller renders is the settled one rather than the state
+    this call replaced. The statuses are assembled from the ``states`` mapping,
+    so writing the settled record back into it is all that is needed for one
+    call to both answer ``applicable`` and report ``completed`` — the honest
+    pair for a workspace where the review retained rows the detector still
+    counts, and the pair that takes the card off Home.
     """
     states, unreadable = _load_states(tasks, config, workspace)
     computed: dict[str, ApplicabilityResult] = {}
     results: dict[tuple[str, int], ApplicabilityResult] = {}
+    fresh: set[tuple[str, int]] = set()
     for task in tasks:
         identity = (task.id, task.revision)
         key = _read_key(config, task, workspace)
@@ -1347,10 +1390,17 @@ def _evaluate_off_loop(
             continue
         answer = apply_detector(task, config=config, workspace=workspace, today=today)
         results[identity] = answer
+        # Freshly computed, whether or not the answer is one that may be cached:
+        # a detector that raised is retried inside the window by design, and the
+        # completion check is not the detector's business — a task whose evidence
+        # is on disk can be settled even on the turn where its detector is
+        # unwell.
+        fresh.add(identity)
         if _is_cacheable(answer):
             computed[key] = answer
     if computed:
         _store_results(computed, token, instant)
+    _settle(tasks, states, config, workspace, fresh)
     return [
         TaskStatus(
             task=task,
@@ -1359,6 +1409,48 @@ def _evaluate_off_loop(
         )
         for task in tasks
     ]
+
+
+def _settle(
+    tasks: tuple[UpdateTask, ...],
+    states: dict[tuple[str, int], TaskState | None],
+    config: Any,
+    workspace: str,
+    fresh: set[tuple[str, int]],
+) -> None:
+    """Ask each started task's own check whether its work is done, in place.
+
+    ``fresh`` is the set of ``(id, revision)`` identities this call computed
+    rather than served from the window, so a check runs at most once per task per
+    window — the same bound the detector has, and deliberately the same window
+    rather than a second timer.
+
+    Only a record in :data:`SETTLING_LIFECYCLES` is asked, and only about tasks
+    whose state this install may act on: the ``states`` mapping holds ``None`` for
+    an unreadable scope, and ``None`` is not a lifecycle, so a task whose record
+    cannot be read is left alone rather than settled on the strength of evidence
+    the record contradicts.
+
+    :func:`record_completion` is the whole of the authority here. It resolves the
+    row's registered check, returns ``None`` for one that is unregistered,
+    raising, rude or unsatisfied, and writes nothing in any of those cases — so
+    this function has no failure mode of its own to handle, and a check that
+    cannot answer leaves the lifecycle exactly as the operator left it.
+
+    A settled record is read back through the public lock-free reader rather than
+    assembled from what was written: the write is somebody else's return value,
+    and the status this call returns should be the file's own account of itself.
+    """
+    for task in tasks:
+        identity = (task.id, task.revision)
+        if identity not in fresh:
+            continue
+        state = states.get(identity)
+        if state is None or state.lifecycle not in SETTLING_LIFECYCLES:
+            continue
+        settled = record_completion(task, config=config, workspace=workspace)
+        if settled is not None:
+            states[identity] = read_task_state(task, config=config, workspace=workspace)
 
 
 async def evaluate(
@@ -1399,6 +1491,17 @@ async def evaluate(
     coalescing key is deliberately the same for a cached and an uncached call —
     two callers of one scope sharing a read share whichever shape of it is
     running, and both are correct answers.
+
+    This is a read of the workspace and a write to one task's own record, and
+    only that write: a task whose attempt has produced the evidence its
+    registered completion check looks for becomes ``completed`` here, through
+    :func:`_settle`. It creates no chat, sends no prompt, starts no model turn,
+    moves no note, and can only ever write the lifecycle
+    :func:`record_completion` is documented to write — an unregistered, raising
+    or unsatisfied check records nothing at all. The write rides the same window
+    as the detector, so it becomes visible within ``APPLICABILITY_TTL_S`` of the
+    evidence landing rather than immediately; the state file itself is still read
+    on every call, so a settled record shows up on the very next listing.
     """
     loaded = catalog if catalog is not None else load_catalog()
     tasks = loaded.eligible(installed_version)
