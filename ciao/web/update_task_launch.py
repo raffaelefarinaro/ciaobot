@@ -55,15 +55,23 @@ still there or not — chats get archived and deleted routinely, and a stale tab
 or a retry must not turn ``completed`` back into ``in_progress`` and re-run
 work a check already judged done.
 
-That last claim is only sound because ``dismiss_task`` keeps ``failed`` out of a
-dismissal. ``failed`` is the one lifecycle that means "this chat never got the
-prompt", and a dismissal that carried its chat forward would throw the only
-record of that away: the next start would find a live chat, send nothing into
-it, write ``in_progress`` and report a task as running that nothing was ever
-dispatched into — and a reopen of the same record, which writes ``offered`` and
-carries the same chat, would reach the same answer through the branch below. So
-a dismissal of a ``failed`` record writes no chat at all, and the next start
-mints a fresh one and dispatches into that.
+That last claim is only sound because ``dismiss_task`` keeps the two lifecycles
+a start cannot undo out of a dismissal. A dismissal of a ``completed`` record is
+refused outright, with the same ``ValueError`` and therefore the same 409 a
+start answers: overwriting a verdict with ``dismissed`` would hand the next
+start a record the ``completed`` guard above never sees, and the work would be
+re-run — as a plain resume with the verdict gone, or, once the chat is archived
+or deleted, as a fresh chat with the packaged prompt sent again.
+
+``failed`` is the other, and it is handled rather than refused because the
+operator has a real decision to make about it. It is the one lifecycle that
+means "this chat never got the prompt", and a dismissal that carried its chat
+forward would throw the only record of that away: the next start would find a
+live chat, send nothing into it, write ``in_progress`` and report a task as
+running that nothing was ever dispatched into — and a reopen of the same record,
+which writes ``offered`` and carries the same chat, would reach the same answer
+through the branch below. So a dismissal of a ``failed`` record writes no chat
+at all, and the next start mints a fresh one and dispatches into that.
 
 Why a revision change cannot resume
 ----------------------------------
@@ -366,14 +374,24 @@ def dismiss_task(
     carrying the *wrong* one loses the only record of whether the prompt ever
     went out.
 
-    A ``failed`` record is that record. Its chat exists, is live, and is empty —
-    the dispatch never reached it — and carrying it into the dismissal would
-    leave the next start with a live chat to write ``in_progress`` over while
-    sending nothing into it: a task reported as running that no prompt was ever
-    dispatched into, with nothing left in the file to retry from. So a dismissal
-    of a ``failed`` record writes no chat at all, and the next start mints a
-    fresh one and dispatches the prompt into that, exactly once. A reopen of
-    that record inherits the empty chat, so it cannot reintroduce the hole.
+    A ``completed`` record is refused, not rewritten. A verdict belongs to the
+    next revision, which is a different record, and a dismissal would move this
+    one out of the reach of the ``completed`` guard :func:`launch_task` holds —
+    so a later start would find no verdict, and with a live chat it would write
+    ``in_progress`` over it and with a gone chat mint a fresh one and run the
+    packaged prompt against work already judged done. So the refusal is the one
+    :func:`launch_task` makes, asked of the record rather than of the chat, and a
+    stale tab pressing Dismiss gets the same 409 a stale tab pressing Start does.
+
+    A ``failed`` record is the lifecycle that is handled rather than refused.
+    Its chat exists, is live, and is empty — the dispatch never reached it — and
+    carrying it into the dismissal would leave the next start with a live chat to
+    write ``in_progress`` over while sending nothing into it: a task reported as
+    running that no prompt was ever dispatched into, with nothing left in the
+    file to retry from. So a dismissal of a ``failed`` record writes no chat at
+    all, and the next start mints a fresh one and dispatches the prompt into
+    that, exactly once. A reopen of that record inherits the empty chat, so it
+    cannot reintroduce the hole.
 
     Every other lifecycle is unchanged, and in particular a dismissal of a task
     that *was* launched keeps its chat: carrying a chat is how a reopen finds
@@ -386,6 +404,18 @@ def dismiss_task(
     """
     task = resolve_task(task_id, installed_version=installed_version)
     with update_tasks._record_lock(task, config, workspace) as (path, previous):
+        if previous is not None and previous.lifecycle == "completed":
+            # Asked of the record, for the same reason and with the same answer
+            # as `launch_task`: a verdict is a check's conclusion, and writing
+            # `dismissed` over it is the one way to put a start back in reach of
+            # this record — with a live chat it would resume and drop the
+            # verdict, and with an archived or deleted one it would mint a fresh
+            # chat and run the packaged prompt against finished work.
+            raise ValueError(
+                f"update task {task.id}@{task.revision} is already completed at "
+                "this revision; the work belongs to the next revision, which is a "
+                "different record"
+            )
         carried = update_tasks._carried(previous)
         if previous is not None and previous.lifecycle == "failed":
             carried["chat_id"] = ""

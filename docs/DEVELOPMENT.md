@@ -829,17 +829,29 @@ replace `completed` with `in_progress`, re-running work that was already judged
 done. The create-fresh recovery itself is unchanged for `offered`, `in_progress`,
 `failed` and `waiting_review`, whose record is stale rather than final.
 
+`dismiss_task` refuses the same record the same way, and it has to: a dismissal
+writes `dismissed` over whatever it replaces, so accepting a `completed` record
+there was a way *around* the guard above rather than past it — the next start
+would no longer meet the `completed` refusal, and with a live chat it resumed
+(the verdict gone), while with an archived or deleted one it minted a fresh chat
+and ran the packaged prompt against finished work. So the refusal is asked of the
+record inside the same `_record_lock` section, as the same `ValueError` a start
+raises and therefore the same 409, and nothing is written: a start afterwards
+still meets the verdict and is still refused. Nothing about the chat is
+consulted, so it holds for a live chat and a gone one alike.
+
 The `dismissed` branch is only safe because `dismiss_task` keeps `failed` out of
 a dismissal. `failed` is the **only** thing in the file that says the prompt
 never went out, and a dismissal that carried that record's chat forward would
 throw it away: the empty chat is live, so the next start finds it, writes
 `in_progress` and sends nothing — a task reported as running that nothing was
 ever dispatched into, with no `failed` left to retry from. So `dismiss_task`
-takes the record lock itself (it cannot delegate: `keyed_lock` is not reentrant)
-and writes the `dismissed` record with `chat_id=""` when the record it replaces
-is `failed`. Every other lifecycle keeps its chat, which is how a reopen finds
-the work again. A reopen of such a dismissal inherits the empty chat, so the
-fail → dismiss → reopen → start history is safe as well.
+takes the record lock itself (it cannot delegate: `keyed_lock` is not reentrant),
+refuses a `completed` record as `launch_task` does, and writes the `dismissed`
+record with `chat_id=""` when the record it replaces is `failed`. Every other
+lifecycle keeps its chat, which is how a reopen finds the work again. A reopen of
+such a dismissal inherits the empty chat, so the fail → dismiss → reopen → start
+history is safe as well.
 
 Two ordering rules fall out of that, and both are load-bearing. The record is
 written **before** the turn is dispatched, and it is written `failed` — the

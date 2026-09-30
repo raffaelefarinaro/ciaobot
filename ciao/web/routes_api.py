@@ -8600,7 +8600,10 @@ async def dismiss_update_task(request: Request) -> JSONResponse:
     render a card for something the operator just declined. An unknown or
     unsupported id is 409: refusing to record a decision against a task this
     engine does not support is the honest answer, and it is a refusal rather
-    than a failure.
+    than a failure. So is a record that already says ``completed`` at this
+    revision — the same 409 a start answers, and for the same reason: overwriting
+    a verdict would put a later start back in reach of this record, which is the
+    one outcome both routes refuse to make.
 
     The chat the task was in is carried into the record, with one exception: a
     ``failed`` record's chat exists and is empty, because the dispatch never

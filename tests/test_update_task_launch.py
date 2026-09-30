@@ -20,9 +20,10 @@ point is that the record stops saying ``dismissed`` while the chat it keeps is
 still the one that holds the work; the same start after a *reopen*, which has to
 land in the same place; a dismissal of a *failed* record, which must not carry
 the empty chat forward, since that chat is the only other proof the prompt never
-left; a *completed* record, which no start may re-run however its chat went
-away; and a record write that fails after the turn started, which must not turn
-a running chat into a refusal with no ``chat_id`` in it.
+left; a *completed* record, which no start may re-run and no dismissal may
+overwrite, however its chat went away; and a record write that fails after the
+turn started, which must not turn a running chat into a refusal with no
+``chat_id`` in it.
 """
 
 from __future__ import annotations
@@ -998,6 +999,77 @@ def test_dismiss_and_reopen_route_through_update_tasks(
     assert after.lifecycle == "offered"
     assert after.chat_id == chat_id
     assert after.attempted_fingerprint == ""
+
+
+@pytest.mark.parametrize("what_happened_to_the_chat", ["live", "deleted"])
+def test_a_dismissal_cannot_overwrite_a_verdict(
+    tmp_path: Path,
+    packaged: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    what_happened_to_the_chat: str,
+) -> None:
+    """The one way around the ``completed`` guard was the other route.
+
+    ``launch_task`` refuses a ``completed`` record, and a dismissal did not: it
+    wrote ``dismissed`` over the verdict and kept the chat. The next start then
+    no longer met that refusal, so it either resumed the same chat and wrote
+    ``in_progress`` — the verdict, and the check behind it, gone — or, once the
+    chat was archived or deleted, minted a fresh one and dispatched the packaged
+    prompt against work a named check had already judged done. Both parameterised
+    cases are the same bypass; only what the start does afterwards differs.
+
+    So a dismissal of a ``completed`` record is refused with the same
+    ``ValueError``, and therefore the same 409, asked of the record rather than of
+    the chat. The record is not merely left as it was: nothing is written at all,
+    so a start afterwards still meets the verdict and is still refused, and the
+    refusal is a 409 rather than a 500 that would send the operator round the
+    loop a second time.
+    """
+    monkeypatch.setattr(
+        update_tasks,
+        "COMPLETION_FUNCTIONS",
+        {CHECK: lambda **_: update_tasks.Detection(True, {"rows": 0})},
+    )
+    config = _config(tmp_path)
+    pcm = _FakePCM()
+    started = _launch(tmp_path, pcm)
+    done = update_tasks.record_completion(
+        _task(), config=config, workspace=WORKSPACE
+    )
+    assert done is not None and done.lifecycle == "completed"
+    if what_happened_to_the_chat == "deleted":
+        pcm.delete_chat(started["chat_id"])
+
+    with pytest.raises(ValueError, match="already completed at this revision"):
+        update_task_launch.dismiss_task(
+            "review-legacy-rows",
+            config=config,
+            workspace=WORKSPACE,
+            installed_version=VERSION,
+            reason="looked at them",
+        )
+
+    # Not merely "left as it was": nothing was written, so the verdict, its chat
+    # and the check's evidence are all still the ones the completion recorded.
+    verdict = update_tasks._state_payload(done)
+    assert update_tasks._state_payload(_state(tmp_path)) == verdict
+
+    with pytest.raises(ValueError, match="already completed at this revision"):
+        _launch(tmp_path, pcm)
+    assert len(pcm.created) == 1, "no start got past the verdict either"
+    assert pcm.dispatched == [(started["chat_id"], PROMPT_R1)], "the prompt ran once"
+
+    # The route answers the same way, so a stale tab pressing Dismiss is told the
+    # same thing a stale tab pressing Start is told.
+    client = _client(config, pcm)
+    refused = client.post(
+        f"/api/update-tasks/review-legacy-rows/dismiss?workspace={WORKSPACE}",
+        json={"reason": "not again"},
+    )
+    assert refused.status_code == 409
+    assert refused.json()["ok"] is False
+    assert "already completed at this revision" in refused.json()["error"]
+    assert update_tasks._state_payload(_state(tmp_path)) == verdict
 
 
 # ── The routes ───────────────────────────────────────────────────────────────
