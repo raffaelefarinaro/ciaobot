@@ -366,7 +366,9 @@ def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
     assert report["pending_action_count"] == 1
     notices = report["upgrade_notices"]["notices"]
     assert notices[0]["workspace"] == "research"
-    assert "Open a Ciaobot chat" in notices[0]["remedy"]
+    # The managed command, not a hand migration: the audit's remedy and the Home
+    # card's are one sentence from `ciao.migration_notices` since #816.
+    assert "ciao vault-relocate research --apply" in notices[0]["remedy"]
 
 
 def test_cli_create_chat_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
