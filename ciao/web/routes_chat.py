@@ -440,6 +440,10 @@ async def ws_events(websocket: WebSocket) -> None:
     except (WebSocketDisconnect, RuntimeError):
         subscription.close()
         return
+    except BaseException:
+        # Anything else must not leave the subscriber queue registered.
+        subscription.close()
+        raise
 
     tracker: ConnectionTracker | None = getattr(
         websocket.app.state, "connection_tracker", None

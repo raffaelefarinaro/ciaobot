@@ -93,3 +93,27 @@ def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> Non
     ) as ws:
         assert ws.receive_json()["type"] == "snapshot"
         assert ws.receive_json() == {"type": "chat_streaming_done", "chat_id": "c1"}
+
+
+def test_snapshot_failure_detaches_the_events_subscription() -> None:
+    from ciao.web.chat_broker import EventsHub
+
+    hub = EventsHub()
+
+    def _boom() -> list[str]:
+        raise KeyError("boom")
+
+    app = _events_app(auth_required=False)
+    app.state.project_chat_manager = SimpleNamespace(
+        active_stream_chat_ids=_boom,
+        get_chat=lambda _cid: None,
+        background_agent_counts={},
+        background_run_counts={},
+        events=hub,
+    )
+    with pytest.raises(KeyError):
+        with TestClient(app).websocket_connect(
+            "/ws/events", headers={"Origin": "http://testserver"}
+        ):
+            pass  # pragma: no cover
+    assert hub.subscriber_count == 0
