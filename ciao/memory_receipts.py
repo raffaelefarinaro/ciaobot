@@ -261,7 +261,7 @@ def write_queue_atomically(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.write.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8", newline="")
         os.replace(tmp, path)
     except OSError:
         try:
