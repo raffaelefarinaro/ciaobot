@@ -426,6 +426,61 @@ async def test_cancel_ends_a_grandchild_on_every_os(
     assert await asyncio.to_thread(_beats_stopped, beat), "the grandchild survived the cancel"
 
 
+# Ignore the polite stop (SIGTERM on POSIX, CTRL_BREAK on Windows), so only the
+# kill after the grace period can end the process that runs this.
+_IGNORE_STOP = (
+    "import signal; "
+    "[signal.signal(getattr(signal, name), signal.SIG_IGN) "
+    "for name in ('SIGTERM', 'SIGBREAK') if hasattr(signal, name)]"
+)
+
+
+async def test_shutdown_kills_a_grandchild_after_the_leader_exits_in_the_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stop()` must still reach the tree when the leader is gone before the kill.
+
+    The leader outlives the polite stop, then exits on its own inside the grace
+    period, so the supervisor finishes before `_terminate` sends its kill. If the
+    supervisor closed the tree at that point, the kill would have nothing to
+    reach on Windows and the grandchild, which also ignores the polite stop,
+    would keep beating.
+    """
+    monkeypatch.setattr(background, "CANCEL_GRACE_SECONDS", 3.0)
+    runner = _runner(tmp_path)
+    beat = tmp_path / "beat"
+    # The real interpreter, not a venv's launcher: a launcher does not ignore
+    # the polite stop, and its death takes its interpreter with it, which would
+    # end the grandchild whatever the kill did.
+    python = getattr(sys, "_base_executable", sys.executable)
+    grandchild ="\n".join(
+        [
+            _IGNORE_STOP,
+            "import sys, time",
+            "while True:",
+            "    open(sys.argv[1], 'w').write(str(time.monotonic()))",
+            "    time.sleep(0.05)",
+        ]
+    )
+    leader = "\n".join(
+        [
+            _IGNORE_STOP,
+            "import subprocess, sys, time",
+            # Not on the run's pipe: holding it open would keep the supervisor
+            # waiting past the kill, and the leader's exit has to finish it.
+            f"subprocess.Popen([{python!r}, '-c', {grandchild!r}, {str(beat)!r}],"
+            " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+            "time.sleep(1.5)",
+        ]
+    )
+    await runner.start_run(
+        parent_chat_id="chat-1", cmd=[python, "-c", leader], timeout_s=300
+    )
+    await asyncio.to_thread(_wait_for_beat, beat)
+    await runner.stop()
+    assert await asyncio.to_thread(_beats_stopped, beat), "the grandchild survived the shutdown"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="pins the POSIX killpg calls")
 async def test_terminate_kills_group_after_leader_has_exited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

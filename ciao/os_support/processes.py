@@ -20,6 +20,12 @@ shares this process's console; without one there is no graceful stop, and
 ``terminate`` does nothing, so the ``kill()`` every caller issues after its
 grace period is what ends the tree. The job does not kill on close: like a
 POSIX session, a tree outlives the ``ProcessTree`` that tracked it.
+
+The assignment happens after the child exists, so a grandchild started in the
+microseconds between ``CreateProcess`` and ``AssignProcessToJobObject`` would
+escape the job. Neither git nor a shell starts children that fast. Closing the
+window needs a suspended spawn (create suspended, assign, resume), which
+``asyncio.create_subprocess_exec`` cannot do.
 """
 
 from __future__ import annotations
