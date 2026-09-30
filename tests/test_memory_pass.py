@@ -467,6 +467,45 @@ def test_helper_normalize_memory_pass() -> None:
     assert chat_service._normalize_chat_helper({**proposal, "kind": "nope"}) == {}
 
 
+def test_helper_normalize_update_task() -> None:
+    """The `update_task` kind, and what a half-valid one does (#761).
+
+    This is the only record of which packaged task a launched chat is for, so it
+    has to survive a restart intact and has to be impossible to half-fill: each
+    of the four fields is required and typed, and a digest that is not a digest
+    is a value this code did not write.
+    """
+    valid = {
+        "kind": "update_task",
+        "task_id": "review-legacy-rows",
+        "revision": 2,
+        "scope": "workspace",
+        "prompt_digest": "0123456789abcdef",
+    }
+    assert chat_service._normalize_chat_helper(valid) == valid
+    # An install-scoped task is the same shape with the other scope.
+    assert (
+        chat_service._normalize_chat_helper({**valid, "scope": "install"})["scope"]
+        == "install"
+    )
+
+    # Fail closed, one field at a time: a missing id, a non-kebab id, a revision
+    # that is not a positive integer, an unknown scope and a digest that is not
+    # 16 hex characters each erase the helper.
+    for broken in (
+        {**valid, "task_id": ""},
+        {**valid, "task_id": "Review Legacy Rows"},
+        {**valid, "revision": 0},
+        {**valid, "revision": "2"},
+        {**valid, "revision": True},
+        {**valid, "scope": "machine"},
+        {**valid, "prompt_digest": ""},
+        {**valid, "prompt_digest": "nothex0123456789"},
+        {**valid, "prompt_digest": "0123456789ABCDEF"},
+    ):
+        assert chat_service._normalize_chat_helper(broken) == {}, broken
+
+
 # ── The Memory project ────────────────────────────────────────────────────
 
 
