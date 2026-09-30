@@ -1018,7 +1018,7 @@ def verify_entry(
     request: EntryVerificationRequest,
     *,
     vault_root: Path | str,
-    config: Any = None,
+    config: Any,
     actor: str = "agent",
     source: str = "curation",
     today: date | None = None,
@@ -1042,25 +1042,23 @@ def verify_entry(
     longer holds, and a ``still_valid`` re-stamp describes the fingerprint the
     re-stamp left behind, which is the *same* fingerprint by construction.
 
-    ``config`` is optional here, unlike 726-B's :func:`ciao.note_verification.verify_note`:
-    that service resolves the vault from the install's own registry so a verdict
-    cannot be filed in a vault the workspace does not claim, and its callers
-    always have one. An entry verification is reached through a caller that has
-    already resolved that same vault — :func:`ciao.note_receipts.apply_entry_edit`
-    re-checks it is a real directory and every path inside it is confined — so a
-    missing ``config`` is a pure seam rather than a second, weaker version of the
-    same rule. A caller that *has* a config should pass it, and then
-    ``workspace_vault_root`` is consulted exactly as 726-B consults it.
+    ``config`` is required, exactly as it is on 726-B's
+    :func:`ciao.note_verification.verify_note`, and for the same reason: the
+    install's own registry is what resolves a vault to a workspace, and a verdict
+    that skips that check is a verdict whose file location nothing vouches for.
+    Making it optional was a weaker second version of the rule rather than a
+    convenience — every caller reaches this through one that has already resolved
+    the same vault, so a ``config`` that was not there was never a real caller's
+    situation, only a seam that let the check be skipped.
     """
     day = today or date.today()
     try:
         root = nr.canonical_vault(vault_root)
     except mr.MemoryReceiptError as exc:
         return EntryVerificationResult(FAILED, message=f"unusable vault root: {exc}")
-    if config is not None:
-        foreign = nv._foreign_workspace_vault(config, request.workspace, root)
-        if foreign:
-            return EntryVerificationResult(FAILED, message=foreign)
+    foreign = nv._foreign_workspace_vault(config, request.workspace, root)
+    if foreign:
+        return EntryVerificationResult(FAILED, message=foreign)
     try:
         target = nr.resolve_note_path(root, request.relative_path)
     except mr.MemoryReceiptError as exc:

@@ -1200,6 +1200,70 @@ def test_an_entry_that_is_not_the_one_the_payload_read_is_a_conflict(
     assert _sidecars(install.workspace_vault_root("personal")) == []
 
 
+def test_a_near_miss_stamp_files_the_repair_as_a_restamp(tmp_path: Path) -> None:
+    """A typo in the tag must reach a person, not die in the filing.
+
+    ``- Sofia runs the release train [verified 2024-01-05]`` is a fact carrying a
+    claim the parser reads and refuses: the near-miss is reported as malformed so
+    the person who meant to write a stamp is told, and the token is still the
+    entry's claim. So a ``still_valid`` verdict on it is not applied unattended
+    — the claim nobody can believe is a reader's call — but it is *repaired* by
+    a ``restamp_entry`` proposal rather than rewritten, and the repair has to be
+    recognisable as the same fact.
+
+    That recognition is the finding this pins. The fingerprint cut only the
+    strict spelling, so it hashed the near-miss line as its own text: the repair
+    changed the fingerprint, the identity digests the fingerprint, and the
+    re-stamp was refused by the filing as "a rewrite rather than a re-stamp". No
+    proposal, no queue row, nobody asked — and because the failure is caught and
+    the check released, the same entry was planned, judged and refused every
+    night for as long as the typo stayed in the file. Nothing was ever written,
+    so this was never corruption; it was a fact nobody could ever be told about.
+    """
+    from ciao import note_entries as ne
+
+    broken = (
+        "---\ntype: person\nupdated: 2024-01-05\n---\n\n"
+        "# Sofia\n\n"
+        "- Sofia runs the release train [verified 2024-01-05]\n"
+    )
+    install, root, note = _install(tmp_path, text=broken)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+    entry = ne.parse_note_entries(
+        broken, note_path=ENTRY_NOTE, workspace="personal"
+    ).entries[0]
+    # The claim is refused, and reported, exactly as the strict-shaped refusals
+    # are: this is not a fact nobody stamped, it is one whose stamp is unusable.
+    assert entry.stamp is not None and entry.stamp.valid is False
+    assert ne.DIAG_STAMP_MALFORMED in entry.diagnostics
+
+    body = _verify(plane, root, _entry_verdict(note, entry))
+
+    assert body["status"] == nv.NEEDS_REVIEW
+    assert body["scope"] == "entry"
+    assert body["proposal_error"] == ""
+    assert body["proposal"]["operation"] == nep.RESTAMP_ENTRY, (
+        "the entry's own date is what moves; nothing is rewritten"
+    )
+    assert body["proposal"]["queued"] is True
+    # The proposal is the same entry, re-dated, and the review it exists to
+    # prevent is exactly the one that used to reject it: the replacement's
+    # fingerprint equals the fingerprint the verdict was reached about.
+    filed = nep.read_sidecar(install, "personal", body["proposal"]["id"])
+    assert filed is not None
+    repaired = nep.entry_replacement(filed)
+    assert ne.refresh_fingerprint(repaired) == entry.fingerprint
+    assert filed.after == broken[: entry.start] + repaired + broken[entry.end :]
+    assert f"[verified: {date.today().isoformat()}]" in repaired
+    # And it is the same fact, not a new one: the check stays on the entry's
+    # identity, pinned to the queue row, so the entry is not asked again.
+    assert body["check"]["identity"] == entry.identity
+    assert body["check"]["proposal_id"] == body["proposal"]["proposal_id"]
+    assert note.read_text(encoding="utf-8") == broken, "nothing was written"
+    assert f"[{nep.KIND} " in _queue(vault)
+
+
 def test_provenance_follows_the_turn_for_an_entry_too(tmp_path: Path) -> None:
     """A scheduled entry verification is not journaled as an interactive one."""
     install, root, note, entry = _entry_install(tmp_path)

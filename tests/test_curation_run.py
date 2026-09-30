@@ -2337,6 +2337,8 @@ def test_the_entry_items_reason_verifies_the_entry_it_planned(tmp_path: Path) ->
     """
     import re
 
+    from types import SimpleNamespace
+
     from ciao import entry_verification as ev
     from ciao import note_verification as nv
 
@@ -2373,6 +2375,7 @@ def test_the_entry_items_reason_verifies_the_entry_it_planned(tmp_path: Path) ->
             reason="planned by the stale-entry pass",
         ),
         vault_root=vault,
+        config=SimpleNamespace(workspace_vault_root=lambda _name: vault),
         today=TODAY_ENTRIES,
     )
 

@@ -801,7 +801,15 @@ def _load_check_document(path: Path) -> tuple[dict[str, Any], str]:
     A missing ``entries`` map is not a reason to skip anything: it is what a file
     written before entries existed looks like, and a reader that demanded one
     would throw away every note check in a vault the moment the two maps were
-    split across versions.
+    split across versions. ``null`` is read as the same absence, which is what
+    several JSON writers mean by it. An ``entries`` value that is *there* and is
+    neither of those is the same thing a malformed ``notes`` is — state this
+    version cannot read — and is reported as one rather than read as the empty
+    map. Reading it as empty is how a file gets quietly repaired by a write: the
+    next record of any kind rewrites the document from what it read, and the value
+    whoever put there is gone with nothing in the file or the log to say so.
+    Skipping costs a night of suppression in a vault somebody has already damaged
+    by hand; erasing costs the same night and the only copy of whatever it was.
     """
     try:
         raw_text = path.read_text(encoding="utf-8")
@@ -825,6 +833,10 @@ def _load_check_document(path: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(notes, dict):
         return _empty_check_document(), f"{path} holds no note map"
     entries = payload.get("entries")
+    if entries is not None and not isinstance(entries, dict):
+        return _empty_check_document(), (
+            f"{path} holds a {type(entries).__name__} where the entry map belongs"
+        )
     return {
         "schema": CHECK_STATE_SCHEMA,
         "notes": dict(notes),

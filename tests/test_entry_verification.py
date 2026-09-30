@@ -276,6 +276,81 @@ def test_a_state_file_written_before_entries_existed_is_tolerated(
     assert list(_entry_checks(vault)) == [_entry().identity]
 
 
+def test_an_entry_map_that_is_not_a_map_is_refused_for_both_maps(
+    tmp_path: Path,
+) -> None:
+    """A missing ``entries`` map is a file from before entries existed; a
+    *malformed* one is state this version cannot read, and is reported as one.
+
+    The two are one character apart in the file and completely different to a
+    reader, and reading the malformed one as the empty map is how it gets erased:
+    every writer rewrites the document from what it read, so the first check
+    recorded after the damage lands replaces the value with ``{}`` and the only
+    copy of whatever it was is gone, with nothing in the file or the log to say
+    so. Refusing the file instead costs a night of suppression in a vault
+    somebody has already damaged by hand, and leaves it there to be looked at.
+    """
+    vault = _vault(tmp_path)
+    state = ev.note_check_state_path(vault)
+    body = '{"schema": 1, "notes": {}, "entries": ["not", "a", "map"]}\n'
+    state.write_text(body, encoding="utf-8")
+
+    assert _entry_checks(vault) == {}
+    assert _note_checks(vault) == {}, "a file neither half can be read from"
+    with pytest.raises(ev.EntryCheckRefused):
+        ev.record_entry_check(
+            vault,
+            ev.EntryCheck(
+                identity=_entry().identity,
+                note_path=NOTE,
+                workspace=WORKSPACE,
+                content_fingerprint=_entry().fingerprint,
+                outcome=ev.UNVERIFIED,
+                checked_at=TODAY,
+                retry_after=TODAY,
+            ),
+        )
+    assert state.read_text(encoding="utf-8") == body, (
+        "a refused write leaves the file exactly as it was"
+    )
+
+    # A map that is simply absent — or spelled `null`, which is how several JSON
+    # writers say "nothing here" — is the file an older version wrote, and is the
+    # one shape that is tolerated rather than refused.
+    state.write_text(
+        '{"schema": 1, "notes": {}, "entries": null}\n', encoding="utf-8"
+    )
+    assert _entry_checks(vault) == {}
+    ev.record_entry_check(
+        vault,
+        ev.EntryCheck(
+            identity=_entry().identity,
+            note_path=NOTE,
+            workspace=WORKSPACE,
+            content_fingerprint=_entry().fingerprint,
+            outcome=ev.UNVERIFIED,
+            checked_at=TODAY,
+            retry_after=TODAY,
+        ),
+    )
+    assert list(_entry_checks(vault)) == [_entry().identity]
+    # And a file with no `entries` key at all is written through, as before.
+    state.write_text('{"schema": 1, "notes": {}}\n', encoding="utf-8")
+    ev.record_entry_check(
+        vault,
+        ev.EntryCheck(
+            identity=_entry().identity,
+            note_path=NOTE,
+            workspace=WORKSPACE,
+            content_fingerprint=_entry().fingerprint,
+            outcome=ev.UNVERIFIED,
+            checked_at=TODAY,
+            retry_after=TODAY,
+        ),
+    )
+    assert list(_entry_checks(vault)) == [_entry().identity]
+
+
 def test_a_foreign_schema_is_refused_for_both_maps(tmp_path: Path) -> None:
     """Unrecognized means unread, for the same reason and in the same direction."""
     vault = _vault(tmp_path)
@@ -690,6 +765,43 @@ def test_a_retire_is_never_applied(tmp_path: Path) -> None:
 # ── The refusals that keep a write honest ──────────────────────────────────
 
 
+def test_a_vault_the_workspace_does_not_claim_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The install's registry is what says whose notes these are, and it is asked.
+
+    The check state lives in the vault it describes, so a request pairing one
+    workspace's name with another workspace's vault records the verdict in the
+    wrong vault and leaves the workspace the caller meant to be asked about the
+    same note for ever. ``config`` is therefore required and always consulted —
+    a request without one is a caller's bug, not a narrower version of the rule,
+    and the alternative is a check filed in a vault nobody claimed.
+    """
+    ours = _vault(tmp_path / "ours")
+    other = _vault(tmp_path / "elsewhere")
+    note = _write(other)
+    entry = _entry()
+
+    result = ev.verify_entry(
+        _request(entry), vault_root=other, config=_config(ours), today=TODAY
+    )
+    assert result.status == ev.FAILED, result.message
+    assert "is not the vault configured" in result.message
+    assert result.check is None
+    assert note.read_text(encoding="utf-8") == PLAIN
+    assert _entry_checks(other) == {}
+    # And a config that cannot be asked is refused rather than waved through.
+    silent = ev.verify_entry(
+        _request(entry),
+        vault_root=other,
+        config=SimpleNamespace(),
+        today=TODAY,
+    )
+    assert silent.status == ev.FAILED, silent.message
+    assert "workspace_vault_root is not callable" in silent.message
+    assert _entry_checks(other) == {}
+
+
 def test_an_identity_the_note_no_longer_holds_is_a_conflict(
     tmp_path: Path,
 ) -> None:
@@ -933,6 +1045,25 @@ def test_a_stamp_replaces_a_token_the_parser_could_not_believe(
         assert ne.refresh_fingerprint(stamped) == ne.refresh_fingerprint(
             f"{words} [verified: 2024-01-01]"
         )
+        # Which includes the entry the note *holds*: reparsing the broken line
+        # and reparsing the repair give one entry, not two. A near-miss is read
+        # as the entry's claim, so the fingerprint cuts it the same way the
+        # writer does; when it did not, repairing the token moved the fingerprint
+        # and the identity with it, this re-stamp looked like a rewrite, and the
+        # proposal was refused as one — every night, with nobody asked.
+        before = ne.parse_note_entries(
+            f"{broken}\n", note_path=NOTE, workspace=WORKSPACE
+        ).entries[0]
+        after_entry = ne.parse_note_entries(
+            f"{stamped}\n", note_path=NOTE, workspace=WORKSPACE
+        ).entries[0]
+        assert after_entry.fingerprint == before.fingerprint, broken
+        assert after_entry.identity == before.identity, broken
+        assert ne.refresh_fingerprint(broken) == before.fingerprint, broken
+        assert ne.refresh_fingerprint(stamped) == before.fingerprint, broken
+        assert before.stamp is not None and before.stamp.valid is False, broken
+        assert before.diagnostics != (), broken
+        assert after_entry.diagnostics == (), broken
 
 
 def test_a_stamp_leaves_a_mid_line_token_and_the_verdict_alone() -> None:
