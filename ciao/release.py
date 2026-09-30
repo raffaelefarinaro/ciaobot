@@ -286,7 +286,7 @@ def _run(
     result = subprocess.run(
         cmd,
         cwd=str(cwd),
-        text=True,
+        text=True, encoding="utf-8",
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
         check=False,

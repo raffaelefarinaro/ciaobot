@@ -546,7 +546,7 @@ def _stage_locked(
             [uv_bin, "tool", "install", "--python", py, str(wheel_path)],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=_UV_TIMEOUT,
             # Pinned to this update's own directories, for the same reason the
             # apply used to pin the install it replaced: an inherited
@@ -564,7 +564,7 @@ def _stage_locked(
             [str(env_python), "-I", "-c", "import ciao; print(ciao.__version__)"],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
         ).stdout.strip()
         if out != target:
             raise UpdateError(f"staged env reports version {out!r}, not {target}")
@@ -578,7 +578,7 @@ def _stage_locked(
             [uv_bin, "pip", "freeze", "--python", str(env_python)],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=_UV_TIMEOUT,
         ).stdout.strip()
 
@@ -1899,7 +1899,7 @@ def run_apply(
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
             ).stdout.strip()
             if reported != op.to_version:
                 raise UpdateError(

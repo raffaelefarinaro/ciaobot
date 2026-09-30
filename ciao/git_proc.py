@@ -104,7 +104,7 @@ def run_git_sync(
             ["git", *args],
             cwd=str(workspace),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             input=stdin,
         )
     except OSError as exc:

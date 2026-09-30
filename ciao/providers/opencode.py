@@ -3433,7 +3433,7 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     try:
         listed = subprocess.run(
             [binary, "auth", "list", "--format", "json"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3448,7 +3448,7 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
         )
     try:
         listed = subprocess.run(
-            [binary, "auth", "list"], capture_output=True, text=True, timeout=timeout
+            [binary, "auth", "list"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3467,7 +3467,7 @@ def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, An
     try:
         result = subprocess.run(
             [binary, "api", "GET", path],
-            capture_output=True, text=True, timeout=timeout, cwd=str(Path.home()),
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout, cwd=str(Path.home()),
         )
         payload = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
@@ -3520,7 +3520,7 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
     version = ""
     try:
         result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=timeout
+            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )
         version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     except (OSError, subprocess.SubprocessError):

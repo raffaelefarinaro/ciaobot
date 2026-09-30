@@ -576,20 +576,20 @@ def ensure_workspace_git(root: Path) -> None:
     _ensure_workspace_gitignore(root)
     probe = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0 and probe.stdout.strip() == "true":
         return
     init = subprocess.run(
         ["git", "init", "-b", "main", str(root)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if init.returncode != 0:
         print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
         return
     subprocess.run(
         ["git", "-C", str(root), "add", "-A"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     commit = subprocess.run(
         [
@@ -597,7 +597,7 @@ def ensure_workspace_git(root: Path) -> None:
             "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
             "commit", "-m", "Initialize Ciaobot workspace",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if commit.returncode != 0:
         print(
@@ -649,7 +649,7 @@ def ensure_vault_git(root: Path) -> None:
         return
     probe = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0:
         toplevel = Path(probe.stdout.strip())
@@ -659,14 +659,14 @@ def ensure_vault_git(root: Path) -> None:
     _ensure_vault_gitignore(root)
     init = subprocess.run(
         ["git", "init", "-b", "main", str(root)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if init.returncode != 0:
         print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
         return
     subprocess.run(
         ["git", "-C", str(root), "add", "-A"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     commit = subprocess.run(
         [
@@ -674,7 +674,7 @@ def ensure_vault_git(root: Path) -> None:
             "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
             "commit", "-m", "Initialize Ciaobot vault",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if commit.returncode != 0:
         print(
