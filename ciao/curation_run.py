@@ -77,6 +77,7 @@ PASS_PROPOSALS = "proposals"
 PASS_REGIONS = "regions"
 PASS_AUDIT = "audit"
 PASS_STALE_NOTE = "stale_note"
+PASS_STALE_ENTRY = "stale_entry"
 PASS_CATEGORIES = "categories"
 PASS_LEARNINGS = "learnings"
 PASS_LEARNINGS_CLEANUP = "learnings_cleanup"
@@ -95,6 +96,13 @@ PASS_ORDER: tuple[str, ...] = (
     # stale pass is weekly — a note goes stale on a clock of its own, and the
     # marker gates only the two hygiene checks and the guide review.
     PASS_STALE_NOTE,
+    # Immediately after it, and because a note is not the unit a person keeps
+    # current: one bullet in it can be two years out of date while its
+    # neighbours were checked last week, and a whole-note verdict has nowhere to
+    # put that. It is the same work one level in — verify, don't guess — with
+    # the same cap discipline, so the two together still leave the weekly keys
+    # reachable.
+    PASS_STALE_ENTRY,
     PASS_CATEGORIES,
     PASS_LEARNINGS,
     # Immediately after the learnings pass, and that ordering is the whole
@@ -135,6 +143,22 @@ DEFAULT_MAX_SECONDS = 1800.0
 # and a journaled write, so five is a night's work for a human-sized pass, and
 # the constant exists to keep that number honest rather than to fill the budget.
 STALE_NOTE_MAX_ITEMS = 5
+
+# How many stale entries one run may plan, however many are due.
+#
+# The same argument as :data:`STALE_NOTE_MAX_ITEMS`, and the same number, because
+# the work is the same shape: a verification is a model read of a fact plus its
+# sources and a journaled write, and five is a night's work. It is also a *separate*
+# cap from the note pass's rather than a shared allowance, because the two select
+# different units and a shared one would let a vault with 500 stale bullets spend
+# the whole entry budget on one note's list and never look at the other 499 files
+# it also has.
+#
+# A whole-note verdict re-stamps the note's `updated:`, so the entry pass drains
+# rather than recurs for entries it settles: tonight's five are stamped, and the
+# fingerprint that the entry check is keyed on is unchanged by a re-stamp, so the
+# rest of the list is not re-asked either.
+STALE_ENTRY_MAX_ITEMS = 5
 
 # How many settled learnings one night may retire, however many are due.
 #
@@ -415,23 +439,146 @@ def _vault_relative(rendered: str, prefix: Path) -> str:
         return Path(rendered).as_posix()
 
 
-def _stale_note_items(
+@dataclass(frozen=True, slots=True)
+class _ScannedNote:
+    """One note the audit looked at, and the audit's own verdict about it.
+
+    Every field here is
+    :func:`ciao.memory_audit.note_verification`'s, carried through rather than
+    recomputed: the thresholds, the type aliases, the exempt set and the
+    frontmatter-then-mtime date rule all live in
+    :mod:`ciao.memory_audit`, and three other surfaces already call it. A pass
+    that re-derived ``threshold_days`` here would be a fourth copy to keep in
+    agreement, and the copy that drifts is the one that quietly stops honouring
+    somebody's custom category.
+
+    ``stale`` is the whole-note verdict (this note's own date is past its horizon)
+    and the two passes read it differently on purpose: the note pass plans
+    ``stale`` notes, the entry pass reads every note because a note re-stamped
+    yesterday can still be holding a bullet from two years ago — which is the
+    whole reason the entry pass exists and the one thing a whole-note selection
+    cannot see.
+    """
+
+    rendered: str
+    relative: str
+    title: str
+    stale: bool
+    exempt: bool
+    age_days: int
+    threshold_days: int
+    last_verified: date | None
+
+
+def _stale_findings(
     *,
     vault_root: Path,
     registry: EntityTypeRegistry,
-    path_prefix: Path | None = None,
+    path_prefix: Path | None,
+    today: date,
+) -> tuple[list[_ScannedNote], str]:
+    """Every note the audit looked at, and why it did not look at the rest.
+
+    One scan for both stale passes, which is the point: scanning a vault twice in
+    one worklist is twice the frontmatter parsing and twice the mtime probes for a
+    selection that cannot differ between them, and a worklist is computed on every
+    ``curation-begin``.
+
+    The thresholds, the exempt event types, the alias resolution and the
+    frontmatter-then-mtime date rule are :mod:`ciao.memory_audit`'s, and are taken
+    from it by calling it — once for the verdict it reports, and once per note for
+    the ones it does not, so that the entry pass gets every note's horizon rather
+    than only the stale ones'. A note with no usable date at all is left out
+    entirely, for the audit's reason: "unverifiable" is not "stale", and guessing a
+    date for an entry inside such a note would be the same guess one level in.
+
+    The second element is why the scan was abandoned, or ``""``; a vault that is
+    not there, and a scan that raised, both land there and both mean "this pass
+    has nothing to say" rather than an error. It is an advisory pass, and a
+    worklist is computed on every ``curation-begin`` regardless of what any one
+    pass found.
+    """
+    from ciao.memory_audit import find_stale_notes, note_verification
+    from ciao.vault_index import VAULT_RENDER_PREFIX, scan_vault
+
+    root = Path(vault_root)
+    prefix = VAULT_RENDER_PREFIX if path_prefix is None else Path(path_prefix)
+    if not root.is_dir():
+        return [], ""
+    try:
+        entries = scan_vault(root, path_prefix=prefix, registry=registry)
+        findings = find_stale_notes(
+            entries,
+            vault_root=root,
+            # The same prefix `scan_vault` rendered, passed on rather than left
+            # to the default: a drifted prefix makes every mtime stat miss
+            # silently, which reads as "no note is stale" instead of an error.
+            path_prefix=prefix,
+            today=today,
+            registry=registry,
+        )
+    except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
+        logger.warning("curation: stale-note scan failed", exc_info=True)
+        return [], "the vault scan failed, so no stale note or entry is planned"
+    stale_paths = {
+        str(finding.get("path") or "") for finding in findings.get("stale_notes") or []
+    }
+    scanned: list[_ScannedNote] = []
+    for entry in entries:
+        rendered = str(entry.path)
+        verification = note_verification(
+            (entry.type or "").strip(),
+            entry.updated,
+            _mtime_of(root, rendered, prefix),
+            today=today,
+            registry=registry,
+        )
+        if verification is None:
+            continue
+        scanned.append(
+            _ScannedNote(
+                rendered=rendered,
+                relative=_vault_relative(rendered, prefix),
+                title=str(entry.title or "") or _vault_relative(rendered, prefix),
+                stale=rendered in stale_paths,
+                exempt=verification.exempt,
+                age_days=verification.age_days,
+                threshold_days=verification.threshold_days,
+                last_verified=verification.last_verified,
+            )
+        )
+    return scanned, ""
+
+
+def _mtime_of(root: Path, rendered: str, prefix: Path) -> float:
+    """The mtime of one rendered note path, or ``0.0`` when it cannot be stat'ed.
+
+    The audit's own fallback, passed the same way it passes it: a note with no
+    ``updated:`` is aged from when the file was last written, and a file that
+    cannot be stat'ed ages as far back as the audit ages it rather than as far
+    back as this pass could invent.
+    """
+    try:
+        return (root / _vault_relative(rendered, prefix)).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _stale_note_items(
+    *,
+    vault_root: Path,
+    scanned: list[_ScannedNote],
     today: date,
 ) -> tuple[list[WorklistItem], str]:
     """The stale notes due to be checked, and a note for the worklist about the rest.
 
-    The selection is the audit's, not a second one:
-    :func:`ciao.memory_audit.find_stale_notes` already owns the thresholds, the
-    exempt event types, the alias resolution and the frontmatter-then-mtime date
-    rule, and three other surfaces (memory-audit, the Memory Map, the review
-    queue's ``unverified`` signal) call it. A fourth copy here would be a fourth
-    thing to keep in agreement, so this pass *calls* it — including with
-    ``registry``, so a custom category's own ``stale_after_days`` reaches the
-    verdict exactly as it reaches the map's flag.
+    The selection is the audit's, not a second one: :func:`_stale_findings` already
+    owns the thresholds, the exempt event types, the alias resolution and the
+    frontmatter-then-mtime date rule, and three other surfaces (memory-audit, the
+    Memory Map, the review queue's ``unverified`` signal) call it too. A fourth
+    copy here would be a fourth thing to keep in agreement, so this pass consumes
+    its result — including with ``registry``, so a custom category's own
+    ``stale_after_days`` reaches the verdict exactly as it reaches the map's flag.
 
     What this adds is the two filters the queue adds and the audit does not, and
     the worklist's own bookkeeping:
@@ -456,9 +603,9 @@ def _stale_note_items(
 
     Oldest first, because that is the order
     :func:`ciao.memory_audit.find_stale_notes` already sorts in (``age``
-    descending, then path), and inheriting it rather than re-sorting is what
-    makes the plan reproducible: two runs over the same vault produce the same
-    list in the same order, and a short budget drops the *youngest* stale note
+    descending, then the rendered path), and inheriting it rather than re-sorting
+    is what makes the plan reproducible: two runs over the same vault produce the
+    same list in the same order, and a short budget drops the *youngest* stale note
     rather than an arbitrary one.
 
     The cap is applied *after* the cooldown filter, not before it. Capping first
@@ -485,66 +632,48 @@ def _stale_note_items(
     """
     from ciao import memory_receipts as mr
     from ciao import note_verification as nv
-    from ciao.memory_audit import find_stale_notes
-    from ciao.vault_index import VAULT_RENDER_PREFIX, scan_vault
-
-    root = Path(vault_root)
-    if not root.is_dir():
-        return [], ""
-    prefix = VAULT_RENDER_PREFIX if path_prefix is None else Path(path_prefix)
-    try:
-        entries = scan_vault(root, path_prefix=prefix, registry=registry)
-        findings = find_stale_notes(
-            entries,
-            vault_root=root,
-            # The same prefix `scan_vault` rendered, passed on rather than left
-            # to the default: a drifted prefix makes every mtime stat miss
-            # silently, which reads as "no note is stale" instead of an error.
-            path_prefix=prefix,
-            today=today,
-            registry=registry,
-        )
-    except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
-        logger.warning("curation: stale-note scan failed", exc_info=True)
-        return [], ""
     from ciao.vault_review import never_queued
 
-    flagged = findings.get("stale_notes") or []
+    root = Path(vault_root)
+    # The audit's order, stated rather than inherited: `find_stale_notes` sorts the
+    # list it returns and this pass consumes the scan it ran alongside it, so the
+    # tiebreak is repeated here once instead of depending on two structures
+    # happening to agree.
+    flagged = sorted(
+        (note for note in scanned if note.stale),
+        key=lambda note: (-note.age_days, note.rendered),
+    )
     items: list[WorklistItem] = []
     settled = 0
     capped = False
-    for finding in flagged:
-        rendered = str(finding.get("path") or "")
-        if not rendered or never_queued(rendered):
+    for note in flagged:
+        if never_queued(note.rendered):
             continue
-        relative = _vault_relative(rendered, prefix)
         try:
-            text = (root / relative).read_bytes().decode("utf-8")
+            text = (root / note.relative).read_bytes().decode("utf-8")
         except (OSError, UnicodeError):
             # A note this pass cannot read is one the operation would report
             # `failed`, so planning it would spend a budget item on an input
             # nobody can judge — and reporting a revision for text we never read
             # would be the one thing worse.
-            logger.debug("curation: stale note %s is not readable UTF-8", relative)
+            logger.debug("curation: stale note %s is not readable UTF-8", note.relative)
             continue
         revision = mr.content_revision(text)
-        if not nv.should_check(root, relative, revision, today=today):
+        if not nv.should_check(root, note.relative, revision, today=today):
             settled += 1
             continue
         if len(items) >= STALE_NOTE_MAX_ITEMS:
             capped = True
             break
-        age = int(finding.get("age_days") or 0)
-        horizon = int(finding.get("threshold_days") or 0)
         items.append(
             WorklistItem(
                 pass_id=PASS_STALE_NOTE,
-                label=str(finding.get("title") or "") or relative,
+                label=note.title or note.relative,
                 reason=(
-                    f"unverified for {age}d against a {horizon}d horizon; "
-                    f"revision {revision}"
+                    f"unverified for {note.age_days}d against a "
+                    f"{note.threshold_days}d horizon; revision {revision}"
                 ),
-                keys=(item_key(PASS_STALE_NOTE, relative),),
+                keys=(item_key(PASS_STALE_NOTE, note.relative),),
             )
         )
     if capped:
@@ -560,6 +689,217 @@ def _stale_note_items(
             "person to decide"
         )
     return items, ""
+
+
+@dataclass(frozen=True, slots=True)
+class _StaleEntry:
+    """One list item this pass found due, with everything a reason needs."""
+
+    relative: str
+    label: str
+    entry: Any
+    age: int
+    horizon: int
+    revision: str
+
+
+def _due_entries(
+    *,
+    vault_root: Path,
+    workspace: str,
+    scanned: list[_ScannedNote],
+    today: date,
+) -> list[_StaleEntry]:
+    """Every list item whose own date is past its type's horizon.
+
+    The audit selected *notes*; this is the same verdict read one bullet in, and
+    the reason the two are not the same question is the whole reason this pass
+    exists. A note's ``updated:`` is one date for every fact in it, so a
+    whole-note check can only ever say the file is or is not current — and a
+    person who re-verified the address last week has silently re-certified the
+    landlord's name from 2019 with it. So **every** note is walked, not only the
+    stale ones, and each entry is aged on its own date where it has one:
+
+    * an entry with a valid ``[verified:]`` stamp is aged from that date and
+      compared against the same horizon the audit measured its note against — the
+      entity type's own ``stale_after_days``, including a custom category's. A
+      bullet stamped two years ago in a note somebody re-stamped yesterday is
+      therefore still work, which is precisely what a whole-note selection can
+      never see;
+    * an entry with no stamp of its own is aged from the note's own date, which is
+      what makes it the same work the note pass found. Its verdict is still a
+      separate one, because re-stamping the note did not verify this bullet in
+      particular;
+    * an entry carrying a stamp that is *not* usable — a typo, an impossible day, a
+      date that has not happened — has no verification date at all, so it ages from
+      the note and is the first thing a re-stamp should be pointed at.
+
+    A note whose type is exempt (a ``journal`` is as true the day it was written)
+    contributes nothing, for the audit's reason rather than a second copy of the
+    exempt set.
+
+    ``workspace`` is the registered workspace's name, and it is passed in rather
+    than read off ``vault_root.name`` because the entry identity digests it: the
+    operations that consume these identities — the entry verification service,
+    the proposal's accept, the managed verifier — all resolve the vault through
+    the workspace registry and name the workspace the registry knows it by. A
+    vault directory is not that name on every registered layout (an install whose
+    ``memory-vault/client-a`` holds workspace ``work`` has a directory name of
+    ``client-a``), and an identity minted with the wrong coordinate names nothing
+    there, so the worklist key never resolves and the nightly pass returns
+    CONFLICT for work it planned itself. Guessing the name from the directory is
+    the one thing that cannot be right in general, so the caller supplies it.
+
+    The note's own :func:`ciao.memory_receipts.content_revision` is computed here
+    rather than in the caller, because this is the one place the note's bytes are
+    already in hand; the reason has to state it (see
+    :func:`_stale_entry_items`) and re-reading the file to get it would double
+    the pass's only body read.
+
+    Order is by age descending, then the rendered path, then the entry's own
+    position: the audit's order for notes with its tiebreak extended one level
+    further, so the plan is reproducible and a short budget drops the youngest
+    rather than an arbitrary one.
+    """
+    from ciao import memory_receipts as mr
+    from ciao import note_entries as ne
+    from ciao.vault_review import never_queued
+
+    root = Path(vault_root)
+    due: list[_StaleEntry] = []
+    for note in scanned:
+        if note.exempt or never_queued(note.rendered):
+            continue
+        try:
+            text = (root / note.relative).read_bytes().decode("utf-8")
+        except (OSError, UnicodeError):
+            logger.debug("curation: stale note %s is not readable UTF-8", note.relative)
+            continue
+        revision = mr.content_revision(text)
+        document = ne.parse_note_entries(
+            text, note_path=note.relative, workspace=workspace, today=today
+        )
+        for entry in document.entries:
+            dated = entry.verified if entry.verified is not None else note.last_verified
+            if dated is None:  # pragma: no cover — a scanned note always has one
+                continue
+            age = (today - dated).days
+            if age < note.threshold_days:
+                continue
+            due.append(
+                _StaleEntry(
+                    relative=note.relative,
+                    label=note.title or note.relative,
+                    entry=entry,
+                    age=age,
+                    horizon=note.threshold_days,
+                    revision=revision,
+                )
+            )
+    due.sort(key=lambda item: (-item.age, item.relative, item.entry.start))
+    return due
+
+
+def _stale_entry_items(
+    *,
+    vault_root: Path,
+    workspace: str,
+    scanned: list[_ScannedNote],
+    today: date,
+) -> tuple[list[WorklistItem], str]:
+    """The stale entries due to be checked, and a note for the worklist about the rest.
+
+    One item per entry, keyed by :func:`ciao.note_entries.entry_identity` — not by
+    the line it sits on and not by the note it lives in. That is the acceptance
+    criterion this pass exists to meet: an identity survives a note being
+    reordered and a fact inserted above it, so finishing an item's key actually
+    suppresses that fact, while a key carrying an offset would go stale the moment
+    anybody edited the file above it.
+
+    The filter is the entry pass's own twin of the note pass's cooldown filter:
+    :func:`ciao.entry_verification.check_settles_entry` for entries whose
+    :class:`ciao.entry_verification.EntryCheck` is still inside its cooldown or
+    still waiting on the proposal it pinned. The predicate is the same one
+    :func:`ciao.entry_verification.verify_entry` short-circuits on, so the plan
+    cannot list an entry the operation would refuse to judge. It is asked over a
+    map read **once**, through the batch form of that predicate rather than
+    :func:`ciao.entry_verification.should_check_entry` per entry:
+    ``read_entry_checks`` re-reads and re-parses the whole sidecar on every call,
+    and this is the one caller that asks once per due entry on every
+    ``curation-begin`` over every note in the vault, so the per-entry spelling is
+    O(entries × check-state size) for no reason.
+
+    The cap comes *after* the filter, for the note pass's reason: capping first
+    would spend a slot every night on the cooled-down entry that is still the
+    oldest, and nothing behind it would ever be planned. What the cap and the
+    filter each left out are reported back rather than passing for a full night's
+    work.
+
+    The reason carries every value the operation needs and cannot rederive
+    without reimplementing a hash and guessing wrong, all of them **whole**:
+    the entry's :func:`ciao.note_entries.entry_identity` itself (the ``entry``
+    the schedule prompt and the ``ciao-memory`` skill tell the agent to add to
+    the payload file, and which :func:`ciao.entry_verification` refuses
+    anything but a full 64-hex digest of — so printing the twelve characters the
+    label shows would plan work the operation cannot be handed), the note's
+    :func:`ciao.memory_receipts.content_revision` (the exact
+    ``expected_revision`` the managed operation refuses to proceed without), the
+    entry's fingerprint (``entry_fingerprint``, compared in full — a truncated
+    one is not a prefix match but a different string, so it comes back
+    ``conflict`` for every entry, for ever), and the span the write lands at.
+    Reads bytes only to parse and state them; reaches no verdict and writes
+    nothing.
+    """
+    from ciao import entry_verification as ev
+
+    root = Path(vault_root)
+    due = _due_entries(
+        vault_root=root, workspace=workspace, scanned=scanned, today=today
+    )
+    if not due:
+        return [], ""
+    items: list[WorklistItem] = []
+    settled = 0
+    checks = ev.read_entry_checks(root)
+    for candidate in due:
+        entry = candidate.entry
+        if ev.check_settles_entry(
+            checks, entry.identity, entry.fingerprint, today=today
+        ):
+            settled += 1
+            continue
+        if len(items) >= STALE_ENTRY_MAX_ITEMS:
+            break
+        items.append(
+            WorklistItem(
+                pass_id=PASS_STALE_ENTRY,
+                label=f"{candidate.label} — entry {entry.identity[:12]}",
+                reason=(
+                    f"entry unverified for {candidate.age}d against a "
+                    f"{candidate.horizon}d horizon; {candidate.relative} at "
+                    f"revision {candidate.revision}, entry identity "
+                    f"{entry.identity}, entry fingerprint "
+                    f"{entry.fingerprint} at characters "
+                    f"{entry.start}-{entry.end}"
+                ),
+                keys=(item_key(PASS_STALE_ENTRY, entry.identity),),
+            )
+        )
+    left_out = len(due) - len(items) - settled
+    if left_out > 0:
+        return items, (
+            f"more than {STALE_ENTRY_MAX_ITEMS} entries are due; this run plans the "
+            f"{STALE_ENTRY_MAX_ITEMS} oldest of {len(due)} found, and the rest wait "
+            "for the next run"
+        )
+    if settled:
+        return items, (
+            f"{settled} of {len(due)} due entr(ies) already have a check that settles "
+            "them — inside its cooldown, or waiting on a proposal for a person to "
+            "decide"
+        )
+    return items, ""
+
 
 
 def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
@@ -863,6 +1203,7 @@ def build_worklist(
     done_keys: frozenset[str] | set[str] | None = None,
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
+    workspace: str | None,
 ) -> Worklist:
     """Compute tonight's work from files alone.
 
@@ -872,6 +1213,22 @@ def build_worklist(
     agent vault root, the notes to this workspace's root. The caller resolves it
     through the config (the CLI does) so a category the owner accepted cannot be
     re-proposed as unlisted.
+
+    ``workspace`` is the registered workspace's name, and it is required because
+    the entry pass cannot plan anything without it:
+    :func:`ciao.note_entries.entry_identity` digests it, so an identity minted
+    under the wrong name names no entry anywhere, every worklist key it produces
+    is unresolvable, and every managed call comes back ``conflict`` for work
+    this function planned itself. The vault directory's own name is that name on
+    the layout where a workspace's vault is a directory of its own and is not
+    otherwise — an install whose ``memory-vault/client-a`` holds workspace
+    ``work`` would mint identities nothing can resolve — so nothing here infers
+    it. A caller that has no registered name to pass says so with ``None``, and
+    the entry pass is then skipped *and reported* in the notes, the same way the
+    cleanup pass reports the registry it was not given: a skipped pass must never
+    read as a pass that found nothing to do. The CLI resolves the name once, from
+    the same registry read that resolved the vault; see
+    :func:`_stale_entry_items`.
 
     ``config`` is the workspace registry, and it is optional only because two
     passes need it and one does not: the skill-proposal queue and the upstream
@@ -924,18 +1281,43 @@ def build_worklist(
         )
     )
     collected.extend(_audit_items(guide_path, workspace_dir=workspace_dir, today=today))
-    # The stale pass is not given the done keys: one filter, here, removes a
+    # The stale passes are not given the done keys: one filter, here, removes a
     # finished key from every pass at once, and a pass that filtered as well
-    # would only be able to drop an item the outer filter drops anyway.
-    stale_items, stale_note = _stale_note_items(
+    # would only be able to drop an item the outer filter drops anyway. They share
+    # one scan: the thresholds and the exempt set are the audit's, and scanning the
+    # vault twice in one worklist is twice the frontmatter parsing for nothing.
+    scanned, scan_note = _stale_findings(
         vault_root=vault_root,
         registry=category_registry,
         path_prefix=path_prefix,
         today=today,
     )
+    if scan_note:
+        notes.append(scan_note)
+    stale_items, stale_note = _stale_note_items(
+        vault_root=vault_root, scanned=scanned, today=today
+    )
     collected.extend(stale_items)
     if stale_note:
         notes.append(stale_note)
+    if workspace is None:
+        # The one pass with nothing to fall back on: an entry identity digests
+        # the workspace name, so a name invented here would mint work nothing
+        # can act on. Skipped and said out loud, like the registry-less cleanup
+        # pass below.
+        notes.append(
+            "the stale-entry pass was not planned: no registered workspace name "
+            "was resolved for this vault, and an entry identity digests that "
+            "name, so a pass planned under a guessed one would mint work no "
+            "operation could be handed"
+        )
+    else:
+        entry_items, stale_entry = _stale_entry_items(
+            vault_root=vault_root, workspace=workspace, scanned=scanned, today=today
+        )
+        collected.extend(entry_items)
+        if stale_entry:
+            notes.append(stale_entry)
     collected.extend(_learning_items(vault_root, today=today))
     if config is None:
         notes.append(

@@ -509,6 +509,58 @@ def test_restamp_does_not_change_fingerprint_but_prose_edit_does() -> None:
         != first.fingerprint
     )
 
+
+def test_repairing_a_near_miss_stamp_does_not_change_the_fingerprint() -> None:
+    """A near-miss token is the entry's claim, so repairing it is a re-stamp.
+
+    ``- Mo leads the platform team [verified 2026-01-01]`` carries a token the
+    parser reads as a claim and refuses to believe (that is the whole point of
+    :data:`ne.STAMP_REASON_MALFORMED`: the user who meant to write a stamp is
+    told). It is the line's claim, and a claim is metadata about the fact, not
+    part of it — so the fingerprint has to cut it, exactly as it cuts the strict
+    spelling and exactly as :func:`ne.strip_trailing_stamp` cuts it.
+
+    The failure this pins is silent and permanent. With only the strict token
+    removed, the parse fingerprinted the near-miss line to a digest of its own,
+    and repairing it into ``[verified: 2026-06-30]`` moved the fingerprint:
+    the identity (which digests the fingerprint) moved with it, so the re-stamp
+    that a nightly pass files looked like a rewrite of the fact, was refused as
+    one, and was planned and refused again every night with nobody asked.
+    """
+    broken = "- Mo leads the platform team [verified 2026-01-01]\n"
+    entry = _parse(broken).entries[0]
+
+    # It is still a claim the parser refuses, and still reported as one.
+    assert entry.stamp is not None
+    assert entry.stamp.valid is False
+    assert entry.stamp.reason == ne.STAMP_REASON_MALFORMED
+    assert ne.DIAG_STAMP_MALFORMED in entry.diagnostics
+
+    # …and the claim is the line's own words with that token and its separator
+    # taken out, which is the fingerprint of the same fact with a good stamp.
+    assert ne.refresh_fingerprint(broken) == ne.refresh_fingerprint(
+        "- Mo leads the platform team [verified: 2024-01-01]\n"
+    )
+    assert ne.refresh_fingerprint("- Mo leads the platform team") == entry.fingerprint
+    # So repairing the token is invisible: the identity is the same fact's.
+    repaired = "- Mo leads the platform team [verified: 2026-06-30]"
+    assert ne.refresh_fingerprint(repaired) == entry.fingerprint
+    assert _parse(repaired + "\n").entries[0].identity == entry.identity
+    # And the repair is exactly what a writer strips the near-miss for.
+    assert ne.strip_trailing_stamp(broken.rstrip("\n")) == "- Mo leads the platform team"
+
+    # Only the *claim* is cut, so a fact that quotes a date keeps it: a mid-line
+    # mention is prose, and a fact about a second token still hashes as itself.
+    prose = "- Config [verified: 2020 spec] changed in v3 [verified 2026-01-01]\n"
+    quoted = _parse(prose).entries[0]
+    assert ne.refresh_fingerprint(prose) == ne.refresh_fingerprint(
+        "- Config [verified: 2020 spec] changed in v3 [verified: 2026-06-30]\n"
+    )
+    # The line does carry two tokens and only one of them is the claim, so that
+    # is reported rather than resolved.
+    assert ne.DIAG_STAMP_DUPLICATE in quoted.diagnostics
+    assert ne.foreign_stamp_token(prose.rstrip("\n")) == "[verified: 2020 spec]"
+
     # A fact that is nothing but a stamp asserts nothing, and says so — but a
     # fact whose words are on a continuation line is a fact.
     stamp_only = _parse("- [verified: 2026-01-01]\n").entries[0]

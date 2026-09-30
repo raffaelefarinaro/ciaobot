@@ -63,6 +63,17 @@ receipt stores, so the file moves with the vault and never names where it used
 to live. A check describes *one revision*, so an edited note is checked again
 (:func:`should_check`) rather than inheriting a verdict nobody gave about its
 current text.
+
+**One document, two maps.** The file also holds the ``entries`` map
+:mod:`ciao.entry_verification` keeps, keyed by
+:func:`ciao.note_entries.entry_identity`, and :data:`CHECK_STATE_SCHEMA` stays
+:data:`CHECK_STATE_SCHEMA` rather than being bumped for it: a reader that met an
+unrecognized version drops *every* check in the file, so a bump would cost the
+whole vault its cooldowns over a map that is purely additive. Both maps therefore
+go through :func:`update_check_state` rather than a read-modify-write of their
+own — two writers each rewriting the file from what they read would drop the
+other map on every record, which is the same class of loss
+:func:`update_check_state` refuses to risk.
 """
 
 from __future__ import annotations
@@ -73,7 +84,7 @@ import re
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ciao import memory_receipts as mr
 from ciao import note_receipts as nr
@@ -135,7 +146,12 @@ CHECK_STATE_SCHEMA = 1
 """The check state's own version, so a reader that meets a shape it was not
 written for can say so instead of guessing. An unrecognized version is treated
 as no checks at all: that re-asks a note, which is the recoverable direction,
-whereas guessing at a row would suppress a check that never happened."""
+whereas guessing at a row would suppress a check that never happened.
+
+The ``entries`` map added by :mod:`ciao.entry_verification` did **not** bump
+this. It is purely additive — a document with both maps is the same document,
+read by the same reader — and a bump would make every note's cooldown unreadable
+to a version that has the note map and not the entry one."""
 
 CHECK_COOLDOWN_DAYS = 30
 """How long one recorded check keeps a later pass from asking the same question
@@ -741,37 +757,18 @@ def _check_from_mapping(key: str, raw: Any) -> NoteCheck | None:
     )
 
 
-def _load_note_checks(path: Path) -> tuple[dict[str, NoteCheck], str]:
-    """Every check readable in *path*, and why the file was skipped if it was.
+def _readable_note_rows(
+    path: Path, notes: dict[str, Any]
+) -> dict[str, NoteCheck]:
+    """The ``notes`` map's readable rows, keyed by the stored path.
 
-    One reader, two policies. A *reader* wants an empty map from a file it cannot
-    understand — re-asking a note costs a pass, while honouring a check nobody can
-    read would be a verdict on trust. A *writer* wants the opposite, because it
-    rewrites the whole file from what it read: an empty map it then writes back
-    drops every other note's cooldown and ``proposal_id``, which is why the skip
-    reason is returned rather than only logged.
+    The key is authoritative for the path and the row's own copy is ignored, so a
+    row disagreeing with the map it is filed under is a row to drop rather than a
+    second truth about where the note lives. A key that is not a vault-relative
+    path, and a row with no readable revision or date, are dropped for the same
+    reason: a check nobody can place against the note in front of them suppresses
+    nothing, and honouring it would be taking a verdict on trust.
     """
-    try:
-        raw_text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}, ""
-    except (OSError, UnicodeDecodeError) as exc:
-        return {}, f"{path} could not be read ({exc})"
-    try:
-        payload = json.loads(raw_text)
-    except ValueError as exc:
-        return {}, f"{path} is not valid JSON ({exc})"
-    if not isinstance(payload, dict):
-        return {}, f"{path} is not a JSON object"
-    schema = payload.get("schema")
-    if isinstance(schema, bool) or schema != CHECK_STATE_SCHEMA:
-        return {}, (
-            f"{path} carries schema {schema!r}, not {CHECK_STATE_SCHEMA}, so its "
-            "checks cannot be read"
-        )
-    notes = payload.get("notes")
-    if not isinstance(notes, dict):
-        return {}, f"{path} holds no note map"
     checks: dict[str, NoteCheck] = {}
     for key, row in notes.items():
         if not isinstance(key, str):
@@ -784,7 +781,67 @@ def _load_note_checks(path: Path) -> tuple[dict[str, NoteCheck], str]:
         check = _check_from_mapping(stored_key, row)
         if check is not None:
             checks[stored_key] = check
-    return checks, ""
+    return checks
+
+
+def _empty_check_document() -> dict[str, Any]:
+    """The document a vault with no check state yet reads as."""
+    return {"schema": CHECK_STATE_SCHEMA, "notes": {}, "entries": {}}
+
+
+def _load_check_document(path: Path) -> tuple[dict[str, Any], str]:
+    """The whole check-state document, and why the file was skipped if it was.
+
+    Both maps come back RAW — unparsed, unfiltered — because a writer rewrites
+    the file from what it read, and a writer that had parsed only its own map
+    would drop the other's rows on every single record. ``note_verification``
+    owns the ``notes`` rows and :mod:`ciao.entry_verification`` the ``entries``
+    ones; each parses its own half through this.
+
+    A missing ``entries`` map is not a reason to skip anything: it is what a file
+    written before entries existed looks like, and a reader that demanded one
+    would throw away every note check in a vault the moment the two maps were
+    split across versions. ``null`` is read as the same absence, which is what
+    several JSON writers mean by it. An ``entries`` value that is *there* and is
+    neither of those is the same thing a malformed ``notes`` is — state this
+    version cannot read — and is reported as one rather than read as the empty
+    map. Reading it as empty is how a file gets quietly repaired by a write: the
+    next record of any kind rewrites the document from what it read, and the value
+    whoever put there is gone with nothing in the file or the log to say so.
+    Skipping costs a night of suppression in a vault somebody has already damaged
+    by hand; erasing costs the same night and the only copy of whatever it was.
+    """
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _empty_check_document(), ""
+    except (OSError, UnicodeDecodeError) as exc:
+        return _empty_check_document(), f"{path} could not be read ({exc})"
+    try:
+        payload = json.loads(raw_text)
+    except ValueError as exc:
+        return _empty_check_document(), f"{path} is not valid JSON ({exc})"
+    if not isinstance(payload, dict):
+        return _empty_check_document(), f"{path} is not a JSON object"
+    schema = payload.get("schema")
+    if isinstance(schema, bool) or schema != CHECK_STATE_SCHEMA:
+        return _empty_check_document(), (
+            f"{path} carries schema {schema!r}, not {CHECK_STATE_SCHEMA}, so its "
+            "checks cannot be read"
+        )
+    notes = payload.get("notes")
+    if not isinstance(notes, dict):
+        return _empty_check_document(), f"{path} holds no note map"
+    entries = payload.get("entries")
+    if entries is not None and not isinstance(entries, dict):
+        return _empty_check_document(), (
+            f"{path} holds a {type(entries).__name__} where the entry map belongs"
+        )
+    return {
+        "schema": CHECK_STATE_SCHEMA,
+        "notes": dict(notes),
+        "entries": dict(entries) if isinstance(entries, dict) else {},
+    }, ""
 
 
 def read_note_checks(vault_root: Path | str) -> dict[str, NoteCheck]:
@@ -797,61 +854,90 @@ def read_note_checks(vault_root: Path | str) -> dict[str, NoteCheck]:
     direction, because re-asking a note costs a pass while silently honouring a
     check we could not read would claim a verification nobody made.
     """
-    checks, skipped = _load_note_checks(note_check_state_path(vault_root))
+    path = note_check_state_path(vault_root)
+    document, skipped = _load_check_document(path)
     if skipped:
         logger.warning("note checks: %s", skipped)
-    return checks
+        return {}
+    return _readable_note_rows(path, document["notes"])
 
 
-def _load_for_write(path: Path) -> dict[str, NoteCheck]:
-    """The checks :func:`record_note_check` is about to rewrite the file from.
+def update_check_state(
+    vault_root: Path | str, mutate: Callable[[dict[str, Any]], None]
+) -> None:
+    """Read-modify-write the whole check-state document under its queue lock.
 
-    Refuses anything but a missing file. This function's caller writes the whole
-    map back, so reading an unparseable or foreign-schema file as empty would
-    delete every check in it — including the ``proposal_id`` that is the only
-    thing standing between a note and a second proposal. Leaving the file exactly
-    as it is, and reporting why, keeps the state that is actually there.
+    The one writer of this file, and the reason there is exactly one. Both maps
+    are rewritten from what was read, so a writer that had parsed only its own
+    half would drop the other half's cooldowns on every single record, which is
+    the loss that makes writing over state this version cannot read a refusal
+    rather than a fallback. The callback gets the live document and mutates it
+    in place; the file is then written through
+    :func:`ciao.memory_receipts.write_queue_atomically` under that module's
+    per-file lock, so a read-modify-write without it cannot drop whichever check
+    landed in between.
+
+    The ``notes`` map is normalized on the way through, so a file that has
+    accumulated a row this version cannot read is not stuck behind it. A reader
+    is the opposite: it keeps the rest and skips the row, because a reader drops
+    one row at a time while a writer rewrites the whole file.
+
+    Both maps go through here, so neither can drop the other's rows. That is worth
+    restating as the limitation it leaves, because a writer that predates the
+    ``entries`` map is the one shape that cannot be defended from inside this
+    module: a version of ``note_verification`` that rewrote the file from its
+    ``notes`` map alone would drop every entry check in the vault, silently and
+    irrecoverably, the first time somebody ran it. The file says ``schema: 1``
+    for both maps precisely so an older reader keeps reading the note half, and
+    the price of that is this one: a version old enough to have written the file
+    is old enough to lose the entry half. An accepted downgrade limitation, not
+    an oversight — but it is a real loss and the fix would be the schema bump the
+    other way round, which costs every note's cooldown in every vault to buy it.
+
+    Raises :class:`NoteCheckRefused` for state this version cannot read, having
+    written nothing, so a foreign schema is left exactly as it is instead of being
+    replaced by a file that describes none of it. A callback that raises has
+    already left the file untouched for the same reason.
     """
-    checks, skipped = _load_note_checks(path)
-    if skipped:
-        raise NoteCheckRefused(
-            f"refusing to write a note check over state this version cannot read: "
-            f"{skipped}. Nothing was written, so no other note lost its check."
+    path = note_check_state_path(vault_root)
+    with mr.queue_lock(path):
+        document, skipped = _load_check_document(path)
+        if skipped:
+            raise NoteCheckRefused(
+                f"refusing to write a note check over state this version cannot "
+                f"read: {skipped}. Nothing was written, so no other check was lost."
+            )
+        document["notes"] = {
+            name: _check_payload(row)
+            for name, row in _readable_note_rows(path, document["notes"]).items()
+        }
+        mutate(document)
+        mr.write_queue_atomically(
+            path,
+            json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         )
-    return checks
 
 
 def record_note_check(vault_root: Path | str, check: NoteCheck) -> None:
     """Store one check, replacing any earlier check of the same note.
 
-    The whole map is read, one row replaced and the file rewritten through
-    :func:`ciao.memory_receipts.write_queue_atomically`, under that module's
-    per-file lock: the state is shared by every pass over the vault, so a
-    read-modify-write without the lock would drop whichever check landed between
-    this read and this write. A note keeps one check, not a history — what
-    happened to it is in the receipts.
+    The whole map is read, one row replaced and the file rewritten under
+    :func:`ciao.memory_receipts.queue_lock`: the state is shared by every pass
+    over the vault, so a read-modify-write without the lock would drop whichever
+    check landed between this read and this write. A note keeps one check, not a
+    history — what happened to it is in the receipts.
 
     Raises :class:`NoteCheckRefused` rather than writing over a state file this
-    version cannot read (see :func:`_load_for_write`).
+    version cannot read (see :func:`update_check_state`).
     """
     key = _stored_key(check.relative_path)
-    path = note_check_state_path(vault_root)
-    with mr.queue_lock(path):
-        checks = _load_for_write(path)
-        notes: dict[str, Any] = {
-            name: _check_payload(row) for name, row in checks.items()
-        }
-        notes[key] = _check_payload(replace(check, relative_path=key))
-        mr.write_queue_atomically(
-            path,
-            json.dumps(
-                {"schema": CHECK_STATE_SCHEMA, "notes": notes},
-                indent=2,
-                sort_keys=True,
-                ensure_ascii=False,
-            )
-            + "\n",
-        )
+    row = _check_payload(replace(check, relative_path=key))
+
+    def _mutate(document: dict[str, Any]) -> None:
+        notes = document.setdefault("notes", {})
+        notes[key] = row
+
+    update_check_state(vault_root, _mutate)
 
 
 def _check_settles(check: NoteCheck, current_revision: str, *, today: date) -> bool:

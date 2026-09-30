@@ -3363,12 +3363,14 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
 
 def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
     """Shared workspace/vault resolution for the memory-proposal commands."""
-    workspace, vault, _registry_root = _resolve_workspace_and_vaults(args)
+    workspace, vault, _registry_root, _name = _resolve_workspace_and_vaults(args)
     return workspace, vault
 
 
-def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path, Path]:
-    """``(workspace, notes vault, agent vault root)`` for one CLI invocation.
+def _resolve_workspace_and_vaults(
+    args: argparse.Namespace,
+) -> tuple[Path, Path, Path, str | None]:
+    """``(workspace, notes vault, agent vault root, workspace name)`` for one CLI run.
 
     A scheduled run exports ``CIAO_ACTIVE_WORKSPACE`` (the logical workspace
     name) next to a ``CIAO_VAULT_ROOT`` that points at the install-wide
@@ -3386,6 +3388,17 @@ def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path,
     every category the owner already added as unlisted. In the explicit-argument
     path there is no per-workspace split to resolve, so the vault the caller
     named is both.
+
+    The fourth is the name the *registry* knows this vault's workspace by, and
+    it is returned rather than left to each caller to re-derive, because every
+    operation that consumes an entry identity resolves the vault through this
+    same registry and mints that identity under the name it knows: a caller that
+    guessed the name from the directory would mint identities nothing resolves.
+    It is ``None`` when this invocation named a directory with no registry to ask
+    (``--workspace``/``--vault-root` from a shell), and the one case that may use
+    the directory's own name is an explicit ``--vault-root`` — where the operator
+    pointed at a directory and no workspace name exists to resolve. The entry pass
+    is skipped and reported in that case rather than planned under a guess.
     """
     active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if not getattr(args, "vault_root", None) and not getattr(args, "workspace", None):
@@ -3404,6 +3417,7 @@ def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path,
                         config.workspace_root,
                         Path(config.workspace_vault_root(active)),
                         Path(config.agent_vault_root(active)),
+                        active,
                     )
             except Exception:  # noqa: BLE001 — fall through to the legacy path
                 pass
@@ -3414,7 +3428,11 @@ def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path,
     if not vault.is_absolute():
         vault = workspace / vault
     resolved = vault.resolve()
-    return workspace, resolved, resolved
+    # `--vault-root` is the operator naming a directory in person, with no
+    # workspace to resolve, and it is the ONLY case where the directory's own
+    # name stands in for the registry's. Anything else says it does not know.
+    name = resolved.name if getattr(args, "vault_root", None) else None
+    return workspace, resolved, resolved, name
 
 
 def _memory_proposals_command(args: argparse.Namespace) -> int:
@@ -3968,17 +3986,19 @@ def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
 
 
-def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any, Path]:
+def _curation_context(
+    args: argparse.Namespace,
+) -> tuple[Path, Path, Path, Any, Path, str | None]:
     from ciao.curation_run import RunBudget
 
-    workspace, vault, registry_root = _resolve_workspace_and_vaults(args)
+    workspace, vault, registry_root, name = _resolve_workspace_and_vaults(args)
     guide = Path(args.guide).expanduser().resolve() if args.guide else guide_path(workspace)
     defaults = RunBudget()
     budget = RunBudget(
         max_items=args.max_items if args.max_items is not None else defaults.max_items,
         max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,
     )
-    return workspace, vault, guide, budget, registry_root
+    return workspace, vault, guide, budget, registry_root, name
 
 
 def _curation_config(workspace: Path, vault: Path) -> Any:
@@ -4010,7 +4030,7 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     from ciao.entity_types import load_entity_types
     from ciao.vault_index import VAULT_RENDER_PREFIX
 
-    workspace, vault, guide, budget, registry_root = _curation_context(args)
+    workspace, vault, guide, budget, registry_root, name = _curation_context(args)
     state = load_state(vault)
     worklist = build_worklist(
         vault_root=vault,
@@ -4026,6 +4046,12 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         # drifted prefix makes every mtime `stat` miss silently, which reads as
         # "no note is stale" rather than as an error.
         path_prefix=VAULT_RENDER_PREFIX,
+        # The registered name the same registry read resolved the vault under,
+        # or None when this invocation named a directory and there is no
+        # registry to ask: the entry pass mints identities that digest it, so a
+        # guess would plan work every operation refuses. None skips the pass and
+        # says so in the worklist notes.
+        workspace=name,
     )
     plan = plan_run(worklist, budget)
     payload: dict[str, Any] = {
@@ -4074,7 +4100,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     """
     from ciao.curation_run import CurationBusy, begin_run, end_run
 
-    _workspace, vault, _guide, budget, _registry_root = _curation_context(args)
+    _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
     try:
         lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
     except CurationBusy as exc:
@@ -4113,7 +4139,7 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     """Record finished worklist keys and renew the lease."""
     from ciao.curation_run import CurationBusy, record_done, renew_run
 
-    _workspace, vault, _guide, budget, _registry_root = _curation_context(args)
+    _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
@@ -4147,7 +4173,7 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     """
     from ciao.curation_run import CurationBusy, end_run
 
-    _workspace, vault, _guide, _budget, _registry_root = _curation_context(args)
+    _workspace, vault, _guide, _budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2

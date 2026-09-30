@@ -316,6 +316,7 @@ def pipeline(tmp_path: Path) -> dict[str, Any]:
     #    note, keyed by its vault-relative path, oldest first, capped.
     worklist = curation_run.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=root / "AGENTS.md",
         category_registry=load_entity_types(vault),
         workspace_dir=root,

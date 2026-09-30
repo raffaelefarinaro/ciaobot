@@ -66,7 +66,9 @@ newline bytes. Nothing else is normalized: CRLF stays CRLF, trailing spaces
 stay, and a byte-order mark stays. The stamp is metadata, so a pure re-stamp
 of a fact changes nothing about what the fact says; editing the prose does.
 The removed span is the stamp token plus the run of whitespace immediately
-before it, which is exactly the separator the stamp introduced.
+before it, which is exactly the separator the stamp introduced — the token in
+*either* spelling this module reads as a claim, so repairing a near-miss into a
+real stamp is as invisible as moving a real one.
 `refresh_fingerprint(text)` answers the same question for text the caller has
 just edited, which is the only form in which it is a real question.
 
@@ -482,6 +484,12 @@ def refresh_fingerprint(text: str) -> str:
     know which span the old stamp occupied — the opening line is re-read from
     the text given, so an entry whose offsets went stale with the note still
     fingerprints correctly.
+
+    "Re-stamp" here means repairing a token as well as moving a date: a
+    near-miss spelling the parser refuses to believe is the entry's claim, and
+    cutting it the same way it is cut in the note is what makes
+    ``refresh_fingerprint`` of the repaired text equal the fingerprint the entry
+    already carries.
     """
     return _fingerprint(text)
 
@@ -554,10 +562,81 @@ def _strict_stamp_span(line: str) -> tuple[int, int] | None:
     match = _VERIFIED_STAMP_RE.search(body)
     if match is None:
         return None
+    return _token_span(body, match)
+
+
+def _token_span(body: str, match: "re.Match[str]") -> tuple[int, int]:
+    """``match``'s span extended left over the whitespace run before it.
+
+    The separator a stamp introduced belongs to the stamp, not to the words
+    before it, so cutting the two together is what leaves the entry's own text
+    identical whichever spelling the stamp had.
+    """
     start = match.start()
     while start > 0 and body[start - 1] in " \t":
         start -= 1
     return start, match.end()
+
+
+def _claim_stamp_span(line: str) -> tuple[int, int] | None:
+    """The span of the stamp token the trailing-stamp reading reads, or ``None``.
+
+    The strict pattern first, so a well-formed stamp is never reported as a
+    typo, and the near-miss pattern only where the strict one misses — which is
+    exactly the order :func:`_scan_stamp` reads a line in. Both are *trailing*:
+    a stamp-shaped token in the middle of a sentence is prose about a date, is
+    not this entry's claim, and is not this function's to remove.
+    """
+    body = _stamp_line(line)
+    match = _VERIFIED_STAMP_RE.search(body) or _VERIFIED_LOOSE_RE.search(body)
+    if match is None:
+        return None
+    return _token_span(body, match)
+
+
+def strip_trailing_stamp(line: str) -> str:
+    """This line without the verification stamp the parser reads as its claim.
+
+    The writer's counterpart to :func:`_strict_stamp_span`, and exactly as wide:
+    the trailing token, in either spelling the parser accepts as a claim (see
+    :func:`_claim_stamp_span`), together with the whitespace run in front of it.
+    A near-miss token is included because the parser does read it as the
+    entry's claim — a claim it refuses to believe — and leaving it behind would
+    leave two tokens on the line after a repair.
+
+    **One** token, and never a second: a ``[verified: …]`` further left on the
+    line is part of the entry's own words, exactly as this module's reading
+    treats it. ``- Config [verified: 2020 spec] changed in v3`` describes a fact
+    *about* a 2020 spec, and cutting the words out of it rewrites the fact —
+    changing its fingerprint and its :func:`entry_identity` under an unattended
+    re-stamp that was only asked to move a date. A caller that finds one asks
+    :func:`foreign_stamp_token` before writing, rather than acting on a line it
+    cannot read as a single claim.
+    """
+    body = _stamp_line(line)
+    span = _claim_stamp_span(body)
+    if span is None:
+        return body
+    return body[: span[0]] + body[span[1] :]
+
+
+def foreign_stamp_token(line: str) -> str:
+    """A stamp-shaped token on this line the trailing claim does not account for.
+
+    Empty when the line carries at most the one stamp the parser reads — the
+    answer for a clean line and for a line whose only token is its own trailing
+    stamp, in either spelling. Non-empty means a re-stamp would leave the line
+    carrying a claim the reader is told is not there: the token this returns is
+    the one :func:`strip_trailing_stamp` deliberately keeps.
+    """
+    body = _stamp_line(line)
+    found = _VERIFIED_ANY_RE.search(body)
+    if found is None:
+        return ""
+    span = _claim_stamp_span(body)
+    if span is None or not (span[0] <= found.start() and found.end() <= span[1]):
+        return found.group(0)
+    return ""
 
 
 def _fingerprint(text: str, span: tuple[int, int] | None = None) -> str:
@@ -565,17 +644,27 @@ def _fingerprint(text: str, span: tuple[int, int] | None = None) -> str:
 
     The opening line is located by splitting, not by the entry's offsets, so
     this is the same function during parsing and from
-    :func:`refresh_fingerprint` after an edit. ``span`` is that line's stamp
-    span, passed in by a caller that already computed it, so the payload the
-    fingerprint hashes and the payload the support check reads are the same
-    slice and cannot drift apart. Newline bytes are whatever the file used: a
-    CRLF entry hashes CRLF, and the two spellings of one note therefore do not
-    collide. Cutting the span out of the raw line leaves its ``\\r`` in place.
+    :func:`refresh_fingerprint` after an edit. ``span`` is that line's claim
+    span (:func:`_claim_stamp_span`), passed in by a caller that already
+    computed it, so the payload the fingerprint hashes and the payload the
+    support check reads are the same slice and cannot drift apart. Newline bytes
+    are whatever the file used: a CRLF entry hashes CRLF, and the two spellings
+    of one note therefore do not collide. Cutting the span out of the raw line
+    leaves its ``\\r`` in place.
     """
     opening, separator, rest = text.partition("\n")
     shift = 1 if opening.startswith(_BOM) else 0
     if span is None:
-        span = _strict_stamp_span(opening[shift:])
+        # The claim span, not the strict one: a near-miss token is read as the
+        # entry's claim (a claim this module refuses to believe), so it is the
+        # token the fingerprint removes, exactly as
+        # :func:`strip_trailing_stamp` removes it. Reading only the strict
+        # spelling here is what made `refresh_fingerprint` disagree with the
+        # parse for `- Fact [verified 2026-01-01]`, and a re-stamp that repairs
+        # such a line then looks like a rewrite: the fingerprint moves for a
+        # date nobody asked anybody to change, the entry's identity moves with
+        # it, and the re-stamp is refused forever.
+        span = _claim_stamp_span(opening[shift:])
     if span is None:
         payload = text
     else:
@@ -602,7 +691,11 @@ def _scan_stamp(
 
     The span is returned rather than recomputed by the caller so the payload
     the fingerprint hashes and the payload the support check reads are the same
-    slice by construction.
+    slice by construction. A *near-miss* is such a claim and gets its span too:
+    the token :func:`_claim_stamp_span` cuts and
+    :func:`strip_trailing_stamp` removes, so repairing one into a real stamp
+    leaves the entry's own words — and therefore its fingerprint and identity —
+    exactly as they were.
 
     A second stamp earlier on the line is *not* folded into this one: the
     trailing token is the entry's claim, and the earlier one is left in the
@@ -616,7 +709,16 @@ def _scan_stamp(
         loose = _VERIFIED_LOOSE_RE.search(body)
         if loose is None:
             return None, None
-        return _rejected_stamp(loose.group(0), STAMP_REASON_MALFORMED), None
+        # A near-miss is the line's claim all the same — a claim this module
+        # refuses to believe — so its span is returned exactly as the strict
+        # branch's is, and `_token_span` cuts it identically to
+        # :func:`_claim_stamp_span`. That is what keeps the entry's own words
+        # the payload the fingerprint hashes and the payload
+        # :func:`strip_trailing_stamp` cuts, so repairing the token is invisible
+        # to the fingerprint and a re-stamp cannot be mistaken for a rewrite.
+        return _rejected_stamp(loose.group(0), STAMP_REASON_MALFORMED), _token_span(
+            body, loose
+        )
     span = _strict_stamp_span(body)
     value = match.group("value").strip()
     if not _ISO_DATE_RE.match(value):

@@ -51,6 +51,7 @@ import pytest
 from ciao import control_plane as cp
 from ciao import memory_receipts as mr
 from ciao import note_edit_proposals as nep
+from ciao import note_entries as ne
 from ciao import note_verification as nv
 
 NOTE = "People/Sofia.md"
@@ -195,6 +196,7 @@ class _Plane:
         return Path(self.config.state_path).parent
 
     verify_note = cp.CiaoControlPlane.verify_note
+    _verify_one_entry = cp.CiaoControlPlane._verify_one_entry
     _verification_payload = cp.CiaoControlPlane._verification_payload
     _unattended_turn = cp.CiaoControlPlane._unattended_turn
 
@@ -871,3 +873,467 @@ def test_provenance_follows_the_turn_not_a_fixed_label(
     receipt = mr.find_receipt(journal, data["receipt_id"])
     assert receipt is not None
     assert receipt["source"] == source
+
+
+# ── The same call, one entry ───────────────────────────────────────────────
+#
+# A payload carrying an `entry` identity and the `entry_fingerprint` it was read
+# at is a request about one list item rather than the note, and it runs the same
+# pipeline one level in. What is pinned here is that it really is the *same*
+# pipeline — the same confinement, the same scoping, the same "a refused verdict
+# files exactly one proposal" wiring — and that the two scopes cannot be confused
+# for one another.
+
+ENTRY_NOTE = "People/Sofia.md"
+ENTRY_PLAIN = (
+    "---\ntype: person\nupdated: 2024-01-05\n---\n\n"
+    "# Sofia\n\n"
+    "- Sofia runs the release train [verified: 2024-01-05]\n"
+    "- Sofia runs the platform team\n"
+)
+ENTRY_TRAIN = "- Sofia runs the release train [verified: 2024-01-05]"
+
+
+def _entry_install(tmp_path: Path) -> tuple[_Install, Path, Path, Any]:
+    install, root, note = _install(tmp_path, text=ENTRY_PLAIN)
+    from ciao import note_entries as ne
+
+    entry = ne.parse_note_entries(
+        ENTRY_PLAIN, note_path=ENTRY_NOTE, workspace="personal"
+    ).entries[0]
+    return install, root, note, entry
+
+
+def _entry_verdict(note: Path, entry: Any, **overrides: Any) -> dict[str, Any]:
+    """A well-formed entry `still_valid` payload for the entry as it stands."""
+    fields: dict[str, Any] = {
+        "relative_path": ENTRY_NOTE,
+        "entry": entry.identity,
+        "entry_fingerprint": entry.fingerprint,
+        "expected_revision": mr.content_revision(note.read_bytes().decode("utf-8")),
+        "outcome": nv.STILL_VALID,
+        "coverage": nv.COVERAGE_COMPLETE,
+        "evidence": [CITATION],
+        "reason": "the March release notes still name her",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _verify(
+    plane: _Plane, root: Path, fields: dict[str, Any], *, name: str = "entry.json"
+) -> dict[str, Any]:
+    """One managed `verify_note` call over a payload file, and its reported body."""
+    import asyncio
+
+    reply = asyncio.run(
+        plane.verify_note(_principal(), payload_file=_payload(root, fields, name=name))
+    )
+    assert reply["ok"], reply
+    return reply["data"]
+
+
+def test_an_entry_verdict_restamps_only_that_entry(tmp_path: Path) -> None:
+    """The managed operation one level in, and the note's other fact survives.
+
+    The whole-note path would have stamped the frontmatter and claimed every
+    fact in the file. This changes one bullet's own date, journals it through the
+    same receipt, and leaves the neighbour alone — which is the whole reason the
+    entry service exists.
+    """
+    install, root, note, entry = _entry_install(tmp_path)
+    plane = _plane(install)
+
+    body = _verify(plane, root, _entry_verdict(note, entry))
+
+    assert body["status"] == nv.APPLIED
+    assert body["scope"] == "entry"
+    assert body["auto_applied"] is True
+    assert body["proposal"] is None, "an applied verdict files nothing"
+    after = note.read_text(encoding="utf-8")
+    assert f"[verified: {date.today().isoformat()}]" in after
+    assert "updated: 2024-01-05" in after, "the note's own date is not this pass's job"
+    assert "- Sofia runs the platform team" in after
+    assert body["check"]["identity"] == entry.identity
+    assert body["check"]["content_fingerprint"] == entry.fingerprint, (
+        "a re-stamp leaves the fingerprint alone, so a verified fact stops being work"
+    )
+    from ciao import entry_verification as ev
+
+    assert not ev.should_check_entry(
+        install.workspace_vault_root("personal"), entry.identity, entry.fingerprint,
+        today=date.today(),
+    )
+
+
+def test_an_entry_verdict_that_needs_a_person_files_one_entry_proposal(
+    tmp_path: Path,
+) -> None:
+    """The #726-C wiring, at the entry's width: one proposal, and the check pinned
+    to its queue row.
+
+    A `retire` is the interesting case because it is the one an operation could
+    most plausibly apply, and the one it must not: it files a `retire_entry` for a
+    person to decide, and the bullet is still in the file.
+    """
+    install, root, note, entry = _entry_install(tmp_path)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+
+    body = _verify(plane, root, _entry_verdict(note, entry, outcome=nv.RETIRE))
+
+    assert body["status"] == nv.NEEDS_REVIEW
+    assert body["scope"] == "entry"
+    assert body["proposal"]["operation"] == nep.RETIRE_ENTRY
+    assert body["proposal"]["queued"] is True
+    assert body["proposal"]["entry_identity"] == entry.identity
+    assert body["proposal"]["entry_span"] == [entry.start, entry.end]
+    assert body["proposal_error"] == ""
+    # The check the reply carries is the re-read one, so it names the queue row.
+    assert body["check"]["proposal_id"] == body["proposal"]["proposal_id"]
+    assert note.read_text(encoding="utf-8") == ENTRY_PLAIN, "nothing was written"
+    assert f"[{nep.KIND} " in _queue(vault)
+    assert _sidecars(vault) == [f"{body['proposal']['id']}.json"]
+
+
+def test_an_entry_verdict_whose_filing_fails_gives_the_entry_its_question_back(
+    tmp_path: Path,
+) -> None:
+    """A verdict nobody was asked about must not sit on its cooldown for a month.
+
+    The check is recorded by the service *before* the proposal that asks a person
+    about it is filed, so a filing that fails leaves that check settled against a
+    question that does not exist: nothing is in the queue, the entry is not
+    planned again for thirty days, and nothing ever re-files it. The verdict is
+    kept — the entry genuinely was judged — but the cooldown is released, so the
+    next pass asks again and files the proposal this time.
+
+    Both ways of "not filed" are covered: a filing that raises, and a filing that
+    leaves a sidecar with no queue row (nothing is asking the owner either).
+    """
+    import asyncio
+
+    from ciao import entry_verification as ev
+
+    install, root, note, entry = _entry_install(tmp_path)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+    name = _payload(root, _entry_verdict(note, entry, outcome=nv.RETIRE))
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise nep.NoteEditRefused("the proposal queue is read-only")
+
+    monkey = nep.file_note_edit
+    nep.file_note_edit = refuse  # type: ignore[assignment]
+    try:
+        data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+    finally:
+        nep.file_note_edit = monkey  # type: ignore[assignment]
+
+    assert data["status"] == nv.NEEDS_REVIEW
+    assert data["proposal"] is None
+    assert "could not be filed" in data["proposal_error"]
+    assert _queue(vault).count(f"[{nep.KIND} ") == 0
+    row = ev.read_entry_checks(vault)[entry.identity]
+    assert row.outcome == nv.RETIRE, "the verdict stands"
+    assert row.retry_after == row.checked_at, "but it no longer holds the entry off"
+    assert ev.should_check_entry(
+        vault, entry.identity, entry.fingerprint, today=date.today()
+    ), "the next pass must ask again and re-file it"
+
+    # The other way of asking nobody: the record is on file but no queue row came
+    # back, so there is nothing in the queue for an owner to decide. Same release.
+    second_root = tmp_path / "ws-again"
+    other_install, other_root, other_note = _install(
+        second_root, text=ENTRY_PLAIN
+    )
+    other_vault = other_install.workspace_vault_root("personal")
+    other_entry = ne.parse_note_entries(
+        ENTRY_PLAIN, note_path=ENTRY_NOTE, workspace="personal"
+    ).entries[0]
+    queued = nep._queued_row_id
+    nep._queued_row_id = lambda *args, **kwargs: ""  # type: ignore[assignment]
+    try:
+        again = _verify(
+            _plane(other_install),
+            other_root,
+            _entry_verdict(other_note, other_entry, outcome=nv.RETIRE),
+        )
+    finally:
+        nep._queued_row_id = queued  # type: ignore[assignment]
+
+    assert again["proposal"]["queued"] is False
+    assert again["check"]["proposal_id"] == "", (
+        "no queue row means nothing is pinned to a decision nobody can see"
+    )
+    assert ev.should_check_entry(
+        other_vault, other_entry.identity, other_entry.fingerprint, today=date.today()
+    )
+
+
+def test_an_entry_update_files_a_replace_entry_proposal(tmp_path: Path) -> None:
+    """An update the evidence cannot carry comes back as an entry replacement.
+
+    The image is the whole note with one span spliced, because that is what the
+    accept applies — and the entry's own text is recovered from the recorded span
+    rather than carried separately, so the record cannot be read as a whole-note
+    rewrite wearing an entry's name.
+    """
+    from ciao import note_receipts as nr
+
+    install, root, note, entry = _entry_install(tmp_path)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+    replacement = "- Sofia runs the platform team [verified: 2024-01-05]"
+
+    body = _verify(
+        plane,
+        root,
+        _entry_verdict(
+            note,
+            entry,
+            outcome=nv.UPDATE,
+            before=entry.text,
+            after=replacement,
+            # One good citation and one uncited row: every row must be a citation,
+            # so this is the `needs_review` a person decides rather than a write.
+            evidence=[CITATION, UNCITED],
+        ),
+    )
+
+    assert body["status"] == nv.NEEDS_REVIEW
+    assert body["proposal"]["operation"] == nep.REPLACE_ENTRY
+    filed = nep.read_sidecar(install, "personal", body["proposal"]["id"])
+    assert filed is not None
+    assert filed.before == ENTRY_PLAIN
+    assert filed.after == ENTRY_PLAIN[: entry.start] + replacement + ENTRY_PLAIN[entry.end :]
+    assert nep.entry_replacement(filed) == replacement
+    assert filed.after == nr.compose_entry_edit(ENTRY_PLAIN, entry, replacement=replacement)[0]
+
+
+def test_an_entry_selector_needs_its_fingerprint(tmp_path: Path) -> None:
+    """An identity that cannot say which version was read could name any version.
+
+    Refused by the operation rather than by the service, so the caller is told the
+    payload is wrong instead of receiving a verdict-shaped `conflict` it would
+    reasonably record as "this fact could not be checked".
+    """
+    install, root, note, entry = _entry_install(tmp_path)
+    plane = _plane(install)
+    fields = _entry_verdict(note, entry)
+    del fields["entry_fingerprint"]
+
+    with pytest.raises(cp.ControlPlaneError) as excinfo:
+        _verify(plane, root, fields)
+
+    assert excinfo.value.code == "payload_invalid"
+    assert "entry_fingerprint" in str(excinfo.value)
+
+
+def test_an_entry_verdict_cannot_name_another_workspace(tmp_path: Path) -> None:
+    """The scope rule is the operation's, so it holds for an entry too."""
+    install, root, note, entry = _entry_install(tmp_path)
+    plane = _plane(install)
+
+    with pytest.raises(cp.ControlPlaneError) as excinfo:
+        import asyncio
+
+        asyncio.run(
+            plane.verify_note(
+                _principal(),
+                payload_file=_payload(
+                    root, _entry_verdict(note, entry, workspace="work")
+                ),
+            )
+        )
+
+    assert excinfo.value.code == "workspace_forbidden"
+
+
+def test_an_entry_verdict_out_of_scope_is_refused_before_the_service(
+    tmp_path: Path,
+) -> None:
+    """Payload confinement, symmetry with the note path.
+
+    The document is still a file, still capped, still inside the caller's own
+    workspace root — an entry's identity does not loosen any of that.
+    """
+    install, root, note, entry = _entry_install(tmp_path)
+    plane = _plane(install)
+    fields = _entry_verdict(note, entry)
+    (install.workspace_vault_root("personal") / "verdict.json").write_text(
+        json.dumps(fields), encoding="utf-8"
+    )
+
+    with pytest.raises(cp.ControlPlaneError) as excinfo:
+        import asyncio
+
+        asyncio.run(
+            plane.verify_note(
+                _principal(), payload_file="../memory-vault/verdict.json"
+            )
+        )
+
+    assert excinfo.value.code == "path_forbidden"
+
+
+def test_an_entry_that_is_not_the_one_the_payload_read_is_a_conflict(
+    tmp_path: Path,
+) -> None:
+    """The same fail-closed direction as a stale note revision, one level in.
+
+    The note is at exactly the revision the payload names, so the only thing left
+    to prove is that the bullet is still the bullet. It is not, so nothing is
+    written, no check is recorded, and the reply says so.
+    """
+    install, root, note, entry = _entry_install(tmp_path)
+    plane = _plane(install)
+
+    body = _verify(plane, root, _entry_verdict(note, entry, entry_fingerprint="b" * 64))
+
+    assert body["status"] == nv.CONFLICT
+    assert body["check"] is None
+    assert note.read_text(encoding="utf-8") == ENTRY_PLAIN
+    from ciao import entry_verification as ev
+
+    assert ev.read_entry_checks(install.workspace_vault_root("personal")) == {}
+    assert _sidecars(install.workspace_vault_root("personal")) == []
+
+
+def test_a_near_miss_stamp_files_the_repair_as_a_restamp(tmp_path: Path) -> None:
+    """A typo in the tag must reach a person, not die in the filing.
+
+    ``- Sofia runs the release train [verified 2024-01-05]`` is a fact carrying a
+    claim the parser reads and refuses: the near-miss is reported as malformed so
+    the person who meant to write a stamp is told, and the token is still the
+    entry's claim. So a ``still_valid`` verdict on it is not applied unattended
+    — the claim nobody can believe is a reader's call — but it is *repaired* by
+    a ``restamp_entry`` proposal rather than rewritten, and the repair has to be
+    recognisable as the same fact.
+
+    That recognition is the finding this pins. The fingerprint cut only the
+    strict spelling, so it hashed the near-miss line as its own text: the repair
+    changed the fingerprint, the identity digests the fingerprint, and the
+    re-stamp was refused by the filing as "a rewrite rather than a re-stamp". No
+    proposal, no queue row, nobody asked — and because the failure is caught and
+    the check released, the same entry was planned, judged and refused every
+    night for as long as the typo stayed in the file. Nothing was ever written,
+    so this was never corruption; it was a fact nobody could ever be told about.
+    """
+    from ciao import note_entries as ne
+
+    broken = (
+        "---\ntype: person\nupdated: 2024-01-05\n---\n\n"
+        "# Sofia\n\n"
+        "- Sofia runs the release train [verified 2024-01-05]\n"
+    )
+    install, root, note = _install(tmp_path, text=broken)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+    entry = ne.parse_note_entries(
+        broken, note_path=ENTRY_NOTE, workspace="personal"
+    ).entries[0]
+    # The claim is refused, and reported, exactly as the strict-shaped refusals
+    # are: this is not a fact nobody stamped, it is one whose stamp is unusable.
+    assert entry.stamp is not None and entry.stamp.valid is False
+    assert ne.DIAG_STAMP_MALFORMED in entry.diagnostics
+
+    body = _verify(plane, root, _entry_verdict(note, entry))
+
+    assert body["status"] == nv.NEEDS_REVIEW
+    assert body["scope"] == "entry"
+    assert body["proposal_error"] == ""
+    assert body["proposal"]["operation"] == nep.RESTAMP_ENTRY, (
+        "the entry's own date is what moves; nothing is rewritten"
+    )
+    assert body["proposal"]["queued"] is True
+    # The proposal is the same entry, re-dated, and the review it exists to
+    # prevent is exactly the one that used to reject it: the replacement's
+    # fingerprint equals the fingerprint the verdict was reached about.
+    filed = nep.read_sidecar(install, "personal", body["proposal"]["id"])
+    assert filed is not None
+    repaired = nep.entry_replacement(filed)
+    assert ne.refresh_fingerprint(repaired) == entry.fingerprint
+    assert filed.after == broken[: entry.start] + repaired + broken[entry.end :]
+    assert f"[verified: {date.today().isoformat()}]" in repaired
+    # And it is the same fact, not a new one: the check stays on the entry's
+    # identity, pinned to the queue row, so the entry is not asked again.
+    assert body["check"]["identity"] == entry.identity
+    assert body["check"]["proposal_id"] == body["proposal"]["proposal_id"]
+    assert note.read_text(encoding="utf-8") == broken, "nothing was written"
+    assert f"[{nep.KIND} " in _queue(vault)
+
+
+def test_provenance_follows_the_turn_for_an_entry_too(tmp_path: Path) -> None:
+    """A scheduled entry verification is not journaled as an interactive one."""
+    install, root, note, entry = _entry_install(tmp_path)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install, unattended=True)
+
+    _verify(plane, root, _entry_verdict(note, entry))
+
+    from ciao import note_receipts as nr
+
+    receipt = [
+        row
+        for row in mr.read_receipts(mr.journal_path(vault, None))
+        if row["kind"] == nr.NOTE_APPLY
+    ][-1]
+    assert receipt["source"] == "curation"
+    assert receipt["actor"] == "agent"
+    assert receipt["provenance"]["entry_identity"] == entry.identity
+    assert receipt["workspace"] == "personal"
+
+
+def test_a_note_verdict_and_an_entry_verdict_are_not_the_same_read(
+    tmp_path: Path,
+) -> None:
+    """Coalescing is per question, and the two scopes are two questions.
+
+    A payload without `entry` is a whole-note request and one with it is an entry
+    request; the off-loop read is keyed on the identity, the fingerprint and a
+    digest of the verdict, so neither can be answered with the other's.
+    """
+    install, root, note, entry = _entry_install(tmp_path)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+    plain = _verdict(vault, note)
+    assert "entry" not in plain
+
+    # A retirement, so the entry verdict needs a person and files one: the two
+    # scopes then have something of their own on file over the same bytes.
+    entry_body = _verify(plane, root, _entry_verdict(note, entry, outcome=nv.RETIRE))
+    assert entry_body["proposal"]["operation"] == nep.RETIRE_ENTRY
+
+    # The note's own verdict runs next and applies, over the same bytes.
+    fields = dict(plain)
+    # The entry verdict above re-stamped a bullet, so the note's revision moved;
+    # read it again the way a caller would.
+    fields["expected_revision"] = mr.content_revision(
+        note.read_bytes().decode("utf-8")
+    )
+    fields["evidence"] = [
+        nv.Evidence(
+            source_type="chat",
+            source_ref="chat-2026-03-02",
+            quoted="Sofia runs the platform team",
+            supports=f"{NOTE}: who Sofia runs",
+        ).as_dict()
+    ]
+    # The note payload names no entry, so it is a whole-note request.
+    note_body = _verify(plane, root, fields, name="note.json")
+
+    assert entry_body["scope"] == "entry"
+    assert "scope" not in note_body
+    assert note_body["status"] == nv.APPLIED
+    assert note_body["proposal"] is None
+    assert len(_sidecars(vault)) == 1, "only the entry verdict needed a person"
+    from ciao import entry_verification as ev
+
+    checks = ev.read_entry_checks(vault)
+    assert list(checks) == [entry.identity]
+    assert nv.read_note_checks(vault)[ENTRY_NOTE].content_revision == (
+        mr.content_revision(note.read_bytes().decode("utf-8"))
+    )
+    # And the note's verdict re-stamped the frontmatter rather than the bullet.
+    assert "updated: " + date.today().isoformat() in note.read_text(encoding="utf-8")

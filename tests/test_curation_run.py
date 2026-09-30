@@ -14,6 +14,7 @@ soon as the holder has no work left.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -98,6 +99,7 @@ def test_a_fresh_idle_workspace_has_nothing_to_do(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -132,6 +134,7 @@ def test_every_mechanical_signal_lands_in_the_worklist(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -183,6 +186,7 @@ def test_a_three_note_cluster_becomes_a_category_item(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -230,6 +234,7 @@ def test_a_cluster_the_registry_already_knows_is_not_offered(tmp_path: Path) -> 
 
     worklist = cr.build_worklist(
         vault_root=notes_vault,
+        workspace=notes_vault.name,
         guide_path=guide,
         category_registry=entity_types.load_entity_types(agent_vault),
         workspace_dir=tmp_path,
@@ -252,6 +257,7 @@ def test_a_declined_category_is_not_work_twice(tmp_path: Path) -> None:
 
     first = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -265,6 +271,7 @@ def test_a_declined_category_is_not_work_twice(tmp_path: Path) -> None:
 
     second = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -283,6 +290,7 @@ def test_a_two_note_cluster_is_not_category_work(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -314,6 +322,7 @@ def test_guide_review_is_weekly_but_not_a_required_hygiene_key(
         item.pass_id: item
         for item in cr.build_worklist(
             vault_root=vault,
+            workspace=vault.name,
             guide_path=guide,
             category_registry=_categories(vault),
             workspace_dir=tmp_path,
@@ -352,6 +361,7 @@ def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -384,6 +394,7 @@ def test_proposals_sharing_one_sentence_are_separate_work(tmp_path: Path) -> Non
     def plan() -> cr.Worklist:
         return cr.build_worklist(
             vault_root=vault,
+            workspace=vault.name,
             guide_path=guide,
             category_registry=_categories(vault),
             workspace_dir=tmp_path,
@@ -415,6 +426,7 @@ def test_a_missing_or_malformed_marker_leaves_the_weekly_pass_due(tmp_path: Path
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -430,6 +442,7 @@ def test_a_region_over_the_consolidation_threshold_is_work(tmp_path: Path) -> No
 
     clear = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -439,6 +452,7 @@ def test_a_region_over_the_consolidation_threshold_is_work(tmp_path: Path) -> No
 
     full = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -456,6 +470,7 @@ def test_an_expired_entry_is_work_even_well_under_cap(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -480,6 +495,7 @@ def test_resolved_learnings_are_not_replanned(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -506,6 +522,7 @@ def _note(vault: Path, relative: str, *, updated: str = "2024-01-05", type_: str
 def _stale_items(vault: Path, guide: Path, today: date = date(2026, 9, 19), **kwargs) -> list[cr.WorklistItem]:
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=guide.parent,
@@ -636,6 +653,7 @@ def test_stale_notes_are_planned_oldest_first(tmp_path: Path) -> None:
     # And a budget of two takes the two oldest, deferring the rest whole.
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=guide.parent,
@@ -785,6 +803,7 @@ def test_a_note_a_check_already_settles_is_not_planned_again(tmp_path: Path) -> 
     nv.record_note_check(vault, _check(cooled))
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=guide.parent,
@@ -816,6 +835,7 @@ def test_a_stale_backlog_cannot_starve_the_required_hygiene_keys(tmp_path: Path)
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=guide.parent,
@@ -879,6 +899,7 @@ def test_a_missing_vault_is_not_a_failed_plan(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=tmp_path / "no-such-vault",
+        workspace="no-such-vault",
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -945,6 +966,7 @@ def test_a_settled_skill_proposal_is_no_longer_waiting_on_a_decision(tmp_path: P
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -967,6 +989,7 @@ def test_a_pending_skill_proposal_beside_a_settled_one_still_counts(
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -989,6 +1012,7 @@ def test_a_budget_limited_run_resumes_at_the_remainder(tmp_path: Path) -> None:
 
     first = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -1001,6 +1025,7 @@ def test_a_budget_limited_run_resumes_at_the_remainder(tmp_path: Path) -> None:
 
     second = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -1025,6 +1050,7 @@ def test_a_worklist_whose_every_key_is_done_reports_empty(tmp_path: Path) -> Non
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -1034,6 +1060,7 @@ def test_a_worklist_whose_every_key_is_done_reports_empty(tmp_path: Path) -> Non
 
     again = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -1556,6 +1583,7 @@ def test_a_settled_learning_becomes_a_cleanup_key(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         config=_cleanup_config(tmp_path, vault),
@@ -1595,6 +1623,7 @@ def test_the_cleanup_pass_runs_after_the_learnings_pass(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         config=_cleanup_config(tmp_path, vault),
@@ -1623,6 +1652,7 @@ def test_an_unproposed_learning_consumes_no_key(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         config=_cleanup_config(tmp_path, vault),
@@ -1648,6 +1678,7 @@ def test_a_worklist_without_a_registry_says_the_pass_did_not_run(
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         workspace_dir=tmp_path,
@@ -1675,6 +1706,7 @@ def test_the_cleanup_backlog_is_capped_and_reported(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         config=_cleanup_config(tmp_path, vault),
@@ -1712,6 +1744,7 @@ def test_a_maximal_cleanup_backlog_leaves_the_required_hygiene_keys_planned(
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         config=_cleanup_config(tmp_path, vault),
@@ -1742,6 +1775,7 @@ def test_the_cleanup_item_names_the_mode_that_performs_it(tmp_path: Path) -> Non
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         config=_cleanup_config(tmp_path, vault),
@@ -1790,6 +1824,7 @@ def test_the_pass_finds_nothing_after_the_unattended_mode_has_run(
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=_guide(tmp_path),
         category_registry=_categories(vault),
         config=config,
@@ -1826,6 +1861,7 @@ def test_the_cleanup_pass_does_not_starve_a_short_budget(tmp_path: Path) -> None
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         config=_cleanup_config(tmp_path, vault),
@@ -1880,6 +1916,7 @@ def test_an_unreadable_line_is_reported_in_the_notes(tmp_path: Path) -> None:
 
     worklist = cr.build_worklist(
         vault_root=vault,
+        workspace=vault.name,
         guide_path=guide,
         category_registry=_categories(vault),
         config=_cleanup_config(tmp_path, vault),
@@ -1892,3 +1929,587 @@ def test_an_unreadable_line_is_reported_in_the_notes(tmp_path: Path) -> None:
     # And the readable entry is still planned: one broken line is not a reason to
     # stop reconciling the rest.
     assert cr.PASS_LEARNINGS_CLEANUP in {item.pass_id for item in worklist.items}
+
+
+# ── The stale-entry pass ───────────────────────────────────────────────────
+#
+# A note is not the unit a person keeps current: one bullet in it can be two
+# years out of date while its neighbours were checked last week, and a
+# whole-note verdict has nowhere to put that. These tests pin the pass that sees
+# it, and specifically the two properties the note pass's own tests pin one
+# level up — determinism with a cap that does not starve hygiene, and a
+# suppression predicate that is the *same* one the operation short-circuits on.
+
+TODAY_ENTRIES = date(2026, 9, 19)
+
+
+def _entry_note(
+    vault: Path,
+    relative: str,
+    *,
+    updated: str = "2026-09-18",
+    facts: tuple[tuple[str, str], ...] = (),
+    type_: str = "person",
+) -> Path:
+    """A note whose facts are bullets, each with its own verification date.
+
+    ``facts`` is ``(text, stamp)`` pairs and an empty stamp means no ``[verified:]``
+    token at all, so a fixture can ask both questions at once: a fact whose own
+    date is past the horizon and one that inherits the note's.
+    """
+    lines = "".join(
+        f"- {text}{f' [verified: {stamp}]' if stamp else ''}\n" for text, stamp in facts
+    )
+    path = vault / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: {type_}\nupdated: {updated}\n---\n\n# {path.stem}\n\n{lines}",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _entry_items(
+    vault: Path, guide: Path, today: date = TODAY_ENTRIES, **kwargs
+) -> list[cr.WorklistItem]:
+    # `workspace` is required by `build_worklist` — the entry identity digests
+    # it — and the vault directory's name is what these fixtures register as the
+    # workspace, which is what `_entry_identity` parses under too.
+    kwargs.setdefault("workspace", vault.name)
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=today,
+        **kwargs,
+    )
+    return [item for item in worklist.items if item.pass_id == cr.PASS_STALE_ENTRY]
+
+
+def _entry_identity(vault: Path, relative: str, text: str) -> str:
+    from ciao import note_entries as ne
+
+    note = (vault / relative).read_text(encoding="utf-8")
+    for entry in ne.parse_note_entries(
+        note, note_path=relative, workspace=vault.name, today=TODAY_ENTRIES
+    ).entries:
+        if entry.text.startswith(text):
+            return entry.identity
+    raise AssertionError(f"no entry starting {text!r} in {relative}")
+
+
+def test_an_entry_is_work_keyed_by_its_identity_not_its_line(
+    tmp_path: Path,
+) -> None:
+    """Acceptance: the key is the fact, and it survives the note moving.
+
+    A key carrying a line number or an offset would go stale the moment anybody
+    edited the file above it, and the pass holding it would re-ask a fact it had
+    already answered — the failure :func:`ciao.note_entries.entry_identity`'s
+    deliberate absence of both is buying.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        facts=(("Speaks Italian and Greek", "2024-01-05"),),
+    )
+    identity = _entry_identity(vault, "People/Sofia.md", "- Speaks Italian")
+
+    items = _entry_items(vault, guide)
+
+    assert [item.keys for item in items] == [
+        (cr.item_key(cr.PASS_STALE_ENTRY, identity),)
+    ]
+    assert items[0].weekly is False, "a fact goes stale on a clock of its own"
+    assert "Sofia" in items[0].label
+    # The reason carries the note's revision, the entry's identity and
+    # fingerprint, and the span, because those are the values a caller cannot
+    # rederive without reimplementing a hash and guessing wrong — the operation
+    # would then come back `conflict` for every entry, for ever, and an identity
+    # that is not a full 64-hex digest is a refusal before the note is opened.
+    # All three WHOLE: a truncated fingerprint is not a prefix match but a
+    # different string, and the expected revision is compared exactly.
+    from ciao import memory_receipts as mr
+    from ciao import note_entries as ne
+
+    note_text = (vault / "People/Sofia.md").read_text(encoding="utf-8")
+    entry = ne.parse_note_entries(
+        note_text,
+        note_path="People/Sofia.md",
+        workspace=vault.name,
+    ).entries[0]
+    age = (TODAY_ENTRIES - date(2024, 1, 5)).days
+    assert items[0].reason == (
+        f"entry unverified for {age}d against a 90d horizon; "
+        f"People/Sofia.md at revision {mr.content_revision(note_text)}, "
+        f"entry identity {entry.identity}, "
+        f"entry fingerprint {entry.fingerprint} at characters "
+        f"{entry.start}-{entry.end}"
+    )
+
+    # The note's own date says the note is current, so the note pass finds
+    # nothing here: this is exactly the case it cannot see.
+    assert [i for i in cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=TODAY_ENTRIES,
+    ).items if i.pass_id == cr.PASS_STALE_NOTE] == []
+
+
+def test_an_entry_survives_its_note_growing_another_fact(tmp_path: Path) -> None:
+    """The acceptance criterion's other half: the key does not go stale.
+
+    A fact inserted above the answer moves its line, its offsets and the note's
+    revision — and the same entry is still the same entry, so the run cursor
+    still suppresses it rather than planning a question that was answered.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    note = _entry_note(
+        vault,
+        "People/Sofia.md",
+        facts=(("Speaks Italian and Greek", "2024-01-05"),),
+    )
+    identity = _entry_identity(vault, "People/Sofia.md", "- Speaks Italian")
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        facts=(
+            ("Lives in Via Verdi 12", "2026-09-01"),
+            ("Speaks Italian and Greek", "2024-01-05"),
+        ),
+    )
+    assert note.read_text(encoding="utf-8") != ""
+    moved = _entry_identity(vault, "People/Sofia.md", "- Speaks Italian")
+
+    assert moved == identity
+    # The fresh fact is not work, and the stale one still is.
+    assert [item.keys[0] for item in _entry_items(vault, guide)] == [
+        cr.item_key(cr.PASS_STALE_ENTRY, identity)
+    ]
+
+
+def test_an_entry_ages_on_its_own_date_not_only_its_notes(
+    tmp_path: Path,
+) -> None:
+    """A fact with no stamp inherits the note's date; one with a stamp is its own.
+
+    Both cases, because the difference is the point: a note re-stamped yesterday
+    has silently re-certified everything in it, and an entry that was checked two
+    years ago and has not been since is still the oldest work in the vault.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        updated="2024-01-05",
+        facts=(
+            ("Lives in Via Verdi 12", ""),
+            ("Works at Acme", "2024-01-05"),
+            ("Speaks Greek", "2026-09-01"),
+        ),
+    )
+
+    items = _entry_items(vault, guide)
+
+    # The unstamped fact and the two-year-old one are both due; the freshly
+    # stamped one is not. Same note, same horizon, three different answers.
+    assert len(items) == 2
+    assert {item.label for item in items} == {
+        f"Sofia — entry {_entry_identity(vault, 'People/Sofia.md', '- Lives in')[:12]}",
+        f"Sofia — entry {_entry_identity(vault, 'People/Sofia.md', '- Works at')[:12]}",
+    }
+
+
+def _entry_fingerprint(vault: Path, relative: str) -> str:
+    from ciao import note_entries as ne
+
+    return ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace=vault.name,
+    ).entries[0].fingerprint
+
+
+def test_a_settled_entry_is_not_planned_again(tmp_path: Path) -> None:
+    """The entry pass's twin of the note pass's cooldown filter.
+
+    An `unverified` verdict writes nothing — a re-stamp is the only outcome that
+    touches the note — so without this the same bullet would be listed every
+    night, come back `already_checked`, and take the first slot for ever. The
+    predicate is the one `verify_entry` short-circuits on, so the plan cannot
+    offer an entry the operation would refuse to judge.
+    """
+    from ciao import entry_verification as ev
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        facts=(("Speaks Italian and Greek", "2024-01-05"),),
+    )
+    identity = _entry_identity(vault, "People/Sofia.md", "- Speaks Italian")
+    assert _entry_items(vault, guide), "the entry is due before it is checked"
+    ev.record_entry_check(
+        vault,
+        ev.EntryCheck(
+            identity=identity,
+            note_path="People/Sofia.md",
+            workspace=vault.name,
+            content_fingerprint=_entry_fingerprint(vault, "People/Sofia.md"),
+            outcome=ev.UNVERIFIED,
+            checked_at=TODAY_ENTRIES,
+            retry_after=TODAY_ENTRIES + timedelta(days=ev.CHECK_COOLDOWN_DAYS),
+        ),
+    )
+
+    assert _entry_items(vault, guide) == []
+
+    # A re-worded fact is due again, because the check describes the words: the
+    # fingerprint the predicate compares is the entry's, not the note's.
+    ev.record_entry_check(
+        vault,
+        replace(
+            ev.read_entry_checks(vault)[identity], content_fingerprint="b" * 64
+        ),
+    )
+    assert len(_entry_items(vault, guide)) == 1
+
+
+def test_the_entry_pass_plans_oldest_first_and_is_capped(tmp_path: Path) -> None:
+    """Acceptance: deterministic, oldest-first, capped, and it says what it left.
+
+    The cap comes after the filter and the order is a total one — age, then path,
+    then the entry's own position — so two runs over the same vault produce the
+    same list in the same order and a short budget drops the *youngest* fact
+    rather than an arbitrary one.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    # Eight notes re-stamped yesterday, each holding one fact stamped a fortnight
+    # apart since 2024: more than the cap, a total order with no ties to break by
+    # accident, and — the point of the fixture — nothing the *note* pass can see.
+    stamps = [date(2024, 1, 5) + timedelta(days=14 * index) for index in range(8)]
+    for index, stamp in enumerate(stamps):
+        _entry_note(
+            vault,
+            f"People/Note{index:02d}.md",
+            updated="2026-09-18",
+            facts=((f"Lives at number {index}", stamp.isoformat()),),
+        )
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=TODAY_ENTRIES,
+    )
+    assert [i for i in worklist.items if i.pass_id == cr.PASS_STALE_NOTE] == [], (
+        "every note was re-stamped yesterday; only the entries are work"
+    )
+    items = _entry_items(vault, guide)
+
+    # Oldest first, so the fact that has gone longest unanswered goes first.
+    assert [item.label.split(" — ")[0] for item in items] == [
+        f"Note{index:02d}" for index in range(cr.STALE_ENTRY_MAX_ITEMS)
+    ]
+    # Capped, and the cap is not passed off as the whole queue.
+    assert len(items) == cr.STALE_ENTRY_MAX_ITEMS
+    assert any("wait for the next run" in note for note in worklist.notes)
+    # And a budget of two takes the two oldest, deferring the rest whole.
+    plan = cr.plan_run(worklist, cr.RunBudget(max_items=2))
+    planned = [key for item in plan.planned for key in item.keys]
+    assert planned == [
+        cr.item_key(cr.PASS_STALE_ENTRY, _entry_identity(vault, f"People/Note{index:02d}.md", "- Lives"))
+        for index in range(2)
+    ]
+
+
+def test_an_entry_backlog_cannot_starve_the_required_hygiene_keys(
+    tmp_path: Path,
+) -> None:
+    """The acceptance criterion, at the new pass's width.
+
+    The pass sits ahead of the weekly hygiene keys and the budget is a whole-run
+    allowance, so an uncapped backlog of bullets would spend it: the two required
+    checks never reached, `last_full_pass` unable to advance, and the backlog
+    unchanged the next night. A vault with one enormous fact list is exactly the
+    one that would never get its weekly care.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    facts = tuple(
+        (f"Fact number {index} about Sofia", "2024-01-05")
+        for index in range(cr.STALE_ENTRY_MAX_ITEMS * 8)
+    )
+    _entry_note(vault, "People/Sofia.md", updated="2024-01-05", facts=facts)
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=TODAY_ENTRIES,
+    )
+    plan = cr.plan_run(worklist)
+
+    planned = {key for item in plan.planned for key in item.keys}
+    assert cr.REQUIRED_HYGIENE_KEYS <= planned
+    assert sum(
+        item.count for item in plan.planned if item.pass_id == cr.PASS_STALE_ENTRY
+    ) == cr.STALE_ENTRY_MAX_ITEMS
+    assert cr.PASS_STALE_ENTRY in cr.PASS_ORDER
+    assert cr.PASS_ORDER.index(cr.PASS_STALE_ENTRY) == (
+        cr.PASS_ORDER.index(cr.PASS_STALE_NOTE) + 1
+    )
+    assert cr.PASS_ORDER.index(cr.PASS_STALE_ENTRY) < cr.PASS_ORDER.index(
+        cr.PASS_HYGIENE
+    )
+
+
+def test_an_exempt_entry_type_is_not_work(tmp_path: Path) -> None:
+    """A `journal` is as true the day it was written, bullet or not.
+
+    And the reason it is not work is the audit's exempt set rather than a second
+    copy of it: a pass that re-decided would drift from the Memory Map's flag and
+    the review queue's signal, and the run would go and verify records that
+    cannot go stale.
+    """
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _entry_note(
+        vault,
+        "Journal/2024.md",
+        updated="2024-01-05",
+        type_="journal",
+        facts=(("Shipped the first release", ""),),
+    )
+
+    assert _entry_items(vault, guide) == []
+
+
+def test_an_entry_the_pass_cannot_read_is_not_planned(tmp_path: Path) -> None:
+    """Advisory: a note that is not there plans nothing rather than raising out of
+    `curation-begin` and costing the run its other passes."""
+    from ciao import curation_run
+
+    assert curation_run._stale_entry_items(
+        vault_root=tmp_path / "not-a-vault",
+        workspace="personal",
+        scanned=[],
+        today=TODAY_ENTRIES,
+    ) == ([], "")
+
+
+def test_the_entry_items_reason_verifies_the_entry_it_planned(tmp_path: Path) -> None:
+    """The plan's reason has to be the payload the operation needs, whole.
+
+    This is the difference between a nightly pass that verifies facts and one
+    that plans work nobody can act on. The skills tell the agent to copy the
+    reason's revision, identity and fingerprint into the payload file, and
+    :func:`ciao.entry_verification.verify_entry` compares all three *exactly* —
+    a 64-hex fingerprint compared as a string is not a prefix match but a
+    different value, an identity that is not a full 64-hex digest is a refusal
+    before the note is even opened, and a missing `expected_revision` is a
+    refusal. So the test parses the reason the pass printed and hands it to the
+    real service, which is the only way to know the plan and the operation agree
+    — and it takes the identity *out of the reason* rather than recomputing it,
+    because recomputing proves nothing about what the agent is given: the label
+    shows twelve characters and the worklist key is a digest of the identity, so
+    an agent with neither could not have built this payload.
+    """
+    import re
+
+    from types import SimpleNamespace
+
+    from ciao import entry_verification as ev
+    from ciao import note_verification as nv
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        facts=(("Speaks Italian and Greek", "2024-01-05"),),
+    )
+    items = _entry_items(vault, guide)
+    reason = items[0].reason
+
+    parsed = re.search(
+        r"(?P<note>\S+) at revision (?P<revision>[0-9a-f]{64}), entry identity "
+        r"(?P<identity>[0-9a-f]{64}), entry fingerprint "
+        r"(?P<fingerprint>[0-9a-f]{64}) at characters (?P<start>\d+)-(?P<end>\d+)",
+        reason,
+    )
+    assert parsed is not None, f"the reason does not carry a usable payload: {reason!r}"
+
+    result = ev.verify_entry(
+        ev.EntryVerificationRequest(
+            workspace=vault.name,
+            relative_path=parsed["note"],
+            identity=parsed["identity"],
+            entry_fingerprint=parsed["fingerprint"],
+            expected_revision=parsed["revision"],
+            # An `unverified` verdict: this test is about the plan handing the
+            # operation a request it can act on, not about a verdict's own rule.
+            outcome=ev.UNVERIFIED,
+            coverage=nv.COVERAGE_PARTIAL,
+            reason="planned by the stale-entry pass",
+        ),
+        vault_root=vault,
+        config=SimpleNamespace(workspace_vault_root=lambda _name: vault),
+        today=TODAY_ENTRIES,
+    )
+
+    assert result.status == ev.UNVERIFIED, result.message
+    # The identity the reason printed is the one the note holds at that span, so
+    # the identity an agent reads off the plan is the one it must hand back.
+    assert parsed["identity"] == _identity_of(
+        vault, parsed["note"], int(parsed["start"])
+    )
+    # The span the reason printed is where the entry actually is, so a caller who
+    # uses it to read the note reads the fact and not its neighbour.
+    assert int(parsed["end"]) - int(parsed["start"]) == len(
+        _entry_text_at(vault, parsed["note"], int(parsed["start"]))
+    )
+    # And nothing else in the item carries it reversibly: the label abbreviates
+    # and the key is a digest, so the reason is the only place it is whole.
+    assert parsed["identity"] not in items[0].label
+    assert parsed["identity"] not in items[0].keys[0]
+
+
+def _identity_of(vault: Path, relative: str, start: int) -> str:
+    """The identity of the entry at *start* in *relative*, as an operation is given it."""
+    from ciao import note_entries as ne
+
+    document = ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace=vault.name,
+    )
+    return next(
+        entry.identity for entry in document.entries if entry.start == start
+    )
+
+
+def _entry_text_at(vault: Path, relative: str, start: int) -> str:
+    """The entry text at *start* in *relative*."""
+    from ciao import note_entries as ne
+
+    document = ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace=vault.name,
+    )
+    return next(entry.text for entry in document.entries if entry.start == start)
+
+
+def test_the_entry_pass_mints_identities_for_the_registered_workspace(
+    tmp_path: Path,
+) -> None:
+    """A vault directory's name is not the workspace's name on every layout.
+
+    :func:`ciao.note_entries.entry_identity` digests the workspace, and every
+    operation that resolves an identity — the managed verifier, the proposal's
+    accept — asks for it under the name the *registry* knows the workspace by.
+    An install whose ``memory-vault/client-a`` holds workspace ``work`` would
+    otherwise have the pass mint identities nothing can resolve: every entry
+    returns CONFLICT, no verdict is ever filed, and the worklist key never
+    settles. So the name is passed in, and the key the pass plans is the key the
+    operation answers to.
+    """
+    from ciao import note_entries as ne
+
+    vault = tmp_path / "memory-vault" / "client-a"
+    (vault / "Workspace").mkdir(parents=True)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _entry_note(
+        vault,
+        "People/Sofia.md",
+        facts=(("Speaks Italian and Greek", "2024-01-05"),),
+    )
+    relative = "People/Sofia.md"
+
+    items = _entry_items(vault, guide, workspace="work")
+    document = ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace="work",
+    )
+    wrong = ne.parse_note_entries(
+        (vault / relative).read_text(encoding="utf-8"),
+        note_path=relative,
+        workspace=vault.name,
+    )
+    entry = document.entries[0]
+
+    assert vault.name == "client-a"
+    assert [item.keys for item in items] == [
+        (cr.item_key(cr.PASS_STALE_ENTRY, entry.identity),)
+    ]
+    assert "entry client-a" not in items[0].label, (
+        "the pass keyed the work on the directory's name, which resolves to nothing"
+    )
+    assert wrong.entries[0].identity != entry.identity
+    assert wrong.entries[0].identity not in {key for item in items for key in item.keys}
+
+
+def test_the_entry_pass_reads_the_check_state_once(tmp_path: Path) -> None:
+    """One read of the sidecar per plan, not one per due entry.
+
+    :func:`ciao.entry_verification.read_entry_checks` re-reads and re-parses the
+    whole document on every call, and the entry pass asks about *every* due entry
+    in the vault on every ``curation-begin`` — so the per-entry spelling is
+    O(entries × check-state size) for no reason, and it is the only caller that
+    does it. The batch form is the same predicate over a map read once, so this
+    pins the *count* rather than the outcome: a plan over many due entries must
+    not read the file once per entry.
+    """
+    from ciao import entry_verification as ev
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    for index in range(cr.STALE_ENTRY_MAX_ITEMS + 3):
+        _entry_note(
+            vault,
+            f"People/Note{index:02d}.md",
+            updated="2026-09-18",
+            facts=((f"Lives at number {index}", "2024-01-05"),),
+        )
+    assert len(_entry_items(vault, guide)) == cr.STALE_ENTRY_MAX_ITEMS
+
+    reads: list[Path] = []
+    original = ev.read_entry_checks
+
+    def counted(root: Path | str) -> dict[str, ev.EntryCheck]:
+        reads.append(Path(root) / cr.CURATION_LOG_RELATIVE)
+        return original(root)
+
+    monkey = ev.read_entry_checks
+    ev.read_entry_checks = counted  # type: ignore[assignment]
+    try:
+        _entry_items(vault, guide)
+    finally:
+        ev.read_entry_checks = monkey  # type: ignore[assignment]
+
+    assert len(reads) == 1, f"the sidecar was read {len(reads)} times for one plan"
