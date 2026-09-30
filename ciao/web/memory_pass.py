@@ -163,7 +163,7 @@ SKILL_REVIEW_PROMPT = (
 #: named here because a pass that only knows the owned path files a proposal
 #: against the wrong thing or files nothing: a packaged skill belongs to whoever
 #: maintains it, so the lesson becomes a ``[review]`` draft for an upstream issue
-#; and a lesson with no fitting skill at all becomes a ``[review]`` draft for a
+#: and a lesson with no fitting skill at all becomes a ``[review]`` draft for a
 #: new one, because the edit-only filer cannot name a target that does not exist
 #: and the resolver must keep refusing to.
 #:
@@ -172,24 +172,43 @@ SKILL_REVIEW_PROMPT = (
 #: of a workspace's skills a lesson applies to is the judgement, and a backend
 #: guess would be a decision about a file this section then told the model it
 #: may not edit. ``{routing}`` is the command for the two non-owned paths.
+#:
+#: **Self-contained, deliberately.** This section renders on its own — with no
+#: used owned skill, :data:`SKILL_REVIEW_PROMPT` is not in the prompt at all — and
+#: that is the case the section exists for: a lesson applying to a skill the
+#: conversation never loaded. So the owned-skill command and the ``origins`` field
+#: shape are spelled out here rather than referred to "above", where they would
+#: point at nothing in precisely the pass that most needs them. The cost is one
+#: repeated sentence when both sections do render, and the benefit is a pass that
+#: is never told to run a command it has not been given.
 LESSON_ROUTING_PROMPT = (
     "\n\nA lesson is a different kind of finding. This workspace's "
     "`Workspace/Learnings.md` holds reusable lessons, and a `/remember` of one "
     "lands in that same document, so read it before you decide a lesson has "
     "nowhere to go. A lesson applies to a skill whether or not this conversation "
-    "happened to load it, and that is a separate path from the correction-based "
-    "one above: {inventory}\n\n"
+    "happened to load it, and that is a path of its own: {inventory}\n\n"
     "An inventory match is a CANDIDATE, never proof. Read the skill's current "
     "source, and file only when you can say both why it applies to this lesson "
     "and what the conversation actually showed — the failure, the correction, or "
     "the step whose absence changed the result. If the skill already says it, "
     "file nothing: an already-covered lesson needs no proposal, and one that "
-    "repeats guidance is noise a person has to read to dismiss. Record the link "
-    "through the `origins` list described above, with the `learning_id` that "
-    "entry's own `ciao:learning` comment holds. Never record it as a `sources` "
-    "entry or a `turn` for a skill this conversation never used: that would "
-    "claim the transcript demonstrated something it did not, and a fabricated "
-    "source is worse than an unlinked finding.\n\n"
+    "repeats guidance is noise a person has to read to dismiss.\n\n"
+    "When one of those owned skills is the answer, file a proposal for it rather "
+    "than an edit. Write a JSON object to a scratch file — a `title`, a `problem` "
+    "saying what went wrong, a `change` giving the exact instruction to add or "
+    "replace, and a `rationale` — then run `ciao skill-proposal-add NAME "
+    "--input-file FILE`, where NAME is that skill's own name and there is one "
+    "file per skill. Add an `origins` list to the same object, where every entry "
+    "carries the `learning_id` that the learning's own `ciao:learning` comment in "
+    "`Workspace/Learnings.md` already holds, a `finding` naming the one specific "
+    "thing in that entry this change addresses, the `source_revision` being the "
+    "sha256 of the current `Workspace/Learnings.md` text, and a one-line "
+    "`summary` of the change. Never record it as a `sources` entry or a `turn` "
+    "for a skill this conversation never used: that would claim the transcript "
+    "demonstrated something it did not, and a fabricated source is worse than an "
+    "unlinked finding. Every one of those fields is text you read, so none of it "
+    "may travel as a shell argument, and never write into the "
+    "`Workspace/Skill-Proposals/` folder by hand.\n\n"
     "When the skill a lesson applies to is NOT this workspace's own — a packaged "
     "or mirrored copy under `.claude/skills`, a shared source, or a skill of "
     "another project — it is not yours to edit: a local edit there is discarded "

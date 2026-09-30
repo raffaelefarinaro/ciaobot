@@ -2779,6 +2779,86 @@ def test_cli_skill_draft_approve_reports_an_unknown_id(
     assert cli.main(["skill-draft-reject", "nope"]) == 1
 
 
+def _run_draft_add(capsys: pytest.CaptureFixture[str], payload: str) -> str:
+    """File a draft through the CLI and return its ``--json`` stdout."""
+    assert cli.main(["skill-draft-add", "--input-file", payload, "--json"]) == 0
+    return capsys.readouterr().out
+
+
+def test_an_unattended_run_cannot_file_create_or_settle_through_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command an automation actually shells, refused with its own exit code.
+
+    `approve_draft(unattended=...)` only refused a caller that said so, and the
+    CLI passed `False` on every path — so the flag proved nothing and a nightly
+    Workspace care run could file a public issue, create a skill, or settle a
+    draft by running the very command a person runs. Attendedness is read from
+    the run's own curation lease here, so there is nothing to pass and nothing to
+    override. The exit code is distinct from 1 because nothing failed: the
+    request was well-formed and the answer is that no reviewer is present.
+    """
+    from ciao import upstream_drafts
+    from ciao.curation_run import begin_run
+
+    reached: list[str] = []
+    monkeypatch.setattr(
+        upstream_drafts, "create_issue", lambda **kw: reached.append("create") or "u"
+    )
+    monkeypatch.setattr(
+        upstream_drafts,
+        "search_existing_issues",
+        lambda **kw: reached.append("search") or [],
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    config = _workspace_config(workspace)
+    stock = json.loads(_run_draft_add(capsys, _draft_payload(tmp_path)))["id"]
+    new = json.loads(
+        _run_draft_add(
+            capsys,
+            _draft_payload(
+                tmp_path,
+                target="new_skill",
+                skill="invoice-recon",
+                body="",
+                change="Create skills/invoice-recon with a trigger and one step.",
+            ),
+        )
+    )["id"]
+    content = tmp_path / "SKILL.md"
+    content.write_text(
+        "---\nname: invoice-recon\ndescription: Reconcile an invoice\n---\n\n"
+        "Match the invoice number first.\n",
+        encoding="utf-8",
+    )
+    begin_run(
+        Path(config.workspace_vault_root("personal")), holder="nightly:1", ttl_s=600
+    )
+
+    refused = cli.UNATTENDED_REFUSED_EXIT
+    assert cli.main(["skill-draft-approve", stock, "--json"]) == refused
+    assert "unattended" in capsys.readouterr().err
+    assert cli.main(
+        ["skill-draft-approve", new, "--content-file", str(content), "--json"]
+    ) == refused
+    capsys.readouterr()
+    assert cli.main(["skill-draft-reject", new, "--reason", "no"]) == refused
+    capsys.readouterr()
+
+    # Nothing reached GitHub, no skill was written, and both rows are still
+    # queued — which is what the run reports under "What needs you".
+    assert reached == []
+    assert not (workspace / "skills" / "invoice-recon").exists()
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["drafts"]
+    assert sorted(row["id"] for row in rows) == sorted([stock, new])
+    assert all(row["lifecycle"] == "pending" for row in rows)
+
+
+
 def _workspace_config(root: Path):
     """The config the CLI itself would build for ``root``, for a direct assertion."""
     from ciao.config import CiaoConfig

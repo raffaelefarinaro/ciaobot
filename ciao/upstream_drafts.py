@@ -29,13 +29,17 @@ the change text is what is compared.
 
 **A draft is not a filing.** :func:`file_draft` writes a record and a queue
 bullet, both local. :func:`approve_draft` is the only thing that reaches GitHub,
-and it refuses when the caller says it is unattended — the same rule the
-unattended capsule and :data:`ciao.memory_policy.UNATTENDED_DEFERRED_ACTIONS`
-already state for any public action. It **searches before it creates**: a lesson
-somebody else already reported upstream should be linked, not duplicated, and a
-retry after a network failure re-runs the search rather than filing a second
-issue for the same finding. A GitHub request that fails or comes back ambiguous
-leaves the draft exactly as it was, pending, and says why.
+and every decision here — approve, create, reject — refuses in an unattended run,
+which :func:`unattended_run` reads off the run's own curation lease rather than
+off a flag the caller passes. That is the same rule the unattended capsule and
+:data:`ciao.memory_policy.UNATTENDED_DEFERRED_ACTIONS` already state for any
+public action. It **searches before it creates**: a lesson somebody else already
+reported upstream should be linked, not duplicated, and a retry after a network
+failure re-runs the search rather than filing a second issue for the same
+finding. Both the search and the create name the same ``--repo``, because a
+dedupe that looked in a different repository than the one it writes to is not a
+dedupe. A GitHub request that fails or comes back ambiguous leaves the draft
+exactly as it was, pending, and says why.
 
 **Sanitized, and the sanitization is not optional.** A public issue body must be
 reproducible by a stranger and must not carry anything private: a verbatim
@@ -139,10 +143,24 @@ SETTLED_DRAFTS = frozenset({DRAFT_FILED, DRAFT_REJECTED})
 #: read. So an unknown key fails the entry rather than being skipped.
 _ORIGIN_FIELDS = frozenset({"learning_id", "finding", "source_revision", "summary"})
 
-#: What a public body may not contain. Each pattern is a class of private thing
+#: What an owning repository may look like. ``owner/name`` and nothing else,
+#: because this string is handed straight to ``gh`` as the target of a **public**
+#: write. A value carrying a flag, a path or a second repository would turn
+#: ``--repo`` into an argument of somebody else's choosing, and a value that is
+#: not a repository at all is a guess about a project this workspace has never
+#: seen. Refused rather than passed through.
+_REPOSITORY_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+#: What a public issue may not contain. Each pattern is a class of private thing
 #: rather than one spelling, and the check refuses the whole body rather than
 #: redacting it: a partially redacted issue is one whose author no longer knows
 #: what they published, and the local record already holds the private text.
+#:
+#: The credential patterns are deliberately broad. The old set named four vendor
+#: prefixes, which made "a credential" mean "one of the four tokens somebody has
+#: met before" — the shapes below are the generic ones: an assignment that hands
+#: a secret to a named field, an HTTP ``Authorization`` header, a PEM private
+#: key block, and a high-entropy token that is not prose.
 _PRIVATE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("a chat or archive path", re.compile(r"(?:^|[\s(])(?:logs|Chats|transcripts)/")),
     (
@@ -160,16 +178,33 @@ _PRIVATE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "a credential",
         re.compile(
-            r"\b(?:gh[pousr]_[A-Za-z0-9]{16,}|sk-[A-Za-z0-9]{16,}|"
-            r"AKIA[0-9A-Z]{16}|xox[abposr]-[A-Za-z0-9-]{10,})\b"
+            r"\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|"
+            r"glpat-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{16,}|"
+            r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|"
+            r"xox[abposr]-[A-Za-z0-9-]{10,})\b"
         ),
+    ),
+    (
+        "a secret assigned to a field",
+        re.compile(
+            r"(?i)\b(?:pass(?:wo?rd)?|passwd|secret|token|api[_-]?key|"
+            r"private[_-]?key|access[_-]?key)\b\s*[:=]\s*\S+"
+        ),
+    ),
+    (
+        "an authorization header",
+        re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{12,}"),
+    ),
+    (
+        "a private key block",
+        re.compile(r"-{3,}\s*BEGIN[ A-Z0-9]*PRIVATE KEY\s*-{3,}"),
     ),
     (
         "an email address",
         re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),
     ),
     (
-        "a home-relative placeholder",
+        "a placeholder standing in for a person",
         re.compile(
             r"<\s*(?:the\s+)?(?:user|owner|company|customer|client|account|repo)s?\b",
             re.IGNORECASE,
@@ -325,34 +360,79 @@ def queue_path(config: CiaoConfig, workspace: str) -> Path:
 # ── Sanitization ────────────────────────────────────────────────────────────
 
 
-def sanitize_lesson(text: str) -> str:
+def sanitize_lesson(text: str, field: str = "") -> str:
     """The publishable form of ``text``, or :class:`SanitizeRefused`.
 
     What a public issue may carry is a lesson a stranger can reproduce: the
     situation, the wrong result, and the instruction that would have avoided it.
     What it may not carry is this workspace's private material, and the patterns
-    are checked against the whole body rather than redacted out of it — a body
-    that needed editing is a body whose author would have to guess what was
-    published, and the private text is kept in
+    are checked against the whole text rather than redacted out of it — text
+    that needed editing is text whose author would have to guess what was
+    published, and the private wording is kept in
     :attr:`UpstreamDraft.private_evidence` regardless.
 
+    The same gate runs over the title, the skill name and the version, because
+    every one of them reaches ``gh issue create`` as an argument and a title is
+    as public as a body. ``field`` names which one is being checked, because the
+    caller is a model that can only fix what it is told.
+
     Raises :class:`SanitizeRefused` naming the first pattern matched, with the
-    body left untouched for the caller to rephrase. Nothing is sent anywhere by
+    text left untouched for the caller to rephrase. Nothing is sent anywhere by
     this function; it is a gate, not a filter.
     """
+    where = f"{field} " if field else ""
     body = text.strip()
     if not body:
-        raise SanitizeRefused("the lesson body is empty: an issue with no body is not a report")
+        raise SanitizeRefused(
+            f"the {where}lesson body is empty: an issue with no body is not a report"
+        )
     for label, pattern in _PRIVATE_PATTERNS:
         match = pattern.search(body)
         if match is not None:
             raise SanitizeRefused(
-                f"the lesson body carries {label} ({match.group(0).strip()!r}); a "
-                "public issue must be reproducible from the instruction alone. "
-                "Rephrase it without the private part and file that — the local "
-                "record keeps the private evidence either way"
+                f"the {where}lesson body carries {label} "
+                f"({match.group(0).strip()!r}); a public issue must be "
+                "reproducible from the instruction alone. Rephrase it without "
+                "the private part and file that — the local record keeps the "
+                "private evidence either way"
             )
     return body
+
+
+def _sanitized_field(value: str, field: str, *, required: bool = False) -> str:
+    """One draft field, checked by the same gate as the body.
+
+    Every field here is an argument to ``gh issue create``, so a name or a
+    version carrying one is as much of a leak as a paragraph that does. An
+    optional field that is blank stays blank: a draft that could not identify a
+    version says so rather than inventing one.
+    """
+    if not value.strip():
+        if required:
+            raise DraftRefused(f"a draft needs a non-empty {field}")
+        return ""
+    return sanitize_lesson(value, field)
+
+
+def _checked_repository(value: str) -> str:
+    """``owner/name`` or a refusal, because ``--repo`` is where a public write goes.
+
+    An unidentifiable owner is an attended question the plan says to ask rather
+    than answer here, and a shape that is not a repository at all is worse than
+    none: ``gh`` would take the next argument, or default to the directory the
+    command happened to run in, and both are a guess about somebody else's
+    project.
+    """
+    repository = value.strip()
+    if not repository:
+        return ""
+    if not _REPOSITORY_RE.match(repository):
+        raise DraftRefused(
+            f"{repository!r} is not an owning repository: it must be owner/name, "
+            "with no path, flag or second repository in it. Leave it empty and "
+            "the draft stays pending rather than guessing a public target"
+        )
+    return repository
 
 
 # ── Filing ──────────────────────────────────────────────────────────────────
@@ -383,14 +463,20 @@ def file_draft(
     re-filing of a rejected change is refused by name rather than silently
     reopening.
 
-    ``body`` is validated with :func:`sanitize_lesson` when there is one. A draft
-    with no body is a new-skill proposal, whose whole point is that the
-    instruction is not a public artifact yet.
+    ``body`` is validated with :func:`sanitize_lesson` when there is one, and so
+    are ``title``, ``skill`` and ``version`` — every one of them is an argument
+    to ``gh issue create``, so a title is as public as a body. ``repository`` is
+    shape-checked rather than sanitized: it has to be ``owner/name`` or it is not
+    a repository. A draft with no body is a new-skill proposal, whose whole point
+    is that the instruction is not a public artifact yet.
 
     A record that is gone but whose decision survives in the sidecar is written
-    back *settled*, for the reason :func:`decided_with` gives: the sidecar is
-    what outlives the row, and a rejection a person gave is exactly the answer
-    the next pass must not re-ask.
+    back *settled*, with the lifecycle and URL the decision row records, for the
+    reason :func:`decision_row` gives: the sidecar is what outlives the row, and
+    a rejection a person gave is exactly the answer the next pass must not
+    re-ask. A ``filed`` row is restored as ``filed`` — reconstructing it as
+    rejected would turn "we reported this upstream" into "a person turned it
+    down", which is the one answer that must never be invented.
 
     The bullet is appended only when the record is not already queued, and the
     append is a no-op for a queue that already holds the identical bullet — so a
@@ -401,17 +487,17 @@ def file_draft(
         raise DraftRefused(
             f"unknown draft target {target!r}: expected one of {', '.join(TARGETS)}"
         )
-    if not skill.strip():
-        raise DraftRefused("a draft names the skill it is about; the name is empty")
-    if not title.strip():
-        raise DraftRefused("a draft needs a title a person can triage by")
     if not change.strip():
         raise DraftRefused(
             "a draft needs the change it proposes: without it there is nothing to "
             "approve, file or create"
         )
+    skill = _sanitized_field(skill, "skill name", required=True)
+    title = _sanitized_field(title, "title", required=True)
+    version = _sanitized_field(version, "version")
     if body:
         body = sanitize_lesson(body)
+    repository = _checked_repository(repository)
     links = _validated_origins(origins)
     identity = draft_id(workspace, target, skill, change)
 
@@ -422,26 +508,36 @@ def file_draft(
             id=identity,
             workspace=workspace,
             target=target,
-            skill=skill.strip(),
-            title=title.strip(),
+            skill=skill,
+            title=title,
             body=body,
             change=change.strip(),
-            repository=repository.strip(),
-            version=version.strip(),
+            repository=repository,
+            version=version,
             private_evidence=private_evidence.strip(),
             origins=links,
         )
-        if existing is None and decided_with(config, workspace, identity):
+        decision = (
+            None if existing is not None else decision_row(config, workspace, identity)
+        )
+        if decision is not None:
             # The record is gone but the decision is not: a settled draft whose
             # sidecar somebody deleted would otherwise be re-queued by the next
             # pass, and a rejection a person gave is exactly the thing that must
-            # not come back. So the record is written settled, and the evidence
-            # this pass brought is added to it rather than re-asked.
+            # not come back. So the record is written settled — as the lifecycle
+            # the decision row recorded, not as a guess — and the evidence this
+            # pass brought is added to it rather than re-asked.
+            filed = str(decision.get("action", "")) == "accepted"
+            lifecycle = DRAFT_FILED if filed else DRAFT_REJECTED
             incoming = replace(
                 incoming,
-                lifecycle=DRAFT_REJECTED,
-                reason="reconstructed from the decision sidecar: the record was "
-                "deleted after it was decided",
+                lifecycle=lifecycle,
+                issue_url=str(decision.get("destination") or ""),
+                reason=(
+                    "reconstructed from the decision sidecar: the record was "
+                    f"deleted after it was decided — restored as {lifecycle}, the "
+                    "answer the decision row recorded"
+                ),
             )
             merged = incoming
         else:
@@ -751,8 +847,8 @@ def _run_gh(args: Sequence[str], timeout: float = 30.0) -> str:
     return completed.stdout
 
 
-def search_existing_issues(*, title: str, body: str) -> list[str]:
-    """The URLs of open upstream issues that already look like this change.
+def search_existing_issues(*, title: str, body: str, repository: str) -> list[str]:
+    """The URLs of open upstream issues in ``repository`` that already look like this.
 
     The search is deliberately narrow — the title's distinctive words, in the
     issue list — because a wide query that returns several plausible hits is
@@ -760,6 +856,13 @@ def search_existing_issues(*, title: str, body: str) -> list[str]:
     at. An empty list means "nothing found", not "nothing exists": a repository
     the operator cannot read looks identical from here, and creating a duplicate
     in a private fork is the outcome the search is there to prevent.
+
+    ``repository`` is passed as ``--repo`` for the same reason the create does.
+    A search left to ``gh``'s default looks in the repository of the current
+    directory, so it dedupes against somewhere the filing never goes: a retry
+    after a create that succeeded but failed to settle finds nothing and opens a
+    second issue for one finding. The two calls naming different repositories is
+    the whole failure, so the parameter is required rather than optional.
 
     Raises ``OSError`` when ``gh`` could not be reached or refused, which
     :func:`approve_draft` turns into a pending hold rather than a filing.
@@ -771,6 +874,8 @@ def search_existing_issues(*, title: str, body: str) -> list[str]:
     stdout = _run_gh([
         "issue",
         "list",
+        "--repo",
+        repository,
         "--state",
         "open",
         "--search",
@@ -793,21 +898,87 @@ def search_existing_issues(*, title: str, body: str) -> list[str]:
     ]
 
 
-def create_issue(*, title: str, body: str, repository: str = "") -> str:
-    """Create one upstream issue and return its URL.
+def create_issue(*, title: str, body: str, repository: str) -> str:
+    """Create one upstream issue in ``repository`` and return its URL.
 
-    ``repository`` is passed through only when the draft named one. Guessing a
-    public repository is exactly what the plan forbids, so an empty value means
-    ``gh``'s own default target (the repository of the current directory), and
-    the attended caller is the one that has to be standing there.
+    ``repository`` is always passed through as ``--repo``. Guessing a public
+    repository is what the plan forbids, and ``gh``'s own default for an empty
+    value is the repository of the current directory — which is exactly that
+    guess, made by a subprocess nobody chose. An empty value is therefore
+    refused, and :func:`approve_draft` holds the draft pending before it gets
+    here rather than letting a refusal be the answer.
     """
-    args = ["issue", "create", "--title", title, "--body", body]
-    if repository.strip():
-        args += ["--repo", repository.strip()]
-    return _run_gh(args).strip()
+    if not repository.strip():
+        raise DraftRefused(
+            "an upstream issue needs an owning repository as owner/name; the "
+            "draft named none, and `gh` would otherwise file it in whatever "
+            "repository the current directory happens to be"
+        )
+    return _run_gh([
+        "issue",
+        "create",
+        "--repo",
+        repository.strip(),
+        "--title",
+        title,
+        "--body",
+        body,
+    ]).strip()
 
 
 # ── Decisions ───────────────────────────────────────────────────────────────
+
+
+def unattended_run(config: CiaoConfig, workspace: str) -> str:
+    """The unattended run working on ``workspace``'s vault, or ``""``.
+
+    **Read from the run, never from a flag the caller passes.** A caller-supplied
+    ``unattended=`` only proves the caller read its own argument: the CLI passed
+    ``False`` on every path, so the parameter was a comment rather than a
+    control. The run's own curation lease is the one thing that cannot be
+    forgotten — ``ciao curation-begin`` takes it before the Workspace care run
+    reads a single file and ``ciao curation-end`` releases it, so a live lease
+    means an automation is mid-run on this very vault, and no attended person is
+    in the room to approve anything.
+
+    Empty for a workspace that cannot resolve its vault: an unanswerable question
+    is not an unattended run, and refusing on a guess would block a person from
+    deciding their own draft.
+    """
+    from ciao.curation_run import active_lease
+
+    try:
+        vault = Path(config.workspace_vault_root(workspace))
+    except (AttributeError, ValueError):  # pragma: no cover - config guard
+        return ""
+    try:
+        lease = active_lease(vault)
+    except OSError:  # pragma: no cover - an unreadable state file decides nothing
+        logger.debug("Could not read the curation state of %s", vault, exc_info=True)
+        return ""
+    if not lease:
+        return ""
+    return str(lease.get("holder") or "an unattended run")
+
+
+def _refuse_if_unattended(config: CiaoConfig, workspace: str, action: str) -> None:
+    """Raise :class:`UnattendedRefused` when a run holds this vault's lease.
+
+    One place, called by every decision here, because the three of them reach
+    three different things — GitHub, a skill file, and the decision log — and a
+    rule kept three times is a rule that drifts. The refusal happens before
+    anything is read or written, so an unattended caller cannot half-file and
+    then discover it was unattended.
+    """
+    holder = unattended_run(config, workspace)
+    if not holder:
+        return
+    raise UnattendedRefused(
+        f"{action} is an attended action, and the unattended run {holder!r} holds "
+        "this vault's curation lease. An unattended run may prepare the draft and "
+        "report it under **What needs you**; a person approves the filing, and "
+        "the draft stays queued for them"
+    )
 
 
 def approve_draft(
@@ -821,19 +992,28 @@ def approve_draft(
 ) -> UpstreamDraft | None:
     """Act on an approved draft: link a matching issue, or file a new one.
 
-    **Attended only.** ``unattended=True`` raises :class:`UnattendedRefused`
-    before anything is read or written. Opening a public issue is already
+    **Attended only**, twice over. ``unattended=True`` raises
+    :class:`UnattendedRefused` for a caller that already knows it is
+    unattended, and so does an unattended run discovered from the vault's
+    curation lease (:func:`_refuse_if_unattended`) — the check a CLI cannot opt
+    out of, because it never supplies the flag. Opening a public issue is already
     :data:`ciao.memory_policy.UNATTENDED_DEFERRED_ACTIONS`, and an unattended run
     that prepares the draft is the whole of what it may do — so the enforcement
     belongs here, where the request would be made, and not in a prompt nobody
     reads.
 
-    **Search before create.** :func:`search_existing_issues` is asked first and
-    a hit is *linked*, not duplicated: a lesson somebody else already reported
+    **Search before create, in the same repository.** :func:`search_existing_issues`
+    is asked first, against the repository the issue would be filed in, and a
+    hit is *linked*, not duplicated: a lesson somebody else already reported
     upstream needs a link, not a second issue saying the same thing. Only when
     the search returns nothing is :func:`create_issue` called, and the URL it
     returns is recorded on the record, so a retry — or a person asking six weeks
     later — can see what was actually published.
+
+    A draft that named no owning repository is held, not filed. ``gh``'s own
+    default for a missing ``--repo`` is the repository of the current directory,
+    and a public issue in a repository nobody identified is not a decision this
+    code may make.
 
     A ``gh`` failure or an ambiguous result returns the draft **unchanged and
     still pending**, with the reason recorded, because "we could not reach
@@ -865,6 +1045,9 @@ def approve_draft(
                 "is not re-filed"
             )
         return None
+    _refuse_if_unattended(
+        config, draft.workspace, "opening or commenting on a public GitHub issue"
+    )
     if draft.target != UPSTREAM_ISSUE:
         raise DraftRefused(
             f"draft {draft_id} proposes a {draft.target}, not an upstream issue: "
@@ -872,11 +1055,25 @@ def approve_draft(
             "before the row is settled"
         )
     body = sanitize_lesson(draft.body)
-    title = draft.title.strip()
-    if not title:
+    if not draft.title.strip():
         raise DraftRefused(f"draft {draft_id} has no title to file an issue under")
+    title = sanitize_lesson(draft.title, "title")
+    repository = _checked_repository(draft.repository)
+    if not repository:
+        return _hold(
+            config,
+            draft,
+            DRAFT_PENDING,
+            reason=(
+                "owning repository not identified, so nothing was filed: this "
+                "draft names no `owner/name` for the packaged skill and `gh` "
+                "would otherwise open the issue in whatever repository the "
+                "current directory happens to be. Name the repository in an "
+                "attended turn, or file the issue by hand"
+            ),
+        )
 
-    hits = search(title=title, body=body)
+    hits = search(title=title, body=body, repository=repository)
     if len(hits) > 1:
         # Ambiguous on purpose. Two issues that both look like this finding means
         # this code cannot say which one is the match, and picking either would
@@ -899,7 +1096,7 @@ def approve_draft(
             reason=reason or "linked to the existing upstream issue",
         )
     try:
-        url = create(title=title, body=body, repository=draft.repository)
+        url = create(title=title, body=body, repository=repository)
     except OSError as exc:
         return _hold(
             config,
@@ -926,13 +1123,17 @@ def reject_draft(
     A rejection is the one answer that retires a finding without touching a
     file, and it is deliberately a person-only step: the unattended rule says a
     run that cannot ask must defer, and "this does not look worth filing" is a
-    judgement about somebody else's repository. Once rejected, the change is not
-    re-offered — :func:`file_draft` keeps a settled record settled and
-    :func:`approve_draft` refuses it by name.
+    judgement about somebody else's repository. It settles exactly as an
+    approval does, so it is guarded the same way — by the run, not by a flag:
+    an unattended run that could reject would archive an unanswered question as
+    an answer, and the finding would never be offered again. Once rejected, the
+    change is not re-offered — :func:`file_draft` keeps a settled record settled
+    and :func:`approve_draft` refuses it by name.
     """
     draft = find_draft(config, draft_id)
     if draft is None:
         return None
+    _refuse_if_unattended(config, draft.workspace, "settling a skill draft")
     return _settle(config, draft, DRAFT_REJECTED, reason=reason, via=via)
 
 
@@ -999,6 +1200,13 @@ def _record_decision(
     ``skill-draft:<id>`` text: a routing decision about a lesson is not a
     remembered fact, and two queues writing the same wording would let one
     dismiss the other's rows.
+
+    ``destination`` carries what the decision produced — the issue URL, or the
+    path of a created skill. It is not decoration: a record may be deleted while
+    its decision lives on (that is the whole point of writing the decision
+    first), and :func:`file_draft`'s reconstruction is only able to bring a
+    ``filed`` row back as ``filed``, with its URL, because the URL is here rather
+    than only on the file somebody deleted.
     """
     record = record_promotion if draft.lifecycle == DRAFT_FILED else record_dismissal
     decisions = queue_path(config, draft.workspace)
@@ -1008,6 +1216,7 @@ def _record_decision(
             text=decision_text(draft.id),
             kind="skill",
             via=via,
+            destination=draft.issue_url,
             outcome=draft.reason,
             proposal_id=draft.id,
             learning_id=origin.get("learning_id", "") if origin else "",
@@ -1037,21 +1246,39 @@ def _remove_bullet(config: CiaoConfig, draft: UpstreamDraft) -> None:
         logger.exception("Could not clear draft %s from %s", draft.id, path)
 
 
-def decided_with(config: CiaoConfig, workspace: str, draft_id: str) -> bool:
-    """Whether the decisions sidecar already records a decision for this draft.
+def decision_row(
+    config: CiaoConfig, workspace: str, draft_id: str
+) -> dict[str, Any] | None:
+    """The decision sidecar's own row for this draft, or ``None``.
 
     Read through :func:`ciao.memory_proposals.read_decisions` rather than
     ``was_dismissed``, for the reason :mod:`ciao.skill_proposals` gives: that
     helper gives up on a workspace with no ``Memory-Proposals.md`` yet, which is
     exactly the install where a draft is the only thing in the queue and the
     decision would then be invisible to the pass that must honour it.
+
+    The last row wins. A draft is decided once, and the append-only log keeps a
+    re-decision of the same text — which the next ``file_draft`` folds into the
+    settled record — as a later row, so the newest is the one standing.
+
+    The row is the answer, not just proof that one exists: ``action`` says which
+    way it went and ``destination`` carries what it produced, so a record deleted
+    after it was *filed* is reconstructed as filed rather than guessed at.
     """
     wanted = decision_text(draft_id)
     try:
         rows = read_decisions(queue_path(config, workspace))
     except OSError:  # pragma: no cover - an unreadable sidecar decides nothing
-        return False
-    return any(row.get("text") == wanted for row in rows)
+        return None
+    for row in reversed(rows):
+        if row.get("text") == wanted:
+            return dict(row)
+    return None
+
+
+def decided_with(config: CiaoConfig, workspace: str, draft_id: str) -> bool:
+    """Whether the decisions sidecar already records a decision for this draft."""
+    return decision_row(config, workspace, draft_id) is not None
 
 
 # ── New-skill creation ──────────────────────────────────────────────────────
@@ -1070,7 +1297,12 @@ def create_new_skill(
     from :func:`approve_draft` on purpose: an issue filed upstream is a thing
     that happened, while a skill created locally is a file somebody's next
     session will load, so the row is only settled once the creation is **read
-    back and checked**.
+    back, checked and synced**.
+
+    **Attended only**, on the same run-derived signal as an issue filing
+    (:func:`_refuse_if_unattended`): creating a skill writes a file every
+    session of this workspace loads, which is the other half of the same
+    "never unattended" rule.
 
     The checks, in order, and what each is for:
 
@@ -1082,12 +1314,18 @@ def create_new_skill(
     2. The readback is the resolver's, so the caller holds a revision of the
        bytes that are actually on disk rather than of the text it submitted.
     3. ``sync`` is called, because a skill that exists only in ``skills/`` is not
-       a skill the providers can see. It is last and its failure is honest:
-       the creation stands, and the row says the sync did not finish.
+       a skill the providers can see. It is last, and **the row settles only
+       once it succeeds**: a failed sync left the row ``filed`` while no provider
+       could see the skill, so the record read as verified and the one person
+       who could have fixed it had nothing to do. It stays pending with the
+       reason on it, and a re-approve resumes — a file already holding exactly
+       the submitted content is the previous attempt's own creation, so the
+       creation is skipped and only the sync re-runs.
 
-    A refusal raises and settles nothing. A successful creation settles the row
-    ``filed`` — the local word for "the thing this row proposed now exists" — with
-    the created path as its URL, so the record and the vault cannot disagree.
+    A refusal raises and settles nothing. A created, synced skill settles the row
+    ``filed`` — the local word for "the thing this row proposed now exists" —
+    with the created path as its URL, so the record and the vault cannot
+    disagree.
     """
     from ciao.skills_inventory import MAX_SKILL_BYTES, create_owned_skill
 
@@ -1101,30 +1339,83 @@ def create_new_skill(
                 "is not re-created"
             )
         return None
+    _refuse_if_unattended(config, draft.workspace, "creating a skill")
     if draft.target != NEW_SKILL:
         raise DraftRefused(
             f"draft {draft_id} proposes an upstream issue, not a new skill: "
             "approve it to file the issue"
         )
 
-    created = create_owned_skill(config, draft.workspace, draft.skill, content)
-    note = f"created skills/{created.skill.name}/SKILL.md"
-    if created.over_budget:
-        note += (
-            f"; it is {len(created.skill.content.encode('utf-8'))} bytes, over the "
-            f"{MAX_SKILL_BYTES}-byte budget every load pays, so it is worth trimming"
+    resumed = _previous_creation(config, draft.workspace, draft.skill, content)
+    if resumed is None:
+        created = create_owned_skill(config, draft.workspace, draft.skill, content)
+        path = str(created.skill.path)
+        note = f"created skills/{created.skill.name}/SKILL.md"
+    else:
+        path = resumed
+        note = (
+            f"skills/{draft.skill}/SKILL.md already holds exactly the submitted "
+            "content, so the creation was skipped and only the sync re-ran"
         )
-    synced = _sync_after_create(config, draft.workspace, sync)
-    if not synced:
-        note += "; the sync did not complete, so a provider may not see it yet"
+    # Measured from the submitted bytes rather than from the readback, so a
+    # resume reports the budget exactly as the first attempt did. The byte count
+    # is `content`'s because `create_owned_skill` writes exactly those bytes and
+    # the readback resolves them unchanged.
+    size = len(content.encode("utf-8"))
+    if size > MAX_SKILL_BYTES:
+        note += (
+            f"; it is {size} bytes, over the {MAX_SKILL_BYTES}-byte budget every "
+            "load pays, so it is worth trimming"
+        )
+    if not _sync_after_create(config, draft.workspace, sync):
+        return _hold(
+            config,
+            draft,
+            DRAFT_PENDING,
+            reason=(
+                f"{note}; the sync did not complete, so a provider may not see it "
+                "yet. Nothing is lost: re-approve this draft to run the sync "
+                "again, and it settles only once the sync succeeds"
+            ),
+        )
     return _settle(
         config,
         draft,
         DRAFT_FILED,
-        issue_url=str(created.skill.path),
+        issue_url=path,
         reason=note,
         via="new-skill",
     )
+
+
+def _previous_creation(
+    config: CiaoConfig, workspace: str, name: str, content: str
+) -> str | None:
+    """The path of a creation a previous attempt already made, or ``None``.
+
+    A failed sync leaves the file on disk, and
+    :func:`ciao.skills_inventory.create_owned_skill` refuses a name that exists
+    — so without this the resume the record invites could not be taken. Only
+    *exactly* the submitted content counts: a different file at that name is
+    somebody's own source, and overwriting it is the edit a creation may not be.
+
+    ``None`` for anything that is not a readable file holding those bytes, so
+    the caller falls through to the creation path and takes the collision
+    refusal — which names the collision, rather than this quietly deciding the
+    name is free.
+    """
+    try:
+        root = config.agent_root(workspace)
+    except (AttributeError, ValueError):  # pragma: no cover - config guard
+        return None
+    path = root / "skills" / name / "SKILL.md"
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        existing = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    return str(path) if existing == content else None
 
 
 def _sync_after_create(
@@ -1134,8 +1425,9 @@ def _sync_after_create(
 
     A failure here is not a reason to un-create the file: the skill is on disk
     and the next sync will pick it up. So the return is a bool the caller turns
-    into a sentence on the record, not an exception that would leave a created
-    skill with an open row nobody can explain.
+    into a pending hold rather than an exception that would leave a created
+    skill with an open row nobody can explain — and the row stays open because a
+    skill no provider can load is not the thing this row proposed.
 
     The sync's own progress lines are captured rather than forwarded. It is a
     CLI-shaped function that prints, and the command calling it has a contract

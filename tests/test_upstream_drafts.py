@@ -91,7 +91,9 @@ class _Github:
 
     ``hits`` is what the search returns and ``raise_on_create`` is how a network
     failure is simulated. ``created`` records every call, so a test can assert
-    that a retry did not open a second issue.
+    that a retry did not open a second issue, and ``searched_in`` records the
+    repository each search was aimed at, so a test can assert the dedupe looked
+    where the filing goes.
     """
 
     def __init__(
@@ -107,11 +109,13 @@ class _Github:
         self.raise_on_create = raise_on_create
         self.raise_on_search = raise_on_search
         self.searches: list[str] = []
+        self.searched_in: list[str] = []
         self.created: list[tuple[str, str, str]] = []
 
-    def search(self, *, title: str, body: str) -> list[str]:
+    def search(self, *, title: str, body: str, repository: str = "") -> list[str]:
         del body
         self.searches.append(title)
+        self.searched_in.append(repository)
         if self.raise_on_search is not None:
             raise self.raise_on_search
         return list(self.hits)
@@ -306,8 +310,14 @@ def test_a_learning_link_round_trips_through_the_sidecar(tmp_path: Path) -> None
         ("an absolute home path", "It lives at /Users/someone/skills/web-research/SKILL.md"),
         ("a transcript excerpt marker", "The user said, turn 12, that it always times out"),
         ("a credential", "The config carries ghp_abcdefghijklmnopqrst in the env"),
+        ("a credential", "The env holds github_pat_11ABCDEFG0abcdefghijklmnop in CI"),
+        ("a credential", "The token is glpat-ABCDEFGHIJKLMNOPQRST in the job log"),
+        ("a secret assigned to a field", "The README says password=hunter2isnotsafe"),
+        ("a secret assigned to a field", "api_key: 'zzz-not-in-the-repo-either'"),
+        ("an authorization header", "The dump showed `Authorization: Bearer abcdef0123456789z`"),
+        ("a private key block", "Pasted -----BEGIN OPENSSH PRIVATE KEY----- into the log"),
         ("an email address", "Reported by the maintainer at maintainer@example.org"),
-        ("a home-relative placeholder", "The <user> asked for a retry"),
+        ("a placeholder standing in for a person", "The <user> asked for a retry"),
     ],
 )
 def test_a_body_carrying_something_private_is_refused(label: str, body: str) -> None:
@@ -316,6 +326,10 @@ def test_a_body_carrying_something_private_is_refused(label: str, body: str) -> 
     A partially redacted issue is one whose author no longer knows what they
     published, so the whole body fails and the caller keeps the private text in
     `private_evidence` and files a rephrased one.
+
+    The credential rows are deliberately several *shapes* rather than several
+    vendor prefixes: naming four tokens somebody has met before made "a
+    credential" mean those four, and every other secret walked straight through.
     """
     with pytest.raises(SanitizeRefused, match=re.escape(label)):
         sanitize_lesson(body)
@@ -352,6 +366,85 @@ def test_an_empty_body_is_refused(tmp_path: Path) -> None:
         file_draft(config, "work", **_stock_draft(body="   "))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("title", "Fix the fetch timeout reported at /Users/someone/work"),
+        ("title", "Reconcile the invoice maintainer@example.org complained about"),
+        ("version", "1.4.0 (built from logs/Chats/abc)"),
+        ("skill", "/Users/someone/skills/web-research"),
+    ],
+)
+def test_a_field_that_reaches_gh_is_sanitized_too(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """A title is as public as a body, and the gate used to skip it.
+
+    `sanitize_lesson` ran on `body` only, so `title`, `skill` and `version` went
+    straight into `gh issue create --title` with the private-pattern check never
+    applied: a path, a name or a token in a title published exactly as loudly as
+    one in a paragraph, and the refusal everyone relied on did not fire.
+    """
+    config = _config(tmp_path, "work")
+    with pytest.raises(SanitizeRefused, match=field):
+        file_draft(config, "work", **_stock_draft(**{field: value}))
+    assert read_records(config, "work") == []
+
+
+def test_a_private_title_is_never_written_at_all(tmp_path: Path) -> None:
+    """The refusal is at the door, so nothing reaches the record either.
+
+    A title is what the review queue shows a person deciding whether to approve
+    a *public* issue, so a leaking one has to fail at filing rather than be
+    caught later by whoever reads the queue.
+    """
+    config = _config(tmp_path, "work")
+    with pytest.raises(SanitizeRefused, match="title"):
+        file_draft(
+            config,
+            "work",
+            **_stock_draft(
+                title="Reproduce the failure from turn 12 of the support chat"
+            ),
+        )
+    assert read_records(config, "work") == []
+    assert not upstream_drafts.queue_path(config, "work").exists()
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "example/tools --repo other/repo",
+        "/srv/git/example/tools",
+        "example",
+        "https://github.com/example/tools",
+        "../../etc",
+    ],
+)
+def test_an_owning_repository_that_is_not_one_is_refused(
+    tmp_path: Path, repository: str
+) -> None:
+    """`--repo` is where a public write goes, so its shape is checked at the door.
+
+    An unidentifiable owner is an attended question the plan says to ask rather
+    than answer here. A value that is not a repository at all is worse than
+    none: `gh` would take the next argument, or fall back to the directory the
+    command ran in, and both are a guess about somebody else's project.
+    """
+    config = _config(tmp_path, "work")
+    with pytest.raises(DraftRefused, match="owning repository"):
+        file_draft(config, "work", **_stock_draft(repository=repository))
+    assert read_records(config, "work") == []
+
+
+def test_an_unidentifiable_repository_is_stored_empty_not_guessed(tmp_path: Path) -> None:
+    """Empty is a legitimate value: the plan says to say so rather than guess."""
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft(repository="  "))
+    assert draft.repository == ""
+    assert draft.lifecycle == DRAFT_PENDING
+
+
 # ── Approval ────────────────────────────────────────────────────────────────
 
 
@@ -383,6 +476,84 @@ def test_an_unattended_run_cannot_file(tmp_path: Path) -> None:
     assert [d.id for d in read_queue(config, "work")] == [draft.id]
 
 
+def _lease_the_vault(config: CiaoConfig, workspace: str) -> str:
+    """Take the curation lease the unattended Workspace care run holds."""
+    from ciao.curation_run import begin_run
+
+    lease = begin_run(
+        Path(config.workspace_vault_root(workspace)),
+        holder="nightly:1",
+        ttl_s=600,
+    )
+    return str(lease.holder)
+
+
+def test_the_unattended_guard_is_read_off_the_run_not_a_caller_flag(tmp_path: Path) -> None:
+    """The guard nobody can forget, because nobody supplies it.
+
+    A caller-supplied `unattended=` only proves the caller read its own
+    argument — and the CLI passed `False` on every path, so the parameter was a
+    comment rather than a control. The curation lease is the run's own state: a
+    live one means an automation is working on this very vault with nobody in the
+    room, which is exactly what the deferral is about.
+    """
+    config = _config(tmp_path, "work")
+    assert upstream_drafts.unattended_run(config, "work") == ""
+    _lease_the_vault(config, "work")
+    assert upstream_drafts.unattended_run(config, "work") == "nightly:1"
+
+
+def test_an_unattended_run_cannot_file_create_or_settle(tmp_path: Path) -> None:
+    """All three decisions, refused from the run's own state.
+
+    An issue filing is public, a skill creation writes a file every session
+    loads, and a settlement is the answer a person owes. One run reaches all
+    three through the same `ciao skill-draft-approve` / `skill-draft-reject`, so
+    a guard on only one of them is a guard the run routes around by picking the
+    other verb.
+    """
+    config = _config(tmp_path, "work")
+    stock = file_draft(config, "work", **_stock_draft())
+    new = file_draft(config, "work", **_new_skill_payload(tmp_path))
+    github = _Github()
+    _lease_the_vault(config, "work")
+
+    with pytest.raises(UnattendedRefused, match="unattended run"):
+        approve_draft(config, stock.id, search=github.search, create=github.create)
+    with pytest.raises(UnattendedRefused, match="unattended run"):
+        create_new_skill(
+            config, new.id, content=_skill_text("invoice-recon"), sync=lambda: None
+        )
+    with pytest.raises(UnattendedRefused, match="unattended run"):
+        reject_draft(config, new.id, reason="not worth it")
+
+    assert github.created == [] and github.searches == []
+    assert not (config.agent_root("work") / "skills" / "invoice-recon").exists()
+    # Nothing settled: both rows are still queued, for the person to decide.
+    assert [d.id for d in read_queue(config, "work")] == sorted([stock.id, new.id])
+
+
+def test_a_released_lease_makes_the_decision_attended_again(tmp_path: Path) -> None:
+    """A person is not locked out by a run that has finished.
+
+    `curation-end` releases the lease, so the guard is scoped to the run rather
+    than to the vault: a decision made after the nightly pass closed is an
+    attended one, and refusing it would make the draft un-actionable until the
+    next run happened to leave a window.
+    """
+    from ciao.curation_run import end_run
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft())
+    _lease_the_vault(config, "work")
+    end_run(Path(config.workspace_vault_root("work")), holder="nightly:1")
+
+    github = _Github()
+    stored = approve_draft(config, draft.id, search=github.search, create=github.create)
+
+    assert stored is not None and stored.lifecycle == DRAFT_FILED
+
+
 def test_approval_searches_before_it_creates(tmp_path: Path) -> None:
     """One matching open issue is linked, not duplicated."""
     config = _config(tmp_path, "work")
@@ -398,6 +569,77 @@ def test_approval_searches_before_it_creates(tmp_path: Path) -> None:
     assert stored.issue_url == "https://github.com/example/tools/issues/3"
     assert github.searches == [draft.title]
     assert github.created == []
+
+
+def test_the_dedupe_looks_in_the_repository_the_issue_would_go_to(
+    tmp_path: Path,
+) -> None:
+    """The two `gh` calls name the same `--repo`, or the dedupe is not one.
+
+    `search_existing_issues` used to pass no `--repo` at all, so `gh` searched the
+    repository of the current directory while the create named the draft's. The
+    consequence was not a slow search but a broken guarantee: a retry after a
+    create that succeeded and failed to settle found nothing in the target repo
+    and opened a second issue for one finding — which is the whole thing the
+    search exists to prevent.
+    """
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft(repository="other/tools"))
+    github = _Github()
+
+    approve_draft(config, draft.id, search=github.search, create=github.create)
+
+    assert github.searched_in == ["other/tools"]
+    assert [repository for _title, _body, repository in github.created] == [
+        "other/tools"
+    ]
+
+
+def test_a_draft_with_no_owning_repository_files_nothing(tmp_path: Path) -> None:
+    """Held, with the reason a person can act on.
+
+    `gh`'s own default for a missing `--repo` is the repository of the current
+    directory, so filing without one publishes into a project nobody identified.
+    The plan says to state "the owning repository if identifiable" and not to
+    guess, so the draft waits and says what is missing.
+    """
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft(repository=""))
+    github = _Github()
+
+    held = approve_draft(config, draft.id, search=github.search, create=github.create)
+
+    assert held is not None
+    assert held.lifecycle == DRAFT_PENDING
+    assert "owning repository not identified" in held.reason
+    assert github.searches == [] and github.created == []
+    assert [d.id for d in read_queue(config, "work")] == [draft.id]
+
+
+def test_create_issue_never_falls_back_to_the_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--repo` is always present, and an empty value is a refusal.
+
+    The `gh` default is the repository of the directory the command happened to
+    run in, which for a scheduled agent is its workspace — so the fallback was a
+    public issue in a project nobody chose. `approve_draft` holds the draft
+    before it gets here; this is the backstop for any other caller.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        upstream_drafts,
+        "_run_gh",
+        lambda args, timeout=30.0: calls.append(list(args)) or "https://example/1",
+    )
+
+    upstream_drafts.create_issue(title="t", body="b", repository="example/tools")
+    assert calls[0][:3] == ["issue", "create", "--repo"]
+    assert "example/tools" in calls[0]
+
+    with pytest.raises(DraftRefused, match="owning repository"):
+        upstream_drafts.create_issue(title="t", body="b", repository="")
+    assert len(calls) == 1
 
 
 def test_approval_creates_only_when_the_search_is_empty(tmp_path: Path) -> None:
@@ -646,18 +888,115 @@ def test_a_new_skill_draft_creates_syncs_and_then_settles(tmp_path: Path) -> Non
     assert read_queue(config, "work") == []
 
 
-def test_a_failed_sync_still_creates_and_says_so(tmp_path: Path) -> None:
+def test_a_failed_sync_leaves_the_draft_pending_for_a_resume(tmp_path: Path) -> None:
+    """A skill no provider can load is not the thing this row proposed.
+
+    The old contract settled the row `filed` with a note that the sync did not
+    finish, which left a record that read as verified while the skill was
+    invisible — and a person had nothing to retry, because the row was gone. So
+    the file is still created (undoing it would be worse), the row stays pending
+    with the reason on it, and the re-approve below is the answer it invites.
+    """
     config = _config(tmp_path, "work")
     draft = file_draft(config, "work", **_new_skill_payload(tmp_path))
 
     def _boom() -> None:
         raise RuntimeError("sync exploded")
 
-    stored = create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=_boom)
+    held = create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=_boom)
 
-    assert stored is not None and stored.lifecycle == DRAFT_FILED
-    assert "sync did not complete" in stored.reason
+    assert held is not None and held.lifecycle == DRAFT_PENDING
+    assert "sync did not complete" in held.reason
+    assert "re-approve" in held.reason
+    # The creation is not undone — the next sync picks it up — and the row is
+    # still open, so the retry is a decision rather than a re-derivation.
     assert (config.agent_root("work") / "skills" / "invoice-recon" / "SKILL.md").is_file()
+    assert [d.id for d in read_queue(config, "work")] == [draft.id]
+
+
+def test_a_re_approve_after_a_failed_sync_resumes_and_settles(tmp_path: Path) -> None:
+    """The resume the hold invites has to be takeable, or the hold is a dead end.
+
+    `create_owned_skill` refuses a name that exists, so a retry would have hit
+    the collision refusal and stopped. It does not, because a file holding
+    *exactly* the submitted content is the previous attempt's own creation: the
+    creation is skipped and only the sync re-runs.
+    """
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_new_skill_payload(tmp_path))
+    calls: list[str] = []
+
+    def _boom() -> None:
+        raise RuntimeError("sync exploded")
+
+    create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=_boom)
+
+    settled = create_new_skill(
+        config,
+        draft.id,
+        content=_skill_text("invoice-recon"),
+        sync=lambda: calls.append("synced"),
+    )
+
+    assert calls == ["synced"]
+    assert settled is not None and settled.lifecycle == DRAFT_FILED
+    assert "creation was skipped" in settled.reason
+    assert settled.issue_url.endswith("skills/invoice-recon/SKILL.md")
+    assert read_queue(config, "work") == []
+
+
+def test_a_resume_will_not_overwrite_a_different_file_at_that_name(tmp_path: Path) -> None:
+    """Only the previous attempt's own bytes count as a resume.
+
+    A file at that name that is not what was submitted is somebody's source, and
+    the collision refusal is what says so by name — quietly treating it as ours
+    would settle a row against a file nobody proposed.
+    """
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_new_skill_payload(tmp_path))
+
+    def _boom() -> None:
+        raise RuntimeError("sync exploded")
+
+    create_new_skill(config, draft.id, content=_skill_text("invoice-recon"), sync=_boom)
+    existing = config.agent_root("work") / "skills" / "invoice-recon" / "SKILL.md"
+    existing.write_text(
+        "---\nname: invoice-recon\ndescription: d\n---\n\nsomething else\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="already has a skills/invoice-recon entry"):
+        create_new_skill(
+            config, draft.id, content=_skill_text("invoice-recon"), sync=lambda: None
+        )
+    assert "something else" in existing.read_text(encoding="utf-8")
+
+
+def test_a_resume_reports_the_budget_the_first_attempt_reported(tmp_path: Path) -> None:
+    """A held attempt's note is not the only place the budget is remembered.
+
+    The hold is overwritten by the retry's reason, so anything only the first
+    pass could see is lost with it. The size is the submitted bytes either way,
+    so both passes say the same thing about a skill nobody can load.
+    """
+    from ciao.skills_inventory import MAX_SKILL_BYTES
+
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_new_skill_payload(tmp_path))
+    body = "\n".join(f"line {n}" for n in range(MAX_SKILL_BYTES // 4))
+    content = (
+        "---\nname: invoice-recon\ndescription: Reconcile an invoice\n---\n\n" + body
+    )
+
+    def _boom() -> None:
+        raise RuntimeError("sync exploded")
+
+    create_new_skill(config, draft.id, content=content, sync=_boom)
+    settled = create_new_skill(config, draft.id, content=content, sync=lambda: None)
+
+    assert settled is not None and settled.lifecycle == DRAFT_FILED
+    assert "creation was skipped" in settled.reason
+    assert "over the" in settled.reason
 
 
 def test_a_refused_creation_settles_nothing(tmp_path: Path) -> None:
@@ -934,6 +1273,33 @@ def test_a_deleted_record_does_not_reopen_a_decided_change(tmp_path: Path) -> No
     assert dismissed_log_path(
         upstream_drafts.queue_path(config, "work")
     ).is_file()
+
+
+def test_a_deleted_filed_record_comes_back_as_filed_with_its_url(
+    tmp_path: Path,
+) -> None:
+    """A `filed` decision reconstructs as `filed`, not as a rejection.
+
+    The reconstruction used to write *any* surviving decision back as
+    `rejected`, so a record deleted after a successful filing came back as
+    "a person turned this down" — a judgement nobody made, on a change already
+    public, and one the record could no longer point at. The lifecycle is read
+    from the decision row and the URL comes back with it, because the decision
+    is what outlives the file.
+    """
+    config = _config(tmp_path, "work")
+    draft = file_draft(config, "work", **_stock_draft())
+    approve_draft(config, draft.id, search=_Github().search, create=_Github().create)
+    upstream_drafts.sidecar_path(config, "work", draft.id).unlink()
+
+    again = file_draft(
+        config, "work", **_stock_draft(private_evidence="a later sighting")
+    )
+
+    assert again.lifecycle == DRAFT_FILED
+    assert again.issue_url == "https://github.com/example/tools/issues/7"
+    assert "a later sighting" in again.private_evidence
+    assert read_queue(config, "work") == []
 
 
 def test_a_deleted_pending_record_comes_back_as_pending(tmp_path: Path) -> None:

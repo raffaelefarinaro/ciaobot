@@ -376,6 +376,10 @@ def test_the_lesson_path_is_a_separate_candidate_set_not_a_relaxed_one() -> None
     # And an already-covered lesson is not a finding, which is the other half.
     assert "the skill already says it" in prompt
     assert "file nothing" in prompt
+    # "A separate path" rather than "the one above": this section renders with no
+    # correction section beside it, so a back-reference names nothing.
+    assert "a path of its own" in prompt
+    assert "above" not in prompt
 
 
 def test_the_lesson_path_names_both_non_owned_destinations() -> None:
@@ -483,13 +487,13 @@ def test_a_workspace_with_no_owned_skills_still_gets_the_two_draft_paths(
 
     prompt = str(streams.calls[0]["prompt"])
     # No correction path: the used skill is a stock copy no pass may edit. The
-    # lesson section names the edit-only command only to forbid it, so the
-    # assertion is on the command *line* a pass would have run, not the word.
+    # lesson section is self-contained now, so it names the owned-skill command
+    # as well; what it must not do is hand this workspace a skill to edit, which
+    # is what the inventory sentence says instead of a list.
     assert "own skills in use" not in prompt
-    assert "ciao skill-proposal-add NAME --input-file FILE" not in prompt
+    assert "This workspace owns no skills of its own" in prompt
     assert "do not aim the edit-only" in prompt
     # The lesson path, saying so rather than listing nothing.
-    assert "This workspace owns no skills of its own" in prompt
     assert memory_pass.DRAFT_COMMAND in prompt
     # And still no stock catalog to walk: the installed copy is named nowhere.
     assert "web-research" not in prompt
@@ -518,6 +522,16 @@ def test_the_lesson_path_renders_on_its_own_with_no_used_skill(
     assert "own skills in use" not in prompt
     assert "These are the skills this workspace owns" in prompt
     assert "notes" in prompt
+    # Actionable on its own: the command and the field shape are in *this*
+    # section, not in a section that did not render. The old prompt said "the
+    # `origins` list described above" and pointed at a correction section that
+    # is absent here, so the pass was told to file a proposal it had never been
+    # given the syntax for.
+    assert "skill-proposal-add NAME --input-file" in prompt
+    assert "`learning_id`" in prompt
+    for field in ("`finding`", "`source_revision`", "`summary`"):
+        assert field in prompt
+    assert "described above" not in prompt
     # The memory half of the pass is untouched by either section.
     assert "Finish with a short list of what you changed." in prompt
 

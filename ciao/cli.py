@@ -4351,6 +4351,37 @@ def _draft_origins(
     return links, ""
 
 
+#: A draft decision an unattended run asked for. Distinct from 1 ("the command
+#: could not do it") because nothing failed: the request was well-formed, the
+#: draft exists, and the answer is that this run has no reviewer. 4 is EPERM,
+#: and a scheduled agent that sees it can report the item as deferred rather than
+#: retrying an action it is not allowed to take.
+UNATTENDED_REFUSED_EXIT = 4
+
+
+def _refuse_unattended_draft(
+    config: CiaoConfig, workspace: str, action: str
+) -> int | None:
+    """Refuse ``action`` when a run holds this vault's curation lease.
+
+    The check lives here as well as inside the decision helpers so the CLI fails
+    *before* it reads ``--content-file`` or reports a draft nobody may act on,
+    and so a caller can tell "you are not allowed" from "this draft could not be
+    acted on" by the exit code alone. The signal is the run's own lease — see
+    :func:`ciao.upstream_drafts.unattended_run` — and there is no flag that turns
+    it off, which is the whole point: the unattended Workspace care run shells
+    this same command a person would.
+    """
+    from ciao.upstream_drafts import UnattendedRefused, _refuse_if_unattended
+
+    try:
+        _refuse_if_unattended(config, workspace, action)
+    except UnattendedRefused as exc:
+        print(f"refused unattended: {exc}", file=sys.stderr)
+        return UNATTENDED_REFUSED_EXIT
+    return None
+
+
 def _skill_draft_approve_command(args: argparse.Namespace) -> int:
     """Approve one draft: link a matching upstream issue, or create a new skill.
 
@@ -4358,14 +4389,18 @@ def _skill_draft_approve_command(args: argparse.Namespace) -> int:
     draft" and the draft says which one it is. The upstream path searches before
     it creates and records the URL it linked or filed; the new-skill path creates
     the owned source, reads it back, checks its frontmatter and syncs, and only
-    settles the row once the file exists.
+    settles the row once the file exists and the sync finished.
 
-    Attended only. There is no ``--unattended`` here on purpose: an automation
-    has no reviewer to approve anything, so the call the unattended capsule
-    defers is not something the command can even be asked to do.
+    Attended only, and read from the run rather than from a flag: there is
+    deliberately no ``--unattended` here, and no argument the caller could set to
+    override :func:`ciao.upstream_drafts.unattended_run`. An automation that
+    shells this command while it holds the vault's curation lease is refused with
+    :data:`UNATTENDED_REFUSED_EXIT`, so it can only prepare the draft and report
+    it.
     """
     from ciao.upstream_drafts import (
         DraftError,
+        UnattendedRefused,
         approve_draft,
         create_new_skill,
         find_draft,
@@ -4373,6 +4408,9 @@ def _skill_draft_approve_command(args: argparse.Namespace) -> int:
 
     config = _proposal_config(args, "skill-draft-approve")
     name = _active_workspace_name(config)
+    refused = _refuse_unattended_draft(config, name, "approving a skill draft")
+    if refused is not None:
+        return refused
     draft_id = args.draft_id.strip()
     draft = find_draft(config, draft_id)
     if draft is None:
@@ -4388,10 +4426,14 @@ def _skill_draft_approve_command(args: argparse.Namespace) -> int:
         stored = (
             create_new_skill(config, draft_id, content=content)
             if draft.target == "new_skill"
-            else approve_draft(
-                config, draft_id, reason=args.reason or "", unattended=False
-            )
+            else approve_draft(config, draft_id, reason=args.reason or "")
         )
+    except UnattendedRefused as exc:
+        # The run context is re-read inside the decision helper, so a lease taken
+        # between the check above and this call is caught here rather than acted
+        # on. Same answer, same code, from whichever side sees it first.
+        print(f"cannot act on draft {draft_id}: {exc}", file=sys.stderr)
+        return UNATTENDED_REFUSED_EXIT
     except DraftError as exc:
         print(f"cannot act on draft {draft_id}: {exc}", file=sys.stderr)
         return 1
@@ -4452,11 +4494,20 @@ def _report_draft(stored, workspace: str, args: argparse.Namespace) -> None:
 
 
 def _skill_draft_reject_command(args: argparse.Namespace) -> int:
-    """Turn one draft down, so the next pass does not offer it again."""
+    """Turn one draft down, so the next pass does not offer it again.
+
+    A rejection settles exactly as an approval does, so it is refused in an
+    unattended run for the same reason: the draft's own ground rules say
+    settlement follows a person, and a run that could reject would archive an
+    unanswered question as an answer.
+    """
     from ciao.upstream_drafts import reject_draft
 
     config = _proposal_config(args, "skill-draft-reject")
     name = _active_workspace_name(config)
+    refused = _refuse_unattended_draft(config, name, "rejecting a skill draft")
+    if refused is not None:
+        return refused
     stored = reject_draft(config, args.draft_id.strip(), reason=args.reason or "")
     if stored is None:
         print(f"no open draft has id {args.draft_id!r}", file=sys.stderr)
@@ -6042,9 +6093,13 @@ def build_parser() -> argparse.ArgumentParser:
             "--input-file holds a JSON object with `target`, `skill`, `title` and "
             "`change`, plus for an issue a `body` — the sanitized lesson a "
             "stranger could reproduce — and optionally `repository`, `version`, "
-            "private_evidence` and `origins`. The body is refused if it carries a "
-            "transcript excerpt, a path, a name or a credential; the private "
-            "evidence stays in `private_evidence` and never leaves the vault."
+            "private_evidence` and `origins`. `title`, `skill` and `version` reach "
+            "`gh` too, so they go through the same gate as the body: any of them "
+            "carrying a transcript excerpt, a path, a name or a credential is "
+            "refused. `repository` must be `owner/name` when given, and an issue "
+            "whose draft names none stays pending rather than guessing a public "
+            "target. The private evidence stays in `private_evidence` and never "
+            "leaves the vault."
         ),
     )
     skill_draft_add_parser.add_argument(
@@ -6063,17 +6118,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Act on an approved skill draft: file its issue, or create its skill.",
         description=(
             "Approves one draft in a workspace's queue. An `upstream_issue` draft "
-            "is linked to a matching open issue when the search finds one and "
-            "filed as a new issue when it does not; the URL is recorded on the "
-            "record either way. A `new_skill` draft is created under this "
-            "workspace's own `skills/` directory — refusing a name that already "
-            "exists — then read back, checked and synced, and the row is settled "
-            "only once the file is there.\n\n"
-            "Attended only. There is deliberately no unattended mode: opening a "
-            "public issue is a deferred action, and creating a skill writes a file "
-            "every session of this workspace loads. A failed or ambiguous GitHub "
-            "request leaves the draft pending with the reason recorded, and a "
-            "retry searches again before it creates."
+            "is searched for in the repository the draft names, linked to a "
+            "matching open issue when the search finds one and filed as a new "
+            "issue when it does not; the URL is recorded on the record either "
+            "way. A `new_skill` draft is created under this workspace's own "
+            "`skills/` directory — refusing a name that already exists — then read "
+            "back, checked and synced, and the row is settled only once the file is "
+            "there and the sync finished.\n\n"
+            "Attended only, and read from the run rather than from a flag. There is "
+            "no unattended mode to turn off: while a run holds this vault's "
+            "curation lease the command exits 4 without filing, creating or "
+            "settling anything, so the nightly Workspace care run can only report "
+            "the draft. Opening a public issue is a deferred action, and creating a "
+            "skill writes a file every session of this workspace loads.\n\n"
+            "A failed or ambiguous GitHub request, an issue whose draft names no "
+            "owning repository, and a sync that did not finish all leave the draft "
+            "pending with the reason recorded, and a retry resumes rather than "
+            "starting over."
         ),
     )
     skill_draft_approve_parser.add_argument(
@@ -6103,7 +6164,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Records an attended decision against one skill draft, takes it out "
             "of the review queue and keeps the record on disk. A rejected change "
             "is not re-filed: the next pass that reaches the same conclusion adds "
-            "its evidence to the settled record instead of opening a second row."
+            "its evidence to the settled record instead of opening a second row.\n\n"
+            "A rejection settles exactly as an approval does, so it is refused the "
+            "same way: while a run holds this vault's curation lease the command "
+            "exits 4 and the draft stays queued for a person."
         ),
     )
     skill_draft_reject_parser.add_argument(
