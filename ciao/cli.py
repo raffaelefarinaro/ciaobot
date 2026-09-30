@@ -3451,6 +3451,7 @@ def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any, 
 def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     from ciao.curation_run import build_worklist, load_state, plan_run
     from ciao.entity_types import load_entity_types
+    from ciao.vault_index import VAULT_RENDER_PREFIX
 
     workspace, vault, guide, budget, registry_root = _curation_context(args)
     state = load_state(vault)
@@ -3460,6 +3461,10 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         workspace_dir=workspace,
         done_keys=frozenset(state.done_keys),
         category_registry=load_entity_types(registry_root),
+        # Named where `scan_vault` renders it rather than restated here: a
+        # drifted prefix makes every mtime `stat` miss silently, which reads as
+        # "no note is stale" rather than as an error.
+        path_prefix=VAULT_RENDER_PREFIX,
     )
     plan = plan_run(worklist, budget)
     payload: dict[str, Any] = {

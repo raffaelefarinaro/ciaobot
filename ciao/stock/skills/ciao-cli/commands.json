@@ -10,6 +10,7 @@
   "vault review complete": "vault_review",
   "vault review restore-completed": "vault_review",
   "vault review delete": "vault_review",
+  "note verify": "verify_note",
   "file surface": "file_surface",
   "chat list": "chats_list",
   "chat get": "chat_get",

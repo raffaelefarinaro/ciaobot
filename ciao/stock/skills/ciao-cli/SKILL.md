@@ -53,6 +53,31 @@ Not for:
 | `vault review restore-completed --candidate ID` | Undo a completion: put the project, its `status:` line and every rewritten link back. Refuses when the original path is occupied or a note the completion rewrote has been edited since. | Same attended-turn guard. |
 | `vault review delete --candidate ID --confirm ID` | Permanently delete a trashed note. | Same attended-turn guard, plus `--confirm` must repeat the candidate id; irreversible. |
 
+### Note verification
+
+| Command | Purpose | Guard |
+|---|---|---|
+| `note verify --payload-file FILE` | Record one stale note's verification verdict: `still_valid`, `update`, `retire` or `unverified`, with its evidence. | `FILE` is JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence[]`, `before`/`after`, `reason`. Every field is note prose or a citation, so it never travels as a shell argument — pass the path and let the server read it. The file must be inside this workspace and under the size cap. `expected_revision` is the lowercase hex SHA-256 of the note's full text as UTF-8, unmodified; the `stale_note` item you were given prints it as `revision <hex>`, so pass that rather than hashing it yourself. |
+
+The reply's `status` is the whole decision, and the words are not
+interchangeable: `applied` wrote the note through a durable receipt;
+`needs_review` means the rule refused to write it unattended and **one typed
+`note_edit` proposal is now queued for a person** — report it, do not route
+around it; `unverified` means nothing this pass reached could settle the
+verdict (no source, partial coverage, or an input too large to judge), with
+nothing written; `conflict` means the note moved since you read it, so re-read
+and judge the text that is there; `already_checked` means a check for this exact
+revision is in its cooldown or waiting on a proposal; `failed` means the note
+could not be used at all.
+
+`still_valid` re-stamps the note's frontmatter `updated:` and needs `coverage:
+complete` plus a citation naming the note. An `update` is applied only when
+*every* evidence row is a citation someone could re-open, and it must carry a
+fresh `updated:` in its own `after` text. Retirement is never applied here: it
+comes back `needs_review` and reaches a person as a proposal. Do not hand-edit
+a stale note's Markdown instead of calling this — a hand edit leaves no receipt,
+no check state and no record of who decided.
+
 ### Memory-proposal review queue
 
 Two older top-level commands, outside the `<noun> <verb>` table and its JSON envelope (plain text unless `--json`). They are how a chat resolves a row from the app's review page.
@@ -208,6 +233,8 @@ ciao context get
 - **`file_not_found`** — `file surface` only opens a path that already exists under the workspace root. Check the file was actually written (or that the path is relative to the workspace, not absolute or outside it) before surfacing it.
 - **`memory_update_invalid` / `invalid_action`** — every `action`-style flag across this CLI is a closed enum, not free text (`memory update` takes `add`/`replace`/`remove`, never `append`). Run `ciao memory update --help` (or the equivalent `--help` on any command) to see the exact accepted values before guessing.
 - **`unattended_forbidden`** — `vault review keep|trash|restore|complete|restore-completed|delete` only resolve during an attended turn. Running as a schedule or other unattended automation, don't attempt the mutation: report the candidate and its evidence instead, and let an attended turn decide.
+- **`payload_required` / `payload_invalid` / `payload_too_large`** — `note verify` takes a path, and the server reads and bounds the document. An empty flag, a path outside the workspace, malformed JSON, an `outcome` outside `still_valid|update|retire|unverified`, or a payload over the cap are all refused before anything is written. Put long evidence in the vault and cite its path instead of pasting it.
+- **`workspace_forbidden`** — a `note verify` payload may not name a workspace other than this chat's. The check state and the note-edit proposal are filed per workspace; pairing one workspace's name with another's vault would record a verdict about a vault nobody claimed. Drop the `workspace` field or make it match.
 
 ## Operation names for telemetry
 
@@ -224,6 +251,7 @@ ciao context get
   "vault review complete": "vault_review",
   "vault review restore-completed": "vault_review",
   "vault review delete": "vault_review",
+  "note verify": "verify_note",
   "file surface": "file_surface",
   "chat list": "chats_list",
   "chat get": "chat_get",

@@ -55,6 +55,7 @@ vault review restore --candidate ID
 vault review complete          --candidate ID
 vault review restore-completed --candidate ID
 vault review delete  --candidate ID --confirm ID
+note verify       --payload-file FILE.json
 file surface      PATH
 chat list         [--project P]
 chat get          [--chat C]
@@ -97,3 +98,4 @@ workspace list
 ```
 
 - The memory-proposal review queue has its own two commands, outside the table: `ciao memory-proposals` lists it, and `ciao memory-proposal-dismiss --text-file F [--promoted]` removes one row (fact text in a file, never argv; `--promoted` only after filing the fact).
+- `note verify --payload-file F` settles a stale note's facts (JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence`, `before`/`after`); `status` is `applied`, `needs_review` (a `note_edit` proposal for a person), `unverified` or `conflict`. Never hand-edit a stale note's `updated:` instead.

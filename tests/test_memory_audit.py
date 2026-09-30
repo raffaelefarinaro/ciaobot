@@ -771,6 +771,65 @@ def test_find_stale_notes_uses_the_shared_predicate_for_aliased_exempt_types() -
     assert report["notes_exempt"] == 1
 
 
+def test_the_curation_stale_pass_agrees_with_the_audit_on_aliased_exempt_types(
+    tmp_path: Path,
+) -> None:
+    """The nightly plan calls this predicate, so it inherits its answers.
+
+    A fourth copy of the threshold table would be a fourth thing to keep in
+    agreement with the other three surfaces that already share this one
+    (`os-audit`, the Memory Map's `stale` flag, the review queue's `unverified`
+    signal). The aliased exempt type is the case that would break first: a
+    `hackathon-log` is a dated record that never ages, and a plan that flagged
+    it would send the nightly run to re-verify a log entry every month forever.
+
+    Run through `build_worklist` rather than the private helper, because what
+    matters is the plan the nightly run acts on, not the selection function.
+    """
+    from ciao import curation_run as cr
+    from ciao.entity_types import load_entity_types
+    from ciao.vault_index import scan_vault
+
+    today = datetime.date(2026, 9, 25)
+    vault = tmp_path / "memory-vault"
+    (vault / "Journal").mkdir(parents=True)
+    (vault / "People").mkdir(parents=True)
+    (vault / "Workspace").mkdir(parents=True)
+    (vault / cr.CURATION_LOG_RELATIVE).write_text(
+        f"---\nlast_full_pass: {today.isoformat()}\n---\n\n# Curation log\n", encoding="utf-8"
+    )
+    (vault / "Journal" / "hack.md").write_text(
+        "---\ntype: hackathon-log\nupdated: 2020-01-01\n---\n\n# Hack\n\nA dated record.\n",
+        encoding="utf-8",
+    )
+    (vault / "People" / "Mo.md").write_text(
+        "---\ntype: Person\nupdated: 2024-01-01\n---\n\n# Mo\n\nDurable fact.\n",
+        encoding="utf-8",
+    )
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Workspace\n", encoding="utf-8")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        guide_path=guide,
+        category_registry=load_entity_types(vault),
+        workspace_dir=tmp_path,
+        today=today,
+    )
+    stale = [item for item in worklist.items if item.pass_id == cr.PASS_STALE_NOTE]
+
+    # The same note the audit lists, keyed by the same vault-relative path it
+    # resolves to — and the aliased exempt type is not among them.
+    audit = find_stale_notes(
+        [e for e in scan_vault(vault)],
+        vault_root=vault,
+        today=today,
+        registry=load_entity_types(vault),
+    )
+    assert [f["path"] for f in audit["stale_notes"]] == ["memory-vault/People/Mo.md"]
+    assert [item.keys[0] for item in stale] == [cr.item_key(cr.PASS_STALE_NOTE, "People/Mo.md")]
+
+
 def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
     """A category's `stale_after_days` is the horizon its notes age against,
     reached through that category's aliases and dropped when it is disabled.

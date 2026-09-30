@@ -68,6 +68,19 @@ def default_vault_root() -> Path:
         root = base / root
     return root.resolve()
 
+
+VAULT_RENDER_PREFIX = Path("memory-vault")
+"""The folder name a note path is *rendered* under, and the default prefix.
+
+An :class:`Entry`'s ``path`` is a rendering: the same note is
+``memory-vault/People/Sofia.md`` in the scan, the Memory Map and the audit
+report, and ``People/Sofia.md`` everywhere the vault's own state keys on it.
+A caller that strips the prefix (to stat a file, to reach the check state) and a
+caller that renders one have to agree on this string or every join misses
+silently — which reads as "no note is stale" rather than as a bug. So it is
+named here, next to the renderer, instead of spelled out at each of them.
+"""
+
 EXCLUDED_TOP_DIRS = {"Logs", "Templates", ".obsidian"}
 
 # Generated or curated files that are *about* the vault rather than notes in it.
@@ -519,7 +532,7 @@ def build_filename_index(
     ``memory-vault``, which raises the moment a scan renders paths under a
     per-root prefix, so a caller that knows the prefix has to say so.
     """
-    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
+    prefix = VAULT_RENDER_PREFIX if path_prefix is None else Path(path_prefix)
     idx: dict[str, list[Path]] = defaultdict(list)
     for e in entries:
         # key by vault-relative path without extension
@@ -598,7 +611,7 @@ def scan_vault(
     if registry is None:
         registry = load_entity_types(vault_root)
     dir_type_map = registry.dir_type_map()
-    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
+    prefix = VAULT_RENDER_PREFIX if path_prefix is None else Path(path_prefix)
     entries: list[Entry] = []
     for md_path in sorted(vault_root.rglob("*.md")):
         rel_from_vault = md_path.relative_to(vault_root)
@@ -914,7 +927,7 @@ def strip_references(
     fails.
     """
     vault_root = vault_root.resolve()
-    prefix = path_prefix or Path("memory-vault")
+    prefix = path_prefix or VAULT_RENDER_PREFIX
     entries = scan_vault(vault_root, path_prefix=path_prefix)
     filename_idx = build_filename_index(entries)
     # Phase 1 (pure): compute every rewrite up front, so a bad or unreadable
@@ -1206,7 +1219,7 @@ def _build_workspace_index(
     for e in entries:
         if not e.workspace:
             continue
-        inside = _strip_prefix(e.path, prefixes.get(e.workspace, Path("memory-vault")))
+        inside = _strip_prefix(e.path, prefixes.get(e.workspace, VAULT_RENDER_PREFIX))
         idx[f"{e.workspace}/{inside.with_suffix('')}"].append(e.path)
         idx[f"{e.workspace}/{e.path.stem}"].append(e.path)
     return idx

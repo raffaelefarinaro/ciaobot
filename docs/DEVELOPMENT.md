@@ -574,8 +574,75 @@ the review queue never lists (`Workspace/` paths, templates,
 `projects/completed/`), so its "unchecked" count is what the queue can show.
 Like `superseded_state_candidates` these findings are informational: they
 surface in `os-audit`'s memory section, the Memory Map, the vault-review queue,
-and the daily `system-memory-curation` run, which re-verifies each note and
-stamps `updated:` when the facts still hold.
+and the daily `system-memory-curation` run.
+
+### The stale-note pass and the managed `verify_note` operation
+
+That last one stopped being prose. The selection is `PASS_STALE_NOTE` in
+`ciao/curation_run.py`: one `WorklistItem` per stale note, keyed by its
+**vault-relative** path, oldest first, and capped at
+`STALE_NOTE_MAX_ITEMS` per run. It calls `memory_audit.find_stale_notes` rather
+than re-deriving the thresholds, so the nightly plan, `os-audit`, the Memory Map
+and the review queue cannot disagree about which notes count — and it applies the
+two filters the audit does not: `vault_review.never_queued` (a note the queue
+would never show a person is not tonight's question) and
+`note_verification.should_check` (a note whose check is still inside its 30-day
+cooldown or still waiting on the proposal that check pinned is a question already
+answered — without this the same cooled-down notes take the first slots every
+night, come back `already_checked`, and the rest of the backlog starves). The cap
+is applied **after** that filter, and both exist for the same reason: the pass
+sits ahead of the two required hygiene keys in `PASS_ORDER` and the budget is a
+whole-run allowance, so an uncapped backlog spends it and `last_full_pass` can
+never advance.
+
+The pass reaches no judgement, and the only body it reads is the flagged note's
+own bytes: its `memory_receipts.content_revision` goes in the item's `reason`, and
+that is the `expected_revision` the managed operation insists on. Without it there,
+the only way to obtain one is to reimplement the hash, and a caller that guesses
+comes back `conflict` for every note forever.
+
+`build_worklist` therefore takes `path_prefix`, and `ciao/cli.py`'s `_curation_plan`
+threads it (`vault_index.VAULT_RENDER_PREFIX` — one constant, so the renderer and
+the reader cannot drift). `path_prefix` must be the prefix
+`vault_index.scan_vault` rendered under, and the same value has to reach
+`find_stale_notes` — a drifted prefix makes every mtime `stat` miss silently,
+which reads as "nothing is stale" rather than as an error.
+
+The judgement is `control_plane.verify_note`, exposed as the agent operation
+`verify_note` (`ciao/mcp_server.py`) and the command `ciao note verify
+--payload-file FILE`. It is a **managed operation**, not a CLI the agent could
+have written itself, for three reasons worth preserving:
+
+- the payload arrives as a **file** inside the caller's own workspace root, so
+  a verdict's before/after text and its citations are never shell arguments
+  (`$()`, backticks, quotes) and never in the process table, and one call cannot
+  be used to read a sibling workspace's document;
+- a `workspace` in the payload naming anything but the caller's is refused,
+  because the check state and the note-edit sidecar are filed per workspace;
+- the whole operation runs as one bounded, coalesced off-loop read
+  (`async_reads.run_read`, keyed by runtime dir + workspace + note + expected
+  revision + a digest of the payload's outcome, coverage, evidence and edit, the
+  same shape `update_tasks` uses — keyed on the note alone, a second caller's
+  different verdict joined the in-flight read and was handed the first caller's
+  answer), and the caps report an oversized payload or note as `unverified` — the
+  honest unknown — rather than `applied`. The receipt's `source` follows the turn
+  (`curation` for an unattended schedule, `chat` for an attended one) rather than
+  being a fixed label.
+
+The wiring #726-C was written for and could not have is here: a
+`needs_review` verdict files **exactly one** `note_edit` proposal and pins the
+check to the queue row's id. Before #726-D that verdict recorded a check and
+asked nobody, which is why `docs/UPKEEP.md` carried a "nothing in production
+calls `file_note_edit`" row. Every way that filing can fail — a refusal, a journal
+that would not write, a lock it could not take, a filesystem that said no — is
+reported in the reply's `proposal_error`, because by then the check and its
+cooldown are already recorded and a failure that escaped instead would leave a
+verdict nobody was asked about. Auto-applied verdicts file nothing, and a
+retirement is never applied here at all — it comes back `needs_review` and
+reaches a person as a proposal. The plan-mode gate is the existing one:
+`mutating=True` on the operation. Tests: `tests/test_verify_note_op.py`,
+`tests/test_curation_run.py` for the pass, and `tests/test_agent_surface.py` for
+the CLI mapping.
 
 `ciao memory-audit` reads one file and skips the vault scan, so the daily
 `system-memory-curation` schedule can afford to call it and fix what it finds.

@@ -462,6 +462,73 @@ async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: 
     )
 
 
+async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> dict[str, Any]:
+    """Record one stale note's verification verdict — the managed operation that
+    replaces hand-editing `updated:` on a stale note.
+
+    Read the note, judge its facts, and put the verdict in a **payload file**
+    inside this workspace; pass that file's path. Every other field of the
+    verdict — the note's exact before/after text, the citations behind it — is
+    user prose, and prose as a shell argument gets mangled by `$()`, backticks
+    and quotes, and lands in the process table besides. Nothing about this
+    operation takes that text as an argument.
+
+    The payload is one JSON object with:
+
+    - `relative_path` — the note, vault-relative (`People/Sofia.md`).
+    - `expected_revision` — the revision of the text you read. The `stale_note`
+      worklist item names it (`revision <hex>` in the item's `reason`), so use
+      the one you were given rather than computing it. If you must compute it, it
+      is the lowercase hex SHA-256 of the note's full text as UTF-8, with nothing
+      normalized, stripped or line-ending rewritten. A note that has changed
+      since is a `conflict` with nothing written, which is the point: never
+      overwrite text you did not see.
+    - `outcome` — `still_valid` | `update` | `retire` | `unverified`.
+    - `coverage` — `complete` | `partial`. A re-stamp claims the whole note is
+      still true, so `still_valid` is only applied from `complete`.
+    - `evidence` — a list of `{source_type, source_ref, quoted, supports,
+      observed_at}`. An `update` needs EVERY row to be a citation somebody could
+      go and read: a `source_ref`, the `quoted` text seen there, and the
+      `supports` clause naming the note. One good row among three uncited ones
+      does not carry the other two, so such an edit comes back `needs_review`.
+    - `before` / `after` — the note's full text both ways. Required for
+      `update`; ignored otherwise. An `update` must carry a fresh `updated:`
+      itself, because the text you hand over is written exactly as given.
+    - `reason` — one sentence, for the log and for the reviewer.
+
+    What comes back decides what happens next, and the words are not
+    interchangeable:
+
+    - `applied` — the note was written (or already held the text) with a
+      durable receipt. A `still_valid` re-stamps `updated:`; an `update` with
+      complete citations applies your exact text.
+    - `needs_review` — the rule refused to write this unattended: a retirement,
+      an edit the evidence cannot carry, or a re-stamp with no frontmatter
+      `updated:` to stamp. ONE typed `note_edit` proposal is filed for you in
+      `Workspace/Memory-Proposals.md` and the check is pinned to it, so the
+      note is not asked about again while a person decides. Report it under
+      What needs you; do not try to apply it another way.
+    - `unverified` — no source this pass reached could support the verdict, the
+      check did not cover the whole note, or the input was too large to judge.
+      Nothing was written, and a cooldown stops tonight's run re-asking.
+    - `conflict` — the note moved since you read it. Re-read and judge again.
+    - `already_checked` — a check for this exact revision is in its cooldown or
+      is waiting on a proposal. Nothing was asked or written.
+    - `failed` — the note could not be used at all.
+
+    A retirement is never applied here: it is a human decision, all the way
+    down, and it arrives as a proposal rather than a write. Do not hand-edit a
+    stale note's Markdown instead of calling this — that is exactly what this
+    operation exists to replace, and a hand edit leaves no receipt, no check and
+    no evidence of who decided.
+    """
+    return await service._invoke(
+        "verify_note",
+        lambda cp, p: cp.verify_note(p, payload_file=payload_file),
+        mutating=True,
+    )
+
+
 async def _op_gws_status(service: CiaoMcpService) -> dict[str, Any]:
     """Report whether the active workspace's Google Workspace account is
     connected and its token is valid.
@@ -983,6 +1050,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
+    Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("gws_status", _READ, _op_gws_status.__doc__ or "", _op_gws_status),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
