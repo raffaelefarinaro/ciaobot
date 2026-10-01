@@ -213,6 +213,26 @@ def _host(machine: _Machine, state: Path) -> WindowsUpdateHost:
     )
 
 
+@pytest.fixture(autouse=True)
+def _tmp_paths_are_task_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the task renderer take this OS's absolute tmp paths.
+
+    The host renders task XML from real directories under ``tmp_path``, which on
+    macOS and Linux are ``/tmp/...``, not drive-letter paths. The renderer's own
+    Windows-path refusal is pinned with literal Windows paths in
+    ``tests/test_windows_service.py``; here only "absolute on this OS" is kept.
+    """
+    if sys.platform == "win32":
+        return
+
+    def absolute(label: str, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError(f"{label} must be absolute: {value!r}")
+        return ws._xml_text(label, value)
+
+    monkeypatch.setattr(ws, "_windows_absolute", absolute)
+
+
 @pytest.fixture
 def user(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USERNAME", "ada")
