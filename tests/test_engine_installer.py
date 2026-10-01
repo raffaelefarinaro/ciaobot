@@ -35,6 +35,15 @@ WHEEL_BYTES = b"the signed wheel"
 
 # The end-to-end runs resolve their downloads with the real curl, so a machine
 # without it (or without shasum) has nothing to run them against.
+# install-engine.sh is the macOS/Linux `curl | sh` installer; Windows installs with
+# scripts/install.ps1 (#853), so a test that runs the script checks nothing there.
+# The tests that only read the script, or run its verifier through Python, stay on
+# every OS.
+runs_the_sh_installer = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="install-engine.sh is the macOS/Linux installer; Windows uses install.ps1 (#853)",
+)
+
 needs_local_tools = pytest.mark.skipif(
     shutil.which("curl") is None or shutil.which("shasum") is None,
     reason="needs curl (for file:// downloads) and shasum",
@@ -98,6 +107,7 @@ def _run_verifier(
     )
 
 
+@runs_the_sh_installer
 def test_engine_installer_is_posix_shell() -> None:
     result = subprocess.run(
         ["sh", "-n", str(SCRIPT)], capture_output=True, text=True, check=False
@@ -549,6 +559,7 @@ def _log(harness: dict[str, Any], name: str) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_engine_installer_end_to_end_with_fakes(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -590,6 +601,7 @@ def test_engine_installer_end_to_end_with_fakes(tmp_path: Path) -> None:
     assert f"Ciaobot engine {VERSION} installed." in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_engine_installer_rejects_tampered_wheel(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -602,6 +614,7 @@ def test_engine_installer_rejects_tampered_wheel(tmp_path: Path) -> None:
     assert "tool install" not in _log(harness, "uv-calls.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_engine_installer_refuses_foreign_ciao(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -634,6 +647,7 @@ def _write_desktop_shim(home: Path, target: Path) -> Path:
     return shim
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_engine_installer_refuses_live_desktop_shim(tmp_path: Path) -> None:
     # The plist is absent (onboarding has not run yet) but the app is live, so
@@ -654,6 +668,7 @@ def test_engine_installer_refuses_live_desktop_shim(tmp_path: Path) -> None:
     assert "tool install" not in _log(harness, "uv-calls.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_engine_installer_replaces_stale_desktop_shim(tmp_path: Path) -> None:
     # The app is gone: nothing owns the engine any more, so the stale shim is
@@ -670,6 +685,7 @@ def test_engine_installer_replaces_stale_desktop_shim(tmp_path: Path) -> None:
     assert "tool install" in _log(harness, "uv-calls.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_engine_installer_rejects_cdpath_surprise(tmp_path: Path) -> None:
     # `cd` consults CDPATH for a bare relative name and prints the path it
@@ -732,6 +748,7 @@ def _run_refuse_desktop_engine(
     )
 
 
+@runs_the_sh_installer
 def test_engine_installer_refuses_app_managed_engine(tmp_path: Path) -> None:
     # The bundle is built under tmp_path, so the refusal means the same thing
     # on a Mac with Ciaobot.app installed and on one without.
@@ -745,6 +762,7 @@ def test_engine_installer_refuses_app_managed_engine(tmp_path: Path) -> None:
     assert "#576" in result.stderr
 
 
+@runs_the_sh_installer
 def test_engine_installer_ignores_plist_of_deleted_app(tmp_path: Path) -> None:
     # Ciaobot.app was moved to the Trash and left its plist behind. Refusing
     # here would be a dead end: the advice in the message
@@ -828,6 +846,7 @@ def _install_receipt(harness: dict[str, Any]) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_repoints_and_retires_app_agent(tmp_path: Path) -> None:
     # --no-start because the health poll needs a real engine to answer; what is
@@ -863,6 +882,7 @@ def test_migrate_host_repoints_and_retires_app_agent(tmp_path: Path) -> None:
     assert "com.ciao.server" not in _log(harness, "launchctl.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "knob,booted_out",
@@ -915,6 +935,7 @@ def test_migrate_client_retirement_failure_rolls_back(
     assert "already" not in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_client_disables_local_engine_and_never_sets_up(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -938,6 +959,7 @@ def test_migrate_client_disables_local_engine_and_never_sets_up(tmp_path: Path) 
     assert "https://mini.ts.net" in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_invalid_requires_explicit_choice(tmp_path: Path) -> None:
     # A node state nobody can read is not a licence to guess: guessing "host"
@@ -952,6 +974,7 @@ def test_migrate_invalid_requires_explicit_choice(tmp_path: Path) -> None:
     assert "tool install" not in _log(harness, "uv-calls.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_invalid_as_client_uses_given_url(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -973,6 +996,7 @@ def test_migrate_invalid_as_client_uses_given_url(tmp_path: Path) -> None:
     assert f"disable gui/{os.getuid()}/com.ciao.server" in _log(harness, "launchctl.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_without_migrate_live_desktop_still_refused_with_hint(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -985,6 +1009,7 @@ def test_without_migrate_live_desktop_still_refused_with_hint(tmp_path: Path) ->
     assert "tool install" not in _log(harness, "uv-calls.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "break_state",
@@ -1030,6 +1055,7 @@ def test_migrate_unreadable_state_never_guesses(
     assert _replaced_state(harness) == untouched
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_is_a_noop_after_success(tmp_path: Path) -> None:
     # "Already migrated" is a claim about this Mac, not about a file: it holds
@@ -1048,6 +1074,7 @@ def test_migrate_is_a_noop_after_success(tmp_path: Path) -> None:
     assert _log(harness, "launchctl.log") == ""
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_client_noop_after_success(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -1060,6 +1087,7 @@ def test_migrate_client_noop_after_success(tmp_path: Path) -> None:
     assert "tool install" not in _log(harness, "uv-calls.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_verification_still_first(tmp_path: Path) -> None:
     # A migration is the one path that rewrites a working install, so the
@@ -1227,6 +1255,7 @@ def _write_settled_migration(
     return migration
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_refuses_running_app_after_timeout(tmp_path: Path) -> None:
     # A Ciaobot.app that is still there 20s after it was asked to quit is a live
@@ -1257,6 +1286,7 @@ def test_migrate_refuses_running_app_after_timeout(tmp_path: Path) -> None:
     assert sum(1 for line in _trace(harness) if line.startswith("pgrep")) == 21
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_preflight_collision_preserves_client_agents(
     tmp_path: Path,
@@ -1283,6 +1313,7 @@ def test_migrate_preflight_collision_preserves_client_agents(
     assert foreign.read_text(encoding="utf-8") == "#!/bin/sh\necho other\n"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_retry_preserves_original_before_images(tmp_path: Path) -> None:
     # The before-images are the only way back to the engine that is running now,
@@ -1313,6 +1344,7 @@ def test_migrate_retry_preserves_original_before_images(tmp_path: Path) -> None:
     assert _migration_receipt(harness)["phase"] == "installed_no_start"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_interruption_retry_preserves_originals(tmp_path: Path) -> None:
     # An install that is interrupted part-way is a failure with less tidiness:
@@ -1345,6 +1377,7 @@ def test_migrate_interruption_retry_preserves_originals(tmp_path: Path) -> None:
     assert _migration_receipt(harness)["phase"] == "installed_no_start"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "case,message",
@@ -1425,6 +1458,7 @@ def test_migrate_rejects_invalid_or_stale_receipts(
     assert _log(harness, "launchctl.log") == ""
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_retry_accepts_a_tool_environment_before_image(tmp_path: Path) -> None:
     # A Mac that already had an engine installed through uv has a tool
@@ -1476,6 +1510,7 @@ def test_migrate_retry_accepts_a_tool_environment_before_image(tmp_path: Path) -
     assert (before / "ciao").read_text(encoding="utf-8") == original_shim
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_never_reads_an_unrecorded_before_image_as_an_absence(
     tmp_path: Path,
@@ -1513,6 +1548,7 @@ def test_migrate_never_reads_an_unrecorded_before_image_as_an_absence(
     assert _log(harness, "launchctl.log") == ""
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "value",
@@ -1549,6 +1585,7 @@ def test_migrate_rejects_a_before_image_that_is_not_a_path(
     assert _log(harness, "launchctl.log") == ""
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_is_a_noop_after_a_real_migration(tmp_path: Path) -> None:
     # The same no-op claim, asked of a Mac this script really migrated rather than
@@ -1585,6 +1622,7 @@ def test_migrate_is_a_noop_after_a_real_migration(tmp_path: Path) -> None:
     assert _replaced_state(harness) == settled
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "break_engine",
@@ -1654,6 +1692,7 @@ def test_migrate_settled_receipt_must_describe_this_mac(
         assert program == str(home / ".local/bin/ciao")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "url",
@@ -1697,6 +1736,7 @@ def test_migrate_rejects_a_malformed_as_client_override(
     assert "no longer runs its own engine" not in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_does_not_believe_a_stale_success_receipt(
     tmp_path: Path,
@@ -1725,6 +1765,7 @@ def test_migrate_does_not_believe_a_stale_success_receipt(
     assert not (harness["home"] / "Library/LaunchAgents/Ciaobot.plist").exists()
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_ignores_success_receipt_with_no_install(tmp_path: Path) -> None:
     # The receipt claims a settled host migration, but there is no install
@@ -1762,6 +1803,7 @@ def test_migrate_ignores_success_receipt_with_no_install(tmp_path: Path) -> None
     assert _migration_receipt(harness)["phase"] == "installed_no_start"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_rejects_receipt_the_reader_cannot_run(tmp_path: Path) -> None:
     # A receipt that cannot be validated is a receipt that cannot be resumed
@@ -1779,6 +1821,7 @@ def test_migrate_rejects_receipt_the_reader_cannot_run(tmp_path: Path) -> None:
     assert "tool install" not in _log(harness, "uv-calls.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "knob,message,phase",
@@ -1844,6 +1887,7 @@ def test_migrate_client_failure_restores_original_state(
     assert "engine was restored" not in result.stderr
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "knob,message",
@@ -1891,6 +1935,7 @@ def test_migrate_host_failure_restores_original_state(
     assert f"enable gui/{os.getuid()}/Ciaobot" in log
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_wrong_health_version_restores_original_state(
     tmp_path: Path,
@@ -1913,6 +1958,7 @@ def test_migrate_host_wrong_health_version_restores_original_state(
     assert f"bootout gui/{os.getuid()}/Ciaobot" not in _log(harness, "launchctl.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_failure_restores_previous_install(tmp_path: Path) -> None:
     # A Mac that already has an engine installed through uv - an upgrade, not a
@@ -1957,6 +2003,7 @@ def test_migrate_host_failure_restores_previous_install(tmp_path: Path) -> None:
     assert (before / "tool-env" / "bin" / "python").read_bytes() == before_tool_env
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_rollback_restores_the_shim_as_a_regular_file(
     tmp_path: Path,
@@ -2001,6 +2048,7 @@ def test_migrate_host_rollback_restores_the_shim_as_a_regular_file(
     assert _app_bundle(tmp_path).is_dir()
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_tool_env_is_probed_before_the_receipt_is_written(tmp_path: Path) -> None:
     # `uv tool install --force` can exit 0 and leave an environment the installed
@@ -2032,6 +2080,7 @@ def test_tool_env_is_probed_before_the_receipt_is_written(tmp_path: Path) -> Non
     assert _migration_receipt(harness)["phase"] == "rolled_back"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_rollback_failure_is_reported(tmp_path: Path) -> None:
     # A rollback that cannot put the engine back has to say so. launchd keeps
@@ -2051,6 +2100,7 @@ def test_migrate_host_rollback_failure_is_reported(tmp_path: Path) -> None:
     assert "rollback incomplete" in _migration_receipt(harness)["error"]
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_success_orders_start_health_retirement(
     tmp_path: Path,
@@ -2095,6 +2145,7 @@ def test_migrate_host_success_orders_start_health_retirement(
     assert "ciao desktop uninstall" not in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_install_keeps_going_when_setup_skips_memory_regions(tmp_path: Path) -> None:
     # #790. `ciao setup` reports a workspace whose memory regions could not be
@@ -2115,6 +2166,7 @@ def test_install_keeps_going_when_setup_skips_memory_regions(tmp_path: Path) -> 
     assert _install_receipt(harness)["version"] == VERSION
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_removes_the_retired_app_bundle(tmp_path: Path) -> None:
     # #672. Once the receipt says `migrated` and no launchd job points into
@@ -2144,6 +2196,7 @@ def test_migrate_host_removes_the_retired_app_bundle(tmp_path: Path) -> None:
     assert (harness["home"] / ".local/bin/ciao").exists()
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_no_start_keeps_the_app_bundle(tmp_path: Path) -> None:
     # `--no-start` promised no service and no retirement, and the app's own
@@ -2163,6 +2216,7 @@ def test_migrate_host_no_start_keeps_the_app_bundle(tmp_path: Path) -> None:
     assert "ciao desktop uninstall" not in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_client_keeps_the_app_bundle(tmp_path: Path) -> None:
     # The client path retires the app's own agent, but this Mac is not being
@@ -2182,6 +2236,7 @@ def test_migrate_client_keeps_the_app_bundle(tmp_path: Path) -> None:
     assert "Removed the retired Ciaobot.app." not in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_reports_a_bundle_it_could_not_remove(tmp_path: Path) -> None:
     # A `/Applications` install the account cannot write. The hand-over has
@@ -2218,6 +2273,7 @@ def test_migrate_host_reports_a_bundle_it_could_not_remove(tmp_path: Path) -> No
     assert "Removed the retired Ciaobot.app." not in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_retirement_failure_rolls_back(tmp_path: Path) -> None:
     # A launchd that refuses to disable the app's agent means the app can come
@@ -2257,6 +2313,7 @@ def test_migrate_host_retirement_failure_rolls_back(tmp_path: Path) -> None:
     assert _app_bundle(tmp_path).is_dir()
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_interruption_after_bootout_reloads_the_app_agent(
     tmp_path: Path,
@@ -2301,6 +2358,7 @@ def test_migrate_host_interruption_after_bootout_reloads_the_app_agent(
     assert desktop_plist.read_bytes() == kept_plist.read_bytes()
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_resumes_from_retiring(tmp_path: Path) -> None:
     # A crash between the phase and the retirement leaves a `retiring` receipt on
@@ -2321,6 +2379,7 @@ def test_migrate_host_resumes_from_retiring(tmp_path: Path) -> None:
     assert "Removed the retired Ciaobot.app." in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_completes_an_unfinished_no_start_handover(tmp_path: Path) -> None:
     # A `--migrate --no-start` run installs the tool, repoints `com.ciao.server`
@@ -2385,6 +2444,7 @@ def test_migrate_host_completes_an_unfinished_no_start_handover(tmp_path: Path) 
     assert "ciao desktop uninstall" not in second.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_resumes_a_receipt_that_never_recorded_the_bundle(
     tmp_path: Path,
@@ -2425,6 +2485,7 @@ def test_migrate_resumes_a_receipt_that_never_recorded_the_bundle(
     assert "Removed the retired Ciaobot.app." not in retry.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_host_completes_an_interruption_after_setup(tmp_path: Path) -> None:
     # The same window by way of a signal: `ciao setup` has repointed the engine
@@ -2470,6 +2531,7 @@ def test_migrate_host_completes_an_interruption_after_setup(tmp_path: Path) -> N
     )
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_as_host_completes_an_unfinished_no_start_handover(
     tmp_path: Path,
@@ -2535,6 +2597,7 @@ def test_migrate_as_host_completes_an_unfinished_no_start_handover(
     assert "ciao desktop uninstall" not in retry.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_as_host_completes_an_interruption_after_setup(tmp_path: Path) -> None:
     # The same branch, interrupted the other way: `ciao setup` has repointed the
@@ -2574,6 +2637,7 @@ def test_migrate_as_host_completes_an_interruption_after_setup(tmp_path: Path) -
     )
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_invalid_client_receipt_is_not_resumed_as_a_host_handover(
     tmp_path: Path,
@@ -2620,6 +2684,7 @@ def test_migrate_invalid_client_receipt_is_not_resumed_as_a_host_handover(
     assert _migration_receipt(harness)["phase"] == "interrupted"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_retry_of_an_unfinished_handover_undoes_itself(tmp_path: Path) -> None:
     # Finishing an unfinished hand-over means the retry is a host transaction,
@@ -2654,6 +2719,7 @@ def test_migrate_retry_of_an_unfinished_handover_undoes_itself(tmp_path: Path) -
     assert f"enable gui/{os.getuid()}/Ciaobot" in _log(harness, "launchctl.log")
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "spelling",
@@ -2699,6 +2765,7 @@ def test_migrate_host_accepts_its_own_workspace_spelled_differently(
     assert _migration_receipt(harness)["phase"] == "installed_no_start"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "extra",
@@ -2758,6 +2825,7 @@ def test_migrate_host_refuses_a_different_workspace(
     assert sorted(p.name for p in another.iterdir()) == [".env", ".runtime"]
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     "extra",
@@ -2836,6 +2904,7 @@ def _desktop_install_without_a_workspace(
     return home
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_as_host_with_no_recoverable_workspace_asks_for_one(
     tmp_path: Path,
@@ -2891,6 +2960,7 @@ def test_migrate_as_host_with_no_recoverable_workspace_asks_for_one(
     assert _migration_receipt(harness)["phase"] == "installed_no_start"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_as_host_refuses_a_workspace_without_an_env(tmp_path: Path) -> None:
     # An existing directory is not yet a Ciaobot workspace. Handing an engine
@@ -2923,6 +2993,7 @@ def test_migrate_as_host_refuses_a_workspace_without_an_env(tmp_path: Path) -> N
     assert _replaced_state(harness) == untouched
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_migrate_client_ignores_a_workspace_it_never_uses(tmp_path: Path) -> None:
     # The workspace rules above are about a host hand-over. A client installs no
@@ -2949,6 +3020,7 @@ def test_migrate_client_ignores_a_workspace_it_never_uses(tmp_path: Path) -> Non
     assert _migration_receipt(harness)["phase"] == "migrated_client"
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_ordinary_install_still_creates_its_workspace(tmp_path: Path) -> None:
     # None of the above is about an ordinary install. A Mac that never ran

@@ -148,6 +148,17 @@ def test_cwd_symlink_out_of_the_workspace_is_rejected(tmp_path: Path) -> None:
     assert excinfo.value.code == "cwd_forbidden"
 
 
+# The interpreter running the suite, not a venv's launcher: a launcher adds a
+# process of its own. Runs that need "a command" use it with `-c`, so the same
+# test runs on every OS instead of assuming /bin/sh.
+PYTHON = getattr(sys, "_base_executable", sys.executable)
+
+
+def _py(code: str) -> list[str]:
+    """argv that runs ``code`` with this interpreter."""
+    return [PYTHON, "-c", code]
+
+
 def test_relative_executable_stays_inside_the_workspace(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     root.mkdir()
@@ -181,8 +192,13 @@ def test_a_relative_path_with_the_native_separator_is_a_path(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="a drive-less rooted path is a Windows shape")
-def test_a_rooted_path_without_a_drive_is_absolute(tmp_path: Path) -> None:
+def test_a_rooted_path_without_a_drive_is_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`\\tools\\x.exe` names the current drive's root, not the run directory."""
+    # The current drive decides what a rooted path means; on a CI runner the
+    # checkout (and so the cwd) is on D: while the temp dir is on C:.
+    monkeypatch.chdir(tmp_path)
     root = tmp_path / "workspace"
     root.mkdir()
     tool = tmp_path / "tool.exe"
@@ -284,14 +300,22 @@ async def test_run_resolves_paths_against_the_owning_workspace_root(
     runner = _rerooted_runner(tmp_path)
     scripts = tmp_path / "work" / "automations"
     scripts.mkdir(parents=True)
-    probe = scripts / "probe.sh"
-    probe.write_text("#!/bin/sh\npwd\n", encoding="utf-8")
-    probe.chmod(probe.stat().st_mode | stat.S_IXUSR)
+    if sys.platform == "win32":
+        # A shebang script is not a Windows program, so the relative path is
+        # the script's, run by the interpreter; it still resolves against the
+        # run's cwd inside the re-rooted workspace.
+        (scripts / "probe.py").write_text("import os\nprint(os.getcwd())\n", encoding="utf-8")
+        cmd = [PYTHON, "./probe.py"]
+    else:
+        probe = scripts / "probe.sh"
+        probe.write_text("#!/bin/sh\npwd\n", encoding="utf-8")
+        probe.chmod(probe.stat().st_mode | stat.S_IXUSR)
+        cmd = ["./probe.sh"]
 
     run = await runner.start_run(
         parent_chat_id="chat-1",
         workspace="work",
-        cmd=["./probe.sh"],
+        cmd=cmd,
         cwd="automations",
     )
     assert Path(run.cwd) == scripts.resolve()
@@ -313,7 +337,7 @@ async def test_run_cannot_reach_another_workspace(tmp_path: Path) -> None:
         await runner.start_run(
             parent_chat_id="chat-1",
             workspace="work",
-            cmd=["/bin/sh", "-c", "true"],
+            cmd=_py('pass'),
             cwd="../personal",
         )
     assert excinfo.value.code == "cwd_forbidden"
@@ -363,7 +387,7 @@ async def test_run_is_refused_when_its_workspace_directory_is_gone(
         await runner.start_run(
             parent_chat_id="chat-1",
             workspace="work",
-            cmd=["/bin/sh", "-c", "true"],
+            cmd=_py('pass'),
         )
     assert excinfo.value.code == "workspace_unavailable"
 
@@ -378,7 +402,7 @@ async def test_happy_path_records_output_and_wakes_once(tmp_path: Path) -> None:
     run = await runner.start_run(
         parent_chat_id="chat-1",
         workspace="work",
-        cmd=["/bin/sh", "-c", "echo hello-from-run"],
+        cmd=_py("print('hello-from-run')"),
         label="greeter",
     )
     assert run.status == "running"
@@ -406,7 +430,7 @@ async def test_failing_command_reports_its_exit_code(tmp_path: Path) -> None:
 
     run = await runner.start_run(
         parent_chat_id="chat-1",
-        cmd=["/bin/sh", "-c", "echo boom >&2; exit 3"],
+        cmd=_py("import sys; print('boom', file=sys.stderr); sys.exit(3)"),
     )
     final = await _await_terminal(runner, run.run_id)
 
@@ -424,9 +448,9 @@ async def test_cancel_terminates_the_whole_process_tree(tmp_path: Path) -> None:
 
     run = await runner.start_run(
         parent_chat_id="chat-1",
-        # A child sleep in the same session: killing only argv[0] would leave
-        # it behind, which is why the run gets its own process group.
-        cmd=["/bin/sh", "-c", "sleep 300 & sleep 300"],
+        # A child sleep in the same tree: killing only argv[0] would leave it
+        # behind, which is why the run gets its own process tree.
+        cmd=_py("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)']); time.sleep(300)"),
         timeout_s=300,
     )
     final = await runner.cancel(run.run_id)
@@ -479,7 +503,7 @@ async def test_shutdown_kills_a_grandchild_after_the_leader_exits_in_the_grace(
     # The real interpreter, not a venv's launcher: a launcher does not ignore
     # the polite stop, and its death takes its interpreter with it, which would
     # end the grandchild whatever the kill did.
-    python = getattr(sys, "_base_executable", sys.executable)
+    python = PYTHON
     grandchild ="\n".join(
         [
             _IGNORE_STOP,
@@ -540,7 +564,7 @@ async def test_terminate_kills_group_after_leader_has_exited(
 
 async def test_cancelling_a_finished_run_is_a_no_op(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
-    run = await runner.start_run(parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "true"])
+    run = await runner.start_run(parent_chat_id="chat-1", cmd=_py('pass'))
     finished = await _await_terminal(runner, run.run_id)
 
     again = await runner.cancel(run.run_id)
@@ -554,7 +578,7 @@ async def test_timeout_kills_the_run_and_reports_it_as_failed(tmp_path: Path) ->
 
     run = await runner.start_run(
         parent_chat_id="chat-1",
-        cmd=["/bin/sh", "-c", "sleep 60"],
+        cmd=_py('import time; time.sleep(60)'),
         timeout_s=1,
     )
     final = await _await_terminal(runner, run.run_id, timeout=30.0)
@@ -570,17 +594,17 @@ async def test_the_per_chat_run_limit_is_enforced(tmp_path: Path) -> None:
     for _ in range(MAX_ACTIVE_RUNS_PER_CHAT):
         started.append(
             await runner.start_run(
-                parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 30"], timeout_s=60
+                parent_chat_id="chat-1", cmd=_py('import time; time.sleep(30)'), timeout_s=60
             )
         )
 
     with pytest.raises(BackgroundRunError) as excinfo:
-        await runner.start_run(parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "true"])
+        await runner.start_run(parent_chat_id="chat-1", cmd=_py('pass'))
     assert excinfo.value.code == "run_limit_reached"
 
     # Another chat is unaffected: the cap is per owner, not global.
     other = await runner.start_run(
-        parent_chat_id="chat-2", cmd=["/bin/sh", "-c", "true"]
+        parent_chat_id="chat-2", cmd=_py('pass')
     )
     await _await_terminal(runner, other.run_id)
 
@@ -593,7 +617,7 @@ async def test_stop_terminates_live_runs_so_a_restart_has_no_orphans(
 ) -> None:
     runner = _runner(tmp_path)
     run = await runner.start_run(
-        parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 300"], timeout_s=600
+        parent_chat_id="chat-1", cmd=_py('import time; time.sleep(300)'), timeout_s=600
     )
 
     await runner.stop()
@@ -616,7 +640,7 @@ async def test_stop_marks_terminated_runs_for_wake_replay(tmp_path: Path) -> Non
     """
     runner = _runner(tmp_path)
     run = await runner.start_run(
-        parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 300"], timeout_s=600
+        parent_chat_id="chat-1", cmd=_py('import time; time.sleep(300)'), timeout_s=600
     )
 
     await runner.stop()
@@ -652,7 +676,7 @@ def test_replay_pending_wakes_delivers_and_clears_the_marker(tmp_path: Path) -> 
     store.replace(BackgroundRun(
         run_id="bg-deferred",
         parent_chat_id="chat-1",
-        cmd=["/bin/sh", "-c", "true"],
+        cmd=_py('pass'),
         started_at="2026-08-12T10:00:00+00:00",
         ended_at="2026-08-12T10:00:05+00:00",
         status="cancelled",
@@ -716,7 +740,7 @@ def test_restart_orphans_resolve_to_a_terminal_state_and_wake(tmp_path: Path) ->
     store.replace(BackgroundRun(
         run_id="bg-orphan",
         parent_chat_id="chat-1",
-        cmd=["/bin/sh", "-c", "sleep 900"],
+        cmd=_py('import time; time.sleep(900)'),
         pid=424242,
         started_at="2026-08-12T10:00:00+00:00",
         status="running",
@@ -761,7 +785,7 @@ def test_orphan_resolution_is_idempotent(tmp_path: Path) -> None:
 async def test_a_live_run_is_not_mistaken_for_an_orphan(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     run = await runner.start_run(
-        parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 30"], timeout_s=60
+        parent_chat_id="chat-1", cmd=_py('import time; time.sleep(30)'), timeout_s=60
     )
 
     assert runner.resolve_orphans() == []
@@ -860,7 +884,7 @@ async def test_finished_runs_are_recorded_as_job_runs(tmp_path: Path) -> None:
     )
     try:
         run = await runner.start_run(
-            parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "exit 2"], label="probe"
+            parent_chat_id="chat-1", cmd=_py('import sys; sys.exit(2)'), label="probe"
         )
         await _await_terminal(runner, run.run_id)
 
@@ -1059,7 +1083,7 @@ async def test_runner_announces_both_edges(tmp_path: Path) -> None:
     run = await runner.start_run(
         parent_chat_id="chat-1",
         workspace="work",
-        cmd=["/bin/sh", "-c", "true"],
+        cmd=_py('pass'),
     )
     assert started == [(run.run_id, {"chat-1": 1})]
 
@@ -1180,7 +1204,7 @@ async def test_a_finished_run_wakes_its_chat_end_to_end(
 
     run = await runner.start_run(
         parent_chat_id=chat.chat_id,
-        cmd=["/bin/sh", "-c", "echo report-ready"],
+        cmd=_py("print('report-ready')"),
         label="nightly",
     )
     await _await_terminal(runner, run.run_id)
@@ -1245,7 +1269,7 @@ async def test_cancelled_drain_replays_marked_wake(
 
     run = await runner.start_run(
         parent_chat_id=chat.chat_id,
-        cmd=["/bin/sh", "-c", "echo report-ready"],
+        cmd=_py("print('report-ready')"),
         label="nightly",
     )
     await _await_terminal(runner, run.run_id)
@@ -1305,7 +1329,7 @@ async def test_control_plane_start_attributes_the_run_to_the_calling_chat(
 
     result = await plane.background_run_start(
         _principal(chat.chat_id, project.project_id),
-        cmd=["/bin/sh", "-c", "echo ok"],
+        cmd=_py("print('ok')"),
         label="probe",
     )
 
@@ -1332,7 +1356,7 @@ async def test_a_run_is_invisible_to_another_chat(tmp_path: Path) -> None:
 
     started = await plane.background_run_start(
         _principal(owner.chat_id, project.project_id),
-        cmd=["/bin/sh", "-c", "sleep 30"],
+        cmd=_py('import time; time.sleep(30)'),
         timeout_s=60,
     )
     run_id = started["data"]["run_id"]
@@ -1371,7 +1395,7 @@ async def test_control_plane_rejects_a_cwd_outside_the_workspace(
     with pytest.raises(ControlPlaneError) as excinfo:
         await plane.background_run_start(
             _principal(chat.chat_id, project.project_id),
-            cmd=["/bin/sh", "-c", "true"],
+            cmd=_py('pass'),
             cwd="../../etc",
         )
     assert excinfo.value.code in {"invalid_cwd", "cwd_forbidden", "cwd_not_found"}
@@ -1401,7 +1425,7 @@ async def test_background_tools_report_unavailable_without_a_runner(
 
     with pytest.raises(ControlPlaneError) as excinfo:
         await plane.background_run_start(
-            _principal(chat.chat_id, project.project_id), cmd=["/bin/sh", "-c", "true"]
+            _principal(chat.chat_id, project.project_id), cmd=_py('pass')
         )
     assert excinfo.value.code == "unavailable"
 
@@ -1415,7 +1439,7 @@ async def test_status_returns_the_log_tail(tmp_path: Path) -> None:
 
     started = await plane.background_run_start(
         _principal(chat.chat_id, project.project_id),
-        cmd=["/bin/sh", "-c", "echo tail-marker"],
+        cmd=_py("print('tail-marker')"),
     )
     run_id = started["data"]["run_id"]
     await _await_terminal(runner, run_id)

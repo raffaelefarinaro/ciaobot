@@ -220,7 +220,7 @@
                     <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
                   </a>
                 </div>
-                <div v-html="renderMarkdown(item.msg.content)"></div>
+                <div v-html="renderUserMessage(item.msg.content)"></div>
               </div>
               <!-- The time shows only on the selected (tapped) message, so the
                    transcript stays quiet. -->
@@ -1294,7 +1294,7 @@ import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCop
 import AppIcon from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
-import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
@@ -3483,11 +3483,17 @@ watch(() => chat.value?.chat_id, (id) => notifyChatFocused(id))
 const knownFilePaths = computed(() => touchedFiles.value.map(f => f.file_path))
 
 const mdCache = new Map<string, string>()
+// User bubbles render through a different pipeline (raw HTML is escaped, see
+// lib/safeMarkdown.ts), so the two renderings cannot share one text-keyed cache.
+const userMdCache = new Map<string, string>()
 const MAX_MD_CACHE_SIZE = 500
 // Rendered output depends on the known-file-path set (for linkification), so
 // drop the cache whenever that set actually changes — keying on text alone is
 // then safe, and avoids a stale render when paths change without the text.
-watch(() => knownFilePaths.value.join('|'), () => mdCache.clear())
+watch(() => knownFilePaths.value.join('|'), () => {
+  mdCache.clear()
+  userMdCache.clear()
+})
 
 function renderMarkdown(text: string): string {
   if (!text) return ''
@@ -3501,6 +3507,20 @@ function renderMarkdown(text: string): string {
     if (firstKey !== undefined) mdCache.delete(firstKey)
   }
   mdCache.set(text, rendered)
+  return rendered
+}
+
+function renderUserMessage(text: string): string {
+  if (!text) return ''
+  const cached = userMdCache.get(text)
+  if (cached !== undefined) return cached
+
+  const rendered = renderSafeUserMarkdown(text, knownFilePaths.value)
+  if (userMdCache.size >= MAX_MD_CACHE_SIZE) {
+    const firstKey = userMdCache.keys().next().value
+    if (firstKey !== undefined) userMdCache.delete(firstKey)
+  }
+  userMdCache.set(text, rendered)
   return rendered
 }
 
