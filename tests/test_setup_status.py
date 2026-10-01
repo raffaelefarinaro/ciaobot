@@ -531,6 +531,36 @@ def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> 
     assert "~/.zshrc" in claude_path_command()
 
 
+def test_claude_path_command_on_windows_is_a_powershell_line(monkeypatch) -> None:
+    """The wizard used to hand Windows nothing at all, which left the user
+    one command short with nothing to copy."""
+    from ciao.setup_status import claude_path_command
+
+    monkeypatch.setattr("ciao.os_support.shell_hints.sys.platform", "win32")
+
+    line = claude_path_command(r"C:\Users\me\.local\bin")
+
+    assert line.startswith(
+        """[Environment]::SetEnvironmentVariable("Path", 'C:\\Users\\me\\.local\\bin;'"""
+    )
+    assert "export" not in line
+
+
+def test_claude_path_command_delegates_to_the_helper(monkeypatch) -> None:
+    from ciao.setup_status import claude_path_command
+
+    calls: list[tuple[str, bool]] = []
+
+    def record(directory: str, *, persist: bool) -> str:
+        calls.append((directory, persist))
+        return "HINT"
+
+    monkeypatch.setattr("ciao.setup_status.path_hint", record)
+
+    assert claude_path_command("/x/bin") == "HINT"
+    assert calls == [("/x/bin", True)]
+
+
 def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
@@ -847,6 +877,86 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     script = " ".join(popen_calls[0])
     assert "com.ciao.server.plist" in script
     assert "launchctl" in script
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
+@pytest.mark.parametrize("handoff_result", [True, False])
+def test_setup_finish_handoff_goes_through_the_backend(
+    handoff_result: bool, tmp_path, monkeypatch
+) -> None:
+    """The wizard's finish asks the seam, not routes_api, to spawn the helper."""
+    import ciao.web.routes_api as routes_api
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setattr(routes_api, "_interactive_foreground_run", lambda: True)
+    calls: list[bool] = []
+
+    class FakeBackend:
+        """Answers only the handoff; the directory methods stay real."""
+
+        name = "fake"
+
+        def agents_dir(self) -> Path:
+            return Path(home / "Library" / "LaunchAgents")
+
+        def live_agents_dir(self) -> Path:
+            return Path(home / "Library" / "LaunchAgents")
+
+        def is_live_agents_dir(self, path: Path) -> bool:
+            return Path(path) == self.live_agents_dir()
+
+        def bootout_agent(self, label: str) -> None:
+            return None
+
+        def load_agent(self, definition: Path) -> int:
+            return 0
+
+        def schedule_server_handoff(self) -> bool:
+            calls.append(handoff_result)
+            return handoff_result
+
+    monkeypatch.setattr(
+        routes_api.service_backend,
+        "current_backend",
+        lambda: FakeBackend(),
+    )
+    real_popen = routes_api.subprocess.Popen
+
+    def fail_popen(cmd, *a, **k):
+        if cmd and cmd[0] == "/bin/sh":
+            raise AssertionError("routes_api must not spawn the helper itself")
+        return real_popen(cmd, *a, **k)
+
+    monkeypatch.setattr(routes_api.subprocess, "Popen", fail_popen)
+
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    restarts: list[int] = []
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    app.state.request_restart = restarts.append
+
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(tmp_path / "workspace"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+
+    assert resp.status_code == 200
+    assert calls == [handoff_result]
+    expected = 0 if handoff_result else routes_api.RESTART_EXIT_CODE
+    assert restarts == [expected]
 
 
 def test_setup_finish_requires_a_password(tmp_path) -> None:

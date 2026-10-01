@@ -39,6 +39,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import proposal_actions
 from ciao import proposal_kinds
+from ciao import service_backend
 from ciao import backup_service
 from ciao import subagent_tracking
 from ciao import entity_types
@@ -5405,23 +5406,7 @@ def _schedule_launchd_server_handoff() -> bool:
     retries. Returns False when the plist is missing or the spawn fails, in
     which case the caller falls back to the in-place re-exec restart.
     """
-    plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.server.plist"
-    if not plist.exists():
-        return False
-    script = (
-        "sleep 3; "
-        f"/bin/launchctl load -w '{plist}' 2>/dev/null; "
-        f"/bin/launchctl kickstart gui/{os.getuid()}/com.ciao.server 2>/dev/null; "
-        "exit 0"
-    )
-    try:
-        subprocess.Popen(
-            ["/bin/sh", "-c", script],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
+    if not service_backend.current_backend().schedule_server_handoff():
         return False
     print(
         "\nSetup complete — Ciaobot is moving to the background service.\n"
