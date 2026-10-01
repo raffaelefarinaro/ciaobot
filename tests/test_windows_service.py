@@ -111,13 +111,17 @@ def test_render_escapes_xml_metacharacters() -> None:
 
 # A task whose command or working directory Task Scheduler cannot use fails at
 # logon, silently; the renderer refuses the values it cannot vouch for instead.
+# PureWindowsPath reads `//server/share` as a UNC drive, so the forward-slash
+# spelling has to be rejected as firmly as the backslash one.
 @pytest.mark.parametrize(
     "kwargs",
     [
         {"python": "pythonw.exe"},
         {"python": r"\\server\share\pythonw.exe"},
+        {"python": "//server/share/pythonw.exe"},
         {"workspace": "ciao"},
         {"workspace": "C:\\w\nx"},
+        {"workspace": "//server/share/ciao"},
         {"user": ""},
     ],
 )
@@ -348,6 +352,23 @@ def test_spawn_delayed_start_reports_a_failed_spawn(
 
     monkeypatch.setattr(ws.subprocess, "Popen", fail)
     monkeypatch.setattr(ws, "windowless_python", lambda python: python)
+
+    assert ws.spawn_delayed_start() is False
+
+
+def test_spawn_delayed_start_reports_an_interpreter_it_cannot_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """schedule_server_handoff is documented to return a bool, never to raise."""
+
+    def fail(*args: object, **kwargs: object):
+        raise AssertionError("Popen must not run without a windowless interpreter")
+
+    def refuse(python: str) -> str:
+        raise ValueError(f"Expected python.exe or pythonw.exe, got {python!r}")
+
+    monkeypatch.setattr(ws.subprocess, "Popen", fail)
+    monkeypatch.setattr(ws, "windowless_python", refuse)
 
     assert ws.spawn_delayed_start() is False
 

@@ -91,6 +91,7 @@ def test_agents_dir_honours_override_on_both_backends(
     assert backend.live_agents_dir() == real_default
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="exercises the POSIX launchd/systemd backends")
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
 def test_is_live_agents_dir(
     platform: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -111,6 +112,7 @@ def test_is_live_agents_dir(
     assert not backend.is_live_agents_dir(tmp_path / "x")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="exercises the POSIX launchd/systemd backends")
 def test_macos_bootout_agent_runs_exact_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -130,6 +132,7 @@ def test_macos_bootout_agent_runs_exact_argv(monkeypatch: pytest.MonkeyPatch) ->
     ]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="exercises the POSIX launchd/systemd backends")
 def test_macos_bootout_agent_swallows_oserror(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -165,6 +168,7 @@ def test_macos_load_agent_runs_unload_probe_then_load(
     assert calls[1][1] == {"check": False}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="exercises the POSIX launchd/systemd backends")
 def test_macos_schedule_server_handoff_script_is_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

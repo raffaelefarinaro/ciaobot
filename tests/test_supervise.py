@@ -279,6 +279,11 @@ def test_no_stdio_redirects_the_child_into_the_runtime_logs(
     logs = tmp_path / ".runtime"
     assert "out" in (logs / "ciao.stdout.log").read_text(encoding="utf-8")
     assert "err" in (logs / "ciao.stderr.log").read_text(encoding="utf-8")
+    # The log files are closed, so the module streams have to be back to the None
+    # they were: ciao.cli keeps writing to sys.stderr after supervise returns and
+    # would raise on a closed file.
+    assert sys.stderr is None
+    assert sys.stdout is None
 
 
 def test_a_console_is_left_alone(

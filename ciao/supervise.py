@@ -76,6 +76,7 @@ def supervise(
     # The task action is `pythonw.exe`, which has no console: sys.stderr is
     # None there and everything the child writes would go nowhere. The log files
     # are the same ones the macOS plist redirects to.
+    saved_stdio = (sys.stdout, sys.stderr)
     out, err = _ensure_stdio(Path.cwd() / ".runtime")
     child_stdio: dict[str, Any] = (
         {} if out is None or err is None else {"stdout": out, "stderr": err}
@@ -186,6 +187,11 @@ def supervise(
                 print(f"Backing off {delay:g}s before relaunching.", file=sys.stderr, flush=True)
                 wait(delay)
     finally:
+        if out is not None:
+            # The handles are about to close, so the module-level streams have to
+            # go back to what they were: ciao.cli keeps writing to sys.stderr after
+            # supervise returns, and a closed file would raise on the first write.
+            sys.stdout, sys.stderr = saved_stdio
         for handle in (out, err):
             if handle is not None:
                 handle.close()

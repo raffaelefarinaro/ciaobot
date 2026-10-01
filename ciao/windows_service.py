@@ -99,8 +99,10 @@ def _windows_absolute(label: str, value: str) -> str:
     # A UNC path has both a drive and a root, but Task Scheduler does not
     # reliably honour one for WorkingDirectory or Command, and a task whose
     # command cannot be found fails only at logon. Rejected here, where the
-    # mistake is visible, rather than there.
-    if value.startswith("\\\\") or not (path.drive and path.root):
+    # mistake is visible, rather than there. PureWindowsPath normalises the
+    # `//server/share` spelling to `\\server\share`, so the drive is the one to
+    # look at: a value that only starts with backslashes after parsing is UNC.
+    if path.drive.startswith("\\\\") or not (path.drive and path.root):
         raise ValueError(f"{label} must be an absolute Windows path with a drive: {value!r}")
     return _xml_text(label, value)
 
@@ -231,7 +233,12 @@ def stop_task(name: str = TASK_NAME) -> None:
 
 
 def spawn_delayed_start(name: str = TASK_NAME) -> bool:
-    """Detached helper: wait HANDOFF_DELAY_S, then ``schtasks /Run``. False on spawn failure."""
+    """Detached helper: wait HANDOFF_DELAY_S, then ``schtasks /Run``.
+
+    False on any failure, including an interpreter that is not a ``python*.exe``:
+    the caller (``WindowsBackend.schedule_server_handoff``) is documented to
+    return a bool, not to raise.
+    """
     script = (
         "import subprocess, sys, time\n"
         f"time.sleep({HANDOFF_DELAY_S})\n"
@@ -241,11 +248,12 @@ def spawn_delayed_start(name: str = TASK_NAME) -> bool:
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", _CREATE_NEW_PROCESS_GROUP) \
         | getattr(subprocess, "CREATE_NO_WINDOW", _CREATE_NO_WINDOW)
     try:
+        interpreter = windowless_python(sys.executable)
         subprocess.Popen(
-            [windowless_python(sys.executable), "-c", script],
+            [interpreter, "-c", script],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=flags, close_fds=True,
         )
-    except OSError:
+    except (OSError, ValueError):
         return False
     return True
