@@ -280,12 +280,20 @@ def resolve_executable(argv0: str, cwd: Path, workspace_root: Path) -> str:
     * an absolute path (``/usr/bin/python3``). Not confined, because PATH
       lookup already reaches outside the workspace and pretending otherwise
       would be friction without a boundary.
+
+    A path is relative when it names a directory with either separator the OS
+    has (``os.sep``, ``os.altsep``), so ``scripts\\x.py`` is a path on Windows
+    and not a program name to look up. A rooted path with no drive
+    (``\\tools\\x.exe``) counts as absolute there: it names the current
+    drive's root, not a place under the run directory. On POSIX both rules are
+    the ``"/" in argv0`` and ``is_absolute()`` checks they replace.
     """
     root = Path(workspace_root).resolve()
     candidate = Path(argv0)
-    if candidate.is_absolute():
+    separators = [sep for sep in (os.sep, os.altsep) if sep]
+    if candidate.is_absolute() or candidate.root:
         target = candidate.resolve()
-    elif "/" in argv0:
+    elif any(sep in argv0 for sep in separators):
         target = (cwd / candidate).resolve()
         if not target.is_relative_to(root):
             raise BackgroundRunError(

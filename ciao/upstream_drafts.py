@@ -832,7 +832,7 @@ def _run_gh(args: Sequence[str], timeout: float = 30.0) -> str:
             ["gh", *args],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=timeout,
         )
     except FileNotFoundError as exc:

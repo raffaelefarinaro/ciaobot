@@ -2329,9 +2329,9 @@ class ProjectChatManager:
                 # the frontmatter lives.
                 for candidate in (dst / f"{vault_folder}.md", dst / "README.md"):
                     if candidate.exists():
-                        text = candidate.read_text()
+                        text = candidate.read_text(encoding="utf-8")
                         text = re.sub(r"(?m)^(status:\s*)active\s*$", r"\1completed", text)
-                        candidate.write_text(text)
+                        candidate.write_text(text, encoding="utf-8")
                         break
                 vault_moved = True
 
@@ -2412,9 +2412,9 @@ class ProjectChatManager:
         # Flip status frontmatter back to active in the main markdown.
         for candidate in (dst / f"{stem}.md", dst / "README.md"):
             if candidate.exists():
-                text = candidate.read_text()
+                text = candidate.read_text(encoding="utf-8")
                 text = re.sub(r"(?m)^(status:\s*)completed\s*$", r"\1active", text)
-                candidate.write_text(text)
+                candidate.write_text(text, encoding="utf-8")
                 break
 
         # Force auto-discovery so the PWA project is recreated and a

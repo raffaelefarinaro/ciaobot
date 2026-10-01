@@ -23,11 +23,12 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
 
 SCHEMA_VERSION = 1
 SERVICE_BACKENDS = ("launchd", "systemd-user", "none")
@@ -146,14 +147,14 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
 
     target = path or default_receipt_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(target.parent, 0o700)
-    # mkstemp creates the file 0600, so it is never briefly readable.
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    make_private_dir(target.parent)
+    # Created 0600 (a private DACL on Windows), so it is never briefly readable.
+    fd, tmp_name = mkstemp_private(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n")
-        os.chmod(tmp, 0o600)
+        make_private(tmp)
         os.replace(tmp, target)
     finally:
         # A no-op once the rename succeeded, a cleanup when it did not.

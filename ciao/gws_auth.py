@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from ciao.jsonio import write_private_text
+from ciao.os_support.private import make_private, make_private_dir
 
 logger = logging.getLogger(__name__)
 
@@ -577,7 +578,7 @@ def store_credentials(
     try:
         # everything under here is OAuth material; tighten the profile dir for
         # installs whose older setup left it group/world-readable
-        config_dir.chmod(0o700)
+        make_private_dir(config_dir)
     except OSError as exc:
         logger.warning("Failed to tighten %s permissions: %s", config_dir, exc)
     creds_path = config_dir / "credentials.json"
@@ -587,7 +588,7 @@ def store_credentials(
     key_file = config_dir / ".encryption_key"
     if key_file.exists():
         try:
-            key_file.chmod(0o600)
+            make_private(key_file)
         except Exception as exc:
             logger.warning("Failed to fix .encryption_key permissions: %s", exc)
 

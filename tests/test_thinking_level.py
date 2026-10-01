@@ -131,11 +131,16 @@ def test_claude_levels_match_sdk_effort_literal() -> None:
 
 def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
     import asyncio
+    from unittest.mock import AsyncMock
 
     from starlette.requests import Request
 
+    from ciao.providers.opencode import OpencodeProvider
     from ciao.web.routes_api import list_models
 
+    # A unit test must never start a real `opencode serve` (#803): the catalog
+    # it would fetch is not what this test is about.
+    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     config = CiaoConfig.from_env()
     scope = {"type": "http", "method": "GET", "path": "/api/models", "headers": [], "query_string": b""}

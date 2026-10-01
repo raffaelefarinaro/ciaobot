@@ -7,6 +7,7 @@ import pytest
 
 from ciao import cli
 from ciao.linux_service import render_service
+from ciao.os_support.private import is_private
 
 
 def test_linux_setup_preserves_configuration_without_desktop_side_effects(tmp_path, monkeypatch, capsys):
@@ -18,7 +19,7 @@ def test_linux_setup_preserves_configuration_without_desktop_side_effects(tmp_pa
     config = (workspace / ".env").read_text()
     assert "PWA_PORT=8544" in config
     assert "PWA_AUTH_REQUIRED=true" in config
-    assert (workspace / ".env").stat().st_mode & 0o777 == 0o600
+    assert is_private(workspace / ".env")
     assert not (tmp_path / "LaunchAgents").exists()
     assert not (tmp_path / "Library").exists()
     assert not (tmp_path / "Applications").exists()

@@ -259,14 +259,42 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-async function mountAndSettle(loader: () => Promise<{ default: unknown }>) {
+/** How long a component import may take before the smoke test fails on it (well under vitest's 5 s). */
+const IMPORT_DEADLINE_MS = 3000
+
+/** Resolve the loader, or fail fast with the import named: a hung import must not look like a slow test. */
+export async function importWithin<T>(
+  loader: () => Promise<T>,
+  label: string,
+  deadlineMs: number = IMPORT_DEADLINE_MS,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`component import ${label} did not settle within ${deadlineMs} ms`)),
+      deadlineMs,
+    )
+  })
+  try {
+    return await Promise.race([
+      loader().catch((err: unknown) => {
+        throw new Error(`component import ${label} failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err })
+      }),
+      deadline,
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function mountAndSettle(loader: () => Promise<{ default: unknown }>, label = loader.toString()) {
   const errors: unknown[] = []
   const errorHandler = (err: unknown) => { errors.push(err) }
   const router = makeRouter()
   await router.push('/')
   await router.isReady()
 
-  const mod = await loader()
+  const mod = await importWithin(loader, label)
   const wrapper = mount(mod.default as never, {
     global: {
       plugins: [router],
@@ -971,5 +999,23 @@ describe('component mount smoke', () => {
   it('ProjectView mounts without throwing', async () => {
     const errors = await mountAndSettle(() => import('../ProjectView.vue'))
     expect(errors).toEqual([])
+  })
+})
+
+describe('importWithin', () => {
+  it('fails fast with the import named when the loader rejects', async () => {
+    await expect(importWithin(() => Promise.reject(new Error('boom')), 'X.vue')).rejects.toThrow(
+      'component import X.vue failed: boom',
+    )
+  })
+
+  it('fails with the import named when the loader never settles', async () => {
+    await expect(importWithin(() => new Promise(() => {}), 'Y.vue', 50)).rejects.toThrow(
+      'component import Y.vue did not settle within 50 ms',
+    )
+  })
+
+  it('returns the module when the loader resolves', async () => {
+    await expect(importWithin(async () => ({ default: 1 }), 'Z.vue')).resolves.toEqual({ default: 1 })
   })
 })

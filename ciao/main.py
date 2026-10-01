@@ -300,7 +300,56 @@ def _ensure_tool_dirs_on_path() -> None:
         os.environ["PATH"] = os.pathsep.join([*missing, *parts])
 
 
-async def _async_main() -> int:
+#: How long the restart watchdog lets asyncio cleanup run before forcing the restart.
+RESTART_WATCHDOG_GRACE_S = 15
+
+
+# asyncio.run's cleanup phase (cancel tasks, shut down the default
+# executor) can wedge after uvicorn drains: leaked Claude SDK
+# subprocess transports and synchronous urllib calls in the
+# heartbeat thread both hold the loop open indefinitely. The watchdog
+# is started only after chat work drains so it cannot cut the
+# wait short.
+def _restart_watchdog(
+    restart_code: int,
+    *,
+    supervised: bool,
+    sleep: Callable[[float], None] = time.sleep,
+    execv: Callable[[str, list[str]], object] = os.execv,
+    exit_now: Callable[[int], object] = os._exit,
+) -> None:
+    """Force the requested restart when asyncio cleanup wedges after the drain.
+
+    A clean-exit request (``restart_code == 0``) just exits. Under ``ciao supervise``
+    the supervisor owns the relaunch, so the process exits with the restart code and
+    never execs (an exec would bypass the supervisor's loop and backoff, and on
+    Windows would end the child with no relaunch). Otherwise re-exec a fresh
+    interpreter, as before, so launchd keeps tracking the same pid and the
+    relaunch picks up the current environment.
+    """
+    sleep(RESTART_WATCHDOG_GRACE_S)
+    if restart_code == 0:
+        # A clean-exit request (setup wizard handing the server over to
+        # launchd): dying is the point, don't relaunch.
+        exit_now(0)
+        return
+    if supervised:
+        logger.info("Cleanup did not finish; exiting for the supervisor to relaunch")
+        exit_now(restart_code)
+        return
+    logger.info("Cleanup did not finish; re-execing for the requested restart")
+    try:
+        # Same as ciao.cli._run_server: let the fresh process
+        # reload the workspace .env instead of inheriting it.
+        from ciao.config import reset_exported_dotenv
+
+        reset_exported_dotenv()
+        execv(sys.executable, [sys.executable, "-m", "ciao.cli", *sys.argv[1:]])
+    except OSError:
+        exit_now(restart_code)
+
+
+async def _async_main(*, supervised: bool = False) -> int:
     _ensure_tool_dirs_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
     config = CiaoConfig.from_env()
@@ -319,10 +368,10 @@ async def _async_main() -> int:
         config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
-        return await _run_server_locked(config)
+        return await _run_server_locked(config, supervised=supervised)
 
 
-async def _run_server_locked(config: CiaoConfig) -> int:
+async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
     setup_error_logging(config.workspace_root)
@@ -1120,42 +1169,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             await _wait_for_chat_drain(pcm)
             logger.info("Chat work drained; proceeding with requested restart")
 
-            # asyncio.run's cleanup phase (cancel tasks, shut down the default
-            # executor) can wedge after uvicorn drains: leaked Claude SDK
-            # subprocess transports and synchronous urllib calls in the
-            # heartbeat thread both hold the loop open indefinitely. Start
-            # the watchdog only after chat work drains so it cannot cut the
-            # wait short. A plain os._exit would leave a foreground `ciao run`
-            # dead; exec a fresh interpreter instead so launchd keeps tracking
-            # the same pid and the relaunch picks up the current environment.
+            # The restart watchdog is started only after chat work drains so it
+            # cannot cut the wait short; see _restart_watchdog.
             restart_code = restart_flag[0]
             if restart_code is None:
                 restart_code = code
 
-            def _force_exit() -> None:
-                time.sleep(15)
-                if restart_code == 0:
-                    # A clean-exit request (setup wizard handing the server
-                    # over to launchd): dying is the point, don't relaunch.
-                    os._exit(0)
-                logger.info(
-                    "Cleanup did not finish; re-execing for the requested restart"
-                )
-                try:
-                    # Same as ciao.cli._run_server: let the fresh process
-                    # reload the workspace .env instead of inheriting it.
-                    from ciao.config import reset_exported_dotenv
-
-                    reset_exported_dotenv()
-                    os.execv(
-                        sys.executable,
-                        [sys.executable, "-m", "ciao.cli", *sys.argv[1:]],
-                    )
-                except OSError:
-                    os._exit(restart_code)
-
             threading.Thread(
-                target=_force_exit, daemon=True, name="ciao-restart-watchdog"
+                target=_restart_watchdog,
+                args=(restart_code,),
+                kwargs={"supervised": supervised},
+                daemon=True,
+                name="ciao-restart-watchdog",
             ).start()
             await server.shutdown()
 
@@ -1238,6 +1263,16 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Background runner shutdown failed")
 
+    async def _shutdown_links_scan() -> None:
+        # Cancel a Home wikilink scan still in flight and wait for it to
+        # acknowledge, before the read executor below is closed. The walk itself
+        # is not interruptible — `run_read`'s worker finishes and stays joinable —
+        # but leaving a task pending on a closing loop is the part a restart
+        # notices.
+        from ciao.migration_notices import shutdown_links_scan
+
+        await shutdown_links_scan(app.state)
+
     async def _shutdown_vault_reads() -> None:
         # Discard vault reads still queued for the off-loop executor (bounded,
         # cancel_futures=True) so a restart is not held up by a backlog of
@@ -1261,6 +1296,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.shutdown_callbacks = [
         _shutdown_providers,
         _shutdown_background_runs,
+        # Before the read executor: the scan is waiting on a worker, and closing
+        # the pool out from under a pending task is the leak worth avoiding.
+        _shutdown_links_scan,
         _shutdown_vault_reads,
         _shutdown_backup,
     ]
@@ -1274,7 +1312,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     return 0
 
 
-def main() -> None:
+def main(*, supervised: bool = False) -> None:
     """CLI entrypoint."""
     from ciao.error_log import resolve_log_level
 
@@ -1282,7 +1320,7 @@ def main() -> None:
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:
-        code = asyncio.run(_async_main())
+        code = asyncio.run(_async_main(supervised=supervised))
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)
         code = 2
