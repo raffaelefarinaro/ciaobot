@@ -42,8 +42,11 @@ UNAVAILABLE_ARGV = {
 class _Schtasks:
     """A recording stand-in for the ``schtasks`` verbs the CLI reaches for."""
 
-    def __init__(self, *, registered: bool = False) -> None:
+    def __init__(self, *, registered: bool = False, end_fails: bool = False) -> None:
         self.registered = registered
+        # schtasks /End exits non-zero when the task has no running instance,
+        # which is every `stop`/`restart` against an engine that is already down.
+        self.end_fails = end_fails
         self.calls: list[tuple[str, ...]] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> "_Schtasks":
@@ -68,6 +71,8 @@ class _Schtasks:
 
     def stop_task(self, name: str = ws.TASK_NAME) -> None:
         self.calls.append(("/End", name))
+        if self.end_fails:
+            raise ws.WindowsServiceError("schtasks /End failed: ERROR: task is not running")
 
 
 class _PlatformShim:
@@ -88,7 +93,11 @@ class _PlatformShim:
 
 
 def _on_windows(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, registered: bool = False
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    registered: bool = False,
+    end_fails: bool = False,
 ) -> _Schtasks:
     """This command believes it is on Windows, with its own definitions dir.
 
@@ -108,7 +117,7 @@ def _on_windows(
     )
     monkeypatch.setattr(macos_service, "server_reachable", lambda _port, **_kw: False)
     monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port, **_kw: [])
-    return _Schtasks(registered=registered).install(monkeypatch)
+    return _Schtasks(registered=registered, end_fails=end_fails).install(monkeypatch)
 
 
 def _workspace(path: Path, *, port: int | None = None) -> Path:
@@ -222,12 +231,67 @@ def test_service_start_registers_the_task_for_an_unregistered_workspace(
     assert cli.main(["service", "start", "--workspace", str(workspace)]) == 0
 
     definition = tmp_path / "service" / ws.TASK_FILE_NAME
-    assert _schtasks.calls == [
+    # `/Query` first (is one there?), then write, register and run.
+    assert _schtasks.calls[-2:] == [
         ("/Create", ws.TASK_NAME, str(definition)),
         ("/Run", ws.TASK_NAME),
     ]
+    assert set(_schtasks.verbs) == {"/Query", "/Create", "/Run"}
     assert ws.task_workspace(definition) == workspace
     assert capsys.readouterr().out.strip() == "Ciaobot engine started."
+
+
+def test_service_start_runs_an_already_registered_task_without_rewriting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Re-registering would repoint the engine at this run's interpreter."""
+
+    _schtasks = _on_windows(monkeypatch, tmp_path, registered=True)
+    _renders(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path / "ws")
+    definition = _stored_task(tmp_path, workspace)
+    before = definition.read_bytes()
+
+    assert cli.main(["service", "start", "--workspace", str(workspace)]) == 0
+
+    assert "/Create" not in _schtasks.verbs
+    assert _schtasks.verbs[-1] == "/Run"
+    assert definition.read_bytes() == before
+    assert capsys.readouterr().out.strip() == "Ciaobot engine started."
+
+
+def test_service_start_after_an_unregister_is_not_blocked_by_a_stale_definition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`bootout_agent` deletes the task and leaves the XML; the file is not the truth."""
+
+    _schtasks = _on_windows(monkeypatch, tmp_path, registered=False)
+    _renders(monkeypatch, tmp_path)
+    _stored_task(tmp_path, _workspace(tmp_path / "installed"))
+    requested = _workspace(tmp_path / "other")
+
+    assert cli.main(["service", "start", "--workspace", str(requested)]) == 0
+
+    assert "/Create" in _schtasks.verbs
+    assert _schtasks.verbs[-1] == "/Run"
+
+
+def test_service_start_without_a_workspace_points_at_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """An unregistered task has nothing to run; say so instead of echoing schtasks."""
+
+    _schtasks = _on_windows(monkeypatch, tmp_path, registered=False)
+
+    assert cli.main(["service", "start", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["action"] == "start"
+    assert payload["details"] == {"setup_required": True}
+    assert "ciao setup --workspace <path> --load-launchd --yes" in payload["message"]
+    # `/Query` is the answer to "is there a task at all?"; nothing runs.
+    assert _schtasks.verbs == ["/Query"]
 
 
 def test_service_start_refuses_another_workspace_and_writes_nothing(
@@ -248,7 +312,8 @@ def test_service_start_refuses_another_workspace_and_writes_nothing(
     assert f"The registered task serves {installed}, not {requested}" in message
     assert "--load-launchd --yes" in message
     assert definition.read_bytes() == before, "a refusal must not rewrite the task"
-    assert _schtasks.calls == [], "a refusal must not reach the scheduler"
+    # `/Query` reads the task to learn which workspace it serves; nothing writes.
+    assert _schtasks.verbs == ["/Query"]
 
 
 @pytest.mark.parametrize(
@@ -267,6 +332,46 @@ def test_service_stop_and_restart_end_and_run_the_task(
 
     assert _schtasks.verbs == verbs
     assert capsys.readouterr().out.strip().startswith("Ciaobot engine ")
+
+
+@pytest.mark.parametrize(
+    ("action", "verbs"), [("stop", ["/End", "/Query"]), ("restart", ["/End", "/Query", "/Run"])]
+)
+def test_service_stop_and_restart_succeed_against_a_stopped_engine(
+    action: str,
+    verbs: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`/End` fails when nothing is running; that is the state being asked for."""
+
+    _schtasks = _on_windows(monkeypatch, tmp_path, registered=True, end_fails=True)
+
+    assert cli.main(["service", action]) == 0
+
+    assert _schtasks.verbs == verbs
+    assert capsys.readouterr().out.strip().startswith("Ciaobot engine ")
+
+
+@pytest.mark.parametrize("action", ["stop", "restart"])
+def test_service_stop_and_restart_refuse_an_unregistered_task(
+    action: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """No task at all is a refusal the user can act on, not an already-stopped no-op."""
+
+    _schtasks = _on_windows(monkeypatch, tmp_path, registered=False, end_fails=True)
+
+    assert cli.main(["service", action, "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "not registered" in payload["message"]
+    assert "ciao setup --workspace <path> --load-launchd --yes" in payload["message"]
+    assert "/Run" not in _schtasks.verbs, "a restart with no task must not try to run one"
 
 
 def test_service_stop_refuses_while_a_chat_is_active(
@@ -333,6 +438,80 @@ def test_setup_load_launchd_registers_the_task_on_windows(
     assert _schtasks.calls == [("/Create", ws.TASK_NAME, str(definition)), ("/Run", ws.TASK_NAME)]
 
 
+def test_setup_renders_the_requested_python_into_the_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--python` and `/api/setup/finish`'s `python` are the interpreter the task runs."""
+
+    _on_windows(monkeypatch, tmp_path, registered=False)
+    monkeypatch.setattr(ws, "current_user", lambda: USER)
+    engine = tmp_path / "engine"
+    engine.mkdir()
+    python = engine / "python.exe"
+    python.touch()
+    pythonw = engine / "pythonw.exe"
+    pythonw.touch()
+    # windowless_python is the seam: its input is the interpreter setup was asked
+    # to record, and a Windows path round-trips through PureWindowsPath, so a
+    # POSIX tmp path would come back spelled with backslashes.
+    requested: list[str] = []
+    rendered: dict[str, object] = {}
+
+    def windowless_python(value: str) -> str:
+        requested.append(value)
+        return str(pythonw)
+
+    def render(**kwargs: object) -> str:
+        rendered.update(kwargs)
+        return _document(r"C:\ws")
+
+    monkeypatch.setattr(ws, "windowless_python", windowless_python)
+    monkeypatch.setattr(ws, "render_task_xml", render)
+    workspace = tmp_path / "ws"
+
+    rc = cli.main(
+        [
+            "setup",
+            "--workspace",
+            str(workspace),
+            "--auth-token",
+            "test-token",
+            "--python",
+            str(python),
+            "--load-launchd",
+            "--yes",
+        ]
+    )
+
+    assert rc == 0
+    assert requested == [str(python)], "--python, not the running interpreter"
+    assert rendered["python"] == str(pythonw)
+
+
+def test_setup_reports_an_interpreter_the_task_cannot_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The renderer raises; setup prints it and exits 1 rather than a traceback."""
+
+    _on_windows(monkeypatch, tmp_path, registered=False)
+    monkeypatch.setenv("CIAO_ENGINE_PATH", str(tmp_path / "not-python.exe.exe"))
+
+    rc = cli.main(
+        [
+            "setup",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--auth-token",
+            "test-token",
+            "--load-launchd",
+            "--yes",
+        ]
+    )
+
+    assert rc == 1
+    assert "not-python.exe.exe" in capsys.readouterr().err
+
+
 def test_setup_without_load_launchd_prints_the_windows_next_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -347,7 +526,9 @@ def test_setup_without_load_launchd_prints_the_windows_next_step(
     assert rc == 0
     # launchctl wording would be wrong here: the task is registered by setup, not launchctl.
     assert "Task not registered. To register it: ciao setup" in capsys.readouterr().out
-    assert _schtasks.calls == []
+    # setup without --load-launchd writes the definition and asks the scheduler
+    # whether one is already registered; it never creates or runs one.
+    assert set(_schtasks.verbs) <= {"/Query"}
 
 
 def test_setup_load_launchd_is_still_refused_on_linux(

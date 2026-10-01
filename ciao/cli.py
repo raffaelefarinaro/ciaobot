@@ -1191,11 +1191,19 @@ def setup_workspace(
             # The Windows definition is Task Scheduler XML written by the module
             # that owns the task, not a plist. The repoint guard already ran
             # above, through `_registered_service_workspace`.
-            written.append(windows_service.write_task_definition(
-                workspace=root,
-                python=os.environ.get("CIAO_ENGINE_PATH", "").strip() or None,
-                directory=launch_dir,
-            ))
+            #
+            # The renderer refuses values the task would only reject at logon:
+            # an interpreter that is not python*.exe, a UNC workspace, a
+            # missing USERNAME. Both setup callers report RuntimeError, so a
+            # bad value is a message and an exit code, never a traceback.
+            try:
+                written.append(windows_service.write_task_definition(
+                    workspace=root,
+                    python=resolved_engine,
+                    directory=launch_dir,
+                ))
+            except (ValueError, windows_service.WindowsServiceError) as exc:
+                raise RuntimeError(str(exc)) from exc
         else:
             written.append(_write_launchd_plist(
                 workspace=root,
@@ -1263,6 +1271,14 @@ def _registered_service_workspace(definitions_dir: Path) -> Path | None:
     if sys.platform == "win32":
         from ciao import windows_service
 
+        # `unregister_task` leaves the XML on disk, so a definition is not proof
+        # a task exists: ask Task Scheduler. Refusing to repoint a task that was
+        # already deleted would strand the user behind a stale file.
+        try:
+            if not windows_service.task_exists():
+                return None
+        except windows_service.WindowsServiceError:
+            return None
         workspace = windows_service.task_workspace(
             definitions_dir.expanduser() / windows_service.TASK_FILE_NAME
         )

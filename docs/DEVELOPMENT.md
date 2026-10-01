@@ -23,7 +23,8 @@ ciao run
 `ciao service status|start|stop|restart` drives that background service on both
 platforms: the LaunchAgent on macOS, the per-user logon task on Windows. `start
 --workspace <dir>` registers a service that is not installed yet, and refuses to
-repoint one that already serves a different workspace without `--yes`. The macOS
+repoint one that already serves a different workspace; use `ciao setup --workspace
+<dir> --load-launchd --yes` to repoint it. The macOS
 desktop-shell actions (`login`, `migrate`, `migration-classify`, `rollback`) and
 `update-engine` are not available on Windows and say so; `stop` and `restart`
 refuse while a chat is active unless `--force` is given.
