@@ -501,6 +501,70 @@ def test_path_write_matches_shell_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "update-shell" not in SCRIPT_TEXT
 
 
+def _ps1_param_block(lines: list[str], after: int) -> tuple[int, int]:
+    """The `param(` block that starts at or after line `after`, as a line range."""
+    start = next(i for i in range(after, len(lines)) if lines[i].strip() == "param(")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == ")")
+    return start, end
+
+
+def test_no_local_overwrites_a_parameter() -> None:
+    # PowerShell variable names are case-insensitive, so a "local" called
+    # $workspace is not a new variable: it is $Workspace, the parameter the
+    # caller passed. `Install-Ciaobot` reset every one of its string parameters
+    # to '' near the top of the body, and that silently threw away what the user
+    # asked for - the Windows CI run passed -Workspace and the log printed the
+    # default directory under %USERPROFILE% instead, which is why it then
+    # reported "workspace kept: no" for a workspace it had never created. There
+    # is nothing to see on a user's machine: the install succeeds against the
+    # wrong directory. So the parameter names are read out of the block itself
+    # and no line outside a `param` block may assign '' to one of them.
+    lines = SCRIPT_TEXT.splitlines()
+    function = next(
+        i for i, line in enumerate(lines) if line.startswith("function Install-Ciaobot {")
+    )
+    script_params = _ps1_param_block(lines, 0)
+    function_params = _ps1_param_block(lines, function)
+    names = [
+        match.group(1)
+        for line in lines[function_params[0] + 1 : function_params[1]]
+        if (match := re.search(r"\$([A-Za-z_][A-Za-z0-9_]*)", line))
+    ]
+    assert names == [
+        "Version",
+        "ReleaseDir",
+        "DryRun",
+        "Workspace",
+        "NoStart",
+        "Uninstall",
+    ], "Install-Ciaobot's parameters changed; check the declarations this test reads"
+
+    # The two `param` blocks are declarations, and both default a string to '';
+    # a nested function's `[string]$Workspace, [string]$PathEntry) {` header is
+    # a declaration too, and does not start with the variable.
+    declared = {
+        index
+        for start, end in (script_params, function_params)
+        for index in range(start, end + 1)
+    }
+    reset = re.compile(
+        rf"(?im)^[ \t]*\$(?:{'|'.join(names)})[ \t]*=[ \t]*''", re.ASCII
+    )
+    offenders = [
+        f"{index + 1}: {line.strip()}"
+        for index, line in enumerate(lines)
+        if index not in declared and reset.match(line)
+    ]
+    assert not offenders, (
+        "install.ps1 assigns '' to a parameter it was given (PowerShell names are "
+        f"case-insensitive, so this is the parameter): {offenders}"
+    )
+
+    # The one assignment to a parameter that is not `''` is the workspace being
+    # resolved to a full path after it is created, which keeps its meaning.
+    assert "$workspace = (Get-Item -LiteralPath $Workspace).FullName" in SCRIPT_TEXT
+
+
 def test_uninstall_removes_exactly_what_install_adds() -> None:
     # "Uninstall removes exactly what install adds" has to be one list, not two
     # that drift. The markers are the list: every mutation in the install body

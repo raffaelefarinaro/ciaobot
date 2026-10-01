@@ -188,6 +188,14 @@ jobs:
     # datum this step exists to produce, not a failure. Nothing below can fail
     # the job, and the workspace is a throwaway under RUNNER_TEMP.
     - name: install.ps1 end-to-end install and uninstall (advisory)
+      # The step's shell is Git Bash, whose MSYS path conversion turns a
+      # `/Query`, `/TN`, `/v` or `/End` argument into a Windows path before the
+      # program ever sees it: `schtasks` and `reg` were being asked to read
+      # paths, reported nothing, and every "no" below was the shell talking
+      # rather than the installer. MSYS_NO_PATHCONV=1 turns that off for this
+      # step; without it the probes test the shell, not the machine.
+      env:
+        MSYS_NO_PATHCONV: '1'
       run: |
         {
           # basename, not the whole path: `cut -d- -f2` on

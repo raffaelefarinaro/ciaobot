@@ -230,8 +230,15 @@ def test_windows_job_checks_the_install_ps1_advisorily() -> None:
     steps = steps.split("    - name: Summarize")[0]
     assert steps.count("|| true") >= 2
     # Each run step's own `run` block ends with its own log redirection and
-    # `|| true`; a step that lost either would fail the job on a refusal.
-    run_blocks = re.findall(r"(?ms)^    - name: ([^\n]+)\n      run: \|\n(.*?)(?=^    - name:|\Z)", steps)
+    # `|| true`; a step that lost either would fail the job on a refusal. A step
+    # may carry keys other than `run` between its name and its `run` block - the
+    # end-to-end step sets `env:` there - so everything up to `run: |` is
+    # skipped rather than assumed to be a single line.
+    run_blocks = re.findall(
+        r"(?ms)^    - name: ([^\n]+)\n(?:^(?!      run: \|\n)[^\n]*\n)*?      run: \|\n"
+        r"(.*?)(?=^    - name:|\Z)",
+        steps,
+    )
     assert run_blocks, "no install.ps1 run steps found in the windows job"
     for name, body in run_blocks:
         # The comment block introducing the *next* step is captured with this
@@ -313,6 +320,23 @@ def test_windows_job_checks_the_install_ps1_advisorily() -> None:
     # then reports "no" for everything having installed nothing.
     assert 'basename "$(ls ps1-e2e/release/*.whl' in commands
     assert "| head -1 | cut -d- -f2)" not in commands
+
+    # The step's shell is Git Bash, whose MSYS path conversion rewrites the
+    # `/Query`, `/TN` and `/v` arguments of the schtasks and reg probes below
+    # into Windows paths: both programs were then asked about paths, printed
+    # nothing, and reported "no" while the task and the PATH entry were there -
+    # the install log said it had added the PATH entry and the very next line
+    # contradicted it. MSYS_NO_PATHCONV=1 is what makes the probes measure the
+    # machine instead of the shell, and it has to be on this step specifically:
+    # `env:` scopes it to the run that needs it.
+    step = workflow.split(
+        "    - name: install.ps1 end-to-end install and uninstall (advisory)"
+    )[1].split("\n    - name:")[0]
+    assert "env:" in step, "the end-to-end step carries no env: mapping"
+    assert re.search(r"(?m)^        MSYS_NO_PATHCONV: '1'$", step), (
+        "the end-to-end step runs under Git Bash without MSYS_NO_PATHCONV, so its "
+        "schtasks and reg probes read paths and report the shell, not the machine"
+    )
 
 
 def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:

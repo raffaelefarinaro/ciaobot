@@ -479,7 +479,6 @@ print(name, digest, size)
     $savedInstallDir = $env:UV_INSTALL_DIR
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('ciaobot-install-' + [guid]::NewGuid().ToString('N'))
     $pathEntry = ''
-    $workspace = ''
 
     try {
         # Windows PowerShell 5.1 defaults to TLS 1.0/1.1 on some builds; GitHub needs 1.2.
@@ -494,8 +493,15 @@ print(name, digest, size)
         # schtasks/uv/the filesystem for the rest - never by what this run did,
         # because this run did nothing.
         if ($Uninstall) {
+            # PowerShell variable names are case-insensitive, so a local named
+            # $workspace here would be the -Workspace parameter: assigning one
+            # would overwrite the value the caller passed and -Workspace would be
+            # silently ignored, and the install it guards would use the default
+            # directory instead. Named for what it is - a directory this run
+            # reads out of the state file and never touches.
+            $keptWorkspace = ''
             $state = Read-InstallState
-            if ($state -and $state.workspace) { $workspace = [string]$state.workspace }
+            if ($state -and $state.workspace) { $keptWorkspace = [string]$state.workspace }
             if ($state -and $state.path_entry) { $pathEntry = [string]$state.path_entry }
             $found = Get-Command uv -ErrorAction SilentlyContinue
             $localBin = Join-Path $env:USERPROFILE '.local\bin'
@@ -515,15 +521,15 @@ print(name, digest, size)
             if (Test-Path -LiteralPath $StateFile) { $done += 'state' }
             if ($pathEntry) { $done += 'path' }
             if (Test-Path -LiteralPath $ReceiptPath) { $done += 'receipt' }
-            $undone = @(Undo-Install -Steps $done -Uv $uv -ToolDirectory $toolDir -Workspace $workspace -PathEntry $pathEntry)
+            $undone = @(Undo-Install -Steps $done -Uv $uv -ToolDirectory $toolDir -Workspace $keptWorkspace -PathEntry $pathEntry)
             if ($undone.Count -eq 0) {
                 Write-Host 'Ciaobot is uninstalled.'
             } else {
                 Write-Host "Ciaobot could not be fully uninstalled; finish by hand: $($undone -join '; ')"
             }
             Write-Host 'uv was left in place: it is not this installer''s to remove, and it runs other tools.'
-            if ($workspace) {
-                Write-Host "Your workspace was kept: $workspace"
+            if ($keptWorkspace) {
+                Write-Host "Your workspace was kept: $keptWorkspace"
             }
             return
         }
