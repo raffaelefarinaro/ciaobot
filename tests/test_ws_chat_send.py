@@ -7,16 +7,24 @@ message frame (WebKit suspension closes the socket in the same instant the
 frame arrives) took the early `break` and `start_stream` was never called —
 the turn silently vanished and the reconnecting client's history reload
 wiped the optimistic bubble.
+
+Also covers the idle keepalive: an open chat with no active stream used to
+get no frames at all, so the PWA watchdog closed and reconnected the socket
+every ~14 s. `_attach_streams` now sends `{"type": "keepalive"}` on the
+STREAM_KEEPALIVE_SECONDS cadence.
 """
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
+from ciao.web import routes_chat
 from ciao.web.routes_chat import ws_chat
 
 
@@ -86,3 +94,29 @@ def test_archived_chat_is_rejected_without_starting_a_stream() ->  None:
         ws.send_text('{"type":"message","text":"hello"}')
         assert ws.receive_json()["archived"] is True
     assert started == []
+
+
+def test_idle_chat_socket_receives_keepalive(monkeypatch) -> None:
+    """An idle chat must get frames, or the PWA watchdog calls it half-open."""
+    monkeypatch.setattr(routes_chat, "STREAM_KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(routes_chat, "_ATTACH_POLL_SECONDS", 0.01)
+    client = TestClient(_app([]))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        assert ws.receive_json() == {"type": "keepalive"}
+        # It repeats: the client stamps liveness on every keepalive.
+        assert ws.receive_json() == {"type": "keepalive"}
+
+
+async def test_attach_streams_ends_when_keepalive_send_fails(monkeypatch) -> None:
+    """A dead socket ends the attach loop instead of spinning forever."""
+    monkeypatch.setattr(routes_chat, "STREAM_KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(routes_chat, "_ATTACH_POLL_SECONDS", 0.01)
+
+    class _DeadWebSocket:
+        async def send_json(self, payload) -> None:
+            raise WebSocketDisconnect()
+
+    pcm = SimpleNamespace(get_active_stream=lambda _cid: None)
+    await asyncio.wait_for(
+        routes_chat._attach_streams(_DeadWebSocket(), pcm, "chat-1"), 2
+    )

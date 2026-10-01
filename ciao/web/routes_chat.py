@@ -24,7 +24,7 @@ import logging
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ciao.web.auth import authorize_websocket
-from ciao.web.chat_broker import ChatStream
+from ciao.web.chat_broker import STREAM_KEEPALIVE_SECONDS, ChatStream
 from ciao.web.connection_tracker import ConnectionTracker
 from ciao.models import ImageAttachment
 from ciao.web.project_chats import RestartDrainingError
@@ -58,17 +58,32 @@ _ATTACH_POLL_SECONDS = 0.5
 
 
 async def _attach_streams(websocket: WebSocket, pcm, chat_id: str) -> None:
-    """Forward every broker stream for this chat until the socket dies."""
+    """Forward every broker stream for this chat until the socket dies.
+
+    While idle it sends a keepalive every STREAM_KEEPALIVE_SECONDS so the PWA
+    watchdog does not read silence as a dead socket.
+    """
     last: ChatStream | None = None
+    loop = asyncio.get_running_loop()
+    last_sent = loop.time()
     while True:
         stream = pcm.get_active_stream(chat_id)
         if stream is not None and stream is not last:
             last = stream
             if not await _forward_stream(websocket, stream):
                 return
+            # The stream's own subscribe() was writing keepalives until it
+            # ended.
+            last_sent = loop.time()
             # Immediately re-check: a queued follow-up or background stream
             # may already have replaced the one that just finished.
             continue
+        if loop.time() - last_sent >= STREAM_KEEPALIVE_SECONDS:
+            try:
+                await websocket.send_json({"type": "keepalive"})
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            last_sent = loop.time()
         await asyncio.sleep(_ATTACH_POLL_SECONDS)
 
 

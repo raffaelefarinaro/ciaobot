@@ -87,7 +87,7 @@
             </div>
             <p v-if="srv.url" class="skill-description">URL: {{ srv.url }}</p>
             <p v-else-if="srv.command" class="skill-description">
-              Command: {{ srv.command }}<template v-if="srv.args?.length"> {{ srv.args.join(' ') }}</template>
+              Command: {{ commandLine(srv) }}
             </p>
             <div v-if="isExpanded(srv.name)" class="skill-detail" @click.stop>
               <div class="settings-field-grid mcp-edit-grid">
@@ -248,6 +248,7 @@ import { computed } from 'vue'
 // them unwrapped.
 import { assetOriginClass, assetOriginLabel, mcpServerOrigin } from '../../lib/assetOrigin'
 import type { McpServersController } from '../../composables/useMcpServers'
+import type { McpProjectServer } from '../../lib/types'
 
 const props = defineProps<{ mcp: McpServersController }>()
 
@@ -296,6 +297,16 @@ const {
 const workspaceLabel = computed(
   () => props.mcp.status.value?.workspace || 'selected',
 )
+
+// One interpolation, not `{{ srv.command }}<template> {{ args }}</template>`:
+// Vue's whitespace condensing trims the leading space inside the <template>,
+// so `{"command": "python", "args": ["server.py"]}` read as
+// `Command: pythonserver.py`. Args containing whitespace are quoted so the
+// line stays unambiguous.
+function commandLine(srv: McpProjectServer): string {
+  const quote = (arg: string) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)
+  return [srv.command ?? '', ...(srv.args ?? []).map(quote)].join(' ')
+}
 </script>
 
 <!-- The rules this markup needs used to live in SettingsView's own scoped
