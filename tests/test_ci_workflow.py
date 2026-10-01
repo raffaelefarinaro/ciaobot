@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -220,12 +221,51 @@ def test_windows_job_checks_the_install_ps1_advisorily() -> None:
     assert 'sys.path.insert(0, ".")' in workflow
     assert "from tests.test_engine_installer import" in workflow
 
-    # Both steps that touch the installer end in `|| true`, and so does the one
-    # that runs it: the job may report a refusal, never fail on one.
+    # Every step that touches the installer redirects into its own log and ends
+    # in `|| true`: the job may report a refusal, never fail on one. #853 added
+    # a second pair of steps (the end-to-end fixture and the end-to-end
+    # install/uninstall run), so the property is checked per step rather than by
+    # pinning whichever one happens to be last.
     steps = workflow.split("    - name: Build install.ps1 offline fixture")[1]
     steps = steps.split("    - name: Summarize")[0]
     assert steps.count("|| true") >= 2
-    assert steps.rstrip().endswith("> windows-install-ps1.txt 2>&1 || true")
+    # Each run step's own `run` block ends with its own log redirection and
+    # `|| true`; a step that lost either would fail the job on a refusal.
+    run_blocks = re.findall(r"(?ms)^    - name: ([^\n]+)\n      run: \|\n(.*?)(?=^    - name:|\Z)", steps)
+    assert run_blocks, "no install.ps1 run steps found in the windows job"
+    for name, body in run_blocks:
+        # The comment block introducing the *next* step is captured with this
+        # one's body; it is not part of the command.
+        body = re.sub(r"(?m)^\s*#.*$", "", body)
+        lines = [line.strip() for line in body.rstrip().splitlines() if line.strip()]
+        if lines[0].startswith("python - <<"):
+            # A heredoc step: the guard is on the command that opens it, the way
+            # the offline fixture step has always done it.
+            assert lines[0].endswith("|| true"), (
+                f"the '{name}' step would fail the windows job: it does not end in '|| true'"
+            )
+            continue
+        last = lines[-1]
+        assert last.endswith("2>&1 || true"), (
+            f"the '{name}' step would fail the windows job: it does not end in '|| true'"
+        )
+        assert last.startswith("} > windows-"), (
+            f"the '{name}' step does not redirect its output to a windows-*.txt log"
+        )
+    names = [name for name, _ in run_blocks]
+    assert "install.ps1 offline verification and analyzer (advisory)" in names
+    assert "install.ps1 end-to-end install and uninstall (advisory)" in names
+    assert "} > windows-install-ps1.txt 2>&1 || true" in steps
+    assert "} > windows-install-e2e.txt 2>&1 || true" in steps
+    # The end-to-end run reports whether the task existed after install and
+    # after uninstall, and never fails on either answer: an InteractiveToken
+    # task may not register or start on a hosted runner, and that is the datum.
+    e2e = dict(run_blocks)["install.ps1 end-to-end install and uninstall (advisory)"]
+    assert "task registered after install:" in e2e
+    assert "task registered after uninstall:" in e2e
+    assert "workspace kept:" in e2e
+    assert "-NoStart" in e2e
+    assert "::add-mask::" in e2e, "the one-time setup URL is a credential and belongs in no log"
 
 
 def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:

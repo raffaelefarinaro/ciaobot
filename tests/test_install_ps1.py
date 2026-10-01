@@ -1,20 +1,29 @@
-"""Tests for the Windows 11 engine installer, scripts/install.ps1 (#838, C8).
+"""Tests for the Windows 11 engine installer, scripts/install.ps1 (#838, C8; #853).
 
 The script is a text file a Windows user pipes into `iex`, so nothing here runs
 PowerShell: what is asserted is the shape of the file (ASCII, no `exit`, the
 constants, the verifier copy) and the order of its steps, which is the one
-property a failed run cannot report. The advisory Windows CI job runs the same
-file under both PowerShell hosts.
+property a failed run cannot report. What the script asks the engine to do is
+asserted against the engine itself - the parser defines the flags, the receipt
+module owns the schema - so a renamed flag fails here rather than on a user's
+machine. The advisory Windows CI job runs the same file under both PowerShell
+hosts.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import re
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from ciao import install_receipt, windows_service
+from ciao.cli import build_parser
+from ciao.os_support import shell_hints
 from ciao.release_manifest import RELEASE_PUBLIC_KEY
 from tests.test_engine_installer import VERSION, WHEEL_BYTES, WHEEL_NAME, _manifest_bytes
 from tests.test_release_manifest import _keypair, _sign
@@ -204,10 +213,14 @@ def test_verification_precedes_install() -> None:
         "param(",
         "[string]$Version = '',",
         "[string]$ReleaseDir = '',",
-        "[switch]$DryRun",
+        "[switch]$DryRun,",
+        "[string]$Workspace = '',",
+        "[switch]$NoStart,",
+        "[switch]$Uninstall",
         ")",
         "function Install-Ciaobot {",
-        "Install-Ciaobot -Version $Version -ReleaseDir $ReleaseDir -DryRun $DryRun.IsPresent",
+        "Install-Ciaobot -Version $Version -ReleaseDir $ReleaseDir -DryRun $DryRun.IsPresent"
+        " -Workspace $Workspace -NoStart $NoStart.IsPresent -Uninstall $Uninstall.IsPresent",
     ]
 
 
@@ -221,3 +234,390 @@ def test_install_ps1_has_no_powershell_crypto() -> None:
         assert banned not in outside, (
             f"install.ps1 verifies crypto in PowerShell ({banned}) instead of the shared verifier"
         )
+
+
+# --- part 2: setup, logon task, start, uninstall (#853) ---------------------
+
+
+def _ps1_function(name: str) -> str:
+    """The body of one nested `function Name { ... }` in the script."""
+    lines = SCRIPT_TEXT.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip().startswith(f"function {name}("))
+    depth = 0
+    for index in range(start, len(lines)):
+        depth += lines[index].count("{") - lines[index].count("}")
+        if depth == 0 and index > start:
+            return "\n".join(lines[start : index + 1])
+    raise AssertionError(f"install.ps1 no longer defines a {name} function")
+
+
+def _undo_source() -> str:
+    return _ps1_function("Undo-Install")
+
+
+def _ps1_flag(block: str, flag: str) -> bool:
+    """Is `flag` passed in the PowerShell argument list `block`?"""
+    return bool(re.search(rf"'{re.escape(flag)}'", block))
+
+
+_PS1_TOKEN = re.compile(r"'([^']*)'|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _ps1_list(literal: str) -> list[str]:
+    """The tokens of one PowerShell array literal, in order.
+
+    A quoted string is the token; a `$name` is a value the script computed, and
+    is kept as a marker so the argument walk below can tell a flag from the value
+    that follows it. That distinction is the whole reason this is not a plain
+    `findall` of quoted strings: `--workspace $workspace --load-launchd` and
+    `--workspace --load-launchd` are different calls.
+    """
+    return [quoted if quoted else f"${name}" for quoted, name in _PS1_TOKEN.findall(literal)]
+
+
+def _ciao_argument_lists() -> list[list[str]]:
+    """Every argv the script builds for the engine, in order.
+
+    The list literals are what is read: they are the whole call the engine sees,
+    and a test cannot run PowerShell to find out. `$setupArgs` is the one list
+    built in two statements (`@('setup', ...)` and the conditional append), so it
+    is reassembled here from both - the widest argv the script can pass, which
+    is what the parser has to accept.
+    """
+    calls: list[list[str]] = []
+    for match in re.finditer(r"^.*Invoke-Native \$ciao (.*)$", SCRIPT_TEXT, re.MULTILINE):
+        line = match.group(1)
+        if line.startswith("$setupArgs"):
+            base = re.search(r"\$setupArgs = @\((.*)\)", SCRIPT_TEXT)
+            assert base, "install.ps1 builds $setupArgs with something other than a list literal"
+            extra = re.findall(r"\$setupArgs \+= (@\(.*?\)|'[^']*')", SCRIPT_TEXT)
+            calls.append(
+                _ps1_list(base.group(1)) + [t for group in extra for t in _ps1_list(group)]
+            )
+            continue
+        # The list literal is what the engine is given; the trailing `$true`/
+        # `$false` is Invoke-Native's own $Quiet argument, not part of the call.
+        array = re.search(r"@\(.*\)", line)
+        assert array, (
+            f"the engine is called with a computed list {line!r}; this test reads the "
+            "literal arguments, so a call has to keep one"
+        )
+        calls.append(_ps1_list(array.group(0)))
+    return calls
+
+
+def _probe_argv(parser: argparse.ArgumentParser, argv: list[str]) -> list[str]:
+    """`argv` with every computed value replaced by a placeholder.
+
+    Walks the sub-parser tree the way argparse does, so a flag is only paired
+    with a following value when the option actually takes one, and a sub-command
+    is descended into rather than mistaken for a value. What comes out is what
+    the engine is asked to accept.
+    """
+    current = parser
+    probe: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        subparsers = next(
+            (a for a in current._actions if isinstance(a, argparse._SubParsersAction)), None
+        )
+        if subparsers is not None and token in subparsers.choices:
+            current = subparsers.choices[token]
+            probe.append(token)
+            index += 1
+            continue
+        probe.append("value" if token.startswith("$") else token)
+        if token.startswith("--"):
+            action = next(
+                (a for a in current._actions if token in (a.option_strings or [])), None
+            )
+            assert action is not None, f"the parser does not define {token}"
+            if action.nargs != 0 and index + 1 < len(argv):
+                index += 1
+                probe.append("value")
+        index += 1
+    return probe
+
+
+def test_flags_and_defaults_match_install_engine_sh() -> None:
+    # The two installers are "the same verified engine, running" or they are two
+    # products, so every user-facing switch and every constant that decides what
+    # a finished install looks like has to be the same on both.
+    for name in ("$Workspace", "$NoStart", "$Uninstall"):
+        assert name in SCRIPT_TEXT.split("param(")[1], f"install.ps1 lost the {name} parameter"
+    assert "--no-start" in SH_TEXT
+    assert "--workspace" in SH_TEXT
+
+    # The default workspace: Ciaobot under the user's home, as on macOS.
+    assert "$DefaultWorkspaceName = 'Ciaobot'" in SCRIPT_TEXT
+    assert "Join-Path $env:USERPROFILE $DefaultWorkspaceName" in SCRIPT_TEXT
+    assert '[ -n "$workspace" ] || workspace="$HOME/Ciaobot"' in SH_TEXT
+
+    # 60 x 1s of health polling, the same budget and the same fallback port.
+    assert "$HealthAttempts = 60" in SCRIPT_TEXT
+    assert "health_attempts=60" in SH_TEXT
+    assert "$DefaultPort = 8443" in SCRIPT_TEXT
+    assert '[ -n "$port" ] || port=8443' in SH_TEXT
+    assert "/api/startup-status" in SCRIPT_TEXT
+    assert "/api/startup-status" in SH_TEXT
+
+    # The two lines that reach the user as "you are signed in now". Byte-equal,
+    # because this is the one moment in the install the user has to trust it.
+    for line in ("Open Ciaobot: ", "This link signs you in once. Do not share it."):
+        assert line in SCRIPT_TEXT, f"install.ps1 lost the sign-in line {line!r}"
+        assert line in SH_TEXT, f"install-engine.sh lost the sign-in line {line!r}"
+
+    # `ciao setup` exiting 3 means the memory regions could not be set up, which
+    # is a warning and not a failed install: the same one code, and only that
+    # one, is tolerated on both platforms.
+    assert "3 { Write-Warning 'ciao setup could not set up memory regions" in SCRIPT_TEXT
+    assert "default { Fail 'ciao setup failed' }" in SCRIPT_TEXT
+    assert '3) echo "warning: ciao setup could not set up memory regions' in SH_TEXT
+    assert '*) abort_install "ciao setup failed" ;;' in SH_TEXT
+
+
+def test_ps1_setup_and_service_flags_exist_in_cli() -> None:
+    # A flag the script passes and the parser does not define is a failed
+    # install on a fresh machine, and the advisory Windows job is the only place
+    # it could ever be caught. argparse itself decides, not a copy of the parser.
+    parser = build_parser()
+    calls = _ciao_argument_lists()
+    assert calls, "install.ps1 no longer calls the engine with a literal argument list"
+
+    for argv in calls:
+        probe = _probe_argv(parser, argv)
+        try:
+            parser.parse_args(probe)
+        except SystemExit:
+            raise AssertionError(
+                f"install.ps1 calls `ciao {' '.join(probe)}`, which the parser refuses"
+            ) from None
+
+    # The three calls the install is made of, and their flags.
+    assert ["setup", "--workspace", "$workspace", "--load-launchd"] in calls
+    assert ["service", "start", "--workspace", "$workspace", "--json"] in calls
+    assert ["setup-url", "--workspace", "$workspace"] in calls
+
+    # `--yes` turns off every guard in `ciao setup`, and a fresh install has no
+    # repoint to confirm: passing it would skip the very check that stops setup
+    # from hijacking an existing workspace. `--python` is the macOS LaunchAgent
+    # interpreter; on win32 the task takes the running ciao's own pythonw.exe.
+    setup_calls = [argv for argv in calls if argv[0] == "setup"]
+    assert setup_calls, "install.ps1 no longer calls `ciao setup`"
+    for argv in setup_calls:
+        assert "--yes" not in argv
+        assert "--python" not in argv
+
+    # --load-launchd is what registers the task, and -NoStart is what promises
+    # no task, so that one conditional is the whole of the interaction.
+    assert "if (-not $NoStart) { $setupArgs += '--load-launchd' }" in SCRIPT_TEXT
+
+
+def test_receipt_call_matches_install_receipt_cli(tmp_path: Path) -> None:
+    # The receipt is written by the module that owns its schema, validation,
+    # atomic write and owner-only DACL; the script only chooses flags. Running
+    # those flags through the real `main` is what proves they are the flags the
+    # module has, rather than the ones it had.
+    match = re.search(
+        r"Invoke-Native \$toolPython @\('-m', 'ciao\.install_receipt', 'write',(.*?)\)\s*\$true",
+        SCRIPT_TEXT,
+        re.DOTALL,
+    )
+    assert match, "install.ps1 no longer writes the receipt through ciao.install_receipt"
+    flags = re.findall(r"'(--[a-z-]+)', (\$[A-Za-z]+)", match.group(1))
+    assert flags, "the receipt call passes no flags"
+    names = [name for name, _ in flags]
+    for required in ("--version", "--executable", "--python", "--service-backend", "--service-label"):
+        assert required in names, f"the receipt call is missing {required}"
+
+    argv: list[str] = ["write"]
+    values = {
+        "$Version": VERSION,
+        "$ciao": r"C:\Users\me\.local\bin\ciao.exe",
+        "$toolPython": r"C:\Users\me\AppData\Roaming\uv\tools\ciaobot\Scripts\python.exe",
+        "$ServiceBackend": "windows-task",
+        "$TaskName": windows_service.TASK_NAME,
+    }
+    for name, variable in flags:
+        assert variable in values, f"the receipt call uses an unexpected value for {name}"
+        argv += [name, values[variable]]
+
+    target = tmp_path / "install-receipt.json"
+    assert install_receipt.main([*argv, "--path", str(target)]) == 0
+    written = install_receipt.read_receipt(target)
+    assert written is not None
+    assert written.service_backend == "windows-task"
+    assert written.service_label == windows_service.TASK_NAME
+    assert written.executable == values["$ciao"]
+    assert "windows-task" in install_receipt.SERVICE_BACKENDS
+
+    # The task name and the XML file name are duplicated in the script because
+    # `ciao` is the thing being uninstalled and defines no unregister action, so
+    # schtasks has to be called directly. Both copies are pinned to the module.
+    assert "$TaskName = '\\Ciaobot\\Engine'" in SCRIPT_TEXT
+    assert windows_service.TASK_NAME == "\\Ciaobot\\Engine"
+    assert "$TaskFileName = 'Ciaobot-Engine.xml'" in SCRIPT_TEXT
+    assert windows_service.TASK_FILE_NAME == "Ciaobot-Engine.xml"
+    assert "$TaskDir = Join-Path $StateDir 'service'" in SCRIPT_TEXT
+    assert "$ReceiptPath = Join-Path $env:USERPROFILE '.local\\state\\ciaobot\\install-receipt.json'" in SCRIPT_TEXT
+
+
+def test_path_write_matches_shell_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One mental model and one tested spelling: the line `ciao setup` already
+    # hands a Windows user is the line the installer performs for them, so a
+    # user who has read one has read the other.
+    monkeypatch.setattr(sys, "platform", "win32")
+    hint = shell_hints.path_hint(r"C:\Users\me\.local\bin", persist=True)
+    assert "OpenSubKey('Environment', $true)" in hint
+    assert "'DoNotExpandEnvironmentNames'" in hint
+    assert "RegistryValueKind]::ExpandString" in hint
+
+    for fragment in (
+        "OpenSubKey('Environment', $true)",
+        "GetValue('Path', '', 'DoNotExpandEnvironmentNames')",
+        "SetValue('Path', $Value, $kind)",
+        "RegistryValueKind]::ExpandString",
+    ):
+        assert fragment in SCRIPT_TEXT, f"install.ps1 writes the user PATH without {fragment!r}"
+
+    # The prepend shape the hint uses, so the entry lands in the same place.
+    assert 'return "$Directory;$PathValue"' in _ps1_function("Add-UserPathEntry")
+
+    # Q2: not [Environment]::SetEnvironmentVariable for the PATH. It reads the
+    # old value expanded and writes it as REG_SZ, which freezes every %VAR% in
+    # a REG_EXPAND_SZ user PATH and changes its type under every other tool that
+    # reads it. A throwaway user variable is still set and cleared, because a
+    # user-scope SetEnvironmentVariable is the broadcast #854 wanted.
+    assert "SetEnvironmentVariable('Path'" not in SCRIPT_TEXT
+    assert "SetEnvironmentVariable('Ciaobot_Install_Notify', '1', 'User')" in SCRIPT_TEXT
+    assert "SetEnvironmentVariable('Ciaobot_Install_Notify', $null, 'User')" in SCRIPT_TEXT
+
+    # HKCU only: a machine-scope write needs an administrator this installer
+    # never asks for, and would be the wrong answer for a per-user engine.
+    assert "'Machine'" not in SCRIPT_TEXT
+    # `uv tool update-shell` has no inverse, and -Uninstall has to remove
+    # exactly the entry this run added.
+    assert "update-shell" not in SCRIPT_TEXT
+
+
+def test_uninstall_removes_exactly_what_install_adds() -> None:
+    # "Uninstall removes exactly what install adds" has to be one list, not two
+    # that drift. The markers are the list: every mutation in the install body
+    # and every step in the undo carry one, and the two sets have to be equal.
+    adds = re.findall(r"^\s*# ADDS: (\w+)\s*$", SCRIPT_TEXT, re.MULTILINE)
+    undoes = re.findall(r"^\s*# UNDOES: (\w+)\s*$", _undo_source(), re.MULTILINE)
+    assert adds, "the install body no longer marks what it adds"
+    assert set(adds) == set(undoes), (
+        f"install adds {sorted(set(adds))} but Undo-Install undoes {sorted(set(undoes))}"
+    )
+    assert adds == ["tool", "receipt", "path", "state", "task", "taskfile"]
+
+    # The workspace is the user's notes and memory. No removal of any kind may
+    # name it, in the undo or anywhere else in that function.
+    for line in _undo_source().splitlines():
+        if "Remove-Item" in line or "Remove-" in line:
+            assert "workspace" not in line.lower() and "Workspace" not in line, (
+                f"Undo-Install removes the workspace: {line.strip()!r}"
+            )
+    assert "Your workspace was kept:" in SCRIPT_TEXT
+
+    # The PATH entry is removed only when the state file says this installer
+    # added it: the uv bin directory belongs to the user's other uv tools too.
+    assert "if (($Steps -contains 'path') -and $PathEntry)" in _undo_source()
+    assert "if ($state -and $state.path_entry) { $pathEntry = [string]$state.path_entry }" in SCRIPT_TEXT
+    assert "if ($pathEntry) { $done += 'path' }" in SCRIPT_TEXT
+
+
+def test_rollback_ordering() -> None:
+    undo = _undo_source()
+    # Windows will not delete a running executable, so the engine has to be
+    # stopped and proven gone before the tool is removed; the task goes before
+    # the tool, because its RestartOnFailure (every minute, 999 times) would
+    # start a dying engine again.
+    assert undo.index("/End") < undo.index("/Delete")
+    assert undo.index("/Delete") < undo.index("tool', 'uninstall', 'ciaobot")
+    assert undo.index("tool', 'uninstall', 'ciaobot") < undo.index("$ReceiptPath")
+
+    # Decision 4's table: the state file goes, then the PATH entry, then the
+    # receipt, and the tool last of all.
+    assert undo.index("$StateFile") < undo.index("Remove-UserPathEntry")
+    assert undo.index("Remove-UserPathEntry") < undo.index("$ReceiptPath")
+
+    # And the install body's own order: tool, receipt, PATH, state, setup,
+    # start, health wait, URL.
+    markers = re.findall(r"^\s*# ADDS: (\w+)\s*$", SCRIPT_TEXT, re.MULTILINE)
+    assert markers.index("tool") < markers.index("receipt") < markers.index("path")
+    assert markers.index("path") < markers.index("state") < markers.index("task")
+    assert SCRIPT_TEXT.index("$setupArgs = @(") < SCRIPT_TEXT.index("service', 'start'")
+    assert SCRIPT_TEXT.index("service', 'start'") < SCRIPT_TEXT.index("$HealthAttempts; $attempt++")
+    assert SCRIPT_TEXT.index("$HealthAttempts; $attempt++") < SCRIPT_TEXT.index("setup-url")
+
+    # The existing-install preflight reads the machine before anything is
+    # downloaded; the reinstall it guards comes after.
+    assert SCRIPT_TEXT.index("Test-ToolInstalled $uv") < SCRIPT_TEXT.index("tool install")
+
+    # #857's spike: uv hard-links every .pyd/.dll from its cache on Windows, and
+    # a cached file another venv shares can be locked by a process that has
+    # nothing to do with Ciaobot. A locked file cannot be deleted, so uninstall
+    # and rollback would fail for as long as that unrelated process runs - which
+    # is why the environment is installed with its own copies.
+    assert "@('tool', 'install', '--force', '--link-mode', 'copy', '--python'" in SCRIPT_TEXT
+
+    # The rollback runs only once something has been changed, and the flag that
+    # says so is set before the first mutation rather than after it.
+    assert "$mutated = $true" in SCRIPT_TEXT
+    assert SCRIPT_TEXT.index("$mutated = $true") < SCRIPT_TEXT.index("tool install")
+    # The `catch` that carries the rollback is the one closing the install
+    # `try`, not one of the many per-step handlers above it: it is the last
+    # `} catch {` in the file, and the only one that names `$mutated`.
+    catch = SCRIPT_TEXT.split("} catch {")[-1]
+    assert "if ($mutated) {" in catch
+    assert "Undo-Install -Steps $done" in catch
+    assert "throw" in catch, "the rollback must rethrow, or the failure is a silent success"
+
+    # Undo-Install never aborts midway: a rollback that stops at the first
+    # refusal leaves more behind than it has to.
+    body = "\n".join(
+        line for line in undo.splitlines()[1:] if not line.strip().startswith("#")
+    )
+    assert "throw" not in body
+    assert body.count("try {") == body.count("} catch {")
+
+
+def _ps1_code_only(text: str) -> str:
+    """install.ps1 with comments and string literals removed.
+
+    PowerShell has no cheap way to lex this from outside, so the two things that
+    hold a `?` legitimately - a comment and a quoted string - are cut with a
+    regex that understands PowerShell's own quoting rather than guessed at. What
+    is left is the only text a 5.1 parser would read as code.
+    """
+    stripped = re.sub(r"(?m)#.*$", "", text)
+    stripped = re.sub(r"'[^'\n]*'", "''", stripped)
+    return re.sub(r'"[^"\n]*"', '""', stripped)
+
+
+def test_install_ps1_is_ps51_safe() -> None:
+    code = _ps1_code_only(SCRIPT_TEXT.replace(_ps1_verifier_source(), ""))
+    for banned, why in (
+        ("&&", "the && operator is 7.0+"),
+        ("||", "the || operator is 7.0+"),
+        ("?", "the ternary, ?. and ?? operators are all 7.0+"),
+    ):
+        assert banned not in code, f"install.ps1 uses {banned}: {why}"
+
+    # `ciao setup` prints warnings on stderr, and with
+    # $ErrorActionPreference='Stop' a native command whose stderr is redirected
+    # becomes a terminating error: the call would abort the install over a
+    # warning install-engine.sh deliberately lets through. It goes through
+    # Invoke-Native instead, which scopes the preference and tests the exit code.
+    setup_line = next(
+        line for line in SCRIPT_TEXT.splitlines() if "Invoke-Native $ciao $setupArgs" in line
+    )
+    assert "2>&1" not in setup_line
+    assert "$setup = Invoke-Native $ciao $setupArgs" in SCRIPT_TEXT
+    assert "default { Fail 'ciao setup failed' }" in SCRIPT_TEXT
+
+    SCRIPT.read_bytes().decode("ascii")
+    assert not re.search(r"^\s*exit\b", SCRIPT_TEXT, re.MULTILINE)
