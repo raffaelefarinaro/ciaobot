@@ -1,11 +1,14 @@
 {
-  "_about": "Folder names Claude Code wrote under ~/.claude/projects for a workspace cwd. Windows rows: Claude Code 2.1.285 on Windows 11, 2026-09-30 (#696). macOS rows: existing ~/.claude/projects folders on the maintainer's Mac (#696).",
+  "_about": "Folder names Claude Code wrote under ~/.claude/projects for a workspace cwd. Windows rows: Claude Code 2.1.285 on Windows 11, 2026-09-30; the three long paths (219, 200 and 201 characters) Claude Code 2.1.286, 2026-10-01 (#696). macOS rows: existing ~/.claude/projects folders on the maintainer's Mac (#696).",
   "windows": [
     ["C:\\dev\\ciaobot", "C--dev-ciaobot"],
     ["C:\\dev\\disco\\with space", "C--dev-disco-with-space"],
     ["C:\\dev\\disco\\a.b\\c_d\\Mixed-Case", "C--dev-disco-a-b-c-d-Mixed-Case"],
     ["C:\\dev\\disco\\ciào ü", "C--dev-disco-ci-o--"],
-    ["c:\\dev\\disco\\lower", "c--dev-disco-lower"]
+    ["c:\\dev\\disco\\lower", "c--dev-disco-lower"],
+    ["C:\\Users\\Spare lenovo 2\\AppData\\Local\\Temp\\claude\\C--dev-ciaobot\\40e4098b-3f22-4ca2-a203-ea7fd0c8dff8\\scratchpad\\longslug\\a-rather-long-workspace-folder-name-for-the-slug-check\\nested.dots_and_underscores\\with spaces\\ws", "C--Users-Spare-lenovo-2-AppData-Local-Temp-claude-C--dev-ciaobot-40e4098b-3f22-4ca2-a203-ea7fd0c8dff8-scratchpad-longslug-a-rather-long-workspace-folder-name-for-the-slug-check-nested-dots-and-undersc-edesjv"],
+    ["C:\\Users\\Spare lenovo 2\\AppData\\Local\\Temp\\claude\\C--dev-ciaobot\\40e4098b-3f22-4ca2-a203-ea7fd0c8dff8\\scratchpad\\longslug\\b\\xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "C--Users-Spare-lenovo-2-AppData-Local-Temp-claude-C--dev-ciaobot-40e4098b-3f22-4ca2-a203-ea7fd0c8dff8-scratchpad-longslug-b-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"],
+    ["C:\\Users\\Spare lenovo 2\\AppData\\Local\\Temp\\claude\\C--dev-ciaobot\\40e4098b-3f22-4ca2-a203-ea7fd0c8dff8\\scratchpad\\longslug\\b\\xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "C--Users-Spare-lenovo-2-AppData-Local-Temp-claude-C--dev-ciaobot-40e4098b-3f22-4ca2-a203-ea7fd0c8dff8-scratchpad-longslug-b-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-c09c0y"]
   ],
   "macos": [
     ["/Users/me/ciao", "-Users-me-ciao"],
