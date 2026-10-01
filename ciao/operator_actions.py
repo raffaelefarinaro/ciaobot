@@ -249,7 +249,7 @@ def _write_star_receipt(context: DetectionContext, status: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps({"status": status, "at": now.isoformat()}),
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
     except OSError:
         logger.exception("operator actions: could not write star receipt")

@@ -113,7 +113,7 @@ class StateStore:
             "contexts": {key: asdict(cs) for key, cs in self._contexts.items()},
         }
         tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
         tmp.replace(self._path)
 
     def _load(self) -> tuple[BotState, dict[str, ContextState]]:

@@ -246,5 +246,5 @@ def persist_workspaces(config: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = [workspace_to_dict(workspace, config) for workspace in config.workspaces.values()]
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)

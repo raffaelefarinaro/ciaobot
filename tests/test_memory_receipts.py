@@ -2334,3 +2334,20 @@ def test_removal_landed_counts_instead_of_matching():
     )
     assert mr._removal_landed(before, before, [("Use Python", "memory")]) is False
     assert mr._removal_landed(before, one_left, []) is False
+
+
+def test_write_queue_atomically_stores_the_text_exactly(tmp_path):
+    """The text is what goes on disk: a CRLF document stays CRLF and LF stays LF
+    on every OS (a Windows text-mode write used to turn `\r\n` into `\r\r\n`)."""
+    for name, text in [("crlf.md", "# L\r\n\r\n- [a] x\r\n"), ("lf.md", "# L\n\n- [a] x\n")]:
+        path = tmp_path / name
+        mr.write_queue_atomically(path, text)
+        assert path.read_bytes() == text.encode("utf-8")
+
+
+def test_the_guide_writer_stores_the_text_exactly(tmp_path):
+    for name, text in [("crlf.md", "# Guide\r\nline\r\n"), ("lf.md", "# Guide\nline\n")]:
+        path = tmp_path / name
+        path.write_bytes(b"old\n")
+        mt.write_guide_atomically(path, text)
+        assert path.read_bytes() == text.encode("utf-8")

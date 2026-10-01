@@ -871,7 +871,7 @@ def write_vault_file(vault: Path, entries: Sequence[EntityType]) -> Path:
     fd, tmp_name = tempfile.mkstemp(dir=root, prefix=".entity-types.", suffix=".tmp")
     temporary = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
         # Before the rename, so the file never appears at the target carrying
         # mkstemp's 0600 instead of the mode it had.

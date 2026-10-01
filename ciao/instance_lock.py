@@ -50,7 +50,7 @@ class WorkspaceInstanceLock:
         if self._handle is not None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+", encoding="utf-8")
+        handle = self.path.open("a+", encoding="utf-8", newline="")
         try:
             lock_exclusive(handle.fileno(), blocking=False)
         except OSError as exc:

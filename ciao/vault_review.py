@@ -561,7 +561,7 @@ def _entry_proposal_operations(root: Path) -> dict[str, str]:
 def _append(root: Path, payload: dict[str, Any]) -> None:
     _workspace_dir(root)
     path = ledger_path(root)
-    with path.open("a", encoding="utf-8") as handle:
+    with path.open("a", encoding="utf-8", newline="") as handle:
         handle.write(json.dumps({"timestamp": _now(), **payload}, sort_keys=True) + "\n")
 
 
@@ -785,7 +785,7 @@ def _write_queue(root: Path, candidates: list[ReviewCandidate], decisions: dict[
         lines.append(f"- `{item.path}` [{item.priority}] {reason} (candidate `{item.candidate_id}`)")
     destination = queue_path(root)
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=destination.parent, delete=False
+        "w", encoding="utf-8", dir=destination.parent, delete=False, newline=""
     ) as handle:
         handle.write("\n".join(lines) + "\n")
         handle.flush()
@@ -1645,7 +1645,7 @@ def trash_note(root: Path, candidate: ReviewCandidate, *, actor: str = "user") -
     metadata = {"candidate_id": candidate.candidate_id, "workspace": candidate.workspace, "original_path": candidate.path, "content_hash": candidate.content_hash, "edited_backlinks": [], "trashed_at": _now()}
     try:
         shutil.move(str(source), str(destination))
-        destination.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        destination.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="")
         _append(root, {**metadata, "path": candidate.path, "disposition": "trash", "status": "trashed", "actor": actor})
     except OSError as exc:
         if destination.is_file() and not source.exists():
@@ -2232,7 +2232,7 @@ def complete_project_note(root: Path, candidate: ReviewCandidate, *, actor: str 
         _prune_created(created)
         raise ValueError(f"could not complete the project; it was put back: {exc}") from exc
     try:
-        recovery.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        recovery.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="")
         _append(root, {**metadata, "disposition": "complete", "status": "reviewed", "actor": actor})
     except OSError as exc:
         if move_to.exists() and not move_from.exists():
@@ -2523,7 +2523,7 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
     except OSError as exc:
         if original.is_file() and not source.exists():
             for path, text in undo.items():
-                Path(path).write_text(text, encoding="utf-8")
+                Path(path).write_text(text, encoding="utf-8", newline="")
             shutil.move(str(original), str(source))
         raise ValueError(f"delete audit failed; recovery metadata was retained: {exc}") from exc
     try:
@@ -2531,7 +2531,7 @@ def delete_permanently(root: Path, candidate_id_value: str, *, confirm: str, act
     except OSError as exc:
         if original.is_file() and not source.exists():
             for path, text in undo.items():
-                Path(path).write_text(text, encoding="utf-8")
+                Path(path).write_text(text, encoding="utf-8", newline="")
             shutil.move(str(original), str(source))
         _append(root, {
             **metadata, "edited_backlinks": edited, "disposition": "delete",

@@ -194,7 +194,7 @@ def write_receipt(
         "unresolved": summary.get("unresolved", {}),
     }
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
     tmp.replace(path)
     return path
 
@@ -282,7 +282,7 @@ def migrate_vault_vocabulary(
                 summary["failed"].append({**change, "error": "type line did not match"})
                 continue
             try:
-                path.write_text(rewritten, encoding="utf-8")
+                path.write_text(rewritten, encoding="utf-8", newline="")
             except OSError as exc:
                 summary["failed"].append({**change, "error": str(exc)})
                 continue
@@ -388,7 +388,7 @@ def retain_retired_stock_types_if_needed(vault_root: Path, runtime_root: Path) -
         "failed": summary.get("failed", ""),
     }
     tmp = receipt.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
     tmp.replace(receipt)
     return summary
 

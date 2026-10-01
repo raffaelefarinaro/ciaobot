@@ -3400,7 +3400,13 @@ class _EphemeralServer:
             return await self._enter_unlocked()
 
     async def _enter_unlocked(self) -> httpx.AsyncClient | None:
-        binary = resolve_opencode_binary()
+        try:
+            binary = resolve_opencode_binary()
+        except OSError as exc:
+            # A wrapper that leads nowhere is not a missing CLI, but for a caller
+            # asking only "can this start a server" the two answers are the same.
+            logger.warning("opencode: %s", exc)
+            return None
         if not binary:
             return None
         port = _free_port()
@@ -3545,7 +3551,22 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
 
     from ciao.setup_status import _provider
 
-    binary = resolve_opencode_binary()
+    binary: str | None
+    try:
+        binary = resolve_opencode_binary()
+    except OSError as exc:
+        # Found on PATH, but as a wrapper that does not lead to one executable —
+        # a `npm install -g` that was interrupted, or a package whose entry point
+        # is a script. Saying "not installed" would send the operator to install
+        # something they already have.
+        return _provider(
+            name="opencode",
+            ok=False,
+            auth="broken",
+            command="opencode",
+            detail=f"installed but broken: {exc}",
+            version="unknown",
+        )
     if not binary:
         return _provider(
             name="opencode",

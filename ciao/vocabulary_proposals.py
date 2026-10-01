@@ -711,7 +711,7 @@ def write_category_sidecar(vault_root: Path, payload: dict[str, Any]) -> Path:
     try:
         tmp.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         os.replace(tmp, path)
     except OSError:

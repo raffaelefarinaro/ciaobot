@@ -509,7 +509,7 @@ def run(
         try:
             chk_file.write_text(
                 json.dumps({"run_id": run_id, "nodes": serialized_nodes}, indent=2),
-                encoding="utf-8",
+                encoding="utf-8", newline="",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to save checkpoint file %s: %s", chk_file, exc)

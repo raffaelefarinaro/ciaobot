@@ -118,7 +118,7 @@ def record_run(run: JobRun) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         _trim_if_large(path)
         payload = asdict(run)
-        with path.open("a", encoding="utf-8") as f:
+        with path.open("a", encoding="utf-8", newline="") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
         _write_latest_run(payload)
     except Exception:  # noqa: BLE001 — recording must never break a job
@@ -139,7 +139,7 @@ def _trim_if_large(path: Path) -> None:
             job = _line_job(line)
             if job and job not in kept_jobs:
                 preserved_by_job[job] = line
-        with path.open("w", encoding="utf-8") as f:
+        with path.open("w", encoding="utf-8", newline="") as f:
             f.writelines([*preserved_by_job.values(), *kept])
     except Exception:  # noqa: BLE001
         logger.debug("Failed to trim job-run log", exc_info=True)
@@ -165,7 +165,7 @@ def _write_latest_run(run: dict[str, Any]) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     tmp_path.replace(path)
 

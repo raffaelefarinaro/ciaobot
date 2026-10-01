@@ -166,7 +166,7 @@ def _write_vault_mirror(
                 "",
             ]
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     return mirror
 
@@ -178,7 +178,7 @@ def _write_subagent_file(path: Path, *, name: str, description: str, content: st
             _frontmatter_string({"name": name, "description": description}),
             content.strip(),
         ]) + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
 
@@ -198,7 +198,7 @@ def _write_command_file(
             _frontmatter_string(fields),
             content.strip(),
         ]) + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
 
