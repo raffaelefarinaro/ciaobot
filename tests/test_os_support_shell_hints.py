@@ -31,6 +31,10 @@ def test_posix_session_hint_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> Non
     assert path_hint("/opt/venv/bin", persist=False) == 'export PATH="/opt/venv/bin:$PATH"'
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="pins POSIX output built from POSIX paths (`$HOME/...` with `/`)",
+)
 def test_posix_persist_zsh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
     target = str(Path.home() / ".local" / "bin")
@@ -44,6 +48,10 @@ def test_posix_persist_zsh(monkeypatch: pytest.MonkeyPatch) -> None:
     assert path_hint(target, persist=True) == expected
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="pins POSIX output built from POSIX paths (`$HOME/...` with `/`)",
+)
 def test_posix_persist_bash(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("SHELL", "/bin/bash")
@@ -55,6 +63,10 @@ def test_posix_persist_bash(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="pins POSIX output built from POSIX paths (`$HOME/...` with `/`)",
+)
 def test_posix_persist_fish(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("SHELL", "/opt/homebrew/bin/fish")

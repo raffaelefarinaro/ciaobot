@@ -15,7 +15,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
-from ciao.setup_status import claude_auth_status, setup_status
+from ciao.setup_status import claude_auth_status, claude_path_command, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,
@@ -418,7 +418,12 @@ def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
     assert "not installed" in claude["detail"]
     # The installer drops `claude` into ~/.local/bin, which a default macOS
     # PATH omits, so the wizard offers the PATH line as a second step.
-    assert "$HOME/.local/bin" in claude["path_command"]
+    if sys.platform == "win32":
+        # A persistent user-PATH update through the registry (C10).
+        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
+        assert ".local" in claude["path_command"]
+    else:
+        assert "$HOME/.local/bin" in claude["path_command"]
 
 
 def test_setup_status_names_the_desktop_app_when_only_the_cli_is_missing(
@@ -488,7 +493,12 @@ def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
 
     claude = setup_status(config, env={})["providers"]["claude"]
 
-    assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
+    if sys.platform == "win32":
+        # A persistent user-PATH update through the registry (C10).
+        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
+        assert ".local" in claude["path_command"]
+    else:
+        assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
 
 
 def test_setup_status_offers_no_path_line_for_the_bundled_cli(tmp_path, monkeypatch) -> None:
@@ -518,6 +528,7 @@ def test_setup_status_offers_no_path_line_when_the_terminal_finds_claude(
     assert "path_command" not in claude
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shells and their rc files; Windows is the test below")
 def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> None:
     """macOS terminals start login shells: bash reads ~/.bash_profile, and
     ~/.bashrc would fix only the shell the user is sitting in."""
@@ -580,6 +591,22 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     assert resp.json()["checks"][0]["id"] == "workspace"
 
 
+
+def _fake_engine_python(tmp_path: Path) -> str:
+    """The interpreter setup points the service at.
+
+    POSIX setup only writes it into the plist, so a made-up path will do. The
+    Windows task renderer accepts only python.exe/pythonw.exe and checks that
+    pythonw.exe exists (the task runs hidden), so there it is two empty files.
+    """
+    if sys.platform != "win32":
+        return "/opt/ciao/bin/python"
+    bin_dir = tmp_path / "fake-python"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("python.exe", "pythonw.exe"):
+        (bin_dir / name).write_bytes(b"")
+    return str(bin_dir / "python.exe")
+
 def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monkeypatch) -> None:
     # Guard the env handoff assertions below: monkeypatch restores these
     # after the endpoint mutates os.environ directly.
@@ -610,7 +637,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
             "vault_root": str(notes),
             "launch_agents_dir": str(launch_agents),
             "app_dir": str(apps),
-            "python": "/opt/ciao/bin/python",
+            "python": _fake_engine_python(tmp_path),
             "port": 9443,
         },
     )
@@ -636,7 +663,14 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
-    assert (launch_agents / "com.ciao.server.plist").is_file()
+    # The platform's service definition: the plist, or the Task Scheduler XML
+    # on Windows.
+    if sys.platform == "win32":
+        from ciao import windows_service
+
+        assert (launch_agents / windows_service.TASK_FILE_NAME).is_file()
+    else:
+        assert (launch_agents / "com.ciao.server.plist").is_file()
     # The wizard no longer writes the retired rumps launcher bundle or its
     # LaunchAgent; Ciaobot.app is the menu bar.
     assert not (apps / "Ciaobot Server.app").exists()
