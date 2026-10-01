@@ -2541,6 +2541,143 @@ def test_an_existing_repository_gets_no_snapshot_gitignore_written(tmp_path: Pat
     assert (install / ".gitignore").read_text(encoding="utf-8") == before
 
 
+def test_a_pre_staged_secret_is_dropped_from_the_snapshot(tmp_path: Path) -> None:
+    """`.gitignore` does not unstage, so the index has to be corrected as well.
+
+    Writing the exclusions on both branches closed the case where nothing was
+    staged. It did not close the case where the owner had ALREADY run
+    `git add .env` — the ordinary thing to do after `git init`, and what a README
+    tells people to do. A path already in the index stays there through
+    `git add -A` regardless of the ignore file, so the snapshot committed the
+    provider keys anyway while the code and its docstring both promised it would
+    not. Reviewer reproduced it.
+
+    The working files must survive: the exclusion is about what the snapshot
+    records, and deleting someone's `.env` to keep it out of a backup would be a
+    far worse outcome than the one being fixed. All values are synthetic.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    _synthetic_volatile_state(install)
+    _git(install, "init", "-b", "main")
+    # The owner's own staging, before the migration ever runs.
+    _git(install, "add", "-A")
+    staged_before = subprocess.run(
+        ["git", "-C", str(install), "ls-files", "--cached"],
+        capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    for secret in (".env", "secrets/sa.json", ".runtime/state.json", ".credentials"):
+        assert secret in staged_before, (
+            f"the fixture has to pre-stage {secret}, or it proves nothing"
+        )
+
+    history = ensure_rollback_history(install)
+    assert history["status"] == "seeded_empty_repo"
+
+    tracked = _tracked(install, history["commit"])
+    for secret in (".env", "secrets/sa.json", ".runtime/state.json", ".credentials"):
+        assert secret not in tracked, (
+            f"{secret} was already staged, and the snapshot committed it anyway"
+        )
+    # Still on disk, byte for byte. Nothing was deleted.
+    assert (install / ".env").read_text(encoding="utf-8") == "PWA_AUTH_TOKEN=super-secret\n"
+    assert (install / "secrets" / "sa.json").is_file()
+    assert (install / ".runtime" / "state.json").is_file()
+    assert (install / ".credentials").is_file()
+
+
+def test_a_pre_staged_durable_file_stays_in_the_snapshot(tmp_path: Path) -> None:
+    """The unstage must remove the excluded paths and nothing else.
+
+    A blanket index reset would satisfy "no secrets" by dropping everything the
+    owner staged, which would leave the snapshot a rollback point for less than it
+    claims to be. The durable staged content has to survive it.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    _git(install, "init", "-b", "main")
+    (install / "durable.md").write_text("notes\n", encoding="utf-8")
+    (install / "keep" / "nested").mkdir(parents=True)
+    (install / "keep" / "nested" / "note.md").write_text("nested\n", encoding="utf-8")
+    (install / ".obsidian").mkdir()
+    (install / ".obsidian" / "workspace.json").write_text("{}\n", encoding="utf-8")
+    (install / ".obsidian" / "app.json").write_text("{}\n", encoding="utf-8")
+    _git(install, "add", "-A")
+
+    history = ensure_rollback_history(install)
+    assert history["status"] == "seeded_empty_repo"
+
+    tracked = _tracked(install, history["commit"])
+    assert "durable.md" in tracked
+    assert "keep/nested/note.md" in tracked
+    # The vault is the thing the rollback restores, so it has to be there.
+    assert any(name.startswith("memory-vault/") for name in tracked)
+    # Only the workspace file is excluded; the rest of `.obsidian/` is the
+    # owner's own configuration and stays.
+    assert ".obsidian/workspace.json" not in tracked
+    assert ".obsidian/app.json" in tracked
+    # And the file it did drop is untouched on disk.
+    assert (install / ".obsidian" / "workspace.json").is_file()
+    assert (install / "durable.md").is_file()
+
+
+def test_a_nested_excluded_path_is_dropped_from_the_snapshot(tmp_path: Path) -> None:
+    """The exclusions mean the same thing at any depth as they do at the root.
+
+    `backup_scope` already learned this the hard way (#734): a root-anchored
+    `.runtime/` pattern stops matching a nested `client/.runtime/` holding
+    credentials, so the pathspec carries the same `**/` prefix the ignore file's
+    unanchored pattern gets for free.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    nested = install / "client"
+    (nested / ".runtime").mkdir(parents=True)
+    (nested / ".runtime" / "config.json").write_text('{"token": "fake"}\n', encoding="utf-8")
+    (nested / "secrets").mkdir()
+    (nested / "secrets" / "key.json").write_text('{"key": "fake"}\n', encoding="utf-8")
+    (nested / ".env").write_text("PWA_AUTH_TOKEN=super-secret\n", encoding="utf-8")
+    _git(install, "init", "-b", "main")
+    _git(install, "add", "-A")
+
+    history = ensure_rollback_history(install)
+    assert history["status"] == "seeded_empty_repo"
+
+    tracked = _tracked(install, history["commit"])
+    for secret in (
+        "client/.runtime/config.json",
+        "client/secrets/key.json",
+        "client/.env",
+    ):
+        assert secret not in tracked, f"{secret} was committed into the snapshot"
+        assert (install / secret).is_file(), f"{secret} was deleted from disk"
+
+
+def test_the_snapshot_pathspecs_match_the_ignore_set() -> None:
+    """The pathspec list is derived from the ignore set, so the two cannot drift.
+
+    And the spellings are the ones that actually match: `:(glob)` is what makes
+    `**` mean "any depth" rather than "any one directory component", and a
+    directory entry needs the `/**` suffix or it matches nothing at all. Both
+    were checked against git rather than assumed.
+    """
+    args = workspace_reroot._unstage_snapshot_ignores_args()
+
+    assert args[0] == "rm"
+    assert "--cached" in args, "the working tree must never be touched"
+    assert "-f" in args, (
+        "without --force git refuses on a repository with no HEAD, which is the "
+        "branch this exists for"
+    )
+    assert "--ignore-unmatch" in args, "an index with nothing to drop must be a no-op"
+    assert "--" in args, "the pathspecs must be passed after --, never as arguments"
+    pathspecs = args[args.index("--") + 1:]
+    for entry in workspace_reroot._SNAPSHOT_IGNORES:
+        name = entry[:-1] if entry.endswith("/") else entry
+        expected = f":(glob)**/{name}/**" if entry.endswith("/") else f":(glob)**/{name}"
+        assert expected in pathspecs, f"{entry} produced no matching pathspec"
+    assert len(pathspecs) == len(workspace_reroot._SNAPSHOT_IGNORES), (
+        "one pathspec per ignore entry, and no strays"
+    )
+
+
 def test_an_empty_directory_does_not_refuse_the_migration(tmp_path: Path) -> None:
     """`git mv` fails on an empty directory and one failure refuses the whole run.
 

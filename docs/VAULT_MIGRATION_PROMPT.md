@@ -199,9 +199,15 @@ a `.gitignore` carrying the exclusions in `_SNAPSHOT_IGNORES` — `.env`,
 `secrets/`, `.runtime/` and the rest — so a `.env` or a `secrets/` directory
 cannot be committed into the snapshot even when the install already had a git
 repository with no commits. The write is additive: an existing `.gitignore` of
-yours is kept and only the missing entries are appended. What the gate needs from
-*you* is that your own uncommitted work is committed or stashed, with a message
-that says what it is. Do not stage the whole tree yourself to satisfy the check:
+yours is kept and only the missing entries are appended.
+
+A `.gitignore` does not unstage anything, so those excluded paths are also
+dropped from git's **staging area** before the snapshot is taken — otherwise a
+`.env` you had already run `git add` on would go into the commit anyway. Nothing
+is deleted from disk: the files stay exactly where they are, they are only left
+out of the snapshot, and every other file you had staged is still in it. What the
+gate needs from *you* is that your own uncommitted work is committed or stashed,
+with a message that says what it is. Do not stage the whole tree yourself to satisfy the check:
 `git add -A` as a backup step commits whatever happens to be lying around, and
 the snapshot the command takes is not the whole tree either — the vault history
 is the thing you will want to read if a migration goes wrong.

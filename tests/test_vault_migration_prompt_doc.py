@@ -555,6 +555,33 @@ def test_the_snapshot_exclusions_apply_to_both_snapshot_branches() -> None:
         )
 
 
+def test_the_snapshot_unstages_the_excluded_paths_and_says_it_does() -> None:
+    """The document must state that a PRE-STAGED secret is left out too.
+
+    A `.gitignore` never unstages, so an owner who ran `git add .env` after
+    `git init` still got `.env` committed into the snapshot by the version that
+    wrote the exclusions on both branches. `ensure_rollback_history` now also
+    runs `git rm --cached` over `_SNAPSHOT_IGNORES`, which is invisible from the
+    outside in the one way that matters: it does not touch the working tree. A
+    reader who has staged their `.env` needs to know it will be dropped from the
+    commit and still be on disk afterwards, or they will refuse to run the
+    migration at all.
+    """
+    doc = _flat()
+
+    for fragment in (
+        "`.gitignore` does not unstage anything",
+        "dropped from git's **staging area** before the snapshot is taken",
+        "you had already run `git add` on would go into the commit anyway",
+        "Nothing is deleted from disk",
+        "every other file you had staged is still in it",
+    ):
+        assert fragment in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md does not tell the reader that a "
+            f"pre-staged secret is unstaged for the snapshot: {fragment!r}"
+        )
+
+
 def test_unrehomed_people_is_documented_as_a_receipt_check() -> None:
     """The notice reports the absence of a receipt, not a scan of the vault.
 

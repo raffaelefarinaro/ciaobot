@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.workspace_reroot import (
+    _HISTORY_REFUSALS,
     run_git,
     _write_registry,
     dirty_tracked_paths,
@@ -394,7 +395,7 @@ def apply(
         return payload
     history = ensure_rollback_history(install_root)
     payload["git_history"] = history
-    if history["status"] in {"no_git_binary", "init_failed", "add_failed", "commit_failed"}:
+    if history["status"] in _HISTORY_REFUSALS:
         payload["status"] = "refused"
         payload["refusals"] = [
             "the install has no git history to roll back to and one could not "
