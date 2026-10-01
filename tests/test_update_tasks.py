@@ -971,6 +971,7 @@ def test_the_shipped_catalog_ships_its_tasks_and_both_probes_exist(
     assert [task.id for task in catalog.tasks] == [
         "learnings-cleanup",
         "unrehomed-people",
+        "vault-relocate",
     ]
     assert update_task_catalog.DETECTORS == set(update_tasks.DETECTOR_FUNCTIONS)
     assert update_task_catalog.COMPLETION_CHECKS == set(
@@ -979,10 +980,11 @@ def test_the_shipped_catalog_ships_its_tasks_and_both_probes_exist(
     # And every shipped task actually reaches its probe over a real config,
     # rather than answering `detector_not_implemented` on a Home render. This
     # fixture registers ONE workspace and an empty vault, which is the honest
-    # `not_applicable` for both: an empty vault has no Learnings document, and a
-    # single workspace has no counterpart for a person note to be misfiled from.
-    # That is a claim rather than an admission that nothing ran — and it is the
-    # same answer a fresh install gets from both tasks.
+    # `not_applicable` for all three: an empty vault has no Learnings document, a
+    # single workspace has no counterpart for a person note to be misfiled from,
+    # and this workspace's vault is already where the layout puts it. That is a
+    # claim rather than an admission that nothing ran — and it is the same answer
+    # a fresh install gets from every task.
     for task in catalog.tasks:
         result = update_tasks.apply_detector(
             task, config=_config(tmp_path), workspace="personal"

@@ -38,7 +38,9 @@ import re
 
 # ---- block structure -------------------------------------------------------
 
-FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+# `\r?\n`: a note saved with Windows line endings (Notepad, a CRLF checkout) has
+# frontmatter too; callers split the block on "\n" and strip each line.
+FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 

@@ -70,16 +70,40 @@ def test_no_vault_location_tile_on_a_correctly_migrated_install(tmp_path: Path) 
     assert [a.id for a in actions if a.kind == "vault-location"] == []
 
 
-def test_a_vault_moved_out_of_its_root_still_raises_the_tile(tmp_path: Path) -> None:
-    """The fix must not silence the check it was built for."""
+def test_a_vault_moved_out_of_its_root_is_still_reported_as_misplaced(
+    tmp_path: Path,
+) -> None:
+    """The fix must not silence the check it was built for.
+
+    It is a check on the *predicate*, not on a surface: this used to assert a
+    `vault-location:work` tile, and since the tile became the `vault-relocate`
+    catalog task (#800) the assertion moved to the two surfaces that still carry
+    it — the audit's notice and the shared predicate the task's detector reads. A
+    check that only asserted "no tile" would pass on a vault that is quietly in
+    the wrong place with nothing reporting it.
+    """
+    from ciao.migration_notices import (
+        RELOCATION_MISPLACED,
+        VAULT_LOCATION_NOTICE,
+        relocation_state,
+    )
+    from ciao.os_audit import audit_upgrade_notices
+
     config = _install(tmp_path, migrated=True)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     config.workspaces["work"].vault_root = str(elsewhere)
 
-    actions = detect_actions(DetectionContext(config=config, runtime_dir=tmp_path / ".runtime"))
+    runtime = tmp_path / ".runtime"
+    actions = detect_actions(DetectionContext(config=config, runtime_dir=runtime))
 
-    assert [a.id for a in actions if a.kind == "vault-location"] == ["vault-location:work"]
+    assert [a for a in actions if a.kind == "vault-location"] == []
+    assert relocation_state(config, "work") == RELOCATION_MISPLACED
+    assert [
+        n["workspace"]
+        for n in audit_upgrade_notices(config, runtime_dir=runtime)["notices"]
+        if n["type"] == VAULT_LOCATION_NOTICE
+    ] == ["work"]
 
 
 # -- health rows belong to the root being checked -----------------------------

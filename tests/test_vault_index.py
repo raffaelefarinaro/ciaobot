@@ -716,3 +716,63 @@ def test_scan_vault_infers_a_custom_category_from_its_folder(tmp_path: Path):
     # Without the registry the shipped tables still answer for themselves, which
     # is what a caller that cannot reach a vault keeps.
     assert vi.canonical_type("client") == ""
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_related_ref_is_repointed_whatever_the_line_endings(tmp_path: Path, newline: str) -> None:
+    """A note saved with Windows line endings still has frontmatter (#696 C9).
+
+    The rewrites edit a note's exact bytes, and the shared FRONTMATTER_RE only
+    matched `---\\n`: a CRLF note's `related:` refs were never repointed when the
+    note they named was completed or re-homed.
+    """
+    from ciao.vault_rehome import rewrite_references
+
+    vault = tmp_path / "memory-vault"
+    # The note as it is before the move: refs resolve against what exists.
+    (vault / "projects" / "active" / "demo").mkdir(parents=True)
+    (vault / "projects" / "active" / "demo" / "demo.md").write_bytes(b"# Demo\n")
+    text = newline.join(["---", "type: note", "related: [projects/active/demo/demo]", "---", "# Hub", ""])
+    entries = vi.scan_vault(vault)
+    index = vi.build_filename_index(entries)
+
+    rewritten, changes = rewrite_references(
+        text,
+        "Notes/Hub.md",
+        "Notes/Hub.md",
+        {"projects/active/demo/demo": "projects/completed/demo/demo"},
+        index,
+        moved_by_resolved={"memory-vault/projects/active/demo/demo.md": "projects/completed/demo/demo"},
+    )
+
+    assert "related: [projects/completed/demo/demo]" in rewritten
+    assert changes
+    assert rewritten.count("\r\n") == text.count("\r\n")  # line endings left as they were
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_strip_references_keeps_the_notes_own_line_endings(tmp_path: Path, eol: str) -> None:
+    """A CRLF note stays CRLF, byte for byte, after a backlink is stripped (#696 C9).
+
+    The note used to be read in text mode (CRLF became LF) and written
+    exactly, so the whole note came back LF; and the frontmatter was rebuilt
+    with LF delimiters and LF-joined lines.
+    """
+    (tmp_path / "People").mkdir(parents=True)
+    (tmp_path / "Projects").mkdir()
+    (tmp_path / "People" / "Mo.md").write_bytes(b"# Mo\n")
+    before = eol.join([
+        "---", "type: project", "related: [People/Mo, People/Ana]", "people:",
+        "  - People/Mo", "  - People/Ana", "---", "# Foo", "", "With [Mo](../People/Mo.md).", "",
+    ])
+    (tmp_path / "People" / "Ana.md").write_bytes(b"# Ana\n")
+    (tmp_path / "Projects" / "Foo.md").write_bytes(before.encode("utf-8"))
+
+    edited = vi.strip_references(tmp_path, "memory-vault/People/Mo.md")
+
+    assert edited == ["memory-vault/Projects/Foo.md"]
+    after = (tmp_path / "Projects" / "Foo.md").read_bytes().decode("utf-8")
+    assert after == eol.join([
+        "---", "type: project", "related: [People/Ana]", "people:",
+        "  - People/Mo", "  - People/Ana", "---", "# Foo", "", "With Mo.", "",
+    ])

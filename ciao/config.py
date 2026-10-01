@@ -643,7 +643,7 @@ class CiaoConfig:
         :meth:`agent_vault_root` already derives from the same receipt.
 
         Answering "shared" unconditionally made this a claim about the past.
-        ``_detect_vault_location`` compares the resolved vault against this and
+        The vault-location check compares the resolved vault against this and
         raised "The personal vault is not in its standard folder" on a correctly
         migrated install, for every workspace, permanently — with a chat prompt
         telling the operator to move the vault back to where the migration had

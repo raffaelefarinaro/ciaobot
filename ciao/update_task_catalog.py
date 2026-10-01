@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
@@ -101,7 +102,11 @@ TASK_FIELDS: frozenset[str] = frozenset(
 #: :data:`ciao.update_tasks.DETECTOR_FUNCTIONS` — see the module docstring for why
 #: "registered but not yet written" is not a state this catalog has.
 DETECTORS: frozenset[str] = frozenset(
-    {"learnings-cleanup-review-needed", "unrehomed-people-review-needed"}
+    {
+        "learnings-cleanup-review-needed",
+        "unrehomed-people-review-needed",
+        "vault-relocate-review-needed",
+    }
 )
 
 #: The completion checks this engine implements, same contract as ``DETECTORS``.
@@ -109,7 +114,11 @@ DETECTORS: frozenset[str] = frozenset(
 #: evaluated apart from any chat the operator starts, and the names here are the
 #: postconditions that engine can actually evaluate.
 COMPLETION_CHECKS: frozenset[str] = frozenset(
-    {"learnings-cleanup-review-recorded", "unrehomed-people-rehome-recorded"}
+    {
+        "learnings-cleanup-review-recorded",
+        "unrehomed-people-rehome-recorded",
+        "vault-relocate-recorded",
+    }
 )
 
 #: The documented spelling of a version. A leading ``v`` is tolerated;
@@ -570,7 +579,14 @@ def _prompt_defect(root: Path, resource: str) -> str:
                 return "prompt_not_confined"
         if not target.resolve().is_relative_to(root.resolve()):
             return "prompt_not_confined"
-        if not target.is_file():
+        # stat, not is_file: is_file() answers False for a name Windows cannot
+        # even parse (WinError 123), which would read as "missing" there and
+        # "unreadable" on POSIX. Only "no such file" is missing.
+        try:
+            mode = target.stat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            return "prompt_missing"
+        if not stat.S_ISREG(mode):
             return "prompt_missing"
         if not target.read_text(encoding="utf-8").strip():
             return "prompt_empty"

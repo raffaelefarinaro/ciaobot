@@ -61,7 +61,7 @@ def test_report_includes_error_log_and_failed_jobs(tmp_path: Path) -> None:
     assert [f["job"] for f in report["failed_jobs"]] == ["schedule_dispatch"]
     assert "stream exploded" in report["report_text"]
     assert "boom" in report["report_text"]
-    assert report["error_log_path"].endswith(".runtime/server_errors.log")
+    assert Path(report["error_log_path"]).as_posix().endswith(".runtime/server_errors.log")
 
 
 def test_failures_sorted_newest_first_and_capped(tmp_path: Path) -> None:
@@ -240,7 +240,7 @@ def test_debug_log_included_when_present(tmp_path: Path) -> None:
     assert report["report_text"] == "(no runtime issues logged)"
     # ...but the raw tail is always in the payload for inspection.
     assert report["debug_log_lines"] == 1
-    assert report["debug_log_path"].endswith(".runtime/server_debug.log")
+    assert Path(report["debug_log_path"]).as_posix().endswith(".runtime/server_debug.log")
     assert "stderr noise" in report["debug_log"]
 
 

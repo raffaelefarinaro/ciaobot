@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from ciao.git_proc import EXACT_BYTES
 
@@ -42,6 +45,7 @@ def test_deploy_plist_points_at_packaged_cli_template() -> None:
     assert "<string>ciao.cli</string>" not in text
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="renders a launchd plist from POSIX paths")
 def test_render_launchd_plist_substitutes_path() -> None:
     import os
 

@@ -52,20 +52,23 @@ empty Home does not mean the audit is.
 |---|---|---|---|---|
 | `workspace-unmigrated` — "Workspaces are still sharing one vault" | Yes, **blocking** | **No** | **Yes** | Step 1 |
 | `vault-vocabulary` — some notes use a retired `type:` vocabulary | Yes | **No** | No | Step 5 |
-| `vault-location:<workspace>` — "The `<name>` vault is not in its standard folder" | Yes | Yes, as `vault_outside_vault_root` | No | Step 2 |
+| "The `<name>` vault is not in its standard folder" | Yes, as an **After this update** task (`vault-relocate`), dismissible, and only when the vault is there and misplaced | Yes, as `vault_outside_vault_root` | No | Step 2 |
 | "The vault may still use the retired wikilink dialect" | Yes | Yes, as `unmigrated_vault_links` | No | Step 3 |
 | `unrehomed_people` — no re-home has been recorded | Yes, as an **After this update** task (`unrehomed-people`), dismissible, and only when there is something to move | Yes | No | Step 4 |
 
 Two consequences worth stating outright. The one **mandatory** notice
 (`workspace-unmigrated`) exists only on Home, so an audit cannot tell you
-whether the install still needs separating — check Home. And `unrehomed_people`
-is the opposite: it is on both, but the two are **not** the same thing, and they
-do not even ask the same question. Home offers a task you may dismiss, reopen
-from Settings → Update task history, and finish — and it appears only when
-`ciao vault-rehome`'s own plan finds a tag-obvious note to move. `ciao os-audit`
-keeps reporting the broader condition whatever that card says, because a dismissed
-card is a decision about a card. What stops the audit line is the receipt below —
-not the dismissal, and not the card.
+whether the install still needs separating — check Home. And the two optional
+notices that are on both are **not** the same thing twice over.
+`unrehomed_people` does not even ask the same question: Home offers a task you
+may dismiss, reopen from Settings → Update task history, and finish — and it
+appears only when `ciao vault-rehome`'s own plan finds a tag-obvious note to
+move, while the audit keeps reporting the broader condition whatever that card
+says, because a dismissed card is a decision about a card. The misplaced-vault
+notice is the simpler case: the card and the audit ask the same question of the
+same registry, so they always agree about which workspaces are misplaced, and
+dismissing the card silences only the card. For both, what stops the audit line
+is the receipt below — not the dismissal, and not the card.
 
 **`unrehomed_people` is a receipt check, not a scan, and it can outlive Step 1.**
 The audit raises it when the install has **more than one registered workspace**
@@ -332,7 +335,7 @@ string:
 
 ## Step 2 — optional: put one workspace's vault in its standard folder
 
-Optional, and only for a `vault-location:<workspace>` card or a
+Optional, and only for a `vault-relocate` card or a
 `vault_outside_vault_root` notice: one workspace whose vault sits somewhere
 other than its standard per-workspace folder — usually adopted before that
 convention, or hand-pinned at an external directory.
@@ -356,7 +359,10 @@ not ask about the move itself, and do not re-derive it by hand.
 
 Its own receipt lives under `<runtime>/migration/`, kept separate from Step 1's
 so neither run's status can be mistaken for the other's, and `--undo` is the
-exact `git mv` in reverse. `--apply` refuses before touching anything if the
+exact `git mv` in reverse — and it **removes** that receipt, so undoing the move
+brings the `vault-relocate` card back rather than leaving it finished over a vault
+that is outside its folder again. `ciao os-audit` reports any new mismatch
+regardless of what you did with the card. `--apply` refuses before touching anything if the
 plan refuses or a tracked file under the source has uncommitted changes. This
 command has no `--vault-root`: it works from the registry, which is where a
 non-standard location is recorded in the first place.

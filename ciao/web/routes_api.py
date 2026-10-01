@@ -9,7 +9,6 @@ import functools
 import json
 import logging
 import math
-import mimetypes
 import os
 import posixpath
 import re
@@ -38,6 +37,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao.git_proc import EXACT_BYTES
+from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import service_backend
@@ -4312,7 +4312,7 @@ async def workspace_binary(request: Request) -> Response:
         media_type = "application/pdf"
         filename = f"{orig_stem}.pdf"
     else:
-        media_type, _ = mimetypes.guess_type(resolved.name)
+        media_type = guess_media_type(resolved.name)
         if media_type is None:
             _FALLBACK_MIMES = {
                 ".pdf": "application/pdf",
@@ -4363,7 +4363,7 @@ async def workspace_image(request: Request) -> Response:
     if resolved.stat().st_size > _WORKSPACE_IMAGE_MAX_BYTES:
         return JSONResponse({"error": "file too large"}, status_code=413)
 
-    media_type, _ = mimetypes.guess_type(resolved.name)
+    media_type = guess_media_type(resolved.name)
     if media_type is None:
         # Fallback: SVGs and a few uncommon types occasionally miss the
         # mimetypes DB depending on platform. Map from the extension.
