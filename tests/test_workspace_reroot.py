@@ -13,9 +13,11 @@ vault root, and a .DS_Store beside them.
 
 from __future__ import annotations
 
+import argparse
 import errno
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -2587,3 +2589,173 @@ def test_an_unmigrated_install_still_runs_the_real_migration(tmp_path: Path) -> 
     assert (install / "work" / "memory-vault" / "People" / "Peter.md").is_file()
     # The next start is the no-op.
     assert workspace_reroot.migrate_if_needed(config) == {"status": "already_migrated"}
+
+
+# -- CLI: what --mark-migrated tells the operator to run ------------------------
+#
+# #812. The refusal used to read "Move the vaults first (see
+# docs/VAULT_MIGRATION_PROMPT.md)" and the flag's help offered the move "by a
+# model following" that same document. Both described a revision of the document
+# that stopped existing at #800/#815: it now says the managed `--apply` is the
+# path and the manual one has no receipt, so the two surfaces disagreed and the
+# document was the right one. A refusal is the only guidance an operator who
+# never opens the document gets, so its wording is a contract and is pinned here
+# against what the CLI actually prints.
+
+#: ``ciao <subcommand> [--flag …]`` as the refusal spells it, up to the closing
+#: backtick, so a command named in the message can be checked against the parser
+#: the same way the document test checks the document's commands.
+_COMMAND_REF_RE = re.compile(r"`ciao ([a-z][a-z0-9-]*)((?: --[a-z][a-z0-9-]*)*)`")
+
+
+def _partly_moved_install(tmp_path: Path, *, present: tuple[str, ...]) -> Path:
+    """A registry naming both workspaces, with a vault directory for only some.
+
+    Deliberately bare: `--mark-migrated` reads `workspaces.json` and looks for
+    `<workspace>/<vault leaf>`, so nothing else about the install is load-bearing
+    for this surface and a git fixture would only be more to keep honest.
+    """
+    install = tmp_path / "install"
+    install.mkdir()
+    _registry(
+        install / ".runtime",
+        [
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "work", "vault_root": "memory-vault/work"},
+        ],
+    )
+    for name in present:
+        (install / name / "memory-vault" / "People").mkdir(parents=True)
+    return install
+
+
+def _subcommands() -> dict[str, argparse.ArgumentParser]:
+    from ciao.cli import build_parser
+
+    action = next(
+        a for a in build_parser()._actions
+        if isinstance(a, argparse._SubParsersAction)
+    )
+    assert action.choices, "ciao.cli registers no subcommands"
+    return action.choices
+
+
+def _reroot_help_text() -> str:
+    """`workspace-reroot`'s raw option help, whitespace-flattened.
+
+    Read off the parser rather than off `--help` so an assertion here is a test
+    of the wording and not of argparse's wrapping.
+    """
+    text = " ".join(
+        action.help
+        for action in _subcommands()["workspace-reroot"]._actions
+        if action.help
+    )
+    return re.sub(r"\s+", " ", text)
+
+
+def test_the_mark_migrated_refusal_names_the_apply_that_moves_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The managed migration is the instruction; the engine caveat comes with it.
+
+    `--apply` is the command that moves a vault into its own root, and the CLI
+    cannot check the one thing that makes it safe — the operator ran it from the
+    engine that will serve the install, with the app stopped — so the refusal has
+    to carry that rather than leave it to a document the operator may not read.
+    """
+    from ciao.cli import main
+
+    install = _partly_moved_install(tmp_path, present=("personal",))
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
+
+    code = main(["workspace-reroot", "--mark-migrated", "--workspace", str(install)])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    # It still refuses, and still names what it refused on.
+    assert "Refusing" in err
+    assert "memory-vault" in err
+    assert "work" in err
+    # The command that does the move, and the caveat its own description carries.
+    assert "`ciao workspace-reroot --apply`" in err
+    assert "from the engine that will serve this install" in err
+    assert "with the app stopped" in err
+    # #729 keeps the document named as the reader — but not as the place to move
+    # the vaults by hand, which is the sentence that has to go.
+    assert "docs/VAULT_MIGRATION_PROMPT.md" in err
+    assert "Move the vaults first" not in err
+    # A refusal writes nothing: the layout is still unrecorded.
+    assert read_receipt(install / ".runtime") is None
+
+
+def test_every_command_and_flag_the_refusal_names_is_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A refusal pointing at a flag nobody defined is worse than no guidance:
+    the operator types it, the CLI errors, and the question is still open."""
+    from ciao.cli import main
+
+    install = _partly_moved_install(tmp_path, present=("personal",))
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
+
+    main(["workspace-reroot", "--mark-migrated", "--workspace", str(install)])
+
+    refs = _COMMAND_REF_RE.findall(capsys.readouterr().err)
+    assert refs, "the refusal names no ciao command; the message or the regex changed"
+    subcommands = _subcommands()
+    for command, flags in refs:
+        assert command in subcommands, (
+            f"the refusal names `ciao {command}`, which is not a subcommand"
+        )
+        for flag in flags.split():
+            assert flag in subcommands[command]._option_string_actions, (
+                f"the refusal names `ciao {command} {flag}`, which that command "
+                "does not define"
+            )
+
+
+def test_the_mark_migrated_help_keeps_hand_and_drops_the_model() -> None:
+    """`--mark-migrated` exists for a real hand migration, so "by hand" stays.
+
+    "or by a model following docs/VAULT_MIGRATION_PROMPT.md" offered the one path
+    with no receipt, described through a revision of the document that no longer
+    exists. #729 keeps the document named as the reader; it does not keep a claim
+    about who performed the move.
+    """
+    flat = _reroot_help_text()
+
+    assert "migrated by hand" in flat
+    assert "by a model" not in flat
+    assert "docs/VAULT_MIGRATION_PROMPT.md" in flat
+    # And the help does not tell anybody to move the vaults themselves either.
+    assert "Move the vaults first" not in flat
+    # The receipt contract the flag exists for is still stated.
+    assert "agent_root" in flat and "per-root only when a receipt says so" in flat
+
+
+def test_a_hand_moved_install_is_still_recorded_and_pointed_at_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The compatibility route #729 forbids removing, driven through the CLI.
+
+    Every registered workspace already has its vault, so there is nothing to
+    refuse: the receipt is the only thing left to write, and it records
+    `origin: hand` so it does not claim a migration that never ran.
+    """
+    from ciao.cli import main
+
+    install = _partly_moved_install(tmp_path, present=("personal", "work"))
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test")
+
+    code = main(["workspace-reroot", "--mark-migrated", "--workspace", str(install)])
+
+    out = capsys.readouterr().out
+    assert code == 0, out
+    receipt = read_receipt(install / ".runtime")
+    assert receipt is not None
+    assert receipt["status"] == "migrated"
+    assert receipt["origin"] == "hand"
+    assert receipt["born_per_root"] is False
+    # The derived files still have to be rebuilt, and the command says so.
+    assert "`ciao workspace-reroot --repair`" in out

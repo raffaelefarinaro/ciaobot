@@ -3087,9 +3087,9 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
 
     if args.mark_migrated:
-        # For a vault migrated by hand or by a model. The receipt is what
-        # `agent_root` reads, so without it the install keeps resolving the shared
-        # layout while the files sit in the new one — the one combination that
+        # For a vault migrated by hand. The receipt is what `agent_root` reads,
+        # so without it the install keeps resolving the shared layout while the
+        # files sit in the new one — the one combination that
         # breaks every layout-dependent path. Verified, not asserted: the folders
         # have to actually be there, or this would tell the app a comforting lie.
         from ciao.workspace_reroot import mark_born_per_root, read_receipt
@@ -3121,11 +3121,25 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
             if not (workspace / n / vault.name).is_dir()
         ]
         if missing:
+            # #812: this used to send the reader to docs/VAULT_MIGRATION_PROMPT.md
+            # as the place to move the vaults by hand, and that document was
+            # rewritten to stop teaching exactly that (#800/#815) — so the refusal
+            # and the reader it named contradicted each other, and the document
+            # was the right one. Name the command that does the move instead,
+            # with the one caveat the refusal cannot check for the operator: an
+            # `--apply` run from the wrong engine boots with no vault at all. The
+            # document stays named, because it is still the reader for what
+            # `--apply` refuses on and for an install already moved by hand.
             print(
                 "Refusing: these workspaces have no "
                 f"<workspace>/{vault.name} directory yet: {', '.join(missing)}.\n"
-                "Move the vaults first (see docs/VAULT_MIGRATION_PROMPT.md), then "
-                "re-run this.",
+                "The move is `ciao workspace-reroot --apply`, run from the engine "
+                "that will serve this install and with the app stopped.\n"
+                "docs/VAULT_MIGRATION_PROMPT.md is the reader for what it refuses "
+                "on.\n"
+                "Only if these vaults are already where they belong because "
+                "someone moved them by hand: finish the directories named above, "
+                "then re-run this.",
                 file=sys.stderr,
             )
             return 1
@@ -6330,11 +6344,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Record that this install is ALREADY in the per-workspace layout, "
-            "without moving anything. For a vault migrated by hand or by a model "
-            "following docs/VAULT_MIGRATION_PROMPT.md: `agent_root` answers "
-            "per-root only when a receipt says so, so without this the install "
-            "keeps resolving the old layout and --repair refuses. Verifies the "
-            "layout is actually in place first and refuses if it is not."
+            "without moving anything. For a vault migrated by hand: `agent_root` "
+            "answers per-root only when a receipt says so, so without this the "
+            "install keeps resolving the old layout and --repair refuses. "
+            "docs/VAULT_MIGRATION_PROMPT.md is the reader for this flag and for "
+            "what to do when it refuses. Verifies the layout is actually in "
+            "place first and refuses if it is not."
         ),
     )
     reroot_parser.set_defaults(func=_workspace_reroot_command)
