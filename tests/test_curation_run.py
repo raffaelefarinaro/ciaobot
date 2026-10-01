@@ -48,7 +48,7 @@ def _guide(tmp_path: Path, *, memory: str = "", profile: str = "") -> Path:
     from ciao.memory_tool import ensure_regions
 
     guide = tmp_path / "CLAUDE.md"
-    guide.write_text("# Workspace\n", encoding="utf-8")
+    guide.write_text("# Workspace\n", encoding="utf-8", newline="")
     ensure_regions(guide)
     if memory or profile:
         from ciao.memory_tool import write_region
@@ -69,7 +69,7 @@ def _vault(tmp_path: Path) -> Path:
 def _fresh_log(vault: Path, *, last_full_pass: str) -> None:
     (vault / cr.CURATION_LOG_RELATIVE).write_text(
         f"---\nlast_full_pass: {last_full_pass}\n---\n\n# Curation log\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
 
@@ -118,18 +118,18 @@ def test_every_mechanical_signal_lands_in_the_worklist(tmp_path: Path) -> None:
 
     (vault / cr.PROPOSALS_RELATIVE).write_text(
         "# Memory proposals\n\n- [people Ada] Ada runs the release train.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     (vault / cr.LEARNINGS_RELATIVE).write_text(
         "# Learnings\n\n## Active\n"
         "- [pin-the-node-version] [2026-01-01 → 2026-09-01] (x4) Pin the Node version.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     (vault / cr.SKILL_PROPOSALS_RELATIVE).mkdir()
-    (vault / cr.SKILL_PROPOSALS_RELATIVE / "deploy.md").write_text("x", encoding="utf-8")
+    (vault / cr.SKILL_PROPOSALS_RELATIVE / "deploy.md").write_text("x", encoding="utf-8", newline="")
     (vault / cr.CURATION_LOG_RELATIVE).write_text(
         f"---\nlast_full_pass: 2026-09-01\n---\n\n{'x' * (cr.LOG_ROTATION_BYTES + 1)}",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     worklist = cr.build_worklist(
@@ -168,7 +168,7 @@ def _cluster_vault(vault: Path, type_: str, count: int) -> None:
     notes.mkdir(parents=True, exist_ok=True)
     for index in range(count):
         (notes / f"Note{index}.md").write_text(
-            f"---\ntype: {type_}\n---\n# Note{index}\n", encoding="utf-8"
+            f"---\ntype: {type_}\n---\n# Note{index}\n", encoding="utf-8", newline=""
         )
 
 
@@ -356,7 +356,7 @@ def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
     (vault / cr.PROPOSALS_RELATIVE).write_text(
         "- [memory] The user prefers uv over pip.\n- [profile] Writes in British English.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     worklist = cr.build_worklist(
@@ -388,7 +388,7 @@ def test_proposals_sharing_one_sentence_are_separate_work(tmp_path: Path) -> Non
         "- [people Ada] Ships on Fridays.\n"
         "- [project docs/Release.md] Ships on Fridays.\n"
         "- [project docs/Release.md] Ships on Fridays.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     def plan() -> cr.Worklist:
@@ -490,7 +490,7 @@ def test_resolved_learnings_are_not_replanned(tmp_path: Path) -> None:
         "# Learnings\n\n## Active\n\n"
         "## Promoted / Resolved\n"
         "- [pin-the-node-version] [2026-01-01 → 2026-09-01] (x4) Pin the Node version.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     worklist = cr.build_worklist(
@@ -514,7 +514,7 @@ def _note(vault: Path, relative: str, *, updated: str = "2024-01-05", type_: str
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"---\ntype: {type_}\nupdated: {updated}\n---\n\n# {path.stem}\n\nSomething durable.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     return path
 
@@ -619,7 +619,7 @@ def test_a_custom_category_threshold_is_honoured(tmp_path: Path) -> None:
         "  kind: entity\n"
         "  folder: People\n"
         "  stale_after_days: 1000\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     entity_types.clear_entity_types_cache()
     try:
@@ -791,7 +791,7 @@ def test_a_note_a_check_already_settles_is_not_planned_again(tmp_path: Path) -> 
     # because that is the only thing that makes the cooldown expire.
     pinned.write_text(
         pinned.read_text(encoding="utf-8").replace("Something durable", "Something newer"),
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     assert {item.label for item in _stale_items(vault, guide, today=today)} == {
         "Fresh",
@@ -947,7 +947,7 @@ def test_the_budget_spends_passes_in_order() -> None:
 def _settled_proposal(vault: Path, name: str) -> None:
     (vault / cr.SKILL_PROPOSALS_RELATIVE / f"{name}.md").write_text(
         f"---\nschema: 1\ntype: skill-proposal\nlifecycle: dismissed\n---\n\n# {name}\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
 
@@ -985,7 +985,7 @@ def test_a_pending_skill_proposal_beside_a_settled_one_still_counts(
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
     (vault / cr.SKILL_PROPOSALS_RELATIVE).mkdir()
     _settled_proposal(vault, "web-research")
-    (vault / cr.SKILL_PROPOSALS_RELATIVE / "deploy.md").write_text("x", encoding="utf-8")
+    (vault / cr.SKILL_PROPOSALS_RELATIVE / "deploy.md").write_text("x", encoding="utf-8", newline="")
 
     worklist = cr.build_worklist(
         vault_root=vault,
@@ -1008,7 +1008,7 @@ def test_a_budget_limited_run_resumes_at_the_remainder(tmp_path: Path) -> None:
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
     (vault / cr.SKILL_PROPOSALS_RELATIVE).mkdir()
     for name in ("a", "b", "c"):
-        (vault / cr.SKILL_PROPOSALS_RELATIVE / f"{name}.md").write_text("x", encoding="utf-8")
+        (vault / cr.SKILL_PROPOSALS_RELATIVE / f"{name}.md").write_text("x", encoding="utf-8", newline="")
 
     first = cr.build_worklist(
         vault_root=vault,
@@ -1046,7 +1046,7 @@ def test_a_worklist_whose_every_key_is_done_reports_empty(tmp_path: Path) -> Non
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
     (vault / cr.SKILL_PROPOSALS_RELATIVE).mkdir()
-    (vault / cr.SKILL_PROPOSALS_RELATIVE / "a.md").write_text("x", encoding="utf-8")
+    (vault / cr.SKILL_PROPOSALS_RELATIVE / "a.md").write_text("x", encoding="utf-8", newline="")
 
     worklist = cr.build_worklist(
         vault_root=vault,
@@ -1135,7 +1135,7 @@ def test_an_unreadable_expiry_reads_as_expired(tmp_path: Path) -> None:
     path = cr.state_path(vault)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["lease"]["expires_at"] = "whenever"
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.write_text(json.dumps(payload), encoding="utf-8", newline="")
 
     assert cr.active_lease(vault) is None
     cr.begin_run(vault, holder="run-b")
@@ -1247,7 +1247,7 @@ def test_advancing_the_marker_keeps_the_existing_log_body(tmp_path: Path) -> Non
     vault = _vault(tmp_path)
     (vault / cr.CURATION_LOG_RELATIVE).write_text(
         "---\nlast_full_pass: 2026-09-01\ntags: [ciao]\n---\n\n# Curation log\n\n## 2026-09-01\nDid things.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
 
@@ -1590,7 +1590,7 @@ def _settled_vault(tmp_path: Path, *records: LearningRecord) -> Path:
     body = "".join(f"{render_learning(record)}\n" for record in records)
     (vault / cr.LEARNINGS_RELATIVE).write_text(
         f"---\ntags: [ciao, learnings]\n---\n# Learnings\n\n## Active\n\n{body}",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     config = _cleanup_config(tmp_path, vault)
     # The queue is addressed through the registry, and the registry is the vault
@@ -1707,7 +1707,7 @@ def test_an_unproposed_learning_consumes_no_key(tmp_path: Path) -> None:
     record = _settled_learning("Nobody has proposed this.", "orphan")
     (vault / cr.LEARNINGS_RELATIVE).write_text(
         f"---\ntags: [ciao, learnings]\n---\n# Learnings\n\n## Active\n\n{render_learning(record)}\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
@@ -1971,7 +1971,7 @@ def test_an_unreadable_line_is_reported_in_the_notes(tmp_path: Path) -> None:
             render_learning(record),
             render_learning(record) + "\n- [broken] [2024-13-45 → nope] (x0) Bad.\n",
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
@@ -2026,7 +2026,7 @@ def _entry_note(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"---\ntype: {type_}\nupdated: {updated}\n---\n\n# {path.stem}\n\n{lines}",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     return path
 
@@ -2230,7 +2230,7 @@ def test_an_undated_note_is_still_scanned_for_its_entries(tmp_path: Path) -> Non
     # rescue it either.
     path.write_text(
         "---\ntype: person\n---\n\n# Sofia\n\n- Speaks Greek [verified: 2020-01-01]\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     import os
 
