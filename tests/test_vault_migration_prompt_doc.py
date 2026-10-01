@@ -360,13 +360,21 @@ def test_home_and_os_audit_are_not_described_as_the_same_set() -> None:
     *asymmetry* stated instead: the card is dismissible and the report is not, so
     a document that called the two interchangeable would send a reader who hid
     the card to `ciao os-audit` and back out again for nothing.
+
+    Since #800's last slice the misplaced-vault notice has both surfaces too, and
+    it is the *other* kind of asymmetry: there the card and the audit ask the same
+    question of the same registry and always agree, so the document must say that
+    too — otherwise a reader would assume "both surfaces" means "the same
+    question on both", which is true here and false for `unrehomed_people`.
     """
     doc = _flat()
 
     assert "they do **not** cover the same ones" in doc
     for fragment in (
         "only on Home, so an audit cannot tell you",
-        "the two are **not** the same thing",
+        "does not even ask the same question",
+        "the same question of the same registry",
+        "dismissing the card silences only the card",
         "dismissing the Home card leaves it exactly where it was",
     ):
         assert fragment in doc, (
