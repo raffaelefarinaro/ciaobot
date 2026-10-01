@@ -826,46 +826,84 @@ def _detect_locked_skills_orphaned(context: DetectionContext) -> list[OperatorAc
 def _detect_skill_triage_pending(context: DetectionContext) -> list[OperatorAction]:
     """Skills the migration could not attribute to one workspace.
 
-    The migration writes a triage file rather than guessing which root owns a
+    The migration writes a triage sheet rather than guessing which root owns a
     customised skill, because guessing hands one workspace's tooling to another.
     Chat-only: every entry is a judgement about what the skill is for.
+
+    The sheet is found through the re-rooting receipt, not by a path spelled out
+    here (#810). ``apply`` already records the file it created, so the receipt is
+    the durable answer and this card follows the sheet wherever the migration put
+    it — inside the primary workspace's vault, whose leaf is the install's fact
+    and not this module's. The detector used to read
+    ``<runtime>/migration/skills-triage.md``, a path nothing in ``ciao/`` has
+    ever written, so the one decision the re-rooting deliberately refuses to
+    guess was surfaced by nothing at all.
+
+    What is counted is the rows whose **Destination** cell is still blank, which
+    is the sheet's own record of what has not been decided. Filling a cell in is
+    the operator's decision, so the count falls as the sheet is answered and
+    reaches zero when it is fully answered — a card that was permanent by
+    construction is the "offered forever" shape #788's upkeep row is about.
+
+    A receipt or a sheet this install cannot read is an unknown, not a clean
+    install: it is logged and no card is drawn, rather than reporting that
+    nothing needs deciding about a sheet nobody managed to look at.
     """
     runtime = context.runtime
-    if runtime is None:
+    install = getattr(context.config, "workspace_root", None)
+    if install is None or runtime is None:
         return []
-    triage = Path(runtime) / "migration" / "skills-triage.md"
+    try:
+        from ciao.workspace_reroot import skill_triage_sheet, undecided_skill_triage
+
+        triage = skill_triage_sheet(runtime, Path(install))
+    except Exception:  # noqa: BLE001 — an unreadable receipt is unknown, not clean
+        logger.exception("operator actions: skill-triage receipt read failed")
+        return []
+    if triage is None:
+        # The migration wrote no sheet: a fresh install has no catalog to sort,
+        # and a refusal or a rehearsal never reached the write.
+        return []
+    # The receipt's claim, checked against the filesystem rather than trusted. An
+    # operator who deleted the sheet has answered it, and a card naming a file
+    # that is not there is a card nobody can act on.
     if not triage.is_file():
         return []
     try:
-        lines = [
-            line for line in triage.read_text(encoding="utf-8").splitlines()
-            if line.strip().startswith(("- ", "* "))
-        ]
+        pending = undecided_skill_triage(triage)
     except OSError:
+        logger.exception("operator actions: skill-triage sheet read failed")
         return []
-    if not lines:
+    if not pending:
         return []
+    shown = ", ".join(pending[:5])
+    more = f" and {len(pending) - 5} more" if len(pending) > 5 else ""
     return [
         OperatorAction(
             id="skill-triage-pending",
             kind="skill-triage-pending",
             severity=_DRIFT_SEVERITY,
-            title=f"{len(lines)} skill(s) need a workspace",
+            title=f"{len(pending)} skill(s) need a workspace",
             detail=(
                 "The separation could not tell which workspace these skills "
                 "belong to, so it left them for a decision rather than handing "
-                "one workspace's tooling to another."
+                f"one workspace's tooling to another: {shown}{more}. The sheet is "
+                f"{triage}."
             ),
             glyph="✦",
             workspace="",
             chat_label="Decide with me",
             chat_prompt=(
-                f"Read `{triage}` and walk me through each skill it lists. For "
-                "each one, say what it does and which workspace it looks like it "
-                "belongs to, then ask me to confirm before moving anything. Move "
-                "an approved skill into that workspace's `skills/` directory and "
-                "run `ciao sync-skills` for that root. Leave anything I do not "
-                "confirm exactly where it is."
+                f"Read `{triage}` and walk me through each skill whose "
+                "**Destination** cell is still blank — the blank is deliberate, "
+                "because deciding which workspace a skill belongs to is a "
+                "judgement about my own work. For each one, say what it does and "
+                "which workspace it looks like it belongs to, then ask me to "
+                "confirm before moving anything. Write the destination I confirm "
+                "into that row's **Destination** cell, `git mv` the directory from "
+                "`<primary>/skills/<name>` to `<destination>/skills/<name>`, and "
+                "run `ciao sync-skills` for both roots. Leave anything I do not "
+                "confirm exactly where it is, and fill no cell I have not decided."
             ),
         )
     ]

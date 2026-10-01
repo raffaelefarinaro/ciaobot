@@ -831,35 +831,252 @@ def test_the_drift_detectors_are_silent_before_the_re_rooting(tmp_path: Path) ->
     assert "workspace-assets-stale" not in kinds
 
 
-def test_pending_skill_triage_is_chat_only(tmp_path: Path) -> None:
-    config = _RerootedConfig(tmp_path)
-    for name in ("personal", "work"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    triage = tmp_path / ".runtime" / "migration" / "skills-triage.md"
-    triage.parent.mkdir(parents=True, exist_ok=True)
-    triage.write_text("# Triage\n\n- skills/alpha\n- skills/beta\n", encoding="utf-8")
+def _migrated_catalog_install(tmp_path: Path, runtime: Path) -> tuple[_RerootedConfig, Path]:
+    """A re-rooted install whose skill catalog the migration could not place.
 
-    actions = [a for a in detect_actions(_context(tmp_path, config=config))
-               if a.kind == "skill-triage-pending"]
+    Built by **running** the migration over a synthetic pre-migration install,
+    not by writing a file where the detector happens to read it (#810). A fixture
+    written at the detector's path passes whether or not the two agree, and that
+    is exactly how a card that could never fire stayed green.
+
+    Returns the config to detect against and the sheet the migration wrote.
+    """
+    from ciao.workspace_reroot import apply
+
+    install = tmp_path / "install"
+    install.mkdir()
+    for name in ("personal", "work"):
+        (install / "memory-vault" / name / "People").mkdir(parents=True)
+        (install / "memory-vault" / name / "People" / "Peter.md").write_text(
+            "---\ntype: person\n---\n# Peter\n", encoding="utf-8"
+        )
+    for generated in ("INDEX.md", "MEMORY.md", "VOCABULARY.md"):
+        (install / "memory-vault" / generated).write_text("generated\n", encoding="utf-8")
+    (install / "skills" / "jira-tickets").mkdir(parents=True)
+    (install / "skills" / "jira-tickets" / "SKILL.md").write_text(
+        "---\nname: jira-tickets\ndescription: File a Jira ticket.\n---\n# Jira\n",
+        encoding="utf-8",
+    )
+    (install / "skills" / "linkedin-writing").mkdir(parents=True)
+    (install / "skills" / "linkedin-writing" / "SKILL.md").write_text(
+        "---\nname: linkedin-writing\ndescription: Draft a post | with a pipe\n---\n",
+        encoding="utf-8",
+    )
+
+    result = apply(
+        install,
+        install / "memory-vault",
+        ["personal", "work"],
+        runtime,
+        primary="personal",
+    )
+    assert result["status"] == "migrated", result.get("refusals")
+    config = _RerootedConfig(install, workspaces=("personal", "work"))
+    sheet = install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md"
+    assert sheet.is_file(), "the migration wrote no sheet for this test to find"
+    return config, sheet
+
+
+def test_the_card_follows_the_sheet_the_migration_actually_wrote(tmp_path: Path) -> None:
+    """#810: the detector and the re-rooting used different paths for the sheet.
+
+    The migration writes `Workspace/Skill-Triage.md` inside the primary
+    workspace's vault and records it in the receipt's `created_files`; the
+    detector used to look for `<runtime>/migration/skills-triage.md`, which
+    nothing in `ciao/` has ever written. So the sheet the re-rooting
+    deliberately left unanswered — the one decision it refuses to guess — was
+    surfaced by nothing.
+
+    This runs the migration and then the detector over what it produced, so the
+    two halves are pinned to each other rather than to a hand-written path.
+    """
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+
+    # The path the detector used to guess, still empty on an install the
+    # migration has just re-rooted, and the receipt recording where the sheet
+    # really went.
+    assert not (runtime / "migration" / "skills-triage.md").exists()
+    receipt = json.loads(
+        (runtime / "migration" / "workspace-rooting.json").read_text(encoding="utf-8")
+    )
+    assert sheet.relative_to(config.workspace_root).as_posix() in receipt["created_files"]
+
+    actions = [
+        a
+        for a in detect_actions(_context(tmp_path, config=config, runtime=runtime))
+        if a.kind == "skill-triage-pending"
+    ]
 
     assert len(actions) == 1
     assert "2 skill" in actions[0].title
+    assert str(sheet) in actions[0].chat_prompt
+    assert "jira-tickets" in actions[0].detail
     # Moving someone's tooling between workspaces is a judgement, never a button.
     assert not actions[0].run_label
     assert actions[0].chat_prompt
 
 
-def test_an_empty_triage_file_is_silent(tmp_path: Path) -> None:
-    config = _RerootedConfig(tmp_path)
-    for name in ("personal", "work"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    triage = tmp_path / ".runtime" / "migration" / "skills-triage.md"
-    triage.parent.mkdir(parents=True, exist_ok=True)
-    triage.write_text("# Triage\n\nNothing needed a decision.\n", encoding="utf-8")
+def test_a_filled_in_destination_clears_the_card(tmp_path: Path) -> None:
+    """The sheet is the completion evidence, so an answered sheet means zero.
 
-    assert "skill-triage-pending" not in _kinds(_context(tmp_path, config=config))
+    Nothing in the codebase writes this file, so a card counted on "the file is
+    there" would be permanent by construction — the "offered forever" shape a
+    dismissible card must not have. The Destination cell is the operator's own
+    record of a decision, and reading it is what lets the card go away.
+    """
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+
+    def pending() -> set[str]:
+        return {
+            a.id
+            for a in detect_actions(_context(tmp_path, config=config, runtime=runtime))
+            if a.kind == "skill-triage-pending"
+        }
+
+    assert pending() == {"skill-triage-pending"}
+
+    text = sheet.read_text(encoding="utf-8")
+    answered = text.replace(
+        "| `jira-tickets` | skills/ |  |", "| `jira-tickets` | skills/ | work |"
+    )
+    sheet.write_text(answered, encoding="utf-8")
+
+    actions = [
+        a
+        for a in detect_actions(_context(tmp_path, config=config, runtime=runtime))
+        if a.kind == "skill-triage-pending"
+    ]
+    assert len(actions) == 1
+    assert "1 skill" in actions[0].title, "a filled row must stop being counted"
+    assert "jira-tickets" not in actions[0].detail
+
+    sheet.write_text(
+        answered.replace(
+            "| `linkedin-writing` | skills/ |  |",
+            "| `linkedin-writing` | skills/ | personal |",
+        ),
+        encoding="utf-8",
+    )
+
+    assert "skill-triage-pending" not in _kinds(
+        _context(tmp_path, config=config, runtime=runtime)
+    ), "a fully answered sheet must reach zero"
+
+
+def test_a_deleted_sheet_is_silence_not_a_card_naming_a_missing_file(tmp_path: Path) -> None:
+    """The receipt's claim is checked against the filesystem, not trusted.
+
+    An operator who deletes the sheet has answered it, and a card that says "read
+    this file" about a file that is not there is the unactionable tile operators
+    learn to ignore.
+    """
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+    sheet.unlink()
+
+    assert "skill-triage-pending" not in _kinds(
+        _context(tmp_path, config=config, runtime=runtime)
+    )
+
+
+def test_an_unreadable_receipt_is_unknown_rather_than_a_clean_install(
+    tmp_path: Path,
+) -> None:
+    """A receipt this install cannot read must not report "nothing to decide".
+
+    Absence of proof is not proof: the sheet may well be sitting in the vault
+    with every destination blank, and a card-free strip on the strength of a file
+    that failed to parse is the notice quietly lying about the one thing it
+    exists to report.
+    """
+    runtime = _runtime(tmp_path)
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    (runtime / "migration" / "workspace-rooting.json").write_text("{not json", encoding="utf-8")
+
+    assert "skill-triage-pending" not in _kinds(_context(tmp_path, runtime=runtime))
+
+
+def test_an_unreadable_sheet_is_unknown_rather_than_a_answered_one(
+    tmp_path: Path,
+) -> None:
+    """A sheet that cannot be read must not report itself fully decided.
+
+    The card's completion evidence is the sheet's own blank cells, so a sheet
+    this install cannot read is not an answered sheet: it is an unknown. The
+    strip survives it and the failure is logged, which is the honest outcome —
+    the alternative is reporting "nothing needs deciding" about work nobody could
+    look at.
+    """
+    runtime = _runtime(tmp_path)
+    config, _sheet = _migrated_catalog_install(tmp_path, runtime)
+
+    with patch(
+        "ciao.workspace_reroot.undecided_skill_triage",
+        side_effect=OSError("unreadable"),
+    ):
+        actions = detect_actions(_context(tmp_path, config=config, runtime=runtime))
+
+    assert "skill-triage-pending" not in {a.kind for a in actions}
+
+
+def test_no_receipt_at_all_means_no_sheet_and_no_card(tmp_path: Path) -> None:
+    """A fresh install has no catalog to sort, so it is never nagged.
+
+    Absence of the migration receipt is the absence of the sheet, which is not
+    the same as an empty sheet, and both are silence.
+    """
+    runtime = _runtime(tmp_path)
+    config = _RerootedConfig(tmp_path)
+
+    assert "skill-triage-pending" not in _kinds(
+        _context(tmp_path, config=config, runtime=runtime)
+    )
+
+
+def test_a_refused_migration_wrote_no_sheet_and_offers_no_card(tmp_path: Path) -> None:
+    """A refusal returns before the write, so its receipt names no sheet.
+
+    `read_receipt` gates on `status == "migrated"`, so the resolver sees no
+    completed migration and says none — which is true: the sheet is written
+    inside the transaction a refusal never commits.
+    """
+    runtime = _runtime(tmp_path)
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    (runtime / "migration" / "workspace-rooting.json").write_text(
+        json.dumps(
+            {
+                "status": "refused",
+                "refusals": ["memory-vault has uncommitted changes"],
+                "created_files": ["personal/memory-vault/Workspace/Skill-Triage.md"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert "skill-triage-pending" not in _kinds(_context(tmp_path, runtime=runtime))
+
+
+def test_a_sheet_with_every_destination_filled_is_silent(tmp_path: Path) -> None:
+    """An install whose sheet lists nothing unanswered has nothing to decide."""
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+    text = sheet.read_text(encoding="utf-8")
+    sheet.write_text(
+        "\n".join(
+            "| `jira-tickets` | skills/ | work |" if "jira-tickets" in line else
+            "| `linkedin-writing` | skills/ | delete |" if "linkedin-writing" in line else
+            line
+            for line in text.splitlines()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert "skill-triage-pending" not in _kinds(
+        _context(tmp_path, config=config, runtime=runtime)
+    )
 
 
 def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> None:

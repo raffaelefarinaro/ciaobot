@@ -33,6 +33,8 @@ from ciao.workspace_reroot import (
     plan,
     plan_skills_triage,
     read_receipt,
+    skill_triage_sheet,
+    undecided_skill_triage,
     ensure_rollback_history,
     rebuild_indexes,
     rebuild_search_index,
@@ -954,6 +956,240 @@ def test_apply_refuses_when_the_primary_is_not_registered(tmp_path: Path) -> Non
     assert result["status"] == "refused"
     assert any("archive" in reason for reason in result["refusals"])
     assert (install / "memory-vault").is_dir(), "a refusal must move nothing"
+
+
+# -- reading the sheet back (#810) -------------------------------------------
+
+
+def _migrated_with_catalog(tmp_path: Path) -> tuple[Path, Path]:
+    """A completed re-rooting of a shared-layout install holding a catalog."""
+    install, vault, runtime = _git_install(tmp_path)
+    _catalog(install)
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "catalog")
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert result["status"] == "migrated", result.get("refusals")
+    return install, runtime
+
+
+def test_the_resolver_finds_the_sheet_where_the_migration_put_it(tmp_path: Path) -> None:
+    """#810's durable answer: the receipt, not a path spelled out by the reader.
+
+    The sheet goes inside the primary workspace's vault, and the primary is the
+    migration's decision while the vault's leaf is the registry's. So the only
+    place a reader can learn the location is the record `apply` already wrote,
+    and this asserts the resolver against the file `apply` actually created.
+    """
+    install, runtime = _migrated_with_catalog(tmp_path)
+
+    sheet = skill_triage_sheet(runtime, install)
+
+    assert sheet == install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md"
+    assert sheet.is_file()
+
+
+def test_the_resolver_follows_a_vault_leaf_it_did_not_expect(tmp_path: Path) -> None:
+    """A reader that recomputed the path would land on the wrong file here.
+
+    `CIAO_VAULT_ROOT` is configurable, so the vault's leaf is a fact about the
+    install and not about this module. Naming the sheet from the receipt is what
+    makes the card survive that; the resolver must not need to know the leaf.
+    """
+    install = tmp_path / "install"
+    install.mkdir()
+    # A vault under a name this module never spells, committed under that name —
+    # which is how a configured install actually looks.
+    vault = install / "notes"
+    for name in ("personal", "work"):
+        (vault / name / "People").mkdir(parents=True)
+        (vault / name / "People" / "Peter.md").write_text(
+            "---\ntype: person\n---\n# Peter\n", encoding="utf-8"
+        )
+    for generated in ("INDEX.md", "MEMORY.md", "VOCABULARY.md"):
+        (vault / generated).write_text("generated\n", encoding="utf-8")
+    (install / "skills" / "solo").mkdir(parents=True)
+    (install / "skills" / "solo" / "SKILL.md").write_text(
+        "---\nname: solo\ndescription: One skill.\n---\n", encoding="utf-8"
+    )
+    runtime = install / ".runtime"
+    runtime.mkdir()
+    _git(install, "init", "-b", "main")
+    _git(install, "config", "user.email", "test@example.com")
+    _git(install, "config", "user.name", "Test")
+    (install / ".gitignore").write_text(".runtime/\n", encoding="utf-8")
+    _git(install, "add", "-A")
+    _git(install, "commit", "-m", "seed")
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="work")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    sheet = skill_triage_sheet(runtime, install)
+    assert sheet == install / "work" / "notes" / "Workspace" / "Skill-Triage.md"
+    assert undecided_skill_triage(sheet) == ("solo",)
+
+
+def test_the_resolver_says_none_when_the_migration_wrote_no_sheet(tmp_path: Path) -> None:
+    """Absence of the receipt is absence of the sheet — not an unreadable one.
+
+    Every shape that wrote no sheet answers None: no receipt at all (a fresh
+    install), a receipt recording a refusal (the write is inside the transaction
+    a refusal never commits), and a migrated receipt whose catalog needed no
+    triage, which writes no sheet because a sheet listing nothing is noise.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+    assert skill_triage_sheet(runtime, install) is None, "no migration has run"
+
+    apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert skill_triage_sheet(runtime, install) is None, "an empty catalog wrote no sheet"
+
+    (tmp_path / "second").mkdir()
+    refused_install, refused_vault, refused_runtime = _git_install(tmp_path / "second")
+    (refused_vault / "personal" / "People" / "Peter.md").write_text("edited\n", encoding="utf-8")
+    result = apply(
+        refused_install, refused_vault, ["personal", "work"], refused_runtime, primary="personal"
+    )
+    assert result["status"] == "refused"
+    assert skill_triage_sheet(refused_runtime, refused_install) is None
+
+
+def test_an_unreadable_receipt_is_an_unknown_not_a_missing_sheet(tmp_path: Path) -> None:
+    """Absence of proof is not proof, in either direction.
+
+    A receipt this module cannot parse leaves the sheet's location unknown, and
+    reporting "no sheet" there is what let the Home card claim a clean install
+    while a real triage sheet sat unread in a vault. It raises instead, so every
+    caller has to deal with the unknown rather than inherit a wrong answer.
+    """
+    install, runtime = _migrated_with_catalog(tmp_path)
+    receipt_path(runtime).write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="triage"):
+        skill_triage_sheet(runtime, install)
+
+
+def test_two_recorded_sheets_make_the_location_unknown(tmp_path: Path) -> None:
+    """Picking one of two claims would be a guess, and this module refuses those."""
+    install, runtime = _migrated_with_catalog(tmp_path)
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    receipt["created_files"] = [
+        *receipt["created_files"],
+        "work/memory-vault/Workspace/Skill-Triage.md",
+    ]
+    receipt_path(runtime).write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="triage sheets"):
+        skill_triage_sheet(runtime, install)
+
+
+def test_the_resolver_returns_the_receipts_claim_without_statting_it(tmp_path: Path) -> None:
+    """The claim and the filesystem are separate questions, kept separate.
+
+    An operator who deleted the sheet has answered it, and a caller must be able
+    to tell that from "the migration wrote no sheet" — so the resolver hands back
+    the path even when nothing is there, and the caller decides what a missing
+    file means.
+    """
+    install, runtime = _migrated_with_catalog(tmp_path)
+    (install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md").unlink()
+
+    sheet = skill_triage_sheet(runtime, install)
+
+    assert sheet is not None
+    assert not sheet.exists(), "the resolver reports the claim, not the filesystem"
+
+
+def test_only_blank_destinations_count_as_undecided(tmp_path: Path) -> None:
+    """The blank is the decision outstanding; a filled cell is one already made."""
+    install, runtime = _migrated_with_catalog(tmp_path)
+    sheet = install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md"
+    assert undecided_skill_triage(sheet) == (
+        "adversarial-review",
+        "jira-tickets",
+        "linkedin-writing",
+    )
+
+    text = sheet.read_text(encoding="utf-8")
+    sheet.write_text(
+        text.replace("| `jira-tickets` | skills/ |  |", "| `jira-tickets` | skills/ | work |"),
+        encoding="utf-8",
+    )
+
+    assert undecided_skill_triage(sheet) == ("adversarial-review", "linkedin-writing")
+
+
+def test_a_pipe_in_a_description_does_not_move_the_destination_column(
+    tmp_path: Path,
+) -> None:
+    """Rows are split on unescaped pipes only.
+
+    `format_skill_triage` escapes a pipe inside a description as `\\|`, and the
+    reference catalog's descriptions are YAML block scalars that contain them.
+    A naive split reads the Destination column one to the right on exactly those
+    rows, so a skill whose description mentions a pipe is reported as decided
+    while it is still blank.
+    """
+    install, runtime = _migrated_with_catalog(tmp_path)
+    sheet = install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md"
+    text = sheet.read_text(encoding="utf-8")
+    assert "| `linkedin-writing` | skills/ |  | Draft a post \\| with a pipe |" in text
+
+    assert "linkedin-writing" in undecided_skill_triage(sheet)
+
+    sheet.write_text(
+        text.replace(
+            "| `linkedin-writing` | skills/ |  | Draft a post \\| with a pipe |",
+            "| `linkedin-writing` | skills/ | work | Draft a post \\| with a pipe |",
+        ),
+        encoding="utf-8",
+    )
+
+    assert "linkedin-writing" not in undecided_skill_triage(sheet)
+
+
+def test_a_sheet_in_any_other_shape_is_silence_not_a_crash(tmp_path: Path) -> None:
+    """An unreadable sheet must never raise a condition on the Home strip.
+
+    A document with no table, one with no header, and one with no rows all say
+    the same thing — nothing is unanswered — and a missing file says it too.
+    """
+    empty = tmp_path / "empty.md"
+    empty.write_text("# Triage\n\nNothing needed a decision.\n", encoding="utf-8")
+    assert undecided_skill_triage(empty) == ()
+
+    headerless = tmp_path / "headerless.md"
+    headerless.write_text("| Skill | Source |\n| --- | --- |\n| `a` | skills/ |\n", encoding="utf-8")
+    assert undecided_skill_triage(headerless) == ()
+
+    answered = tmp_path / "answered.md"
+    answered.write_text(
+        "| Skill | Source | Destination | What it does |\n"
+        "| --- | --- | --- | --- |\n"
+        "| `a` | skills/ | work | does a thing |\n",
+        encoding="utf-8",
+    )
+    assert undecided_skill_triage(answered) == ()
+
+    # A file that cannot be read is not "nothing outstanding": it is an unknown,
+    # and an unreadable sheet reporting itself as answered is the same lie as an
+    # unreadable vault reporting itself clean.
+    with pytest.raises(OSError):
+        undecided_skill_triage(tmp_path / "not-there.md")
+
+
+def test_undo_removes_the_sheet_the_resolver_points_at(tmp_path: Path) -> None:
+    """The resolver's answer and the undo are the same record.
+
+    `undo` removes exactly what `created_files` names, so a receipt whose claim
+    is gone reports no sheet — one file, one record, and no leftover sheet
+    announcing a decision the migration has been rolled back from.
+    """
+    install, runtime = _migrated_with_catalog(tmp_path)
+    assert skill_triage_sheet(runtime, install) is not None
+
+    result = undo(install, runtime)
+
+    assert result["status"] == "undone", result
+    assert skill_triage_sheet(runtime, install) is None
 
 
 def test_apply_refuses_on_a_dirty_tracked_skill(tmp_path: Path) -> None:

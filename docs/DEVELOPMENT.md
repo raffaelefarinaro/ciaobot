@@ -872,6 +872,7 @@ Taken from the merged tree, and every cell is pinned by a test.
 | `vault-unmigrated-links` | tile + audit `unmigrated_vault_links`, one `resolve_links`/`cached_links` | install | receipt read **plus** a bounded off-loop walk — Home reads the published verdict, the audit walks itself | `vault_migrate_links.read_receipt` — per **install**, not per vault, so the first converted root marks the whole install converted | No | `ciao vault-migrate-links [--apply]`, `ciao vault-unmigrate-links --apply` | none: a per-workspace loop over its remedy is not available |
 | `unrehomed_people` | audit `unrehomed_people` (one `rehomed_people_finding`) **and** the `unrehomed-people` catalog card (#833), which asks a narrower question (`rehome_legacy_candidates`) | install | the **notice**: registry read + one receipt read, no vault walk. The **card**: four cheap gates, then one `vault_rehome.plan_rehome` walk — off-loop through `run_read`, at most once per `APPLICABILITY_TTL_S` | `vault_rehome.read_receipt` — a **completed** receipt. Only a *completed* one, and the truthful no-op receipt counts solely as a record of an inspection the operator already approved | No | `ciao vault-rehome [--apply]`, `ciao vault-unrehome --apply` | `unrehomed-people-review-needed` / `unrehomed-people-rehome-recorded` |
 | `learnings-cleanup` | the `learnings-cleanup` catalog card (#728-E) | workspace | `plan_cleanup` per workspace, TTL-cached off-loop | an **attended** receipt (`reviewed`/`approvals`, `removed_by != system`) naming the revision the document has now | No | `ciao learnings-cleanup [--apply --approval-file FILE]`, `--revert` | `learnings-cleanup-review-needed` / `learnings-cleanup-review-recorded` |
+| `skill-triage-pending` | operator-actions tile | install | one `workspace_reroot.read_receipt`, one `stat`, one table read. No vault walk: the sheet's path comes from the receipt, not from a search | **The sheet's own blank cells.** `undecided_skill_triage` counts the rows whose **Destination** cell is empty, so filling one in is the operator recording a decision and the count falls to zero (#810). A real postcondition, and the only notice here whose completion is the operator writing something rather than a receipt appearing | No | none, deliberately: attributing a customised skill to a root is a judgement about the user's own work, so the remedy is the chat that walks them through the sheet. `ciao sync-skills` mirrors whatever they moved | none — see below |
 
 Three shapes, and they are not interchangeable. **Mandatory** is the first row
 alone. **A real receipt** is `unrehomed_people` and `vault-vocabulary`: a
@@ -879,6 +880,18 @@ completion check can read it, and a successful `--apply` writes one even when it
 moved nothing. **No receipt at all** is everything else, where "completion" is the
 condition's absence recomputed each render — a legitimate detector, and a
 tautological check.
+
+`skill-triage-pending` is the fourth shape, and it is the one row whose
+completion is neither a receipt nor the condition's absence: it is **the
+operator's own writing**. The migration deliberately leaves each skill's
+Destination cell blank, because attributing a customised skill to a root is a
+judgement about the user's work, so filling a cell in *is* the decision being
+recorded, and the card's count falls to zero on its own. That is what #800's
+table was waiting on before it could be catalogued: it said nothing clears the
+triage sheet, which made a task over it permanent by construction. It still is
+not a catalog task — there is no managed remedy command to offer, only a chat
+that walks the operator through their own sheet — but the reason is the absence
+of a command, not the absence of evidence.
 
 A receipt decides only the **last** column. What makes a row offerable is the
 fourth, and it is the one #833's review turned on: see below.
