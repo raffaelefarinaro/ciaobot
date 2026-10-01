@@ -22,14 +22,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import ciao.engine_update as engine_update
+import ciao.update_host as update_host
 from ciao.engine_update import (
     OPERATION_NAME,
     PREVIOUS_ENV_NAME,
-    RECOVER_LABEL,
-    RECOVER_PLIST_NAME,
     SERVER_LABEL,
-    UPDATER_LABEL,
-    UPDATER_PLIST_NAME,
     Operation,
     UpdateError,
     UpdateInProgress,
@@ -45,6 +42,13 @@ from ciao.engine_update import (
     run_apply,
     stage_update,
     write_operation,
+)
+from ciao.update_host import (
+    RECOVER_LABEL,
+    RECOVER_PLIST_NAME,
+    UPDATER_LABEL,
+    UPDATER_PLIST_NAME,
+    MacUpdateHost,
 )
 from ciao import install_receipt, macos_service
 from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
@@ -926,7 +930,7 @@ def _recorder(calls: list[str]) -> Any:
 
 def _install_recovery_agent(state: Path, op: Operation) -> Path:
     """The durable agent's plist, as `apply_update` writes it before the stop."""
-    return engine_update._write_recover_plist(
+    return update_host._write_recover_plist(
         op, op.env_python or str(Path(op.stage_dir) / "env" / "bin" / "python"), state
     )
 
@@ -938,7 +942,7 @@ def _agent_program(state: Path) -> str:
     not exist is not a net — so it is read where launchd reads it, rather than
     out of whatever the test last computed.
     """
-    plist, _ = engine_update._recovery_plists(state)
+    plist, _ = update_host._recovery_plists(state)
     with plist.open("rb") as handle:
         return plistlib.load(handle)["ProgramArguments"][0]
 
@@ -1121,7 +1125,7 @@ def _interrupted(
     staged env still in place.
     """
     op, state, receipt_path, engine = _staged(root, phase=phase)
-    engine_update._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
+    update_host._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
     return op, state, receipt_path, engine
 
 
@@ -2548,7 +2552,7 @@ def test_swap_in_flight_reads_the_loaded_job_arguments(
     def launchctl(_args: list[str]) -> subprocess.CompletedProcess[str]:
         return printed
 
-    assert engine_update._swap_in_flight(launchctl, 501) is expected
+    assert MacUpdateHost(launchctl=launchctl, uid=501).swap_in_flight() is expected
 
 
 def test_swap_in_flight_is_false_for_a_job_launchd_does_not_have() -> None:
@@ -2563,7 +2567,7 @@ def test_swap_in_flight_is_false_for_a_job_launchd_does_not_have() -> None:
     # A job launchd has never heard of cannot be running a swap, and answering
     # True here would strand every interrupted swap on a machine whose updater
     # never loaded.
-    assert engine_update._swap_in_flight(launchctl, 501) is False
+    assert MacUpdateHost(launchctl=launchctl, uid=501).swap_in_flight() is False
 
 
 @pytest.mark.parametrize("settled", ["applied", "rollback_failed"])
@@ -2665,7 +2669,7 @@ def test_run_recover_replaces_a_recreated_live_env(
     # `uv` got as far as recreating the env, which is the crash this is about:
     # the old install is retained under `previous-env` *and* a new live env is on
     # disk, so "is the live env gone?" cannot tell whether the move happened.
-    engine_update._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
+    update_host._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
     _write_env(engine.live_env, TO_VERSION)
     installed = read_receipt(receipt_path)
     assert installed is not None
@@ -2858,7 +2862,7 @@ def test_loaded_program_argument_reads_launchctl_output(
 ) -> None:
     # The formats launchd has used for a loaded job's program, and the two answers
     # that must never refuse an update: no program, and no output at all.
-    assert engine_update._loaded_program_argument(printed) == expected
+    assert update_host._loaded_program_argument(printed) == expected
 
 
 @pytest.mark.parametrize(
@@ -2887,7 +2891,7 @@ def test_loaded_program_argument_reads_launchctl_output(
 def test_loaded_tokens_reads_a_jobs_arguments(
     printed: str, expected: list[str]
 ) -> None:
-    assert engine_update._loaded_tokens(printed, "arguments") == expected
+    assert update_host._loaded_tokens(printed, "arguments") == expected
 
 
 def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:
