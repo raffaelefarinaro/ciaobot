@@ -790,3 +790,33 @@ def test_uninstall_keeps_the_bin_dir_on_path_while_anything_is_still_in_it() -> 
     assert "Get-ChildItem -LiteralPath $PathEntry -Force -ErrorAction Stop" in undo
     assert "if ($left.Count -gt 0) {" in undo
     assert "Kept $PathEntry on your PATH: it still holds $names." in undo
+
+
+def test_install_ps1_does_not_wait_for_an_engine_that_cannot_start_yet() -> None:
+    # #903: the logon task is InteractiveToken, so with no Windows session for
+    # this account (SSH, runas, never signed in) nothing can start until the next
+    # sign-in. The health wait is skipped and the user is told when it starts.
+    assert "$signedIn = Test-UserSignedIn" in SCRIPT_TEXT
+    assert "$signedIn -and $attempt -le $HealthAttempts" in SCRIPT_TEXT
+    assert "so the engine starts the next time this account signs in." in SCRIPT_TEXT
+    # Asked of the session list, not of localized `query user` output.
+    assert "WTSEnumerateSessionsW" in SCRIPT_TEXT
+    assert "query user" not in _ps1_code_only(SCRIPT_TEXT) and "quser" not in _ps1_code_only(SCRIPT_TEXT)
+    assert SCRIPT_TEXT.index("$signedIn = Test-UserSignedIn") < SCRIPT_TEXT.index("$HealthAttempts; $attempt++")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs wtsapi32 and Windows PowerShell 5.1")
+def test_session_check_compiles_under_ps51_and_answers_false_for_an_absent_account() -> None:
+    start = SCRIPT_TEXT.index("    function Test-UserSignedIn {")
+    end = SCRIPT_TEXT.index("    function Test-EngineAnswering")
+    probe = (
+        SCRIPT_TEXT[start:end]
+        + "\nTest-UserSignedIn | Out-Null\n"
+        + "[CiaobotSessions]::SignedIn('NO-SUCH-DOMAIN', 'no-such-ciaobot-user')\n"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", probe],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == "False"
