@@ -91,8 +91,6 @@ def test_configured_workspace_root_from_plist_fallback(tmp_path, monkeypatch) ->
     real_root = tmp_path / "real-workspace"
     real_root.mkdir()
     fake_home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("USERPROFILE", str(fake_home))  # Path.home() on Windows
     bootstrap = fake_home / ".ciao" / "bootstrap"
     # The conftest isolates CIAO_BOOTSTRAP_WORKSPACE so no test writes the
     # developer's real `~/.ciao`. This test needs the bootstrap path to BE the
@@ -118,8 +116,6 @@ def test_configured_workspace_root_honours_launch_agents_override(
     real_root = tmp_path / "real-workspace"
     real_root.mkdir()
     fake_home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(fake_home))
-    monkeypatch.setenv("USERPROFILE", str(fake_home))  # Path.home() on Windows
     # A decoy in the home-relative location must lose to the override.
     _write_plist(fake_home / "Library" / "LaunchAgents", tmp_path / "wrong-workspace")
     override = tmp_path / "override-agents"
@@ -146,8 +142,6 @@ def test_configured_workspace_root_detects_overridden_bootstrap(
     real_root.mkdir()
     bootstrap = tmp_path / "elsewhere" / "bootstrap"
     bootstrap.mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))  # Path.home() on Windows
     monkeypatch.setenv("CIAO_BOOTSTRAP_WORKSPACE", str(bootstrap))
     launch_agents = tmp_path / "LaunchAgents"
     monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(launch_agents))

@@ -150,8 +150,6 @@ def test_a_whitespace_only_workspace_does_not_resolve_to_the_cwd(
     for name in ("CIAO_RUNTIME_ROOT", "CIAO_VAULT_ROOT", "CIAO_BOOTSTRAP_WORKSPACE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CIAO_WORKSPACE", "   ")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))  # Path.home() on Windows
     (tmp_path / "home").mkdir()
 
     reset_reroot_cache()

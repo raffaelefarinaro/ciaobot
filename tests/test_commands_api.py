@@ -40,9 +40,7 @@ def test_frontmatter_missing_returns_empty_dict() -> None:
 
 
 def test_list_commands_reads_project_dir(tmp_path: Path, monkeypatch) -> None:
-    # Point $HOME at tmp so the user-level scan stays empty for this test.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))  # Path.home() on Windows
+    # The home is isolated by conftest, so the user-level scan stays empty here.
     _write_cmd(
         tmp_path / ".claude" / "commands",
         "brief",
@@ -64,8 +62,6 @@ def test_list_commands_reads_project_dir(tmp_path: Path, monkeypatch) -> None:
 
 def test_project_wins_over_user_on_collision(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     _write_cmd(
         home / ".claude" / "commands",
         "shared",
@@ -83,8 +79,6 @@ def test_project_wins_over_user_on_collision(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_missing_dirs_return_empty(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "nonexistent-home"))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path / "nonexistent-home"))  # Path.home() on Windows
     assert list_commands(tmp_path / "no-project") == []
 
 

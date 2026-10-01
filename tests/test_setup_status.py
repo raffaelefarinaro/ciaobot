@@ -784,8 +784,6 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
 
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     # `_isolate_launch_agents` redirects the default away from the real
     # ~/Library/LaunchAgents; re-point it at this test's faked home so the
     # assertion still exercises per-user default resolution.
@@ -1061,7 +1059,7 @@ def test_setup_list_dirs_lists_visible_directories_only(tmp_path) -> None:
     assert body["home"] == str(Path.home().resolve())
 
 
-def test_setup_list_dirs_defaults_to_home_and_abbreviates_display_path(tmp_path) -> None:
+def test_setup_list_dirs_defaults_to_home_and_abbreviates_display_path(tmp_path, home_dir) -> None:
     client = _folder_picker_client(tmp_path)
 
     resp = client.get("/api/setup/list-dirs")

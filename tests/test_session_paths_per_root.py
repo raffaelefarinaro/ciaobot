@@ -77,7 +77,6 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point ``Path.home()`` at a temp dir so slugs land under it."""
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("HOME", str(home))
     return home
 
 
