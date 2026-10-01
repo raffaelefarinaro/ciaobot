@@ -25,14 +25,20 @@ shell they replace by four orders of magnitude, so the answer is not cached and
 the wizard's PATH hint goes live the moment the user edits their environment.
 
 ``resolve_executable()`` honours ``PATHEXT`` — a service does not inherit one,
-and the bare command name would then match nothing — and then unwraps an npm
-shim. ``npm install -g`` writes ``opencode.cmd`` and ``opencode.ps1`` wrappers
-beside the real binary; spawning one runs ``cmd.exe``, which starts the real
-program and only exits when it does, so the engine stops a wrapper rather than
-the tool behind it. The shim names its own target, so that is what is read:
-nothing is guessed from the package layout, and a shim whose target is missing
-(or which is not a shim at all) raises :class:`ToolResolutionError` rather than
-passing off an unusable tool as one that is not installed.
+and the bare command name would then match nothing — and then unwraps a command
+wrapper. ``npm install -g`` writes ``opencode.cmd`` and ``opencode.ps1``
+wrappers beside the real binary; spawning one runs ``cmd.exe``, which starts the
+real program and only exits when it does, so the engine stops a wrapper rather
+than the tool behind it. Any ``.cmd``/``.bat``/``.ps1`` is treated that way, in
+any directory, because nvm-windows, Volta and a custom ``npm prefix`` all put
+them somewhere other than ``%APPDATA%\\npm``. The wrapper names the program it
+launches on its last argument line, so that is what is read — a package whose
+entry point is a script or an extensionless file launches an interpreter, and
+naming ``node.exe`` in place of the tool would spawn node with no arguments, so
+that raises instead. Nothing is guessed from the package layout, and a wrapper
+whose executable is missing (or which launches no single executable) raises
+:class:`ToolResolutionError` rather than passing off an unusable tool as one that
+is not installed.
 
 The helpers below the split are the same code both branches run, defined once
 rather than inside either of them: the PATHEXT search, the shim reader and the
@@ -51,8 +57,6 @@ import sys
 import threading
 from pathlib import Path
 from typing import Iterable
-
-_WINDOWS = sys.platform == "win32"
 
 # The separator this OS joins path parts with, captured once: the shim reader
 # below splices it into a path it assembles from text a Windows file wrote.
@@ -94,15 +98,23 @@ def _expand_vars(entry: str) -> str:
 def _join_path_sources(values: Iterable[str]) -> str:
     """One PATH string from the raw per-scope values, in the order given.
 
-    Each value is split on ``;``, every entry trimmed and expanded, empties
-    dropped and duplicates kept at their first position — the order and the
-    substitutions Windows applies to a new logon's PATH.
+    Each value is split on ``;``, every entry trimmed, unquoted and expanded,
+    empties dropped and duplicates kept at their first position — the order and
+    the substitutions Windows applies to a new logon's PATH. Duplicates are
+    compared the way the OS compares them, so ``C:\\Tools`` twice with different
+    case is one directory; ``normcase`` is the identity on POSIX, where the two
+    really would be different.
     """
     entries: list[str] = []
+    seen: set[str] = set()
     for value in values:
         for raw in value.split(";"):
-            entry = _expand_vars(raw.strip())
-            if entry and entry not in entries:
+            entry = _expand_vars(raw.strip().strip('"'))
+            if not entry:
+                continue
+            key = os.path.normcase(entry)
+            if key not in seen:
+                seen.add(key)
                 entries.append(entry)
     return ";".join(entries)
 
@@ -121,26 +133,33 @@ def _expand_shim_dir(path: str, base: str) -> str:
     resolved to ``base``.
 
     Whatever separator npm wrote after the token is absorbed rather than
-    doubled, and a token written with none gets one, so
-    ``%dp0%\\node_modules\\pkg\\bin.exe``, ``%~dp0\\node.exe`` and
-    ``%~dp0node.exe`` all come out as one path. A path that names no token is
-    already absolute and is left alone.
+    doubled, a token written with none gets one, and the rest is spelled with
+    THIS OS's separator — the text came out of a Windows file, so it is full of
+    backslashes that are not separators on a POSIX test run.
     """
     match = _SHIM_DIR.match(path)
     if match is None:
         return path
-    return base + _SEP + path[match.end() :].lstrip("\\/")
+    tail = path[match.end() :].lstrip("\\/").replace("\\", _SEP)
+    return base + _SEP + tail
 
 
-# Everything the shim quotes is a path it uses; the reader below only decides
-# what to do with them, so they are read once and judged by extension.
+# Everything the shim quotes on one line, judged by extension where needed.
 _QUOTED_PATH = re.compile(r'"([^"\r\n]+)"')
 _EXTENSION = re.compile(r"\.[A-Za-z0-9]+$")
 
-# A shim that hands a script to an interpreter names no executable for the tool:
-# `node.exe` without the entry point beside it is not the CLI, and resolving to
-# it would spawn node with no arguments at all.
-_SCRIPT_SUFFIXES = (".js", ".mjs", ".cjs")
+# A shim launches its tool on ONE line, and that line is the last one carrying
+# the argument list: `%*` in a .cmd/.bat, `$args` in a .ps1. Everything else in
+# the file is setup — `SET dp0=%~dp0`, `SET "_prog=%dp0%\node.exe"`, an existence
+# check — and a path quoted in there says nothing about what is run. Scanning
+# the whole file for quoted `.exe` paths read npm's own script-package shim as
+# `node.exe`, which is the interpreter rather than the tool.
+_LAUNCH_ARGUMENTS = {".cmd": "%*", ".bat": "%*", ".ps1": "$args"}
+
+# The one executable a shim may legitimately hand back is never node itself: it
+# is the tool's own binary. `node.exe` beside an entry point is an interpreter
+# being handed a script, and resolving to it would spawn node with no arguments.
+_NODE = "node.exe"
 
 
 def _suffix_of(path: str) -> str:
@@ -148,34 +167,41 @@ def _suffix_of(path: str) -> str:
     return match.group(0).lower() if match else ""
 
 
-def _shim_executable(shim: Path) -> str:
-    """The executable an npm shim launches, read out of the shim, or "".
+def _shim_launch_program(shim: Path) -> str:
+    """The quoted program token on the shim's launch line, or "".
 
-    "" means the file does not name one this can run: it is not an npm shim, it
-    passes a ``.js`` entry point to an interpreter, or it quotes no executable at
-    all. Nothing is inferred from where the shim sits or from the package layout.
+    The first quoted token on that line, which is the program npm runs; a later
+    one is the entry point or an argument it is given.
     """
+    marker = _LAUNCH_ARGUMENTS.get(shim.suffix.lower())
+    if marker is None:
+        return ""
     try:
         text = shim.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    quoted = _QUOTED_PATH.findall(text)
-    if any(_suffix_of(q) in _SCRIPT_SUFFIXES for q in quoted):
-        return ""
-    for candidate in reversed(quoted):
-        if _suffix_of(candidate) == ".exe":
-            return _expand_shim_dir(candidate, str(shim.parent)).strip()
+    for line in reversed(text.splitlines()):
+        if marker in line:
+            tokens = _QUOTED_PATH.findall(line)
+            return tokens[0].strip() if tokens else ""
     return ""
 
 
-def _comparable(path: Path) -> str:
-    """A path spelled for comparison: on Windows neither separators nor case
-    distinguish two directories, and a registry value is spelled its own way."""
-    return str(path).replace("/", "\\").lower()
+def _shim_executable(shim: Path) -> str:
+    """The executable an npm shim launches, read out of the shim, or "".
 
-
-# What npm writes beside a global install, and the wrappers it writes it as.
-_NPM_SHIM_SUFFIXES = (".cmd", ".bat", ".ps1")
+    "" means the shim does not launch a single executable Ciaobot can run: its
+    program is an interpreter (a script package, an extensionless entry point),
+    it names nothing at all, or the file cannot be read. Nothing is inferred
+    from where the shim sits or from the package layout.
+    """
+    program = _shim_launch_program(shim)
+    if _suffix_of(program) != ".exe":
+        return ""
+    target = _expand_shim_dir(program, str(shim.parent))
+    if _suffix_of(target) != ".exe" or os.path.basename(target).lower() == _NODE:
+        return ""
+    return target
 
 
 def _npm_bin_dir() -> Path | None:
@@ -188,46 +214,36 @@ def _npm_bin_dir() -> Path | None:
     return Path(appdata) / "npm" if appdata else None
 
 
-def _is_npm_shim(path: Path) -> bool:
-    """``path`` is a wrapper ``npm install -g`` left in the npm bin dir.
+def _unwrap_shim(cmd: str, found: str) -> str:
+    """The executable behind a command wrapper, read out of the wrapper itself.
 
-    Restricted to that directory on purpose: an extension alone says nothing
-    about what a file runs, and only npm's own wrappers can be read as one.
-    """
-    if path.suffix.lower() not in _NPM_SHIM_SUFFIXES:
-        return False
-    npm_dir = _npm_bin_dir()
-    return npm_dir is not None and _comparable(path.parent) == _comparable(npm_dir)
-
-
-def _unwrap_npm_shim(cmd: str, found: str) -> str:
-    """The executable behind an npm shim, read out of the shim itself.
-
-    Raises :class:`ToolResolutionError` naming what was found and what it did
-    not lead to, because the alternative — handing a caller a wrapper that
-    cannot be stopped on its own, or reporting nothing at all — is what the
-    engine would then spawn.
+    Raises :class:`ToolResolutionError` naming what was found and what it did not
+    lead to. The alternative — handing a caller the ``.cmd``, which Windows runs
+    through ``cmd.exe`` — is the bug this exists to fix: the engine would then
+    stop a wrapper instead of the program behind it.
     """
     shim = Path(found)
-    if not _is_npm_shim(shim):
+    if shim.suffix.lower() not in _LAUNCH_ARGUMENTS:
         return found
     target = _shim_executable(shim)
     if not target:
+        program = _shim_launch_program(shim)
+        launched = f"{program!r} through an interpreter" if program else "no program at all"
         raise ToolResolutionError(
-            f"{found} is an npm shim for {cmd!r} that names no executable: it "
-            "launches the program through an interpreter, so there is no binary "
-            "to run. Install the tool again to repair it."
+            f"{found} is the wrapper for {cmd!r} and launches {launched}, so there "
+            "is no single executable to run. Install the tool again to repair it."
         )
     if not os.path.isfile(target):
         raise ToolResolutionError(
-            f"{found} is the npm shim for {cmd!r} and launches {target}, which "
-            "is not there. Install the tool again to repair it."
+            f"{found} is the wrapper for {cmd!r} and launches {target}, which is "
+            "not there. Install the tool again to repair it."
         )
     return target
 
 
-# The PATHEXT a Windows install ships with. Used only when the process has none
-# of its own, as `shutil.which` does for the same reason.
+# The PATHEXT Windows itself substitutes for a process whose environment has
+# none — CreateProcess' documented default, not a compatibility shim, and the
+# same list `shutil.which` falls back to.
 _DEFAULT_PATHEXT = (".COM", ".EXE", ".BAT", ".CMD")
 
 
@@ -241,7 +257,7 @@ def _pathext_suffixes() -> list[str]:
     return suffixes or list(_DEFAULT_PATHEXT)
 
 
-def _search_pathext(cmd: str, path: str | None) -> str | None:
+def _search_pathext(cmd: str, path: str) -> str | None:
     """The first file named ``cmd`` on ``path``, honouring ``PATHEXT``.
 
     ``shutil.which`` does this too, but it decides from ``sys.platform`` inside
@@ -252,8 +268,6 @@ def _search_pathext(cmd: str, path: str | None) -> str | None:
     directory never is, so a file dropped into a workspace cannot be spawned as
     a tool.
     """
-    if path is None:
-        return shutil.which(cmd)
     if not path:
         return None
     suffixes = _pathext_suffixes()
@@ -269,8 +283,14 @@ def _search_pathext(cmd: str, path: str | None) -> str | None:
     return None
 
 
-if _WINDOWS:
+# A literal `sys.platform` check, not a module constant: mypy only narrows the
+# platform-specific stubs (here `winreg`) on the literal form.
+if sys.platform == "win32":
+    import logging
+
     import winreg
+
+    logger = logging.getLogger(__name__)
 
     # The two places a new logon's PATH is written, in the order Windows
     # combines them: the machine value first, then the user's, so a directory
@@ -292,7 +312,11 @@ if _WINDOWS:
         try:
             with winreg.OpenKey(hive, subkey) as key:
                 value, _kind = winreg.QueryValueEx(key, "Path")
-        except OSError:
+        except OSError as exc:
+            # A key nobody can read is a PATH we cannot see, not a PATH that is
+            # empty; the wizard shows the difference between "claude is missing"
+            # and "claude is there and we cannot look".
+            logger.debug("os_support.tool_path: cannot read %s: %s", subkey, exc)
             return ""
         return value if isinstance(value, str) else ""
 
@@ -336,14 +360,15 @@ if _WINDOWS:
             dirs.append(str(Path(local) / "Microsoft" / "WindowsApps"))
         return dirs
 
-    def resolve_executable(cmd: str, *, path: str | None = None) -> str | None:
+    def resolve_executable(cmd: str, *, path: str) -> str | None:
         """Absolute path to a runnable executable for ``cmd``, or None.
 
-        Raises :class:`ToolResolutionError` when ``cmd`` is on PATH as an npm
-        shim whose real executable is not there; see :func:`_unwrap_npm_shim`.
+        Raises :class:`ToolResolutionError` when ``cmd`` is on PATH as a command
+        wrapper that does not lead to a single executable, or whose executable is
+        not there; see :func:`_unwrap_shim`.
         """
         found = _search_pathext(cmd, path)
-        return None if found is None else _unwrap_npm_shim(cmd, found)
+        return None if found is None else _unwrap_shim(cmd, found)
 
 else:
     # Markers wrap the printed PATH so noisy shell rc files (which may echo
@@ -479,6 +504,6 @@ else:
             _terminal_path_cache = (fingerprint, value)
             return value
 
-    def resolve_executable(cmd: str, *, path: str | None = None) -> str | None:
+    def resolve_executable(cmd: str, *, path: str) -> str | None:
         """Absolute path to ``cmd`` on ``path``, or None. See the module docstring."""
         return shutil.which(cmd, path=path)

@@ -14,6 +14,13 @@ result. What "the user's terminal" means is an operating-system difference, so
 the probing and the tool resolution live in :mod:`ciao.os_support.tool_path`:
 POSIX spawns an interactive login shell, Windows reads the PATH a new logon
 gets out of the registry. Nothing here branches on the platform.
+
+On Windows the resolved path is always a real executable: a ``.cmd``/``.ps1``
+wrapper found on PATH is read for the program it launches, because Windows runs
+one through ``cmd.exe`` and Ciaobot would then stop the wrapper instead of the
+tool. That raises :class:`~ciao.os_support.tool_path.ToolResolutionError` (an
+``OSError``) when the wrapper leads nowhere usable, so a caller that only wants
+to know whether a tool is usable already handles it.
 """
 
 from __future__ import annotations
@@ -49,9 +56,10 @@ def login_shell_path() -> str:
     """PATH as seen by the user's interactive login shell.
 
     Returns the current process PATH augmented with the terminal's PATH and a
-    set of well-known tool directories. Deduplicated, order-preserving. Cached
-    for the process lifetime — PATH directories are stable even after a tool is
-    installed into one of them.
+    set of well-known tool directories. Deduplicated, order-preserving, and
+    deduplicated the way the OS compares two directories, so on Windows one
+    spelling of a PATH entry is one entry. Cached for the process lifetime — PATH
+    directories are stable even after a tool is installed into one of them.
     """
     current = os.environ.get("PATH", "")
     shell_path = terminal_path()
@@ -60,12 +68,18 @@ def login_shell_path() -> str:
     seen: set[str] = set()
     for chunk in (shell_path, current):
         for d in chunk.split(os.pathsep):
-            if d and d not in seen:
-                seen.add(d)
+            if not d:
+                continue
+            key = os.path.normcase(d)
+            if key not in seen:
+                seen.add(key)
                 ordered.append(d)
     for d in common_tool_dirs():
-        if d and os.path.isdir(d) and d not in seen:
-            seen.add(d)
+        if not d or not os.path.isdir(d):
+            continue
+        key = os.path.normcase(d)
+        if key not in seen:
+            seen.add(key)
             ordered.append(d)
     return os.pathsep.join(ordered)
 

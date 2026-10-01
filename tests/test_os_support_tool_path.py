@@ -51,17 +51,68 @@ if ($MyInvocation.ExpectingInput) {
 exit $LASTEXITCODE
 """
 
-# What `npm install -g some-script-package` writes (npm's own `cmd-shim`
-# template): an interpreter plus the entry point. There is no single executable
-# behind it to resolve to.
+# What `npm install -g` writes for a package whose entry point is a script
+# (npm's own `cmd-shim` template): the interpreter in a variable, then the
+# script beside it. There is no single executable behind it, and `node.exe` is
+# emphatically not the tool.
 SCRIPT_PACKAGE_SHIM = """@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
 SETLOCAL
-IF EXIST "%~dp0node.exe" (
-  "%~dp0node.exe"  "%~dp0node_modules\\pkg\\bin\\run.js" %*
+CALL :find_dp0
+SET "_prog=%dp0%\\node.exe"
+IF EXIST "%_prog%" (
+  "%_prog%" "%dp0%\\node_modules\\pkg\\bin\\run.js" %*
 ) ELSE (
   @SET PATHEXT=%PATHEXT:;.JS;=;%
-  node  "%~dp0node_modules\\pkg\\bin\\run.js" %*
+  node "%dp0%\\node_modules\\pkg\\bin\\run.js" %*
 )
+"""
+
+# The same package with an extensionless entry point, and its .ps1 twin.
+EXTENSIONLESS_SHIM = """@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+SET "_prog=%dp0%\\node.exe"
+IF EXIST "%_prog%" (
+  "%_prog%" "%dp0%\\node_modules\\pkg\\bin\\tool" %*
+) ELSE (
+  node "%dp0%\\node_modules\\pkg\\bin\\tool" %*
+)
+"""
+
+EXTENSIONLESS_PS1_SHIM = """#!/usr/bin/env pwsh
+$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent
+
+$exe=""
+if ($PSVersionTable.PSVersion -lt "6.0" -or $IsWindows) {
+  $exe=".exe"
+}
+$ret=0
+if (Test-Path "$basedir/node$exe") {
+  if ($MyInvocation.ExpectingInput) {
+    $input | & "$basedir/node$exe"  "$basedir/node_modules/pkg/bin/tool" $args
+  } else {
+    & "$basedir/node$exe"  "$basedir/node_modules/pkg/bin/tool" $args
+  }
+  $ret = $LASTEXITCODE
+} else {
+  if ($MyInvocation.ExpectingInput) {
+    $input | & "node$exe"  "$basedir/node_modules/pkg/bin/tool" $args
+  } else {
+    & "node$exe"  "$basedir/node_modules/pkg/bin/tool" $args
+  }
+  $ret = $LASTEXITCODE
+}
+exit $ret
 """
 
 posix_only = pytest.mark.skipif(
@@ -123,27 +174,80 @@ def test_join_path_sources_drops_whitespace_and_empty_entries() -> None:
     assert joined == "C:\\a;C:\\b"
 
 
+def test_join_path_sources_strips_the_quotes_a_registry_value_can_carry() -> None:
+    """A quoted entry is one directory, not a name with a quote on it."""
+    joined = os_tool_path._join_path_sources(['"C:\\Program Files\\Git\\cmd"'])
+    assert joined == "C:\\Program Files\\Git\\cmd"
+
+
+@windows_only
+def test_join_path_sources_deduplicates_the_way_windows_compares() -> None:
+    """`C:\\Tools` and `c:\\tools` are one directory; `normcase` is the identity on
+    POSIX, where they would really be two."""
+    joined = os_tool_path._join_path_sources(["C:\\Tools;C:\\bin", "c:\\tools"]).split(";")
+    assert joined == ["C:\\Tools", "C:\\bin"]
+
+
 # ── reading the target out of an npm shim ─────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    "body", [pytest.param(OPENCODE_CMD_SHIM, id="cmd"), pytest.param(OPENCODE_PS1_SHIM, id="ps1")]
+    ("name", "body"),
+    [
+        pytest.param("opencode.cmd", OPENCODE_CMD_SHIM, id="cmd"),
+        pytest.param("opencode.ps1", OPENCODE_PS1_SHIM, id="ps1"),
+    ],
 )
-def test_shim_executable_reads_the_target_out_of_the_file(tmp_path: Path, body: str) -> None:
+def test_shim_executable_reads_the_target_out_of_the_file(
+    tmp_path: Path, name: str, body: str
+) -> None:
     """The shim says which file it launches; that answer is the only one used."""
-    shim = tmp_path / "opencode.cmd"
+    shim = tmp_path / name
     shim.write_text(body, encoding="utf-8", newline="")
     target = os_tool_path._shim_executable(shim)
     assert target
     assert Path(target) == tmp_path / "node_modules" / "@opencode" / "cli" / "bin" / "opencode.exe"
 
 
-def test_shim_executable_refuses_a_script_package(tmp_path: Path) -> None:
-    """`node` plus an entry point is not one executable, and naming `node.exe`
-    alone would spawn node with no arguments."""
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        pytest.param("run.cmd", SCRIPT_PACKAGE_SHIM, id="script-cmd"),
+        pytest.param("tool.cmd", EXTENSIONLESS_SHIM, id="extensionless-cmd"),
+        pytest.param("tool.ps1", EXTENSIONLESS_PS1_SHIM, id="extensionless-ps1"),
+    ],
+)
+def test_shim_executable_never_resolves_to_the_interpreter(
+    tmp_path: Path, name: str, body: str
+) -> None:
+    """A package whose entry point is a script launches an interpreter.
+
+    npm writes that interpreter into a variable (`SET "_prog=…\\node.exe"`) and
+    quotes it on the launch line, so scanning the whole file for a quoted `.exe`
+    found `node.exe` and returned it. Spawning that would run node with no
+    arguments, so the reader takes the launch line's program token and refuses.
+    """
+    shim = tmp_path / name
+    shim.write_text(body, encoding="utf-8", newline="")
+    assert os_tool_path._shim_executable(shim) == ""
+    with pytest.raises(ToolResolutionError) as raised:
+        os_tool_path._unwrap_shim("tool", str(shim))
+    assert "node.exe" not in str(raised.value).split("launches", 1)[-1]
+
+
+def test_shim_launch_program_is_the_first_quoted_token_on_the_launch_line(
+    tmp_path: Path,
+) -> None:
+    """`SET "_prog=…\\node.exe"` is setup, not the program, even though it quotes
+    an `.exe`. The program is the first quoted token of the last `%*` line."""
     shim = tmp_path / "run.cmd"
     shim.write_text(SCRIPT_PACKAGE_SHIM, encoding="utf-8", newline="")
-    assert os_tool_path._shim_executable(shim) == ""
+    program = os_tool_path._shim_launch_program(shim)
+    # The last `%*` line is the ELSE branch, which runs bare `node` and quotes
+    # only the script beside it.
+    assert program == "%dp0%\\node_modules\\pkg\\bin\\run.js"
+    assert "_prog=" not in program
+    assert "node.exe" not in program
 
 
 def test_shim_executable_is_empty_for_a_file_that_names_none(tmp_path: Path) -> None:
@@ -253,40 +357,47 @@ def test_search_pathext_on_an_empty_path_finds_nothing(
     assert os_tool_path._search_pathext("git", path) is None
 
 
-# ── npm shims ─────────────────────────────────────────────────────────────
+# ── wrappers on PATH ──────────────────────────────────────────────────────
 
 
-def test_is_npm_shim_only_claims_the_npm_bin_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    npm_dir = _fake_npm_dir(tmp_path, monkeypatch)
-    for name in ("opencode.cmd", "opencode.ps1", "opencode.bat"):
-        assert os_tool_path._is_npm_shim(npm_dir / name)
-    # A .cmd elsewhere is a hand-written wrapper, not something npm generated,
-    # and reading it as a shim would be a guess.
-    assert not os_tool_path._is_npm_shim(tmp_path / "elsewhere" / "opencode.cmd")
-    # The executable itself is never a shim, even in the npm directory.
-    assert not os_tool_path._is_npm_shim(npm_dir / "opencode.exe")
-
-
-def test_is_npm_shim_compares_the_directory_the_way_windows_does(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A registry value and a search result need not spell a directory alike."""
-    appdata = tmp_path / "AppData" / "Roaming"
-    (appdata / "npm").mkdir(parents=True)
-    monkeypatch.setenv("APPDATA", str(appdata).upper())
-    assert os_tool_path._is_npm_shim(appdata / "npm" / "opencode.CMD")
-
-
-def test_is_npm_shim_is_false_without_an_appdata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_npm_bin_dir_is_appdata_npm_or_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one place `%APPDATA%\\npm` is spelled, read by the Windows tool-dir
+    list; None means the variable is unset, so there is no such directory."""
     monkeypatch.delenv("APPDATA", raising=False)
-    assert not os_tool_path._is_npm_shim(tmp_path / "npm" / "opencode.cmd")
+    assert os_tool_path._npm_bin_dir() is None
+    monkeypatch.setenv("APPDATA", "C:/Users/me/AppData/Roaming")
+    assert os_tool_path._npm_bin_dir() == Path("C:/Users/me/AppData/Roaming/npm")
 
 
-def test_unwrap_npm_shim_returns_the_executable_behind_it(
+def test_a_wrapper_is_unwrapped_in_any_prefix_not_just_the_npm_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nvm-windows, Volta and a custom `npm prefix` all put the wrapper
+    somewhere other than `%APPDATA%\\npm`, and returning it means spawning
+    `cmd.exe` — the bug this exists to fix."""
+    monkeypatch.setenv("APPDATA", str(tmp_path / "no-such-appdata"))
+    for prefix in ("nvm/node-v22.11.0", "Volta/tools/image/npm/6.9.0/bin", "opt/npm"):
+        directory = tmp_path / prefix
+        target = directory / "node_modules" / "@opencode" / "cli" / "bin" / "opencode.exe"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"MZ")
+        shim = directory / "opencode.cmd"
+        shim.write_text(OPENCODE_CMD_SHIM, encoding="utf-8", newline="")
+        assert os_tool_path._unwrap_shim("opencode", str(shim)) == str(target)
+
+
+def test_a_wrapper_outside_every_prefix_is_never_returned_as_the_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `.cmd` Ciaobot cannot read must not be handed back as the executable."""
+    monkeypatch.delenv("APPDATA", raising=False)
+    shim = tmp_path / "handwritten.cmd"
+    shim.write_text("@echo off\r\ngit status\r\n", encoding="utf-8", newline="")
+    with pytest.raises(ToolResolutionError):
+        os_tool_path._unwrap_shim("git", str(shim))
+
+
+def test_unwrap_shim_returns_the_executable_behind_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     npm_dir = _fake_npm_dir(tmp_path, monkeypatch)
@@ -296,10 +407,10 @@ def test_unwrap_npm_shim_returns_the_executable_behind_it(
     shim = npm_dir / "opencode.cmd"
     shim.write_text(OPENCODE_CMD_SHIM, encoding="utf-8", newline="")
 
-    assert os_tool_path._unwrap_npm_shim("opencode", str(shim)) == str(target)
+    assert os_tool_path._unwrap_shim("opencode", str(shim)) == str(target)
 
 
-def test_unwrap_npm_shim_fails_clearly_when_the_target_is_gone(
+def test_unwrap_shim_fails_clearly_when_the_target_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A broken install is not a tool that is not installed: say which and what."""
@@ -308,31 +419,19 @@ def test_unwrap_npm_shim_fails_clearly_when_the_target_is_gone(
     shim.write_text(OPENCODE_CMD_SHIM, encoding="utf-8", newline="")
 
     with pytest.raises(ToolResolutionError) as raised:
-        os_tool_path._unwrap_npm_shim("opencode", str(shim))
+        os_tool_path._unwrap_shim("opencode", str(shim))
     message = str(raised.value)
     assert str(shim) in message
     assert str(_opencode_exe(npm_dir)) in message
 
 
-def test_unwrap_npm_shim_fails_clearly_when_there_is_no_executable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    npm_dir = _fake_npm_dir(tmp_path, monkeypatch)
-    shim = npm_dir / "run.cmd"
-    shim.write_text(SCRIPT_PACKAGE_SHIM, encoding="utf-8", newline="")
-
-    with pytest.raises(ToolResolutionError) as raised:
-        os_tool_path._unwrap_npm_shim("run", str(shim))
-    assert str(shim) in str(raised.value)
-
-
-def test_unwrap_npm_shim_leaves_a_real_executable_alone(
+def test_unwrap_shim_leaves_a_real_executable_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     npm_dir = _fake_npm_dir(tmp_path, monkeypatch)
     binary = npm_dir / "claude.exe"
     binary.write_bytes(b"MZ")
-    assert os_tool_path._unwrap_npm_shim("claude", str(binary)) == str(binary)
+    assert os_tool_path._unwrap_shim("claude", str(binary)) == str(binary)
 
 
 def test_tool_resolution_error_is_an_os_error() -> None:
@@ -581,21 +680,6 @@ def test_resolve_executable_honours_pathext_end_to_end(
 
 
 @windows_only
-def test_resolve_executable_without_a_path_uses_the_process_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    marker = tmp_path / "bin" / "ciao-test-tool.exe"
-    marker.parent.mkdir()
-    marker.write_bytes(b"")
-    monkeypatch.setenv("PATH", str(marker.parent))
-    found = os_tool_path.resolve_executable("ciao-test-tool")
-    assert found is not None
-    # `shutil.which` spells the suffix the way PATHEXT does, so the case can
-    # differ from the file on disk; on Windows that is the same file.
-    assert os.path.normcase(found) == os.path.normcase(str(marker))
-
-
-@windows_only
 def test_resolve_executable_raises_on_a_broken_npm_shim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -604,6 +688,19 @@ def test_resolve_executable_raises_on_a_broken_npm_shim(
     monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
     with pytest.raises(ToolResolutionError):
         os_tool_path.resolve_executable("opencode", path=str(npm_dir))
+
+
+@windows_only
+def test_resolve_executable_never_hands_back_a_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: whatever a PATHEXT search finds, the answer is not a `.cmd`."""
+    directory = tmp_path / "volta" / "bin"
+    directory.mkdir(parents=True)
+    (directory / "opencode.cmd").write_text(EXTENSIONLESS_SHIM, encoding="utf-8", newline="")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    with pytest.raises(ToolResolutionError):
+        os_tool_path.resolve_executable("opencode", path=str(directory))
 
 
 @windows_only
