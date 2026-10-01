@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from datetime import UTC, datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +28,13 @@ from ciao.vault_review import (
 # its fixture's `updated:` date instead of letting the date age into a failure.
 _PINNED = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 
+
+# POSIX permission semantics: mode bits (0o644) and a read-only directory that
+# refuses unlinks. Windows has neither (chmod only toggles the read-only
+# attribute of a file, never a folder's delete permission).
+posix_permissions = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX mode bits and read-only directories"
+)
 
 def _note(root: Path, name: str, body: str) -> None:
     path = root / name
@@ -176,6 +184,7 @@ def test_a_hub_note_does_not_outrank_an_orphan(tmp_path: Path) -> None:
     assert hub.priority < orphan.priority
 
 
+@posix_permissions
 def test_permanent_delete_keeps_backlinks_when_the_folder_is_read_only(tmp_path: Path) -> None:
     _note(tmp_path, "People/A.md", "The canonical note.")
     _note(tmp_path, "People/B.md", "See [A](A.md).")
@@ -704,6 +713,7 @@ def test_no_retention_window_is_claimed_in_code(tmp_path: Path) -> None:
 # ── release review fixes ─────────────────────────────────────────────────────
 
 
+@posix_permissions
 def test_keep_preserves_the_note_file_mode(tmp_path: Path) -> None:
     """A temp file lands at 0600; os.replace would tighten the note silently.
 
@@ -2371,8 +2381,10 @@ def _stale_note(root: Path, name: str = "People/Old.md", body: str = "An old cla
     """A note whose `updated:` is old enough to be flagged, and that is unlinked."""
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Exact bytes: a check records the revision of the text the caller read, and
+    # a text-mode write on Windows would put CRLF on disk under an LF reading.
     path.write_text(
-        "---\ntype: note\nupdated: 2025-01-01\n---\n" + body, encoding="utf-8"
+        "---\ntype: note\nupdated: 2025-01-01\n---\n" + body, encoding="utf-8", newline=""
     )
     return path
 
@@ -2489,7 +2501,7 @@ def test_a_proposal_is_the_sole_reason_suppresses_the_duplicate_candidate(
     path = tmp_path / "Notes/Lonely.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        "---\ntype: note\nupdated: 2025-01-01\n---\nClaimed fact.\n", encoding="utf-8"
+        "---\ntype: note\nupdated: 2025-01-01\n---\nClaimed fact.\n", encoding="utf-8", newline=""
     )
     # Linked from elsewhere, so `unlinked` cannot fire, and it carries
     # frontmatter, so `weak_provenance` cannot either.
