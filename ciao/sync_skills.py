@@ -14,6 +14,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+from ciao.os_support.links import (
+    is_link,
+    link_dir,
+    link_file,
+    link_source,
+    link_target,
+    points_to,
+    preserve_divergent_mirror,
+    prune_orphan_sidecars,
+    remove_link,
+)
 from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
@@ -140,17 +151,17 @@ LEGACY_REMOVED_STOCK_AGENTS = frozenset({
 
 
 def _remove_path(path: Path) -> None:
-    if path.is_dir() and not path.is_symlink():
+    if path.is_dir() and not is_link(path):
         shutil.rmtree(path)
     else:
-        path.unlink(missing_ok=True)
+        remove_link(path)
 
 
 def _is_custom_skill_link(path: Path, workspace: Path) -> bool:
-    if not path.is_symlink():
+    if not is_link(path):
         return False
     try:
-        raw = os.readlink(path)
+        raw = link_target(path)
     except OSError:
         return False
     try:
@@ -165,22 +176,26 @@ def _is_custom_skill_link(path: Path, workspace: Path) -> bool:
 
 def _ensure_symlink(source: Path, link: Path, *, relative_to: Path | None = None) -> bool:
     source = source.resolve()
-    if link.exists():
-        try:
-            if link.resolve() == source:
-                return True
-        except OSError:
-            pass
-    if link.is_symlink():
-        link.unlink()
+    if link.exists() and points_to(link, source):
+        return True
+    kept = preserve_divergent_mirror(link)
+    if kept is not None:
+        # An editor saved the mirror by replacing it: the edit is in the
+        # mirror, not the source. Never discard it.
+        print(
+            f"WARN: {link} had edits that are not in {source}; kept them as {kept}",
+            file=sys.stderr,
+        )
+    if is_link(link):
+        remove_link(link)
     elif link.exists():
         _remove_path(link)
 
     link.parent.mkdir(parents=True, exist_ok=True)
-    target: Path | str = source
-    if relative_to is not None:
-        target = os.path.relpath(source, relative_to)
-    link.symlink_to(target)
+    if source.is_dir():
+        link_dir(source, link, relative_to=relative_to)
+    else:
+        link_file(source, link, relative_to=relative_to)
     return True
 
 
@@ -251,7 +266,7 @@ def _install_stock_skills(
             # (plan S5), when this set empties.
             continue
         target = claude_skills / entry.name
-        if target.is_symlink():
+        if is_link(target):
             continue  # user-managed link, leave it alone
         with resources.as_file(entry) as source:
             shutil.copytree(source, target, dirs_exist_ok=True)
@@ -261,7 +276,7 @@ def _install_stock_skills(
 
     pruned = 0
     for existing in _iter_entries(claude_skills):
-        if existing.name in live or existing.is_symlink() or not existing.is_dir():
+        if existing.name in live or is_link(existing) or not existing.is_dir():
             continue
         if not (existing / STOCK_SKILL_MARKER).exists():
             continue
@@ -288,15 +303,15 @@ def _rebuild_custom_skill_links(workspace: Path) -> tuple[int, int]:
 
     pruned = 0
     for target in _iter_entries(claude_skills):
-        if not target.is_symlink() or target.exists():
+        if not is_link(target) or target.exists():
             continue
         try:
-            current = os.readlink(target)
+            current = link_target(target)
         except OSError:
             continue
         if "/skills/" not in current:
             continue
-        target.unlink(missing_ok=True)
+        remove_link(target)
         pruned += 1
     return installed, pruned
 
@@ -342,15 +357,15 @@ def mirror_shared_skill_sources(workspace: Path, shared_root: Path) -> tuple[int
 
     pruned = 0
     for target in _iter_entries(claude_skills):
-        if target.name in live or not target.is_symlink() or target.exists():
+        if target.name in live or not is_link(target) or target.exists():
             continue
         try:
-            current = os.readlink(target)
+            current = link_target(target)
         except OSError:
             continue
         if marker not in current:
             continue
-        target.unlink(missing_ok=True)
+        remove_link(target)
         pruned += 1
     return linked, pruned
 
@@ -366,7 +381,7 @@ def _stock_command_marker(command_path: Path) -> Path:
 def _stock_command_marker_is_safe(command_path: Path) -> bool:
     # A symlinked marker would make the writer truncate whatever it points at
     # (e.g. ../../.env pulled in from a hostile git checkout).
-    return not _stock_command_marker(command_path).is_symlink()
+    return not is_link(_stock_command_marker(command_path))
 
 
 def _read_stock_command_marker(command_path: Path) -> str | None:
@@ -378,11 +393,11 @@ def _read_stock_command_marker(command_path: Path) -> str | None:
 
 def _write_stock_command_marker(command_path: Path, digest: str) -> None:
     marker = _stock_command_marker(command_path)
-    if marker.is_symlink():
+    if is_link(marker):
         # Belt and braces: the seed loop never reaches a symlinked marker.
         print(
             f"WARN: refusing to write symlinked stock-command marker {marker} "
-            f"-> {os.readlink(marker)}",
+            f"-> {link_target(marker)}",
             file=sys.stderr,
         )
         return
@@ -443,7 +458,7 @@ def _install_stock_agents(workspace: Path) -> tuple[int, int]:
         if (custom_dir / name).is_file():
             continue  # workspace subagent shadows the packaged agent
         target = agents_dir / name
-        if target.is_symlink():
+        if is_link(target):
             continue  # user-managed link, leave it alone
         with resources.as_file(stock_entry) as stock_path:
             shutil.copy2(stock_path, target)
@@ -455,7 +470,7 @@ def _install_stock_agents(workspace: Path) -> tuple[int, int]:
     for existing in _iter_entries(agents_dir):
         if not existing.is_file() or existing.name.endswith(STOCK_AGENT_MARKER_SUFFIX):
             continue
-        if not existing.name.endswith(".md") or existing.is_symlink():
+        if not existing.name.endswith(".md") or is_link(existing):
             continue
         if existing.name in live:
             continue
@@ -524,13 +539,13 @@ def _seed_stock_commands(workspace: Path) -> StockCommandSync:
     for stock_entry in stock_files:
         name = stock_entry.name
         canonical = commands_dir / name
-        if canonical.is_symlink():
+        if is_link(canonical):
             continue  # user-managed link, leave it alone
         if not _stock_command_marker_is_safe(canonical):
             marker = _stock_command_marker(canonical)
             print(
                 f"WARN: skipping {name}; stock-command marker {marker} is a "
-                f"symlink to {os.readlink(marker)}",
+                f"symlink to {link_target(marker)}",
                 file=sys.stderr,
             )
             continue  # never follow or replace a symlinked marker
@@ -577,13 +592,13 @@ def _seed_stock_commands(workspace: Path) -> StockCommandSync:
     pruned = 0
     for marker in commands_dir.glob(f"*{STOCK_COMMAND_MARKER_SUFFIX}"):
         command_path = marker.with_name(marker.name[: -len(STOCK_COMMAND_MARKER_SUFFIX)])
-        if marker.is_symlink():
+        if is_link(marker):
             # Never unlink or read a symlinked marker: the link itself is not
             # ours and its target must stay untouched.
             continue
         if command_path.name in live:
             continue
-        if command_path.is_file() and not command_path.is_symlink():
+        if command_path.is_file() and not is_link(command_path):
             marker_digest = _read_stock_command_marker(command_path)
             if marker_digest is not None and _digest(command_path.read_bytes()) == marker_digest:
                 _remove_path(command_path)
@@ -613,9 +628,9 @@ def _mirror_dir_symlinks(
     if source_dir.is_dir():
         for entry in sorted(source_dir.glob(glob_pattern), key=lambda item: item.name):
             if not entry.exists():
-                if entry.is_symlink():
+                if is_link(entry):
                     print(
-                        f"WARN: skipping dangling symlink {entry} -> {os.readlink(entry)}",
+                        f"WARN: skipping dangling symlink {entry} -> {link_target(entry)}",
                         file=sys.stderr,
                     )
                 continue
@@ -627,10 +642,11 @@ def _mirror_dir_symlinks(
     for entry in _iter_entries(dest_dir):
         if entry.name in live:
             continue
-        if not prune_regular and not entry.is_symlink():
+        if not prune_regular and not is_link(entry):
             continue
         _remove_path(entry)
         pruned += 1
+    prune_orphan_sidecars(dest_dir)
     return linked, pruned
 
 
@@ -693,7 +709,7 @@ def _cleanup_legacy_codex_projections(workspace: Path) -> int:
     pruned = 0
     wrapper_root = workspace / ".agents" / "skills"
     for entry in _iter_entries(wrapper_root):
-        if entry.is_dir() and not entry.is_symlink() and (entry / CODEX_WRAPPER_MARKER).is_file():
+        if entry.is_dir() and not is_link(entry) and (entry / CODEX_WRAPPER_MARKER).is_file():
             _remove_path(entry)
             pruned += 1
         elif _is_custom_skill_link(entry, workspace):
@@ -996,9 +1012,9 @@ def _canonical_agent_sources(workspace: Path) -> list[Path]:
         if not source.is_file() or source.suffix != ".md":
             continue
         canonical = False
-        if source.is_symlink():
+        if is_link(source):
             try:
-                source.resolve().relative_to((workspace / "subagents").resolve())
+                link_source(source).relative_to((workspace / "subagents").resolve())
                 canonical = True
             except (OSError, ValueError):
                 pass
@@ -1026,11 +1042,11 @@ def _ensure_workspace_guide(workspace: Path) -> None:
         if guide_path(workspace).is_file():
             return
         agents_guide = workspace / GUIDE_NAME
-        if agents_guide.is_symlink():
+        if is_link(agents_guide):
             # A dangling link (its CLAUDE.md target was migrated or removed).
             if agents_guide.exists():
                 return
-            agents_guide.unlink()
+            remove_link(agents_guide)
 
         stock_workspace = resources.files("ciao.stock").joinpath("workspace")
         with resources.as_file(stock_workspace.joinpath(GUIDE_NAME)) as source:
