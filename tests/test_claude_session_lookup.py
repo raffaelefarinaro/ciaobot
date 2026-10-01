@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao.agent_paths import claude_project_slug
 from ciao import transcripts
 from ciao.transcripts import (
     _global_session_matches,
@@ -44,7 +45,7 @@ def _reset_scan_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _slug(root: Path, cwd: str) -> Path:
-    d = root / ("-" + cwd.replace("/", "-").lstrip("-"))
+    d = root / claude_project_slug(cwd)
     d.mkdir(parents=True, exist_ok=True)
     return d
 

@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     get_session_messages as _sdk_get_session_messages,
 )
 
+from ciao.agent_paths import claude_projects_dir
 from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
@@ -990,10 +991,8 @@ def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
 
 
 def _claude_projects_dir(workspace_root: Path) -> Path:
-    """Derive the Claude Code session directory for a workspace."""
-    # Claude Code encodes workspace path: /Users/me/ciao → -Users-me-ciao
-    slug = str(workspace_root).replace("/", "-").lstrip("-")
-    return Path.home() / ".claude" / "projects" / f"-{slug}"
+    """Derive the Claude Code session directory for a workspace (``agent_paths``)."""
+    return claude_projects_dir(workspace_root)
 
 
 # The global session-lookup fallback (``~/.claude/projects/*/<sid>.jsonl``)
