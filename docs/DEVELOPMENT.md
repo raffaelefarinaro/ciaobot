@@ -89,13 +89,42 @@ first-time user gets the engine and nobody can install the app.
 `install-engine.sh` is published as the same bytes under the other name the
 already-merged transition release's hand-over fetched (#604); the app
 installer is not published under any name. `install.ps1` is the sixth asset: the
-Windows 11 installer, part 1 and a preview — it verifies the signed manifest
-and installs the engine as a uv tool, then prints where `ciao.exe` landed.
-Setup, service and autostart, update and uninstall arrive in a later issue.
-It embeds the same manifest verifier as `install-engine.sh` (a test keeps the
-two copies byte-identical) and runs it under `uv run --python 3.13`; the
-advisory `windows` CI job exercises it offline with `-DryRun` against a
-generated fixture.
+Windows 11 installer (#853). It embeds the same manifest verifier as
+`install-engine.sh` (a test keeps the two copies byte-identical) and runs it
+under `uv run --python 3.13`; then it does everything `install-engine.sh` does
+after the engine lands, so a Windows install is the same verified engine,
+running. It verifies the signed manifest and the wheel digest before anything is
+installed, refuses to overwrite a `ciao` it did not install, and re-running it
+over its own engine is a repair rather than a refusal. It then installs the
+wheel with `uv tool install --force --link-mode copy` (copy, not uv's default
+hard link into its cache, which another venv on the machine can lock and so
+make uninstall and rollback fail), writes the install receipt
+(`%USERPROFILE%\.local\state\ciaobot\install-receipt.json`, backend
+`windows-task`, label `\Ciaobot\Engine`, written by `ciao.install_receipt`
+itself so the schema stays in Python), puts `ciao.exe`'s directory on the
+**user** `PATH` through the registry (raw, `DoNotExpandEnvironmentNames`, keeping
+the existing `REG_EXPAND_SZ`, so a `%VAR%` entry is not frozen — the same rule
+`ciao setup`'s own PATH hint follows), creates the workspace
+(`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the logon task with
+`ciao setup --load-launchd` (writing
+`%LOCALAPPDATA%\Ciaobot\service\Ciaobot-Engine.xml`), starts it with
+`ciao service start`, waits up to 60 s for `http://localhost:$PWA_PORT/api/startup-status`,
+and prints the one-time sign-in URL, opening it only when the console is
+interactive. `-NoStart` omits `--load-launchd` and everything after it (no task,
+no start, no URL). Updating an install that is already there is **not** covered
+yet — re-running repairs a half-finished one, and any failure undoes exactly
+the steps that run performed, newest first, through one `Undo-Install` function
+that `-Uninstall` also uses; the workspace is never removed, and a rollback that
+cannot finish says which step is left with the command that finishes it.
+`-Uninstall` downloads nothing and verifies no manifest: it stops and
+unregisters the task, deletes its XML, uninstalls the uv tool, deletes the
+receipt, removes the `PATH` entry **only** if this installer added it (recorded
+in `%LOCALAPPDATA%\Ciaobot\install-state.json`, the two facts nothing else
+keeps), leaves `uv` in place, and prints where the workspace was kept. The
+advisory `windows` CI job runs the file under both PowerShell hosts with
+`-DryRun` against a generated fixture, and then runs a real end-to-end
+install/`-Uninstall`/`-NoStart` against a wheel built from the branch, printing
+whether the task existed after each.
 
 The retired app installer is no longer in the tree. A DMG is intentionally
 not built or attached to releases. The release workflow generates the public

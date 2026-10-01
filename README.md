@@ -22,6 +22,22 @@ Installs the engine with uv, starts it as a LaunchAgent, and prints a one-time l
 
 During setup you choose the folder where Ciaobot keeps your notes and memory: a new folder, or an existing one such as an Obsidian vault. It stays yours, in plain Markdown, usable with any other tool.
 
+**Windows 11 (x64 or ARM64):**
+
+```powershell
+irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
+```
+
+No administrator rights needed. This installs the engine, puts `ciao` on your `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`), registers the logon task that starts the engine when you sign in, starts it, and prints the same one-time link.
+
+`iex` cannot take arguments, so any option goes through a script block: `-Workspace 'D:\Ciaobot'` to put the workspace elsewhere, `-NoStart` to install without registering the logon task or starting anything, and `-Uninstall` to remove what the installer added.
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1))) -Uninstall
+```
+
+Uninstalling stops and unregisters the logon task, removes the engine and its receipt, and takes the `PATH` entry back out. Your workspace folder is kept, and the script prints where it is.
+
 ### Connect your agent
 
 Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
