@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from ciao.install_receipt import (
+    SERVICE_BACKENDS,
     InstallReceipt,
     main,
     read_receipt,
@@ -63,6 +64,17 @@ def test_write_then_read_round_trips(tmp_path: Path) -> None:
 
     assert written == tmp_path / "r.json"
     assert read_receipt(tmp_path / "r.json") == receipt
+
+
+# The backend is what a receipt is asked for first, so every value the installer
+# may legitimately write has to survive a write/read round trip.
+@pytest.mark.parametrize("backend", list(SERVICE_BACKENDS))
+def test_every_service_backend_round_trips(backend: str, tmp_path: Path) -> None:
+    receipt = _receipt(service_backend=backend, service_label="\\Ciaobot\\Engine")
+
+    write_receipt(receipt, tmp_path / f"{backend}.json")
+
+    assert read_receipt(tmp_path / f"{backend}.json") == receipt
 
 
 # The update coordinator (#569) is a second writer of this file, so the

@@ -179,7 +179,8 @@ ciao/                          Python backend (Starlette).
   # mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
   macos_service.py             JSON launchd/service, engine-update, migration, and rollback surface behind `ciao service` and the engine installer.
   linux_service.py             Side-effect-free systemd unit renderer (`ciao linux-service`). Linux setup initializes workspace data independently of service installation; the unit runs the virtualenv interpreter under a dedicated account.
-  service_backend.py          The one platform-neutral seam for per-user service operations (where definitions go, and how an agent is loaded, booted out, or handed off). macOS and Linux both write launchd-format plists and never run launchctl on Linux; any other platform raises UnsupportedPlatformError until a backend for it exists.
+  service_backend.py          The one platform-neutral seam for per-user service operations (where definitions go, and how an agent is loaded, booted out, or handed off). macOS and Linux both write launchd-format plists and never run launchctl on Linux; Windows registers a scheduled task instead of a plist; any other platform raises UnsupportedPlatformError until a backend for it exists.
+  windows_service.py          Per-user Task Scheduler logon task for Windows: renders the task XML (`pythonw.exe -m ciao.cli supervise`, InteractiveToken, LeastPrivilege) and wraps `schtasks.exe` argv calls. Status comes from the `/Query` exit code, never from parsed localized output.
 
 web/                           Vue 3 PWA frontend.
   src/App.vue                  Root component.

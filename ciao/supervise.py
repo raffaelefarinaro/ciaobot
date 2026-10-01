@@ -8,7 +8,8 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
-from typing import Any
+from pathlib import Path
+from typing import IO, Any
 
 from ciao.config import RESTART_EXIT_CODE
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
@@ -23,6 +24,20 @@ STOP_GRACE_S = 30.0              # after forwarding a stop, kill the tree if the
 def default_child_argv(extra_args: Sequence[str] = ()) -> list[str]:
     """argv for the engine child: works without the console-script shim."""
     return [sys.executable, "-m", "ciao.cli", "run", "--supervised", *extra_args]
+
+
+def _ensure_stdio(log_dir: Path) -> tuple[IO[str] | None, IO[str] | None]:
+    """Under pythonw.exe stdout/stderr are None. Redirect to the runtime logs.
+
+    Returns the opened files (to close) or (None, None) when stdio exists.
+    """
+    if sys.stderr is not None:
+        return None, None
+    log_dir.mkdir(parents=True, exist_ok=True)
+    out = open(log_dir / "ciao.stdout.log", "a", encoding="utf-8", buffering=1)
+    err = open(log_dir / "ciao.stderr.log", "a", encoding="utf-8", buffering=1)
+    sys.stdout, sys.stderr = out, err
+    return out, err
 
 
 def backoff_delay(consecutive_restarts: int) -> float:
@@ -58,6 +73,13 @@ def supervise(
     loop from a long-lived engine that merely asked to restart.
     """
     stop = threading.Event()
+    # The task action is `pythonw.exe`, which has no console: sys.stderr is
+    # None there and everything the child writes would go nowhere. The log files
+    # are the same ones the macOS plist redirects to.
+    out, err = _ensure_stdio(Path.cwd() / ".runtime")
+    child_stdio: dict[str, Any] = (
+        {} if out is None or err is None else {"stdout": out, "stderr": err}
+    )
     tree: ProcessTree | None = None
     running: subprocess.Popen[Any] | None = None
     timer: threading.Timer | None = None
@@ -115,7 +137,9 @@ def supervise(
             if stop.is_set():
                 return 130
             started = clock()
-            proc = subprocess.Popen(argv, **tree_spawn_options(dies_with_engine=True))
+            proc = subprocess.Popen(
+                argv, **tree_spawn_options(dies_with_engine=True), **child_stdio
+            )
             running = proc
             try:
                 tree = ProcessTree(proc.pid, dies_with_engine=True)
@@ -162,6 +186,9 @@ def supervise(
                 print(f"Backing off {delay:g}s before relaunching.", file=sys.stderr, flush=True)
                 wait(delay)
     finally:
+        for handle in (out, err):
+            if handle is not None:
+                handle.close()
         if timer is not None:
             timer.cancel()
         for sig, handler in previous.items():
