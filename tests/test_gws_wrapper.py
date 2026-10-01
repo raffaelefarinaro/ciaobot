@@ -162,3 +162,26 @@ def test_gws_auth_helper_profile_config_matches_gws_auth(tmp_path) -> None:
     cfg = _config(tmp_path)
     # The helper resolves the credential dir through gws_auth's single source.
     assert gws_auth.profile_config_dir(cfg, "work") == tmp_path / "secrets" / "gws"
+
+
+# ── hand-off to gws ─────────────────────────────────────────────────────────
+
+
+def test_main_returns_the_exit_code_of_gws(tmp_path, monkeypatch) -> None:
+    """The caller (an agent) must read gws's own result, not the wrapper's."""
+    monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: _config(tmp_path)))
+    monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
+    monkeypatch.setattr(gws_wrapper, "resolve_tool", lambda name: "/opt/bin/gws")
+    seen: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def fake_hand_off(executable: str, argv: list[str], env: dict[str, str]) -> int:
+        seen.append((executable, argv, env))
+        return 5
+
+    monkeypatch.setattr(gws_wrapper, "hand_off", fake_hand_off)
+
+    assert gws_wrapper.main(["personal", "drive", "files", "list"]) == 5
+    executable, argv, env = seen[0]
+    assert executable == "/opt/bin/gws"
+    assert argv == ["/opt/bin/gws", "drive", "files", "list"]
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"].endswith("gws-personal")
