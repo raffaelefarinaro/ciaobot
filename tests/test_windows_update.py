@@ -226,7 +226,10 @@ def _tmp_paths_are_task_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         return
 
     def absolute(label: str, value: str) -> str:
-        if not (Path(value).is_absolute() or PureWindowsPath(value).drive):
+        # `windowless_python` spells a POSIX /tmp path the Windows way (`\tmp\...`):
+        # rooted, with no drive. Any of the three is an absolute path here.
+        windows = PureWindowsPath(value)
+        if not (Path(value).is_absolute() or windows.drive or windows.root):
             raise ValueError(f"{label} must be absolute: {value!r}")
         return ws._xml_text(label, value)
 

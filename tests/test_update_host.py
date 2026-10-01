@@ -838,12 +838,13 @@ def test_fake_host_run_apply_still_starts_the_engine_when_the_rollback_fails(
     # outcome than a broken one, and it is the last thing the rollback does.
     assert "boom" in result.error
     assert "restore the previous env" in result.error
-    # Last of the rollback's own steps, before it retires the net: a start is
-    # attempted whatever else failed, and the engine ends up running.
-    assert [call[0] for call in host.calls][-2:] == [
-        "start_engine",
-        "retire_recovery_agent",
-    ]
+    # A start is attempted whatever else failed, and the engine ends up running.
+    # The net is *not* retired: the previous env is still on disk, so the
+    # restore did not happen and the next recovery tick retries it.
+    names = [call[0] for call in host.calls]
+    assert names[-1] == "start_engine"
+    assert "retire_recovery_agent" not in names
+    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
     assert engine.starts == 1
 
 
