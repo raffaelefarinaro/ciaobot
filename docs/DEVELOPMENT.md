@@ -71,7 +71,7 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 ```
 
 The release publishes the **engine only** (#653). Its assets are the wheel, the
-signed engine manifest, and the installer — there is no app archive, no
+signed engine manifest, and the installers — there is no app archive, no
 updater feed, no native verifier and no bundled runtime attached, so a machine
 still running the retired macOS app has no update path left and is moved with
 the terminal one-liner below. `install.sh` — the one-liner every README, site
@@ -79,7 +79,14 @@ page and stale external link already names — is the **engine** installer, so a
 first-time user gets the engine and nobody can install the app.
 `install-engine.sh` is published as the same bytes under the other name the
 already-merged transition release's hand-over fetched (#604); the app
-installer is not published under any name.
+installer is not published under any name. `install.ps1` is the sixth asset: the
+Windows 11 installer, part 1 and a preview — it verifies the signed manifest
+and installs the engine as a uv tool, then prints where `ciao.exe` landed.
+Setup, service and autostart, update and uninstall arrive in a later issue.
+It embeds the same manifest verifier as `install-engine.sh` (a test keeps the
+two copies byte-identical) and runs it under `uv run --python 3.13`; the
+advisory `windows` CI job exercises it offline with `-DryRun` against a
+generated fixture.
 
 The retired app installer is no longer in the tree. A DMG is intentionally
 not built or attached to releases. The release workflow generates the public
@@ -233,7 +240,7 @@ scripts/prepare-release --apply --create-pr --ready
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches five engine assets: `install.sh`, `install-engine.sh`, the wheel, the manifest and its signature. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches six engine assets: `install.sh`, `install-engine.sh`, `install.ps1`, the wheel, the manifest and its signature. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 

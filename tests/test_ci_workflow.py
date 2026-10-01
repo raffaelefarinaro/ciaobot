@@ -167,11 +167,12 @@ def test_release_smoke_only_runs_with_a_published_version() -> None:
     assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
 
 
-def test_publish_attaches_only_the_five_engine_assets() -> None:
-    # #653: the release carries the engine and nothing else. Exactly five
-    # assets - the installer under both names, the wheel, and the manifest with
-    # its signature - each pinned here so a re-added app asset is a failing
-    # test rather than a surprise in a published release.
+def test_publish_attaches_only_the_six_engine_assets() -> None:
+    # #653: the release carries the engine and nothing else. Exactly six
+    # assets - the macOS installer under both names, the Windows installer, the
+    # wheel, and the manifest with its signature - each pinned here so a
+    # re-added app asset is a failing test rather than a surprise in a published
+    # release.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
     ).read_text(encoding="utf-8")
@@ -180,23 +181,51 @@ def test_publish_attaches_only_the_five_engine_assets() -> None:
           gh release upload "$TAG" \\
             install.sh \\
             scripts/install-engine.sh \\
+            scripts/install.ps1 \\
             dist/ciaobot-*.whl \\
             ciaobot-engine-manifest.json \\
             ciaobot-engine-manifest.json.sig \\
             --clobber
 """
     assert attached in workflow, (
-        "publish.yml no longer attaches exactly the five engine assets"
+        "publish.yml no longer attaches exactly the six engine assets"
     )
 
-    # Both names are attached, from the one script, and both are proven present
-    # on the release where the tag is still known - a missing asset would
-    # otherwise only surface as a failed install on a user's machine.
+    # Every name is attached and proven present on the release where the tag is
+    # still known - a missing asset would otherwise only surface as a failed
+    # install on a user's machine. install.ps1 is uploaded as the file itself,
+    # so /releases/latest/download/install.ps1 resolves without a rename.
     assert "cp scripts/install-engine.sh install.sh" in workflow
     assert "s/__VERIFIER_SHA256__/" not in workflow
     assert "verifier_name" not in workflow
     assert "grep -qx install.sh" in workflow
     assert "grep -qx install-engine.sh" in workflow
+    assert "grep -qx install.ps1" in workflow
+
+
+def test_windows_job_checks_the_install_ps1_advisorily() -> None:
+    # #838: the Windows installer can only be exercised on a Windows runner,
+    # and the whole `windows` job is a measurement until C9 - a step that could
+    # fail it would take every other measurement down with it.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "scripts/install.ps1" in workflow
+    assert "-ReleaseDir ./ps1-fixture/release -DryRun" in workflow
+    assert "Invoke-ScriptAnalyzer" in workflow
+    assert "windows-install-ps1.txt" in workflow
+    # The offline fixture is built from the same helpers the test suite uses, so
+    # it has to import them from a checkout root.
+    assert 'sys.path.insert(0, ".")' in workflow
+    assert "from tests.test_engine_installer import" in workflow
+
+    # Both steps that touch the installer end in `|| true`, and so does the one
+    # that runs it: the job may report a refusal, never fail on one.
+    steps = workflow.split("    - name: Build install.ps1 offline fixture")[1]
+    steps = steps.split("    - name: Summarize")[0]
+    assert steps.count("|| true") >= 2
+    assert steps.rstrip().endswith("> windows-install-ps1.txt 2>&1 || true")
 
 
 def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:
