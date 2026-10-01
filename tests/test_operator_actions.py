@@ -1058,6 +1058,42 @@ def test_a_refused_migration_wrote_no_sheet_and_offers_no_card(tmp_path: Path) -
     assert "skill-triage-pending" not in _kinds(_context(tmp_path, runtime=runtime))
 
 
+def test_a_truncated_sheet_row_keeps_the_card_up_rather_than_answering_it(
+    tmp_path: Path,
+) -> None:
+    """A row with no Destination cell is a decision outstanding, not a silent zero.
+
+    The count is the card's completion evidence, so a row the reader cannot find a
+    Destination in cannot be said to be answered. Dropping it let a half-typed row
+    make the card disappear while a skill the operator never decided about was
+    still sitting in the sheet.
+    """
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+    text = sheet.read_text(encoding="utf-8")
+    # Two rows answered, one truncated mid-edit — inside the catalog table, which
+    # is where a row belongs and the only place the reader looks.
+    sheet.write_text(
+        text.replace("| `jira-tickets` | skills/ |  |", "| `jira-tickets` | skills/ | work |")
+        .replace("| `linkedin-writing` | skills/ |  |", "| `linkedin-writing` | skills/ | delete |")
+        .replace(
+            "| `jira-tickets` | skills/ | work |",
+            "| `half-typed` | skills/ |\n| `jira-tickets` | skills/ | work |",
+        ),
+        encoding="utf-8",
+    )
+
+    actions = [
+        a
+        for a in detect_actions(_context(tmp_path, config=config, runtime=runtime))
+        if a.kind == "skill-triage-pending"
+    ]
+
+    assert len(actions) == 1, "a row that cannot be answered must not clear the card"
+    assert "1 skill" in actions[0].title
+    assert "half-typed" in actions[0].detail
+
+
 def test_a_sheet_with_every_destination_filled_is_silent(tmp_path: Path) -> None:
     """An install whose sheet lists nothing unanswered has nothing to decide."""
     runtime = _runtime(tmp_path)
