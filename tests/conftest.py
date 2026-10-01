@@ -7,6 +7,51 @@ from ciao import job_runs as jr
 from ciao import transcripts
 from types import SimpleNamespace
 
+# Captured before any fixture runs, so the guard test can prove no test sees it.
+REAL_HOME = Path.home()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point every test's home at ``tmp_path / "home"``, on every OS.
+
+    ``Path.home()`` reads ``HOME`` on POSIX and ``USERPROFILE`` on Windows
+    (``HOMEDRIVE``/``HOMEPATH`` only when that is unset), so a test that faked
+    the home with ``HOME`` alone read and wrote the developer's real
+    ``~/.claude``, ``~/Applications`` and gws config on Windows (#696), and one
+    run's leftovers satisfied the next run's assertions. Autouse and
+    unconditional, like ``_isolate_ciao_home``: remembering it per test is what
+    failed. The directory is not created; a test that needs files in the home
+    uses the ``home_dir`` fixture (same path) and makes them.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+
+
+@pytest.fixture
+def home_dir(tmp_path: Path) -> Path:
+    """This test's isolated home (``_isolate_home``), created."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never find the developer's own ``opencode`` on ``PATH``.
+
+    A setup-status or Settings test that reaches the CLI would read the real
+    home's OpenCode config through it, the leak ``_isolate_home`` closes; and
+    under the isolated home the CLI starts a ``serve --service`` of its own
+    that holds the output pipes, so on Windows the call never returns.
+    CI has no OpenCode installed, so this is what CI already sees. A test that
+    wants a binary sets ``CIAO_OPENCODE_BIN``, which is resolved first.
+    """
+    monkeypatch.setattr("ciao.providers.opencode.resolve_tool", lambda name: None)
+
 
 @pytest.fixture(autouse=True)
 def _reset_exported_dotenv() -> None:

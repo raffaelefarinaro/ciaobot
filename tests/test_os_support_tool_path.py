@@ -495,14 +495,13 @@ def test_terminal_path_does_not_inherit_our_own_path(
 
     monkeypatch.setattr(os_tool_path.subprocess, "run", fake_run)
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setenv("HOME", str(tmp_path))
 
     assert os_tool_path.terminal_path() == "/usr/bin"
     env = captured["env"]
     assert isinstance(env, dict)
     assert "PATH" not in env
     # Everything else the rc files may need is still there.
-    assert env["HOME"] == str(tmp_path)
+    assert env["HOME"] == os.environ["HOME"]
     os_tool_path.clear_terminal_path_cache()
 
 
@@ -526,7 +525,6 @@ def test_terminal_path_reprobes_when_an_rc_file_is_saved(
     hint clear on the next poll, without an engine restart."""
     home = tmp_path / "home"
     (home / ".config" / "fish").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     calls = _probe_counter(monkeypatch)
 

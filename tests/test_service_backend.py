@@ -99,7 +99,6 @@ def test_is_live_agents_dir(
     home = tmp_path / "home"
     live = home / "Library" / "LaunchAgents"
     live.mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(sys, "platform", platform)
     backend = current_backend()
 
@@ -176,7 +175,6 @@ def test_macos_schedule_server_handoff_script_is_unchanged(
     plist = home / "Library" / "LaunchAgents" / "com.ciao.server.plist"
     plist.parent.mkdir(parents=True)
     plist.write_text("plist", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def fake_popen(command, *args, **kwargs):
@@ -208,7 +206,6 @@ def test_macos_schedule_server_handoff_without_a_plist(
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
 
     def fail_popen(*args, **kwargs):
         raise AssertionError("Popen must not run when the plist is missing")
@@ -225,7 +222,6 @@ def test_macos_schedule_server_handoff_swallows_oserror(
     plist = home / "Library" / "LaunchAgents" / "com.ciao.server.plist"
     plist.parent.mkdir(parents=True)
     plist.write_text("plist", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
 
     def fail_popen(*args, **kwargs):
         raise OSError("cannot spawn")
