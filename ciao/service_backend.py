@@ -1,9 +1,9 @@
 """One platform-neutral seam for the per-user service operations.
 
 Call sites that used to hardcode ``~/Library/LaunchAgents`` or shell out to
-``launchctl`` ask ``current_backend()`` instead. macOS and Linux behave exactly
-as before. Any other platform raises ``UnsupportedPlatformError``: that is the
-honest answer until a backend for it exists, not a fallback.
+``launchctl`` ask ``current_backend()`` instead. macOS, Linux and Windows behave
+exactly as before. Any other platform raises ``UnsupportedPlatformError``: that
+is the honest answer until a backend for it exists, not a fallback.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
-from ciao import macos_service
+from ciao import macos_service, windows_service
 
 
 class UnsupportedPlatformError(RuntimeError):
@@ -100,13 +100,59 @@ class LinuxBackend(_PlistDirs):
         )
 
 
+class WindowsBackend:
+    """Per-user Task Scheduler task; the 'definition' is the rendered task XML."""
+
+    name = "windows"
+
+    def agents_dir(self) -> Path:
+        return windows_service.default_task_dir()
+
+    def live_agents_dir(self) -> Path:
+        return windows_service.live_task_dir()
+
+    def is_live_agents_dir(self, path: Path) -> bool:
+        real_dir = self.live_agents_dir()
+        try:
+            return path.expanduser().resolve() == real_dir.resolve()
+        except OSError:
+            return path.expanduser() == real_dir
+
+    def bootout_agent(self, label: str) -> None:
+        if label != macos_service.SERVER_LABEL:
+            return None
+        try:
+            windows_service.unregister_task()
+        except (OSError, windows_service.WindowsServiceError):
+            return None
+
+    def load_agent(self, definition: Path) -> int:
+        try:
+            windows_service.register_task(definition)
+            windows_service.start_task()
+        except windows_service.WindowsServiceError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    def schedule_server_handoff(self) -> bool:
+        try:
+            if not windows_service.task_exists():
+                return False
+        except windows_service.WindowsServiceError:
+            return False
+        return windows_service.spawn_delayed_start()
+
+
 def current_backend() -> ServiceBackend:
     """The backend for this platform. Reads ``sys.platform`` on every call."""
     if sys.platform == "darwin":
         return MacOSBackend()
     if sys.platform.startswith("linux"):
         return LinuxBackend()
+    if sys.platform == "win32":
+        return WindowsBackend()
     raise UnsupportedPlatformError(
         f"Ciaobot has no service backend for platform {sys.platform!r}; "
-        "supported platforms are macOS and Linux."
+        "supported platforms are macOS, Linux and Windows."
     )

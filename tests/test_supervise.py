@@ -259,6 +259,45 @@ def test_restart_code_after_stop_returns_zero(tmp_path: Path) -> None:
     assert _launches(tmp_path) == 1
 
 
+def test_no_stdio_redirects_the_child_into_the_runtime_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under pythonw.exe there is no console: without this the child's output is lost."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    code = supervise(
+        child_argv=[
+            sys.executable,
+            "-c",
+            "import sys; print('out'); print('err', file=sys.stderr)",
+        ]
+    )
+
+    assert code == 0
+    logs = tmp_path / ".runtime"
+    assert "out" in (logs / "ciao.stdout.log").read_text(encoding="utf-8")
+    assert "err" in (logs / "ciao.stderr.log").read_text(encoding="utf-8")
+    # The log files are closed, so the module streams have to be back to the None
+    # they were: ciao.cli keeps writing to sys.stderr after supervise returns and
+    # would raise on a closed file.
+    assert sys.stderr is None
+    assert sys.stdout is None
+
+
+def test_a_console_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """macOS and Linux run this under launchd/systemd with real stdio: no log files."""
+    monkeypatch.chdir(tmp_path)
+
+    code = supervise(child_argv=[sys.executable, "-c", "print('hi')"])
+
+    assert code == 0
+    assert not (tmp_path / ".runtime").exists()
+
+
 def test_a_child_is_killed_when_the_process_tree_cannot_be_tracked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

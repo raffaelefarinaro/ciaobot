@@ -31,7 +31,7 @@ from typing import Any
 from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
 
 SCHEMA_VERSION = 1
-SERVICE_BACKENDS = ("launchd", "systemd-user", "none")
+SERVICE_BACKENDS = ("launchd", "systemd-user", "windows-task", "none")
 
 # Fields every receipt must carry as a string. `previous_*` and `schema` are
 # optional; the rest describe the install itself and a receipt missing any of
@@ -221,7 +221,11 @@ def main(argv: list[str] | None = None) -> int:
     write.add_argument(
         "--service-backend", required=True, choices=SERVICE_BACKENDS, help="service owner"
     )
-    write.add_argument("--service-label", default="", help="launchd/systemd unit label")
+    write.add_argument(
+        "--service-label",
+        default="",
+        help="launchd label, systemd unit, or Task Scheduler task name",
+    )
     write.add_argument("--previous-version", default="", help="release being replaced")
     write.add_argument(
         "--previous-executable", default="", help="executable being replaced"
