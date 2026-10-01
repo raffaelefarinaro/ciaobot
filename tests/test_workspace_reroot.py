@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from ciao import workspace_reroot
+from ciao.os_support.links import is_link
 from ciao.workspace_reroot import (
     apply,
     receipt_path,
@@ -890,7 +891,7 @@ def test_apply_writes_a_triage_sheet_with_every_destination_blank(tmp_path: Path
 
     sheet = install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md"
     assert sheet.is_file()
-    assert str(sheet.relative_to(install)) in result["created_files"]
+    assert sheet.relative_to(install).as_posix() in result["created_files"]
     text = sheet.read_text(encoding="utf-8")
     rows = [line for line in text.splitlines() if line.startswith("| `")]
     assert len(rows) == 3, rows
@@ -1566,7 +1567,7 @@ def test_a_shared_source_skill_is_linked_into_every_root(tmp_path: Path) -> None
     assert "skills_unmirrored" in _drifts(result)
     for name in ("personal", "work"):
         link = install / name / ".claude" / "skills" / "web-research"
-        assert link.is_symlink(), name
+        assert is_link(link), name  # a symlink on POSIX, a junction on Windows
         assert link.resolve() == shared.resolve()
 
 
@@ -2341,7 +2342,7 @@ def test_undo_refuses_when_a_seeded_command_was_edited_in_place(
     result = undo(install, runtime)
 
     assert result["status"] == "refused"
-    assert str(seeded.relative_to(install)) in result["reason"]
+    assert seeded.relative_to(install).as_posix() in result["reason"]
     assert seeded.read_text(encoding="utf-8") == "# rewritten\n"
     assert read_receipt(runtime) is not None, "a refusal consumed the receipt"
 
@@ -2360,7 +2361,7 @@ def test_undo_refuses_when_a_seeded_command_was_deleted(tmp_path: Path) -> None:
     result = undo(install, runtime)
 
     assert result["status"] == "refused"
-    assert str(seeded.relative_to(install)) in result["reason"]
+    assert seeded.relative_to(install).as_posix() in result["reason"]
 
     # Putting the bytes back lets the same undo complete.
     seeded.write_bytes(original)
