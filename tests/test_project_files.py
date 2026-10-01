@@ -16,6 +16,8 @@ import time
 import uuid
 from pathlib import Path
 
+import sys
+
 import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -482,7 +484,7 @@ def test_chat_document_upload_does_not_follow_markdown_symlink(
 
     entry = pcm.save_chat_attachment_upload(project.project_id, b"source", "report.docx")
 
-    assert entry["markdown_path"].endswith("/report-2.md")
+    assert Path(entry["markdown_path"]).as_posix().endswith("/report-2.md")
     assert not outside.exists()
     assert folder.joinpath("report-2.md").read_text(encoding="utf-8") == "# safe\n"
 
@@ -578,6 +580,7 @@ def test_native_desktop_drop_returns_full_host_path_and_image_ref(
     ).status_code == 404
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="stands in for a macOS TCC denial with chmod(0o000), which cannot make a file unreadable on Windows")
 def test_native_desktop_drop_explains_an_unreadable_screenshot(tmp_path: Path) -> None:
     """A macOS screenshot the server cannot read gets advice, not a raw errno.
 
@@ -622,6 +625,7 @@ def test_native_desktop_drop_explains_an_unreadable_screenshot(tmp_path: Path) -
     assert str(dropped_image) not in error["error"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="stands in for a macOS TCC denial with chmod(0o000), which cannot make a file unreadable on Windows")
 def test_native_desktop_drop_keeps_generic_error_for_non_screenshot(tmp_path: Path) -> None:
     """An unreadable file outside an NSIRD staging dir keeps the generic error.
 
