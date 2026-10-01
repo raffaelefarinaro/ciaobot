@@ -26,6 +26,7 @@ from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
 from ciao.jsonio import write_private_text
+from ciao.os_support.shell_hints import path_hint, path_hint_note
 from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
@@ -303,7 +304,7 @@ def _pwa_port_from_env(workspace: Path, fallback: int) -> int:
 
 
 def _path_export_hint() -> str | None:
-    """An ``export PATH=...`` line for the running interpreter's bin dir, or
+    """A shell line that puts the interpreter's bin dir on PATH, or
     ``None`` when it is already on PATH.
 
     Ciaobot installs into a standalone venv (``~/.ciaobot-venv``) that is not
@@ -322,7 +323,7 @@ def _path_export_hint() -> str | None:
     }
     if str(bin_dir) in entries:
         return None
-    return f'export PATH="{bin_dir}:$PATH"'
+    return path_hint(str(bin_dir), persist=False)
 
 
 def _print_setup_summary(workspace: Path, port: int) -> None:
@@ -343,6 +344,11 @@ def _print_setup_summary(workspace: Path, port: int) -> None:
     if hint is not None:
         print("To run `ciao` from a shell, add its venv to PATH:")
         print(f"  {hint}")
+        # Only alongside the line it qualifies: with the bin dir already on PATH
+        # there is nothing to change and nothing to wait for.
+        note = path_hint_note()
+        if note:
+            print(f"  {note}")
 
 
 def _default_app_dir() -> Path:

@@ -531,6 +531,36 @@ def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> 
     assert "~/.zshrc" in claude_path_command()
 
 
+def test_claude_path_command_on_windows_is_a_powershell_line(monkeypatch) -> None:
+    """The wizard used to hand Windows nothing at all, which left the user
+    one command short with nothing to copy."""
+    from ciao.setup_status import claude_path_command
+
+    monkeypatch.setattr("ciao.os_support.shell_hints.sys.platform", "win32")
+
+    line = claude_path_command(r"C:\Users\me\.local\bin")
+
+    assert line.startswith(
+        """[Environment]::SetEnvironmentVariable("Path", 'C:\\Users\\me\\.local\\bin;'"""
+    )
+    assert "export" not in line
+
+
+def test_claude_path_command_delegates_to_the_helper(monkeypatch) -> None:
+    from ciao.setup_status import claude_path_command
+
+    calls: list[tuple[str, bool]] = []
+
+    def record(directory: str, *, persist: bool) -> str:
+        calls.append((directory, persist))
+        return "HINT"
+
+    monkeypatch.setattr("ciao.setup_status.path_hint", record)
+
+    assert claude_path_command("/x/bin") == "HINT"
+    assert calls == [("/x/bin", True)]
+
+
 def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()

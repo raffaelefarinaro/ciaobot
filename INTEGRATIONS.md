@@ -41,11 +41,15 @@ commands in this document work in a terminal. Two cases need a manual step, and
 the installer says which one applies:
 
 - `~/.local/bin` is not on your `PATH`: add it. The setup wizard shows the
-  exact copyable line for your shell; the variants are:
+  exact copyable line for your OS and shell; the variants are:
   - zsh (default): `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc`
   - bash (login shells read `~/.bash_profile`, not `~/.bashrc`):
     `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile && source ~/.bash_profile`
   - fish: `fish_add_path $HOME/.local/bin`.
+  - Windows (PowerShell): the wizard substitutes your real directory for the
+    `C:\Users\you` below —
+    `[Environment]::SetEnvironmentVariable("Path", 'C:\Users\you\.local\bin;' + [Environment]::GetEnvironmentVariable("Path","User"), "User")`
+    — then open a new terminal so the change takes effect.
 - Another `ciao` already exists (the name collides with Ciao Prolog, among
   others): the installer never overwrites it, so call Ciaobot's engine by its
   full path instead.
