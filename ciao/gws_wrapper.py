@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ciao.gws_auth import GWS_SERVICE_NAMES, profile_config_dir
+from ciao.os_support.processes import hand_off
 from ciao.tool_path import login_shell_path, resolve_command
 
 
@@ -136,12 +137,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        os.execve(gws[0], [*gws, *rest], env)
+        return hand_off(gws[0], [*gws, *rest], env)
     except OSError as exc:
         print(f"ciao gws: failed to run gws: {exc}", file=sys.stderr)
         return 1
-    # unreachable
-    return 0
 
 
 if __name__ == "__main__":

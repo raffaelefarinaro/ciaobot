@@ -128,7 +128,7 @@ class ServiceResult:
         return asdict(self)
 
 
-def _read_dotenv(path: Path) -> dict[str, str]:
+def read_dotenv(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -181,7 +181,7 @@ def discover_runtime(
         or ""
     ).strip()
     workspace = Path(workspace_raw).expanduser().resolve() if workspace_raw else None
-    dotenv = _read_dotenv(workspace / ".env") if workspace else {}
+    dotenv = read_dotenv(workspace / ".env") if workspace else {}
 
     raw_port = str(
         dotenv.get("PWA_PORT")
@@ -238,7 +238,7 @@ def _command_error(completed: subprocess.CompletedProcess[str]) -> str:
     return (completed.stderr or completed.stdout or "").strip()
 
 
-def _active_chat_ids(port: int, *, timeout: float = 2.0) -> list[str]:
+def active_chat_ids(port: int, *, timeout: float = 2.0) -> list[str]:
     try:
         with urllib.request.urlopen(
             f"http://localhost:{port}/api/active-chats",
@@ -251,7 +251,7 @@ def _active_chat_ids(port: int, *, timeout: float = 2.0) -> list[str]:
     return [str(value) for value in values] if isinstance(values, list) else []
 
 
-def _server_reachable(port: int, *, timeout: float = 2.0) -> bool:
+def server_reachable(port: int, *, timeout: float = 2.0) -> bool:
     try:
         with urllib.request.urlopen(
             f"http://localhost:{port}/api/startup-status",
@@ -279,8 +279,8 @@ def service_status(
         loaded = loaded_result.returncode == 0
     except OSError:
         loaded = False
-    reachable = _server_reachable(runtime.port)
-    active = _active_chat_ids(runtime.port) if reachable else []
+    reachable = server_reachable(runtime.port)
+    active = active_chat_ids(runtime.port) if reachable else []
     return ServiceResult(
         ok=True,
         action="status",
@@ -335,7 +335,7 @@ def stop_service(
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
     runtime = runtime or discover_runtime()
-    active = _active_chat_ids(runtime.port)
+    active = active_chat_ids(runtime.port)
     if active and not force:
         return ServiceResult(
             False,
@@ -369,7 +369,7 @@ def restart_service(
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
     runtime = runtime or discover_runtime()
-    active = _active_chat_ids(runtime.port)
+    active = active_chat_ids(runtime.port)
     if active and not force:
         return ServiceResult(
             False,
@@ -443,7 +443,7 @@ def update_engine(
     from ciao.package_version import update_package
 
     runtime = runtime or discover_runtime()
-    active = _active_chat_ids(runtime.port)
+    active = active_chat_ids(runtime.port)
     if active and not force:
         return ServiceResult(
             False,
@@ -633,7 +633,7 @@ def migrate_legacy_companion(
             not moved_app_to
             and desktop_installed
             and old_app is not None
-            and _server_reachable(runtime.port)
+            and server_reachable(runtime.port)
         ):
             trash = Path.home() / ".Trash" if trash_dir is None else Path(trash_dir)
             trash.mkdir(parents=True, exist_ok=True)

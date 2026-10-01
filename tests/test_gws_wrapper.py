@@ -162,3 +162,50 @@ def test_gws_auth_helper_profile_config_matches_gws_auth(tmp_path) -> None:
     cfg = _config(tmp_path)
     # The helper resolves the credential dir through gws_auth's single source.
     assert gws_auth.profile_config_dir(cfg, "work") == tmp_path / "secrets" / "gws"
+
+
+# ── hand-off to gws ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["/opt/bin/gws"], ["/opt/node/node.exe", "/opt/npm/node_modules/@googleworkspace/cli/run.js"]],
+    ids=["executable", "script-wrapper"],
+)
+def test_main_runs_the_resolved_command_and_returns_its_exit_code(
+    tmp_path, monkeypatch, command
+) -> None:
+    """The caller (an agent) must read gws's own result, not the wrapper's, and a
+    script-based install runs as [node, script] with gws's arguments after it."""
+    monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: _config(tmp_path)))
+    monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
+    monkeypatch.setattr(gws_wrapper, "resolve_command", lambda name: list(command))
+    seen: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def fake_hand_off(executable: str, argv: list[str], env: dict[str, str]) -> int:
+        seen.append((executable, argv, env))
+        return 5
+
+    monkeypatch.setattr(gws_wrapper, "hand_off", fake_hand_off)
+
+    assert gws_wrapper.main(["personal", "drive", "files", "list"]) == 5
+    executable, argv, env = seen[0]
+    assert executable == command[0]
+    assert argv == [*command, "drive", "files", "list"]
+    assert env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"].endswith("gws-personal")
+
+
+def test_main_reports_an_unusable_install_instead_of_running_it(tmp_path, monkeypatch, capsys) -> None:
+    from ciao.os_support.tool_path import ToolResolutionError
+
+    monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: _config(tmp_path)))
+    monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
+
+    def broken(name: str) -> list[str]:
+        raise ToolResolutionError("gws.cmd runs run.js with node, but node is not on PATH.")
+
+    monkeypatch.setattr(gws_wrapper, "resolve_command", broken)
+    monkeypatch.setattr(gws_wrapper, "hand_off", lambda *a: pytest.fail("must not run"))
+
+    assert gws_wrapper.main(["personal", "drive", "files", "list"]) == 1
+    assert "node is not on PATH" in capsys.readouterr().err

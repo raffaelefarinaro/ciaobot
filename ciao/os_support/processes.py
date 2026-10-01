@@ -210,3 +210,29 @@ else:
 
         def close(self) -> None:
             """Stop tracking the tree; nothing to release on POSIX."""
+
+
+# ── Handing this process over to another program ───────────────────────────
+# A thin CLI wrapper (`ciao gws`) prepares an environment and then becomes the
+# real tool, so the caller sees the tool's output and exit code. POSIX does
+# that with execve, exactly as the wrapper did before. Windows has no exec: its
+# os.execve starts a new process and ends this one at once with exit code 0,
+# so the caller reads success before the tool has run. There the child is
+# started, waited for and its exit code returned; Ctrl+C reaches the child
+# from the shared console, so the wait keeps going until the child decides.
+if sys.platform == "win32":
+
+    def hand_off(executable: str, argv: list[str], env: dict[str, str]) -> int:
+        """Run ``argv`` in this process's place and return its exit code."""
+        with subprocess.Popen(argv, executable=executable, env=env) as child:
+            while True:
+                try:
+                    return child.wait()
+                except KeyboardInterrupt:
+                    continue
+
+else:
+
+    def hand_off(executable: str, argv: list[str], env: dict[str, str]) -> int:
+        """Replace this process with ``argv`` (``os.execve``); does not return."""
+        os.execve(executable, argv, env)
