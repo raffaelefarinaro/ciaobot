@@ -1162,6 +1162,68 @@ def test_renew_extends_only_the_holders_own_lease(tmp_path: Path) -> None:
     assert cr.active_lease(vault, now=started + timedelta(seconds=300)) is not None
 
 
+# ── Did the dispatched run do its job? ─────────────────────────────────────
+
+
+_DISPATCHED = datetime(2026, 9, 19, 0, 10, tzinfo=UTC)
+_LATER = datetime(2026, 9, 19, 0, 20, tzinfo=UTC)
+
+
+def test_a_vault_with_no_state_file_reports_an_unstarted_run(tmp_path: Path) -> None:
+    """`ciao` off the agent's PATH leaves no state file at all (issue #866)."""
+    vault = _vault(tmp_path)
+
+    assert cr.unstarted_run_reason(vault, _DISPATCHED, now=_LATER) != ""
+    assert "curation lease was never taken" in cr.unstarted_run_reason(
+        vault, _DISPATCHED, now=_LATER
+    )
+
+
+def test_a_run_that_took_the_lease_counts_as_started(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    cr.begin_run(vault, holder="t", now=_LATER)
+
+    assert cr.unstarted_run_reason(vault, _DISPATCHED, now=_LATER) == ""
+
+
+def test_a_run_that_finished_counts_as_started(tmp_path: Path) -> None:
+    """A crashed run leaves a lease; a completed one leaves `last_run`."""
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="t", now=_LATER)
+    cr.end_run(vault, holder=lease.holder, now=_LATER)
+
+    assert cr.unstarted_run_reason(vault, _DISPATCHED, now=_LATER) == ""
+
+
+def test_a_stale_last_run_from_an_earlier_night_is_not_this_run(
+    tmp_path: Path,
+) -> None:
+    """Yesterday's finished run must not vouch for tonight's dispatch."""
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="t")
+    cr.end_run(vault, holder=lease.holder)
+    path = cr.state_path(vault)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["lease"] = {}
+    payload["last_run"] = {
+        **payload["last_run"],
+        "finished_at": "2026-09-18T23:00:00Z",
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cr.unstarted_run_reason(vault, _DISPATCHED, now=_LATER) != ""
+
+
+def test_standing_down_for_another_runs_live_lease_is_not_a_failure(
+    tmp_path: Path,
+) -> None:
+    """Exit 75 means another run is doing the work, not that none was."""
+    vault = _vault(tmp_path)
+    cr.begin_run(vault, holder="other", ttl_s=1800, now=_DISPATCHED)
+
+    assert cr.unstarted_run_reason(vault, _DISPATCHED, now=_LATER) == ""
+
+
 # ── Weekly marker ─────────────────────────────────────────────────────────
 
 
