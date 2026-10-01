@@ -437,13 +437,21 @@ def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorActi
 def _detect_vault_vocabulary(context: DetectionContext) -> list[OperatorAction]:
     """Frontmatter types that the canonical-vocabulary migration could not resolve.
 
-    Read from the ``vault-vocabulary.json`` receipt only. The migration is run
-    at install (see ``sync_skills``), which writes the receipt with the
-    ``unresolved`` types it declined to guess. Those are real categorisation
-    decisions the operator must make; the tile surfaces them. The run button
-    re-applies the aliased renames (a note written since the migration may have
-    reintroduced an alias) and rewrites the receipt, so a clean re-run clears
-    the tile.
+    Read from the INSTALL-WIDE view only — ``vault_migration.read_receipt`` with
+    no vault named, which is assembled from the per-vault **keyed** receipts and
+    consults the pre-keying unkeyed file only on a single-vault install. The
+    migration is run at install (see ``sync_skills``), which writes one receipt
+    per vault with the ``unresolved`` types it declined to guess; the view
+    answers None while any vault of the install is still uncovered, because a
+    half-migrated install is not one whose vocabulary is settled. Those
+    ``unresolved`` types are real categorisation decisions the operator must
+    make, and the tile surfaces them.
+
+    The run button re-applies the aliased renames (a note written since the
+    migration may have reintroduced an alias) and rewrites each vault's own keyed
+    receipt, which is the same file this read is built from — so a clean re-run
+    clears the tile, and one that is not clean leaves it with the types still
+    outstanding. See :func:`_run_vault_vocabulary` for the write side.
     """
     runtime = context.runtime
     if runtime is None:
@@ -1160,23 +1168,103 @@ def _run_package_update(context: DetectionContext) -> tuple[dict[str, Any], str]
     raise RuntimeError(reason)
 
 
-def _run_vault_vocabulary(context: DetectionContext) -> tuple[dict[str, Any], str]:
-    config = context.config
-    vault_root = getattr(config, "vault_root", None)
-    runtime = context.runtime
-    if vault_root is None or runtime is None:
-        raise RuntimeError("vault or runtime is not configured")
-    from ciao.vault_migration import migrate_vault_vocabulary, write_receipt
+def _vocabulary_vaults(config: Any) -> list[Path]:
+    """Every vault this install holds notes in, deduplicated, in registry order.
 
-    summary = migrate_vault_vocabulary(Path(vault_root), apply=True)
-    if "skipped" in summary:
-        raise RuntimeError(str(summary["skipped"]))
-    # Rewrite the receipt so the next detection reflects the re-scan: resolved
-    # types clear the tile, anything still unresolved keeps it.
-    write_receipt(runtime, {"renamed": summary["renamed"], "unresolved": summary["unresolved"]})
-    renamed = len(summary.get("renamed", []))
-    failed = len(summary.get("failed", []))
-    return summary, f"{renamed} type(s) renamed, {failed} failed."
+    ``vault_scan_targets`` is the seam for "all the notes in this install" (one
+    shared vault before the re-rooting, one per agent root after), and it hands
+    back the very paths ``sync_skills`` migrates per root — so a receipt written
+    here lands on the key the install's own migration writes. Two roots holding
+    the same vault would otherwise be walked and stamped twice on one press.
+    """
+    vaults: list[Path] = []
+    for root, _workspace, _prefix in config.vault_scan_targets():
+        vault = Path(root)
+        if vault not in vaults:
+            vaults.append(vault)
+    return vaults
+
+
+def _run_vault_vocabulary(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Re-migrate the vaults the card reported, writing one KEYED receipt each.
+
+    The card is install-scoped and reads the install-wide view, which is
+    assembled from the per-vault keyed receipts (see
+    :func:`_detect_vault_vocabulary`). This used to write the pre-keying unkeyed
+    ``vault-vocabulary.json``, which that view consults only on a single-vault
+    install — so on a re-rooted install the press wrote a file nobody read, the
+    card survived it, and the button looked like it worked on exactly the layout
+    that could not use it (#814). The write is therefore keyed on the vault the
+    press just migrated: the same file the reader builds its answer from, and
+    nobody else's, since the key names one vault and no receipt of another root
+    is touched.
+
+    Two rules keep a press honest. A vault whose own receipt is already complete
+    is left alone — re-walking it would mutate a root with nothing to migrate and
+    re-stamp a receipt that is not the card's evidence. And the summary reports
+    the re-read install-wide view rather than the press's own arithmetic, so a
+    root still waiting on its first migration is named instead of being rounded
+    into "all done": the view stays None until every vault has a receipt, and a
+    press that completed one of two roots has fixed one root, not the install.
+    """
+    runtime = context.runtime
+    if runtime is None:
+        raise RuntimeError("vault or runtime is not configured")
+    from ciao.vault_migration import migrate_vault_vocabulary, read_receipt, write_receipt
+
+    vaults = _vocabulary_vaults(context.config)
+    scanned: list[Path] = []
+    blocked: list[str] = []
+    renamed = 0
+    failed = 0
+    for vault in vaults:
+        receipt = read_receipt(runtime, vault)
+        if receipt is not None and not (receipt.get("unresolved") or {}):
+            continue
+        summary = migrate_vault_vocabulary(vault, apply=True)
+        if "skipped" in summary:
+            # No vault on disk yet. Leave no receipt for it, exactly as the
+            # managed migration does, so the real vault is migrated when it exists.
+            blocked.append(f"{vault}: {summary['skipped']}")
+            continue
+        # Keyed on the vault this run just migrated: the file the install-wide
+        # view is built from, rewritten so the next detection sees this scan.
+        write_receipt(runtime, summary, vault_root=vault)
+        scanned.append(vault)
+        renamed += len(summary.get("renamed") or [])
+        failed += len(summary.get("failed") or [])
+
+    if not scanned and blocked:
+        raise RuntimeError(blocked[0])
+
+    # What the card will read on its next pass, re-read rather than assumed.
+    view = read_receipt(runtime)
+    unresolved = (view or {}).get("unresolved") or {}
+    uncovered = [str(vault) for vault in vaults if read_receipt(runtime, vault) is None]
+    result = {
+        "vaults": [str(vault) for vault in scanned],
+        "renamed": renamed,
+        "failed": failed,
+        "unresolved": sorted(unresolved),
+        "uncovered": uncovered,
+        "blocked": blocked,
+    }
+    if not scanned:
+        return result, "Every vault is already migrated."
+    text = f"{renamed} type(s) renamed, {failed} failed."
+    if uncovered:
+        text += (
+            f" {len(uncovered)} vault(s) still have no migration receipt: "
+            f"{', '.join(uncovered)}."
+        )
+    elif unresolved:
+        text += (
+            f" {len(unresolved)} type(s) still need a decision: "
+            f"{', '.join(sorted(unresolved))}."
+        )
+    else:
+        text += " Nothing left to decide on."
+    return result, text
 
 
 async def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, Any], str]:
