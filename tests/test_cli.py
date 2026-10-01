@@ -1104,6 +1104,31 @@ def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli._path_export_hint() is None
 
 
+def test_path_export_hint_uses_the_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "path_hint", lambda directory, *, persist: "HINT")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    assert cli._path_export_hint() == "HINT"
+
+
+def test_setup_summary_prints_the_windows_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    workspace = tmp_path / "workspace"
+    token_path = workspace / ".runtime" / "setup-token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text("tok\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_path_export_hint", lambda: "LINE")
+    monkeypatch.setattr(cli, "path_hint_note", lambda: "NOTE")
+
+    cli._print_setup_summary(workspace, 9443)
+
+    out = capsys.readouterr().out
+    # Windows writes the user PATH, which the terminal that ran it cannot see,
+    # so the note has to sit directly under the line it is about.
+    assert "  LINE\n  NOTE" in out
+
+
 def test_setup_url_rotates_token_by_default(tmp_path: Path, capsys) -> None:
     workspace = tmp_path / "workspace"
     token_path = workspace / ".runtime" / "setup-token"
