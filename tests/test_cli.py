@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import plistlib
 import sqlite3
 import subprocess
@@ -13,6 +14,31 @@ from pathlib import Path
 import pytest
 
 from ciao import cli
+
+
+def _fake_python(tmp_path: Path) -> str:
+    """The interpreter setup points its service at.
+
+    POSIX setup only writes the path into the plist, so a made-up one will do.
+    Windows' Task Scheduler renderer accepts only python.exe/pythonw.exe and
+    checks pythonw.exe is really there (the task runs hidden), so on Windows it
+    is a pair of empty files under ``tmp_path``.
+    """
+    if sys.platform != "win32":
+        return "/opt/ciao/bin/python"
+    bin_dir = tmp_path / "fake-python"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("python.exe", "pythonw.exe"):
+        (bin_dir / name).write_bytes(b"")
+    return str(bin_dir / "python.exe")
+
+# setup's launchd backend: the plist and the ~/Applications bundle clean-up run
+# only there. On Windows setup writes a Task Scheduler definition instead, which
+# tests/test_windows_service.py covers.
+launchd_setup_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the launchd plist and ~/Applications clean-up are setup's macOS backend",
+)
 
 
 def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,11 +207,11 @@ def test_cli_dev_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cli.dev, "main", lambda argv: called.append(argv) or 0)
 
-    assert cli.main(["dev", "--workspace", "/tmp/app", "--no-install"]) == 0
+    assert cli.main(["dev", "--workspace", str(Path("/tmp/app")), "--no-install"]) == 0
     assert called == [
         [
             "--workspace",
-            "/tmp/app",
+            str(Path("/tmp/app")),
             "--backend-port",
             "8543",
             "--frontend-port",
@@ -227,8 +253,8 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(cli, "_vault_lint_command", lambda args: called.append(args) or 0)
 
-    assert cli.main(["vault-lint", "--vault-root", "/tmp/vault"]) == 0
-    assert str(called[0].vault_root) == "/tmp/vault"
+    assert cli.main(["vault-lint", "--vault-root", str(Path("/tmp/vault"))]) == 0
+    assert str(called[0].vault_root) == str(Path("/tmp/vault"))
 
 
 def test_cli_gws_auth_helper_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,8 +278,8 @@ def test_cli_workspace_census_dispatches_command(
         cli, "_workspace_census_command", lambda args: called.append(args) or 0
     )
 
-    assert cli.main(["workspace-census", "--vault-root", "/tmp/vault", "--json"]) == 0
-    assert str(called[0].vault_root) == "/tmp/vault"
+    assert cli.main(["workspace-census", "--vault-root", str(Path("/tmp/vault")), "--json"]) == 0
+    assert str(called[0].vault_root) == str(Path("/tmp/vault"))
     assert called[0].json is True
 
 
@@ -440,8 +466,8 @@ def test_cli_cleanup_sdk_blobs_dispatches_command(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(cli, "_cleanup_sdk_blobs_command", lambda args: called.append(args) or 0)
 
-    assert cli.main(["cleanup-sdk-blobs", "--workspace", "/tmp/workspace", "--apply"]) == 0
-    assert str(called[0].workspace) == "/tmp/workspace"
+    assert cli.main(["cleanup-sdk-blobs", "--workspace", str(Path("/tmp/workspace")), "--apply"]) == 0
+    assert str(called[0].workspace) == str(Path("/tmp/workspace"))
     assert called[0].apply is True
 
 
@@ -465,13 +491,13 @@ def test_cli_sync_skills_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> 
             [
                 "sync-skills",
                 "--workspace",
-                "/tmp/workspace",
+                str(Path("/tmp/workspace")),
                 "--skip-upstream",
             ]
         )
         == 0
     )
-    assert str(called[0].workspace) == "/tmp/workspace"
+    assert str(called[0].workspace) == str(Path("/tmp/workspace"))
     assert called[0].skip_upstream is True
 
 
@@ -494,7 +520,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
             "--app-dir",
             str(apps),
             "--python",
-            "/opt/ciao/bin/python",
+            _fake_python(tmp_path),
             "--port",
             "9443",
         ]
@@ -544,21 +570,24 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     )
     assert registry[0]["name"] == "research"
     assert registry[0]["vault_root"] == "research/memory-vault"
-    plist = launch_agents / "com.ciao.server.plist"
-    assert plist.is_file()
-    plist_text = plist.read_text(encoding="utf-8")
-    assert "<string>/opt/ciao/bin/python</string>" in plist_text
-    assert "<string>run</string>" in plist_text
-    assert f"<string>{workspace.resolve()}</string>" in plist_text
-    assert "<string>9443</string>" in plist_text
-    assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
+    # The platform's own service definition: the plist here, the Task Scheduler
+    # XML on Windows, whose fields tests/test_windows_service.py pins.
+    service = cli._service_definition(launch_agents)
+    assert service is not None and service.is_file()
+    if sys.platform != "win32":
+        plist_text = service.read_text(encoding="utf-8")
+        assert "<string>/opt/ciao/bin/python</string>" in plist_text
+        assert "<string>run</string>" in plist_text
+        assert f"<string>{workspace.resolve()}</string>" in plist_text
+        assert "<string>9443</string>" in plist_text
+        assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
+        # Login Items still groups the server agent under the desktop app.
+        assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
+        assert "<string>local.ciaobot.app</string>" in plist_text
     # No menu-bar agent and no launcher bundle: Ciaobot.app is the menu bar
     # now, and nothing writes the retired rumps helper.
     assert not (launch_agents / "com.ciao.menubar.plist").exists()
     assert not (apps / "Ciaobot Server.app").exists()
-    # Login Items still groups the server agent under the desktop app.
-    assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
-    assert "<string>local.ciaobot.app</string>" in plist_text
     # Setup always mints the one-time login token, even with no desktop app:
     # the summary prints it as the login URL.
     setup_token = (workspace / ".runtime" / "setup-token").read_text(
@@ -644,6 +673,7 @@ def test_setup_exits_zero_without_warning_on_the_normal_path(
     assert "memory regions not set up" not in capsys.readouterr().err
 
 
+@launchd_setup_only
 def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -664,6 +694,7 @@ def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     assert "CIAO_NATIVE_SIDECAR" not in plist["EnvironmentVariables"]
 
 
+@launchd_setup_only
 def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
     launch_agents = tmp_path / "LaunchAgents"
 
@@ -709,7 +740,7 @@ def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool =
         "--workspace", str(workspace),
         "--launch-agents-dir", str(launch_agents),
         "--app-dir", str(apps),
-        "--python", "/opt/ciao/bin/python",
+        "--python", _fake_python(launch_agents.parent),
         "--port", "9443",
     ]
     if yes:
@@ -732,7 +763,15 @@ def test_setup_refuses_source_checkout(tmp_path: Path, capsys) -> None:
     assert not (checkout / ".env").exists()  # nothing scaffolded
 
 
-def test_setup_refuses_to_repoint_existing_workspace(tmp_path: Path, capsys) -> None:
+def test_setup_refuses_to_repoint_existing_workspace(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform == "win32":
+        # The Windows guard asks Task Scheduler whether the task exists before
+        # trusting the XML (a stale file is not a task); stand in for it here.
+        from ciao import windows_service
+
+        monkeypatch.setattr(windows_service, "task_exists", lambda: True)
     launch_agents = tmp_path / "LaunchAgents"
     apps = tmp_path / "Applications"
     first = tmp_path / "ws-one"
@@ -1137,6 +1176,7 @@ def test_setup_workspace_asks_the_backend_where_a_service_exists(
     assert plist.is_file()
 
 
+@launchd_setup_only
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"
@@ -1163,6 +1203,7 @@ def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     assert not foreign.exists()  # untouched (never created); guard for typos
 
 
+@launchd_setup_only
 def test_setup_migrates_native_ciaobot_app_without_removing_pwa(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     legacy = apps / "Ciaobot.app" / "Contents"
@@ -1217,6 +1258,7 @@ def test_setup_keeps_browser_pwa_named_ciaobot_app(tmp_path: Path) -> None:
     assert not (apps / "Ciaobot Server.app").exists()
 
 
+@launchd_setup_only
 def test_setup_skips_legacy_companion_when_the_app_is_installed(
     tmp_path: Path,
 ) -> None:
@@ -1245,6 +1287,7 @@ def test_default_app_dir_matches_the_release_installer() -> None:
     assert cli._default_app_dir() == Path.home() / "Applications"
 
 
+@launchd_setup_only
 def test_setup_cleans_our_bundles_from_home_applications(tmp_path: Path, monkeypatch) -> None:
     home_apps = tmp_path / "home" / "Applications"
     for name, bundle_id in (("Ciao.app", "local.ciao.app"), ("Ciaobot.app", "local.ciaobot.app")):
@@ -1365,9 +1408,10 @@ def test_setup_prints_workspace_and_login_url(tmp_path: Path, capsys) -> None:
 
 def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = Path(cli.sys.executable).parent
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    assert cli._path_export_hint() == f'export PATH="{bin_dir}:$PATH"'
-    monkeypatch.setenv("PATH", f"/usr/bin:{bin_dir}")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+    # The exact line per shell is pinned in tests/test_os_support_shell_hints.py.
+    assert cli._path_export_hint() == cli.path_hint(str(bin_dir), persist=False)
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(bin_dir)]))
     assert cli._path_export_hint() is None
 
 
@@ -2762,7 +2806,7 @@ def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
     assert "Aymen" in out  # this workspace's own note still resolves
     assert "Alba" not in out
     # And the link points at the note that actually exists on disk.
-    assert str(work_vault / "People" / "Aymen.md") in out
+    assert (work_vault / "People" / "Aymen.md").as_uri() in out
 
 
 def test_critique_is_reachable_through_the_ciao_entry_point(monkeypatch):
@@ -3188,7 +3232,7 @@ def test_cli_skill_draft_approve_creates_the_new_skill_from_a_file(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["lifecycle"] == "filed"
-    assert payload["issue_url"].endswith("skills/invoice-recon/SKILL.md")
+    assert Path(payload["issue_url"]).as_posix().endswith("skills/invoice-recon/SKILL.md")
     assert (workspace / "skills" / "invoice-recon" / "SKILL.md").is_file()
 
 
