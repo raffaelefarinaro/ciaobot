@@ -414,10 +414,11 @@ def task_command(name: str, *, runner: Schtasks = _schtasks) -> str | None:
     Asked of Task Scheduler (``/Query /XML``) rather than read from the file
     Ciaobot wrote, because the registered copy is the one that runs. schtasks
     prints that XML in the console's OEM code page, not the UTF-16 its own
-    declaration claims, and prints ``?`` for a character the code page lacks.
-    ``?`` cannot appear in a Windows path, so a command containing one is a
-    path this machine could not report. It answers None, which is evidence of
-    nothing, rather than a wrong path to compare.
+    declaration claims. A character the code page lacks comes back as ``?``,
+    or best-fit mapped to a look-alike (``Łukasz`` as ``Lukasz``) with nothing
+    to show it happened. So only a pure-ASCII command is trusted: anything else
+    answers None, which is evidence of nothing, rather than a wrong path that
+    would refuse an update as "the service runs a different env".
     """
     try:
         completed = runner("/Query", "/TN", name, "/XML", encoding="oem")
@@ -433,7 +434,7 @@ def task_command(name: str, *, runner: Schtasks = _schtasks) -> str | None:
         return None
     element = root.find(f"{TASK_NS}Actions/{TASK_NS}Exec/{TASK_NS}Command")
     command = (element.text or "").strip() if element is not None else ""
-    if not command or "?" in command:
+    if not command or "?" in command or not command.isascii():
         return None
     return command
 

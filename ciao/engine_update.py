@@ -462,6 +462,20 @@ def _stage_locked(
         raise UpdateError(f"already on {target}")
 
     stage_dir = state_dir / target
+    existing = read_operation(state_dir)
+    if (
+        existing is not None
+        and os.path.abspath(existing.stage_dir) == os.path.abspath(stage_dir)
+        and _update_pending(existing)
+    ):
+        # The stage dir holds the interpreter the updater and the recovery job
+        # run from, and the previous env a rollback restores. Deleting it under
+        # a pending update strands both; before any record is written, like the
+        # refusal above.
+        raise UpdateError(
+            f"the update to {target} is still {existing.phase}; wait for it to "
+            "settle (ciao update status) before staging it again"
+        )
     shutil.rmtree(stage_dir, ignore_errors=True)
     stage_dir.mkdir(parents=True)
     make_private_dir(stage_dir)
@@ -1019,7 +1033,11 @@ def _rollback(
         except Exception as exc:  # noqa: BLE001 — recorded, never raised
             errors.append(f"{name}: {exc}")
 
-    step("stop the engine", lambda: host.stop_engine())
+    stopped = False
+    try:
+        stopped = bool(host.stop_engine())
+    except Exception as exc:  # noqa: BLE001 — recorded, never raised
+        errors.append(f"stop the engine: {exc}")
     # Stopping the engine returns before its supervisor has finished with the
     # job, and the forward path already waits for the engine to stop before
     # touching a file. Starting it again in that window is the race
@@ -1031,7 +1049,17 @@ def _rollback(
         "wait for the engine to stop",
         lambda: _wait_until_unreachable(get, status_url, _STOP_TIMEOUT, sleep, clock),
     )
-    if env_moved:
+    if env_moved and not stopped:
+        # A host that could not confirm the stop (Windows: the engine still
+        # holds its runtime lock) must not have its env deleted or renamed from
+        # under it. Nothing is touched, the receipt included, and the record
+        # says so; `previous-env` is still on disk, so the recovery task retries
+        # the whole rollback on its next tick (see `_restore_pending`).
+        errors.append(
+            "the engine did not stop, so the environment and receipt were left in "
+            "place for the recovery task to retry"
+        )
+    elif env_moved:
         step(
             "remove the half-installed env",
             lambda: shutil.rmtree(live_env, ignore_errors=True),
@@ -1045,12 +1073,13 @@ def _rollback(
             "re-point the entry points",
             lambda: host.after_env_restored(live_env, bin_dir=bin_dir, wheel=wheel),
         )
-    step(
-        "restore the receipt",
-        lambda: install_receipt.write_receipt(
-            _previous_receipt(op) or receipt, receipt_path
-        ),
-    )
+    if stopped or not env_moved:
+        step(
+            "restore the receipt",
+            lambda: install_receipt.write_receipt(
+                _previous_receipt(op) or receipt, receipt_path
+            ),
+        )
     step("start the engine", lambda: _require_started(start()))
     step(
         "verify the restored engine",
@@ -1428,7 +1457,10 @@ def run_apply(
             # The env is whole again and the record says so, so the net has
             # nothing left to guard: retiring it here is what stops the next
             # 30-second tick from finding a terminal record to stand down over.
-            stand_down()
+            # A restore that did not land is the exception: the net stays, and
+            # its next tick retries the rollback.
+            if not _restore_pending(op):
+                stand_down()
             return op
         if ok:
             _advance_ignoring_failure(advance, "applied")
@@ -1448,6 +1480,27 @@ def run_apply(
 # damage recovery exists to prevent. Every other phase is a decision the
 # transaction already made and an operator should not have to re-make.
 _POST_MOVE_PHASES = ("swapping", "starting", "verifying_start", "rolling_back")
+# Every phase in which a process is, or should be, working on the record: the
+# foreground drain, the handoff, the stop and the post-move phases.
+_IN_FLIGHT_PHASES = ("draining", "applying", "stopping", *_POST_MOVE_PHASES)
+
+
+def _restore_pending(op: Operation) -> bool:
+    """Whether a settled rollback still has the previous env to put back.
+
+    ``rollback_failed`` with ``previous-env`` still on disk is a restore that
+    did not happen (a rename refused by a transient lock, or a stop that could
+    not be confirmed), with an intact copy of the operator's install sitting
+    beside a broken one. That is not an outcome to stand down over: the
+    recovery net keeps retrying the rollback on every tick until the restore
+    lands, and only then retires.
+    """
+    return op.phase == "rollback_failed" and (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+
+
+def _update_pending(op: Operation) -> bool:
+    """Whether ``op`` still has work, or a recovery, outstanding."""
+    return op.phase in _IN_FLIGHT_PHASES or _restore_pending(op)
 
 
 def recover_interrupted_apply(
@@ -1655,11 +1708,17 @@ def recover_apply(
             # A newer update has taken the record over, and there is nothing
             # here to undo: the operation in flight is not this job's to
             # rewrite, and the engine is untouched and still serving. This net
-            # *is* stale — but the net in front of the operator now is the new
-            # update's, installed under this same label, so retiring from here
-            # would pull down the only recovery for the swap that is actually
-            # in flight. It stays loaded and keeps answering for its own
-            # (retired) id until the newer one settles and retires the pair.
+            # *is* stale. While the newer update is in flight, the net in front
+            # of the operator is the new update's, installed under this same
+            # label, so retiring from here would pull down the only recovery for
+            # the swap that is actually in flight. Once the newer record is
+            # settled (only staged, say), nothing will ever retire this one but
+            # itself: the host retires it, after deleting whatever a
+            # best-effort delete left behind, which on Windows can keep it
+            # registered for another tick. The record is not touched.
+            if not _update_pending(op):
+                platform.retire_recovery_agent(root)
+                return None
             logger.info(
                 "engine update %s is the one in flight, not %s; leaving the "
                 "recovery net standing",
@@ -1667,7 +1726,30 @@ def recover_apply(
                 operation_id,
             )
             return None
-        if op.phase not in _POST_MOVE_PHASES:
+        if op.phase == "stopping":
+            # The updater died after it began stopping the engine and before it
+            # moved anything (this process holds the lock, so it is not still
+            # running). Nothing is undone because nothing moved; the engine is
+            # started again, since a supervisor that saw it stopped on purpose
+            # will not (Windows: `/End` does not trigger `RestartOnFailure`),
+            # and the record says what happened.
+            logger.warning(
+                "engine update %s was interrupted while stopping the engine; "
+                "nothing was moved, starting the engine again",
+                op.id,
+            )
+            _start_best_effort(start)
+            op.phase = "failed"
+            op.error = (
+                "interrupted while stopping the engine; nothing was touched and "
+                "the engine was started again"
+            )
+            op.updated_at = _now()
+            with contextlib.suppress(OSError):
+                write_operation(op, root)
+            platform.retire_recovery_agent(root)
+            return op
+        if op.phase not in _POST_MOVE_PHASES and not _restore_pending(op):
             # The transaction finished while this job was starting. It settled
             # the record itself, and a rollback over a settled phase would undo
             # an outcome the operator already has.
@@ -1761,8 +1843,10 @@ def recover_apply(
         # it here is also what stops the next tick from re-reading a terminal
         # phase to reach the same conclusion. It stops this very process when
         # this *is* the agent, which is why the record is already written, the
-        # env is already back and the engine has already been started.
-        platform.retire_recovery_agent(root)
+        # env is already back and the engine has already been started. A restore
+        # that still did not land keeps the net for the next tick.
+        if not _restore_pending(op):
+            platform.retire_recovery_agent(root)
         return op
     finally:
         release_lock(handle)

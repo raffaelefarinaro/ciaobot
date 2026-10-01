@@ -1001,11 +1001,13 @@ def default_update_host(
 ) -> UpdateHost:
     """The host the transaction uses when its caller names none.
 
-    Windows gets its own host. Every other platform gets the macOS host, built
-    from the ``launchctl`` and ``uid`` the caller passed, exactly as the
-    transaction did before Windows had a host: the tests drive that host on
-    Linux CI through a fake ``launchctl``, and nothing else changes for them.
+    A ``launchctl`` or ``uid`` is a request for the launchd host by name, so it
+    gets the macOS host on any OS: that is how the transaction's macOS tests
+    drive it on Linux and Windows CI. Otherwise Windows gets its own host, and
+    every other platform the macOS host, exactly as before Windows had one.
     """
+    if launchctl is not None or uid is not None:
+        return MacUpdateHost(launchctl=launchctl, uid=uid)
     if sys.platform == "win32":
         return current_update_host()
-    return MacUpdateHost(launchctl=launchctl, uid=uid)
+    return MacUpdateHost()

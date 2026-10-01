@@ -64,6 +64,13 @@ CONSTRAINTS_NAME = "constraints.txt"
 # How long to wait for the engine to release `server.lock` after its port has
 # closed. The spike measured 1.5 s on this hardware with Defender on.
 _LOCK_POLL_S = 0.5
+# The rollback's restore rename (previous-env back into the live place) is
+# retried this long: a scanner or the search indexer can hold a handle in the
+# old env for a moment after the engine has gone, and failing the restore over
+# that would leave the operator on a broken env with an intact one beside it.
+# Not the stop signal (the lock is), and only the restore retries.
+_RESTORE_RETRY_S = 10.0
+_RESTORE_POLL_S = 0.5
 
 Schtasks = Callable[..., "subprocess.CompletedProcess[str]"]
 Runner = Callable[..., Any]
@@ -185,6 +192,9 @@ class WindowsUpdateHost:
         except FileNotFoundError:
             # No engine has ever started in this runtime directory: the lock
             # file is created on first start and deliberately never removed.
+            # On a machine whose engine is being updated that is unusual, and
+            # it means this probe cannot see the engine at all.
+            logger.warning("%s does not exist; treating the engine as stopped", path)
             return False
         except OSError as exc:
             raise _update_error(f"could not open {path}: {exc}") from exc
@@ -433,10 +443,18 @@ class WindowsUpdateHost:
             except OSError as exc:
                 raise _update_error(f"could not move {dest} out of the way: {exc}") from exc
             _rmtree_best_effort(aside)
-        try:
-            os.replace(source, dest)
-        except OSError as exc:
-            raise _update_error(f"could not move {source} to {dest}: {exc}") from exc
+        # The restore is the one rename whose source is previous-env.
+        restoring = source.name == engine_update.PREVIOUS_ENV_NAME
+        deadline = self._clock() + _RESTORE_RETRY_S
+        while True:
+            try:
+                os.replace(source, dest)
+                return
+            except OSError as exc:
+                if not restoring or self._clock() >= deadline:
+                    raise _update_error(f"could not move {source} to {dest}: {exc}") from exc
+                logger.warning("restoring %s failed (%s); retrying", source, exc)
+                self._sleep(_RESTORE_POLL_S)
 
     def env_python(self, env: Path) -> Path:
         """A Windows tool env's interpreter: ``<env>/Scripts/python.exe``."""
@@ -477,6 +495,13 @@ class WindowsUpdateHost:
         """
         if not op.env_freeze.strip():
             raise _update_error("the update record has no resolved pins to install from")
+        # Again here, although run_apply checked it before the engine stopped:
+        # the wheel sits in a user-writable directory, and this is the last
+        # moment before uv reads it.
+        if engine_update._sha256(wheel)[0] != op.wheel_sha256:
+            raise _update_error(
+                f"{wheel.name} no longer matches the digest recorded when it was staged"
+            )
         stage = Path(op.stage_dir)
         (stage / CONSTRAINTS_NAME).write_text(_pins(op.env_freeze), encoding="utf-8", newline="")
         python_version = f"{sys.version_info.major}.{sys.version_info.minor}"

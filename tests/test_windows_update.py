@@ -15,7 +15,7 @@ import hashlib
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any
 from xml.etree import ElementTree
@@ -226,7 +226,7 @@ def _tmp_paths_are_task_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         return
 
     def absolute(label: str, value: str) -> str:
-        if not Path(value).is_absolute():
+        if not (Path(value).is_absolute() or PureWindowsPath(value).drive):
             raise ValueError(f"{label} must be absolute: {value!r}")
         return ws._xml_text(label, value)
 
@@ -951,3 +951,210 @@ def test_retire_also_retries_a_superseded_previous_env(tmp_path: Path) -> None:
     assert not older.exists()
     # This update's own previous-env is its one rollback generation.
     assert own.exists()
+
+
+# ── review round 1 (#900) ────────────────────────────────────────────
+
+
+def _recover(op: Operation, state: Path, receipt_path: Path, machine: _Machine, operation_id: str | None = None) -> Any:
+    return recover_apply(
+        operation_id or op.id,
+        state_dir=state,
+        port=PORT,
+        http_post=lambda url: pytest.fail("recovery must post nothing"),
+        http_get=machine.get,
+        start_service=machine.start_service,
+        sleep=lambda seconds: None,
+        clock=_Clock(),
+        receipt_path=receipt_path,
+        host=_host(machine, state),
+    )
+
+
+def _uv_ready(tmp_path: Path, receipt_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ciao.install_receipt.default_receipt_path", lambda: receipt_path)
+    (tmp_path / "uv.exe").write_text("uv", encoding="utf-8")
+    monkeypatch.setattr("ciao.engine_update.os.access", lambda path, mode: True)
+
+
+def test_recover_starts_the_engine_after_a_helper_died_while_stopping(tmp_path: Path, user: None) -> None:
+    op, state, receipt_path, machine = _staged(tmp_path, phase="stopping")
+    # The helper had sent /End and died: the engine is down, nothing moved.
+    machine.up = False
+
+    result = _recover(op, state, receipt_path, machine)
+
+    assert result is not None and result.phase == "failed"
+    assert "nothing was touched" in result.error
+    assert machine.up is True
+    assert machine.changing_calls() == [
+        ["/Run", "/TN", ws.TASK_NAME],
+        ["/Delete", "/TN", ws.RECOVER_TASK_NAME, "/F"],
+    ]
+    assert _env_version(machine.live_env) == FROM_VERSION
+    assert not (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
+
+
+def _flaky_restore(monkeypatch: pytest.MonkeyPatch, failures: int) -> list[str]:
+    """Make renaming previous-env back fail ``failures`` times (a scanner's handle)."""
+    import os as os_module
+
+    real = os_module.replace
+    seen: list[str] = []
+
+    def replace(src: Any, dst: Any) -> None:
+        if Path(src).name == PREVIOUS_ENV_NAME and len(seen) < failures:
+            seen.append(str(src))
+            raise PermissionError(13, "The process cannot access the file", str(src))
+        real(src, dst)
+
+    monkeypatch.setattr("ciao.windows_update.os.replace", replace)
+    return seen
+
+
+def test_rollback_retries_a_restore_rename_that_fails_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: None
+) -> None:
+    op, state, receipt_path, machine = _staged(tmp_path)
+    _uv_ready(tmp_path, receipt_path, monkeypatch)
+    machine.uv_error = "error: not found in the cache"
+    refused = _flaky_restore(monkeypatch, failures=2)
+
+    result = _run(op, state, receipt_path, machine)
+
+    assert len(refused) == 2
+    assert result.phase == "rolled_back", result.error
+    assert _env_version(machine.live_env) == FROM_VERSION
+    assert machine.changing_calls()[-1] == ["/Delete", "/TN", ws.RECOVER_TASK_NAME, "/F"]
+
+
+def test_a_restore_that_never_lands_keeps_the_net_until_a_tick_restores_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: None
+) -> None:
+    op, state, receipt_path, machine = _staged(tmp_path)
+    _uv_ready(tmp_path, receipt_path, monkeypatch)
+    machine.uv_error = "error: not found in the cache"
+    _flaky_restore(monkeypatch, failures=10_000)
+
+    result = _run(op, state, receipt_path, machine)
+
+    assert result.phase == "rollback_failed"
+    previous = Path(op.stage_dir) / PREVIOUS_ENV_NAME
+    assert _env_version(previous) == FROM_VERSION
+    # The intact old install is still on disk, so the net is not retired.
+    assert ["/Delete", "/TN", ws.RECOVER_TASK_NAME, "/F"] not in machine.changing_calls()
+
+    # The scanner lets go; the next recovery tick restores it and retires.
+    monkeypatch.undo()
+    _uv_ready(tmp_path, receipt_path, monkeypatch)
+    ticked = _recover(op, state, receipt_path, machine)
+
+    assert ticked is not None and ticked.phase == "rolled_back", ticked and ticked.error
+    assert _env_version(machine.live_env) == FROM_VERSION
+    assert not previous.exists()
+    assert machine.changing_calls()[-1] == ["/Delete", "/TN", ws.RECOVER_TASK_NAME, "/F"]
+
+
+def test_rollback_touches_no_file_when_the_stop_is_not_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: None
+) -> None:
+    op, state, receipt_path, machine = _staged(tmp_path)
+    _uv_ready(tmp_path, receipt_path, monkeypatch)
+    original_run = machine.run
+
+    def uv_fails_and_something_starts_the_engine(argv: list[str], **kwargs: Any) -> Any:
+        if "-c" in argv:
+            return original_run(argv, **kwargs)
+        # Half an install, and an engine that grabs its lock and will not let go.
+        (machine.live_env / "Lib").mkdir(parents=True, exist_ok=True)
+        machine.hold_lock()
+        raise subprocess.CalledProcessError(2, argv, output="", stderr="error: interrupted")
+
+    machine.run = uv_fails_and_something_starts_the_engine  # type: ignore[method-assign]
+    original = machine.schtasks
+
+    def end_keeps_the_lock(*args: str, encoding: str = "utf-8") -> Any:
+        if list(args[:1]) == ["/End"] and machine.held_lock is not None:
+            machine.schtasks_calls.append(list(args))
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+        return original(*args, encoding=encoding)
+
+    machine.schtasks = end_keeps_the_lock  # type: ignore[method-assign]
+    try:
+        result = _run(op, state, receipt_path, machine)
+    finally:
+        machine.release_lock()
+
+    assert result.phase == "rollback_failed"
+    assert "did not stop" in result.error
+    # Nothing deleted or renamed: the half install and the old env are both still there.
+    assert (machine.live_env / "Lib").is_dir()
+    assert _env_version(Path(op.stage_dir) / PREVIOUS_ENV_NAME) == FROM_VERSION
+    assert ["/Delete", "/TN", ws.RECOVER_TASK_NAME, "/F"] not in machine.changing_calls()
+
+
+def test_a_stale_net_retires_once_the_newer_record_is_settled(tmp_path: Path, user: None) -> None:
+    op, state, receipt_path, machine = _staged(tmp_path, phase="rolled_back")
+    newer = Operation(
+        id="20261002T100000-1.2.4", phase="staged", from_version=FROM_VERSION, to_version="1.2.4",
+        started_at="", updated_at="", stage_dir=str(state / "1.2.4"),
+    )
+    write_operation(newer, state)
+
+    assert _recover(op, state, receipt_path, machine) is None
+    assert machine.changing_calls() == [["/Delete", "/TN", ws.RECOVER_TASK_NAME, "/F"]]
+    # The record is not this net's to touch.
+    assert read_operation(state) == newer
+
+
+def test_a_stale_net_stays_while_the_newer_update_is_in_flight(tmp_path: Path, user: None) -> None:
+    op, state, receipt_path, machine = _staged(tmp_path, phase="rolled_back")
+    newer = Operation(
+        id="20261002T100000-1.2.4", phase="applying", from_version=FROM_VERSION, to_version="1.2.4",
+        started_at="", updated_at="", stage_dir=str(state / "1.2.4"),
+    )
+    write_operation(newer, state)
+
+    assert _recover(op, state, receipt_path, machine) is None
+    assert machine.changing_calls() == []
+
+
+def test_task_command_is_none_for_a_command_that_is_not_ascii() -> None:
+    # Best fit can print `Łukasz` as `Lukasz` with no `?`; any non-ASCII
+    # character means the code page was involved, so nothing is trusted.
+    body = (
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec>'
+        "<Command>C:\\Users\\\u00c9mile\\pythonw.exe</Command></Exec></Actions></Task>"
+    )
+    runner, _ = _query(body)
+
+    assert ws.task_command(ws.TASK_NAME, runner=runner) is None
+
+
+def test_install_env_rechecks_the_wheel_digest_before_uv_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    op, state, receipt_path, machine = _staged(tmp_path)
+    with Path(op.wheel).open("ab") as handle:
+        handle.write(b"swapped after the pre-flight")
+
+    with pytest.raises(UpdateError, match="no longer matches the digest"):
+        _install(op, machine, state, receipt_path, monkeypatch)
+    assert machine.uv_calls == []
+
+
+def test_staging_a_version_whose_update_is_pending_is_refused(tmp_path: Path) -> None:
+    from ciao.engine_update import stage_update
+
+    op, state, _, _ = _staged(tmp_path, phase="swapping")
+
+    with pytest.raises(UpdateError, match="still swapping"):
+        stage_update(
+            TO_VERSION,
+            current_version=FROM_VERSION,
+            state_dir=state,
+            fetch=lambda *args, **kwargs: pytest.fail("nothing may be fetched"),
+        )
+    # The interpreter the recovery task runs from is still there.
+    assert Path(op.env_python).is_file()
+    assert read_operation(state).phase == "swapping"  # type: ignore[union-attr]
