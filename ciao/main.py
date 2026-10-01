@@ -569,14 +569,22 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     # rollback — this process cannot: it is the engine being booted out, and
     # moving the env it is running out of from under itself is how a recovery
     # turns into a second outage. So this never waits on the recovery, only on
-    # the job launch. macOS-only because the swap is launchd's; the state dir is
-    # absent elsewhere, and the call is then a cheap no-op.
-    if sys.platform == "darwin":
+    # the job launch. On Windows the same step starts `\Ciaobot\Updater` in
+    # `run-recover` mode, beside the once-a-minute `\Ciaobot\Recover` task
+    # (#857). A platform with no update host has no swap to recover, so the step
+    # is skipped there.
+    from ciao.update_host import UnsupportedPlatformError, current_update_host
+
+    try:
+        update_host = current_update_host()
+    except UnsupportedPlatformError:
+        update_host = None
+    if update_host is not None:
         tracker.start("recover_engine_update")
         try:
             from ciao.engine_update import recover_interrupted_apply
 
-            recovered = await asyncio.to_thread(recover_interrupted_apply)
+            recovered = await asyncio.to_thread(recover_interrupted_apply, host=update_host)
             if recovered is None:
                 tracker.done("recover_engine_update")
             else:

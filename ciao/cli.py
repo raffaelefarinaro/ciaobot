@@ -5572,8 +5572,9 @@ def _service_command(args: argparse.Namespace) -> int:
     return macos_service.print_result(result, as_json=as_json)
 
 
-# The macOS desktop shell and the engine updater. They have no Windows
-# equivalent yet, so they fail with a clean result instead of half-running.
+# The macOS desktop shell, including its `update-engine` action. They have no
+# Windows equivalent, so they fail with a clean result instead of half-running;
+# Windows updates the engine with `ciao update` (#857).
 _WINDOWS_UNAVAILABLE_ACTIONS = (
     "login",
     "update-engine",

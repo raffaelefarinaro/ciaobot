@@ -15,17 +15,19 @@ a shell.
 This module also owns the lifecycle ``ciao service`` drives on Windows
 (``status``, ``start``, ``stop``, ``restart``) and answers in
 ``macos_service.ServiceResult``, so the CLI prints one result shape on every
-platform. The macOS desktop shell and the engine updater have no Windows
-equivalent and are not stubbed here; the CLI refuses those outright.
+platform, and it renders the engine updater's two sibling tasks, which
+``ciao.windows_update`` registers (#857). The macOS desktop shell has no
+Windows equivalent and is not stubbed here; the CLI refuses it outright.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, Callable, Sequence
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
@@ -38,6 +40,16 @@ RESTART_INTERVAL = "PT1M"   # the schema minimum
 RESTART_COUNT = 999         # the schema maximum
 SCHTASKS_TIMEOUT_S = 30.0
 HANDOFF_DELAY_S = 3
+# The engine updater's two sibling tasks (#857). The updater runs one swap and
+# is bounded well past a stop, an offline install and a readiness wait; the
+# recovery task re-checks a stranded swap once a minute.
+UPDATER_TASK_NAME = "\\Ciaobot\\Updater"
+UPDATER_DESCRIPTION = "Ciaobot engine update: replaces the engine, then exits."
+RECOVER_TASK_NAME = "\\Ciaobot\\Recover"
+RECOVER_DESCRIPTION = "Ciaobot engine update recovery: rolls back an interrupted update."
+RECOVER_INTERVAL = "PT1M"
+UPDATE_JOB_TIME_LIMIT = "PT30M"
+_LOCAL_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 # The task schema's namespace: every element in the document is qualified, so a
 # reader has to qualify its search the same way or it finds nothing.
 TASK_NS = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
@@ -53,6 +65,10 @@ class WindowsServiceError(RuntimeError):
     """A ``schtasks.exe`` call failed, timed out, or could not start."""
 
 
+# One document for every task Ciaobot registers: the engine's logon task and
+# the updater's two siblings (#857). They share the principal and the settings
+# on purpose, and differ only in their triggers, their time limit, whether a
+# failure is retried, and the program they run.
 _TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -60,13 +76,7 @@ _TEMPLATE = """\
     <Description>{description}</Description>
     <URI>{task_name}</URI>
   </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-      <UserId>{user}</UserId>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
+{triggers}  <Principals>
     <Principal id="Author">
       <UserId>{user}</UserId>
       <LogonType>InteractiveToken</LogonType>
@@ -83,21 +93,45 @@ _TEMPLATE = """\
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <ExecutionTimeLimit>{time_limit}</ExecutionTimeLimit>
     <Priority>7</Priority>
-    <RestartOnFailure>
-      <Interval>{restart_interval}</Interval>
-      <Count>{restart_count}</Count>
-    </RestartOnFailure>
-  </Settings>
+{restart}  </Settings>
   <Actions Context="Author">
     <Exec>
       <Command>{python}</Command>
-      <Arguments>-m ciao.cli supervise</Arguments>
-      <WorkingDirectory>{workspace}</WorkingDirectory>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
+"""
+
+_LOGON_TRIGGER = """\
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+"""
+
+# No <Duration>: the repetition runs for as long as the trigger is enabled,
+# across reboots, which is what the recovery task needs. It is retired by
+# deleting the task, not by letting the repetition run out.
+_REPEATING_TRIGGER = """\
+    <TimeTrigger>
+      <Repetition>
+        <Interval>{interval}</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>{start}</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+"""
+
+_RESTART_ON_FAILURE = """\
+    <RestartOnFailure>
+      <Interval>{interval}</Interval>
+      <Count>{count}</Count>
+    </RestartOnFailure>
 """
 
 
@@ -128,14 +162,92 @@ def render_task_xml(*, python: str, workspace: str, user: str) -> str:
     XML-escaped; control characters and non-absolute paths raise ``ValueError``.
     Paths are ``PureWindowsPath``-checked so the renderer is testable anywhere.
     """
+    user_text = _xml_text("user", user)
     return _TEMPLATE.format(
         description=escape(TASK_DESCRIPTION),
         task_name=escape(TASK_NAME),
-        user=_xml_text("user", user),
-        restart_interval=RESTART_INTERVAL,
-        restart_count=RESTART_COUNT,
+        triggers=_triggers(_LOGON_TRIGGER.format(user=user_text)),
+        user=user_text,
+        time_limit="PT0S",
+        restart=_RESTART_ON_FAILURE.format(interval=RESTART_INTERVAL, count=RESTART_COUNT),
         python=_windows_absolute("python", python),
-        workspace=_windows_absolute("workspace", workspace),
+        arguments="-m ciao.cli supervise",
+        workdir=_windows_absolute("workspace", workspace),
+    )
+
+
+def _triggers(*blocks: str) -> str:
+    return "  <Triggers>\n" + "".join(blocks) + "  </Triggers>\n"
+
+
+def _update_job_xml(
+    *,
+    task_name: str,
+    description: str,
+    triggers: str,
+    python: str,
+    arguments: Sequence[str],
+    workdir: str,
+    user: str,
+) -> str:
+    return _TEMPLATE.format(
+        description=escape(description),
+        task_name=escape(task_name),
+        triggers=triggers,
+        user=_xml_text("user", user),
+        time_limit=UPDATE_JOB_TIME_LIMIT,
+        # A failed swap is settled by its own rollback and recorded; Task
+        # Scheduler running it again would be a second swap nobody asked for.
+        restart="",
+        python=_windows_absolute("python", python),
+        arguments=_xml_text("arguments", subprocess.list2cmdline(list(arguments))),
+        workdir=_windows_absolute("workdir", workdir),
+    )
+
+
+def render_oneshot_task_xml(
+    *, python: str, arguments: Sequence[str], workdir: str, user: str
+) -> str:
+    """Task XML for the updater task: no trigger, started once with ``/Run``.
+
+    The engine task's principal and settings, so it runs as the same user in
+    the same session, but as a sibling of the engine task rather than a child:
+    ``/End`` on the engine, and the Job Object that kills the engine's process
+    tree, cannot reach it.
+    """
+    return _update_job_xml(
+        task_name=UPDATER_TASK_NAME,
+        description=UPDATER_DESCRIPTION,
+        triggers="",
+        python=python,
+        arguments=arguments,
+        workdir=workdir,
+        user=user,
+    )
+
+
+def render_recover_task_xml(
+    *, python: str, arguments: Sequence[str], workdir: str, user: str, start: str
+) -> str:
+    """Task XML for the recovery task: at logon, then once a minute.
+
+    ``start`` is the local ``YYYY-MM-DDTHH:MM:SS`` the repetition counts from.
+    One minute is the schema's minimum interval (#857, maintainer decision 2).
+    """
+    if not _LOCAL_TIME.fullmatch(start):
+        raise ValueError(f"start must be a local YYYY-MM-DDTHH:MM:SS time: {start!r}")
+    user_text = _xml_text("user", user)
+    return _update_job_xml(
+        task_name=RECOVER_TASK_NAME,
+        description=RECOVER_DESCRIPTION,
+        triggers=_triggers(
+            _LOGON_TRIGGER.format(user=user_text),
+            _REPEATING_TRIGGER.format(interval=RECOVER_INTERVAL, start=start),
+        ),
+        python=python,
+        arguments=arguments,
+        workdir=workdir,
+        user=user,
     )
 
 
@@ -188,7 +300,7 @@ def write_task_definition(*, workspace: Path, python: str | None = None,
     return target
 
 
-def _schtasks(*args: str) -> subprocess.CompletedProcess[str]:
+def _schtasks(*args: str, encoding: str = "utf-8") -> subprocess.CompletedProcess[str]:
     argv = ["schtasks.exe", *args]
     try:
         return subprocess.run(
@@ -196,7 +308,7 @@ def _schtasks(*args: str) -> subprocess.CompletedProcess[str]:
             check=False,
             capture_output=True,
             text=True,
-            encoding="utf-8",
+            encoding=encoding,
             errors="replace",
             timeout=SCHTASKS_TIMEOUT_S,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", _CREATE_NO_WINDOW),
@@ -291,6 +403,40 @@ def task_workspace(definition: Path) -> Path | None:
     )
     text = (element.text or "").strip() if element is not None else ""
     return Path(text) if text else None
+
+
+Schtasks = Callable[..., "subprocess.CompletedProcess[str]"]
+
+
+def task_command(name: str, *, runner: Schtasks = _schtasks) -> str | None:
+    """The program the *registered* task runs, or None if that cannot be told.
+
+    Asked of Task Scheduler (``/Query /XML``) rather than read from the file
+    Ciaobot wrote, because the registered copy is the one that runs. schtasks
+    prints that XML in the console's OEM code page, not the UTF-16 its own
+    declaration claims. A character the code page lacks comes back as ``?``,
+    or best-fit mapped to a look-alike (``Łukasz`` as ``Lukasz``) with nothing
+    to show it happened. So only a pure-ASCII command is trusted: anything else
+    answers None, which is evidence of nothing, rather than a wrong path that
+    would refuse an update as "the service runs a different env".
+    """
+    try:
+        completed = runner("/Query", "/TN", name, "/XML", encoding="oem")
+    except WindowsServiceError:
+        return None
+    if completed.returncode != 0:
+        return None
+    # The declaration names an encoding the text no longer has.
+    body = re.sub(r"^\s*<\?xml[^>]*\?>", "", completed.stdout or "")
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        return None
+    element = root.find(f"{TASK_NS}Actions/{TASK_NS}Exec/{TASK_NS}Command")
+    command = (element.text or "").strip() if element is not None else ""
+    if not command or "?" in command or not command.isascii():
+        return None
+    return command
 
 
 # Asked of the user in every place where the answer is "there is no task yet".

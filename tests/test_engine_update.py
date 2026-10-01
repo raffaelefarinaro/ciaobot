@@ -842,7 +842,7 @@ def _staged(
         updated_at="2026-09-25T10:00:00+00:00",
         stage_dir=str(stage_dir),
         wheel=str(wheel),
-        wheel_sha256="deadbeef",
+        wheel_sha256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
         env_python=str(staged_python),
         previous_receipt=str(previous_receipt),
     )

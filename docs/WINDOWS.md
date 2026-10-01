@@ -173,14 +173,42 @@ new terminal, install [Git for Windows](https://gitforwindows.org/).
 
 ## Update and rollback
 
-Engine updates on Windows land with #857. Until then:
+Engine updates work the same way as on macOS: Settings -> Home, or from a
+terminal:
 
-- `ciao service update-engine` is not available on Windows.
-- Settings -> Home update buttons are not supported on Windows yet.
-- Re-running `install.ps1` repairs a half-finished install; it is not an
-  updater.
+```powershell
+ciao update stage     # download, verify and prepare the next release; the engine keeps running
+ciao update apply     # wait for running chats, then replace the engine and restart it
+ciao update status    # what the last update did
+```
 
-This section will be replaced when #857 ships.
+`apply` stops admitting new turns, waits for running chats (up to ten minutes),
+and then hands the swap to a separate Task Scheduler task, `\Ciaobot\Updater`.
+That task stops `\Ciaobot\Engine`, waits until the engine's port is closed and
+its files are released, sets your current engine aside, reinstalls the new
+release from the files `stage` already downloaded and verified (no network is
+needed), and starts the engine again. If anything fails, it puts the previous
+engine back and starts that one, and `ciao update status` says why.
+
+A second task, `\Ciaobot\Recover`, runs at logon and once a minute while an
+update is in progress. If the machine restarts or the updater is killed in the
+middle of a swap, it rolls back within about a minute. It removes itself when
+the update has finished and nothing is left to clean up.
+
+What differs from macOS:
+
+- macOS moves the environment `stage` built into place. Windows cannot,
+  because its launchers name their environment by absolute path, so it
+  reinstalls the same wheel, checked against the digest recorded at staging,
+  with the same pinned dependencies, offline from uv's cache. If that cache was
+  cleared between `stage` and `apply`, the apply rolls back and asks you to
+  stage again.
+- If another program has a file in the old engine open (an antivirus scan, a
+  terminal still running `ciao`), deleting it is retried by the recovery task
+  rather than blocking the update.
+- `ciao service update-engine` is the macOS app's command and is not available
+  on Windows; use `ciao update`. Re-running `install.ps1` still repairs a
+  half-finished install.
 
 ## Uninstall
 
