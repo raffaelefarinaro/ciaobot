@@ -201,6 +201,58 @@ print(name, digest, size)
         return ([string]$lines[0]).Trim()
     }
 
+    # Whether this account has a Windows session right now (the console, a
+    # switched-away session, or Remote Desktop). The engine's logon task is an
+    # InteractiveToken task, so it only runs inside one: installed over SSH, or
+    # by `runas` before the account has ever signed in, `/Run` is accepted and
+    # nothing starts until the next sign-in. Asked of the session list
+    # (WTSEnumerateSessions), not `query user`: that output is localized, and
+    # quser.exe is not on every edition. A list that cannot be read answers
+    # True, which only keeps the wait below.
+    function Test-UserSignedIn {
+        if (-not ('CiaobotSessions' -as [type])) {
+            # One single-quoted line per C# line, not a here-string: the only
+            # here-string in this file is the verifier's (a test pins that).
+            $source = @(
+                'using System;'
+                'using System.Runtime.InteropServices;'
+                'public static class CiaobotSessions {'
+                '    [StructLayout(LayoutKind.Sequential)]'
+                '    struct SessionInfo { public int SessionId; public IntPtr WinStationName; public int State; }'
+                '    [DllImport("wtsapi32.dll", SetLastError = true)]'
+                '    static extern bool WTSEnumerateSessionsW(IntPtr server, int reserved, int version, out IntPtr info, out int count);'
+                '    [DllImport("wtsapi32.dll", SetLastError = true)]'
+                '    static extern bool WTSQuerySessionInformationW(IntPtr server, int session, int infoClass, out IntPtr buffer, out int bytes);'
+                '    [DllImport("wtsapi32.dll")]'
+                '    static extern void WTSFreeMemory(IntPtr memory);'
+                '    const int WTSUserName = 5, WTSDomainName = 7;'
+                '    static string Query(int session, int infoClass) {'
+                '        IntPtr buffer; int bytes;'
+                '        if (!WTSQuerySessionInformationW(IntPtr.Zero, session, infoClass, out buffer, out bytes)) return "";'
+                '        try { return Marshal.PtrToStringUni(buffer) ?? ""; } finally { WTSFreeMemory(buffer); }'
+                '    }'
+                '    static bool Same(string a, string b) { return string.Equals(a, b, StringComparison.OrdinalIgnoreCase); }'
+                '    public static bool SignedIn(string domain, string user) {'
+                '        IntPtr info; int count;'
+                '        if (!WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out info, out count)) return true;'
+                '        try {'
+                '            int size = Marshal.SizeOf(typeof(SessionInfo));'
+                '            for (int i = 0; i < count; i++) {'
+                '                SessionInfo s = (SessionInfo)Marshal.PtrToStructure(new IntPtr(info.ToInt64() + i * size), typeof(SessionInfo));'
+                '                if (Same(Query(s.SessionId, WTSUserName), user)) {'
+                '                    if (Same(Query(s.SessionId, WTSDomainName), domain)) return true;'
+                '                }'
+                '            }'
+                '            return false;'
+                '        } finally { WTSFreeMemory(info); }'
+                '    }'
+                '}'
+            ) -join "`n"
+            Add-Type -TypeDefinition $source
+        }
+        return [CiaobotSessions]::SignedIn($env:USERDOMAIN, $env:USERNAME)
+    }
+
     function Test-EngineAnswering([int]$Port) {
         # -UseBasicParsing because 5.1 would otherwise try to load the IE engine
         # to parse the response, which is not there on a server install.
@@ -829,14 +881,20 @@ print(name, digest, size)
         # it promised.
         $port = Read-WorkspacePort $workspace
         $healthy = $false
-        for ($attempt = 1; $attempt -le $HealthAttempts; $attempt++) {
+        # Without a session for this account the task cannot run yet, so there
+        # is nothing to wait for: say when it will start instead of spending
+        # the whole health wait on a port that cannot open.
+        $signedIn = Test-UserSignedIn
+        for ($attempt = 1; $signedIn -and $attempt -le $HealthAttempts; $attempt++) {
             if (Test-EngineAnswering $port) {
                 $healthy = $true
                 break
             }
             Start-Sleep -Seconds 1
         }
-        if (-not $healthy) {
+        if (-not $signedIn) {
+            Write-Host "Nobody is signed in to Windows as $env:USERDOMAIN\$env:USERNAME, so the engine starts the next time this account signs in."
+        } elseif (-not $healthy) {
             # The same sentence install-engine.sh prints: a warning, not a
             # failure, and not a rollback either - the task is registered, so the
             # engine is on its way up.
