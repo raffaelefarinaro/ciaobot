@@ -81,6 +81,11 @@ REVIEW_STATUSES = frozenset({"candidate", "reviewed", "archived", "trashed", "de
 # carries both paths and the inbound references that were rewritten to follow it.
 DISPOSITIONS = frozenset({"keep", "reopen", "trash", "restore", "delete", "complete", "vanished"})
 DECISION_DISPOSITIONS = frozenset({"keep"})
+# The vault-review actions that change a note or the queue's record of it. An
+# unattended turn may list and inspect and nothing else; the control plane
+# refuses every action here with `unattended_forbidden`. `decide` is the wire
+# action behind `ciao vault review keep`.
+ATTENDED_ONLY_ACTIONS = frozenset({"decide", "trash", "restore", "delete", "complete", "restore_completed"})
 _SUPERSEDED_RE = re.compile(r"\b(?:superseded|deprecated|obsolete|replaced by|moved to)\b", re.I)
 # Where a note is allowed to say it was superseded: its frontmatter and its
 # opening prose, before the first section heading.

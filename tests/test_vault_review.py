@@ -335,6 +335,72 @@ def test_an_unattended_turn_cannot_complete_or_restore_a_project(tmp_path: Path)
     assert (tmp_path / "projects" / "completed" / "demo" / "demo.md").is_file()
 
 
+@pytest.mark.parametrize("action", sorted(review.ATTENDED_ONLY_ACTIONS))
+def test_every_attended_only_action_is_refused_on_an_unattended_turn(action: str, tmp_path: Path) -> None:
+    """ATTENDED_ONLY_ACTIONS is the control plane's gate set, not a copy of it (#882).
+
+    The Workspace care prompt is written against this set, so a gate that grew
+    without the prompt being re-read would let the prompt name an action the
+    engine refuses. Reading the constant here keeps the two from drifting: an
+    action added to one and not the other fails here rather than in a nightly run.
+    """
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal")[0]
+    chat = SimpleNamespace(user_turn_count=1, user_turn_unattended={"0": True})
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object(), workspace_vault_root=lambda name: tmp_path),
+        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: chat),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="token-1", chat_id="chat-1", project_id="project-1",
+        workspace="personal", provider="opencode",
+    )
+
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.vault_review(
+            principal,
+            action,
+            candidate_id=candidate.candidate_id,
+            disposition="keep",
+            confirm=candidate.candidate_id,
+        )
+    assert refused.value.code == "unattended_forbidden"
+    # The refusal is the whole outcome: the note is untouched and nothing is
+    # recorded, whatever the action would have moved.
+    assert (tmp_path / "People" / "A.md").is_file()
+    assert read_ledger(tmp_path) == []
+
+
+def test_reading_the_queue_is_allowed_on_an_unattended_turn(tmp_path: Path) -> None:
+    """The other half of #882's set: `list` and `inspect` are the whole surface
+    an unattended run has on the review queue, so the guard must not touch them."""
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, McpPrincipal
+
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    chat = SimpleNamespace(user_turn_count=1, user_turn_unattended={"0": True})
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object(), workspace_vault_root=lambda name: tmp_path),
+        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: chat),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="token-1", chat_id="chat-1", project_id="project-1",
+        workspace="personal", provider="opencode",
+    )
+
+    listed = plane.vault_review(principal, "list")
+    assert listed["ok"] and listed["data"]["candidates"]
+    candidate = listed["data"]["candidates"][0]
+    assert plane.vault_review(principal, "inspect", path=candidate["path"])["ok"]
+
+
 def test_lookup_notes_need_more_than_unlinked_to_be_offered_for_retirement(tmp_path: Path) -> None:
     """Nothing links to a person note by design, so `unlinked` alone is not a finding.
 
