@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ciao.entity_types import stock_entity_type_registry
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
 from ciao.models import BridgeMode
+from ciao.os_support.paths import resolve_path
 from ciao.providers.opencode import OpencodeSettings
 
 if TYPE_CHECKING:
@@ -812,7 +813,7 @@ class CiaoConfig:
             raise ValueError("vault_root must not be empty")
         root = Path(cleaned).expanduser()
         if root.is_absolute():
-            resolved = root.resolve()
+            resolved = resolve_path(root)
             if resolved == Path(resolved.anchor):
                 raise ValueError("vault_root must not be the filesystem root")
             # Absolute compatibility roots are canonicalized when the registry
@@ -826,14 +827,14 @@ class CiaoConfig:
             candidate = self.vault_root / root
             if candidate.is_symlink():
                 raise ValueError("workspace vault folder must not be a symlink")
-            resolved = candidate.resolve()
+            resolved = resolve_path(candidate)
             if resolved.parent != self.vault_root:
                 raise ValueError(
                     "workspace vault folder must stay inside the vault root"
                 )
             return resolved
         candidate = self.workspace_root / root
-        resolved = candidate.resolve()
+        resolved = resolve_path(candidate)
         if resolved == Path(resolved.anchor):
             raise ValueError("vault_root must not be the filesystem root")
         if resolved != candidate:
