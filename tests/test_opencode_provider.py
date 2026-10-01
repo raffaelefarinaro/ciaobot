@@ -3071,3 +3071,53 @@ def test_extra_env_overlay_does_not_hide_an_exported_override(tmp_path, monkeypa
     assert resolve_opencode_binary(
         {"CIAO_OPENCODE_BIN": str(other)}
     ) == str(other.resolve())
+
+# ── a wrapper that leads nowhere ──────────────────────────────────────────
+
+
+def test_login_status_reports_a_broken_wrapper_as_broken_not_missing(
+    tmp_path: Path, monkeypatch
+):
+    """`resolve_opencode_binary` raises `ToolResolutionError` (an `OSError`) when
+    the wrapper on PATH leads to no single executable.
+
+    Before the guard this propagated out of `opencode_login_status`, which
+    `setup_status` calls, so one interrupted `npm install -g` made the whole
+    setup status raise. And reporting "not installed" would send the operator to
+    install something they already have.
+    """
+    from ciao.providers import opencode as mod
+    from ciao.os_support.tool_path import ToolResolutionError
+
+    def broken(_env=None):
+        raise ToolResolutionError(
+            r"C:\Users\me\AppData\Roaming\npm\opencode.cmd is the wrapper for "
+            r"'opencode' and launches 'C:\...\node_modules\pkg\bin\tool' through "
+            "an interpreter, so there is no single executable to run."
+        )
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", broken)
+
+    row = mod.opencode_login_status()
+
+    assert row["ok"] is False
+    assert row["auth"] == "broken"
+    assert row["detail"].startswith("installed but broken: ")
+    assert "node_modules" in row["detail"]
+
+
+async def test_the_ephemeral_server_degrades_when_the_wrapper_is_broken(
+    tmp_path: Path, monkeypatch
+):
+    """The model catalogue asks only "can this start a server"; a wrapper that
+    leads nowhere answers no, it does not raise into a settings route."""
+    from ciao.providers import opencode as mod
+    from ciao.os_support.tool_path import ToolResolutionError
+
+    def broken(_env=None):
+        raise ToolResolutionError("no executable behind the wrapper")
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", broken)
+
+    async with mod._EphemeralServer(tmp_path) as client:
+        assert client is None
