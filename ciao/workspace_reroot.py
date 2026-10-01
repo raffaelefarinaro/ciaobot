@@ -1553,6 +1553,16 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
 # migration writes into as it runs. None of them are moved by the migration, so
 # excluding them costs the rollback nothing. `.env.example` is deliberately not
 # matched — it is documentation.
+#
+# Every entry is read at ANY depth, so each one is either unanchored (no interior
+# slash, which gitignore already matches at every level) or carries its own
+# `**/` prefix. That is not redundancy. An entry like `.obsidian/workspace*` has
+# an interior slash, which anchors a gitignore pattern to the directory holding
+# the `.gitignore`, so written bare it would exclude only the root copy while the
+# pathspec below matched the nested one — a path excluded from the snapshot when
+# it happened to be pre-staged and captured when it did not. Obsidian's workspace
+# file is per-vault UI state, never worth a rollback point, so it is excluded
+# wherever it appears.
 _SNAPSHOT_IGNORES: tuple[str, ...] = (
     ".runtime/",
     ".env",
@@ -1561,7 +1571,7 @@ _SNAPSHOT_IGNORES: tuple[str, ...] = (
     "node_modules/",
     ".venv/",
     ".DS_Store",
-    ".obsidian/workspace*",
+    "**/.obsidian/workspace*",
 )
 
 # The statuses that mean there is no usable rollback point, shared by both
@@ -1604,6 +1614,14 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
     the excluded paths from the INDEX ONLY — ``git rm --cached``, which leaves
     every working file on disk untouched. The exclusion is about what the
     snapshot records, not about deleting anything from the install.
+
+    And the correction is not trusted: an owner's ``.gitignore`` can re-admit a
+    credential the append could not override (a ``!`` negation placed after our
+    entry, or a nested ``.gitignore`` we never read), so the index is read back
+    with the same pathspecs before the commit. Anything still staged, and any
+    failure to run the check at all, is an ``unstage_failed`` refusal — the one
+    outcome this function must never produce is a snapshot commit holding a
+    secret while reporting success.
     """
     root = Path(install_root).resolve()
     out: dict[str, Any] = {"status": "", "created_repo": False, "commit": ""}
@@ -1657,6 +1675,36 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
         out["status"] = "add_failed"
         out["error"] = add_out.strip()
         return out
+    # VERIFY, do not assume. The unstage above is a best effort, and an owner's
+    # own `.gitignore` can undo it in two ways it cannot be defended against by
+    # appending: a negation AFTER our entry (`.env` then `!.env`, which
+    # `_write_snapshot_gitignore` skips because `.env` is already mentioned) and
+    # a nested `sub/.gitignore` saying `!.env`, which applies to the whole subtree
+    # and is never read by the exclusion write. Either one puts the secret back
+    # into the index on `git add -A`, which is exactly what #811 is about.
+    #
+    # So the index is read back with the same pathspecs and the commit is made
+    # only if nothing came back. A verification that cannot run counts as not
+    # clean: an unverifiable snapshot is not a safety net.
+    check_code, check_out = run_git(
+        root, "ls-files", "-z", "--", *_snapshot_ignore_pathspecs()
+    )
+    if check_code != 0:
+        out["status"] = "unstage_failed"
+        out["error"] = (
+            "could not verify the snapshot excludes credentials: "
+            f"{check_out.strip()}"
+        )
+        return out
+    leaked = [name for name in check_out.split("\0") if name]
+    if leaked:
+        out["status"] = "unstage_failed"
+        out["error"] = (
+            "still staged for the snapshot after the credential exclusions: "
+            + ", ".join(sorted(leaked)[:8])
+            + (" and more" if len(leaked) > 8 else "")
+        )
+        return out
     commit_code, commit_out = run_git(
         root,
         "-c",
@@ -1676,21 +1724,27 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
     return out
 
 
-def _unstage_snapshot_ignores_args() -> list[str]:
-    """The ``git rm --cached`` invocation that drops excluded paths from the index.
+def _snapshot_ignore_pathspecs() -> list[str]:
+    """``_SNAPSHOT_IGNORES`` in the one pathspec spelling both callers share.
 
-    Built from ``_SNAPSHOT_IGNORES`` rather than spelled out a second time, and
-    translated per entry into the ``:(glob)`` spelling git needs:
+    The unstage and the verification that guards the commit must agree exactly —
+    a verification looking for something the unstage did not remove would either
+    pass a dirty index or refuse a clean one — so there is one translation here
+    and both read it.
 
-    - a trailing slash means a directory, so it becomes ``<name>/**`` — the
-      pathspec ``secrets/`` alone matches nothing, because git reads it as a
-      literal path with an unusable trailing slash;
-    - every entry is prefixed ``**/`` because a gitignore pattern without a
-      leading slash matches at ANY depth. ``client/.runtime/`` holds a
-      credentialed config in exactly the way ``.runtime/`` does, and the
-      exclusion has to mean the same thing in both places — a root-anchored
-      ``.runtime/`` would silently stop matching and re-open the hole #811
-      closed.
+    Per entry:
+
+    - a trailing slash means a directory, so it becomes ``<name>/**``. The
+      pathspec ``secrets/`` alone matches NOTHING, because git reads it as a
+      literal path with an unusable trailing slash, which is the shape a
+      verification would silently pass on.
+    - an unanchored entry is prefixed ``**/``, because a gitignore pattern with
+      no interior slash matches at ANY depth. ``client/.runtime/`` holds a
+      credentialed config in exactly the way ``.runtime/`` does, and a
+      root-anchored ``.runtime/`` would silently stop matching and re-open the
+      hole #811 closed.
+    - an entry that already carries its own ``**/`` is left alone, so prefixing
+      is not applied twice.
 
     ``:(glob)`` is required, not decoration, and both of its effects matter here.
     Verified against git rather than assumed: in the DEFAULT pathspec matcher a
@@ -1699,6 +1753,18 @@ def _unstage_snapshot_ignores_args() -> list[str]:
     the root-level ``.env`` — the very file this exists to protect. With
     ``:(glob)``, ``*`` stops at ``/`` and ``**`` means "any number of
     directories, including none".
+    """
+    pathspecs: list[str] = []
+    for entry in _SNAPSHOT_IGNORES:
+        directory = entry.endswith("/")
+        name = entry[:-1] if directory else entry
+        prefix = "" if name.startswith("**/") else "**/"
+        pathspecs.append(f":(glob){prefix}{name}/**" if directory else f":(glob){prefix}{name}")
+    return pathspecs
+
+
+def _unstage_snapshot_ignores_args() -> list[str]:
+    """The ``git rm --cached`` invocation that drops excluded paths from the index.
 
     ``--force`` is what makes this work on a repository with no HEAD: git
     otherwise refuses to drop a path whose staged content differs from both the
@@ -1710,12 +1776,6 @@ def _unstage_snapshot_ignores_args() -> list[str]:
     The pathspecs come from the fixed ignore list and are passed after ``--``,
     so nothing an owner wrote is ever interpreted as a git argument.
     """
-    pathspecs: list[str] = []
-    for entry in _SNAPSHOT_IGNORES:
-        name = entry[:-1] if entry.endswith("/") else entry
-        if entry.endswith("/"):
-            name = f"{name}/**"
-        pathspecs.append(f":(glob)**/{name}")
     return [
         "rm",
         "--cached",
@@ -1724,7 +1784,7 @@ def _unstage_snapshot_ignores_args() -> list[str]:
         "-f",
         "--ignore-unmatch",
         "--",
-        *pathspecs,
+        *_snapshot_ignore_pathspecs(),
     ]
 
 

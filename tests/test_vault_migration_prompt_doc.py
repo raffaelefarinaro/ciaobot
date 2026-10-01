@@ -582,6 +582,35 @@ def test_the_snapshot_unstages_the_excluded_paths_and_says_it_does() -> None:
         )
 
 
+def test_the_snapshot_verifies_itself_and_says_so() -> None:
+    """The document must state that the unstage is verified, and what it does.
+
+    The unstage is a best effort: an owner's `.gitignore` can put a credential
+    back on the very next `git add -A` (a `!.env` after our entry, or a
+    `sub/.gitignore` saying `!.env`, which nothing reads).
+    `ensure_rollback_history` re-reads the index before committing and returns
+    `unstage_failed` if anything is still staged. A reader who has a `!` line
+    needs to know the run refuses and leaves their files alone, or they will read
+    the refusal as damage.
+    """
+    doc = _flat()
+
+    for fragment in (
+        "That is not taken on trust",
+        "`!.env` placed after them",
+        "containing `!.env`, which applies to everything under `sub/`",
+        "the staging area is read back immediately before the commit",
+        "if anything in `_SNAPSHOT_IGNORES` is still staged the migration refuses",
+        "`unstage_failed`",
+        "makes no commit at all",
+        "Your files are still on disk either way",
+    ):
+        assert fragment in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md does not tell the reader that the "
+            f"snapshot is verified and refuses when it cannot be proven clean: {fragment!r}"
+        )
+
+
 def test_unrehomed_people_is_documented_as_a_receipt_check() -> None:
     """The notice reports the absence of a receipt, not a scan of the vault.
 

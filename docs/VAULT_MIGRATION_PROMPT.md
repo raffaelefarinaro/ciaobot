@@ -185,7 +185,8 @@ refuses outright when:
 - the primary workspace is not registered, so the guide's regions and the skill
   catalog have nowhere to go;
 - the install has no git history to roll back to and one could not be created
-  (no `git` binary, or the snapshot commit failed).
+  (no `git` binary, a credential that could not be kept out of the snapshot, or
+  the snapshot commit failed).
 
 Clear the refusals, re-run the plan, and watch the list shrink. The ones that
 need you rather than a file move: a symlink or unregistered directory, and a
@@ -205,9 +206,19 @@ A `.gitignore` does not unstage anything, so those excluded paths are also
 dropped from git's **staging area** before the snapshot is taken — otherwise a
 `.env` you had already run `git add` on would go into the commit anyway. Nothing
 is deleted from disk: the files stay exactly where they are, they are only left
-out of the snapshot, and every other file you had staged is still in it. What the
-gate needs from *you* is that your own uncommitted work is committed or stashed,
-with a message that says what it is. Do not stage the whole tree yourself to satisfy the check:
+out of the snapshot, and every other file you had staged is still in it.
+
+That is not taken on trust. A `.gitignore` of your own can re-admit a file the
+exclusions removed — a `!` line such as `!.env` placed after them, or a
+`sub/.gitignore` containing `!.env`, which applies to everything under `sub/` and
+is never read by the exclusion write. So the staging area is read back
+immediately before the commit, and **if anything in `_SNAPSHOT_IGNORES` is still
+staged the migration refuses** (`unstage_failed`, one of the refusals listed
+above) and makes no commit at all. Your files are still on disk either way;
+remove or move the `!` line and re-run.
+
+What the gate needs from *you* is that your own uncommitted work is committed or
+stashed, with a message that says what it is. Do not stage the whole tree yourself to satisfy the check:
 `git add -A` as a backup step commits whatever happens to be lying around, and
 the snapshot the command takes is not the whole tree either — the vault history
 is the thing you will want to read if a migration goes wrong.

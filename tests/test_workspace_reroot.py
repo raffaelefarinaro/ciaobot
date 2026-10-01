@@ -2651,13 +2651,33 @@ def test_a_nested_excluded_path_is_dropped_from_the_snapshot(tmp_path: Path) -> 
 
 
 def test_the_snapshot_pathspecs_match_the_ignore_set() -> None:
-    """The pathspec list is derived from the ignore set, so the two cannot drift.
+    """The exact pathspec list, pinned rather than recomputed.
+
+    Spelling it out here is the point: a test that re-derives the expectation
+    from the same rule the code uses passes whatever that rule becomes. The
+    unstage and the verification read this one list, so a divergence between
+    them has to show up as a change to this literal.
 
     And the spellings are the ones that actually match: `:(glob)` is what makes
     `**` mean "any depth" rather than "any one directory component", and a
     directory entry needs the `/**` suffix or it matches nothing at all. Both
     were checked against git rather than assumed.
     """
+    assert workspace_reroot._snapshot_ignore_pathspecs() == [
+        ":(glob)**/.runtime/**",
+        ":(glob)**/.env",
+        ":(glob)**/.credentials",
+        ":(glob)**/secrets/**",
+        ":(glob)**/node_modules/**",
+        ":(glob)**/.venv/**",
+        ":(glob)**/.DS_Store",
+        ":(glob)**/.obsidian/workspace*",
+    ]
+    # One pathspec per ignore entry, so the two cannot drift apart.
+    assert len(workspace_reroot._snapshot_ignore_pathspecs()) == len(
+        workspace_reroot._SNAPSHOT_IGNORES
+    )
+
     args = workspace_reroot._unstage_snapshot_ignores_args()
 
     assert args[0] == "rm"
@@ -2668,14 +2688,146 @@ def test_the_snapshot_pathspecs_match_the_ignore_set() -> None:
     )
     assert "--ignore-unmatch" in args, "an index with nothing to drop must be a no-op"
     assert "--" in args, "the pathspecs must be passed after --, never as arguments"
-    pathspecs = args[args.index("--") + 1:]
-    for entry in workspace_reroot._SNAPSHOT_IGNORES:
-        name = entry[:-1] if entry.endswith("/") else entry
-        expected = f":(glob)**/{name}/**" if entry.endswith("/") else f":(glob)**/{name}"
-        assert expected in pathspecs, f"{entry} produced no matching pathspec"
-    assert len(pathspecs) == len(workspace_reroot._SNAPSHOT_IGNORES), (
-        "one pathspec per ignore entry, and no strays"
+    assert args[args.index("--") + 1:] == workspace_reroot._snapshot_ignore_pathspecs(), (
+        "the unstage must unstage exactly what the verification looks for"
     )
+
+
+def _no_head(install: Path) -> bool:
+    return "Needed a single revision" in _git(install, "rev-parse", "--verify", "HEAD")
+
+
+def test_a_negated_gitignore_refuses_instead_of_committing_the_secret(
+    tmp_path: Path,
+) -> None:
+    """An owner's own `!` negation wins over the exclusion we appended.
+
+    `_write_snapshot_gitignore` skips an entry the file already mentions, so a
+    `.gitignore` reading `.env` then `!.env` looks excluded, is not, and the
+    `git add -A` puts the credential straight back into the snapshot. The unstage
+    cannot help either: it runs BEFORE the add, and the add follows the owner's
+    file. Appending our `.env` after their `!.env` would win the ignore-file
+    contest but would silently overrule a rule the owner wrote deliberately, so
+    the snapshot is verified and refused instead.
+
+    The refusal has to be total: no commit at all, and the file still on disk.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    _git(install, "init", "-b", "main")
+    (install / ".gitignore").write_text(".env\n!.env\n", encoding="utf-8")
+
+    history = ensure_rollback_history(install)
+
+    assert history["status"] == "unstage_failed"
+    assert history["commit"] == "", "a snapshot with a credential in it must not be made"
+    assert ".env" in history["error"], (
+        "the refusal has to name the path, or the operator cannot act on it"
+    )
+    assert _no_head(install), "the refusal must leave the repository with no commits"
+    assert (install / ".env").read_text(encoding="utf-8") == "PWA_AUTH_TOKEN=super-secret\n"
+
+
+def test_a_nested_negated_gitignore_refuses_instead_of_committing_the_secret(
+    tmp_path: Path,
+) -> None:
+    """The same hole one level down, through a file nobody reads.
+
+    `sub/.gitignore` saying `!.env` applies to the whole subtree and is never
+    seen by `_write_snapshot_gitignore`, which only reads the install root's
+    file. A project vendored into the install — a client of yours, an agent's own
+    checkout — is an ordinary thing to have there.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    nested = install / "sub"
+    nested.mkdir()
+    (nested / ".gitignore").write_text("!.env\n", encoding="utf-8")
+    (nested / ".env").write_text("PWA_AUTH_TOKEN=super-secret\n", encoding="utf-8")
+    _git(install, "init", "-b", "main")
+
+    history = ensure_rollback_history(install)
+
+    assert history["status"] == "unstage_failed"
+    assert history["commit"] == ""
+    assert "sub/.env" in history["error"]
+    assert _no_head(install)
+    assert (nested / ".env").read_text(encoding="utf-8") == "PWA_AUTH_TOKEN=super-secret\n"
+
+
+def test_a_failed_verification_refuses_rather_than_committing(tmp_path: Path) -> None:
+    """A check that cannot run is not a check that passed.
+
+    Mocking `run_git` to fail the `ls-files` is the only honest way to reach it —
+    an unreadable index or a git that refuses the pathspec would all land here.
+    Committing anyway would make the outcome depend on a command nobody watched.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    _git(install, "init", "-b", "main")
+    real_run_git = workspace_reroot.run_git
+
+    def refuse_ls_files(root: Path, *args: str) -> tuple[int, str]:
+        if args[:2] == ("ls-files", "-z"):
+            return 128, "fatal: unable to read the index"
+        return real_run_git(root, *args)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(workspace_reroot, "run_git", refuse_ls_files)
+        history = ensure_rollback_history(install)
+
+    assert history["status"] == "unstage_failed"
+    assert history["commit"] == ""
+    assert "could not verify" in history["error"]
+    assert _no_head(install)
+
+
+def test_the_refusal_reaches_the_operator_as_a_migration_refusal(
+    tmp_path: Path,
+) -> None:
+    """`unstage_failed` is in `_HISTORY_REFUSALS`, so `apply` refuses on it.
+
+    Otherwise the function would return a refusal status the caller does not read
+    and the migration would carry on over an install whose rollback point could
+    not be taken — which is the situation the whole snapshot exists to prevent.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    _git(install, "init", "-b", "main")
+    (install / ".gitignore").write_text(".env\n!.env\n", encoding="utf-8")
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    assert result["git_history"]["status"] == "unstage_failed"
+    assert any("no git history to roll back" in r for r in result["refusals"])
+    # Nothing moved, which is the point of refusing rather than committing.
+    assert (install / "memory-vault" / "personal" / "People" / "Peter.md").is_file()
+
+
+def test_a_nested_workspace_file_is_excluded_without_being_pre_staged(
+    tmp_path: Path,
+) -> None:
+    """`.obsidian/workspace*` means the same thing at any depth, staged or not.
+
+    It was root-anchored in the ignore file while the pathspec was `**/`-prefixed,
+    so the two disagreed: a nested workspace file was dropped when it happened to
+    be staged and captured when it did not. The ignore entry carries its own
+    `**/` now, so the two say the same thing.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    nested = install / "sub" / ".obsidian"
+    nested.mkdir(parents=True)
+    (nested / "workspace.json").write_text("{}\n", encoding="utf-8")
+    (nested / "app.json").write_text("{}\n", encoding="utf-8")
+    _git(install, "init", "-b", "main")
+
+    history = ensure_rollback_history(install)
+    assert history["status"] == "seeded_empty_repo"
+
+    tracked = _tracked(install, history["commit"])
+    assert "sub/.obsidian/workspace.json" not in tracked
+    assert "sub/.obsidian/app.json" in tracked, (
+        "the owner's own Obsidian configuration is not a snapshot exclusion, and the "
+        "glob must not have grown into a match for the whole directory"
+    )
+    assert (nested / "workspace.json").is_file(), "nothing is deleted from disk"
 
 
 def test_an_empty_directory_does_not_refuse_the_migration(tmp_path: Path) -> None:
