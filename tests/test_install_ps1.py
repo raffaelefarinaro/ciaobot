@@ -779,3 +779,14 @@ def test_install_ps1_is_ps51_safe() -> None:
 
     SCRIPT.read_bytes().decode("ascii")
     assert not re.search(r"^\s*exit\b", SCRIPT_TEXT, re.MULTILINE)
+
+def test_uninstall_keeps_the_bin_dir_on_path_while_anything_is_still_in_it() -> None:
+    # #904: the PATH entry is uv's tool bin dir. When this installer installed
+    # uv there, uv.exe stays after -Uninstall, and so do the user's other uv
+    # tools; the entry is removed only once the directory is empty, which means
+    # after the tool (and its launchers) is gone.
+    undo = _undo_source()
+    assert undo.index("tool', 'uninstall', 'ciaobot") < undo.index("Remove-UserPathEntry")
+    assert "Get-ChildItem -LiteralPath $PathEntry -Force -ErrorAction Stop" in undo
+    assert "if ($left.Count -gt 0) {" in undo
+    assert "Kept $PathEntry on your PATH: it still holds $names." in undo
