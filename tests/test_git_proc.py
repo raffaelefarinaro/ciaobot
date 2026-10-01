@@ -15,12 +15,23 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git
+from ciao import git_proc
+from ciao.git_proc import GIT_TIMEOUT_DETAIL, run_git, run_git_sync
+from tests.test_os_support_processes import _beats_stopped, _leader
+
+# The fake `git` below is a shell script; the tree kill itself is covered on
+# every OS by `test_timeout_kills_the_whole_tree_on_every_os`.
+posix_fake_git = pytest.mark.skipif(
+    sys.platform == "win32", reason="the fake git is a POSIX shell script"
+)
 
 
 def _open_fd_count() -> int:
@@ -51,6 +62,7 @@ def _alive(pid: int) -> bool:
     return True
 
 
+@posix_fake_git
 @pytest.mark.asyncio
 async def test_timeout_does_not_leak_file_descriptors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -80,6 +92,7 @@ async def test_timeout_does_not_leak_file_descriptors(
     assert leaked <= 0, f"leaked {leaked} descriptors across 10 timeouts"
 
 
+@posix_fake_git
 @pytest.mark.asyncio
 async def test_cancel_reaps_the_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -120,6 +133,7 @@ async def test_cancel_reaps_the_child(
         pytest.fail(f"grandchild {grandchild} survived the cancel")
 
 
+@posix_fake_git
 @pytest.mark.asyncio
 async def test_timeout_kills_the_grandchild(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -147,6 +161,7 @@ async def test_timeout_kills_the_grandchild(
         pytest.fail(f"grandchild {grandchild} survived the timeout")
 
 
+@posix_fake_git
 @pytest.mark.asyncio
 async def test_runs_in_its_own_process_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -160,6 +175,7 @@ async def test_runs_in_its_own_process_group(
     assert int(out.strip()) != os.getpgid(0)
 
 
+@posix_fake_git
 @pytest.mark.asyncio
 async def test_success_returns_untrimmed_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -174,6 +190,7 @@ async def test_success_returns_untrimmed_output(
     assert err == ""
 
 
+@posix_fake_git
 @pytest.mark.asyncio
 async def test_nonzero_exit_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -187,6 +204,7 @@ async def test_nonzero_exit_is_reported(
     assert err.strip() == "boom"
 
 
+@posix_fake_git
 @pytest.mark.asyncio
 async def test_no_timeout_waits_for_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -198,3 +216,47 @@ async def test_no_timeout_waits_for_completion(
     rc, out, _ = await run_git(tmp_path, "fetch")
     assert rc == 0
     assert out.strip() == "done"
+
+
+
+@pytest.mark.asyncio
+async def test_timeout_kills_the_whole_tree_on_every_os(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Python stand-in for `git push`: it forks a heartbeat, then hangs.
+
+    Only the program is swapped; the spawn options, the tree and the reap are
+    `run_git`'s own. A heartbeat that keeps changing after the timeout is a
+    grandchild the tree kill missed.
+    """
+    beat = tmp_path / "beat"
+    leader = _leader(beat, then="time.sleep(300)")
+    real_exec = asyncio.create_subprocess_exec
+
+    async def python_as_git(program, *args, **kwargs):  # type: ignore[no-untyped-def]
+        assert program == "git"
+        return await real_exec(*leader, **kwargs)
+
+    monkeypatch.setattr(git_proc.asyncio, "create_subprocess_exec", python_as_git)
+    rc, _, err = await run_git(tmp_path, "push", timeout=5.0)
+    assert (rc, err) == (-1, GIT_TIMEOUT_DETAIL)
+    assert beat.exists(), "the grandchild never started, so nothing was tested"
+    assert _beats_stopped(beat), "the grandchild survived the timeout"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a real git")
+def test_sync_output_is_decoded_as_utf8_on_every_os(tmp_path: Path) -> None:
+    """Git writes UTF-8; decoding with the locale's code page (cp1252 on a
+    Western Windows) turned `café ✓` into mojibake rather than failing."""
+    subject = "café ✓ naïve"
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", subject],
+        check=True,
+        env=env,
+    )
+    rc, out, _ = run_git_sync(tmp_path, "log", "-1", "--format=%s")
+    assert rc == 0
+    assert out.strip() == subject

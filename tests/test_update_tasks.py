@@ -949,7 +949,7 @@ async def test_a_downgrade_hides_a_task_and_keeps_its_state(
 # ── The shipped catalog, and the layer over an injected one ─────────────────
 
 
-def test_the_shipped_catalog_ships_one_task_and_both_probes_exist(
+def test_the_shipped_catalog_ships_its_tasks_and_both_probes_exist(
     tmp_path: Path,
 ) -> None:
     """The catalog's names and this module's implementations are the same set.
@@ -958,8 +958,9 @@ def test_the_shipped_catalog_ships_one_task_and_both_probes_exist(
     only name a probe that exists, so there is no state in which the packaged
     catalog offers follow-up work this engine cannot decide or verify. Before
     #728-E both registries were empty and the catalog shipped no task; the first
-    real task landed with its detector and its completion check, and the two have
-    to keep landing together.
+    real task landed with its detector and its completion check, and #833's
+    install-scoped re-home task landed the same way. Every probe has to keep
+    landing with its row.
     """
     catalog = load_catalog()
 
@@ -967,16 +968,21 @@ def test_the_shipped_catalog_ships_one_task_and_both_probes_exist(
         "the packaged catalog has diagnostics: "
         f"{[(d.code, d.message) for d in catalog.diagnostics]}"
     )
-    assert [task.id for task in catalog.tasks] == ["learnings-cleanup"]
+    assert [task.id for task in catalog.tasks] == [
+        "learnings-cleanup",
+        "unrehomed-people",
+    ]
     assert update_task_catalog.DETECTORS == set(update_tasks.DETECTOR_FUNCTIONS)
     assert update_task_catalog.COMPLETION_CHECKS == set(
         update_tasks.COMPLETION_FUNCTIONS
     )
-    # And the shipped task actually reaches its probe over a real workspace,
-    # rather than answering `detector_not_implemented` on a Home render. An empty
-    # vault has no learnings document, so the honest answer here is
-    # `not_applicable` — the postcondition is absent, and that is a claim rather
-    # than an admission that nothing ran.
+    # And every shipped task actually reaches its probe over a real config,
+    # rather than answering `detector_not_implemented` on a Home render. This
+    # fixture registers ONE workspace and an empty vault, which is the honest
+    # `not_applicable` for both: an empty vault has no Learnings document, and a
+    # single workspace has no counterpart for a person note to be misfiled from.
+    # That is a claim rather than an admission that nothing ran — and it is the
+    # same answer a fresh install gets from both tasks.
     for task in catalog.tasks:
         result = update_tasks.apply_detector(
             task, config=_config(tmp_path), workspace="personal"

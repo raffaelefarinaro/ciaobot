@@ -42,7 +42,7 @@ class PushManager:
     def _load_or_create_keys(self) -> None:
         if self._vapid_path.exists():
             try:
-                data = json.loads(self._vapid_path.read_text())
+                data = json.loads(self._vapid_path.read_text(encoding="utf-8"))
                 self._private_pem = data["private_pem"]
                 self._public_b64 = data["public_b64"]
                 # Older files may not have the raw key; derive + persist it.
@@ -77,7 +77,7 @@ class PushManager:
             "private_pem": self._private_pem,
             "private_raw_b64": self._private_raw_b64,
             "public_b64": self._public_b64,
-        }))
+        }), encoding="utf-8")
 
     @staticmethod
     def _derive_raw_from_pem(pem: str) -> str:
@@ -104,13 +104,13 @@ class PushManager:
         if not self._subs_path.exists():
             return
         try:
-            self._subs = json.loads(self._subs_path.read_text()).get("subscriptions", [])
+            self._subs = json.loads(self._subs_path.read_text(encoding="utf-8")).get("subscriptions", [])
         except Exception:
             logger.exception("Failed to load subscriptions")
             self._subs = []
 
     def _save_subs(self) -> None:
-        self._subs_path.write_text(json.dumps({"subscriptions": self._subs}, indent=2))
+        self._subs_path.write_text(json.dumps({"subscriptions": self._subs}, indent=2), encoding="utf-8")
 
     def add(self, subscription: dict[str, Any]) -> None:
         endpoint = subscription.get("endpoint")

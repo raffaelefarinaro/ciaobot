@@ -1383,7 +1383,17 @@ if [ "$migrate_path" != client ]; then
     # Reload the agent so launchd drops any job definition it already holds
     # (another engine's), otherwise `service start` restarts the old one.
     [ "$no_start" -ne 0 ] || set -- "$@" --load-launchd
-    install_step "ciao setup failed" "$ciao" setup "$@" >/dev/null
+    # `ciao setup` reports a workspace whose memory regions could not be set
+    # up by exiting 3, which is not a failed install: everything else it
+    # scaffolds is there, and a rollback would throw all of that away. Only
+    # that one code is tolerated.
+    setup_rc=0
+    "$ciao" setup "$@" >/dev/null || setup_rc=$?
+    case "$setup_rc" in
+        0) ;;
+        3) echo "warning: ciao setup could not set up memory regions (see the warning above); continuing install" >&2 ;;
+        *) abort_install "ciao setup failed" ;;
+    esac
 fi
 
 if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then

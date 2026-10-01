@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from ciao.migration_notices import cached_links, vault_location_findings
 from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
@@ -307,55 +308,32 @@ def _detect_github_star(context: DetectionContext) -> list[OperatorAction]:
 def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
     """A workspace vault kept outside its standard folder is a chat-only fix.
 
-    Mirrors the ``vault_outside_vault_root`` notice: the standard location is a
-    fact of the registry, not a scan, so comparing two resolved paths is cheap.
-    Moving an existing vault is a user-owned decision with possible conflicts,
-    so this is a chat action, never a mechanical run.
+    The condition and every sentence about it come from
+    ``ciao.migration_notices.vault_location_findings``, which the OS audit reads
+    for the same notice — the standard location is a fact of the registry, not a
+    scan, so one predicate serves both surfaces and neither can drift from the
+    other. Moving an existing vault is a user-owned decision with possible
+    conflicts, so this is a chat action, never a mechanical run.
     """
-    config = context.config
-    resolver = getattr(config, "workspace_vault_root", None)
-    standardizer = getattr(config, "canonical_workspace_vault_root", None)
-    lister = getattr(config, "workspace_names", None)
-    if not callable(resolver) or not callable(standardizer) or not callable(lister):
-        return []
     actions: list[OperatorAction] = []
-    for name in lister():
-        try:
-            actual = Path(resolver(name)).resolve()
-            standard = Path(standardizer(name)).resolve()
-        except Exception:  # noqa: BLE001 — advisory; a bad registry must not fail
-            continue
-        if actual == standard or not actual.is_dir():
-            continue
+    for finding in vault_location_findings(context.config):
         actions.append(
             OperatorAction(
-                id=f"vault-location:{name}",
+                id=f"vault-location:{finding.workspace}",
                 kind="vault-location",
                 severity=20,
-                title=f"The {name} vault is not in its standard folder",
-                detail=(
-                    f"Workspace '{name}' keeps its vault at {actual}; its standard "
-                    f"location is {standard}."
-                ),
+                title=finding.title,
+                detail=finding.detail,
                 glyph="⌂",
-                workspace=name,
+                workspace=finding.workspace,
                 chat_label="Fix in chat",
                 chat_prompt=(
-                    f"Preview the move with `ciao vault-relocate {name}`, then "
-                    f"apply it with `ciao vault-relocate {name} --apply`. It moves "
-                    "this workspace's own content into the standard folder "
-                    "automatically and updates the registry; reverse it exactly "
-                    f"with `ciao vault-relocate {name} --undo`. If the preview "
-                    "lists anything it could not classify (a symlink, most often), "
-                    "resolve only those with the operator — don't ask about the "
-                    "move itself, and don't re-derive it by hand. If it refuses "
-                    "because the vault lives outside the install's git worktree "
-                    "(an external or hand-pinned vault root), that is a real "
-                    "limitation, not something to work around — tell the operator "
-                    "rather than moving it by hand yourself. After a successful "
-                    "apply, tell the operator Ciaobot needs a restart (Settings -> "
-                    "Restart) before the new location takes effect everywhere, "
-                    "including in this chat."
+                    f"{finding.remedy} If the preview lists anything it could not "
+                    "classify, resolve only those with the operator — don't ask "
+                    "about the move itself, and don't re-derive it by hand. If it "
+                    "refuses, that is a real limitation rather than something to "
+                    "work around: say what it refused and why, and let the "
+                    "operator decide."
                 ),
             )
         )
@@ -514,59 +492,37 @@ def _detect_vault_vocabulary(context: DetectionContext) -> list[OperatorAction]:
 def _detect_unmigrated_links(context: DetectionContext) -> list[OperatorAction]:
     """A vault still written in the retired wikilink dialect.
 
-    Cheap path: an ``existing``-mode vault is the only one that can carry
-    wikilinks (a ``scratch`` install is created conformant, so it is skipped
-    entirely and reaches zero), and an absent link-migration receipt is the
-    signal it was never converted. The exact wikilink walk belongs to the
-    button press, never to deciding to draw the tile.
-    """
-    config = context.config
-    runtime = context.runtime
-    if runtime is None:
-        return []
-    mode = getattr(config, "vault_mode", "scratch") or "scratch"
-    if mode != "existing":
-        return []
-    try:
-        from ciao.vault_migrate_links import read_receipt
+    Applicability and wording come from ``ciao.migration_notices``, which the OS
+    audit reads for the same notice, so the two surfaces ask one question and
+    cannot answer it differently. This side of the probe reads a verdict a scan
+    already established — it runs on every app open, every window focus and every
+    60s poll, and establishing the verdict means walking the vault, which is the
+    one cost the Home contract is written against. The route starts that scan
+    detached (``routes_api._refresh_links_scan``), so a card appears a poll or two
+    after the first scan rather than on the first render.
 
-        receipt = read_receipt(runtime)
-    except Exception:  # noqa: BLE001
-        logger.exception("operator actions: link migration receipt read failed")
-        return []
-    if receipt is not None:
+    What that buys is a card that is true when it is drawn: a finding exists only
+    when a walk actually found a wikilink, so the tile names a note instead of
+    inferring one from a receipt's absence, and an install whose last scan found
+    nothing gets no card at all. That is how this detector reaches zero for a
+    reason other than "a migration ran" — and it is why the vault's mode is not
+    part of the question, since a vault Ciaobot created is also the one an operator
+    can hand a wikilink.
+    """
+    finding = cached_links(context.config, context.runtime)
+    if finding is None:
         return []
     return [
         OperatorAction(
             id="vault-unmigrated-links",
             kind="unmigrated-links",
             severity=20,
-            # Worded conditionally on purpose. This detector runs on every app
-            # open and window focus, so it cannot call has_unmigrated_links,
-            # which walks the vault. It knows only that the vault was adopted
-            # and no migration receipt exists, which does NOT establish that a
-            # wikilink is present: an adopted vault written in markdown links
-            # from the start satisfies both and contains nothing to convert.
-            # The audit's own notice does run the accurate check and may
-            # legitimately stay silent where this tile speaks.
-            title="The vault may still use the retired wikilink dialect",
-            detail=(
-                "This vault was adopted and no link migration has been recorded, "
-                "so it may still contain `[[wikilinks]]`, which nothing reads as "
-                "graph edges, backlinks, or clickable links. The preview below "
-                "reports exactly what would change, and finds nothing if the "
-                "vault is already clean."
-            ),
+            title=finding.title,
+            detail=finding.detail,
             glyph="🔗",
             workspace="",
             chat_label="Convert in chat",
-            chat_prompt=(
-                "The vault may still contain retired `[[wikilinks]]`. Preview the "
-                "conversion with `ciao vault-migrate-links` (dry-run by default), "
-                "then apply it with `ciao vault-migrate-links --apply`. Every "
-                "rewrite is recorded, so `ciao vault-unmigrate-links --apply` "
-                "restores the notes byte for byte."
-            ),
+            chat_prompt=finding.remedy,
         )
     ]
 

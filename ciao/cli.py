@@ -25,6 +25,8 @@ import urllib.request
 from ciao import dev, gws_wrapper, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
+from ciao.jsonio import write_private_text
+from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
@@ -48,12 +50,12 @@ def _relaunch_argv() -> list[str]:
     return [sys.executable, "-m", "ciao.cli", *sys.argv[1:]]
 
 
-def _run_server() -> int:
+def _run_server(*, supervised: bool = False) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
-        server_main()
+        server_main(supervised=supervised)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
@@ -62,9 +64,13 @@ def _run_server() -> int:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
         # foreground `ciao run` would just die and leave the site unreachable.
-        # Re-exec (rather than loop) so the relaunch picks up new code.
+        # Re-exec (rather than loop) so the relaunch picks up new code. Under
+        # `ciao supervise` the supervisor owns the relaunch instead and only
+        # needs the code back.
         print("Restart requested — relaunching Ciaobot…", file=sys.stderr)
         sys.stderr.flush()
+        if supervised:
+            return code
         # The exec inherits os.environ, and load_dotenv never overrides a key
         # that is already set, so without this a value edited in the workspace
         # .env would be shadowed by the stale copy the old process exported.
@@ -74,6 +80,15 @@ def _run_server() -> int:
         reset_exported_dotenv()
         os.execv(sys.executable, _relaunch_argv())
     return code
+
+
+def _supervise_command(args: argparse.Namespace) -> int:
+    from ciao.supervise import supervise
+
+    extra = list(args.child_args)
+    if extra[:1] == ["--"]:
+        extra = extra[1:]
+    return supervise(extra)
 
 
 def _copy_tree(src, dest: Path) -> None:
@@ -575,20 +590,20 @@ def ensure_workspace_git(root: Path) -> None:
     _ensure_workspace_gitignore(root)
     probe = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0 and probe.stdout.strip() == "true":
         return
     init = subprocess.run(
         ["git", "init", "-b", "main", str(root)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if init.returncode != 0:
         print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
         return
     subprocess.run(
         ["git", "-C", str(root), "add", "-A"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     commit = subprocess.run(
         [
@@ -596,7 +611,7 @@ def ensure_workspace_git(root: Path) -> None:
             "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
             "commit", "-m", "Initialize Ciaobot workspace",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if commit.returncode != 0:
         print(
@@ -648,7 +663,7 @@ def ensure_vault_git(root: Path) -> None:
         return
     probe = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0:
         toplevel = Path(probe.stdout.strip())
@@ -658,14 +673,14 @@ def ensure_vault_git(root: Path) -> None:
     _ensure_vault_gitignore(root)
     init = subprocess.run(
         ["git", "init", "-b", "main", str(root)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if init.returncode != 0:
         print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
         return
     subprocess.run(
         ["git", "-C", str(root), "add", "-A"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     commit = subprocess.run(
         [
@@ -673,7 +688,7 @@ def ensure_vault_git(root: Path) -> None:
             "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
             "commit", "-m", "Initialize Ciaobot vault",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if commit.returncode != 0:
         print(
@@ -773,6 +788,7 @@ def setup_workspace(
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
     confirm_repoint: bool = False,
+    sync_failures: list[str] | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -886,11 +902,10 @@ def setup_workspace(
         ("PWA_PORT", str(port)),
     ])
     if not existing_env and not env_path.exists():
-        env_path.write_text(
-            "\n".join(f"{key}={value}" for key, value in desired_env) + "\n",
-            encoding="utf-8",
+        # The password is in here in clear text: owner-only from creation.
+        write_private_text(
+            env_path, "\n".join(f"{key}={value}" for key, value in desired_env) + "\n"
         )
-        env_path.chmod(0o600)
         written.append(env_path)
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace
@@ -1010,13 +1025,19 @@ def setup_workspace(
         # wrong — it just had not synced yet. Local only: no upstream refresh, so
         # setup still does not touch the network.
         try:
-            sync_workspace_skills(
+            sync_result = sync_workspace_skills(
                 asset_root,
                 refresh_upstream=False,
                 workspace_name=_name or None,
             )
         except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
             print(f"skill sync failed for {asset_root}: {exc}", file=sys.stderr)
+        else:
+            if sync_result.memory_error and sync_failures is not None:
+                sync_failures.append(
+                    f"memory regions not set up for {asset_root}: "
+                    f"{sync_result.memory_error}"
+                )
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(
@@ -1275,6 +1296,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
     except OSError:
         had_token = False
+    sync_failures: list[str] = []
     try:
         written = setup_workspace(
             args.workspace,
@@ -1286,12 +1308,20 @@ def _setup_command(args: argparse.Namespace) -> int:
             launch_agents_dir=args.launch_agents_dir,
             app_dir=args.app_dir,
             confirm_repoint=args.yes,
+            sync_failures=sync_failures,
         )
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     for path in written:
         print(path)
+    for failure in sync_failures:
+        print(
+            f"Warning: {failure}. Skills were synced; fix the error and "
+            "re-run `ciao setup`.",
+            file=sys.stderr,
+        )
+    setup_rc = SETUP_MEMORY_FAILED_RC if sync_failures else 0
     if auth_required and not args.auth_token and not had_token:
         print(
             "\nPassword protection is on. No --auth-token was given, so a random "
@@ -1307,7 +1337,7 @@ def _setup_command(args: argparse.Namespace) -> int:
     )
     plists = [server_plist] if server_plist is not None and server_plist.is_file() else []
     if args.load_launchd:
-        rc = 0
+        rc = setup_rc
         for plist in plists:
             # The unload is a probe: during an install the agent is normally
             # not loaded, and launchctl says so on stderr ("Unload failed: 5:
@@ -1321,11 +1351,16 @@ def _setup_command(args: argparse.Namespace) -> int:
                 stderr=subprocess.DEVNULL,
             )
             # Keep a real load failure visible to the installer and preserve
-            # its status as the setup result.
-            rc = subprocess.run(
+            # its status as the setup result - except that launchctl's own 3
+            # would be read as the tolerated memory warning, so the installer
+            # would continue with the agent never loaded. Anything load
+            # returns is a hard failure: report it as 1.
+            lrc = subprocess.run(
                 ["launchctl", "load", "-w", str(plist)],
                 check=False,
-            ).returncode or rc
+            ).returncode
+            if lrc:
+                rc = 1 if lrc == SETUP_MEMORY_FAILED_RC else lrc
         _print_setup_summary(root, _pwa_port_from_env(root, args.port))
         return rc
     for plist in plists:
@@ -1336,7 +1371,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             "`ciao linux-service` to render a systemd unit."
         )
     _print_setup_summary(root, _pwa_port_from_env(root, args.port))
-    return 0
+    return setup_rc
 
 
 def _setup_url_command(args: argparse.Namespace) -> int:
@@ -3284,9 +3319,9 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             # workspace_root is a required config field, populated above from
             # the same value injected into config_source — no fallback.
             key_prefix = vault_key_prefix(vault, Path(config.workspace_root))
+            # Keys, prefix and rendered paths are all `/`-spelled on every OS
+            # (fts_search.KEY_SEPARATOR, Entry.path_key), so they compare as is.
             if hit_paths is not None and key_prefix != NO_MATCH_KEY_PREFIX:
-                normalized_hits = {hit.replace(os.sep, "/") for hit in hit_paths}
-                normalized_prefix = key_prefix.replace(os.sep, "/")
                 # A prefix that no hit carries means the log's keys were
                 # written against a different base (the audit invoked with
                 # another workspace root than the server's). That is missing
@@ -3295,15 +3330,10 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
                 # prefix (vault == workspace root) takes the same rule: every
                 # hit trivially carries it, so marking is skipped only when
                 # the log has no usable hits at all.
-                if any(
-                    hit.startswith(normalized_prefix) for hit in normalized_hits
-                ):
+                if any(hit.startswith(key_prefix) for hit in hit_paths):
                     for finding in report["stale_notes"]["stale_notes"]:
-                        rendered = str(finding["path"]).replace(os.sep, "/")
-                        rel = rendered.removeprefix(render_prefix + "/")
-                        finding["retrieved_recently"] = (
-                            normalized_prefix + rel
-                        ) in normalized_hits
+                        rel = str(finding["path"]).removeprefix(render_prefix + "/")
+                        finding["retrieved_recently"] = (key_prefix + rel) in hit_paths
         except Exception as exc:  # noqa: BLE001 — advisory section
             report["stale_notes"] = {
                 "stale_notes": [],
@@ -5504,7 +5534,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run the Ciaobot server.")
-    run_parser.set_defaults(func=lambda _args: _run_server())
+    run_parser.add_argument(
+        "--supervised",
+        action="store_true",
+        help="Exit with the restart code instead of re-execing; for `ciao supervise`.",
+    )
+    run_parser.set_defaults(func=lambda args: _run_server(supervised=args.supervised))
+
+    supervise_parser = subparsers.add_parser(
+        "supervise",
+        help="Run the server as a child process and relaunch it when it asks to restart.",
+    )
+    supervise_parser.add_argument(
+        "child_args", nargs=argparse.REMAINDER, help="Extra arguments passed to `ciao run`."
+    )
+    supervise_parser.set_defaults(func=_supervise_command)
 
     def add_service_parser(
         name: str,

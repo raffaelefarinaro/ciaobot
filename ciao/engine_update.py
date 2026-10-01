@@ -25,7 +25,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -37,6 +36,7 @@ from typing import IO, Any, Callable, Sequence
 
 from ciao import install_receipt, macos_service, package_version, release_manifest
 from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
 
 logger = logging.getLogger(__name__)
 
@@ -230,12 +230,12 @@ def write_operation(op: Operation, state_dir: Path | None = None) -> None:
     """
     target = _operation_path(state_dir or default_state_dir())
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    fd, tmp_name = mkstemp_private(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(asdict(op), indent=2, sort_keys=True) + "\n")
-        os.chmod(tmp, 0o600)
+        make_private(tmp)
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
@@ -436,7 +436,7 @@ def stage_update(
     """
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
+    make_private_dir(root)
     handle = acquire_lock(root)
     try:
         return _stage_locked(
@@ -478,7 +478,7 @@ def _stage_locked(
     stage_dir = state_dir / target
     shutil.rmtree(stage_dir, ignore_errors=True)
     stage_dir.mkdir(parents=True)
-    os.chmod(stage_dir, 0o700)
+    make_private_dir(stage_dir)
 
     now = _now()
     op = Operation(
@@ -546,7 +546,7 @@ def _stage_locked(
             [uv_bin, "tool", "install", "--python", py, str(wheel_path)],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=_UV_TIMEOUT,
             # Pinned to this update's own directories, for the same reason the
             # apply used to pin the install it replaced: an inherited
@@ -564,7 +564,7 @@ def _stage_locked(
             [str(env_python), "-I", "-c", "import ciao; print(ciao.__version__)"],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
         ).stdout.strip()
         if out != target:
             raise UpdateError(f"staged env reports version {out!r}, not {target}")
@@ -578,7 +578,7 @@ def _stage_locked(
             [uv_bin, "pip", "freeze", "--python", str(env_python)],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=_UV_TIMEOUT,
         ).stdout.strip()
 
@@ -713,14 +713,14 @@ def _write_plist(plist: dict[str, Any], target: Path) -> Path:
     loads with nothing in the record to explain it.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
+    fd, tmp_name = mkstemp_private(
         dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
     )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
             plistlib.dump(plist, handle)
-        os.chmod(tmp, 0o600)
+        make_private(tmp)
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
@@ -1293,7 +1293,7 @@ def apply_update(
     """
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
+    make_private_dir(root)
     post = http_post or _post_json
     launch = launchctl or (lambda args: macos_service._launchctl(args))
     domain_uid = os.getuid() if uid is None else uid
@@ -1899,7 +1899,7 @@ def run_apply(
                 ],
                 check=True,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
             ).stdout.strip()
             if reported != op.to_version:
                 raise UpdateError(
