@@ -288,13 +288,14 @@ if no workspace is registered, or if any registered workspace has no
 missing. If a receipt already exists it prints that there is nothing to do.
 Then run `--repair`, which it tells you to, to rebuild the derived files.
 
-Its refusal message points at this document as the place to read about moving
-the vaults by hand. This document no longer teaches that, and you should not do
-it — so here is what the refusal actually means. The command has just told you
-the layout is **not** finished, and named the workspaces whose
-`<workspace>/memory-vault` is absent. Either the install is still on the shared
-layout, in which case run Step 1's `--apply` and let the commands do the move;
-or the layout is partly built by hand, in which case finish the directories the
+The refusal names the command rather than a manual move: it says which
+workspaces have no `<workspace>/memory-vault` yet, points at Step 1's `--apply`
+as the thing that does the move, points here for what `--apply` refuses on, and
+carries the one caveat the command cannot check for you — that `--apply` has to
+run from the engine that will serve this install, with the app stopped. It has
+just told you the layout is **not** finished. Either the install is still on the
+shared layout, in which case run `--apply` and let the commands do the move; or
+the layout is partly built by hand, in which case finish the directories the
 refusal listed, re-run `--mark-migrated`, and let `--repair` rebuild the derived
 files. What you should not do is re-derive the move yourself: that is the path
 this document was rewritten to stop teaching, and it is the path with no
