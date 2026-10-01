@@ -1,7 +1,17 @@
+"""ciao.tool_path merges the terminal PATH with the process one.
+
+The platform half — what "the terminal's PATH" is, the login-shell probe on
+POSIX, the registry read on Windows, PATHEXT and the npm shims — is
+``ciao.os_support.tool_path`` and is tested in ``tests/test_os_support_tool_path.py``.
+What is left here is the merge and the two lookups built on it, and those are
+the same on every OS.
+"""
+
 from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 
 from ciao import tool_path
@@ -9,24 +19,34 @@ from ciao import tool_path
 
 def _clear_cache():
     # `login_shell_path` memoizes for the process lifetime with lru_cache;
-    # `terminal_path` keeps its own TTL cache behind a module-level clear.
-    # A monkeypatched replacement carries neither, hence the getattr.
+    # the terminal PATH keeps its own cache behind a module-level clear.
     clear = getattr(tool_path.login_shell_path, "cache_clear", None)
     if clear is not None:
         clear()
     tool_path.clear_terminal_path_cache()
 
 
+def _tool_name(name: str) -> str:
+    """The file a PATH search on this OS would find for a bare ``name``."""
+    return f"{name}.exe" if sys.platform == "win32" else name
+
+
+def _same_file(found: str, expected: Path) -> bool:
+    """A resolved path equals the file, whatever case its suffix came back in."""
+    return os.path.normcase(found) == os.path.normcase(str(expected))
+
+
 def test_resolve_tool_finds_binary_on_login_shell_path(tmp_path, monkeypatch):
     _clear_cache()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    fake = bin_dir / "gws"
+    fake = bin_dir / _tool_name("gws")
     fake.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 
     monkeypatch.setattr(tool_path, "login_shell_path", lambda: str(bin_dir))
-    assert tool_path.resolve_tool("gws") == str(fake)
+    found = tool_path.resolve_tool("gws")
+    assert found is not None and _same_file(found, fake)
     assert tool_path.resolve_tool("definitely-not-a-real-tool") is None
 
 
@@ -36,18 +56,15 @@ def test_login_shell_path_merges_shell_and_current_path_deduped(tmp_path, monkey
     cur_dir = tmp_path / "curdir"
     shell_dir.mkdir()
     cur_dir.mkdir()
-
-    class _Result:
-        returncode = 0
-        # Shell reports shell_dir plus cur_dir (a duplicate of the current PATH).
-        stdout = f"{tool_path._START}{shell_dir}{os.pathsep}{cur_dir}{tool_path._END}"
-        stderr = ""
-
-    monkeypatch.setattr(tool_path.subprocess, "run", lambda *a, **k: _Result())
+    monkeypatch.setattr(tool_path, "common_tool_dirs", lambda: [])
+    # The terminal reports shell_dir plus cur_dir (a duplicate of the current PATH).
+    monkeypatch.setattr(
+        tool_path, "terminal_path", lambda: f"{shell_dir}{os.pathsep}{cur_dir}"
+    )
     monkeypatch.setenv("PATH", str(cur_dir))
 
     result = tool_path.login_shell_path().split(os.pathsep)
-    # Shell PATH entries come first, current PATH merged, no duplicates.
+    # Terminal PATH entries come first, current PATH merged, no duplicates.
     assert result.count(str(cur_dir)) == 1
     assert str(shell_dir) in result
     assert result.index(str(shell_dir)) < result.index(str(cur_dir))
@@ -56,53 +73,35 @@ def test_login_shell_path_merges_shell_and_current_path_deduped(tmp_path, monkey
 
 def test_login_shell_path_survives_shell_probe_failure(monkeypatch):
     _clear_cache()
-
-    def boom(*a, **k):
-        raise OSError("no shell")
-
-    monkeypatch.setattr(tool_path.subprocess, "run", boom)
+    monkeypatch.setattr(tool_path, "terminal_path", lambda: "")
+    monkeypatch.setattr(tool_path, "common_tool_dirs", lambda: [])
     monkeypatch.setenv("PATH", "/usr/bin")
     result = tool_path.login_shell_path()
     assert "/usr/bin" in result.split(os.pathsep)
     _clear_cache()
 
 
-def test_terminal_path_does_not_inherit_our_own_path(tmp_path, monkeypatch):
-    """The engine prepends common_tool_dirs() to its own PATH at startup
-    (ciao/main.py). Handing that to the probe would make ~/.local/bin come
-    back as if the user's terminal had it, and setup would then tell them to
-    type a bare command their shell cannot resolve."""
+def test_login_shell_path_appends_the_tool_dirs_that_exist(tmp_path, monkeypatch):
     _clear_cache()
-    captured: dict[str, object] = {}
+    present = tmp_path / "present"
+    present.mkdir()
+    absent = tmp_path / "absent"
+    monkeypatch.setattr(tool_path, "terminal_path", lambda: "")
+    monkeypatch.setattr(tool_path, "common_tool_dirs", lambda: [str(absent), str(present)])
+    monkeypatch.setenv("PATH", "")
 
-    class _Result:
-        returncode = 0
-        stdout = f"{tool_path._START}/usr/bin{tool_path._END}"
-        stderr = ""
-
-    def fake_run(*args, **kwargs):
-        captured["env"] = kwargs.get("env")
-        return _Result()
-
-    monkeypatch.setattr(tool_path.subprocess, "run", fake_run)
-    monkeypatch.setenv("PATH", str(tmp_path))
-
-    assert tool_path.terminal_path() == "/usr/bin"
-    env = captured["env"]
-    assert isinstance(env, dict)
-    assert "PATH" not in env
-    # Everything else the rc files may need is still there.
-    assert env["HOME"] == os.environ["HOME"]
+    result = tool_path.login_shell_path().split(os.pathsep)
+    assert result == [str(present)]
     _clear_cache()
 
 
 def test_resolve_on_terminal_path_ignores_the_fallback_dirs(tmp_path, monkeypatch):
     """`resolve_tool` searches ~/.local/bin and Homebrew whether or not the
-    user's shell has them; the terminal-only lookup must not."""
+    user's terminal has them; the terminal-only lookup must not."""
     _clear_cache()
     fallback = tmp_path / "local-bin"
     fallback.mkdir()
-    fake = fallback / "claude"
+    fake = fallback / _tool_name("claude")
     fake.write_text("#!/bin/sh\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 
@@ -112,7 +111,8 @@ def test_resolve_on_terminal_path_ignores_the_fallback_dirs(tmp_path, monkeypatc
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
     assert tool_path.resolve_on_terminal_path("claude") is None
-    assert tool_path.resolve_tool("claude") == str(fake)
+    found = tool_path.resolve_tool("claude")
+    assert found is not None and _same_file(found, fake)
     _clear_cache()
 
 
@@ -121,106 +121,3 @@ def test_resolve_on_terminal_path_returns_none_when_the_probe_fails(monkeypatch)
     monkeypatch.setattr(tool_path, "terminal_path", lambda: "")
     assert tool_path.resolve_on_terminal_path("sh") is None
     _clear_cache()
-
-
-# ── terminal PATH: cache, invalidation, single-flight ────────────────────────
-
-
-def _probe_counter(monkeypatch, value: str = "/usr/bin:/opt/homebrew/bin"):
-    """Replace the login-shell spawn with a counter."""
-    calls: list[int] = []
-
-    def fake_probe() -> str:
-        calls.append(1)
-        return value
-
-    monkeypatch.setattr(tool_path, "_probe_terminal_path", fake_probe)
-    tool_path.clear_terminal_path_cache()
-    return calls
-
-
-def test_terminal_path_does_not_respawn_a_shell_when_nothing_changed(
-    tmp_path, monkeypatch
-):
-    """The wizard polls every 2s; each poll used to cost a ~0.74s login shell."""
-    calls = _probe_counter(monkeypatch)
-
-    assert tool_path.terminal_path() == "/usr/bin:/opt/homebrew/bin"
-    for _ in range(20):
-        tool_path.terminal_path()
-
-    assert len(calls) == 1
-
-
-def test_terminal_path_reprobes_when_an_rc_file_is_saved(tmp_path, monkeypatch):
-    """The behaviour the old per-call cache-clear existed to guarantee.
-
-    A user who adds ~/.local/bin to their rc file must see the wizard's PATH
-    hint clear on the next poll, without an engine restart.
-    """
-    home = tmp_path / "home"
-    (home / ".config" / "fish").mkdir(parents=True)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    calls = _probe_counter(monkeypatch)
-
-    tool_path.terminal_path()
-    tool_path.terminal_path()
-    assert len(calls) == 1
-
-    # Creating a previously absent rc file counts, not just touching one.
-    (home / ".zshrc").write_text('export PATH="$HOME/.local/bin:$PATH"\n', encoding="utf-8")
-    tool_path.terminal_path()
-    assert len(calls) == 2
-
-    # And a later edit to it.
-    os.utime(home / ".zshrc", (0, 0))
-    tool_path.terminal_path()
-    assert len(calls) == 3
-
-
-def test_terminal_path_reprobes_when_the_shell_changes(monkeypatch):
-    """$SHELL decides which rc files are read at all."""
-    monkeypatch.setenv("SHELL", "/bin/zsh")
-    calls = _probe_counter(monkeypatch)
-
-    tool_path.terminal_path()
-    tool_path.terminal_path()
-    assert len(calls) == 1
-
-    monkeypatch.setenv("SHELL", "/opt/homebrew/bin/fish")
-    tool_path.terminal_path()
-    assert len(calls) == 2
-
-
-def test_concurrent_probes_share_one_shell(monkeypatch):
-    """Single-flight: an rc file slower than the poll interval used to make
-    every overlapping poll spawn its own login shell."""
-    import threading as _threading
-
-    started = _threading.Event()
-    release = _threading.Event()
-    calls: list[int] = []
-
-    def slow_probe() -> str:
-        calls.append(1)
-        started.set()
-        release.wait(5)
-        return "/usr/bin"
-
-    monkeypatch.setattr(tool_path, "_probe_terminal_path", slow_probe)
-    tool_path.clear_terminal_path_cache()
-
-    results: list[str] = []
-    threads = [
-        _threading.Thread(target=lambda: results.append(tool_path.terminal_path()))
-        for _ in range(5)
-    ]
-    for t in threads:
-        t.start()
-    assert started.wait(5)
-    release.set()
-    for t in threads:
-        t.join(5)
-
-    assert len(calls) == 1
-    assert results == ["/usr/bin"] * 5

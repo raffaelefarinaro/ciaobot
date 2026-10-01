@@ -77,7 +77,7 @@ class PushManager:
             "private_pem": self._private_pem,
             "private_raw_b64": self._private_raw_b64,
             "public_b64": self._public_b64,
-        }), encoding="utf-8")
+        }), encoding="utf-8", newline="")
 
     @staticmethod
     def _derive_raw_from_pem(pem: str) -> str:
@@ -110,7 +110,7 @@ class PushManager:
             self._subs = []
 
     def _save_subs(self) -> None:
-        self._subs_path.write_text(json.dumps({"subscriptions": self._subs}, indent=2), encoding="utf-8")
+        self._subs_path.write_text(json.dumps({"subscriptions": self._subs}, indent=2), encoding="utf-8", newline="")
 
     def add(self, subscription: dict[str, Any]) -> None:
         endpoint = subscription.get("endpoint")

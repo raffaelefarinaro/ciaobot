@@ -72,7 +72,7 @@ def _store_pending_verifier(config_dir, code_verifier: str) -> None:
     # Create with 0600 rather than writing then chmod-ing: the verifier must
     # never exist group/world-readable, even briefly.
     fd = open_private(path, os.O_WRONLY | os.O_TRUNC)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
         fh.write(code_verifier)
     make_private(path)
 

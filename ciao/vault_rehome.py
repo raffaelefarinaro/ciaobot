@@ -369,7 +369,7 @@ def write_receipt(runtime_root: Path, summary: dict[str, Any]) -> Path:
         "proposals": summary.get("proposals", []),
     }
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
     tmp.replace(path)
     return path
 
@@ -1543,7 +1543,7 @@ def move_note_between_roots(
 
         def _restore() -> None:
             for target, original in reversed(swapped):
-                target.write_text(original, encoding="utf-8")
+                target.write_text(original, encoding="utf-8", newline="")
             for _, temp in staged:
                 try:
                     temp.unlink(missing_ok=True)
@@ -1560,7 +1560,7 @@ def move_note_between_roots(
                     delete=False,
                     dir=abs_path.parent,
                     prefix=f".{abs_path.name}.",
-                    suffix=".tmp",
+                    suffix=".tmp", newline="",
                 ) as handle:
                     handle.write(new_text)
                     temp = Path(handle.name)
@@ -1759,7 +1759,7 @@ def _unwrite_own_links(
     original = originals.get(move["to"])
     if original is not None:
         try:
-            (root / move["from"]).write_text(original, encoding="utf-8")
+            (root / move["from"]).write_text(original, encoding="utf-8", newline="")
         except OSError as exc:
             summary["failed"].append(
                 {
@@ -1843,7 +1843,7 @@ def rehome_vault_people(
                 except (OSError, UnicodeDecodeError):
                     pass
             try:
-                (root / before).write_text(record["text"], encoding="utf-8")
+                (root / before).write_text(record["text"], encoding="utf-8", newline="")
             except OSError as exc:
                 summary["failed"].append({"path": before, "error": str(exc)})
                 # Nothing landed, so there is nothing to take back if the move
@@ -1991,7 +1991,7 @@ def unrehome_vault_people(
             continue
         if apply:
             try:
-                note.write_text(restored, encoding="utf-8")
+                note.write_text(restored, encoding="utf-8", newline="")
             except OSError as exc:
                 summary["failed"].append({"path": path_key, "error": str(exc)})
                 unrestorable.add(path_key)

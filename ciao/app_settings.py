@@ -219,7 +219,7 @@ class AppSettingsStore:
                 payload[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
-            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+            json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline=""
         )
 
     def update(self, changes: dict[str, object]) -> AppSettings:

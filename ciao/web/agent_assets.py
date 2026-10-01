@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao.os_support.links import is_link, link_source, remove_link
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
 from ciao.workspace_guide import guide_path, legacy_guide_path, migrate_root
@@ -103,7 +104,7 @@ def _frontmatter_body(text: str) -> tuple[dict[str, str], str]:
 def _iter_markdown_files(root: Path) -> Iterable[Path]:
     if not root.is_dir():
         return []
-    return sorted(path for path in root.glob("*.md") if path.is_file() or path.is_symlink())
+    return sorted(path for path in root.glob("*.md") if path.is_file() or is_link(path))
 
 
 def _mirror_vault_root(config: Any, workspace: str = "") -> Path:
@@ -165,7 +166,7 @@ def _write_vault_mirror(
                 "",
             ]
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     return mirror
 
@@ -177,7 +178,7 @@ def _write_subagent_file(path: Path, *, name: str, description: str, content: st
             _frontmatter_string({"name": name, "description": description}),
             content.strip(),
         ]) + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
 
@@ -197,18 +198,18 @@ def _write_command_file(
             _frontmatter_string(fields),
             content.strip(),
         ]) + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
 
 def _installed_name_conflict(installed_path: Path, target_path: Path) -> bool:
     """True when creating ``target_path`` would replace an installed asset."""
-    if not installed_path.exists() and not installed_path.is_symlink():
+    if not installed_path.exists() and not is_link(installed_path):
         return False
-    if not installed_path.is_symlink():
+    if not is_link(installed_path):
         return True
     try:
-        return installed_path.resolve() != target_path.resolve()
+        return link_source(installed_path) != target_path.resolve()
     except FileNotFoundError:
         return True
 
@@ -419,7 +420,7 @@ def workspace_health(config: Any) -> dict:
 
         workspace_guide = guide_path(root)
         legacy_guide = legacy_guide_path(root)
-        if legacy_guide.exists() or legacy_guide.is_symlink():
+        if legacy_guide.exists() or is_link(legacy_guide):
             # Both providers read AGENTS.md now, and Claude Code only falls
             # back to it when no CLAUDE.md is present — so a surviving
             # CLAUDE.md keeps the old file winning and the rename never takes
@@ -459,7 +460,7 @@ def workspace_health(config: Any) -> dict:
             for source in _iter_markdown_files(source_dir):
                 link = link_dir / source.name
                 try:
-                    synced = link.is_symlink() and link.resolve() == source.resolve()
+                    synced = is_link(link) and link_source(link) == source.resolve()
                 except OSError:
                     synced = False
                 if not synced:
@@ -486,7 +487,9 @@ def workspace_health(config: Any) -> dict:
             if not link_dir.exists():
                 continue
             for path in link_dir.rglob("*"):
-                if path.is_symlink() and not path.exists():
+                # A dangling link, or (Windows) a hard-linked mirror whose
+                # recorded source is gone.
+                if is_link(path) and not (path.exists() and link_source(path).exists()):
                     add(
                         f"broken-{label}-{path.name}{id_suffix}",
                         f"Broken generated {label} link",
@@ -817,14 +820,14 @@ async def update_command_endpoint(request: Request) -> JSONResponse:
 
 
 def _delete_generated_link(link: Path, target: Path) -> None:
-    if not link.is_symlink():
+    if not is_link(link):
         return
     try:
-        if link.resolve() != target.resolve():
+        if link_source(link) != target.resolve():
             return
     except FileNotFoundError:
         pass
-    link.unlink(missing_ok=True)
+    remove_link(link)
 
 
 async def delete_subagent_endpoint(request: Request) -> JSONResponse:

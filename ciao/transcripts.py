@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     get_session_messages as _sdk_get_session_messages,
 )
 
+from ciao.agent_paths import claude_projects_dir
 from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
@@ -82,7 +83,7 @@ class TurnJournal:
             stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
             name = f"{_safe_slug(self._provider)}-{stamp}-{id(self):x}.jsonl"
             self._path = self._dir / name
-            self._handle = self._path.open("a", encoding="utf-8")
+            self._handle = self._path.open("a", encoding="utf-8", newline="")
             self._last_flush = time.monotonic()
             # Header goes straight to disk so a crash before any event still
             # leaves a recoverable prompt + provider record.
@@ -460,7 +461,7 @@ class TranscriptStore:
         started_at = str(transcript.get("started_at") or ended_at).replace(":", "-")
         session_slug = _safe_slug(str(transcript.get("session_id") or "no-session-id"))
         path = archive_dir / f"{started_at}-{session_slug}.md"
-        path.write_text(body, encoding="utf-8")
+        path.write_text(body, encoding="utf-8", newline="")
         self._delete_current(ctx, provider)
         return path
 
@@ -597,7 +598,7 @@ class TranscriptStore:
     ) -> None:
         path = self._current_path(ctx, provider)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
 
     def _delete_current(self, ctx: ChatContext, provider: str = "claude") -> None:
         path = self._current_path(ctx, provider)
@@ -990,10 +991,8 @@ def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
 
 
 def _claude_projects_dir(workspace_root: Path) -> Path:
-    """Derive the Claude Code session directory for a workspace."""
-    # Claude Code encodes workspace path: /Users/me/ciao → -Users-me-ciao
-    slug = str(workspace_root).replace("/", "-").lstrip("-")
-    return Path.home() / ".claude" / "projects" / f"-{slug}"
+    """Derive the Claude Code session directory for a workspace (``agent_paths``)."""
+    return claude_projects_dir(workspace_root)
 
 
 # The global session-lookup fallback (``~/.claude/projects/*/<sid>.jsonl``)

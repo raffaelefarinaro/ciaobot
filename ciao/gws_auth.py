@@ -185,7 +185,7 @@ def save_profile_registry(config, entries: Sequence[dict[str, str]]) -> None:
         if slugify_profile(entry.get("name", ""))
     ]
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
 
 
@@ -968,7 +968,7 @@ class GwsHealthMonitor:
         self._runtime.mkdir(parents=True, exist_ok=True)
         self._cache_path().write_text(
             json.dumps({"profiles": profiles}, indent=2, sort_keys=True),
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
 
     def _configured_profiles(self) -> list[str]:

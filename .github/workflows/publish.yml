@@ -71,23 +71,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          # Exactly five engine assets: the installer under both names, the
-          # wheel, and the signed manifest beside it. No app archive, no
-          # latest.json feed, no verifier, no bundled runtime (#653).
+          # Exactly six engine assets: the macOS installer under both names,
+          # the Windows installer, the wheel, and the signed manifest beside
+          # it. No app archive, no latest.json feed, no verifier, no bundled
+          # runtime (#653).
           gh release upload "$TAG" \
             install.sh \
             scripts/install-engine.sh \
+            scripts/install.ps1 \
             dist/ciaobot-*.whl \
             ciaobot-engine-manifest.json \
             ciaobot-engine-manifest.json.sig \
             --clobber
           # The transition release hands the engine over by downloading
-          # install-engine.sh at its own tag (#604), and a first-time user runs
-          # install.sh; both names have to be on the release or a documented
-          # install path is dead. Checked here, where the tag is still known.
+          # install-engine.sh at its own tag (#604), a first-time macOS user
+          # runs install.sh, and a Windows user runs install.ps1; every name
+          # has to be on the release or a documented install path is dead.
+          # Checked here, where the tag is still known.
           assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
           printf '%s\n' "$assets" | grep -qx install.sh
           printf '%s\n' "$assets" | grep -qx install-engine.sh
+          printf '%s\n' "$assets" | grep -qx install.ps1
 
   release-smoke:
     needs: build-engine

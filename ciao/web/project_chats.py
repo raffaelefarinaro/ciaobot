@@ -267,7 +267,7 @@ def _state_file_lock(path: Path) -> Iterator[None]:
     """Serialize read/merge/write cycles across overlapping server processes."""
     lock_path = path.with_name(f"{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
+    with lock_path.open("a+", encoding="utf-8", newline="") as handle:
         lock_exclusive(handle.fileno())
         try:
             yield
@@ -1026,7 +1026,7 @@ class ProjectChatManager:
             "chats": chat_mutations,
         }
         try:
-            with audit_path.open("a", encoding="utf-8") as handle:
+            with audit_path.open("a", encoding="utf-8", newline="") as handle:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -1105,7 +1105,7 @@ class ProjectChatManager:
                 f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             )
             try:
-                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="")
                 tmp.replace(self._path)
                 self._append_registry_audit(
                     revision=revision,
@@ -1343,7 +1343,7 @@ class ProjectChatManager:
             "Catch-all home for ad-hoc chats and scheduled automations.\n"
         )
         try:
-            target.write_text(body, encoding="utf-8")
+            target.write_text(body, encoding="utf-8", newline="")
         except OSError as exc:
             logger.warning("Could not seed %s: %s", target, exc)
 
@@ -1565,7 +1565,7 @@ class ProjectChatManager:
             updated = chat_service._set_frontmatter_description(current, project.context)
             if updated is None or updated == current:
                 return False
-            doc.write_text(updated, encoding="utf-8")
+            doc.write_text(updated, encoding="utf-8", newline="")
         except OSError as exc:
             logger.warning("Failed to sync context into %s: %s", doc, exc)
             return False
@@ -2331,7 +2331,7 @@ class ProjectChatManager:
                     if candidate.exists():
                         text = candidate.read_text(encoding="utf-8")
                         text = re.sub(r"(?m)^(status:\s*)active\s*$", r"\1completed", text)
-                        candidate.write_text(text, encoding="utf-8")
+                        candidate.write_text(text, encoding="utf-8", newline="")
                         break
                 vault_moved = True
 
@@ -2414,7 +2414,7 @@ class ProjectChatManager:
             if candidate.exists():
                 text = candidate.read_text(encoding="utf-8")
                 text = re.sub(r"(?m)^(status:\s*)completed\s*$", r"\1active", text)
-                candidate.write_text(text, encoding="utf-8")
+                candidate.write_text(text, encoding="utf-8", newline="")
                 break
 
         # Force auto-discovery so the PWA project is recreated and a
@@ -4412,7 +4412,7 @@ class ProjectChatManager:
         }
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
+            with path.open("a", encoding="utf-8", newline="") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:
             logger.exception("Failed writing agent tool telemetry")
@@ -7186,7 +7186,7 @@ class ProjectChatManager:
                 target = vault_dir / f"{stem}-{n}.md"
                 n += 1
                 continue
-            with os.fdopen(fd, "w", encoding="utf-8") as output:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as output:
                 output.write(markdown)
             break
         return {"original_path": str(source.resolve()), "markdown_path": str(target.resolve())}

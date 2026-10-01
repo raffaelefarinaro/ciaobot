@@ -17,6 +17,9 @@ It flags, when no ``encoding=`` keyword is given:
 
 A mode that is not a string literal counts as text: the scan cannot prove it
 binary, and naming the encoding there costs nothing.
+
+A second scan (``_newline_problem``) requires ``newline=""`` on every
+text-mode write, so the bytes on disk are the text in memory on every OS.
 """
 
 from __future__ import annotations
@@ -89,22 +92,97 @@ def _problem(call: ast.Call) -> str | None:
     return None
 
 
-def _findings() -> list[str]:
+def _newline_problem(call: ast.Call) -> str | None:
+    """A text-mode *write* without ``newline=`` (the line-endings decision, #696).
+
+    A text-mode write turns every ``\\n`` into ``\\r\\n`` on Windows, so the same
+    text is stored as different bytes on the two OSes (git-synced vault churn,
+    different ``content_revision`` hashes), and CRLF text a caller preserved on
+    purpose comes out ``\\r\\r\\n``. ``newline=""`` writes the text as it is in
+    memory; on POSIX ``newline=None`` already wrote ``\\n``, so it is identical
+    there. Reads are out of scope, and so is a mode that is not a literal (it
+    may be a read).
+    """
+    keywords = _keywords(call)
+    if "newline" in keywords:
+        return None
+    func = call.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+    owner = func.value.id if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) else ""
+    if name == "write_text" and isinstance(func, ast.Attribute):
+        return "write_text() without newline="
+    mode: ast.expr | None
+    if name == "open" and (isinstance(func, ast.Name) or owner == "io"):
+        mode = keywords.get("mode", call.args[1] if len(call.args) > 1 else None)
+    elif name == "open" and owner != "os" and (
+        not call.args
+        or (isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str))
+        or "mode" in keywords
+    ):
+        mode = keywords.get("mode", call.args[0] if call.args else None)
+    elif name == "fdopen" and owner == "os":
+        mode = keywords.get("mode", call.args[1] if len(call.args) > 1 else None)
+    elif name in _TEMPFILE:
+        mode = keywords.get("mode", call.args[0] if call.args else None)
+    else:
+        return None
+    if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str)):
+        return None
+    if "b" in mode.value or not any(flag in mode.value for flag in "wax+"):
+        return None
+    return f"text-mode {name}({mode.value!r}) write without newline="
+
+
+def _scan(check) -> list[str]:  # type: ignore[no-untyped-def]
     found = []
     for path in sorted(_PACKAGE.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
-                problem = _problem(node)
+                problem = check(node)
                 if problem:
                     rel = path.relative_to(_PACKAGE.parent).as_posix()
                     found.append(f"{rel}:{node.lineno}: {problem}")
     return found
 
 
+def _findings() -> list[str]:
+    return _scan(_problem)
+
+
 def test_every_text_io_in_ciao_names_its_encoding() -> None:
     findings = _findings()
     assert not findings, "name the encoding (see this module's docstring):\n" + "\n".join(findings)
+
+
+def test_every_text_write_in_ciao_passes_newline() -> None:
+    findings = _scan(_newline_problem)
+    assert not findings, 'pass newline="" (see _newline_problem):\n' + "\n".join(findings)
+
+
+@pytest.mark.parametrize(
+    ("source", "flagged"),
+    [
+        ("p.write_text(t, encoding='utf-8')", True),
+        ("p.write_text(t, encoding='utf-8', newline='')", False),
+        ("open(p, 'w', encoding='utf-8')", True),
+        ("open(p, 'a+', encoding='utf-8')", True),
+        ("open(p, 'x', encoding='utf-8')", True),
+        ("open(p, encoding='utf-8')", False),
+        ("open(p, 'r', encoding='utf-8')", False),
+        ("open(p, 'wb')", False),
+        ("open(p, mode, encoding='utf-8')", False),
+        ("p.open('w', encoding='utf-8')", True),
+        ("os.fdopen(fd, 'w', encoding='utf-8')", True),
+        ("os.fdopen(fd, 'w', encoding='utf-8', newline='')", False),
+        ("tempfile.NamedTemporaryFile('w', encoding='utf-8')", True),
+        ("tarfile.open(tmp, 'w:gz')", False),
+    ],
+)
+def test_the_newline_scan_itself(source: str, flagged: bool) -> None:
+    call = ast.parse(source, mode="eval").body
+    assert isinstance(call, ast.Call)
+    assert (_newline_problem(call) is not None) is flagged
 
 
 @pytest.mark.parametrize(
