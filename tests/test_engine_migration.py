@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,15 @@ from ciao.engine_migration import (
     check_client_url,
     classify,
     main,
+)
+
+# What these classify is a launchd plist whose program lives inside Ciaobot.app,
+# the macOS desktop install this migration retires. That layout exists only on
+# macOS (launchd writes POSIX paths), so on Windows there is nothing to classify.
+# The URL rules and the malformed-plist answers stay on every OS.
+macos_app_layout = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the Ciaobot.app launchd layout exists only on macOS",
 )
 
 PORT = 9555
@@ -80,6 +90,7 @@ def _write_node_state(workspace: Path, state: object) -> None:
     (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
 
 
+@macos_app_layout
 def test_classify_none_without_plist(tmp_path: Path) -> None:
     agents, _ = _fixture(tmp_path, write_plist=False)
 
@@ -88,6 +99,7 @@ def test_classify_none_without_plist(tmp_path: Path) -> None:
     assert result.kind == "none"
 
 
+@macos_app_layout
 def test_classify_engine_for_non_app_program(tmp_path: Path) -> None:
     # An engine this installer (or `ciao setup`) already placed is not a desktop
     # install: there is nothing to migrate, and treating it as one would take a
@@ -100,6 +112,7 @@ def test_classify_engine_for_non_app_program(tmp_path: Path) -> None:
     assert result.plist_program.endswith(".local/bin/ciao")
 
 
+@macos_app_layout
 def test_classify_desktop_host_when_node_state_absent(tmp_path: Path) -> None:
     # No node state at all is the host path: the desktop shell writes one as
     # soon as it knows, and its absence means nobody else is using this Mac's
@@ -114,6 +127,7 @@ def test_classify_desktop_host_when_node_state_absent(tmp_path: Path) -> None:
     assert result.port == PORT
 
 
+@macos_app_layout
 def test_classify_desktop_host_for_host_role(tmp_path: Path) -> None:
     for role in ("host", "active"):
         agents, workspace = _fixture(tmp_path / role)
@@ -125,6 +139,7 @@ def test_classify_desktop_host_for_host_role(tmp_path: Path) -> None:
         assert result.node_role == "host", role
 
 
+@macos_app_layout
 def test_classify_desktop_client_with_host_url(tmp_path: Path) -> None:
     agents, workspace = _fixture(tmp_path)
     _write_node_state(workspace, {"role": "standby", "host_url": "https://mini.ts.net"})
@@ -136,6 +151,7 @@ def test_classify_desktop_client_with_host_url(tmp_path: Path) -> None:
     assert result.host_url == "https://mini.ts.net"
 
 
+@macos_app_layout
 @pytest.mark.parametrize(
     "state",
     [
@@ -194,6 +210,7 @@ def test_existing_plist_without_a_program_is_invalid(tmp_path: Path) -> None:
     assert result.node_role == "invalid"
 
 
+@macos_app_layout
 def test_classify_defaults_to_the_users_own_launch_agents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -205,6 +222,7 @@ def test_classify_defaults_to_the_users_own_launch_agents(
     assert classify().kind == "desktop_host"
 
 
+@macos_app_layout
 def test_missing_runtime_root_is_invalid(tmp_path: Path) -> None:
     # The engine is live and the runtime root it is supposed to own is not there.
     # Reading that as "no node file, therefore a host" is the guess that hands a
@@ -220,6 +238,7 @@ def test_missing_runtime_root_is_invalid(tmp_path: Path) -> None:
     assert result.workspace == str(workspace)
 
 
+@macos_app_layout
 def test_classify_is_invalid_without_a_workspace(tmp_path: Path) -> None:
     # No `CIAO_WORKSPACE` and no `WorkingDirectory` means the runtime root
     # resolves against whatever directory the classifier happened to run in,
@@ -240,6 +259,7 @@ def test_classify_is_invalid_without_a_workspace(tmp_path: Path) -> None:
     assert result.kind == "desktop_invalid"
 
 
+@macos_app_layout
 @pytest.mark.parametrize(
     "host_url",
     [
@@ -267,6 +287,7 @@ def test_client_url_requires_host(tmp_path: Path, host_url: str) -> None:
     assert result.host_url == "", host_url
 
 
+@macos_app_layout
 def test_unreadable_node_state_is_invalid(tmp_path: Path) -> None:
     # A node_state.json that cannot be read is not a host that has not written
     # one yet. It is the file that says which writer this Mac is, and a file
@@ -285,6 +306,7 @@ def test_unreadable_node_state_is_invalid(tmp_path: Path) -> None:
     assert not node.is_file()
 
 
+@macos_app_layout
 @pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0,
     reason="root reads a file whatever its mode says",
@@ -303,6 +325,7 @@ def test_node_state_without_permission_is_invalid(tmp_path: Path) -> None:
     assert result.node_role == "invalid"
 
 
+@macos_app_layout
 def test_classify_never_raises_under_an_existing_plist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -339,6 +362,7 @@ def test_classify_never_raises_without_a_plist(
     assert classify(agents).kind == "none"
 
 
+@macos_app_layout
 def test_classify_stale_when_app_program_missing(tmp_path: Path) -> None:
     # Ciaobot.app was deleted and left its plist behind. There is no live app to
     # take the engine from, so this is an ordinary install, not a refusal.
@@ -353,6 +377,7 @@ def test_classify_stale_when_app_program_missing(tmp_path: Path) -> None:
     assert result.app_bundle.endswith("Ciaobot.app")
 
 
+@macos_app_layout
 def test_classify_stale_does_not_need_a_runtime_root(tmp_path: Path) -> None:
     # The bundle is gone, so nothing is running and nothing is being handed
     # over: whether the runtime root survived is not this migration's business,
@@ -366,6 +391,7 @@ def test_classify_stale_does_not_need_a_runtime_root(tmp_path: Path) -> None:
     assert classify(agents).kind == "desktop_stale"
 
 
+@macos_app_layout
 def test_classify_never_writes(tmp_path: Path) -> None:
     # NodeStateManager *creates* a host state when the file is missing, so a
     # classifier that went through it would silently turn "no state" into "this
@@ -391,6 +417,7 @@ def test_classify_never_writes(tmp_path: Path) -> None:
     assert sorted(p.name for p in workspace.rglob("*")) == before
 
 
+@macos_app_layout
 def test_main_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     agents, _ = _fixture(tmp_path)
 
@@ -402,6 +429,7 @@ def test_main_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert set(payload) == set(engine_migration.asdict(engine_migration.classify(agents)))
 
 
+@macos_app_layout
 def test_main_readable_line(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -452,6 +480,7 @@ def test_check_client_url_refuses_what_is_not_one(url: str) -> None:
     assert check_client_url(url) == ""
 
 
+@macos_app_layout
 def test_check_client_url_matches_the_state_file_rule(tmp_path: Path) -> None:
     # One rule, not two: whatever this accepts has to be exactly what a client's
     # `host_url` may be in a state file, or the same Mac would be a client with
