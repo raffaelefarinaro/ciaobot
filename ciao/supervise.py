@@ -34,8 +34,8 @@ def _ensure_stdio(log_dir: Path) -> tuple[IO[str] | None, IO[str] | None]:
     if sys.stderr is not None:
         return None, None
     log_dir.mkdir(parents=True, exist_ok=True)
-    out = open(log_dir / "ciao.stdout.log", "a", encoding="utf-8", buffering=1)
-    err = open(log_dir / "ciao.stderr.log", "a", encoding="utf-8", buffering=1)
+    out = open(log_dir / "ciao.stdout.log", "a", encoding="utf-8", newline="", buffering=1)
+    err = open(log_dir / "ciao.stderr.log", "a", encoding="utf-8", newline="", buffering=1)
     sys.stdout, sys.stderr = out, err
     return out, err
 
