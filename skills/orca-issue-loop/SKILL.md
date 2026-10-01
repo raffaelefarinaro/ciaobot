@@ -93,7 +93,7 @@ Rules:
 
 **Starting from a description:** investigate the codebase properly — read the files you will name, find the tests that cover them, and read `AGENTS.md` / `docs/DEVELOPMENT.md` / `web/README.md` / `DESIGN.md` where relevant. Then fill `references/plan-template.md`.
 
-The plan is written for a model that will **not** explore on its own. It must name exact files, functions and line anchors, the change in each, the new tests (file + test name + what they assert), the commands to verify, and explicit out-of-scope items. If you cannot write a step concretely, you have not investigated enough — keep reading. Split work that needs more than ~8 files or two subsystems into separate child issues (`Part of #N`), track them as a checklist comment on the parent, and run the loop on one child at a time, planning each against the current `develop` just before it runs.
+The plan is written for a model that will **not** explore on its own. It must name exact files, functions and line anchors, the change in each, the new tests (file + test name + what they assert), the commands to verify, and explicit out-of-scope items. If you cannot write a step concretely, you have not investigated enough — keep reading. Split work that needs more than ~8 files or two subsystems into separate child issues (`Part of #N`), track them as a checklist comment on the parent, and run the loop on every ready child (dependencies merged, up to the concurrency cap in the pitfalls), planning each against the current `develop` just before it runs.
 
 Classification (from `ciao-support`): title prefix `[Bug]` → label `bug`; `[Feature]` → label `enhancement`; small improvements to existing behavior are `[Feature]`/`enhancement` too.
 
@@ -254,7 +254,7 @@ Merge procedure:
 4. `gh issue close <N> --repo raffaelefarinaro/ciaobot --comment "Merged into develop via #<PR> (<merge sha link>). Ships in the next release."` — needed because develop isn't the default branch. Tick the child on the parent's checklist comment if there is one.
 5. `orca worktree set --worktree id:<wt> --workspace-status completed --comment "merged #<PR>" --json`, then `orca worktree rm --worktree id:<wt> --force --json` (the branch is merged; nothing is lost).
 6. Update the records: set `plans/issue-<N>/record.md` to `merged #<PR>` with the merge sha and the final shipped shape (§0.1), and mark the issue merged in `plans/loop-state.md`.
-7. Report to the user: issue, PR, merge commit, rounds used, model, anything deferred into follow-up issues.
+7. Report to the user: issue, PR, merge commit, rounds used, model, anything deferred into follow-up issues (tracked in the graph and cleared per §0.2 unless the user deferred them).
 
 ## Traps
 
