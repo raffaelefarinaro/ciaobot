@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from ciao.git_proc import EXACT_BYTES
+
 
 def test_deploy_folder_has_no_private_reverse_proxy_or_absolute_paths() -> None:
     repo = Path(__file__).parents[1]
@@ -377,11 +379,12 @@ async def test_commit_and_push_passes_identity_before_the_commit_subcommand(
     assert ok is True, details
 
     assert [
-        "git",
+        "git", *EXACT_BYTES,
         "-c", "user.name=Ciaobot",
         "-c", "user.email=ciaobot@localhost",
         "commit", "-m", "pwa snapshot before deploy",
     ] in calls
-    # add/diff/push stay plain — only the commit needs an author.
-    assert calls[0] == ["git", "add", "-A"]
-    assert calls[-1] == ["git", "push"]
+    # add/diff/push carry only the exact-bytes setting; only the commit needs
+    # an author.
+    assert calls[0] == ["git", *EXACT_BYTES, "add", "-A"]
+    assert calls[-1] == ["git", *EXACT_BYTES, "push"]

@@ -35,6 +35,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.files import open_fd
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ def _aliases(link: Path, target: Path) -> bool:
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        ["git", *EXACT_BYTES, *args],
         cwd=root,
         capture_output=True,
         text=True, encoding="utf-8",

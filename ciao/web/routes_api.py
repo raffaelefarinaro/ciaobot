@@ -36,6 +36,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import proposal_actions
 from ciao import proposal_kinds
@@ -5834,12 +5835,12 @@ async def admin_snapshot(request: Request) -> JSONResponse:
             return JSONResponse({"error": exc.detail}, status_code=500)
 
         try:
-            result = await _snapshot_git(["git", "add", "-A"], cwd=ws, timeout=30)
+            result = await _snapshot_git(["git", *EXACT_BYTES, "add", "-A"], cwd=ws, timeout=30)
             if result.returncode != 0:
                 return JSONResponse({"error": f"git add failed: {result.stderr}"}, status_code=500)
 
             status = await _snapshot_git(
-                ["git", "status", "--porcelain"], cwd=ws, timeout=10
+                ["git", *EXACT_BYTES, "status", "--porcelain"], cwd=ws, timeout=10
             )
             # Checked before the emptiness test: a failing status is empty
             # stdout, and reading that as a clean tree is how a snapshot
@@ -5852,7 +5853,7 @@ async def admin_snapshot(request: Request) -> JSONResponse:
             from datetime import UTC, datetime
             ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
             commit = await _snapshot_git(
-                ["git", "commit", "-m", f"pwa snapshot {ts}"], cwd=ws, timeout=30
+                ["git", *EXACT_BYTES, "commit", "-m", f"pwa snapshot {ts}"], cwd=ws, timeout=30
             )
             # No push after a failed commit: a rejected commit (no identity, a
             # full disk, a pre-commit hook) leaves nothing recorded, and
@@ -5860,7 +5861,7 @@ async def admin_snapshot(request: Request) -> JSONResponse:
             if commit.returncode != 0:
                 return JSONResponse({"error": f"git commit failed: {commit.stderr}"}, status_code=500)
 
-            push = await _snapshot_git(["git", "push"], cwd=ws, timeout=60)
+            push = await _snapshot_git(["git", *EXACT_BYTES, "push"], cwd=ws, timeout=60)
 
             return JSONResponse({
                 "ok": True,
