@@ -448,9 +448,7 @@ def test_spawn_updater_registers_then_runs_the_sibling_task(tmp_path: Path, user
     root = ElementTree.fromstring(definition.read_bytes())
     assert definition.read_bytes()[:2] == b"\xff\xfe"
     # pythonw.exe beside the staged interpreter, so no console window opens.
-    assert root.findtext(f"{NS}Actions/{NS}Exec/{NS}Command") == str(
-        Path(op.env_python).with_name("pythonw.exe")
-    )
+    assert root.findtext(f"{NS}Actions/{NS}Exec/{NS}Command") == ws.windowless_python(op.env_python)
     assert root.findtext(f"{NS}Actions/{NS}Exec/{NS}Arguments") == (
         f"-I -m ciao.engine_update run-apply --operation {op.id}"
     )
@@ -479,9 +477,7 @@ def test_recovery_task_always_runs_from_the_staged_interpreter(tmp_path: Path, u
 
     assert written == state / RECOVER_FILE_NAME
     root = ElementTree.fromstring(written.read_bytes())
-    assert root.findtext(f"{NS}Actions/{NS}Exec/{NS}Command") == str(
-        Path(op.env_python).with_name("pythonw.exe")
-    )
+    assert root.findtext(f"{NS}Actions/{NS}Exec/{NS}Command") == ws.windowless_python(op.env_python)
     assert machine.changing_calls() == [
         ["/Create", "/TN", ws.RECOVER_TASK_NAME, "/XML", str(written), "/F"],
     ]
