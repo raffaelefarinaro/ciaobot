@@ -61,6 +61,14 @@ made must not wait out a TTL — while the detectors, which are the part that ca
 expensive, run at most once per fresh window. An answer that exists only because a
 probe failed is not an answer about the workspace, so it is never cached.
 
+#833's ``unrehomed-people`` detector is what makes that contract load-bearing
+rather than theoretical: it is the one probe in the catalog that walks a vault, so
+the window, the executor and the off-loop hop are the reason it is affordable at
+all, and they are what a third detector that walks has to rely on too. It also
+demonstrates the other half of the contract — a probe that can *prove* its answer
+without walking should, and does: four cheap gates decide most installs, and the
+walk is the last resort rather than the first step.
+
 **A started task settles from evidence, not from prose.** A record in
 :data:`SETTLING_LIFECYCLES` is an attempt nobody has judged yet, and judging it
 is this layer's job rather than the chat's: :func:`evaluate` asks the row's
@@ -83,16 +91,31 @@ catalog row may use is a name this engine can act on — #728-E's
 re-home — so the loader refuses anything else, and a probe with no implementation
 behind it still answers ``unknown`` rather than ``applicable``.
 
-**A task may share its condition with a surface that cannot dismiss it.** #833's
-``unrehomed-people`` is the same condition the OS audit reports as
+**A task may share a surface's answer without sharing its evidence.** #833's
+``unrehomed-people`` is about the same receipt the OS audit reports as
 ``unrehomed_people``, and it is the first pair here where the two disagree about
 what happens next: the card can be dismissed or completed and disappear, the
 report cannot be silenced at all. So the probes call
-:mod:`ciao.migration_notices` rather than restating the rule, the audit reads the
-same two functions, and nothing in that module reads a task record. That is what
-keeps "the card is gone" and "the audit is quiet" from being the same sentence —
-they are two different claims about one install, and only one of them is ever
-allowed to be an operator's decision.
+:mod:`ciao.migration_notices` rather than restating anything, and nothing in that
+module reads a task record — which is what keeps "the card is gone" and "the
+audit is quiet" from being the same sentence.
+
+What the two do **not** share is the strength of the evidence, and the difference
+is the point. The audit's answer is a receipt check, cheap and broad, and it stays
+that way: a diagnostic should keep reporting a migration nobody ever needed. A
+*card* is an offer to do work, so it needs a reason that survives an operator's
+"why am I seeing this?" — and #833's first pass answered it with the receipt check,
+which offered the task on every fresh conforming install. Its detector therefore
+runs :func:`ciao.migration_notices.rehome_legacy_candidates`, a bounded plan walk
+that establishes a real candidate, and it is the only applicability probe in this
+catalog that reads the vault. The asymmetry is one-directional and pinned by a
+test:
+
+    task offered  =>  audit reports
+    audit silent  =>  task not offered
+
+Nothing widens a task to make it match a notice. That direction is how #833's
+review happened.
 """
 
 from __future__ import annotations
@@ -403,41 +426,67 @@ def _learnings_cleanup_review_recorded(
 def _unrehomed_people_rehome_needed(
     *, config: Any, workspace: str = "", today: date | None = None
 ) -> Detection:
-    """Whether this install has person notes that may still need re-homing.
+    """Whether this install has **real** legacy misfiled person notes to re-home.
 
-    The audit's ``unrehomed_people`` condition, called rather than restated:
-    more than one registered workspace, and no completed ``vault-rehome``
-    receipt. Two surfaces reporting one install are two implementations waiting
-    to disagree, and #833's card is dismissible where the audit's report is not
-    — so the copy that can drift is exactly the copy this engine must not make.
+    Deliberately narrower than the ``unrehomed_people`` **notice** the audit
+    reports, and the difference is the whole of this probe. The notice is a
+    diagnostic that says "a re-homing has never been recorded here", which is
+    true of every fresh install that never needed one; this is an offer to do
+    work, so it needs something to do. #833's first pass used the notice's
+    condition and the review was right: a fresh conforming multi-workspace
+    install with no legacy data was offered a task, which is precisely what #800
+    says a task must not be.
 
-    Install-scoped on purpose, and ``workspace`` is unused rather than consulted:
-    the receipt is per install (``<runtime>/migration/vault-rehome.json``) and the
-    remedy moves notes between that install's workspaces, so an answer scoped to
-    one workspace would be a claim about half a condition. The record lives in the
-    runtime directory with it.
+    So the evidence is the plan itself — :func:`ciao.vault_rehome.plan_rehome` on
+    the shared vault, over the registry's workspace names — and only a
+    **mechanical** candidate counts: a person note whose tags name another
+    registered workspace, which is the damage the old global curation run did. An
+    untagged note is a judgement case about a relationship with a person, and
+    untagged contacts are ordinary on a fresh install, so they are never evidence.
+    Conflicts are counted but not offered either: they are tag-obvious notes whose
+    destination is occupied, which is a content decision the command refuses.
 
-    Cheap by construction — one registry read and one receipt read, no vault walk
-    — because this runs on a Home listing and an audit alike. ``plan_rehome``
-    walks every person note, which is exactly what this task *asks a person to
-    run deliberately*, and never what a detector does to decide whether to ask.
+    Four gates run before the walk and each one *proves* a mechanical candidate is
+    unreachable (a completed receipt, one workspace, no shared vault directory,
+    fewer than two bound tag roles) — so the common answer, "nothing to move",
+    costs no vault read at all. See
+    :func:`ciao.migration_notices.rehome_legacy_candidates`, which is where that
+    reasoning lives.
 
-    The evidence is the workspace count rather than a bare boolean, so the
-    fingerprint moves when the registry does and the task comes back for a
-    second workspace that did not exist when it was last offered.
+    **This probe walks the vault, and the layer is what makes that affordable.**
+    :func:`evaluate` runs it off the event loop through
+    :func:`ciao.async_reads.run_read` — coalesced per install, admission-capped
+    with every other vault read — and at most once per fresh window per task, so a
+    full plan costs one walk per ``APPLICABILITY_TTL_S`` and no more. This is the
+    only applicability probe in the catalog that walks anything, and it is the
+    price of not offering the task on an install with nothing to move. Nothing
+    polled (``operator_actions``, the audit) calls it: they use the notice.
 
-    A raise is not a "no": an unreadable registry or a failing receipt read
-    propagates, and :func:`apply_detector` records ``unknown`` rather than
-    ``not_applicable``. Silence from an unreadable install would be a claim it
-    cannot make.
+    The evidence carries the candidate paths and the counts, all of them
+    vault-relative or scalar so the record stays portable, and the fingerprint
+    moves when the candidate set does — a workspace that gains a second
+    misfiled contact brings the task back with a new fingerprint.
+
+    A raise is not a "no": an unreadable registry, a failing receipt read or a
+    config with no vault root propagates, and :func:`apply_detector` records
+    ``unknown``. Silence from evidence this install could not read would be a
+    claim it cannot make, in the one direction where the operator would act on it.
     """
     del workspace, today  # install-scoped: neither argument is about one workspace
-    from ciao.migration_notices import rehomed_people_finding
+    from ciao.migration_notices import rehome_legacy_candidates
 
-    finding = rehomed_people_finding(config, _runtime_root(config))
-    if finding is None:
-        return Detection(False, {"reason": "no_rehome_needed"})
-    return Detection(True, {"workspaces": len(finding.workspaces)})
+    evidence = rehome_legacy_candidates(config, _runtime_root(config))
+    return Detection(
+        bool(evidence.mechanical),
+        {
+            "reason": evidence.reason,
+            "mechanical": list(evidence.mechanical),
+            "conflicts": evidence.conflicts,
+            "needs_judgement": evidence.needs_judgement,
+            "notes_scanned": evidence.notes_scanned,
+            "scanned": evidence.scanned,
+        },
+    )
 
 
 def _unrehomed_people_rehome_recorded(

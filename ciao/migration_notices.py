@@ -89,23 +89,55 @@ and a lifecycle recorded in ``<runtime>/update-tasks.json`` is not one of its
 inputs. That is what lets one condition be shared by an *offer* and a *report*
 without the offer being able to erase the report.
 
-The one notice that is not about a walk
----------------------------------------
-``unrehomed_people`` is a **receipt** check, not a scan: more than one registered
-workspace, and no completed ``vault-rehome`` receipt. Nothing here opens a file
-under a vault to decide it, which is why ``rehomed_people_finding`` costs one
-registry read and one receipt read and is safe for a poll, an audit and a
-catalog detector alike — the third of which (#833) is the first surface here that
-is allowed to be *dismissed*, so the shared rule is the only thing keeping the
-audit's finding and the task's offer saying the same thing.
+One notice has two questions, and they are not the same question
+----------------------------------------------------------------
+``unrehomed_people`` is the only notice here a surface answers differently on
+purpose, and #833's review is why. There are two questions:
 
-The receipt is read through :func:`completed_rehome` on both sides, deliberately.
+* **Is there anything here an upgrade left undone?** That is a *diagnostic*, and
+  :func:`rehomed_people_finding` answers it with a **receipt check**: more than
+  one registered workspace and no completed ``vault-rehome`` receipt. It opens no
+  file under a vault, which is what makes it safe for a poll and for a report, and
+  it cannot tell you anything is actually misfiled — hence the hedge in its own
+  wording. It stays broad and advisory on purpose: a migration nobody ever needed
+  is still worth mentioning once, in a place that never turns the report red.
+* **Is there something to actually do?** That is the catalog task's question, and
+  it is much the harder one. #833's first pass answered it with the receipt check
+  too, which offered the card on every fresh conforming install — no receipt, two
+  workspaces, no legacy data at all — the false positive #800's table rules out by
+  name. :func:`rehome_legacy_candidates` answers it instead, from
+  ``vault_rehome.plan_rehome``: four cheap gates that each *prove* a mechanical
+  candidate is unreachable, and only then one plan walk over the shared vault.
+  Only a tag-obvious cross-workspace move counts; untagged person notes are
+  ordinary on a fresh install and are never treated as evidence of legacy damage.
+
+So the asymmetry is deliberate and bounded in one direction only:
+
+    task offered  =>  audit reports
+    audit silent  =>  task not offered
+
+A completed receipt silences both (it is gate 1, and the notice's own term). The
+task is otherwise **narrower** than the notice: an install the audit describes as
+"person notes may be filed in the wrong workspace" gets no card until the plan
+says there is a move. Nothing widens the task, because #833's review is the
+evidence for what widening it costs.
+
+And the walk is paid for by the layer, not by the probe: it runs from
+``update_tasks.evaluate``, off the event loop through ``ciao.async_reads.run_read``,
+coalesced per install, admission-capped with every other vault read, and at most
+once per ``APPLICABILITY_TTL_S``. ``operator_actions`` and ``os_audit`` never call
+it. Any new surface that cannot afford a vault read wants
+:func:`rehomed_people_finding`, and the pinned claim that a **Home poll** opens no
+file under the vault still holds — the module now contains a probe that walks, and
+the test that counts accesses proves nothing on a poll reaches it.
+
+The receipt is read through :func:`completed_rehome` on every side, deliberately.
 A detector that says "no completed receipt" and a completion check that says "a
 completed receipt" are the same question asked twice, and two readers of one file
 are two rules — the drift this module exists to remove. ``vault_rehome
 .read_receipt`` is the canonical completed-only reader (a ``partial`` receipt is
-incomplete, a receipt predating the ``status`` field counts as complete), and both
-halves go through it here rather than each reaching for the file.
+incomplete, a receipt predating the ``status`` field counts as complete), and all
+three callers go through it here rather than each reaching for the file.
 """
 
 from __future__ import annotations
@@ -660,7 +692,7 @@ class UnrehomedPeopleFinding:
 def rehomed_people_finding(
     config: Any, runtime_dir: Path | None
 ) -> UnrehomedPeopleFinding | None:
-    """The re-home finding for this install, or ``None``.
+    """The re-home **notice** for this install, or ``None``.
 
     Two terms, both cheap and read-only, and both of them the audit's own terms
     rather than a stricter version of them:
@@ -673,6 +705,18 @@ def rehomed_people_finding(
     * **no completed re-home receipt.** See :func:`completed_rehome` for what
       counts, including why a ``partial`` run keeps the finding and a receipt
       without a ``status`` field does not.
+
+    **This is deliberately the broad answer, and it is not the task's answer.**
+    It is a *diagnostic*: "there has never been a re-homing here, and here is the
+    command that does one". It cannot know whether anything is misfiled, which is
+    why its wording hedges and why nothing here walks a vault — this routine runs
+    on every app open. The optional Home card has to say something stronger than
+    "a receipt is missing", or it is offered on every fresh conforming install,
+    which is the false positive #833's first pass produced and the reason #800
+    says a task needs real evidence. That evidence is
+    :func:`rehome_legacy_candidates`, and the two answers are allowed to differ:
+    the notice is the broad advisory one, the card is the narrow actionable one,
+    and a card is a thing an operator is asked to act on.
 
     ``runtime_dir is None`` cannot apply the notice at all, which is a different
     answer from "there is no receipt": a caller with no runtime root has nowhere
@@ -701,3 +745,193 @@ def rehomed_people_finding(
     if completed_rehome(runtime_dir) is not None:
         return None
     return UnrehomedPeopleFinding(workspaces=names)
+
+
+# -- the evidence a re-home TASK needs, as opposed to the notice above --------
+
+# The re-home question's answers, and none of them is another one. Named constants
+# because a caller recording one in a state file or a log line has to be able to
+# spell it, and because a test asserting "the task is not offered" should say
+# *why* rather than only that. A caller with no runtime root is deliberately
+# absent from this set: it cannot ask the question at all, and that is raised
+# rather than answered.
+
+#: A completed re-homing is recorded. The remedy refuses a second pass, so there
+#: is nothing for this task to ask for.
+REHOME_ALREADY_COMPLETED = "rehome_already_completed"
+
+#: One registered workspace: nowhere for a note to be misfiled from. The same
+#: half the notice keeps.
+REHOME_SINGLE_WORKSPACE = "single_workspace"
+
+#: No shared vault directory. After the re-rooting ``config.vault_root`` names a
+#: path that does not exist, and ``ciao vault-rehome`` plans
+#: ``<vault>/<workspace>/People`` — so on a per-workspace root there is no move
+#: it can make and no managed remedy that can make it. Advertising the task there
+#: would be offering a command that finds nothing, permanently.
+REHOME_NO_SHARED_VAULT = "no_shared_vault"
+
+#: The workspaces do not bind two roles, so ``detect_misfiled_people`` cannot
+#: reach a mechanical bucket at all. See :func:`rehome_legacy_candidates` for why
+#: that is a proof rather than a guess.
+REHOME_NO_ROLE_BINDING = "no_role_binding"
+
+#: The scan ran and found no tag-obvious cross-workspace move. This is the only
+#: one of the five that is a statement about the vault rather than about the
+#: layout.
+REHOME_NO_CANDIDATES = "no_legacy_candidates"
+
+#: The scan ran and found at least one. The only answer that makes a task worth
+#: offering.
+REHOME_CANDIDATES_FOUND = "legacy_candidates"
+
+
+@dataclass(frozen=True)
+class RehomeCandidates:
+    """What the managed re-home command would actually do on this install's vault.
+
+    ``mechanical`` holds the vault-relative paths of the moves the command would
+    make, in the order its own plan produced them — the deterministic,
+    tag-obvious candidates. Empty is the answer that matters: an install with no
+    legacy misfiling has nothing for the task, whatever its receipts say.
+
+    ``conflicts`` and ``needs_judgement`` are counted rather than listed because
+    neither of them is offered as work. A conflict is a tag-obvious candidate
+    whose destination is taken (two people, same filename, two workspaces) — a
+    content decision this engine refuses — and a judgement case is a note with no
+    tag naming a workspace, which is a relationship with a person and not a
+    misfiling. Both are reported by the run itself, and neither is the legacy
+    damage this task exists for.
+
+    ``notes_scanned`` is the scan's own count and nothing more. It is here to make
+    the bound visible in a state file, never to imply that a number of notes is a
+    number of problems.
+
+    ``reason`` is one of the ``REHOME_*`` constants, and it says which of the
+    four cheap gates decided the answer — so a task that is not offered can be
+    read as "the plan found nothing" rather than as silence.
+    """
+
+    reason: str
+    mechanical: tuple[str, ...] = ()
+    conflicts: int = 0
+    needs_judgement: int = 0
+    notes_scanned: int = 0
+    scanned: bool = False
+
+
+def rehome_legacy_candidates(
+    config: Any, runtime_dir: Path | None
+) -> RehomeCandidates:
+    """Whether this install has real legacy misfiled person notes, and the evidence.
+
+    The narrow question, for the optional task, and it is the one #800 asks of a
+    catalog row: not "has nobody ever run a migration here" but "is there
+    something to migrate". A fresh install that has never needed a migration
+    answers no, and answers it without the card ever appearing.
+
+    Four gates before the walk, each of them a proof rather than a guess, so the
+    vault is only read on an install where a mechanical candidate is reachable at
+    all:
+
+    1. **a completed re-home receipt** (:func:`completed_rehome`). The remedy
+       refuses a second pass without ``--force``, so an install that has recorded
+       one has nothing for this task to ask — and a card the operator cannot act
+       on is the "offered forever" shape #788's upkeep row is about. This also
+       keeps the two surfaces consistent at the one point where they must agree:
+       a completed receipt silences the notice *and* the card.
+    2. **more than one registered workspace**, the notice's own half. One
+       workspace has no counterpart for a note to be misfiled from.
+    3. **a shared vault that exists.** ``config.vault_root`` is the shared
+       layout's directory and, after the re-rooting, a path that is not there
+       (``CiaoConfig.vault_scan_targets`` says so in its own docstring). This is
+       the same gate ``operator_actions._detect_workspace_unmigrated`` uses. A
+       per-workspace root has no workspace segment in its paths, so the command
+       has nothing to move there and ``--workspace-name`` changes nothing: this
+       install has no managed re-home, and the task must not pretend otherwise.
+    4. **two roles bound.** ``resolve_role_workspaces`` maps the tag roles
+       (``work``/``personal``) onto registered workspace *names*, and
+       ``detect_misfiled_people`` can only reach ``bucket == "mechanical"`` when
+       some note's tag names a role bound to a workspace *other than* the note's
+       own. That needs two distinct roles bound to two distinct workspaces, so an
+       install that binds one role or none can never produce a mechanical
+       candidate, whatever its notes say — and the walk is skipped instead of run
+       to learn that. This is the gate that keeps a fresh install whose workspaces
+       are named anything else (``clientA``/``clientB``) from paying for a scan
+       every window to hear "no".
+
+    Only then is :func:`ciao.vault_rehome.plan_rehome` run, on the shared root,
+    over the **registry's** workspace names (``plan_rehome``'s own docstring:
+    a caller with a config passes ``config.workspace_names()``; a directory that
+    happens to exist is not a workspace). The plan is the source of truth because
+    it is the same object the operator's preview prints and the same classifier
+    the apply executes, so the task cannot offer work the command would refuse.
+
+    **This walks the vault, and that is the deliberate price of the answer.** Every
+    other applicability probe in this module is a receipt read, because a Home
+    poll runs on every focus. This one is for an update-task detector, which
+    ``update_tasks.evaluate`` calls off the event loop through
+    ``ciao.async_reads.run_read`` — coalesced per install, admission-capped with
+    every other vault read, and bounded to once per ``APPLICABILITY_TTL_S`` — and
+    never from ``operator_actions``. A caller that cannot pay that (the strip,
+    the audit) must use :func:`rehomed_people_finding` instead, and the module
+    docstring says which is which.
+
+    A ``needs_judgement`` note is deliberately **not** evidence. Untagged person
+    notes are ordinary on a fresh install — everyone has contacts whose tags say
+    nothing about which workspace they belong to — so treating them as proof of
+    legacy misfiling is the false positive again with a different justification.
+    Only a tag-obvious cross-workspace move counts, which is the damage the old
+    global curation run actually did.
+
+    Raises rather than swallowing, for the same reason the notice does: a config
+    with no ``vault_root`` at all, a registry that will not name its workspaces,
+    or a receipt read that fails is an **unknown**, and ``update_tasks`` answers
+    it ``unknown`` so no card is offered on evidence this install could not read.
+    """
+    from ciao.vault_rehome import plan_rehome, resolve_role_workspaces
+
+    if runtime_dir is None:
+        raise ValueError(
+            "the re-home task needs a runtime root to read its receipt from"
+        )
+    if completed_rehome(runtime_dir) is not None:
+        return RehomeCandidates(REHOME_ALREADY_COMPLETED)
+
+    lister = getattr(config, "workspace_names", None)
+    if not callable(lister):
+        # Same rule as `vault_location_findings`: no registry is a surface with
+        # nothing to say, not an install with nothing wrong.
+        return RehomeCandidates(REHOME_SINGLE_WORKSPACE)
+    names = [str(name) for name in lister() if str(name)]
+    if len(names) < 2:
+        return RehomeCandidates(REHOME_SINGLE_WORKSPACE)
+
+    vault_raw = getattr(config, "vault_root", None)
+    if vault_raw is None:
+        raise ValueError("the re-home task needs a vault root to look in")
+    vault_root = Path(vault_raw)
+    if not vault_root.is_dir():
+        # Re-rooted, or never set up: no shared vault, so no managed re-home.
+        return RehomeCandidates(REHOME_NO_SHARED_VAULT)
+
+    if len(set(resolve_role_workspaces(names).values())) < 2:
+        return RehomeCandidates(REHOME_NO_ROLE_BINDING)
+
+    plan = plan_rehome(vault_root, workspaces=names)
+    if "skipped" in plan:
+        # `plan_rehome` skipped the root between the `is_dir()` above and here.
+        # It cannot write a move list, so there is nothing to offer; the run
+        # itself will say which shape it was.
+        return RehomeCandidates(REHOME_NO_SHARED_VAULT, notes_scanned=0)
+    mechanical = tuple(
+        str(candidate.get("path", "")) for candidate in plan.get("mechanical") or []
+    )
+    return RehomeCandidates(
+        REHOME_CANDIDATES_FOUND if mechanical else REHOME_NO_CANDIDATES,
+        mechanical=mechanical,
+        conflicts=len(plan.get("conflicts") or []),
+        needs_judgement=len(plan.get("needs_judgement") or []),
+        notes_scanned=int(plan.get("notes_scanned") or 0),
+        scanned=True,
+    )

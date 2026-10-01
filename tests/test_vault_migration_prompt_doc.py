@@ -579,6 +579,36 @@ def test_unrehomed_people_is_documented_as_a_receipt_check() -> None:
     assert "informational, not a defect" in doc
 
 
+def test_the_home_task_is_narrower_than_the_audit_notice() -> None:
+    """The card needs a move to offer; the notice only needs a missing receipt.
+
+    #833's first pass gave the card the notice's condition, which offered it on
+    every fresh install that never needed the migration — a receipt's absence is
+    free on a clean install. A reader told the two are the same question would
+    wait for a card that is correctly never offered, and one told the card always
+    appears would look for it on a separated install where the command cannot act.
+    """
+    doc = _flat()
+
+    assert "only when `ciao vault-rehome`'s own plan finds a tag-obvious note" in doc
+    for fragment in (
+        "A card is an offer to do work, so it needs a reason to exist rather than a receipt's absence",
+        "Untagged contacts are normal in any vault and are never counted as evidence",
+        "a separated install gets **no task at all**",
+        "the notice keeps reporting",
+        "it is never how one comes to be offered",
+    ):
+        assert fragment in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md no longer keeps the broad notice and "
+            f"the narrower card apart: {fragment!r}"
+        )
+    # And the table says so in the Home column rather than only in prose.
+    assert (
+        "Yes, as an **After this update** task (`unrehomed-people`), dismissible, "
+        "and only when there is something to move" in doc
+    )
+
+
 def test_the_skill_triage_paths_are_not_described_as_meeting() -> None:
     """The detector and the migration read and write different files.
 

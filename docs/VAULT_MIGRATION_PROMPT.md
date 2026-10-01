@@ -54,30 +54,41 @@ empty Home does not mean the audit is.
 | `vault-vocabulary` — some notes use a retired `type:` vocabulary | Yes | **No** | No | Step 5 |
 | `vault-location:<workspace>` — "The `<name>` vault is not in its standard folder" | Yes | Yes, as `vault_outside_vault_root` | No | Step 2 |
 | "The vault may still use the retired wikilink dialect" | Yes | Yes, as `unmigrated_vault_links` | No | Step 3 |
-| `unrehomed_people` — no re-home has been recorded | Yes, as an **After this update** task (`unrehomed-people`), dismissible | Yes | No | Step 4 |
+| `unrehomed_people` — no re-home has been recorded | Yes, as an **After this update** task (`unrehomed-people`), dismissible, and only when there is something to move | Yes | No | Step 4 |
 
 Two consequences worth stating outright. The one **mandatory** notice
 (`workspace-unmigrated`) exists only on Home, so an audit cannot tell you
 whether the install still needs separating — check Home. And `unrehomed_people`
-is the opposite: it is on both, but the two are **not** the same thing. Home
-offers it as a task you may dismiss, reopen from Settings → Update task history,
-and finish; `ciao os-audit` keeps reporting it as a pending action whatever that
-card says, because a dismissed card is a decision about a card. What stops the
-audit line is the receipt below — not the dismissal.
+is the opposite: it is on both, but the two are **not** the same thing, and they
+do not even ask the same question. Home offers a task you may dismiss, reopen
+from Settings → Update task history, and finish — and it appears only when
+`ciao vault-rehome`'s own plan finds a tag-obvious note to move. `ciao os-audit`
+keeps reporting the broader condition whatever that card says, because a dismissed
+card is a decision about a card. What stops the audit line is the receipt below —
+not the dismissal, and not the card.
 
 **`unrehomed_people` is a receipt check, not a scan, and it can outlive Step 1.**
-It is raised when the install has **more than one registered workspace**
-and there is **no completed re-home receipt** — it does not walk the vault, so
-it cannot tell you whether anything is actually misfiled. That has two
-consequences. It stays silent on a single-workspace install, where every
-candidate comes back with no counterpart to move to and offering a move would be
-an unactionable tile. And it is **not** cleared by Step 1: the re-rooting writes
-no re-home receipt, so after separating your workspaces the notice is still
-there, while `ciao vault-rehome` now has nothing to move — the notes are already
-in per-workspace vaults and it plans `<vault>/<workspace>/People` only. What
-clears it is a completed receipt, and an honest no-op run writes one: after Step
-1, point the command at a root that exists and let it record that there was
-nothing to do.
+The audit raises it when the install has **more than one registered workspace**
+and there is **no completed re-home receipt** — it does not walk the vault, so it
+cannot tell you whether anything is actually misfiled. That has two consequences.
+It stays silent on a single-workspace install, where every candidate comes back
+with no counterpart to move to and offering a move would be an unactionable tile.
+And it is **not** cleared by Step 1: the re-rooting writes no re-home receipt, so
+after separating your workspaces the notice is still there, while `ciao vault-rehome`
+now has nothing to move — the notes are already in per-workspace vaults and it
+plans `<vault>/<workspace>/People` only.
+
+**The Home task is narrower, and it does not survive Step 1 either.** A card is an
+offer to do work, so it needs a reason to exist rather than a receipt's absence: it
+appears only when the plan finds a **tag-obvious cross-workspace move**, which is
+the damage the old global curation run actually did. Untagged contacts are normal
+in any vault and are never counted as evidence. Because the moves only exist in the
+shared layout, a separated install gets **no task at all** — there is no managed
+command that can act there — while the notice keeps reporting.
+
+What clears the audit line on a separated install is a completed receipt, and an
+honest no-op run writes one: point the command at a root that exists and let it
+record that there was nothing to do.
 
 ```bash
 ciao vault-rehome --vault-root <install>/<workspace>/memory-vault --apply
@@ -85,10 +96,11 @@ ciao vault-rehome --vault-root <install>/<workspace>/memory-vault --apply
 
 That is a real run, not a trick: it refuses on a dirty tree, reports "No
 tag-obvious misfiled people", and writes `vault-rehome.json` with
-`status: migrated`, which is exactly what the audit reads and what settles the
-Home task. If you would rather not run it, the notice is a pending action and
-never turns the audit red — it is informational, not a defect, and dismissing
-the Home card leaves it exactly where it was.
+`status: migrated`, which is exactly what the audit reads. It is only the route to
+settling a Home task when the task was already offered and you decided against the
+move — it is never how one comes to be offered. If you would rather not run it, the
+notice is a pending action and never turns the audit red — it is informational, not
+a defect, and dismissing the Home card leaves it exactly where it was.
 
 `workspace-unmigrated` is a precondition this install cannot get past on its
 own, which is why it is prominent, permanent and retryable rather than
@@ -426,13 +438,13 @@ identically.
 
 Optional, for an `unrehomed_people` notice — and note from the table above that
 this notice reports the *absence of a receipt* rather than scanning for misfiled
-notes, and that it now has a Home card too: the dismissible
-`unrehomed-people` **After this update** task, which is finished by the same
-receipt and settles when you run this command. Read the section above first:
-after Step 1 the notice can be there with nothing for this command to move, and
-the honest no-op run is what clears it. Before Step 1 it does its real work:
-person notes that a global memory-curation run filed into one workspace's
-`People/`. The routing bug is fixed; this moves the backlog.
+notes, while the Home task (`unrehomed-people`) is offered only when this
+command's plan has a tag-obvious move in it. Read the section above first: after
+Step 1 the notice can be there with nothing for this command to move, no Home task
+appears, and the honest no-op run is what clears the notice. Before Step 1 the
+command does its real work, and the task appears with it: person notes that a
+global memory-curation run filed into one workspace's `People/`. The routing bug
+is fixed; this moves the backlog.
 
 ```bash
 ciao vault-rehome                                  # the plan; changes nothing

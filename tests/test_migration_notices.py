@@ -18,6 +18,7 @@ of. The contracts under test, one per acceptance item in #816:
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import threading
@@ -36,6 +37,7 @@ from ciao.migration_notices import (
     LINKS_FOUND,
     LINKS_SCAN_TTL_S,
     UNMIGRATED_LINKS_NOTICE,
+    UNREHOMED_PEOPLE_NOTICE,
     VAULT_LOCATION_NOTICE,
     LinksFinding,
     cached_links,
@@ -43,6 +45,7 @@ from ciao.migration_notices import (
     refresh_links,
     reset_links_cache,
     resolve_links,
+    rehomed_people_finding,
     start_links_scan,
     vault_location_findings,
 )
@@ -959,6 +962,9 @@ def test_neither_surface_keeps_a_second_implementation() -> None:
     assert os_audit.VAULT_LOCATION_NOTICE == VAULT_LOCATION_NOTICE
     assert os_audit.UNMIGRATED_LINKS_NOTICE == UNMIGRATED_LINKS_NOTICE
     assert os_audit.resolve_links is resolve_links
+    # The re-home notice is the third shared probe, and it is named the same way.
+    assert os_audit.UNREHOMED_PEOPLE_NOTICE == UNREHOMED_PEOPLE_NOTICE
+    assert os_audit.rehomed_people_finding is rehomed_people_finding
 
     package = Path(migration_notices.__file__).parent
     for module in ("operator_actions.py", "os_audit.py"):
@@ -969,6 +975,75 @@ def test_neither_surface_keeps_a_second_implementation() -> None:
         # surface. (`read_receipt(runtime)` also appears in the re-rooting gate,
         # which is a mandatory notice and deliberately not part of this pair.)
         assert "vault_migrate_links import read_receipt" not in text, module
+
+
+def test_only_the_task_probe_may_plan_the_re_home() -> None:
+    """The planning probe is off limits to everything a poll or a report can reach.
+
+    The re-home task's applicability costs a `plan_rehome` walk, which is
+    affordable exactly once per `APPLICABILITY_TTL_S` because `update_tasks`
+    runs it off the loop and only `update_tasks` calls it. The Home strip polls
+    every 60s and the audit runs on every app open, so if either ever reached the
+    walking probe the cost class of this module would change with nothing failing.
+    Checked through the modules rather than by reading them, so a detector added
+    to either surface fails here.
+    """
+    from ciao import operator_actions, os_audit
+
+    for module in (operator_actions, os_audit):
+        symbols = _module_symbols(Path(module.__file__))
+        assert "plan_rehome" not in symbols, module.__name__
+        assert "rehome_legacy_candidates" not in symbols, module.__name__
+        assert "resolve_role_workspaces" not in symbols, module.__name__
+
+    from ciao import update_tasks
+
+    symbols = _module_symbols(Path(update_tasks.__file__))
+    assert "rehome_legacy_candidates" in symbols
+    assert "rehomed_people_finding" not in symbols, (
+        "the task must ask the harder question; reading the notice's condition "
+        "here is the false positive #833's review found"
+    )
+
+
+def test_the_shared_module_cannot_see_a_task_record() -> None:
+    """No probe here may read an update-task lifecycle, or a dismissal silences the audit.
+
+    The one structural guarantee behind "a dismissed card silences the card and
+    never the report": a suppression flag added to a shared probe would make the
+    two surfaces agree by making the diagnostic lie. So the shared module must not
+    reference the update-task layer at all — not even lazily. Read through the AST
+    rather than as text, so a docstring saying the same thing does not trip it.
+    """
+    symbols = _module_symbols(Path(migration_notices.__file__))
+
+    assert not [s for s in symbols if s.startswith("update_tasks")], sorted(symbols)
+    assert "INSTALL_STATE_FILENAME" not in symbols
+    assert "record_dismissal" not in symbols
+    assert "read_task_state" not in symbols
+
+
+def _module_symbols(path: Path) -> set[str]:
+    """Every name a module's *code* imports, reads or calls. Docstrings excluded.
+
+    `ast.Constant` is not collected, so prose — including the sentence in this
+    module's own docstring that says why it must not do this — cannot make the
+    assertion pass or fail for the wrong reason.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out.update(alias.name for alias in node.names)
+            out.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            out.add(node.module or "")
+            out.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Name):
+            out.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            out.add(node.attr)
+    return out
 
 
 def test_a_json_receipt_that_is_not_an_object_does_not_retire_the_notice(
