@@ -1395,6 +1395,12 @@ async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) ->
 
     monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
     monkeypatch.setattr(routes_api.asyncio, "to_thread", fake_to_thread)
+    # The derivation is under test, not where this machine keeps `claude`: the
+    # SDK wheel bundles the CLI on macOS and Linux but not on Windows, so a
+    # runner without it on PATH answered "Claude CLI not found" instead.
+    from ciao.providers import claude as claude_provider
+
+    monkeypatch.setattr(claude_provider, "get_bundled_claude_path", lambda: str(tmp_path / "claude"))
 
     config = _config(tmp_path)
     request = SimpleNamespace(
