@@ -699,15 +699,17 @@ def _ref_matches(raw: str, filename_idx: dict[str, list[Path]], deleted_path: st
 
 
 def _strip_frontmatter_related(
-    fm_text: str, filename_idx: dict[str, list[Path]], deleted_path: str
+    fm_text: str, filename_idx: dict[str, list[Path]], deleted_path: str, *, eol: str = "\n"
 ) -> tuple[str, bool]:
     """Remove `related:`/`relatedTo:` entries pointing at deleted_path.
 
     Edits surgically line-by-line instead of round-tripping through
     yaml.safe_dump, so untouched keys keep their original formatting,
-    quoting, and order.
+    quoting, and order. ``eol`` is the note's own line ending: the lines are
+    read without their ``\r`` and joined back with it, so a CRLF note stays
+    CRLF instead of coming back with its rewritten lines LF.
     """
-    lines = fm_text.split("\n")
+    lines = [line.removesuffix("\r") for line in fm_text.split("\n")]
     out: list[str] = []
     changed = False
     i, n = 0, len(lines)
@@ -756,7 +758,7 @@ def _strip_frontmatter_related(
             out.extend(kept_item_lines)
         # else: every item under this key was stripped, so drop the key too.
         i = j
-    return "\n".join(out), changed
+    return eol.join(out), changed
 
 
 def _strip_body_links(
@@ -816,10 +818,13 @@ def _strip_all_references(
     m = FRONTMATTER_RE.match(text)
     changed = False
     if m:
-        new_fm_text, fm_changed = _strip_frontmatter_related(m.group(1), filename_idx, deleted_path)
+        eol = "\r\n" if "\r\n" in m.group(0) else "\n"
+        new_fm_text, fm_changed = _strip_frontmatter_related(
+            m.group(1), filename_idx, deleted_path, eol=eol
+        )
         if fm_changed:
             changed = True
-            text = text[:m.start()] + f"---\n{new_fm_text}\n---\n" + text[m.end():]
+            text = text[:m.start()] + f"---{eol}{new_fm_text}{eol}---{eol}" + text[m.end():]
     m2 = FRONTMATTER_RE.match(text)
     body_start = m2.end() if m2 else 0
     new_body, body_changed = _strip_body_links(
@@ -928,7 +933,10 @@ def strip_references(
         rel_from_vault = _strip_prefix(e.path, prefix)
         abs_path = vault_root / rel_from_vault
         try:
-            text = abs_path.read_text(encoding="utf-8")
+            # Exact text: a text-mode read turns CRLF into LF, and the write
+            # below is exact, so the whole note came back converted.
+            with open(abs_path, encoding="utf-8", newline="") as handle:
+                text = handle.read()
         except OSError:
             continue
         new_text, file_changed = _strip_all_references(
