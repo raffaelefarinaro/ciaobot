@@ -64,6 +64,15 @@ DOMAIN = "gui/501"
 # ── apply_update: the foreground half, on the real macOS path ───────────
 
 
+# MacUpdateHost: launchd's gui/<uid> domain (os.getuid), SIGHUP, and the POSIX
+# shebang entry-point shims a macOS env carries. These tests patch
+# sys.platform to darwin to drive it from any OS; on Windows those calls do not
+# exist. The Windows update host (#857) carries its own tests.
+mac_update_host = pytest.mark.skipif(
+    sys.platform == "win32", reason="drives MacUpdateHost (launchd gui/<uid>, SIGHUP, shebang shims)"
+)
+
+
 def test_macos_apply_update_runs_exactly_these_launchctl_calls(tmp_path: Path) -> None:
     _, state, _, engine = _staged(tmp_path)
 
@@ -341,6 +350,7 @@ def test_macos_recover_apply_writes_the_record_phases_in_order(
 # ── the seam itself: selection, and what `MacUpdateHost` forwards ───────
 
 
+@mac_update_host
 def test_current_update_host_is_macos_on_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
 
@@ -349,6 +359,7 @@ def test_current_update_host_is_macos_on_darwin(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(host, MacUpdateHost)
 
 
+@mac_update_host
 def test_current_update_host_reads_platform_on_every_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -433,6 +444,7 @@ def test_mac_update_host_stop_engine_runs_the_wait_it_is_given() -> None:
     assert host.stop_engine() is True
 
 
+@mac_update_host
 def test_mac_update_host_interrupt_signals_are_term_and_hup() -> None:
     host = MacUpdateHost(launchctl=lambda args: subprocess.CompletedProcess(args, 0), uid=501)
 

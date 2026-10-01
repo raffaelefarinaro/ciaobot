@@ -17,6 +17,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import sys
+
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -74,6 +76,15 @@ RELEASE_BASE = "https://example.test/releases/download"
 TOOL_NAME = "ciaobot"
 TOOL_DIR_NAME = "ciao_bot"
 ENTRY_POINTS = ("ciao", "ciaobot")
+
+
+# MacUpdateHost: launchd's gui/<uid> domain (os.getuid), SIGHUP, and the POSIX
+# shebang entry-point shims a macOS env carries. These tests patch
+# sys.platform to darwin to drive it from any OS; on Windows those calls do not
+# exist. The Windows update host (#857) carries its own tests.
+mac_update_host = pytest.mark.skipif(
+    sys.platform == "win32", reason="drives MacUpdateHost (launchd gui/<uid>, SIGHUP, shebang shims)"
+)
 
 
 def _fake_wheel(path: Path, version: str) -> Path:
@@ -190,6 +201,7 @@ def fake_run() -> tuple[Any, list[list[str]]]:
     return run, calls
 
 
+@mac_update_host
 def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run) -> None:
     run, calls = fake_run
     envs: list[dict[str, str] | None] = []
@@ -330,6 +342,7 @@ def test_stage_update_rejects_wheel_digest_mismatch(
     assert op.phase == "failed"
 
 
+@mac_update_host
 def test_stage_update_rejects_version_check_mismatch(
     tmp_path: Path, release: FakeRelease
 ) -> None:
@@ -368,6 +381,7 @@ def test_stage_update_already_current_writes_no_record(
     assert not (tmp_path / "state" / "1.2.3").exists()
 
 
+@mac_update_host
 def test_stage_update_lock_blocks_concurrent_run(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -404,6 +418,7 @@ def test_stage_update_lock_blocks_concurrent_run(
     )
 
 
+@mac_update_host
 def test_stage_update_copies_previous_receipt(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -438,6 +453,7 @@ def test_stage_update_copies_previous_receipt(
     assert Path(op.previous_receipt).read_bytes() == receipt_path.read_bytes()
 
 
+@mac_update_host
 def test_find_uv_prefers_receipt_then_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -522,6 +538,7 @@ def test_cli_status_without_record(capsys: pytest.CaptureFixture[str]) -> None:
 # not in `str(exc)`, which is only "returned non-zero exit status 1". The record
 # must keep the real explanation, or `ciao update status` and the UI show an
 # operator an unexplained failure. (Round 1 review finding.)
+@mac_update_host
 def test_stage_update_keeps_uv_stderr_in_failed_record(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -1334,6 +1351,7 @@ def test_run_apply_offline_apply_succeeds(tmp_path: Path) -> None:
     assert (engine.live_env / "uv-receipt.toml").is_file()
 
 
+@mac_update_host
 def test_run_apply_entry_point_shims_point_at_the_new_env(tmp_path: Path) -> None:
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     bin_dir = tmp_path / "bin"
@@ -1391,6 +1409,7 @@ def test_run_apply_falls_back_to_rollback_when_shims_cannot_be_written(
     assert engine.up is True
 
 
+@mac_update_host
 def test_run_apply_refuses_an_entry_point_the_staged_path_survives_in(
     tmp_path: Path,
 ) -> None:
@@ -1857,6 +1876,7 @@ def test_cli_apply_rejects_an_unusable_drain_timeout(
     assert engine_update._drain_timeout_arg("1") == 1.0
 
 
+@mac_update_host
 def test_cli_apply_reports_an_interrupted_apply(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
