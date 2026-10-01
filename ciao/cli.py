@@ -1661,7 +1661,9 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         # re-rooted install those differ by the workspace segment, so joining
         # against the parent printed a `file://` link that does not exist.
         abs_path = key_base / result["path"]
-        link = f"file://{abs_path.as_posix()}"
+        # as_uri, not "file://" + the path: on Windows that read `C:` as a host,
+        # and a space or non-ASCII name broke the markdown link on every OS.
+        link = abs_path.as_uri()
         print(f"- **[{result['title']}]({link})** (rank: {result['rank']})")
         if result["snippet"]:
             snippet = result["snippet"].replace("<<<", "**`").replace(">>>", "`**")
