@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao import gws_auth_helper
+from ciao.os_support.private import is_private
 
 
 # --- the parked-verifier store ----------------------------------------------
@@ -26,8 +27,7 @@ def test_verifier_round_trips_and_is_owner_only(tmp_path: Path) -> None:
     gws_auth_helper._store_pending_verifier(tmp_path, "verifier-abc")
 
     assert gws_auth_helper._load_pending_verifier(tmp_path) == "verifier-abc"
-    mode = gws_auth_helper._pending_verifier_path(tmp_path).stat().st_mode & 0o777
-    assert mode == 0o600
+    assert is_private(gws_auth_helper._pending_verifier_path(tmp_path))
 
 
 def test_missing_verifier_reads_as_empty(tmp_path: Path) -> None:

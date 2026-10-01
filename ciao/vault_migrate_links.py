@@ -288,7 +288,7 @@ def run_git(root: Path, *args: str) -> tuple[int, str]:
         proc = subprocess.run(
             ["git", "-C", str(root), *args],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=False,
         )
     except OSError as exc:  # git vanished between the which() and the call

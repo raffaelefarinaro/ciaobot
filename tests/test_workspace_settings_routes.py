@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import stat
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -24,6 +23,7 @@ from ciao.web.routes_api import (
     provider_config_settings,
     upsert_workspace_setting,
 )
+from ciao.os_support.private import is_private
 
 
 def _policy_denies(config: CiaoConfig, tools: list[str]) -> list[str]:
@@ -667,8 +667,8 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     # The uploaded file carries the Google client secret, so both it and its
     # containing profile dir must be owner-only.
     secret_path = tmp_path / "secrets" / "gws-personal" / "client_secret.json"
-    assert stat.S_IMODE(secret_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(secret_path.parent.stat().st_mode) == 0o700
+    assert is_private(secret_path)
+    assert is_private(secret_path.parent)
 
     # Check validation error
     resp = client.post(

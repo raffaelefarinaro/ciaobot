@@ -61,8 +61,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.private import open_private
 from ciao.os_support.users import user_key
 from ciao.workspace_guide import guide_path
 
@@ -414,7 +414,7 @@ def _open_private(
     minus the umask: a 0600 note's own before/after images ended up readable by
     every local account on the machine.
     """
-    return open_fd(path, flags | os.O_CREAT, mode, follow_symlinks=follow_symlinks)
+    return open_private(path, flags, mode, follow_symlinks=follow_symlinks)
 
 
 def _append(journal: Path, payload: dict[str, Any]) -> None:

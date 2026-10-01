@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +9,7 @@ from starlette.testclient import TestClient
 
 from ciao.web.auth import make_serializer
 from ciao.web.routes_auth import auth_settings_get, auth_settings_update
+from ciao.os_support.private import is_private
 
 
 def _app(tmp_path: Path, *, auth_required: bool = False, token: str = "old-secret") -> Starlette:
@@ -52,7 +52,7 @@ def test_auth_settings_enable_password(tmp_path: Path) -> None:
     assert "PWA_AUTH_TOKEN=hunter2" in env
     # .env holds the password in clear text by design, so it must at least be
     # owner-only
-    assert stat.S_IMODE((tmp_path / ".env").stat().st_mode) == 0o600
+    assert is_private(tmp_path / ".env")
     assert "ciao_session=" in res.headers.get("set-cookie", "")
 
 

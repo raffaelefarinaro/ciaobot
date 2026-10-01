@@ -165,6 +165,33 @@ def test_relative_executable_stays_inside_the_workspace(tmp_path: Path) -> None:
     assert excinfo.value.code == "cmd_forbidden"
 
 
+def test_a_relative_path_with_the_native_separator_is_a_path(tmp_path: Path) -> None:
+    """`scripts\\x.py` on Windows is a path under the run dir, not a program name."""
+    root = tmp_path / "workspace"
+    (root / "scripts").mkdir(parents=True)
+    script = root / "scripts" / "x.py"
+    script.write_text("print('hi')\n", encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    native = os.path.join("scripts", "x.py")
+    assert resolve_executable(native, root, root) == str(script.resolve())
+    with pytest.raises(BackgroundRunError) as excinfo:
+        resolve_executable(os.path.join("..", "evil.py"), root, root)
+    assert excinfo.value.code == "cmd_forbidden"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a drive-less rooted path is a Windows shape")
+def test_a_rooted_path_without_a_drive_is_absolute(tmp_path: Path) -> None:
+    """`\\tools\\x.exe` names the current drive's root, not the run directory."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    tool = tmp_path / "tool.exe"
+    tool.write_bytes(b"")
+    rooted = str(tool)[len(tool.drive):]  # C:\\...\\tool.exe -> \\...\\tool.exe
+    assert not Path(rooted).is_absolute() and Path(rooted).root
+    assert Path(resolve_executable(rooted, root, root)).resolve() == tool.resolve()
+
+
 def test_missing_executable_fails_at_validation_not_in_the_log(tmp_path: Path) -> None:
     with pytest.raises(BackgroundRunError) as excinfo:
         resolve_executable("definitely-not-a-real-binary-xyz", tmp_path, tmp_path)

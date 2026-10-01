@@ -18,14 +18,14 @@ from ciao import cli
 def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
-    monkeypatch.setattr(cli, "_run_server", lambda: called.append("run") or 0)
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: called.append(kwargs) or 0)
 
     assert cli.main(["run"]) == 0
-    assert called == ["run"]
+    assert called == [{"supervised": False}]
 
 
 def _raise_system_exit(code: int):
-    def _main() -> None:
+    def _main(*, supervised: bool = False) -> None:
         raise SystemExit(code)
 
     return _main
@@ -80,6 +80,60 @@ def test_run_propagates_other_exit_codes_without_relaunch(
     monkeypatch.setattr(cli.os, "execv", fail_execv)
 
     assert cli._run_server() == 3
+
+
+def test_run_supervised_returns_restart_code_without_execv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supervisor owns the relaunch, so the child only reports the code."""
+    import ciao.main
+
+    def fail_execv(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("execv must not be called under --supervised")
+
+    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(75))
+    monkeypatch.setattr(cli.os, "execv", fail_execv)
+
+    assert cli._run_server(supervised=True) == 75
+
+
+def test_run_parser_accepts_supervised_flag() -> None:
+    assert cli.build_parser().parse_args(["run", "--supervised"]).supervised is True
+
+
+def test_run_server_passes_supervised_to_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine's restart watchdog has to know it is supervised too, or a
+    wedged cleanup re-execs and bypasses the supervisor's relaunch."""
+    import ciao.main
+
+    seen: list[dict[str, object]] = []
+
+    def _fake_main(**kwargs: object) -> None:
+        seen.append(kwargs)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(ciao.main, "main", _fake_main)
+
+    assert cli._run_server(supervised=True) == 0
+    assert seen == [{"supervised": True}]
+
+
+def test_supervise_is_registered_and_help_exits_zero() -> None:
+    """Registered as a subparser too, so `ciao --help` discloses it."""
+    parser = cli.build_parser()
+    action = next(a for a in parser._subparsers._actions if hasattr(a, "choices") and a.choices)
+    assert "supervise" in action.choices
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["supervise", "--help"])
+    assert exc.value.code == 0
+
+
+def test_supervise_is_not_an_agent_command() -> None:
+    """`ciao supervise` is an operator launcher: the agent surface must not claim it."""
+    from ciao.agent_cli import is_agent_invocation
+
+    assert is_agent_invocation(["supervise"]) is False
 
 
 def test_cli_public_preflight_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -366,7 +420,9 @@ def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
     assert report["pending_action_count"] == 1
     notices = report["upgrade_notices"]["notices"]
     assert notices[0]["workspace"] == "research"
-    assert "Open a Ciaobot chat" in notices[0]["remedy"]
+    # The managed command, not a hand migration: the audit's remedy and the Home
+    # card's are one sentence from `ciao.migration_notices` since #816.
+    assert "ciao vault-relocate research --apply" in notices[0]["remedy"]
 
 
 def test_cli_create_chat_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -535,6 +591,57 @@ def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
     env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
     assert "PWA_AUTH_REQUIRED=false" in env_lines
     assert "PWA_AUTH_REQUIRED=true" not in env_lines
+
+
+def _setup_cli_args(tmp_path: Path) -> list[str]:
+    return [
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--auth-token",
+        "test-token",
+        "--no-auth",
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+    ]
+
+
+def test_setup_exits_nonzero_and_warns_when_memory_regions_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The memory step never blocks skill sync, but setup must say it failed
+    and exit non-zero instead of reporting success (#790). The code is the
+    one install-engine.sh tolerates, so a good install is not rolled back."""
+    workspace = tmp_path / "workspace"
+
+    def _boom(*a, **k):
+        raise RuntimeError("guide unwritable")
+
+    monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom)
+    rc = cli.main(_setup_cli_args(tmp_path))
+
+    assert rc == cli.SETUP_MEMORY_FAILED_RC
+    err = capsys.readouterr().err
+    assert "memory regions not set up for" in err
+    assert "guide unwritable" in err
+    # Skills were still synced before the failure was reported. A fresh setup
+    # scaffolds assets per agent root, so that is `workspace/personal`.
+    skills = workspace / "personal" / ".claude" / "skills"
+    assert skills.is_dir()
+    assert any(skills.iterdir())
+
+
+def test_setup_exits_zero_without_warning_on_the_normal_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    rc = cli.main(_setup_cli_args(tmp_path))
+
+    assert rc == 0
+    assert "memory regions not set up" not in capsys.readouterr().err
 
 
 def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
@@ -734,6 +841,32 @@ def test_setup_preserves_load_failure_status_and_stderr(
     assert result == 5
     assert calls[1][1] == {"check": False}
     assert capsys.readouterr().err == "launchctl: load failed\n"
+
+
+def test_setup_launchctl_failure_never_reads_as_the_memory_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """install-engine.sh reads setup's exit 3 as the tolerated memory warning
+    and carries on, so a launchctl load that happens to fail with 3 must not
+    be reported as one: the install would continue with the agent unloaded
+    (#790)."""
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "launchctl":
+            return real_run(command, *args, **kwargs)
+        return subprocess.CompletedProcess(command, 3 if command[1] == "load" else 0)
+
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = cli.main(
+        _launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents")
+    )
+
+    assert result == 1
+    assert result != cli.SETUP_MEMORY_FAILED_RC
 
 
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:

@@ -54,6 +54,20 @@ def test_not_following_links_still_creates_and_opens_regular_files(tmp_path: Pat
     assert path.read_bytes() == b"two"
 
 
+def test_not_following_links_is_binary_and_honours_append(tmp_path: Path) -> None:
+    path = tmp_path / "journal.bin"
+    for chunk in (_AWKWARD, _AWKWARD):
+        fd = open_fd(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600, follow_symlinks=False)
+        os.write(fd, chunk)
+        os.close(fd)
+    assert path.read_bytes() == _AWKWARD + _AWKWARD
+
+
+def test_not_following_links_refuses_a_directory(tmp_path: Path) -> None:
+    with pytest.raises(IsADirectoryError):  # EISDIR, as `os.open` gives on POSIX
+        open_fd(tmp_path, os.O_WRONLY, follow_symlinks=False)
+
+
 def test_a_symlink_is_refused_and_its_target_untouched(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
     target.write_bytes(b"keep")
@@ -110,12 +124,18 @@ def test_posix_makes_the_same_os_open_calls_as_before(monkeypatch: pytest.Monkey
 def test_windows_opens_every_descriptor_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A followed open is `os.open` + `O_BINARY`; a no-follow one never calls it.
+
+    The no-follow path goes through `CreateFileW` (`create_fd`), which is binary
+    by construction; `test_not_following_links_is_binary_and_honours_append`
+    checks its bytes.
+    """
     missing = str(tmp_path / "missing")
     calls = _record_os_open(monkeypatch)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     open_fd(missing, flags, 0o600)
-    open_fd(missing, flags, 0o600, follow_symlinks=False)
-    assert calls == [
-        (missing, flags | os.O_BINARY, 0o600),
-        (missing, flags | os.O_BINARY, 0o600),
-    ]
+    assert calls == [(missing, flags | os.O_BINARY, 0o600)]
+    monkeypatch.undo()
+    fd = open_fd(missing, flags, 0o600, follow_symlinks=False)
+    os.close(fd)
+    assert calls == [(missing, flags | os.O_BINARY, 0o600)]

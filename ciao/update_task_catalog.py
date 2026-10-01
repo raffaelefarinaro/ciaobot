@@ -100,13 +100,17 @@ TASK_FIELDS: frozenset[str] = frozenset(
 #: these, and every name here has a function behind it in
 #: :data:`ciao.update_tasks.DETECTOR_FUNCTIONS` — see the module docstring for why
 #: "registered but not yet written" is not a state this catalog has.
-DETECTORS: frozenset[str] = frozenset({"learnings-cleanup-review-needed"})
+DETECTORS: frozenset[str] = frozenset(
+    {"learnings-cleanup-review-needed", "unrehomed-people-review-needed"}
+)
 
 #: The completion checks this engine implements, same contract as ``DETECTORS``.
 #: Opening a chat is not completion: a check is a registered postcondition,
 #: evaluated apart from any chat the operator starts, and the names here are the
 #: postconditions that engine can actually evaluate.
-COMPLETION_CHECKS: frozenset[str] = frozenset({"learnings-cleanup-review-recorded"})
+COMPLETION_CHECKS: frozenset[str] = frozenset(
+    {"learnings-cleanup-review-recorded", "unrehomed-people-rehome-recorded"}
+)
 
 #: The documented spelling of a version. A leading ``v`` is tolerated;
 #: prerelease/dev suffixes and build metadata are tolerated, and a suffix may

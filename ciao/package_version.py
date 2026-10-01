@@ -346,7 +346,7 @@ def installed_version(timeout_s: float = 10.0) -> str | None:
         result = subprocess.run(
             [sys.executable, "-I", "-c", "import ciao; print(ciao.__version__)"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=timeout_s,
         )
     except (OSError, subprocess.SubprocessError):
