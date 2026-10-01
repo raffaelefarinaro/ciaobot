@@ -167,7 +167,6 @@ def test_legacy_global_cache_is_left_in_place_and_not_used(tmp_path: Path, monke
     use. The user's markdown is irrelevant to this path and must be untouched.
     """
     home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
     legacy_dir = home / ".ciao"
     legacy_dir.mkdir(parents=True)
     legacy = legacy_dir / fts_search.SEARCH_DB_NAME

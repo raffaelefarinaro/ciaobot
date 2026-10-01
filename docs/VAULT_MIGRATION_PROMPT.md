@@ -185,7 +185,8 @@ refuses outright when:
 - the primary workspace is not registered, so the guide's regions and the skill
   catalog have nowhere to go;
 - the install has no git history to roll back to and one could not be created
-  (no `git` binary, or the snapshot commit failed).
+  (no `git` binary, a credential that could not be kept out of the snapshot, or
+  the snapshot commit failed).
 
 Clear the refusals, re-run the plan, and watch the list shrink. The ones that
 need you rather than a file move: a symlink or unregistered directory, and a
@@ -194,18 +195,33 @@ non-empty destination. Nothing is guessed about your own notes.
 **About backups.** You do not need to take one by hand. The command calls
 `ensure_rollback_history` first, which leaves a repository with at least one
 commit completely alone, gives a repository with no commits a snapshot commit,
-and creates a repository plus a `.gitignore` when there is none. **Read that
-sentence before you rely on it:** the credential-excluding `.gitignore` is
-written *only* in the "no repository at all" case. If the install already had a
-git repository with no commits — someone ran `git init` and never committed —
-the snapshot is taken without adding those exclusions, so a `.env`, a
-`secrets/` directory or anything else in `_SNAPSHOT_IGNORES` can end up in that
-commit. Check what the snapshot captured (`git show --stat HEAD`) before you
-continue, and add the exclusions yourself if it is not clean. What the gate
-needs from *you* is that your own uncommitted work is committed or stashed, with
-a message that says what it is. Do not stage the whole tree to satisfy the
-check: `git add -A` commits whatever happens to be lying around, and the vault
-history is the thing you will want to read if a migration goes wrong.
+and creates a repository when there is none. Both snapshotting branches first get
+a `.gitignore` carrying the exclusions in `_SNAPSHOT_IGNORES` — `.env`,
+`secrets/`, `.runtime/` and the rest — so a `.env` or a `secrets/` directory
+cannot be committed into the snapshot even when the install already had a git
+repository with no commits. The write is additive: an existing `.gitignore` of
+yours is kept and only the missing entries are appended.
+
+A `.gitignore` does not unstage anything, so those excluded paths are also
+dropped from git's **staging area** before the snapshot is taken — otherwise a
+`.env` you had already run `git add` on would go into the commit anyway. Nothing
+is deleted from disk: the files stay exactly where they are, they are only left
+out of the snapshot, and every other file you had staged is still in it.
+
+That is not taken on trust. A `.gitignore` of your own can re-admit a file the
+exclusions removed — a `!` line such as `!.env` placed after them, or a
+`sub/.gitignore` containing `!.env`, which applies to everything under `sub/` and
+is never read by the exclusion write. So the staging area is read back
+immediately before the commit, and **if anything in `_SNAPSHOT_IGNORES` is still
+staged the migration refuses** (`unstage_failed`, one of the refusals listed
+above) and makes no commit at all. Your files are still on disk either way;
+remove or move the `!` line and re-run.
+
+What the gate needs from *you* is that your own uncommitted work is committed or
+stashed, with a message that says what it is. Do not stage the whole tree yourself to satisfy the check:
+`git add -A` as a backup step commits whatever happens to be lying around, and
+the snapshot the command takes is not the whole tree either — the vault history
+is the thing you will want to read if a migration goes wrong.
 
 ### What it does when it runs
 

@@ -447,7 +447,7 @@ def apply(
     payload["git_history"] = history
 
     history_refusal: list[str] = []
-    if history["status"] in {"no_git_binary", "init_failed", "add_failed", "commit_failed"}:
+    if history["status"] in _HISTORY_REFUSALS:
         detail = history.get("error") or history["status"]
         history_refusal = [
             "the install has no git history to roll back to and one could not be "
@@ -1553,6 +1553,16 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
 # migration writes into as it runs. None of them are moved by the migration, so
 # excluding them costs the rollback nothing. `.env.example` is deliberately not
 # matched — it is documentation.
+#
+# Every entry is read at ANY depth, so each one is either unanchored (no interior
+# slash, which gitignore already matches at every level) or carries its own
+# `**/` prefix. That is not redundancy. An entry like `.obsidian/workspace*` has
+# an interior slash, which anchors a gitignore pattern to the directory holding
+# the `.gitignore`, so written bare it would exclude only the root copy while the
+# pathspec below matched the nested one — a path excluded from the snapshot when
+# it happened to be pre-staged and captured when it did not. Obsidian's workspace
+# file is per-vault UI state, never worth a rollback point, so it is excluded
+# wherever it appears.
 _SNAPSHOT_IGNORES: tuple[str, ...] = (
     ".runtime/",
     ".env",
@@ -1561,7 +1571,16 @@ _SNAPSHOT_IGNORES: tuple[str, ...] = (
     "node_modules/",
     ".venv/",
     ".DS_Store",
-    ".obsidian/workspace*",
+    "**/.obsidian/workspace*",
+)
+
+# The statuses that mean there is no usable rollback point, shared by both
+# callers (this module's `apply` and `vault_relocate`'s) so the two cannot drift.
+# `unstage_failed` joins them because a snapshot we could not prove is free of
+# credentials is not a safety net: proceeding would commit the very secrets the
+# excludes exist to keep out, so the migration refuses and says so.
+_HISTORY_REFUSALS: frozenset[str] = frozenset(
+    {"no_git_binary", "init_failed", "unstage_failed", "add_failed", "commit_failed"}
 )
 
 
@@ -1579,11 +1598,30 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
     - a repository with at least one commit: left completely alone.
     - a repository with no commits: given the snapshot commit, because ``git mv``
       works without a HEAD but ``git checkout`` has nothing to return to.
-    - not a repository: ``git init``, a ``.gitignore``, then the snapshot.
+    - not a repository: ``git init``, then the snapshot.
 
-    The snapshot deliberately excludes credentials and volatile state (see
-    ``_SNAPSHOT_IGNORES``). A safety net that captured `.env` would turn "we made
-    you a backup" into "we committed your provider keys".
+    Both snapshotting branches first get the credential-excluding ``.gitignore``
+    (see ``_SNAPSHOT_IGNORES``), and it is additive: an owner's entries are kept
+    and only missing ones are appended. The snapshot deliberately excludes
+    credentials and volatile state. A safety net that captured `.env` would turn
+    "we made you a backup" into "we committed your provider keys", so the
+    exclusion is written on every path that reaches the snapshot rather than only
+    on the one where the repository is created.
+
+    The ignore file alone is not enough, because ``.gitignore`` never unstages:
+    a path the owner ``git add``ed before the migration is still in the index
+    and ``git add -A`` keeps it there. So the index is corrected too, removing
+    the excluded paths from the INDEX ONLY — ``git rm --cached``, which leaves
+    every working file on disk untouched. The exclusion is about what the
+    snapshot records, not about deleting anything from the install.
+
+    And the correction is not trusted: an owner's ``.gitignore`` can re-admit a
+    credential the append could not override (a ``!`` negation placed after our
+    entry, or a nested ``.gitignore`` we never read), so the index is read back
+    with the same pathspecs before the commit. Anything still staged, and any
+    failure to run the check at all, is an ``unstage_failed`` refusal — the one
+    outcome this function must never produce is a snapshot commit holding a
+    secret while reporting success.
     """
     root = Path(install_root).resolve()
     out: dict[str, Any] = {"status": "", "created_repo": False, "commit": ""}
@@ -1604,7 +1642,6 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
             return out
         out["status"] = "seeded_empty_repo"
     else:
-        _write_snapshot_gitignore(root)
         init_code, init_out = run_git(root, "init", "-b", "main")
         if init_code != 0:
             out["status"] = "init_failed"
@@ -1613,10 +1650,60 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
         out["created_repo"] = True
         out["status"] = "created"
 
+    # Written here, not in the `else`, so it covers BOTH branches that reach
+    # `git add -A`. The pre-seeded empty repository used to skip it and got its
+    # snapshot with no exclusions at all, so the very first `git add -A` over
+    # that install root committed `.env` and `secrets/`. The exclusion file is
+    # itself a repo file, so git honours it for a repo that already exists.
+    # It appends only the missing entries and never rewrites what an owner
+    # already wrote, and a repository with a HEAD has returned above, so no
+    # established history is touched.
+    _write_snapshot_gitignore(root)
+    # A `.gitignore` does not unstage anything: a path an owner `git add`ed
+    # before the migration is still in the index, and `git add -A` keeps it
+    # there, so the snapshot would carry their credentials despite the
+    # exclusions. The index is corrected first — the working files stay exactly
+    # where they are, which is the whole point: the exclusion is about what the
+    # snapshot records, not about deleting anything from disk.
+    unstage_code, unstage_out = run_git(root, *_unstage_snapshot_ignores_args())
+    if unstage_code != 0:
+        out["status"] = "unstage_failed"
+        out["error"] = unstage_out.strip()
+        return out
     add_code, add_out = run_git(root, "add", "-A")
     if add_code != 0:
         out["status"] = "add_failed"
         out["error"] = add_out.strip()
+        return out
+    # VERIFY, do not assume. The unstage above is a best effort, and an owner's
+    # own `.gitignore` can undo it in two ways it cannot be defended against by
+    # appending: a negation AFTER our entry (`.env` then `!.env`, which
+    # `_write_snapshot_gitignore` skips because `.env` is already mentioned) and
+    # a nested `sub/.gitignore` saying `!.env`, which applies to the whole subtree
+    # and is never read by the exclusion write. Either one puts the secret back
+    # into the index on `git add -A`, which is exactly what #811 is about.
+    #
+    # So the index is read back with the same pathspecs and the commit is made
+    # only if nothing came back. A verification that cannot run counts as not
+    # clean: an unverifiable snapshot is not a safety net.
+    check_code, check_out = run_git(
+        root, "ls-files", "-z", "--", *_snapshot_ignore_pathspecs()
+    )
+    if check_code != 0:
+        out["status"] = "unstage_failed"
+        out["error"] = (
+            "could not verify the snapshot excludes credentials: "
+            f"{check_out.strip()}"
+        )
+        return out
+    leaked = [name for name in check_out.split("\0") if name]
+    if leaked:
+        out["status"] = "unstage_failed"
+        out["error"] = (
+            "still staged for the snapshot after the credential exclusions: "
+            + ", ".join(sorted(leaked)[:8])
+            + (" and more" if len(leaked) > 8 else "")
+        )
         return out
     commit_code, commit_out = run_git(
         root,
@@ -1635,6 +1722,70 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
     head_code, head = run_git(root, "rev-parse", "HEAD")
     out["commit"] = head.strip() if head_code == 0 else ""
     return out
+
+
+def _snapshot_ignore_pathspecs() -> list[str]:
+    """``_SNAPSHOT_IGNORES`` in the one pathspec spelling both callers share.
+
+    The unstage and the verification that guards the commit must agree exactly —
+    a verification looking for something the unstage did not remove would either
+    pass a dirty index or refuse a clean one — so there is one translation here
+    and both read it.
+
+    Per entry:
+
+    - a trailing slash means a directory, so it becomes ``<name>/**``. The
+      pathspec ``secrets/`` alone matches NOTHING, because git reads it as a
+      literal path with an unusable trailing slash, which is the shape a
+      verification would silently pass on.
+    - an unanchored entry is prefixed ``**/``, because a gitignore pattern with
+      no interior slash matches at ANY depth. ``client/.runtime/`` holds a
+      credentialed config in exactly the way ``.runtime/`` does, and a
+      root-anchored ``.runtime/`` would silently stop matching and re-open the
+      hole #811 closed.
+    - an entry that already carries its own ``**/`` is left alone, so prefixing
+      is not applied twice.
+
+    ``:(glob)`` is required, not decoration, and both of its effects matter here.
+    Verified against git rather than assumed: in the DEFAULT pathspec matcher a
+    ``*`` crosses a ``/`` (``a*env`` matches ``a/b/.env``) and ``**`` collapses to
+    a single component, so ``**/.env`` needs an intermediate directory and misses
+    the root-level ``.env`` — the very file this exists to protect. With
+    ``:(glob)``, ``*`` stops at ``/`` and ``**`` means "any number of
+    directories, including none".
+    """
+    pathspecs: list[str] = []
+    for entry in _SNAPSHOT_IGNORES:
+        directory = entry.endswith("/")
+        name = entry[:-1] if directory else entry
+        prefix = "" if name.startswith("**/") else "**/"
+        pathspecs.append(f":(glob){prefix}{name}/**" if directory else f":(glob){prefix}{name}")
+    return pathspecs
+
+
+def _unstage_snapshot_ignores_args() -> list[str]:
+    """The ``git rm --cached`` invocation that drops excluded paths from the index.
+
+    ``--force`` is what makes this work on a repository with no HEAD: git
+    otherwise refuses to drop a path whose staged content differs from both the
+    worktree and HEAD, which is every path in a seeded repository. It forces the
+    INDEX entry only. ``--cached`` never touches the working tree, so the
+    owner's files stay on disk, and ``--ignore-unmatch`` makes an index that
+    holds nothing to drop a no-op instead of an error.
+
+    The pathspecs come from the fixed ignore list and are passed after ``--``,
+    so nothing an owner wrote is ever interpreted as a git argument.
+    """
+    return [
+        "rm",
+        "--cached",
+        "-r",
+        "-q",
+        "-f",
+        "--ignore-unmatch",
+        "--",
+        *_snapshot_ignore_pathspecs(),
+    ]
 
 
 def _write_snapshot_gitignore(root: Path) -> None:

@@ -24,15 +24,27 @@ def path_hint(directory: str, *, persist: bool) -> str:
     PowerShell cannot make ``ciao`` findable for the *next* terminal without
     writing the user PATH -- so both shapes are the same persistent update
     there.
+
+    The Windows line goes through the registry rather than
+    ``[Environment]::SetEnvironmentVariable`` on purpose (#854). That setter
+    reads the old value through ``GetEnvironmentVariable``, which hands back
+    the *expanded* string, and writes the result back as ``REG_SZ``. A user
+    PATH stored as ``REG_EXPAND_SZ`` with ``%USERPROFILE%\\...`` entries
+    would then be frozen to today's expanded paths and change type under every
+    other tool that reads it. ``GetValue(..., 'DoNotExpandEnvironmentNames')``
+    plus an explicit ``RegistryValueKind`` keeps both the entries and the kind.
     """
     if sys.platform == "win32":
         # Single-quoted so a ``$`` or a backtick in the path cannot expand;
         # doubling ``'`` is how PowerShell escapes one inside a literal.
         quoted = directory.replace("'", "''")
         return (
-            '[Environment]::SetEnvironmentVariable("Path", '
-            f"'{quoted};' + "
-            '[Environment]::GetEnvironmentVariable("Path","User"), "User")'
+            "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("
+            f"'Environment', $true); $v = $k.GetValue('Path', '', "
+            "'DoNotExpandEnvironmentNames'); "
+            f"$k.SetValue('Path', '{quoted}' + "
+            "$(if ($v) { ';' + $v }), "
+            "[Microsoft.Win32.RegistryValueKind]::ExpandString)"
         )
     if not persist:
         return f'export PATH="{directory}:$PATH"'
