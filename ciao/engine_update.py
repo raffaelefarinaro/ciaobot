@@ -293,6 +293,7 @@ def default_fetch(
             )
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 written = 0
+                too_large = False
                 with part.open("wb") as handle:
                     while True:
                         chunk = response.read(_CHUNK)
@@ -300,17 +301,21 @@ def default_fetch(
                             break
                         written += len(chunk)
                         if max_bytes and written > max_bytes:
-                            # Not an OSError, so this is not retried: the
-                            # server is answering fine, it is just serving
-                            # something this release does not describe. The
-                            # partial bytes are dropped first: they are not a
-                            # release anybody can install, and leaving them
-                            # makes a retry look like it is resuming.
-                            part.unlink(missing_ok=True)
-                            raise UpdateError(
-                                f"{url} is larger than the {max_bytes} bytes expected"
-                            )
+                            too_large = True
+                            break
                         handle.write(chunk)
+                if too_large:
+                    # Not an OSError, so this is not retried: the server is
+                    # answering fine, it is just serving something this release
+                    # does not describe. The partial bytes are dropped first:
+                    # they are not a release anybody can install, and leaving
+                    # them makes a retry look like it is resuming. Dropped
+                    # after the handle is closed: Windows refuses to delete a
+                    # file that is still open (WinError 32).
+                    part.unlink(missing_ok=True)
+                    raise UpdateError(
+                        f"{url} is larger than the {max_bytes} bytes expected"
+                    )
             os.replace(part, dest)
             return
         except (OSError, urllib.error.URLError) as exc:
