@@ -90,7 +90,6 @@ def _write_node_state(workspace: Path, state: object) -> None:
     (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
 
 
-@macos_app_layout
 def test_classify_none_without_plist(tmp_path: Path) -> None:
     agents, _ = _fixture(tmp_path, write_plist=False)
 
@@ -480,7 +479,6 @@ def test_check_client_url_refuses_what_is_not_one(url: str) -> None:
     assert check_client_url(url) == ""
 
 
-@macos_app_layout
 def test_check_client_url_matches_the_state_file_rule(tmp_path: Path) -> None:
     # One rule, not two: whatever this accepts has to be exactly what a client's
     # `host_url` may be in a state file, or the same Mac would be a client with
