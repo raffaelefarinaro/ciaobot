@@ -23,7 +23,7 @@ def _run(coro):
 def test_capture_writes_blob_and_meta(tmp_path: Path, store: SnapshotStore) -> None:
     target = tmp_path / "vault" / "note.md"
     target.parent.mkdir(parents=True)
-    target.write_text("first version\n")
+    target.write_text("first version\n", newline="")
 
     meta = _run(store.capture(
         chat_id="chat-1",
@@ -58,7 +58,7 @@ def test_repeated_capture_dedups_identical_content(tmp_path: Path, store: Snapsh
     own hook firing on the ToolUseEvent before the CLI has actually run
     the edit — without dedup we'd record N copies of the pre-edit state."""
     target = tmp_path / "note.md"
-    target.write_text("same content\n")
+    target.write_text("same content\n", newline="")
 
     m1 = _run(store.capture(chat_id="c", file_path=str(target), action="written", tool="Write"))
     m2 = _run(store.capture(chat_id="c", file_path=str(target), action="written", tool="Write"))
@@ -73,11 +73,11 @@ def test_repeated_capture_dedups_identical_content(tmp_path: Path, store: Snapsh
 def test_capture_records_each_distinct_revision(tmp_path: Path, store: SnapshotStore) -> None:
     target = tmp_path / "note.md"
 
-    target.write_text("v1\n")
+    target.write_text("v1\n", newline="")
     _run(store.capture(chat_id="c", file_path=str(target), action="written", tool="Write"))
-    target.write_text("v2\n")
+    target.write_text("v2\n", newline="")
     _run(store.capture(chat_id="c", file_path=str(target), action="edited", tool="Edit"))
-    target.write_text("v3\n")
+    target.write_text("v3\n", newline="")
     _run(store.capture(chat_id="c", file_path=str(target), action="edited", tool="Edit"))
 
     listed = store.list_snapshots(chat_id="c", file_path=str(target))
@@ -122,7 +122,7 @@ def test_oversized_file_records_truncated_marker(tmp_path: Path, store: Snapshot
 
 def test_delete_chat_removes_all_snapshots(tmp_path: Path, store: SnapshotStore) -> None:
     target = tmp_path / "note.md"
-    target.write_text("v1")
+    target.write_text("v1", newline="")
     _run(store.capture(chat_id="c", file_path=str(target), action="written", tool="Write"))
     assert store.list_snapshots(chat_id="c", file_path=str(target))
 
@@ -137,7 +137,7 @@ def test_quoted_path_stays_in_single_directory(tmp_path: Path, store: SnapshotSt
     could traverse out via `../`."""
     target = tmp_path / "deep" / "nested" / "note.md"
     target.parent.mkdir(parents=True)
-    target.write_text("v1")
+    target.write_text("v1", newline="")
 
     _run(store.capture(chat_id="c", file_path=str(target), action="written", tool="Write"))
 

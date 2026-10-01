@@ -11,7 +11,11 @@ migration that relocates 42 notes and breaks 70 links has made the vault worse.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from typing import Callable
+
+import pytest
 
 from ciao import entity_types
 from ciao.vault_index import DIR_TYPE_MAP
@@ -704,19 +708,34 @@ def test_a_forced_rerun_with_nothing_to_do_keeps_the_reverse_map(tmp_path: Path)
 # ---- a run that could not finish -------------------------------------------
 
 
-def _block_moves(vault: Path) -> Path:
+def _block_moves(vault: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[], None]:
     """Make the move fail the way a permission or quota problem does.
 
-    The destination workspace is left unwritable, so the link rewrites all land
-    and only `source.replace(destination)` fails — the shape that matters,
-    because it is the one that leaves work on disk with nothing recording it.
+    Every move into the destination workspace raises PermissionError, so the
+    link rewrites all land and only `source.replace(destination)` fails — the
+    shape that matters, because it is the one that leaves work on disk with
+    nothing recording it. Patched rather than chmod-ed: a read-only directory
+    refuses new entries on POSIX but not on Windows, where the move would just
+    succeed. Returns the function that lifts the block.
     """
-    work = vault / "work"
-    work.chmod(0o555)
-    return work
+    work = (vault / "work").resolve()
+    real_replace = Path.replace
+    blocked = {"on": True}
+
+    def refusing(self: Path, target: str | os.PathLike[str]) -> Path:
+        if blocked["on"] and Path(target).resolve().is_relative_to(work):
+            raise PermissionError(13, "Permission denied", str(target))
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", refusing)
+
+    def unblock() -> None:
+        blocked["on"] = False
+
+    return unblock
 
 
-def test_a_partial_run_is_not_recorded_as_complete(tmp_path: Path) -> None:
+def test_a_partial_run_is_not_recorded_as_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One note that could not be moved means the vault is not re-homed. A receipt
     saying otherwise made the migration stop short of done and report that it had
     finished: the next normal run was refused as "already migrated" while the note
@@ -724,7 +743,7 @@ def test_a_partial_run_is_not_recorded_as_complete(tmp_path: Path) -> None:
     at a path it is not at, so the vault was left worse than before the run."""
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
-    blocked = _block_moves(vault)
+    unblock = _block_moves(vault, monkeypatch)
     try:
         summary = rehome_people(vault, runtime, apply=True)
 
@@ -762,10 +781,10 @@ def test_a_partial_run_is_not_recorded_as_complete(tmp_path: Path) -> None:
             if path != receipt_path(runtime)
         ] == []
     finally:
-        blocked.chmod(0o755)
+        unblock()
 
 
-def test_a_partial_run_is_undoable_on_its_own(tmp_path: Path) -> None:
+def test_a_partial_run_is_undoable_on_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A run that could not finish still has to be an exact inverse of what it did
     write, or the receipt it now leaves behind is no better than the missing one.
     Two ways that failed: the spans of the note whose move failed were keyed to
@@ -774,11 +793,11 @@ def test_a_partial_run_is_undoable_on_its_own(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
     before = _snapshot(vault)
-    blocked = _block_moves(vault)
+    unblock = _block_moves(vault, monkeypatch)
     try:
         rehome_people(vault, runtime, apply=True)
     finally:
-        blocked.chmod(0o755)
+        unblock()
 
     summary = unrehome_people(vault, runtime, apply=True)
 
@@ -792,7 +811,7 @@ def test_a_partial_run_is_undoable_on_its_own(tmp_path: Path) -> None:
     assert after == before
 
 
-def test_a_retry_after_a_partial_run_can_undo_both_batches(tmp_path: Path) -> None:
+def test_a_retry_after_a_partial_run_can_undo_both_batches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The reverse map has to stay usable across retries. Rotating it away on the
     second pass left the references the first pass rewrote with nothing to restore
     them — the retry moves the note and records only that, so the undo put the note
@@ -800,11 +819,11 @@ def test_a_retry_after_a_partial_run_can_undo_both_batches(tmp_path: Path) -> No
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
     before = _snapshot(vault)
-    blocked = _block_moves(vault)
+    unblock = _block_moves(vault, monkeypatch)
     try:
         first = rehome_people(vault, runtime, apply=True)
     finally:
-        blocked.chmod(0o755)
+        unblock()
     assert first["failed"], "the fixture has to actually fail the first move"
 
     retry = rehome_people(vault, runtime, apply=True)
@@ -846,11 +865,11 @@ def test_a_rewrite_that_cannot_be_taken_back_is_still_mapped_to_the_real_path(
         return real(self, data, *args, **kwargs)
 
     monkeypatch.setattr(Path, "write_text", refuse_the_rollback)
-    blocked = _block_moves(vault)
+    unblock = _block_moves(vault, monkeypatch)
     try:
         summary = rehome_people(vault, runtime, apply=True)
     finally:
-        blocked.chmod(0o755)
+        unblock()
         monkeypatch.undo()
 
     assert any(
@@ -868,17 +887,17 @@ def test_a_rewrite_that_cannot_be_taken_back_is_still_mapped_to_the_real_path(
     assert after == before, "the degraded branch is still an exact inverse"
 
 
-def test_a_partial_receipt_never_reads_as_a_re_homed_vault(tmp_path: Path) -> None:
+def test_a_partial_receipt_never_reads_as_a_re_homed_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The accessor split, stated on its own: the completed-only reader is what
     every "has this vault been re-homed?" surface must ask, and the raw one is for
     the undo and the carry-forward, which need the map whatever its status."""
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
-    blocked = _block_moves(vault)
+    unblock = _block_moves(vault, monkeypatch)
     try:
         rehome_people(vault, runtime, apply=True)
     finally:
-        blocked.chmod(0o755)
+        unblock()
 
     assert read_receipt(runtime) is None
     assert peek_receipt(runtime)["status"] == "partial"
@@ -1313,7 +1332,7 @@ def test_a_link_back_to_a_different_person_is_not_a_link_back(tmp_path: Path) ->
 
 
 def test_the_cli_does_not_claim_a_clean_vault_when_every_move_failed(
-    tmp_path: Path, capsys
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """"No tag-obvious misfiled people" was a lie, and the receipt went unmentioned.
 
@@ -1327,9 +1346,7 @@ def test_the_cli_does_not_claim_a_clean_vault_when_every_move_failed(
 
     vault = _vault(tmp_path)
     runtime = tmp_path / ".runtime"
-    destination = vault / "work" / "People"
-    destination.mkdir(parents=True, exist_ok=True)
-    destination.chmod(0o555)
+    unblock = _block_moves(vault, monkeypatch)
     try:
         code = cli.main([
             "vault-rehome", "--apply",
@@ -1339,7 +1356,7 @@ def test_the_cli_does_not_claim_a_clean_vault_when_every_move_failed(
             "--workspace-name", "work",
         ])
     finally:
-        destination.chmod(0o755)
+        unblock()
 
     out = capsys.readouterr()
     assert code == 1

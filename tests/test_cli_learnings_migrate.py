@@ -500,7 +500,7 @@ def test_a_file_edited_since_the_migration_is_left_entirely_alone(
     receipt = _receipts(runtime)[0]
 
     edited = _learnings(vault).replace("## Format", "## Format (edited)")
-    (vault / "Workspace" / "Learnings.md").write_text(edited, encoding="utf-8")
+    (vault / "Workspace" / "Learnings.md").write_text(edited, encoding="utf-8", newline="")
     capsys.readouterr()
 
     assert _run(*args, "--revert", str(receipt), "--apply") == 1
@@ -539,7 +539,7 @@ def test_an_unreadable_receipt_is_refused_rather_than_half_trusted(
 ) -> None:
     vault, runtime = _vault(tmp_path)
     bogus = tmp_path / "not-a-receipt.json"
-    bogus.write_text("{ not json", encoding="utf-8")
+    bogus.write_text("{ not json", encoding="utf-8", newline="")
 
     assert _run(
         "learnings-migrate",
@@ -686,7 +686,7 @@ def test_a_concurrent_write_is_refused_rather_than_overwritten(
 
     def _raced(target: Path, text: str, *, expect: str = "") -> None:
         # An accept landing between this run's read and its write.
-        path.write_text(text + "\n- raced in\n", encoding="utf-8")
+        path.write_text(text + "\n- raced in\n", encoding="utf-8", newline="")
         real(target, text, expect=expect)
 
     monkeypatch.setattr(learnings_migrate, "_write_locked", _raced)
@@ -706,6 +706,6 @@ def test_a_new_receipt_path_never_overwrites_an_existing_one(tmp_path: Path) -> 
     runtime = tmp_path / ".runtime"
     first = lm.new_receipt_path(runtime)
     first.parent.mkdir(parents=True, exist_ok=True)
-    first.write_text("{}", encoding="utf-8")
+    first.write_text("{}", encoding="utf-8", newline="")
 
     assert lm.new_receipt_path(runtime) != first
