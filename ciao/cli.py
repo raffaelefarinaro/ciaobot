@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, public_release, release
+from ciao import dev, gws_wrapper, package_smoke, public_release, release, service_backend
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
 from ciao.jsonio import write_private_text
@@ -216,12 +216,7 @@ def _write_launchd_plist(
             # launch_agents_dir overrides) are not live — the resolved-path
             # comparison already distinguishes them, so an env override alone
             # must not bypass protection when the target is still the real dir.
-            real_dir = Path.home() / "Library" / "LaunchAgents"
-            try:
-                is_real = launch_agents_dir.expanduser().resolve() == real_dir.expanduser().resolve()
-            except OSError:
-                is_real = launch_agents_dir.expanduser() == real_dir
-            if is_real:
+            if service_backend.current_backend().is_live_agents_dir(launch_agents_dir):
                 existing = _plist_workspace(launch_agents_dir)
                 try:
                     requested = Path(workspace).expanduser().resolve()
@@ -448,20 +443,14 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
     the user's real launchd domain.
     """
 
-    real_launch_dir = Path.home() / "Library" / "LaunchAgents"
-    launch_dir = (launch_agents_dir or default_launch_agents_dir()).expanduser()
+    backend = service_backend.current_backend()
+    launch_dir = (launch_agents_dir or backend.agents_dir()).expanduser()
     plist_path = launch_dir / "com.ciao.menubar.plist"
     if not plist_path.exists():
         return False
 
-    if sys.platform == "darwin" and launch_dir == real_launch_dir:
-        label = f"gui/{os.getuid()}/com.ciao.menubar"
-        try:
-            subprocess.run(
-                ["launchctl", "bootout", label], check=False, capture_output=True
-            )
-        except OSError:
-            pass
+    if launch_dir == backend.live_agents_dir():
+        backend.bootout_agent("com.ciao.menubar")
     try:
         plist_path.unlink()
     except OSError:
@@ -810,17 +799,13 @@ def setup_workspace(
             "yes",
         )
         if not allow_env:
+            backend = service_backend.current_backend()
             _early_launch = (
                 Path(launch_agents_dir)
                 if launch_agents_dir is not None
-                else default_launch_agents_dir()
+                else backend.agents_dir()
             )
-            real_dir = Path.home() / "Library" / "LaunchAgents"
-            try:
-                is_real = _early_launch.expanduser().resolve() == real_dir.expanduser().resolve()
-            except OSError:
-                is_real = _early_launch.expanduser() == real_dir
-            if is_real:
+            if backend.is_live_agents_dir(_early_launch):
                 existing = _plist_workspace(_early_launch)
                 if existing is not None and existing != root:
                     raise RuntimeError(
@@ -1163,11 +1148,6 @@ def setup_workspace(
                     "      It is reversible: `ciao vault-unmigrate-links --apply`.",
                 )
 
-    launch_dir = (
-        Path(launch_agents_dir)
-        if launch_agents_dir is not None
-        else default_launch_agents_dir()
-    )
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     # The bundled launcher exports its own entrypoint so onboarding does not
     # write the embedded interpreter directly into launchd as ``python run``.
@@ -1182,6 +1162,11 @@ def setup_workspace(
     # bundle, which no longer exists.
     _ensure_setup_token(root)
     if write_launchd:
+        launch_dir = (
+            Path(launch_agents_dir)
+            if launch_agents_dir is not None
+            else service_backend.current_backend().agents_dir()
+        )
         written.append(_write_launchd_plist(
             workspace=root,
             launch_agents_dir=launch_dir,
@@ -1247,7 +1232,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         return 2
     launch_dir = args.launch_agents_dir
     if launch_dir is None and sys.platform == "darwin":
-        launch_dir = default_launch_agents_dir()
+        launch_dir = service_backend.current_backend().agents_dir()
 
     # Guard against the two ways `ciao setup` silently hijacks the workspace:
     # running it inside the source checkout, or re-pointing an already
@@ -1338,27 +1323,14 @@ def _setup_command(args: argparse.Namespace) -> int:
     plists = [server_plist] if server_plist is not None and server_plist.is_file() else []
     if args.load_launchd:
         rc = setup_rc
+        backend = service_backend.current_backend()
         for plist in plists:
-            # The unload is a probe: during an install the agent is normally
-            # not loaded, and launchctl says so on stderr ("Unload failed: 5:
-            # Input/output error"). check=False swallows the status but not the
-            # output, and install.sh redirects only stdout - so that expected
-            # non-event was the first line a user saw when re-running the
-            # installer over a configured workspace, ahead of the success lines.
-            subprocess.run(
-                ["launchctl", "unload", str(plist)],
-                check=False,
-                stderr=subprocess.DEVNULL,
-            )
             # Keep a real load failure visible to the installer and preserve
             # its status as the setup result - except that launchctl's own 3
             # would be read as the tolerated memory warning, so the installer
             # would continue with the agent never loaded. Anything load
             # returns is a hard failure: report it as 1.
-            lrc = subprocess.run(
-                ["launchctl", "load", "-w", str(plist)],
-                check=False,
-            ).returncode
+            lrc = backend.load_agent(plist)
             if lrc:
                 rc = 1 if lrc == SETUP_MEMORY_FAILED_RC else lrc
         _print_setup_summary(root, _pwa_port_from_env(root, args.port))

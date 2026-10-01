@@ -46,6 +46,68 @@ def default_launch_agents_dir() -> Path:
     return Path.home() / "Library" / "LaunchAgents"
 
 
+def live_launch_agents_dir() -> Path:
+    """The real per-user LaunchAgents dir, ignoring ``CIAO_LAUNCH_AGENTS_DIR``."""
+    return Path.home() / "Library" / "LaunchAgents"
+
+
+def bootout_agent(label: str) -> None:
+    """Best-effort ``launchctl bootout gui/<uid>/<label>``; output is discarded."""
+    try:
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        pass
+
+
+def load_agent(definition: Path) -> int:
+    """``launchctl unload`` (a quiet probe) then ``launchctl load -w``; return load's status."""
+    # The unload is a probe: during an install the agent is normally
+    # not loaded, and launchctl says so on stderr ("Unload failed: 5:
+    # Input/output error"). check=False swallows the status but not the
+    # output, and install.sh redirects only stdout - so that expected
+    # non-event was the first line a user saw when re-running the
+    # installer over a configured workspace, ahead of the success lines.
+    subprocess.run(
+        ["launchctl", "unload", str(definition)],
+        check=False,
+        stderr=subprocess.DEVNULL,
+    )
+    return subprocess.run(
+        ["launchctl", "load", "-w", str(definition)],
+        check=False,
+    ).returncode
+
+
+def schedule_server_handoff() -> bool:
+    """Spawn a detached helper that loads and kickstarts the server agent.
+
+    Returns False when the live plist is missing or the spawn fails.
+    """
+    plist = live_launch_agents_dir() / f"{SERVER_LABEL}.plist"
+    if not plist.exists():
+        return False
+    script = (
+        "sleep 3; "
+        f"/bin/launchctl load -w '{plist}' 2>/dev/null; "
+        f"/bin/launchctl kickstart gui/{os.getuid()}/{SERVER_LABEL} 2>/dev/null; "
+        "exit 0"
+    )
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", script],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class DesktopRuntime:
     workspace: str

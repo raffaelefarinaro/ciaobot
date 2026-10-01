@@ -869,6 +869,242 @@ def test_setup_launchctl_failure_never_reads_as_the_memory_warning(
     assert result != cli.SETUP_MEMORY_FAILED_RC
 
 
+class _RecordingBackend:
+    """Stands in for `service_backend.current_backend()` in the load path."""
+
+    name = "recording"
+
+    def __init__(self, status: int = 0) -> None:
+        self.status = status
+        self.loaded: list[Path] = []
+
+    def agents_dir(self) -> Path:
+        return Path.home() / "Library" / "LaunchAgents"
+
+    def live_agents_dir(self) -> Path:
+        return Path.home() / "Library" / "LaunchAgents"
+
+    def is_live_agents_dir(self, path: Path) -> bool:
+        return False
+
+    def bootout_agent(self, label: str) -> None:
+        return None
+
+    def load_agent(self, definition: Path) -> int:
+        self.loaded.append(definition)
+        return self.status
+
+    def schedule_server_handoff(self) -> bool:
+        return False
+
+
+def _no_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command and command[0] == "launchctl":
+            raise AssertionError(f"cli must not shell out to launchctl: {command!r}")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+
+def test_setup_load_launchd_goes_through_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    backend = _RecordingBackend(status=0)
+    monkeypatch.setattr(
+        cli.service_backend, "current_backend", lambda: backend
+    )
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    _no_launchctl(monkeypatch)
+
+    assert (
+        cli.main(_launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents"))
+        == 0
+    )
+
+    assert backend.loaded == [tmp_path / "LaunchAgents" / "com.ciao.server.plist"]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"), [(3, 1), (5, 5)]
+)
+def test_setup_load_failure_through_the_backend(
+    status: int,
+    expected: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    backend = _RecordingBackend(status=status)
+    monkeypatch.setattr(
+        cli.service_backend, "current_backend", lambda: backend
+    )
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    _no_launchctl(monkeypatch)
+
+    result = cli.main(
+        _launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents")
+    )
+
+    assert result == expected
+    assert backend.loaded == [tmp_path / "LaunchAgents" / "com.ciao.server.plist"]
+
+
+def test_disable_legacy_menubar_agent_boots_out_only_the_live_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Backend(_RecordingBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.booted: list[str] = []
+            self.default_dir = tmp_path / "default"
+            self.live_dir = tmp_path / "live"
+
+        def agents_dir(self) -> Path:
+            return self.default_dir
+
+        def live_agents_dir(self) -> Path:
+            return self.live_dir
+
+        def bootout_agent(self, label: str) -> None:
+            self.booted.append(label)
+
+    backend = Backend()
+    monkeypatch.setattr(
+        cli.service_backend, "current_backend", lambda: backend
+    )
+    live_plist = backend.live_dir / "com.ciao.menubar.plist"
+    default_plist = backend.default_dir / "com.ciao.menubar.plist"
+    for plist in (live_plist, default_plist):
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text("plist", encoding="utf-8")
+    other_plist = tmp_path / "other" / "com.ciao.menubar.plist"
+    other_plist.parent.mkdir(parents=True)
+    other_plist.write_text("plist", encoding="utf-8")
+
+    assert cli._disable_legacy_menubar_agent(backend.live_dir) is True
+    assert cli._disable_legacy_menubar_agent(tmp_path / "other") is True
+    # No argument falls back to the backend's default agents dir.
+    assert cli._disable_legacy_menubar_agent() is True
+
+    assert not live_plist.exists()
+    assert not default_plist.exists()
+    assert not other_plist.exists()
+    assert backend.booted == ["com.ciao.menubar"]
+
+
+def test_write_launchd_plist_repoint_guard_uses_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
+    agents = tmp_path / "a"
+    agents.mkdir()
+    workspace_a = tmp_path / "ws-a"
+    workspace_a.mkdir()
+    (agents / "com.ciao.server.plist").write_text(
+        _plist_with_workspace(workspace_a), encoding="utf-8"
+    )
+    backend = _RecordingBackend()
+    monkeypatch.setattr(
+        cli.service_backend, "current_backend", lambda: backend
+    )
+    monkeypatch.setattr(cli, "_plist_workspace", lambda _path: workspace_a.resolve())
+
+    def write(workspace: Path, is_live: bool) -> Path:
+        backend.is_live_agents_dir = lambda _path: is_live  # type: ignore[method-assign]
+        return cli._write_launchd_plist(
+            workspace=workspace,
+            launch_agents_dir=agents,
+            port=8443,
+            confirm_repoint=False,
+        )
+
+    with pytest.raises(RuntimeError, match="Refusing to repoint"):
+        write(tmp_path / "ws-b", True)
+
+    written = write(tmp_path / "ws-b", False)
+    assert written.is_file()
+
+
+class _PlatformShim:
+    """`cli.sys` with a different `platform`, leaving the real module alone.
+
+    `monkeypatch.setattr(cli.sys, "platform", ...)` would patch the global
+    `sys` module, so unrelated code (shutil, ctypes) would take the win32
+    branches too. Only cli needs to believe it is on another platform.
+    """
+
+    def __init__(self, real: object, platform: str) -> None:
+        self._real = real
+        self.platform = platform
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def _plist_with_workspace(workspace: Path) -> str:
+    return (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<plist version=\"1.0\"><dict><key>ProgramArguments</key><array>"
+        f"<string>{workspace}</string></array></dict></plist>\n"
+    )
+
+
+def test_setup_workspace_early_guard_uses_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
+    agents = tmp_path / "a"
+    agents.mkdir()
+    workspace_a = tmp_path / "ws-a"
+    workspace_a.mkdir()
+    (agents / "com.ciao.server.plist").write_text(
+        _plist_with_workspace(workspace_a), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        _RecordingBackend,
+        "is_live_agents_dir",
+        lambda self, _path: True,
+    )
+    monkeypatch.setattr(
+        cli.service_backend,
+        "current_backend",
+        _RecordingBackend,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_plist_workspace",
+        lambda _path: workspace_a.resolve(),
+    )
+    target = tmp_path / "ws-b"
+
+    with pytest.raises(RuntimeError, match="Refusing to repoint"):
+        cli.setup_workspace(target, launch_agents_dir=agents)
+
+    assert not target.exists(), "the early guard must refuse before creating anything"
+
+
+def test_setup_workspace_does_not_ask_for_a_backend_without_launchd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "sys", _PlatformShim(sys, "win32"))
+    monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
+
+    def no_backend():
+        raise AssertionError("setup_workspace must not ask for a backend here")
+
+    monkeypatch.setattr(cli.service_backend, "current_backend", no_backend)
+
+    written = cli.setup_workspace(tmp_path / "ws")
+
+    assert (tmp_path / "ws").is_dir()
+    assert not any("LaunchAgents" in str(path) for path in written)
+
+
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"
