@@ -771,9 +771,9 @@ REHOME_SINGLE_WORKSPACE = "single_workspace"
 #: would be offering a command that finds nothing, permanently.
 REHOME_NO_SHARED_VAULT = "no_shared_vault"
 
-#: The workspaces do not bind two roles, so ``detect_misfiled_people`` cannot
-#: reach a mechanical bucket at all. See :func:`rehome_legacy_candidates` for why
-#: that is a proof rather than a guess.
+#: No tag role binds to a registered workspace, so ``detect_misfiled_people``
+#: cannot reach a mechanical bucket at all. See :func:`rehome_legacy_candidates`
+#: for why that is a proof rather than a guess.
 REHOME_NO_ROLE_BINDING = "no_role_binding"
 
 #: The scan ran and found no tag-obvious cross-workspace move. This is the only
@@ -849,16 +849,33 @@ def rehome_legacy_candidates(
        per-workspace root has no workspace segment in its paths, so the command
        has nothing to move there and ``--workspace-name`` changes nothing: this
        install has no managed re-home, and the task must not pretend otherwise.
-    4. **two roles bound.** ``resolve_role_workspaces`` maps the tag roles
-       (``work``/``personal``) onto registered workspace *names*, and
+    4. **at least one tag role bound.** ``resolve_role_workspaces`` maps the tag
+       roles (``work``/``personal``) onto registered workspace *names*, and
        ``detect_misfiled_people`` can only reach ``bucket == "mechanical"`` when
-       some note's tag names a role bound to a workspace *other than* the note's
-       own. That needs two distinct roles bound to two distinct workspaces, so an
-       install that binds one role or none can never produce a mechanical
-       candidate, whatever its notes say — and the walk is skipped instead of run
-       to learn that. This is the gate that keeps a fresh install whose workspaces
-       are named anything else (``clientA``/``clientB``) from paying for a scan
-       every window to hear "no".
+       some note's tag names a role that is bound — and the workspace it binds to
+       is not the note's own. **One bound role is enough**, and this gate was wrong
+       for exactly that reason before #833's R2 review: it demanded two distinct
+       bound roles, so an install named ``[work, clientA]`` silently dropped a real
+       mechanical candidate (``clientA/People/Mo.md`` tagged ``colleague``, moving
+       to ``work/People/Mo.md``) because ``clientA`` plays no role of its own.
+       That is a false *negative* on the one install the task exists for, which is
+       worse than the false positive it was added to remove.
+
+       The necessary condition is one, not two: a note needs a tag whose role is in
+       ``roles`` and whose bound workspace differs from the note's own directory,
+       and with no role bound at all ``target_workspaces`` is empty for every note,
+       so the command can reach no mechanical candidate whatever the vault holds —
+       it drops those notes without even queueing them. So the gate is now exactly
+       that: **zero** bound roles skips the walk. This still keeps an install named
+       entirely outside the two role vocabularies (``clientA``/``clientB``) from
+       paying for a scan every window to hear "no", and it keeps every install
+       *with* a bound role honest about the walk it pays for.
+
+       Note what the gate is and is not: it is a necessary condition for the
+       *classifier*, checked against the registry alone, so a caller can skip a walk
+       it cannot use the answer of. It says nothing about whether any note is
+       actually misfiled — that is the plan's question and the only thing that
+       answers it.
 
     Only then is :func:`ciao.vault_rehome.plan_rehome` run, on the shared root,
     over the **registry's** workspace names (``plan_rehome``'s own docstring:
@@ -915,7 +932,12 @@ def rehome_legacy_candidates(
         # Re-rooted, or never set up: no shared vault, so no managed re-home.
         return RehomeCandidates(REHOME_NO_SHARED_VAULT)
 
-    if len(set(resolve_role_workspaces(names).values())) < 2:
+    if not resolve_role_workspaces(names):
+        # No tag role binds to a registered workspace, so `detect_misfiled_people`
+        # cannot reach a mechanical bucket for any note: `target_workspaces` is
+        # empty for every one of them and the command drops them without queueing.
+        # One bound role is enough — see gate 4, which was wrong about that until
+        # #833's R2 review found a real candidate this test was suppressing.
         return RehomeCandidates(REHOME_NO_ROLE_BINDING)
 
     plan = plan_rehome(vault_root, workspaces=names)

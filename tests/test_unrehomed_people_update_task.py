@@ -51,6 +51,7 @@ from ciao import __version__, async_reads, update_tasks, vault_rehome
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.migration_notices import (
     REHOME_ALREADY_COMPLETED,
+    REHOME_CANDIDATES_FOUND,
     REHOME_NO_CANDIDATES,
     REHOME_NO_ROLE_BINDING,
     REHOME_NO_SHARED_VAULT,
@@ -148,23 +149,25 @@ def _note(vault: Path, relative: str, body: str) -> Path:
     return path
 
 
-def _misfiled_person(vault: Path) -> Path:
-    """One work contact sitting in the personal workspace's `People/`, referenced.
+def _misfiled_person(vault: Path, *, filed_in: str = "personal") -> Path:
+    """One work contact sitting in the wrong workspace's `People/`, referenced.
 
     The shape the whole migration exists for: `colleague` names the work
     workspace, so the move is mechanical, and the inbound link is what makes the
-    move more than a file rename.
+    move more than a file rename. ``filed_in`` names the workspace holding it,
+    which is the half that varies: a note filed under a workspace that plays no
+    tag role of its own is still a mechanical move.
     """
     _note(
         vault,
-        "personal/People/Mo.md",
+        f"{filed_in}/People/Mo.md",
         "---\ntype: person\ntags: [person, colleague]\n---\n# Mo\n",
     )
     return _note(
         vault,
-        "personal/Projects/Foo.md",
-        "---\ntype: project\nrelated:\n  - personal/People/Mo\n---\n"
-        "# Foo\n\nOwner [[personal/People/Mo|Mo]].\n",
+        f"{filed_in}/Projects/Foo.md",
+        f"---\ntype: project\nrelated:\n  - {filed_in}/People/Mo\n---\n"
+        f"# Foo\n\nOwner [[{filed_in}/People/Mo|Mo]].\n",
     )
 
 
@@ -347,35 +350,93 @@ def test_the_task_is_never_offered_on_a_single_workspace_install(tmp_path: Path)
     assert _detector(install).status == NOT_APPLICABLE
 
 
+def test_one_bound_role_is_enough_and_offers_the_move(tmp_path: Path) -> None:
+    """A note whose own workspace plays no role still has a real destination.
+
+    ``[work, clientA]``: ``clientA`` binds no tag role of its own, so
+    ``detect_misfiled_people`` has no ``own_role`` to disagree with, and a
+    ``colleague`` tag names the ``work`` role — which is bound, and is not the
+    note's own workspace. That is a mechanical move to ``work/People/Mo.md``, and
+    it is exactly the legacy damage: a work contact filed under the wrong
+    workspace. The pre-walk gate used to demand **two** bound roles and silently
+    dropped this install, which is a false *negative* on the one case the task
+    exists for — worse than the fresh-install false positive the gate was added to
+    remove. Asserted against the plan itself, so the test states what the command
+    would do rather than what the detector believes.
+    """
+    install = _install(tmp_path, workspaces=("work", "clientA"))
+    _misfiled_person(install.vault, filed_in="clientA")
+    names = list(install.config.workspace_names())
+
+    plan = vault_rehome.plan_rehome(install.vault, workspaces=names)
+    assert vault_rehome.resolve_role_workspaces(names) == {"work": "work"}
+    assert [c["destination"] for c in plan["mechanical"]] == ["work/People/Mo.md"]
+
+    result = _detector(install)
+
+    assert result.status == APPLICABLE
+    assert result.evidence["reason"] == REHOME_CANDIDATES_FOUND
+    assert result.evidence["mechanical"] == ["clientA/People/Mo.md"]
+    assert result.evidence["scanned"] is True
+    assert _rehome_notices(install)
+
+    # And the run it asks for does what the detector said it would.
+    summary = _rehome(install)
+    assert not summary["failed"], summary
+    assert (install.vault / "work/People/Mo.md").is_file()
+    assert _check(install).applicable is True
+
+
+def test_a_fresh_install_with_one_bound_role_still_gets_nothing(tmp_path: Path) -> None:
+    """The gate got wider, and the answer did not: no candidate, no task.
+
+    The R2 fix lets an install with a single bound role reach the walk, so this
+    is the case that could have regressed: a *fresh* install named
+    ``[personal, clientA]`` binds one role, pays for the scan, finds no
+    mechanical candidate, and is offered nothing. Widening a gate must not
+    reintroduce the noise the gate existed to avoid — and here the walk is what
+    produces the honest answer rather than a shortcut.
+    """
+    install = _install(tmp_path, workspaces=("personal", "clientA"))
+    _person(install.vault, "clientA/People/Ida.md")
+    _person(install.vault, "personal/People/Lou.md", tags="[person, friend]")
+    names = list(install.config.workspace_names())
+    assert len(vault_rehome.resolve_role_workspaces(names)) == 1
+
+    result = _detector(install)
+
+    assert result.evidence["scanned"] is True, "one bound role now reaches the plan"
+    assert result.evidence["reason"] == REHOME_NO_CANDIDATES
+    assert result.status == NOT_APPLICABLE
+    # The advisory notice is still broad, which is the half R0 asked to keep.
+    assert _rehome_notices(install)
+
+
 def test_workspaces_that_bind_no_tag_roles_cost_no_vault_read(tmp_path: Path) -> None:
-    """One bound role means no mechanical candidate is reachable, so nothing is walked.
+    """Zero bound roles means no mechanical candidate is reachable, so nothing is walked.
 
     ``detect_misfiled_people`` can only reach ``bucket == "mechanical"`` when a
-    note's tag names a role bound to a workspace *other than* the note's own, so
-    it needs two distinct roles bound to two distinct workspaces. An install named
-    anything else cannot produce one whatever its notes say, and the common
-    convention here is `clientA`/`clientB` — which is why the gate is a proof and
-    not a heuristic. A test that puts a misfiled note in the vault and asserts the
-    *scan did not happen* is what pins that; asserting only the absence of a task
-    would pass just as well if the walk ran every time.
+    note's tag names a role that is bound *and* whose workspace is not the note's
+    own, so an install whose names are outside both role vocabularies cannot
+    produce one whatever its notes say — and the common convention here is
+    `clientA`/`clientB`. **One** bound role is enough and is covered above; this
+    is the other side of the same proof.
 
-    The proof is checked against the command rather than asserted: the plan this
-    gate skips finds no mechanical candidate either, so nothing the remedy could
-    have done is being hidden. That is the difference between a gate and a
-    narrowing, and it is the whole reason #800's rule is not satisfied by looking
-    harder at the receipt.
+    The proof is checked against the command rather than asserted, and the walk's
+    absence is asserted as a *count* of accesses: an assertion that only "no task"
+    would pass just as well if the walk ran every window.
     """
     install = _install(tmp_path, workspaces=("clientA", "clientB"))
     _misfiled_person(install.vault)
+    names = list(install.config.workspace_names())
 
     assert _accesses_under(install.vault, lambda: _detector(install)) == []
     result = _detector(install)
     assert result.evidence["reason"] == REHOME_NO_ROLE_BINDING
     assert result.evidence["scanned"] is False
 
-    plan = vault_rehome.plan_rehome(
-        install.vault, workspaces=list(install.config.workspace_names())
-    )
+    plan = vault_rehome.plan_rehome(install.vault, workspaces=names)
+    assert vault_rehome.resolve_role_workspaces(names) == {}
     assert plan["mechanical"] == [], "the gate hid a move the command would make"
     # Not a judgement case either: with no registered workspace playing that role
     # there is nowhere to put the note, so the command does not even queue it. The

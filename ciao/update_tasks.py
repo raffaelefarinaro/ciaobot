@@ -448,10 +448,12 @@ def _unrehomed_people_rehome_needed(
 
     Four gates run before the walk and each one *proves* a mechanical candidate is
     unreachable (a completed receipt, one workspace, no shared vault directory,
-    fewer than two bound tag roles) — so the common answer, "nothing to move",
-    costs no vault read at all. See
-    :func:`ciao.migration_notices.rehome_legacy_candidates`, which is where that
-    reasoning lives.
+    no bound tag role) — so the common answer, "nothing to move", costs no vault
+    read at all. See :func:`ciao.migration_notices.rehome_legacy_candidates`,
+    which is where that reasoning lives. **One** bound role is enough for a real
+    move: a note tagged for a role that binds to a workspace other than its own
+    moves even when its own workspace plays no role at all, which is the case a
+    "two roles or more" gate got wrong.
 
     **This probe walks the vault, and the layer is what makes that affordable.**
     :func:`evaluate` runs it off the event loop through

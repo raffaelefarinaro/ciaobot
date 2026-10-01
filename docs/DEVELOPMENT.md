@@ -915,11 +915,26 @@ ask for. That is the "offered forever" shape #788's upkeep row is about.
 **Four gates before the walk, and each one is a proof.** A completed receipt; more
 than one registered workspace; a shared vault that exists (`config.vault_root` is
 that directory, and after the re-rooting it names a path that is not there — the
-same gate `_detect_workspace_unmigrated` uses); and two bound tag roles, without
-which `detect_misfiled_people` cannot reach a mechanical bucket at all. The last
-one is why a `clientA`/`clientB` install never pays for a scan to hear "no", and
-the test that pins it asserts the *scan did not happen* — asserting only the
-absence of a task would pass just as well if the walk ran every time.
+same gate `_detect_workspace_unmigrated` uses); and **at least one** bound tag
+role, without which `detect_misfiled_people` cannot reach a mechanical bucket for
+any note at all.
+
+That last gate is the one that got a false negative, and the shape of the mistake
+is worth keeping: it first asked for **two** bound roles, reasoning that a note
+needs a role of its own to disagree with. It does not — `own_role` is empty for a
+workspace that plays no role, and a `colleague` tag naming the one bound role is
+then a mechanical move on its own. So `[work, clientA]` lost a real candidate, and
+a false negative on the one install the task exists for is worse than the false
+positive the gate was added to remove. **One** bound role is the necessary
+condition, and the test now asserts the move against `plan_rehome` itself rather
+than against the detector's opinion.
+
+Zero bound roles still skips the walk, which is why a `clientA`/`clientB` install
+never pays for a scan to hear "no" — and the test that pins *that* asserts the
+scan did not happen, because asserting only the absence of a task would pass just
+as well if the walk ran every window. Widening the gate did not reintroduce any
+fresh-install noise either: a fresh install with one bound role now walks, finds
+no candidate, and is offered nothing, which is a test of its own.
 
 **The walk is the one in this catalog, and the layer is what pays for it.** It runs
 from `evaluate`, off the event loop through `async_reads.run_read`, coalesced per
