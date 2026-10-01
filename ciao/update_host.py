@@ -629,13 +629,7 @@ class MacUpdateHost:
 
     def __init__(self, launchctl: Launchctl | None = None, uid: int | None = None) -> None:
         self._launchctl: Launchctl = launchctl or macos_service._launchctl
-        if uid is None:
-            # `os.getuid` does not exist on Windows, and this module is imported
-            # there. Typed locally because the `getattr` is `Any` (AGENTS.md,
-            # `no-any-return`).
-            getuid: Callable[[], int] = getattr(os, "getuid")
-            uid = getuid()
-        self._uid = uid
+        self._uid = macos_service._getuid() if uid is None else uid
 
     def _target(self, label: str) -> str:
         """The launchd job ``label`` in this user's domain."""
@@ -971,7 +965,10 @@ class MacUpdateHost:
 
     def interrupt_signals(self) -> tuple[signal.Signals, ...]:
         """``SIGTERM`` and ``SIGHUP``: the two ways a ten-minute drain really ends."""
-        return (signal.SIGTERM, signal.SIGHUP)
+        # `SIGHUP` does not exist on Windows, where this module is imported;
+        # read through `getattr` so mypy's win32 pass checks this file too.
+        sighup: signal.Signals = getattr(signal, "SIGHUP")
+        return (signal.SIGTERM, sighup)
 
     def redirect_detached_stdio(self, root: Path) -> None:
         """Nothing to do: each job's plist names its own log file.
