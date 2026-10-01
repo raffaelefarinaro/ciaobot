@@ -91,6 +91,7 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
 #
 # Keep this short: the PWA's half-open watchdog treats ~2 missed keepalives as
 # stale, so 5s here → recovery in ~12s instead of ~45s with a 15s cadence.
+# `_attach_streams` sends it too while a chat is idle.
 STREAM_KEEPALIVE_SECONDS = 5.0
 
 
