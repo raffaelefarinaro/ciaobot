@@ -158,6 +158,41 @@ export function renderMarkdown(text: string, knownPaths: string[] = []): string 
   }
 }
 
+// User-typed text is shown as typed: raw HTML is escaped to text instead of
+// being parsed (issue #867). The one exception is the four comment tags the
+// app writes itself (lib/commentContext.ts), which render as quote cards.
+const COMMENT_TAG_NAMES = COMMENT_TAGS.join('|')
+const NON_COMMENT_LT = new RegExp(`<(?!/?(?:${COMMENT_TAG_NAMES})>)`, 'gi')
+const COMMENT_TAG_ANY = new RegExp(`</?(?:${COMMENT_TAG_NAMES})>`, 'i')
+
+const userMarkdownRenderer = new Renderer()
+Object.assign(userMarkdownRenderer, {
+  table: chatMarkdownRenderer.table,
+  code: chatMarkdownRenderer.code,
+  link: chatMarkdownRenderer.link,
+})
+userMarkdownRenderer.html = function html(token: Tokens.HTML | Tokens.Tag): string {
+  const escaped = token.text.replace(NON_COMMENT_LT, '&lt;')
+  // Inline fragments sit inside a paragraph already. A block of raw HTML has
+  // no paragraph, so give it one and keep its line breaks.
+  if (!token.block || COMMENT_TAG_ANY.test(token.text)) return escaped
+  return `<p>${escaped.replace(/\n+$/, '').replace(/\n/g, '<br>')}</p>`
+}
+
+const userMarkdownParser = new Marked({
+  ...MARKDOWN_OPTIONS,
+  renderer: userMarkdownRenderer,
+})
+
+export function renderUserMarkdown(text: string, knownPaths: string[] = []): string {
+  try {
+    const html = userMarkdownParser.parse(text) as string
+    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(html)), knownPaths)
+  } catch {
+    return escapeAttr(text)
+  }
+}
+
 export function renderFileMarkdown(text: string, options: FileMarkdownOptions): string {
   // Cross-note links are relative markdown links (`[Mo](./People/Mo.md)`).
   // Left to the default renderer they would emit `<a href="./People/Mo.md">`,

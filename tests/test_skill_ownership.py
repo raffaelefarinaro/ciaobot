@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.os_support.links import is_link
 from ciao.skills_inventory import (
     STOCK_SKILL_MARKER,
     eligible_owned_skills,
@@ -50,7 +51,7 @@ def _write_skill_file(skill_dir: Path, name: str, description: str = "Owned skil
     skill_md.parent.mkdir(parents=True, exist_ok=True)
     skill_md.write_text(
         f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     return skill_md
 
@@ -87,7 +88,7 @@ def test_workspace_local_source_and_revision(tmp_path: Path) -> None:
     assert owned.revision == hashlib.sha256(skill_md.read_bytes()).hexdigest()
     assert eligible_owned_skills(config, "personal") == [owned]
 
-    skill_md.write_text("# demo, rewritten\n", encoding="utf-8")
+    skill_md.write_text("# demo, rewritten\n", encoding="utf-8", newline="")
 
     assert resolve_owned_skill(config, "personal", "demo").revision != owned.revision
 
@@ -232,7 +233,8 @@ def test_shared_sources_are_ineligible(tmp_path: Path) -> None:
     linked, pruned = mirror_shared_skill_sources(root, shared)
 
     assert (linked, pruned) == (1, 0)
-    assert (root / ".claude" / "skills" / "shared-demo").is_symlink()
+    # A symlink on POSIX, a junction on Windows: the link module answers for both.
+    assert is_link(root / ".claude" / "skills" / "shared-demo")
     assert eligible_owned_skills(config, "personal") == []
     with pytest.raises(ValueError, match="owns no canonical source"):
         resolve_owned_skill(config, "personal", "shared-demo")

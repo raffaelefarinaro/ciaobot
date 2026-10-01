@@ -1674,6 +1674,35 @@ def active_lease(vault_root: Path, *, now: datetime | None = None) -> dict[str, 
     return _live_lease(load_state(vault_root), now or datetime.now(UTC))
 
 
+def unstarted_run_reason(
+    vault_root: Path, since: datetime, *, now: datetime | None = None
+) -> str:
+    """Why a curation run dispatched at ``since`` did not do its job, or "".
+
+    "" means the run took the lease (``begin_run`` stamps ``lease.started_at``
+    and ``end_run`` stamps ``last_run.finished_at``, so a run that crashed
+    mid-way still counts as started) or another run holds a live lease and
+    this one correctly stood down. The reason is non-empty only when neither
+    happened: ``curation-begin`` never ran or never succeeded, for example
+    because ``ciao`` is not on the agent's PATH.
+
+    ``since`` must be timezone-aware: the lease stamps are written in UTC and
+    a naive ``since`` would compare against nothing.
+    """
+    state = load_state(vault_root)
+    floor = since.astimezone(UTC).replace(microsecond=0)
+    for stamp in (state.lease.get("started_at"), state.last_run.get("finished_at")):
+        parsed = _parse_iso(str(stamp or ""))
+        if parsed is not None and parsed >= floor:
+            return ""
+    if _live_lease(state, now or datetime.now(UTC)) is not None:
+        return ""
+    return (
+        "curation lease was never taken: no `ciao curation-begin` succeeded "
+        "during this run (is `ciao` on the agent's PATH?)"
+    )
+
+
 def begin_run(
     vault_root: Path,
     *,

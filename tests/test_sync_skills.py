@@ -14,7 +14,7 @@ from ciao.os_support.links import is_link, link_dir, link_source
 
 def _write(path: Path, text: str = "content\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")
 
 
 def _dangling_dir_link(target: Path, link: Path, *, relative_to: Path | None = None) -> None:
@@ -116,14 +116,14 @@ def test_sync_restamps_stale_cap_markers(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     guide = workspace / "AGENTS.md"
-    guide.write_text("# Guide\n\n", encoding="utf-8")
+    guide.write_text("# Guide\n\n", encoding="utf-8", newline="")
     ensure_regions(guide)
     stamped = re.sub(
         r"(<!-- ciao:memory:start cap=)\d+( -->)",
         r"\g<1>2200\g<2>",
         guide.read_text(encoding="utf-8"),
     )
-    guide.write_text(stamped, encoding="utf-8")
+    guide.write_text(stamped, encoding="utf-8", newline="")
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -281,7 +281,7 @@ def test_unmodified_stock_command_is_refreshed(tmp_path: Path) -> None:
     old = b"# Old stock remember\n"
     _write(canonical, old.decode("utf-8"))
     marker = workspace / "commands" / "remember.md.ciao-stock-command"
-    marker.write_text(hashlib.sha256(old).hexdigest(), encoding="utf-8")
+    marker.write_text(hashlib.sha256(old).hexdigest(), encoding="utf-8", newline="")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -301,7 +301,7 @@ def test_edited_stock_command_is_left_alone_and_unmarked(tmp_path: Path) -> None
     _write(canonical, "# My edit\n")
     marker = workspace / "commands" / "remember.md.ciao-stock-command"
     # Hash of bytes other than what is on disk: simulates a user edit.
-    marker.write_text(hashlib.sha256(b"something else\n").hexdigest(), encoding="utf-8")
+    marker.write_text(hashlib.sha256(b"something else\n").hexdigest(), encoding="utf-8", newline="")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -415,12 +415,12 @@ def test_stale_stock_command_is_pruned_only_when_unmodified(tmp_path: Path) -> N
     gone_bytes = b"# Once packaged\n"
     gone.write_bytes(gone_bytes)
     (commands_dir / "gone.md.ciao-stock-command").write_text(
-        hashlib.sha256(gone_bytes).hexdigest(), encoding="utf-8"
+        hashlib.sha256(gone_bytes).hexdigest(), encoding="utf-8", newline=""
     )
     gone_edited = commands_dir / "gone-edited.md"
     gone_edited.write_bytes(b"# My edit of a stale command\n")
     (commands_dir / "gone-edited.md.ciao-stock-command").write_text(
-        hashlib.sha256(b"different bytes\n").hexdigest(), encoding="utf-8"
+        hashlib.sha256(b"different bytes\n").hexdigest(), encoding="utf-8", newline=""
     )
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
@@ -453,7 +453,7 @@ def test_symlinked_stock_command_marker_is_never_followed(
     commands_dir = tmp_path / "workspace" / "commands"
     commands_dir.mkdir(parents=True)
     target = tmp_path / "secret.env"
-    target.write_text("SECRET=1", encoding="utf-8")
+    target.write_text("SECRET=1", encoding="utf-8", newline="")
     for present in (True, False):
         canonical = commands_dir / "remember.md"
         if present:
@@ -542,7 +542,7 @@ def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
                 },
             }
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     canonical = workspace / ".agents" / "skills" / "upstream"
     _write(canonical / "SKILL.md", "# Upstream\n")

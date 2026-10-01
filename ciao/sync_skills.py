@@ -98,6 +98,7 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
     "interrogation.md": frozenset({
         "11d35c9c49bffe7b37a01b7097a2b59f13ffa9c55cbd3911303a19ba063ecbfb",
         "17600a45d0fd58b5f79a6f865c57243f4bda134aeb31f2f89078223c2449ef71",
+        "39fe04830f698d88980d2e90b564c2ebbb0f0cd0809ea68ceb299f1ed883c3f3",
         "d21a3788354ffa84ef7178e5e3ff9dd5b159bda518eb210cb4ba2fe6e2e4faa9",
         "efcc5d781e3d4fb04657ba6505b833c56bb07851bac28d7d34f634a745fe7408",
     }),

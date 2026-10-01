@@ -142,7 +142,7 @@ def _document(*records: LearningRecord, frontmatter: str = FRONTMATTER) -> str:
 def _write(config: CiaoConfig, text: str) -> Path:
     path = Path(config.workspace_vault_root(WORKSPACE)).joinpath("Workspace/Learnings.md")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")
     return path
 
 
@@ -748,7 +748,7 @@ def test_an_unreadable_suppression_store_stops_the_whole_plan(tmp_path: Path) ->
     _file_settled(config, _origin(RETIRED_RECORD))
     store = lc.suppression_path(vault)
     store.parent.mkdir(parents=True, exist_ok=True)
-    store.write_text("{ not json", encoding="utf-8")
+    store.write_text("{ not json", encoding="utf-8", newline="")
 
     plan = _plan(config, vault)
 
@@ -1394,7 +1394,7 @@ def test_an_undo_of_a_changed_file_is_refused_entirely(tmp_path: Path) -> None:
     # undo has to refuse when somebody has typed into the file this module wrote.
     body = path.read_text(encoding="utf-8")
     path.write_text(
-        body.replace(render_learning(PENDING_RECORD), "# a hand edit"), encoding="utf-8"
+        body.replace(render_learning(PENDING_RECORD), "# a hand edit"), encoding="utf-8", newline=""
     )
 
     undo = lc.unmigrate_cleanup(vault, result.receipt, apply=True)
@@ -1585,9 +1585,9 @@ def test_a_receipt_from_another_schema_is_not_honoured(tmp_path: Path) -> None:
     """Reversing from a reverse map this code does not understand would restore
     spans against a file it has not checked."""
     path = tmp_path / "receipt.json"
-    path.write_text(json.dumps({"schema_version": 99, "removals": []}), encoding="utf-8")
+    path.write_text(json.dumps({"schema_version": 99, "removals": []}), encoding="utf-8", newline="")
     assert lc.read_receipt(path) is None
-    path.write_text("not json", encoding="utf-8")
+    path.write_text("not json", encoding="utf-8", newline="")
     assert lc.read_receipt(path) is None
     assert lc.read_receipt(tmp_path / "missing.json") is None
 
@@ -1596,7 +1596,7 @@ def test_a_receipt_path_never_overwrites_an_existing_one(tmp_path: Path) -> None
     """Two runs in the same second must not share a reverse map."""
     first = lc.new_receipt_path(tmp_path)
     first.parent.mkdir(parents=True, exist_ok=True)
-    first.write_text("{}", encoding="utf-8")
+    first.write_text("{}", encoding="utf-8", newline="")
 
     second = lc.new_receipt_path(tmp_path)
 
