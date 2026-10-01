@@ -170,3 +170,28 @@ def test_posix_a_tree_that_dies_with_the_engine_stays_in_its_group(
     assert group == []
     assert single == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
 
+
+
+def test_hand_off_passes_the_programs_output_and_exit_code_through(tmp_path) -> None:
+    """A wrapper that hands off must report what the program did (#696 C6:
+    on Windows, os.execve exited 0 before `gws` had run)."""
+    script = tmp_path / "wrapper.py"
+    script.write_text(
+        "import os, sys\n"
+        "from ciao.os_support.processes import hand_off\n"
+        "child = [sys.executable, '-c', \"import sys; print('child ran'); sys.exit(7)\"]\n"
+        "sys.exit(hand_off(sys.executable, child, dict(os.environ)))\n",
+        encoding="utf-8",
+        newline="",
+    )
+    repo = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONPATH": str(repo)},
+        timeout=60,
+    )
+    assert result.returncode == 7, result.stderr
+    assert "child ran" in result.stdout
