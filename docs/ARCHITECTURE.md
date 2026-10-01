@@ -363,8 +363,27 @@ checkout. The re-exec happens in-process (`ciao.cli._run_server`), so the
 relaunches the job if the exec fails. `ciao supervise` (`ciao/supervise.py`) is
 the cross-platform alternative: it runs `ciao run --supervised` as a child,
 relaunches it on exit code 75 (with a crash-loop backoff) and forwards
-SIGTERM/SIGINT; no service file uses it yet. `POST /api/admin/deploy` refuses a
-bundled app up front.
+SIGTERM/SIGINT (SIGBREAK on Windows); the Windows logon task is the service
+file that uses it (below). `POST /api/admin/deploy` refuses a bundled app up
+front.
+
+**Windows lifecycle (#696).** There is no LaunchAgent or systemd unit on
+Windows. `ciao setup --load-launchd` (the flag name is historical: on macOS
+and Windows it means "register the per-user service") writes
+`%LOCALAPPDATA%\Ciaobot\service\Ciaobot-Engine.xml` and registers it as the
+per-user Task Scheduler task `\Ciaobot\Engine` through
+`ciao/windows_service.py`. The task fires at that user's logon and runs
+`pythonw.exe -m ciao.cli supervise` with the workspace as its working
+directory. `pythonw.exe` has no console, so `ciao supervise` redirects its
+stdio to `<workspace>\.runtime\ciao.stdout.log` and `ciao.stderr.log`. The
+supervisor starts `ciao run --supervised` as a child in a Job Object, so
+ending the task (`ciao service stop`, `schtasks /End`) terminates the whole
+tree. When the engine exits with `RESTART_EXIT_CODE` (75: Settings -> Restart,
+the setup wizard, a package update) the supervised `_run_server` returns the
+code instead of calling `os.execv`, and the supervisor relaunches the child
+with the crash-loop backoff above; any other exit code ends the supervisor,
+and the task's `RestartOnFailure` (every minute, up to 999 times) is the outer
+retry. The operator-facing guide is [WINDOWS.md](WINDOWS.md).
 
 `ciao/` is a Starlette web server that mounts the PWA frontend, exposes a JSON API for projects/chats/schedules, and drives Claude Agent SDK sessions for each chat turn. Auth is a pre-shared token (`PWA_AUTH_TOKEN` — the dashboard password) traded for a signed session cookie, and it is required by default: an unset `PWA_AUTH_REQUIRED` protects any workspace that has a token, and only an explicit `PWA_AUTH_REQUIRED=false` runs the dashboard open. Settings can change the password but not disable protection. Operational state lives in `.runtime/` under `CIAO_WORKSPACE`; durable memory lives under `CIAO_VAULT_ROOT` (default `<CIAO_WORKSPACE>/memory-vault`).
 

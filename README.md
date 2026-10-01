@@ -22,7 +22,7 @@ Installs the engine with uv, starts it as a LaunchAgent, and prints a one-time l
 
 During setup you choose the folder where Ciaobot keeps your notes and memory: a new folder, or an existing one such as an Obsidian vault. It stays yours, in plain Markdown, usable with any other tool.
 
-**Windows 11 (x64 or ARM64):**
+**Windows 11 (x64 or ARM64), preview:**
 
 ```powershell
 irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
@@ -38,11 +38,13 @@ No administrator rights needed. This installs the engine, puts `ciao` on your `P
 
 Uninstalling stops and unregisters the logon task, removes the engine and its receipt, and takes the `PATH` entry back out. Your workspace folder is kept, and the script prints where it is.
 
+Windows support is a **preview**: the first Windows releases are labelled that way and the label comes off after one release cycle with no Windows-specific regressions. Requirements, the logon task, logs, provider setup and troubleshooting are in [docs/WINDOWS.md](docs/WINDOWS.md). Engine updates on Windows are not available yet, so for now re-run the installer only to repair an install.
+
 ### Connect your agent
 
 Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
 
-- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`, then add `~/.local/bin` to your `PATH` if needed) and run `claude auth login`.
+- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`, then add `~/.local/bin` to your `PATH` if needed) and run `claude auth login`. On Windows, install it with `irm https://claude.ai/install.ps1 | iex` instead.
 - **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.0.16+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors running from a git checkout: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
