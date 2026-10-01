@@ -366,7 +366,11 @@ class WindowsUpdateHost:
         with contextlib.suppress(OSError):
             found.extend(sorted(discarded.iterdir()))
         op = engine_update.read_operation(root)
-        if op is not None:
+        # A superseded previous-env is only superseded once an update has
+        # succeeded: that is when `_prune_previous_envs` drops the others on
+        # every platform. After a rollback, the installed release's own
+        # previous-env (in an older stage dir) is still its rollback generation.
+        if op is not None and op.phase == "applied":
             keep = os.path.abspath(op.stage_dir)
             with contextlib.suppress(OSError):
                 for child in sorted(root.iterdir()):

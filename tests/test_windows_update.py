@@ -1157,3 +1157,18 @@ def test_staging_a_version_whose_update_is_pending_is_refused(tmp_path: Path) ->
     # The interpreter the recovery task runs from is still there.
     assert Path(op.env_python).is_file()
     assert read_operation(state).phase == "swapping"  # type: ignore[union-attr]
+
+
+def test_retire_after_a_rollback_keeps_the_installed_releases_previous_env(tmp_path: Path) -> None:
+    # Seen on the real install (#900): after 1.0.91 -> 1.0.92 applied and a later
+    # attempt rolled back, the net must not delete 1.0.92's previous-env, which is
+    # still the installed release's rollback generation (macOS prunes other
+    # stages only after a success too).
+    op, state, _, machine = _staged(tmp_path, phase="rolled_back")
+    older = state / "1.2.1" / PREVIOUS_ENV_NAME
+    _write_env(older, "1.2.0")
+
+    _host(machine, state).retire_recovery_agent(state)
+
+    assert older.exists()
+    assert machine.changing_calls() == [["/Delete", "/TN", ws.RECOVER_TASK_NAME, "/F"]]
