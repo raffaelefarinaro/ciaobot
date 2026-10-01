@@ -1409,8 +1409,15 @@ def test_setup_prints_workspace_and_login_url(tmp_path: Path, capsys) -> None:
 def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = Path(cli.sys.executable).parent
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
-    # The exact line per shell is pinned in tests/test_os_support_shell_hints.py.
-    assert cli._path_export_hint() == cli.path_hint(str(bin_dir), persist=False)
+    hint = cli._path_export_hint()
+    if sys.platform == "win32":
+        # A persistent user-PATH update through the registry, not `export`
+        # (the full line is pinned in tests/test_os_support_shell_hints.py).
+        assert hint is not None
+        assert hint.startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
+        assert f"'{bin_dir}'" in hint
+    else:
+        assert hint == f'export PATH="{bin_dir}:$PATH"'
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(bin_dir)]))
     assert cli._path_export_hint() is None
 
