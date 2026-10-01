@@ -464,18 +464,6 @@ print(name, digest, size)
             }
         }
 
-        # UNDOES: path
-        if (($Steps -contains 'path') -and $PathEntry) {
-            try {
-                Set-UserPath (Remove-UserPathEntry (Get-UserPath) $PathEntry)
-                if (Test-UserPathEntry $env:Path $PathEntry) {
-                    $env:Path = Remove-UserPathEntry $env:Path $PathEntry
-                }
-            } catch {
-                $failed += "the user PATH entry ($($_.Exception.Message))"
-            }
-        }
-
         # UNDOES: tool
         if (($Steps -contains 'tool') -and $Uv) {
             try {
@@ -485,6 +473,33 @@ print(name, digest, size)
                 }
             } catch {
                 $failed += "the uv tool environment ($($_.Exception.Message))"
+            }
+        }
+
+        # UNDOES: path
+        # After the tool, so its launchers are already gone, and only when the
+        # directory is then empty (#904). It is uv's tool bin directory: when
+        # this installer installed uv, uv.exe lives there, and so does every
+        # other tool the user installed with uv. Taking it off PATH under
+        # them would stop all of them running by name, so it stays, and the
+        # user is told why.
+        if (($Steps -contains 'path') -and $PathEntry) {
+            try {
+                $left = @()
+                if (Test-Path -LiteralPath $PathEntry) {
+                    $left = @(Get-ChildItem -LiteralPath $PathEntry -Force -ErrorAction Stop)
+                }
+                if ($left.Count -gt 0) {
+                    $names = (@($left | Select-Object -First 3 | ForEach-Object { $_.Name }) -join ', ')
+                    Write-Host "Kept $PathEntry on your PATH: it still holds $names."
+                } else {
+                    Set-UserPath (Remove-UserPathEntry (Get-UserPath) $PathEntry)
+                    if (Test-UserPathEntry $env:Path $PathEntry) {
+                        $env:Path = Remove-UserPathEntry $env:Path $PathEntry
+                    }
+                }
+            } catch {
+                $failed += "the user PATH entry ($($_.Exception.Message))"
             }
         }
 
