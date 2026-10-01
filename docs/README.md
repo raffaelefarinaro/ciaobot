@@ -23,6 +23,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 - [Memory backup](https://www.raffaelefarinaro.com/ciaobot/memory.html#backup): connect a private repository and inspect backup status.
 - [Remote access](https://www.raffaelefarinaro.com/ciaobot/remote.html): browsers, the installed PWA, and HTTPS access from other devices.
 - [Linux hosting](LINUX.md): systemd deployment and server operation.
+- [Windows (preview)](WINDOWS.md): install, logon task, logs, providers, and uninstall on Windows 11.
 - [Troubleshooting and configuration](../INTEGRATIONS.md): setup checks and integration diagnostics.
 - [Security policy](../SECURITY.md) and [remote boundary audit](REMOTE_BOUNDARY.md): access controls and their limits.
 - [Report a problem](https://github.com/raffaelefarinaro/ciaobot/issues): include what you tried and what happened, without credentials or private workspace data.

@@ -6,6 +6,14 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 
 ## Install
 
+### Windows 11 (preview)
+
+```powershell
+irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
+```
+
+The installer is per user and needs no administrator rights. It installs the engine into a `uv tool` environment, puts `ciao.exe` on your user `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the per-user logon task `\Ciaobot\Engine` and starts it. Options are `-Workspace`, `-NoStart` and `-Uninstall`; because `iex` cannot take arguments, pass them through a script block. The full guide, including logs and troubleshooting, is [docs/WINDOWS.md](docs/WINDOWS.md). Engine updates on Windows are not available yet (#857).
+
 ### Upgrading from the macOS app
 
 v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine.
@@ -57,6 +65,8 @@ the installer says which one applies:
 - Another `ciao` already exists (the name collides with Ciao Prolog, among
   others): the installer never overwrites it, so call Ciaobot's engine by its
   full path instead.
+
+On Windows the installer does not write a shim: `ciao.exe` lives in the `uv tool` bin directory (`uv tool dir --bin`), which the installer adds to the user `PATH`.
 
 Provider logins do not depend on the shim: the setup wizard hands out each
 provider's own login command (`claude auth login`, `opencode auth login`).
@@ -367,7 +377,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
   outside the login-shell `PATH`. The path is used for provider startup and
   authentication; an invalid path is reported as unavailable.
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
-  CLI runs. It is still read by `ciao/cli.py`, but nothing sets it any more
+  CLI runs. It is still read by `ciao/cli.py`, and on Windows `ciao service start` uses it as the interpreter (`python.exe` or `pythonw.exe`) when it has to register the logon task, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
 - `CIAO_DESKTOP_SERVER_URL` (development only): overrides runtime discovery for
   a local development-server target.
