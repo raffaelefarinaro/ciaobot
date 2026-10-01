@@ -261,11 +261,58 @@ def test_windows_job_checks_the_install_ps1_advisorily() -> None:
     # after uninstall, and never fails on either answer: an InteractiveToken
     # task may not register or start on a hosted runner, and that is the datum.
     e2e = dict(run_blocks)["install.ps1 end-to-end install and uninstall (advisory)"]
-    assert "task registered after install:" in e2e
-    assert "task registered after uninstall:" in e2e
-    assert "workspace kept:" in e2e
-    assert "-NoStart" in e2e
-    assert "::add-mask::" in e2e, "the one-time setup URL is a credential and belongs in no log"
+    # The four markers the summary line and a human reader both grep for. They
+    # are worded so that reading the log says what happened in one word each:
+    # `installed` is the engine's own entry point, `uninstalled` is the absence
+    # of the uv tool, and the two task lines are the schtasks probe either side
+    # of -Uninstall. A step that failed before installing prints "installed: no"
+    # and nothing pretends otherwise.
+    for marker in (
+        '"installed: yes"',
+        '"task existed after install: yes"',
+        '"uninstalled: yes',
+        '"task gone after uninstall: yes',
+        "workspace kept:",
+        "task registered after -NoStart:",
+        "-NoStart",
+    ):
+        assert marker in e2e, f"the end-to-end run no longer reports {marker!r}"
+
+    # The summary line greps the same four markers, so a reader of the job
+    # summary sees whether the installer ran at all without opening the artifact.
+    summary = workflow.split("    - name: Summarize")[1]
+    assert (
+        "^(installed|task existed after install|uninstalled|task gone after uninstall): (yes|no)"
+        in summary
+    )
+    assert "install.ps1 end-to-end:" in summary
+    # The comments in this step quote `::add-mask::` while explaining why it is not
+    # used; every check here is about the commands, not the prose about them.
+    commands = "\n".join(
+        line for line in e2e.splitlines() if not line.strip().startswith("#")
+    )
+    # Q3: the one-time setup URL is a credential and belongs in no log, least of
+    # all in windows-install-e2e.txt, which is uploaded as an artifact. The token
+    # is only known after the installer prints it, so it cannot be masked before
+    # the fact: `::add-mask::` on its own masks the empty string and protects
+    # nothing. The install output is redacted on the way into the file instead,
+    # and the exit code is the installer's, taken from PIPESTATUS before the
+    # pipe overwrites it.
+    assert "add-mask" not in commands, (
+        "the setup URL token is redacted, not masked: it is unknown until the "
+        "installer prints it, so no mask can cover it"
+    )
+    assert r"sed -E 's#(Open Ciaobot: ).*#\1[redacted]#'" in commands
+    assert "${PIPESTATUS[0]}" in commands, (
+        "the install's exit code must come from PIPESTATUS, not from sed's"
+    )
+    # The version the installer is given is cut from the wheel *file name*. The
+    # path has to go through basename first: `cut -d- -f2` on
+    # `ps1-e2e/release/ciaobot-1.2.3-py3-none-any.whl` yields
+    # `e2e/release/ciaobot`, which the installer refuses as invalid, and the step
+    # then reports "no" for everything having installed nothing.
+    assert 'basename "$(ls ps1-e2e/release/*.whl' in commands
+    assert "| head -1 | cut -d- -f2)" not in commands
 
 
 def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:

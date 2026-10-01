@@ -190,20 +190,32 @@ jobs:
     - name: install.ps1 end-to-end install and uninstall (advisory)
       run: |
         {
-          version=$(ls ps1-e2e/release/*.whl 2>/dev/null | head -1 | cut -d- -f2)
+          # basename, not the whole path: `cut -d- -f2` on
+          # `ps1-e2e/release/ciaobot-1.2.3-py3-none-any.whl` yields
+          # `e2e/release/ciaobot`, which the installer refuses as an invalid
+          # version - the run then "passes" having installed nothing.
+          version=$(basename "$(ls ps1-e2e/release/*.whl 2>/dev/null | head -1)" | cut -d- -f2)
           if [ -z "$version" ]; then
             echo "no end-to-end wheel was built; skipping the run"
           else
             workspace="$RUNNER_TEMP/ps1-e2e-ws"
             python -m pip install uv >/dev/null 2>&1 || true
             bin_dir="$(uv tool dir --bin 2>/dev/null)"
-            # The one-time setup URL is a credential. It is on a throwaway
-            # runner and a throwaway workspace, but a token belongs in no log.
-            echo "::add-mask::"
             echo "--- install ---"
-            powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Version "$version" -ReleaseDir ps1-e2e/release -Workspace "$workspace"
-            echo "install exit $?"
-            schtasks /Query /TN '\Ciaobot\Engine' >/dev/null 2>&1 && echo "task registered after install: yes" || echo "task registered after install: no"
+            # The one-time setup URL is a credential, and Q3 keeps it out of the
+            # log. `::add-mask::` with no value masks the empty string and hides
+            # nothing, and the token is only known after the installer prints it,
+            # so the install output is redacted on its way into this file (which
+            # is uploaded as an artifact) instead of masked afterwards.
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Version "$version" -ReleaseDir ps1-e2e/release -Workspace "$workspace" 2>&1 \
+              | sed -E 's#(Open Ciaobot: ).*#\1[redacted]#'
+            echo "install exit ${PIPESTATUS[0]}"
+            # Four markers, one word each, so the Summarize step and a human
+            # reading the artifact can tell an installer that ran from one that
+            # refused before it started. "installed" is the engine's own entry
+            # point on disk, which is the first thing a failed run does not leave.
+            test -f "$bin_dir/ciao.exe" && echo "installed: yes" || echo "installed: no"
+            schtasks /Query /TN '\Ciaobot\Engine' >/dev/null 2>&1 && echo "task existed after install: yes" || echo "task existed after install: no"
             port="$(awk -F= '/^PWA_PORT=/{gsub(/"/,"",$2); print $2}' "$workspace/.env" 2>/dev/null | tail -1)"
             [ -n "$port" ] || port=8443
             curl -fsS "http://localhost:$port/api/startup-status" >/dev/null 2>&1 && echo "engine reachable: yes" || echo "engine reachable: no"
@@ -212,8 +224,8 @@ jobs:
             echo "--- uninstall ---"
             powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Uninstall
             echo "uninstall exit $?"
-            schtasks /Query /TN '\Ciaobot\Engine' >/dev/null 2>&1 && echo "task registered after uninstall: yes (expected no)" || echo "task registered after uninstall: no (expected no)"
-            uv tool list 2>/dev/null | grep -qE '^[[:space:]]*-[[:space:]]+ciaobot([[:space:]]|$)' && echo "tool installed: yes (expected no)" || echo "tool installed: no (expected no)"
+            uv tool list 2>/dev/null | grep -qE '^[[:space:]]*-[[:space:]]+ciaobot([[:space:]]|$)' && echo "uninstalled: no (expected no)" || echo "uninstalled: yes (expected yes)"
+            schtasks /Query /TN '\Ciaobot\Engine' >/dev/null 2>&1 && echo "task gone after uninstall: no (expected yes)" || echo "task gone after uninstall: yes (expected yes)"
             test -f "$USERPROFILE/.local/state/ciaobot/install-receipt.json" && echo "receipt present: yes (expected no)" || echo "receipt present: no (expected no)"
             test -d "$workspace" && echo "workspace kept: yes (expected yes)" || echo "workspace kept: no (expected yes)"
             echo "--- -NoStart registers nothing ---"
@@ -236,7 +248,7 @@ jobs:
           echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
           echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
           echo "- install.ps1: $(grep -E 'exit ' windows-install-ps1.txt 2>/dev/null | paste -sd ';' -)"
-          echo "- install.ps1 end-to-end: task after install=$(grep -oE 'task registered after install: (yes|no)' windows-install-e2e.txt 2>/dev/null | tail -1 | awk '{print $NF}'); task after uninstall=$(grep -oE 'task registered after uninstall: (yes|no)' windows-install-e2e.txt 2>/dev/null | tail -1 | awk '{print $NF}')"
+          echo "- install.ps1 end-to-end: $(grep -oE '^(installed|task existed after install|uninstalled|task gone after uninstall): (yes|no)' windows-install-e2e.txt 2>/dev/null | paste -sd',' - | sed -E 's#,#, #g')"
           echo
           echo "Full logs and the failing-test list are in the \`windows-results\` artifact."
         } >> "$GITHUB_STEP_SUMMARY"

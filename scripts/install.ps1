@@ -310,18 +310,21 @@ print(name, digest, size)
         }
     }
 
-    # "Gone" is proven, not assumed: the port closed and no pythonw.exe left
-    # under the tool directory. Windows refuses to delete a running executable,
-    # and uv tool uninstall would leave a half-removed environment behind.
+    # "Gone" is proven, not assumed: the port closed and no pythonw.exe *process*
+    # is left running out of the tool directory. Windows refuses to delete a
+    # running executable, and uv tool uninstall would leave a half-removed
+    # environment behind. It has to be the process, not the file: every venv on
+    # disk ships a Scripts\pythonw.exe, so looking for one would report the engine
+    # as running forever and make every undo wait out its full timeout.
     function Wait-EngineStopped([string]$ToolDirectory, [int]$Port) {
         $deadline = (Get-Date).AddSeconds(15)
         while ((Get-Date) -lt $deadline) {
             $busy = $false
             if ($Port -gt 0) { $busy = Test-EngineAnswering $Port }
             if ((-not $busy) -and $ToolDirectory) {
-                $leftover = @(Get-ChildItem -Path $ToolDirectory -Filter 'pythonw.exe' `
-                        -Recurse -ErrorAction SilentlyContinue)
-                if ($leftover.Count -gt 0) { $busy = $true }
+                $running = @(Get-Process -Name 'pythonw' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Path -and $_.Path.StartsWith($ToolDirectory, 'OrdinalIgnoreCase') })
+                if ($running.Count -gt 0) { $busy = $true }
             }
             if (-not $busy) { return $true }
             Start-Sleep -Milliseconds 500
@@ -385,7 +388,14 @@ print(name, digest, size)
         # UNDOES: taskfile
         if ($Steps -contains 'taskfile') {
             try {
-                Remove-Item -LiteralPath (Join-Path $TaskDir $TaskFileName) -Force -ErrorAction SilentlyContinue
+                # -ErrorAction Stop, because -ErrorAction SilentlyContinue in a
+                # try/catch never throws and a locked file would be reported as a
+                # clean uninstall. Test-Path first, so a file that is already gone
+                # is not a failure.
+                $taskFile = Join-Path $TaskDir $TaskFileName
+                if (Test-Path -LiteralPath $taskFile) {
+                    Remove-Item -LiteralPath $taskFile -Force -ErrorAction Stop
+                }
             } catch {
                 $failed += "the task definition (Remove-Item '$TaskDir\$TaskFileName')"
             }
@@ -394,7 +404,9 @@ print(name, digest, size)
         # UNDOES: state
         if ($Steps -contains 'state') {
             try {
-                Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $StateFile) {
+                    Remove-Item -LiteralPath $StateFile -Force -ErrorAction Stop
+                }
             } catch {
                 $failed += "the install state file (Remove-Item '$StateFile')"
             }
@@ -430,7 +442,9 @@ print(name, digest, size)
         # a receipt left behind here cannot hand the machine to a removed engine.
         if ($Steps -contains 'receipt') {
             try {
-                Remove-Item -LiteralPath $ReceiptPath -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $ReceiptPath) {
+                    Remove-Item -LiteralPath $ReceiptPath -Force -ErrorAction Stop
+                }
             } catch {
                 $failed += "the install receipt (Remove-Item '$ReceiptPath')"
             }
@@ -688,6 +702,11 @@ print(name, digest, size)
         # owner-only DACL: PowerShell never builds this JSON. The receipt says
         # windows-task even under -NoStart, exactly as install-engine.sh writes
         # launchd when --no-start was passed.
+        # A receipt that was already there belongs to the earlier install this
+        # run is repairing, so this run did not create it and must not delete it
+        # on a later failure: the step is recorded as done only when it was
+        # absent a moment ago.
+        $receiptWasThere = Test-Path -LiteralPath $ReceiptPath
         $receipt = Invoke-Native $toolPython @('-m', 'ciao.install_receipt', 'write',
             '--version', $Version,
             '--executable', $ciao,
@@ -695,15 +714,17 @@ print(name, digest, size)
             '--service-backend', $ServiceBackend,
             '--service-label', $TaskName) $true
         if ($receipt.ExitCode -ne 0) { Fail 'could not write the install receipt' }
-        $done += 'receipt'
+        if (-not $receiptWasThere) { $done += 'receipt' }
 
         # ADDS: path
         # The uv bin directory is shared with the user's other uv tools, so
         # whether this run added it is what the state file records below.
         $userPath = Get-UserPath
+        $pathEntryAdded = $false
         if (-not (Test-UserPathEntry $userPath $binDir)) {
             Set-UserPath (Add-UserPathEntry $userPath $binDir)
             $pathEntry = $binDir
+            $pathEntryAdded = $true
             $done += 'path'
         }
         # Process scope only: so `ciao` also works in the terminal that ran this
@@ -726,11 +747,23 @@ print(name, digest, size)
         # entry above (an empty path_entry means it was already there), and where
         # the workspace is, so an uninstall can print it. Not the receipt: that
         # schema is Python-owned and has no field for either.
+        $stateWasThere = Test-Path -LiteralPath $StateFile
+        # Read before the write, because this file is the only record of who put
+        # the PATH entry there. A repair re-run finds the entry already present,
+        # takes $pathEntry = '' for itself, and must carry the earlier run's
+        # value forward instead: writing '' over it would make the next
+        # -Uninstall leave an entry nobody owns behind, for good.
+        $previousState = Read-InstallState
+        if ((-not $pathEntryAdded) -and $previousState -and $previousState.path_entry) {
+            $pathEntry = [string]$previousState.path_entry
+        }
         $state = [ordered]@{ path_entry = $pathEntry; workspace = $workspace; version = $Version }
         New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
         $json = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($StateFile, (ConvertTo-Json -InputObject $state), $json)
-        $done += 'state'
+        # A state file that was already there is this install's to keep, so only a
+        # file this run created is a step a rollback may delete.
+        if (-not $stateWasThere) { $done += 'state' }
 
         # ADDS: task
         # ADDS: taskfile
@@ -751,6 +784,14 @@ print(name, digest, size)
         $taskWasRegistered = Test-TaskRegistered
         $taskFileWasThere = Test-Path -LiteralPath $taskFile
         $setup = Invoke-Native $ciao $setupArgs $false
+        # Recorded before the exit code is judged, because `ciao setup` can fail
+        # *after* it has registered the task: a rollback that only learned about
+        # the task here would leave it registered, RestartOnFailure would keep
+        # the engine alive, and `uv tool uninstall` would then fail on the
+        # running pythonw.exe. Recorded only when this run is what created them,
+        # so a repair re-run does not delete the task it found.
+        if ((-not $taskWasRegistered) -and (Test-TaskRegistered)) { $done += 'task' }
+        if ((-not $taskFileWasThere) -and (Test-Path -LiteralPath $taskFile)) { $done += 'taskfile' }
         # `ciao setup` reports a workspace whose memory regions could not be set
         # up by exiting 3, which is not a failed install: everything else it
         # scaffolds is there, and a rollback would throw all of that away. Only
@@ -760,11 +801,6 @@ print(name, digest, size)
             3 { Write-Warning 'ciao setup could not set up memory regions (see the warning above); continuing install' }
             default { Fail 'ciao setup failed' }
         }
-        # Recorded only when this run is what created them: a re-run over an
-        # engine that was already registered must not delete that task on a
-        # failure later in the run.
-        if ((-not $taskWasRegistered) -and (Test-TaskRegistered)) { $done += 'task' }
-        if ((-not $taskFileWasThere) -and (Test-Path -LiteralPath $taskFile)) { $done += 'taskfile' }
 
         if ($NoStart) {
             # -NoStart promised no service: no task registered (above), no

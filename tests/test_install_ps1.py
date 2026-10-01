@@ -529,6 +529,100 @@ def test_uninstall_removes_exactly_what_install_adds() -> None:
     assert "if ($pathEntry) { $done += 'path' }" in SCRIPT_TEXT
 
 
+def test_rerun_rollback_undoes_only_this_runs_own_steps() -> None:
+    # Q1: a re-run repairs an install instead of refusing, so "undo exactly what
+    # this run did" has to be enforced per step, not once for the install as a
+    # whole. Each of these four was a way the earlier version undid something it
+    # had not created.
+    undo = _undo_source()
+
+    # 1. `receipt` and `state` were added to $done unconditionally, so a failed
+    #    repair deleted the earlier install's receipt and state file while
+    #    leaving its tool in place. What a rollback may remove is what was
+    #    absent before this run wrote it.
+    receipt_write = SCRIPT_TEXT.index("'ciao.install_receipt', 'write',")
+    assert SCRIPT_TEXT.index("$receiptWasThere = Test-Path -LiteralPath $ReceiptPath") < receipt_write
+    assert "if (-not $receiptWasThere) { $done += 'receipt' }" in SCRIPT_TEXT
+    assert "\n        $done += 'receipt'\n" not in SCRIPT_TEXT
+    state_write = SCRIPT_TEXT.index("WriteAllText($StateFile")
+    assert SCRIPT_TEXT.index("$stateWasThere = Test-Path -LiteralPath $StateFile") < state_write
+    assert "if (-not $stateWasThere) { $done += 'state' }" in SCRIPT_TEXT
+
+    # 2. A re-run finds the PATH entry already present, so $pathEntry is '' for
+    #    this run. Writing that '' over install-state.json lost the record of
+    #    who added the entry, and the next -Uninstall then left it behind. The
+    #    previous state is read before the write and its path_entry carried over.
+    assert SCRIPT_TEXT.index("$previousState = Read-InstallState") < state_write
+    keep = re.search(
+        r"if \(\(-not \$pathEntryAdded\) -and \$previousState -and \$previousState\.path_entry\) \{\s*"
+        r"\$pathEntry = \[string\]\$previousState\.path_entry",
+        SCRIPT_TEXT,
+    )
+    assert keep, "a repair re-run overwrites install-state.json with path_entry=''"
+    # The entry this run really added is still the one it undoes.
+    assert re.search(
+        r"\$pathEntryAdded = \$true\s*\n\s*\$done \+= 'path'", SCRIPT_TEXT
+    ), "the PATH step is only recorded as done when this run added the entry"
+
+    # 3. A failed `ciao setup` threw before the two $done += lines below it, so
+    #    a task setup had already registered was never stopped or deleted, and
+    #    `uv tool uninstall` then failed on the running pythonw.exe. Both checks
+    #    are above the exit-code switch.
+    setup_call = SCRIPT_TEXT.index("$setup = Invoke-Native $ciao $setupArgs")
+    switch = SCRIPT_TEXT.index("switch ($setup.ExitCode)")
+    assert setup_call < SCRIPT_TEXT.index("if ((-not $taskWasRegistered) -and (Test-TaskRegistered)) { $done += 'task' }") < switch
+    assert SCRIPT_TEXT.index("if ((-not $taskFileWasThere) -and (Test-Path -LiteralPath $taskFile)) { $done += 'taskfile' }") < switch
+    assert "$taskWasRegistered = Test-TaskRegistered" in SCRIPT_TEXT
+    assert "$taskFileWasThere = Test-Path -LiteralPath $taskFile" in SCRIPT_TEXT
+
+    # 4. Undo-Install deletes the task and its file only when this run is
+    #    recorded as having added them; the -Uninstall path, which did nothing
+    #    this run, builds its own list from what is on the machine.
+    assert "$done += 'task'" not in undo
+    assert "$Steps -contains 'task'" in undo
+
+
+def test_wait_engine_stopped_looks_for_a_process_not_a_file() -> None:
+    # Every venv on disk ships Scripts\pythonw.exe, so searching the tool
+    # directory for that file reported "still running" forever: each undo waited
+    # out its full 15 s and then named the engine as something the user had to
+    # finish by hand. What is running is a process, matched on its image path.
+    wait = _ps1_function("Wait-EngineStopped")
+    assert "Get-Process -Name 'pythonw'" in wait
+    assert "$_.Path.StartsWith($ToolDirectory" in wait
+    assert "Get-ChildItem" not in wait
+    assert "pythonw.exe" not in wait
+
+
+def test_undo_reports_a_file_it_could_not_delete() -> None:
+    # Remove-Item -ErrorAction SilentlyContinue inside try/catch never throws, so
+    # a locked receipt, state file or task XML was silently skipped and the run
+    # printed "uninstalled" with the file still there. -ErrorAction Stop makes the
+    # catch reachable; Test-Path first keeps an already-absent file out of the
+    # failure list.
+    undo = _undo_source()
+    removals = [
+        line.strip()
+        for line in undo.splitlines()
+        if line.strip().startswith("Remove-Item")
+    ]
+    assert len(removals) == 3
+    assert all("-ErrorAction Stop" in line for line in removals), (
+        "a Remove-Item that cannot fail is a deletion that is never reported"
+    )
+    for path in ("$taskFile", "$StateFile", "$ReceiptPath"):
+        assert f"if (Test-Path -LiteralPath {path}) {{" in undo, (
+            f"Undo-Install removes {path} without checking it is there first"
+        )
+    # Nothing else in the undo swallows an error either: every other step in it
+    # is a command whose exit code is tested, so a SilentlyContinue anywhere else
+    # is the same silent skip.
+    code = "\n".join(
+        line for line in undo.splitlines() if not line.strip().startswith("#")
+    )
+    assert "SilentlyContinue" not in code
+
+
 def test_rollback_ordering() -> None:
     undo = _undo_source()
     # Windows will not delete a running executable, so the engine has to be
