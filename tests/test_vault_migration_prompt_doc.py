@@ -526,20 +526,32 @@ def test_the_vocabulary_card_is_not_described_as_clearing() -> None:
     )
 
 
-def test_the_snapshot_gitignore_caveat_is_stated() -> None:
-    """The credential exclusions are only written when git init runs.
+def test_the_snapshot_exclusions_apply_to_both_snapshot_branches() -> None:
+    """The credential exclusions are written on every path that snapshots.
 
-    `ensure_rollback_history` calls `_write_snapshot_gitignore` on the
+    `ensure_rollback_history` used to call `_write_snapshot_gitignore` on the
     "not a repository" branch only, so an install that already had a repository
-    with no commits gets its snapshot without them.
+    with no commits got its snapshot with no exclusions at all. The document must
+    not tell a reader the old caveat still holds.
     """
     doc = _flat()
 
-    assert "is written *only* in the \"no repository at all\" case" in doc
-    for fragment in ("git init", "git show --stat HEAD", "can end up in that commit"):
+    assert "Both snapshotting branches first get a `.gitignore`" in doc, (
+        "the document must state that both snapshotting branches get the exclusions"
+    )
+    for fragment in (".env", "secrets/", "cannot be committed into the snapshot", "additive"):
         assert fragment in doc, (
             "docs/VAULT_MIGRATION_PROMPT.md no longer carries the snapshot "
-            f"caveat: {fragment!r}"
+            f"exclusion statement: {fragment!r}"
+        )
+    # The old caveat is now false and must be gone, not merely softened.
+    for gone in (
+        "is written *only* in the \"no repository at all\" case",
+        "git show --stat HEAD",
+    ):
+        assert gone not in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md still carries the withdrawn snapshot "
+            f"caveat: {gone!r}"
         )
 
 

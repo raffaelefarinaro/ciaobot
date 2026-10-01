@@ -1579,11 +1579,15 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
     - a repository with at least one commit: left completely alone.
     - a repository with no commits: given the snapshot commit, because ``git mv``
       works without a HEAD but ``git checkout`` has nothing to return to.
-    - not a repository: ``git init``, a ``.gitignore``, then the snapshot.
+    - not a repository: ``git init``, then the snapshot.
 
-    The snapshot deliberately excludes credentials and volatile state (see
-    ``_SNAPSHOT_IGNORES``). A safety net that captured `.env` would turn "we made
-    you a backup" into "we committed your provider keys".
+    Both snapshotting branches first get the credential-excluding ``.gitignore``
+    (see ``_SNAPSHOT_IGNORES``), and it is additive: an owner's entries are kept
+    and only missing ones are appended. The snapshot deliberately excludes
+    credentials and volatile state. A safety net that captured `.env` would turn
+    "we made you a backup" into "we committed your provider keys", so the
+    exclusion is written on every path that reaches the snapshot rather than only
+    on the one where the repository is created.
     """
     root = Path(install_root).resolve()
     out: dict[str, Any] = {"status": "", "created_repo": False, "commit": ""}
@@ -1604,7 +1608,6 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
             return out
         out["status"] = "seeded_empty_repo"
     else:
-        _write_snapshot_gitignore(root)
         init_code, init_out = run_git(root, "init", "-b", "main")
         if init_code != 0:
             out["status"] = "init_failed"
@@ -1613,6 +1616,15 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
         out["created_repo"] = True
         out["status"] = "created"
 
+    # Written here, not in the `else`, so it covers BOTH branches that reach
+    # `git add -A`. The pre-seeded empty repository used to skip it and got its
+    # snapshot with no exclusions at all, so the very first `git add -A` over
+    # that install root committed `.env` and `secrets/`. The exclusion file is
+    # itself a repo file, so git honours it for a repo that already exists.
+    # It appends only the missing entries and never rewrites what an owner
+    # already wrote, and a repository with a HEAD has returned above, so no
+    # established history is touched.
+    _write_snapshot_gitignore(root)
     add_code, add_out = run_git(root, "add", "-A")
     if add_code != 0:
         out["status"] = "add_failed"

@@ -2432,6 +2432,115 @@ def test_a_repository_with_no_commits_gets_the_snapshot(tmp_path: Path) -> None:
     assert history["commit"]
 
 
+def _synthetic_volatile_state(install: Path) -> None:
+    """The runtime state and credentials a real install holds, as fake values.
+
+    `_no_git_install` writes `.env` and `secrets/sa.json` but leaves `.runtime/`
+    empty, and `.credentials` absent, so the excludes for those two had nothing
+    to act on. Synthetic placeholders only — no real credential is read or
+    written by any of these tests.
+    """
+    (install / ".runtime" / "state.json").write_text('{"jobs": []}\n', encoding="utf-8")
+    (install / ".credentials").write_text("token: fake\n", encoding="utf-8")
+
+
+def _tracked(install: Path, ref: str = "HEAD") -> list[str]:
+    """The snapshot COMMIT's tree, read from the commit rather than the index.
+
+    The index already carries the staged renames, so it describes the migrated
+    layout rather than the thing a rollback would restore.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(install), "ls-tree", "-r", "--name-only", ref],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return out.splitlines()
+
+
+def test_the_seeded_empty_repo_snapshot_excludes_secrets(tmp_path: Path) -> None:
+    """A pre-seeded empty repository must not commit the owner's credentials.
+
+    `_write_snapshot_gitignore` used to be called on the "not a repository"
+    branch only, so `git init` + no commits — the ordinary state of an install
+    whose owner followed a README and never got to a first commit — reached the
+    same `git add -A` with no exclusions at all. The snapshot then carried `.env`
+    and `secrets/` while `ensure_rollback_history`'s own docstring promised it
+    would not. Synthetic values only; no real credential is involved.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    _git(install, "init", "-b", "main")
+    _synthetic_volatile_state(install)
+
+    history = ensure_rollback_history(install)
+    assert history["status"] == "seeded_empty_repo"
+
+    tracked = _tracked(install, history["commit"])
+    for secret in (".env", "secrets/sa.json", ".runtime/state.json", ".credentials"):
+        assert secret not in tracked, (
+            f"{secret} was committed into the re-rooting snapshot of a pre-seeded "
+            "empty repository"
+        )
+    # The exclusions have to be a repo file for git to honour them.
+    assert ".gitignore" in tracked
+    # And the snapshot still has to be a rollback point: documentation and the
+    # vault itself are what it exists for.
+    assert ".env.example" in tracked
+    assert any(name.startswith("memory-vault/") for name in tracked)
+
+
+def test_the_seeded_empty_repo_snapshot_keeps_the_owners_gitignore(tmp_path: Path) -> None:
+    """The exclusion write is additive on the pre-seeded branch too.
+
+    An install that ran `git init` may well have a `.gitignore` of its own. The
+    write appends the missing entries and leaves the owner's line in place,
+    because a snapshot that overwrote the owner's file would be trading one
+    surprise for another.
+    """
+    install, vault, runtime = _no_git_install(tmp_path)
+    _git(install, "init", "-b", "main")
+    (install / ".gitignore").write_text("scratch/\n# mine\n", encoding="utf-8")
+
+    ensure_rollback_history(install)
+
+    written = (install / ".gitignore").read_text(encoding="utf-8")
+    assert "scratch/" in written
+    assert "# mine" in written
+    for entry in workspace_reroot._SNAPSHOT_IGNORES:
+        assert entry in written, f"{entry} missing from the snapshot exclusions"
+
+
+def test_a_created_repo_snapshot_excludes_secrets(tmp_path: Path) -> None:
+    """The freshly-initialised branch, asserted at the same level as the seeded
+    one so a move of the exclusion write cannot silently drop either."""
+    install, vault, runtime = _no_git_install(tmp_path)
+    _synthetic_volatile_state(install)
+
+    history = ensure_rollback_history(install)
+    assert history["status"] == "created"
+
+    tracked = _tracked(install, history["commit"])
+    assert ".env" not in tracked
+    assert "secrets/sa.json" not in tracked
+    assert ".runtime/state.json" not in tracked
+    assert ".env.example" in tracked
+    assert any(name.startswith("memory-vault/") for name in tracked)
+
+
+def test_an_existing_repository_gets_no_snapshot_gitignore_written(tmp_path: Path) -> None:
+    """The write must not reach the branch with a HEAD.
+
+    That install is left completely alone — its history is established, and a
+    `.gitignore` Ciaobot rewrote there would be a working-tree change the owner
+    never asked for, staging as uncommitted drift before the clean-tree gate.
+    """
+    install, vault, runtime = _git_install(tmp_path)
+    before = (install / ".gitignore").read_text(encoding="utf-8")
+
+    ensure_rollback_history(install)
+
+    assert (install / ".gitignore").read_text(encoding="utf-8") == before
+
+
 def test_an_empty_directory_does_not_refuse_the_migration(tmp_path: Path) -> None:
     """`git mv` fails on an empty directory and one failure refuses the whole run.
 
