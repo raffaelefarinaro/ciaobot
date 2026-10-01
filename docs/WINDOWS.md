@@ -41,7 +41,7 @@ Options:
 | `-NoStart` | Install the engine but do not register the logon task, do not start it and do not print a sign-in link. The installer prints the two commands that finish the job later. |
 | `-Uninstall` | Remove what the installer added (see Uninstall). Your workspace is kept. |
 | `-Version <x.y.z>` | Install a specific release instead of the latest. |
-| `-DryRun` | Download and verify the release against its signed manifest, then stop without installing anything. |
+| `-DryRun` | Download the release and verify it against its signed manifest, then stop without installing anything. Needs uv to be installed already. |
 
 (`-ReleaseDir <folder>` installs from a local release folder and needs `-Version`;
 it is for testing a release candidate.)
@@ -161,6 +161,10 @@ new terminal, install [Git for Windows](https://gitforwindows.org/).
   NTFS junctions (folders) and hard links with a `<name>.ciao-link` marker file
   (files) instead of symlinks, so Developer Mode is not required. Do not delete
   the `.ciao-link` files by hand: they are how Ciaobot knows a file is its own.
+- Workspace Git repositories are set to `core.autocrlf=false`, so Git for
+  Windows stores the bytes Ciaobot wrote and your notes are not rewritten with
+  Windows line endings on commit. A value you set yourself in a repo is left
+  alone.
 - Defender real-time scanning made no measurable difference to stopping the
   engine or freeing its files (about 1.5 s either way, measured in the #857
   spike). Not measured: how deep vault or `node_modules` paths behave beyond 260
@@ -201,7 +205,7 @@ and prints the command that completes it.
 | `ciao` is not recognised | Open a new terminal. If it still fails, check that the directory printed by `uv tool dir --bin` is in your user `PATH` (`[Environment]::GetEnvironmentVariable('Path','User')`). |
 | The browser shows nothing at `http://localhost:8443` | `ciao service status`. If the task is registered but the engine is not reachable, read `<workspace>\.runtime\ciao.stderr.log`, then `ciao service restart`. Another program may already use the port: change `PWA_PORT` in the workspace `.env` and restart. |
 | The engine is not running after a restart of Windows | The task starts when you sign in, not at boot. Sign in, or run `ciao service start`. Confirm the task exists: `schtasks /Query /TN \Ciaobot\Engine`. |
-| `The Ciaobot engine task is not registered` | Run `ciao setup --workspace <folder> --load-launchd --yes`, then `ciao service start`. |
+| `Ciaobot engine task is not registered` | Run `ciao setup --workspace <folder> --load-launchd --yes`, then `ciao service start`. |
 | Installer says a `ciao.exe` exists and was not installed by Ciaobot | Another program put a `ciao.exe` in the uv bin directory. Move it away and run the installer again. |
 | The installer stops with a manifest or digest error | The download did not match the signed manifest. Run it again; if it repeats, open an issue with the version. |
 | PowerShell blocks the script | Use the `-ExecutionPolicy Bypass -File` form shown under Install. |
