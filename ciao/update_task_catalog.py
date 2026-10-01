@@ -101,7 +101,11 @@ TASK_FIELDS: frozenset[str] = frozenset(
 #: :data:`ciao.update_tasks.DETECTOR_FUNCTIONS` — see the module docstring for why
 #: "registered but not yet written" is not a state this catalog has.
 DETECTORS: frozenset[str] = frozenset(
-    {"learnings-cleanup-review-needed", "unrehomed-people-review-needed"}
+    {
+        "learnings-cleanup-review-needed",
+        "unrehomed-people-review-needed",
+        "vault-relocate-review-needed",
+    }
 )
 
 #: The completion checks this engine implements, same contract as ``DETECTORS``.
@@ -109,7 +113,11 @@ DETECTORS: frozenset[str] = frozenset(
 #: evaluated apart from any chat the operator starts, and the names here are the
 #: postconditions that engine can actually evaluate.
 COMPLETION_CHECKS: frozenset[str] = frozenset(
-    {"learnings-cleanup-review-recorded", "unrehomed-people-rehome-recorded"}
+    {
+        "learnings-cleanup-review-recorded",
+        "unrehomed-people-rehome-recorded",
+        "vault-relocate-recorded",
+    }
 )
 
 #: The documented spelling of a version. A leading ``v`` is tolerated;

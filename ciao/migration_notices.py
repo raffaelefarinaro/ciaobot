@@ -89,6 +89,15 @@ and a lifecycle recorded in ``<runtime>/update-tasks.json`` is not one of its
 inputs. That is what lets one condition be shared by an *offer* and a *report*
 without the offer being able to erase the report.
 
+The vault location is the same asymmetry with one fewer variable: since this
+slice the Home *tile* is gone and the condition has an offer (a workspace-scoped
+``vault-relocate`` catalog task) beside the report, and both read
+``vault_location_findings``, so they cannot disagree about which workspaces are
+misplaced — only about what the operator did about it. See
+:func:`completed_relocation` for why the reversible remedy makes this the one
+notice whose completion is a receipt *and* the current state, and why that is the
+property that lets a suppressed task come back.
+
 One notice has two questions, and they are not the same question
 ----------------------------------------------------------------
 ``unrehomed_people`` is the only notice here a surface answers differently on
@@ -160,11 +169,76 @@ VAULT_LOCATION_NOTICE = "vault_outside_vault_root"
 #: The audit's notice type for a vault still written in the retired wikilink dialect.
 UNMIGRATED_LINKS_NOTICE = "unmigrated_vault_links"
 
+
 #: The audit's notice type for person notes that may still need re-homing. The
 #: same condition #833's ``unrehomed-people`` update task offers on Home, so the
 #: string is the join between the report and the card; it is one spelling because
 #: two surfaces that have to agree on which notice this is cannot each invent it.
 UNREHOMED_PEOPLE_NOTICE = "unrehomed_people"
+
+# -- vault relocation, the task half -----------------------------------------
+#
+# The vault-location notice is the one #800's evidence table got wrong, and the
+# correction matters more than the promotion: the table said the remedy wrote no
+# receipt, which would have made this shape 3 and kept it a tile. It writes one —
+# per workspace, `status: relocated` on success, and removed again by `--undo`
+# (see `vault_relocate.read_receipt`). So the notice is promotable, and the shape
+# is a *fourth* one rather than either of the three the table names: a real
+# receipt, but on a **reversible** remedy.
+#
+# That is the property #833's task cannot have and this one needs. `evaluate`
+# settles a started task once and then suppresses the offer for the whole
+# revision, so a task whose condition can come *back* needs evidence that goes
+# away when the work is undone — otherwise `--undo` would leave the card hidden
+# while the vault sat outside its folder again, with nothing on Home saying so.
+# `vault-relocate`'s receipt is exactly that: undo deletes it, so a re-misplaced
+# vault is applicable work again rather than a task already finished. The audit
+# notice covers the same window on its own, and stays independent throughout.
+#
+# The asymmetry is the same one-directional shape as the re-home task, and for a
+# sharper reason — here the task and the notice ask the *same* question, so they
+# cannot disagree about it, and only the response differs:
+#
+#     task offered  =>  audit reports
+#     dismissed/relocated  =>  card gone; the audit still reports any new mismatch
+#
+# No update-task record is an input to anything in this module, which is what
+# keeps the two apart: the card is an offer the operator may decline, the report
+# is not theirs to silence.
+
+#: The workspace's vault is registered outside its standard folder and is there,
+#: so there is something to relocate. The only reason that offers the card; the
+#: others exist so a task that is *not* offered reads as a reason rather than as
+#: silence.
+RELOCATION_MISPLACED = "misplaced_vault"
+
+#: The registry and the layout already agree. Not applicable, and the ordinary
+#: answer on a healthy install — a detector that cannot reach zero here is a
+#: detector that offers work for ever.
+RELOCATION_STANDARD = "standard_location"
+
+#: The registered path is not a directory. A **different notice**
+#: (`workspace-root-missing` on Home, a setup finding in the audit), and there is
+#: no misplaced vault to relocate: offering a move for a path that is not there is
+#: the unactionable card operators learn to ignore.
+RELOCATION_VAULT_MISSING = "vault_missing"
+
+#: A **completed** relocation is recorded for this workspace, and the workspace
+#: no longer sits outside its folder. Only a `status: "relocated"` receipt counts:
+#: a `refused` one means a run happened and moved nothing, and a receipt this
+#: install cannot parse proves nothing in either direction.
+RELOCATION_DONE = "relocated"
+
+#: No completed receipt. The task has not been done, whatever any other receipt
+#: shape says — including a `refused` one, which is what most retries write.
+RELOCATION_NOT_DONE = "no_completed_relocation_receipt"
+
+#: A completed receipt exists but the workspace is **mismatched again**. Reachable
+#: by hand — a registry edit, a restore from an old copy, a partial undo — and it
+#: is the exact state a check reading only the receipt would report as finished.
+#: It cannot happen through `--undo`, which removes the receipt; it can happen
+#: through anything that does not go through the receipt.
+RELOCATION_MISMATCHED = "relocated_but_still_mismatched"
 
 #: How long an established wikilink verdict may be reused before it is recomputed.
 #:
@@ -276,6 +350,104 @@ def vault_location_findings(config: Any) -> list[VaultLocationFinding]:
             VaultLocationFinding(workspace=str(name), actual=actual, standard=standard)
         )
     return findings
+
+
+def completed_relocation(runtime_dir: Path, workspace: str) -> dict[str, Any] | None:
+    """The receipt of a **completed** relocation for one workspace, or ``None``.
+
+    One reader, for the same reason :func:`completed_rehome` is one reader: the
+    question is asked in opposite directions by two surfaces — the catalog's
+    completion check asks "is there one?" and a caller deciding whether the work
+    is still outstanding asks "is there not one?" — and two callers reaching for
+    ``vault-relocate-<workspace>.json`` with different ideas of what counts as
+    done is how a task and a report come to disagree about the same workspace.
+
+    The accessor is :func:`ciao.vault_relocate.read_receipt`, which gates on
+    ``status == "relocated"``. Two properties of that gate are the whole reason
+    this notice was promotable:
+
+    * a ``refused`` receipt is **not** completion. Most of the shapes
+      ``vault_relocate.plan`` refuses are permanent properties of an install, so
+      a retry writes one every time and none of them moved a note.
+    * ``--undo`` **deletes** the receipt, so an undone relocation reads as no
+      relocation at all. The task lifecycle suppresses a completed task for the
+      rest of its revision, so a check that could only see "a receipt once
+      existed" would hide the card while the vault was back outside its folder.
+
+    No tolerance for a receipt with no ``status`` field, unlike
+    ``vault_rehome``. Every run this engine has written names its own status, so
+    a file without one is not this engine's record of anything and reading it as
+    proof would be reading an uninterpretable file as evidence.
+
+    Returns the receipt rather than a boolean, because the completion check has
+    to name the run it looked at in its evidence and a bare ``True`` cannot.
+    """
+    from ciao.vault_relocate import read_receipt
+
+    return read_receipt(Path(runtime_dir), str(workspace))
+
+
+def relocation_state(config: Any, workspace: str) -> str:
+    """Where this workspace's vault sits *right now*, as one of the reasons above.
+
+    The *current* half of the vault-location condition, resolved from the same two
+    accessors :func:`vault_location_findings` reads, so the task's answer and the
+    notice's are one predicate over one registry rather than two rules that can
+    drift. It is a question about the present, which is why completion needs it
+    **and** the receipt: the receipt says a run finished, and this says the layout
+    still agrees. A relocated workspace whose registry was later hand-edited has
+    the first and not the second.
+
+    One workspace only, and that is the point rather than a convenience: a
+    mismatch in a *different* workspace is a different task record in a different
+    vault, so a workspace task must never read another workspace's answer as its
+    own. ``vault_location_findings`` returns every workspace's; this asks about
+    one.
+
+    :func:`vault_location_findings` *skips* an entry it cannot resolve, because a
+    broken registry must not take an audit or a Home render down with it. Here the
+    same fault **raises**, and the difference is deliberate rather than
+    accidental. Skipping answers "there is nothing to report", which is the right
+    thing for a diagnostic that renders and the wrong thing for a card: the task
+    would offer nothing on the strength of an entry it never read, and the
+    operator would have no way to tell that from a clean workspace. ``update_tasks``
+    turns a raise into ``unknown`` — no card offered, and the answer recorded as
+    not known rather than as known-absent — which is the same shape the re-home
+    task settled on for the same fault.
+    """
+    resolver = getattr(config, "workspace_vault_root", None)
+    standardizer = getattr(config, "canonical_workspace_vault_root", None)
+    if not callable(resolver) or not callable(standardizer):
+        raise ValueError(
+            "the vault-relocate task needs a config with a workspace registry"
+        )
+    try:
+        actual = Path(resolver(workspace)).resolve()
+        standard = Path(standardizer(workspace)).resolve()
+    except Exception as exc:  # noqa: BLE001 — an unresolvable entry is an unknown
+        raise ValueError(
+            f"the workspace registry does not resolve {workspace!r} to a vault "
+            f"root: {exc}"
+        ) from exc
+    if actual == standard:
+        return RELOCATION_STANDARD
+    # A root that is not there is a different notice (`workspace-root-missing` on
+    # Home, a setup finding in the audit) and there is no misplaced vault to
+    # relocate — the same skip `vault_location_findings` makes, named rather than
+    # silent so a card-free workspace is readable as a reason.
+    if not actual.is_dir():
+        return RELOCATION_VAULT_MISSING
+    return RELOCATION_MISPLACED
+
+
+def relocation_mismatch(config: Any, workspace: str) -> bool:
+    """Whether this workspace's vault is currently outside its standard folder.
+
+    :func:`relocation_state` narrowed to the question the completion check asks,
+    and it inherits that function's raise-on-unresolvable behaviour: a check that
+    could not read the layout must not report the postcondition as holding.
+    """
+    return relocation_state(config, workspace) == RELOCATION_MISPLACED
 
 
 # -- unmigrated links --------------------------------------------------------

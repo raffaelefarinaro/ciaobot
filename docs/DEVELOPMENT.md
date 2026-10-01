@@ -886,14 +886,20 @@ The scan is proven to run on a worker thread and to go through `run_read`, and t
 cold path is asserted end to end — one poll starts one detached scan and reports no
 card, the scan lands, the next poll reports a card that names the note.
 
-Neither of those two notices is an update-task catalog row, and the test says so.
-A catalog task needs a registered completion check that reads a real
-postcondition, and for these two the only "evidence" the work was done is the
-condition's absence recomputed each render, which makes the check a tautology.
-`vault-relocate` is the best candidate for a receipt (it has an apply/undo cycle
-and a registry update to hang one on); the link migration's receipt is per
-*install*, not per vault, so a per-workspace loop over its remedy is not
-available either. Do not add a row because a card looks like a task.
+Of the two notices #816 named, the link migration is still not a catalog row, and
+the test says so. A catalog task needs a registered completion check that reads a
+real postcondition, and for `unmigrated_vault_links` the only "evidence" the work
+was done is the condition's absence recomputed each render, which makes the check
+a tautology — and its receipt is per *install*, not per vault, so a
+per-workspace loop over its remedy is not available either. Do not add a row
+because a card looks like a task.
+
+**The vault location *is* one now, and the table's premise about it was wrong.**
+The table said `vault-relocate` writes no receipt, which would have made it shape
+3 and kept it a tile. It has written a per-workspace
+`vault-relocate-<workspace>.json` with `status: relocated` on every successful
+run for some time, and `--undo` **removes** it. Correct the premise before
+reusing the classification: see "A reversible remedy is a fourth shape" below.
 
 #### The notice classification table (#800)
 
@@ -905,7 +911,7 @@ Taken from the merged tree, and every cell is pinned by a test.
 | Notice | Surfaces today | Scope | Applicability cost | Completion evidence | Mandatory? | Managed remedy | Catalog detector / check |
 |---|---|---|---|---|---|---|---|
 | `workspace-unmigrated` | operator-actions tile, **blocking** | install | 2 registry reads + one receipt peek, no vault walk | **None.** Renders until `workspace_reroot.read_receipt` returns a record; absence of a receipt is not proof the work was done | **Yes** | `ciao workspace-reroot [--rehearse\|--apply\|--undo\|--repair]`, retried at every start by `migrate_if_needed` | **never.** A dismissible, revision-suppressed task is precisely wrong for a blocker that must not go away until the migration runs |
-| `vault-location:{workspace}` | tile + audit `vault_outside_vault_root`, one `vault_location_findings` | workspace | 2 resolved paths + one `is_dir()` | **None.** The registry *is* the layout, so the condition is a comparison of two paths recomputed each render | No | `ciao vault-relocate {name} [--apply\|--undo]` | none today; it needs a receipt `vault-relocate` does not write |
+| `vault-location:{workspace}` | audit `vault_outside_vault_root` **and** the workspace-scoped `vault-relocate` catalog card (#800's last slice), which replaced the Home tile | workspace | 2 resolved paths + one `is_dir()`, no walk — the cheapest notice here, and cheap enough for a task detector, a 60s poll and an audit alike | `vault_relocate.read_receipt` — a `status: "relocated"` receipt **and** the current layout agreeing. No tolerance for a missing `status` (unlike `vault_rehome`): every run names its own, so a status-less file is not this engine's record. A `refused` receipt, an unparseable one, and one naming another workspace are all *not* completion | No | `ciao vault-relocate {name} [--apply\|--undo]` | `vault-relocate-review-needed` / `vault-relocate-recorded` |
 | `vault-vocabulary` | tile | install | one `vault_migration.read_receipt` | `unresolved` non-empty — a real postcondition for the **mechanical** renames only; nothing records the categorisation decision a person still owes | No | the tile's run button — the only re-scan, since #814: it re-migrates each reported vault and rewrites **that vault's keyed receipt**, the file the card's own install-wide read is built from. `ciao sync-skills` writes the receipts at install and never re-scans | none yet — #814 made the mechanical half write the receipt its chat half needs, so the two halves agree; the row itself is still to be added |
 | `vault-unmigrated-links` | tile + audit `unmigrated_vault_links`, one `resolve_links`/`cached_links` | install | receipt read **plus** a bounded off-loop walk — Home reads the published verdict, the audit walks itself | `vault_migrate_links.read_receipt` — per **install**, not per vault, so the first converted root marks the whole install converted | No | `ciao vault-migrate-links [--apply]`, `ciao vault-unmigrate-links --apply` | none: a per-workspace loop over its remedy is not available |
 | `unrehomed_people` | audit `unrehomed_people` (one `rehomed_people_finding`) **and** the `unrehomed-people` catalog card (#833), which asks a narrower question (`rehome_legacy_candidates`) | install | the **notice**: registry read + one receipt read, no vault walk. The **card**: four cheap gates, then one `vault_rehome.plan_rehome` walk — off-loop through `run_read`, at most once per `APPLICABILITY_TTL_S` | `vault_rehome.read_receipt` — a **completed** receipt. Only a *completed* one, and the truthful no-op receipt counts solely as a record of an inspection the operator already approved | No | `ciao vault-rehome [--apply]`, `ciao vault-unrehome --apply` | `unrehomed-people-review-needed` / `unrehomed-people-rehome-recorded` |
@@ -917,7 +923,9 @@ alone. **A real receipt** is `unrehomed_people` and `vault-vocabulary`: a
 completion check can read it, and a successful `--apply` writes one even when it
 moved nothing. **No receipt at all** is everything else, where "completion" is the
 condition's absence recomputed each render — a legitimate detector, and a
-tautological check.
+tautological check. `vault-location` moved out of that last row; the reasoning is
+its own subsection rather than a fifth bullet because the premise it corrects is
+the one the table was consulted for.
 
 `skill-triage-pending` is the fourth shape, and it is the one row whose
 completion is neither a receipt nor the condition's absence: it is **the
@@ -933,6 +941,69 @@ of a command, not the absence of evidence.
 
 A receipt decides only the **last** column. What makes a row offerable is the
 fourth, and it is the one #833's review turned on: see below.
+
+#### A reversible remedy is a fourth shape: `vault-location` (#800)
+
+The table's `vault-location` row said the remedy wrote no receipt, which made it
+shape 3 and kept it a tile. **That premise is wrong**, and it was checked against
+the merged tree rather than against the plan text: `vault_relocate` has written a
+per-workspace `vault-relocate-<workspace>.json` with `status: relocated` on every
+successful run for some time, and `ciao vault-relocate {name} --undo` **removes**
+that file when it succeeds. `vault_relocate.read_receipt` is the one accessor that
+answers "has this workspace been relocated", and it gates strictly on
+`status == "relocated"` — deliberately with **no** tolerance for a missing
+`status`, unlike `vault_rehome.read_receipt`, which counts a status-less receipt as
+a completed run because that remedy predates its own field. Every
+`vault_relocate` run names its status, so a file without one is not this engine's
+record of anything.
+
+So the row is a **fourth shape, not a third one**: a real receipt on a
+*reversible* remedy. Reversibility is the whole design constraint, and it comes
+from the task lifecycle rather than from the migration. `evaluate` settles a
+started task once and then suppresses the offer for the rest of that revision, so
+a task whose condition can come *back* needs evidence that **goes away when the
+work is undone** — otherwise `--undo` would leave the card hidden while the vault
+sat outside its folder again, with nothing on Home saying so. Two things make
+that work without touching generic task semantics:
+
+* **The check is a conjunction, not a receipt read.** A `status: "relocated"`
+  receipt says a run happened; `relocation_state(config, workspace)` says the
+  layout still agrees. A registry edited by hand afterwards, a restore from an
+  older copy, or any change not routed through the receipt leaves a workspace
+  that has a completed relocation recorded and is still misplaced — the reason
+  `RELOCATION_MISMATCHED` exists, and it is reachable without any bug.
+* **The receipt is recorded but never load-bearing for applicability.** A
+  relocated-and-undone workspace has no receipt and is mismatched again, so the
+  detector — which reads the current layout, not the receipt — offers the work
+  again. The generic lifecycle is untouched; the *evidence* moves instead.
+
+Two more rules came out of writing it:
+
+* **A card asks a different question than a poll can afford, but not always.**
+  #833 had to separate `unrehomed_people`'s notice from its task because the
+  notice is only a receipt check. Here the task and the notice ask the *same*
+  question of the *same* predicate, so they cannot disagree about which
+  workspaces are misplaced — only about what the operator did about it. Do not
+  invent a narrower detector for this notice; there is nothing to narrow.
+* **Skipping an unreadable registry entry is right for a report and wrong for a
+  card.** `vault_location_findings` skips an entry it cannot resolve, so one
+  broken entry cannot take an audit or a render down. `relocation_state` **raises**
+  on the same fault, and `update_tasks` turns that into `unknown`. Skipping would
+  offer nothing on the strength of an entry the probe never read, and the operator
+  could not tell that from a clean workspace.
+
+**The Home tile is gone, and that is the point of it.** A tile can reach zero but
+cannot be dismissed or completed — a machine condition is only ever fixed, never
+declined — so an operator who did not want this work had no way to record it and
+the same tile reappeared on every 60s poll. The audit notice is unchanged and
+still independent: nothing in `migration_notices` reads an update-task record, so
+a dismissed card silences the card and never the report.
+`tests/test_vault_relocate_update_task.py` fails if a `vault-location` tile is ever
+added back beside the task.
+
+The audit/vocabulary rows' classification is untouched by this: `vault-vocabulary`
+is still shape 2 with no row, because its chat half still records nothing, and
+`vault-unmigrated-links` is still shape 3 with no row.
 
 #### One notice, two questions, and a task narrower than its notice (#833)
 

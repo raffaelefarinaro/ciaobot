@@ -309,8 +309,19 @@ def test_locked_skills_orphaned_silent_without_lock(tmp_path: Path) -> None:
     assert "locked-skills-orphaned" not in [a.id for a in detect_actions(context)]
 
 
-def test_vault_location_fires_on_misplaced_vault(tmp_path: Path) -> None:
-    # personal workspace vault placed outside the standard folder.
+def test_vault_location_is_a_catalog_task_not_a_tile(tmp_path: Path) -> None:
+    """The misplaced-vault tile is gone; the condition is the `vault-relocate` task.
+
+    A tile could reach zero, but it could not be **dismissed** or **finished**: a
+    machine condition is only ever fixed, never declined, so an operator who did
+    not want this work had no way to say so and the same tile reappeared on every
+    60s poll. The catalog task carries both, and the audit keeps reporting it
+    independently — so the condition lost a surface, not a finding.
+
+    `tests/test_vault_relocate_update_task.py` owns the task's own contract; this
+    is the strip-side half, and it fails the moment a `_detect_vault_location`
+    comes back beside it.
+    """
     standard = tmp_path / "memory-vault" / "personal"
     standard.mkdir(parents=True, exist_ok=True)
     actual = tmp_path / "elsewhere" / "personal"
@@ -321,13 +332,11 @@ def test_vault_location_fires_on_misplaced_vault(tmp_path: Path) -> None:
             super().__init__(tmp_path, workspaces=("personal", "work"))
             self._roots["personal"] = actual
 
-    context = _context(tmp_path, config=_Weird())
-    ids = [a.id for a in detect_actions(context)]
-    assert "vault-location:personal" in ids
-    # A correctly placed vault does not fire.
-    context = _context(tmp_path)
-    ids = [a.id for a in detect_actions(context)]
-    assert "vault-location:personal" not in ids
+    ids = [a.id for a in detect_actions(_context(tmp_path, config=_Weird()))]
+    assert [i for i in ids if "vault-location" in i] == []
+    # And nothing else stood in for it either.
+    actions = detect_actions(_context(tmp_path, config=_Weird()))
+    assert [a for a in actions if a.kind == "vault-location"] == []
 
 
 def test_vault_vocabulary_fires_on_unresolved_only(tmp_path: Path) -> None:

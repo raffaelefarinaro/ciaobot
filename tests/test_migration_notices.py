@@ -1,25 +1,32 @@
-"""The migration notices, probed once and shared by both surfaces (#816).
+"""The migration notices, probed once and shared by every surface (#816, #833, #800).
 
 `ciao/migration_notices.py` owns the condition, the applicability rule and the
-wording for the two notices Home and the OS audit used to keep separate copies
-of. The contracts under test, one per acceptance item in #816:
+wording for the migration conditions Home and the OS audit used to keep separate
+copies of. The contracts under test, one per acceptance item in #816:
 
-1. the vault-location condition and its wording are the same on both surfaces,
+1. the vault-location condition and its wording are the same on every surface,
    and the remedy names the ways `vault-relocate --apply` can refuse;
 2. the audit reports a links finding the Home card cannot yet know about, and
    nothing Home does can silence it;
 3. the two surfaces ask one question about the wikilink dialect and cannot
    answer it differently — including for a **scratch** vault holding a
    hand-written wikilink, which is the diagnostic the audit must not lose;
-4. neither notice is an update-task catalog row, because neither has an honest
-   completion receipt yet;
+4. the wikilink notice is not an update-task catalog row, because it has no
+   honest completion receipt — its receipt is per install, not per vault;
 5. a Home poll opens no file under the vault, at any vault size, and the scan
    that establishes the verdict runs off the event loop.
+
+The vault-location notice became a catalog row in #800's last slice, which is why
+item 4 is one notice rather than two. Its own parity is pinned in
+`tests/test_vault_relocate_update_task.py`, and the two places the sides
+deliberately differ — an unresolvable registry entry (here: skipped, there:
+`unknown`) and the Home tile that no longer exists — are asserted below.
 """
 from __future__ import annotations
 
 import ast
 import asyncio
+import inspect
 import json
 import threading
 from pathlib import Path
@@ -29,13 +36,14 @@ from unittest.mock import patch
 
 import pytest
 
-from ciao import migration_notices
+from ciao import migration_notices, update_tasks
 from ciao.async_reads import run_read
 from ciao.migration_notices import (
     LINKS_CLEAN,
     LINKS_FAILED,
     LINKS_FOUND,
     LINKS_SCAN_TTL_S,
+    RELOCATION_MISPLACED,
     UNMIGRATED_LINKS_NOTICE,
     UNREHOMED_PEOPLE_NOTICE,
     VAULT_LOCATION_NOTICE,
@@ -43,6 +51,7 @@ from ciao.migration_notices import (
     cached_links,
     links_scan_is_stale,
     refresh_links,
+    relocation_state,
     reset_links_cache,
     resolve_links,
     rehomed_people_finding,
@@ -117,34 +126,36 @@ def _tiles(config: object, runtime: Path) -> list[Any]:
 # -- (1) one condition, one wording, for the vault location ------------------
 
 
-def test_home_and_the_audit_agree_on_the_misplaced_vault_and_its_wording(
+def test_the_card_and_the_audit_agree_on_the_misplaced_vault(
     tmp_path: Path,
 ) -> None:
     """The duplicated pair resolves to one implementation and one sentence.
 
-    Both surfaces read the same findings, so the detail, the title and the remedy
-    are the same strings — a mismatch here means one of them still holds a copy.
+    Both surfaces read the same findings, so the detail and the title come from
+    one object — a mismatch here means one of them still holds a copy.
+
+    The Home **tile** that used to be the second surface is gone since #800's last
+    slice (it became the `vault-relocate` catalog task), so the parity to pin is
+    between the audit's report and the task's detector: the same predicate, one
+    per workspace, so they cannot name different workspaces as misplaced.
     """
     elsewhere = tmp_path / "elsewhere" / "personal"
     elsewhere.mkdir(parents=True)
     config = _cfg(tmp_path, roots={"personal": elsewhere})
     runtime = _runtime(tmp_path)
 
-    tile = next(
-        a for a in detect_actions(DetectionContext(config=config, runtime_dir=runtime))
-        if a.kind == "vault-location"
-    )
     notice = next(
         n for n in audit_upgrade_notices(config, runtime_dir=runtime)["notices"]
         if n["type"] == VAULT_LOCATION_NOTICE
     )
-
-    assert tile.title == "The personal vault is not in its standard folder"
-    assert tile.detail == notice["detail"]
+    finding = vault_location_findings(config)[0]
+    assert notice["detail"] == finding.detail
+    assert relocation_state(config, "personal") == RELOCATION_MISPLACED
     # The audit's remedy used to describe moving the folder and hand-editing the
-    # registry by hand. The Home card's chat seed carries the shared sentence, so
-    # the command is in both and the hand path is in neither.
-    assert "ciao vault-relocate personal --apply" in tile.chat_prompt
+    # registry by hand. The managed sentence is what both the report and the task's
+    # packaged prompt carry now, so the command is in both and the hand path in
+    # neither.
+    assert "ciao vault-relocate personal --apply" in notice["remedy"]
     assert "ciao vault-relocate personal --undo" in notice["remedy"]
 
 
@@ -211,10 +222,12 @@ def test_one_finding_per_misplaced_workspace(tmp_path: Path) -> None:
         root.mkdir(parents=True)
 
     assert [f.workspace for f in vault_location_findings(config)] == ["personal", "work"]
+    # And the audit reports exactly those two, from the same predicate.
     assert {
-        a.id for a in detect_actions(DetectionContext(config=config))
-        if a.kind == "vault-location"
-    } == {"vault-location:personal", "vault-location:work"}
+        n["workspace"]
+        for n in audit_upgrade_notices(config, runtime_dir=_runtime(tmp_path))["notices"]
+        if n["type"] == VAULT_LOCATION_NOTICE
+    } == {"personal", "work"}
 
 
 def test_a_root_that_is_not_there_is_not_a_misplaced_vault(tmp_path: Path) -> None:
@@ -243,9 +256,31 @@ def test_a_registry_that_cannot_be_resolved_is_skipped_not_raised(
     config.workspace_vault_root = _resolve
 
     assert [f.workspace for f in vault_location_findings(config)] == ["personal"]
-    assert "vault-location:personal" in {
-        a.id for a in detect_actions(DetectionContext(config=config))
-    }
+    assert {
+        n["workspace"]
+        for n in audit_upgrade_notices(config, runtime_dir=_runtime(tmp_path))["notices"]
+        if n["type"] == VAULT_LOCATION_NOTICE
+    } == {"personal"}
+    # The `vault-relocate` task asks the same registry and does NOT inherit the
+    # skip: for a card, an entry it could not read is `unknown`, not "nothing to
+    # do". Asserted here because it is the one place the two sides' error
+    # handling deliberately differs, and the difference is invisible otherwise.
+    assert relocation_state(config, "personal") == RELOCATION_MISPLACED
+    with pytest.raises(ValueError, match="does not resolve"):
+        relocation_state(config, "work")
+    result = update_tasks.apply_detector(
+        _vault_relocate_task(), config=config, workspace="work"
+    )
+    assert result.status == update_tasks.UNKNOWN
+
+
+def _vault_relocate_task() -> Any:
+    """The packaged `vault-relocate` row, or a loud failure if it stopped shipping."""
+    from ciao.update_task_catalog import load_catalog
+
+    task = load_catalog().by_id.get("vault-relocate")
+    assert task is not None, "vault-relocate is not in the packaged catalog"
+    return task
 
 
 def test_a_config_without_a_registry_reports_nothing(tmp_path: Path) -> None:
@@ -616,29 +651,30 @@ def _stored_state(vault: Path) -> str:
     return entry.state
 
 
-# -- (4) neither notice is a catalog task yet --------------------------------
+# -- (4) the wikilink notice is still not a catalog task ----------------------
 
 
-def test_neither_notice_is_an_update_task() -> None:
+def test_the_links_notice_is_still_not_an_update_task() -> None:
     """No catalog row without an honest completion receipt (#800, step 3).
 
-    Both notices are shape 3: the only "evidence" that the work was done is the
+    This notice is still shape 3: the only "evidence" that the work was done is the
     condition's absence recomputed each render, which makes a completion check a
-    tautology. `vault-relocate` has an apply/undo cycle and could hang a real
-    receipt on its registry update, and the link migration's receipt is per install
-    rather than per vault — so promoting either now would be claiming completion
-    from a card. When that changes, the row's completion check must name a receipt
-    that records the run, and this test is what has to be revisited.
+    tautology. `vault-relocate` was promoted out of shape 3 in #800's last slice
+    because it turned out to write a real receipt — this test's premise about it
+    was wrong, and that is the correction the sibling test file records — but the
+    link migration's receipt is per **install**, not per vault, so a
+    per-workspace loop over its remedy is not available and promoting it would
+    still be claiming completion from a card. When that changes, the row's
+    completion check must name a receipt that records the run.
     """
     from ciao.update_task_catalog import load_catalog
 
     catalog = load_catalog()
-    notices = {VAULT_LOCATION_NOTICE, UNMIGRATED_LINKS_NOTICE}
-    assert not [task for task in catalog.tasks if notices & {task.id, task.detector}]
     assert not [
         task
         for task in catalog.tasks
-        if any(word in task.id for word in ("vault-location", "links"))
+        if UNMIGRATED_LINKS_NOTICE in {task.id, task.detector}
+        or "links" in task.id
     ]
 
 
@@ -958,13 +994,28 @@ def test_neither_surface_keeps_a_second_implementation() -> None:
     from ciao import operator_actions, os_audit
 
     assert operator_actions.cached_links is cached_links
-    assert operator_actions.vault_location_findings is vault_location_findings
+    # The vault-location predicate has two callers since #800's last slice: the
+    # audit, and the `vault-relocate` catalog task that replaced the Home tile.
+    # Both name this module's object rather than re-deriving the condition, and
+    # the tile is gone — so there is one report, one card, and one predicate.
+    assert os_audit.vault_location_findings is vault_location_findings
+    assert not hasattr(operator_actions, "vault_location_findings")
+    # The tile is gone, so the Home strip cannot have kept a private copy either.
+    assert "vault_location_findings" not in Path(operator_actions.__file__).read_text(
+        encoding="utf-8"
+    )
     assert os_audit.VAULT_LOCATION_NOTICE == VAULT_LOCATION_NOTICE
     assert os_audit.UNMIGRATED_LINKS_NOTICE == UNMIGRATED_LINKS_NOTICE
     assert os_audit.resolve_links is resolve_links
     # The re-home notice is the third shared probe, and it is named the same way.
     assert os_audit.UNREHOMED_PEOPLE_NOTICE == UNREHOMED_PEOPLE_NOTICE
     assert os_audit.rehomed_people_finding is rehomed_people_finding
+    # And the relocation task asks this module too, rather than restating the
+    # condition in `update_tasks` — which is what keeps the card and the report
+    # from naming different workspaces.
+    source = inspect.getsource(update_tasks)
+    assert "relocation_state" in source
+    assert "canonical_workspace_vault_root(" not in source
 
     package = Path(migration_notices.__file__).parent
     for module in ("operator_actions.py", "os_audit.py"):

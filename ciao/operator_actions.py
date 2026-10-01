@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from ciao.migration_notices import cached_links, vault_location_findings
+from ciao.migration_notices import cached_links
 from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
@@ -52,9 +52,9 @@ logger = logging.getLogger(__name__)
 class OperatorAction:
     """One clearable condition the operator can act on.
 
-    ``id`` is stable and scope-suffixed (``vault-location:work``) so a client
-    can accept it by id across renders. ``severity`` is a sort key only, never
-    rendered. ``glyph`` is one character shown next to the amber rule.
+    ``id`` is stable and scope-suffixed (``workspace-root-missing:work``) so a
+    client can accept it by id across renders. ``severity`` is a sort key only,
+    never rendered. ``glyph`` is one character shown next to the amber rule.
     """
 
     id: str
@@ -303,41 +303,27 @@ def _detect_github_star(context: DetectionContext) -> list[OperatorAction]:
 
 
 # -- vault location ----------------------------------------------------------
-
-
-def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
-    """A workspace vault kept outside its standard folder is a chat-only fix.
-
-    The condition and every sentence about it come from
-    ``ciao.migration_notices.vault_location_findings``, which the OS audit reads
-    for the same notice — the standard location is a fact of the registry, not a
-    scan, so one predicate serves both surfaces and neither can drift from the
-    other. Moving an existing vault is a user-owned decision with possible
-    conflicts, so this is a chat action, never a mechanical run.
-    """
-    actions: list[OperatorAction] = []
-    for finding in vault_location_findings(context.config):
-        actions.append(
-            OperatorAction(
-                id=f"vault-location:{finding.workspace}",
-                kind="vault-location",
-                severity=20,
-                title=finding.title,
-                detail=finding.detail,
-                glyph="⌂",
-                workspace=finding.workspace,
-                chat_label="Fix in chat",
-                chat_prompt=(
-                    f"{finding.remedy} If the preview lists anything it could not "
-                    "classify, resolve only those with the operator — don't ask "
-                    "about the move itself, and don't re-derive it by hand. If it "
-                    "refuses, that is a real limitation rather than something to "
-                    "work around: say what it refused and why, and let the "
-                    "operator decide."
-                ),
-            )
-        )
-    return actions
+#
+# There is deliberately no `_detect_vault_location` here any more, and the shape
+# of its absence is the point of #800's last slice.
+#
+# This module's contract above says every detector must be able to reach zero, and
+# the vault-location condition could: the OS audit reports it, `ciao vault-relocate`
+# is a managed remedy with an apply/undo cycle and a per-workspace receipt, and
+# "After this update" now carries a workspace-scoped `vault-relocate` task for it.
+# What it could not do is be *dismissed*, or *finished*: a tile has no "not now"
+# for a machine condition (`dismiss_action` refuses it by design) and no
+# completion, so an operator who declined this work had no way to record that and
+# the same tile reappeared on every poll for ever.
+#
+# The task is the one surface that can carry both. It is also the only one that
+# should: a duplicate card is not "two views of one finding", it is the same
+# finding asked about twice, and `tests/test_vault_relocate_update_task.py` fails if
+# a tile is ever added back beside it.
+#
+# The condition, its wording and the managed remedy sentence all still live in
+# `ciao.migration_notices`, which the audit reads and the task's detector reads —
+# so nothing about *what is true* moved, only where an operator is asked about it.
 
 
 # -- workspace re-rooting ----------------------------------------------------
@@ -1036,7 +1022,6 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
 _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_unmigrated,
     _detect_package_update,
-    _detect_vault_location,
     _detect_vault_vocabulary,
     _detect_unmigrated_links,
     _detect_missed_schedules,

@@ -27,6 +27,30 @@ Every move is a ``git mv``, so ``git mv`` in reverse (what :func:`undo` does)
 stays a working undo and history follows the file. Refuses before touching
 anything if the plan refuses or a tracked file under the source has
 uncommitted changes.
+
+The receipt, and why it is the completion evidence
+--------------------------------------------------
+Every run records ``<runtime>/migration/vault-relocate-<workspace>.json`` with
+its own ``status`` — ``relocated`` or ``refused`` — and :func:`undo` **removes
+that file** when it succeeds. That is what makes this command's outcome readable
+by an automated check: :func:`read_receipt` is the one accessor that answers
+"has this workspace been relocated", it gates strictly on
+``status == "relocated"``, and after an undo the answer is ``None`` again, so a
+later drift is applicable work rather than a task already finished.
+
+That last property is the reason the "After this update" catalog can carry a
+``vault-relocate`` task at all. A task's completion check is settled once and then
+suppressed for the whole revision, so a condition whose remedy is *reversible*
+needs evidence that disappears when the remedy is reversed — otherwise undoing
+the move would leave the card hidden while the vault was back outside its folder.
+This receipt does that, and ``ciao.migration_notices.completed_relocation`` is the
+only way any surface reads it.
+
+``_write_receipt`` refuses to downgrade a completed receipt with a refusal, and
+that guard is load-bearing here too: retrying ``--apply`` on a relocated
+workspace legitimately refuses ("already at its standard location"), and
+overwriting the completed receipt would both settle nothing and turn ``--undo``
+into a no-op for a relocation still fully in effect.
 """
 
 from __future__ import annotations
@@ -274,7 +298,7 @@ def receipt_path(runtime_root: Path, workspace: str) -> Path:
     return Path(runtime_root) / "migration" / f"vault-relocate-{workspace}.json"
 
 
-def _peek_receipt(runtime_root: Path, workspace: str) -> dict[str, Any] | None:
+def peek_receipt(runtime_root: Path, workspace: str) -> dict[str, Any] | None:
     """The receipt file whatever its status. See ``workspace_reroot.peek_receipt``."""
     path = receipt_path(runtime_root, workspace)
     if not path.is_file():
@@ -284,6 +308,35 @@ def _peek_receipt(runtime_root: Path, workspace: str) -> dict[str, Any] | None:
     except (OSError, ValueError, TypeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def read_receipt(runtime_root: Path, workspace: str) -> dict[str, Any] | None:
+    """The receipt of a **completed** relocation for one workspace, or ``None``.
+
+    The canonical completed-only reader, and the one every other surface must go
+    through. Two callers need it and they must not each hold their own idea of
+    "done": the "After this update" catalog's completion check, which asks whether
+    the workspace is finished, and :func:`undo`, which is only allowed to reverse
+    a run that moved something.
+
+    **Gates strictly on ``status == "relocated"``, with no tolerance for a missing
+    field** — unlike ``vault_rehome.read_receipt``, which counts a receipt
+    predating its ``status`` field as a completed run. The difference is the
+    remedy: ``vault_rehome`` shipped before its receipt had a status and had to
+    keep honouring the installs that already did the work, whereas every
+    ``vault_relocate`` run this module has ever written has named its own status,
+    so a receipt without one is not this engine's record of anything. Reading it
+    as done would be reading a file this install cannot interpret as proof.
+
+    A ``refused`` receipt is the same answer for the same reason, and it is a
+    common one: most of the shapes ``plan`` refuses are permanent properties of
+    an install rather than transients, so ``--apply`` writes one on every retry
+    and none of them moved a note.
+    """
+    data = peek_receipt(runtime_root, workspace)
+    if data is None:
+        return None
+    return data if data.get("status") == "relocated" else None
 
 
 def _write_receipt(runtime_root: Path, workspace: str, payload: dict[str, Any]) -> Path:
@@ -303,7 +356,7 @@ def _write_receipt(runtime_root: Path, workspace: str, payload: dict[str, Any]) 
     path = receipt_path(runtime_root, workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     if payload.get("status") != "relocated":
-        existing = _peek_receipt(runtime_root, workspace)
+        existing = peek_receipt(runtime_root, workspace)
         if existing is not None and existing.get("status") == "relocated":
             return path
     if path.is_file():
@@ -650,16 +703,30 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
 
     CLI only, same as ``workspace_reroot.undo``: there is no housekeeping
     button for this, only a receipt-driven reverse.
+
+    Reads the receipt once through :func:`peek_receipt` rather than calling
+    :func:`read_receipt`, because the three refusals — no run recorded, the file
+    unreadable, the last run relocated nothing — have to be told apart and only the
+    last of them says the record is fine. The gate on ``status`` is the same rule
+    :func:`read_receipt` applies, so the reverse and the "After this update" task's
+    completion check cannot disagree about which run is reversible.
     """
-    path = receipt_path(runtime_root, workspace)
-    if not path.is_file():
-        return {"status": "nothing_to_undo", "reason": "no relocation receipt for this workspace"}
-    try:
-        receipt = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {"status": "nothing_to_undo", "reason": "receipt is unreadable"}
-    if not isinstance(receipt, dict) or receipt.get("status") != "relocated":
-        return {"status": "nothing_to_undo", "reason": "last recorded run did not relocate anything"}
+    recorded = peek_receipt(runtime_root, workspace)
+    if recorded is None:
+        return {
+            "status": "nothing_to_undo",
+            "reason": (
+                "no relocation receipt for this workspace"
+                if not receipt_path(runtime_root, workspace).is_file()
+                else "receipt is unreadable"
+            ),
+        }
+    if recorded.get("status") != "relocated":
+        return {
+            "status": "nothing_to_undo",
+            "reason": "last recorded run did not relocate anything",
+        }
+    receipt = recorded
 
     install_root = Path(config.workspace_root).resolve()
     current_registry = _read_registry(runtime_root)
@@ -805,7 +872,12 @@ def undo(config: Any, workspace: str, runtime_root: Path) -> dict[str, Any]:
         if workspace_config is not None and prior_vault_root is not None:
             workspace_config.vault_root = prior_vault_root
 
-    path.unlink(missing_ok=True)
+    # Deleting the receipt is what makes the reverse *complete* rather than
+    # merely applied: `read_receipt` then answers "no", so an "After this update"
+    # `vault-relocate` task stops claiming the workspace is finished and offers the
+    # work again. A receipt left behind here would hide the card over a vault that
+    # is outside its folder once more.
+    receipt_path(runtime_root, workspace).unlink(missing_ok=True)
     return {
         "status": "undone",
         "reversed": reversed_moves,

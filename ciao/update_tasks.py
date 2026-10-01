@@ -87,9 +87,26 @@ constant*, not a setting and not an env var: a per-install knob for "how stale m
 an answer be" is not a decision an operator has ever asked to make, and
 ``AGENTS.md`` forbids a new env var where a constant does. And every name a
 catalog row may use is a name this engine can act on — #728-E's
-``learnings-cleanup`` and, since #833, the install-scoped ``unrehomed-people``
-re-home — so the loader refuses anything else, and a probe with no implementation
-behind it still answers ``unknown`` rather than ``applicable``.
+``learnings-cleanup``, #833's install-scoped ``unrehomed-people`` re-home and
+#800's workspace-scoped ``vault-relocate`` — so the loader refuses anything else,
+and a probe with no implementation behind it still answers ``unknown`` rather than
+``applicable``.
+
+**A reversible remedy needs evidence that goes away when it is reversed.** This is
+the constraint the third row adds, and it is a property of *this* lifecycle rather
+than of the migration, so it is easy to miss until a task is silently
+un-completable. Suppression is per revision and a settlement is written once, so a
+task whose condition can come back needs a check whose postcondition can come back
+too — otherwise ``ciao vault-relocate --undo`` would leave the card hidden for the
+rest of that revision while the vault sat outside its folder again, with the OS
+audit the only thing reporting it. ``_vault_relocate_recorded`` is therefore a
+conjunction: ``vault_relocate.read_receipt`` says a run happened and
+``migration_notices.relocation_state`` says the layout still agrees. And because
+``--undo`` deletes the receipt, the second half is what re-offers the work — the
+generic semantics are untouched and the *evidence* moves. The asymmetry with
+#833's row is worth holding onto: there the card had to be **narrower** than its
+notice, and here it must not be, and both follow from the same rule — a card's
+evidence has to be something the operator's own decisions can take away.
 
 **A task may share a surface's answer without sharing its evidence.** #833's
 ``unrehomed-people`` is about the same receipt the OS audit reports as
@@ -543,6 +560,158 @@ def _unrehomed_people_rehome_recorded(
     )
 
 
+# ── The vault relocation probes (#800) ───────────────────────────────────────
+
+
+def _vault_relocate_needed(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether this workspace's vault currently sits outside its standard folder.
+
+    The same question the audit's ``vault_outside_vault_root`` notice asks, and
+    deliberately not a *narrower* one the way #833's re-home detector is. That
+    asymmetry had to be built there because the re-home **notice** is only a
+    receipt check; here the notice and the task ask the identical question of the
+    identical registry (:func:`ciao.migration_notices.relocation_state`, which
+    resolves what :func:`~ciao.migration_notices.vault_location_findings`
+    resolves), so they cannot report different workspaces as misplaced. What
+    differs is the response, not the finding: this one is a card an operator may
+    dismiss, and the notice is a report they may not silence.
+
+    So applicability is exactly the current, existing, misplaced vault, and
+    nothing else is layered on:
+
+    * the mismatch is real — the registry resolves to a path that is not the
+      standard one, which is a comparison of two resolved paths and no scan;
+    * the vault is **there**. A root that does not exist is a different notice
+      (``workspace-root-missing`` on Home, a setup finding in the audit) and there
+      is no misplaced vault to relocate; offering a move for a path that is not
+      there is the unactionable card #800's rules out, so the answer is
+      :data:`~ciao.migration_notices.RELOCATION_VAULT_MISSING` rather than a card.
+
+    Evidence is deliberately portable: the reason, the workspace name, and whether
+    a completed receipt already records a run. No `actual`/`standard` path travels
+    in a state file — those are absolute paths and the notice's own `detail`, where
+    an operator reads them, is where they belong.
+
+    The receipt is read but does **not** decide applicability. That is the whole
+    difference from the re-home task, and it is forced by this remedy being
+    reversible: a workspace that was relocated and then undone has no receipt and
+    is mismatched again, so it must be offered again; a check that treated "a
+    receipt once existed" as applicable-ness would keep offering work on a
+    workspace that is already where it belongs.
+
+    An unresolvable registry entry **raises**, so the layer records ``unknown``
+    rather than this reporting silence over an entry it never read — the same
+    choice :func:`ciao.migration_notices.relocation_state` makes and for the same
+    reason.
+    """
+    del today  # the registry is the layout; the date decides nothing here
+    from ciao.migration_notices import (
+        RELOCATION_MISPLACED,
+        completed_relocation,
+        relocation_state,
+    )
+
+    _require_workspace(workspace)
+    state = relocation_state(config, workspace)
+    receipt = completed_relocation(_runtime_root(config), workspace)
+    return Detection(
+        state == RELOCATION_MISPLACED,
+        {
+            # The one answer that offers the card; the other two exist so a task
+            # that is *not* offered reads as a reason rather than as silence, and
+            # so "the vault is missing" — a different notice — is nameable.
+            "reason": state,
+            "workspace": workspace,
+            # Recorded, never load-bearing: a relocated-and-undone workspace must
+            # be offered again, so the receipt cannot decide applicability.
+            "relocated": receipt is not None,
+            # No `actual`/`standard`: both are absolute paths and a state file
+            # travels between machines. The notice's own `detail` carries them.
+        },
+    )
+
+
+def _vault_relocate_recorded(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether this workspace's relocation is finished, as the receipt and the
+    current layout together can prove it.
+
+    **Both**, and the conjunction is the point rather than belt-and-braces:
+
+    * a ``status: "relocated"`` receipt says a run happened. It is read through
+      :func:`~ciao.migration_notices.completed_relocation`, the one accessor, so
+      a ``refused`` receipt, a receipt that cannot be parsed and a receipt written
+      for a *different* workspace are all the same answer: nothing was done. Most
+      of the shapes ``vault_relocate.plan`` refuses are permanent properties of an
+      install, so a retry writes a ``refused`` receipt every time and none of them
+      moved a note.
+    * the **current** layout must agree. The receipt is a record of a past run and
+      this is the present; a registry hand-edited afterwards, a restore from an
+      older copy, or any change that did not go through the receipt leaves a
+      workspace that has a completed relocation recorded and is still outside its
+      folder. Reporting that finished is how a task would settle over a vault the
+      operator still has to move.
+
+    And because ``--undo`` **deletes** the receipt, undoing the move puts the task
+    back to applicable rather than leaving it suppressed forever — which is the
+    only reason a reversible remedy can carry a task at all, since the lifecycle
+    suppresses a completed record for the rest of its revision.
+
+    Evidence is portable: the receipt's ``recorded_at``, the number of moves, and
+    which of the two halves was missing. The receipt's own ``source`` and
+    ``destination`` are absolute paths and deliberately not carried.
+    """
+    del today  # the receipt and the registry are the evidence; the date is not
+    from ciao.migration_notices import (
+        RELOCATION_DONE,
+        RELOCATION_MISMATCHED,
+        RELOCATION_NOT_DONE,
+        completed_relocation,
+        relocation_mismatch,
+    )
+
+    _require_workspace(workspace)
+    receipt = completed_relocation(_runtime_root(config), workspace)
+    if receipt is None:
+        return Detection(False, {"reason": RELOCATION_NOT_DONE, "workspace": workspace})
+    if relocation_mismatch(config, workspace):
+        return Detection(
+            False,
+            {
+                "reason": RELOCATION_MISMATCHED,
+                "workspace": workspace,
+                "recorded_at": str(receipt.get("recorded_at") or ""),
+            },
+        )
+    return Detection(
+        True,
+        {
+            "reason": RELOCATION_DONE,
+            "workspace": workspace,
+            "recorded_at": str(receipt.get("recorded_at") or ""),
+            "moved": len(receipt.get("applied") or []),
+        },
+    )
+
+
+def _require_workspace(workspace: str) -> None:
+    """Refuse a probe call that names no workspace at all.
+
+    Both halves of the ``vault-relocate`` pair need it, and they need it for the
+    same reason: with an empty name the receipt lookup asks for
+    ``vault-relocate-.json`` and the registry question is about nothing, so both
+    would answer about *no* workspace — one of them ``not_applicable``, which is a
+    positive claim, and the other "nothing was done", which would settle the task.
+    The launch route already refuses a workspace-scoped task with no workspace,
+    so this only guards the probes' own contract.
+    """
+    if not workspace.strip():
+        raise ValueError("the vault-relocate task is workspace-scoped and needs a workspace")
+
+
 def _workspace_vault(config: Any, workspace: str) -> Path | None:
     """The vault root of one workspace, or ``None`` when nothing resolves it.
 
@@ -595,6 +764,7 @@ def _learnings_revision(vault_root: Path) -> str | None:
 DETECTOR_FUNCTIONS: dict[str, Probe] = {
     "learnings-cleanup-review-needed": _learnings_cleanup_review_needed,
     "unrehomed-people-review-needed": _unrehomed_people_rehome_needed,
+    "vault-relocate-review-needed": _vault_relocate_needed,
 }
 
 #: Registered completion checks, same contract. A name with no implementation
@@ -603,6 +773,7 @@ DETECTOR_FUNCTIONS: dict[str, Probe] = {
 COMPLETION_FUNCTIONS: dict[str, Probe] = {
     "learnings-cleanup-review-recorded": _learnings_cleanup_review_recorded,
     "unrehomed-people-rehome-recorded": _unrehomed_people_rehome_recorded,
+    "vault-relocate-recorded": _vault_relocate_recorded,
 }
 
 
