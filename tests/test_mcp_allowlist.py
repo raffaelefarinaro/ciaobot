@@ -340,3 +340,72 @@ def test_a_root_without_its_own_file_still_sees_the_shared_one(
     assert _mcp_denials(config.disallowed_tools_for_workspace("personal")) == [
         "mcp__beta"
     ]
+
+
+# -- seeding from a workspace's own .mcp.json (issue #863) --------------------
+#
+# Seeding resolved the declared names once for the whole registry, from the
+# install root and its parent only. On a composed install that found nothing, the
+# migration returned early, and every workspace stayed at ``None`` — which fails
+# closed, so a chat could not reach the servers its own root declares until the
+# operator PATCHed the allowlist by hand. It is now resolved per entry, from the
+# same candidate list the chat's deny resolution uses.
+
+
+def test_migration_seeds_from_the_workspaces_own_mcp_json(tmp_path: Path) -> None:
+    """A composed install: the only declaration is the agent root's own file."""
+    _write_root_mcp_json(tmp_path, "personal")
+    # No ``allowed_mcp_servers`` key at all: the entry is pre-allowlist.
+    _write_registry(tmp_path, [{"name": "personal"}])
+    _mark_rerooted(tmp_path)
+    config = _config(tmp_path)
+
+    assert config.workspace("personal").allowed_mcp_servers == ["alpha", "beta"]
+    assert _registry_entries(tmp_path)[0]["allowed_mcp_servers"] == [
+        "alpha",
+        "beta",
+    ]
+    assert _mcp_denials(config.disallowed_tools_for_workspace("personal")) == []
+
+
+def test_migration_keeps_each_workspaces_declarations_separate(tmp_path: Path) -> None:
+    """One workspace's declaration never seeds another's allowlist."""
+    _write_root_mcp_json(tmp_path, "personal")
+    _write_root_mcp_json(
+        tmp_path,
+        "work",
+        {"mcpServers": {"gamma": {"command": "npx", "args": ["gamma"]}}},
+    )
+    _write_registry(tmp_path, [{"name": "personal"}, {"name": "work"}])
+    _mark_rerooted(tmp_path)
+    config = _config(tmp_path)
+
+    assert config.workspace("personal").allowed_mcp_servers == ["alpha", "beta"]
+    assert config.workspace("work").allowed_mcp_servers == ["gamma"]
+
+
+def test_migration_leaves_a_workspace_with_a_corrupt_own_mcp_json_untouched(
+    tmp_path: Path,
+) -> None:
+    """One unreadable root must not block another workspace's seeding."""
+    personal_root = tmp_path / "personal"
+    personal_root.mkdir(parents=True, exist_ok=True)
+    (personal_root / ".mcp.json").write_text("{not json", encoding="utf-8")
+    _write_root_mcp_json(tmp_path, "work")
+    _write_registry(tmp_path, [{"name": "personal"}, {"name": "work"}])
+    _mark_rerooted(tmp_path)
+    config = _config(tmp_path)
+
+    # Unparseable, so it maps to no names and stays fail-closed.
+    assert config.workspace("personal").allowed_mcp_servers is None
+    assert config.workspace("work").allowed_mcp_servers == ["alpha", "beta"]
+
+
+def test_migration_with_nothing_declared_does_not_rewrite_registry(
+    tmp_path: Path,
+) -> None:
+    """No `.mcp.json` anywhere: the registry bytes must survive untouched."""
+    _write_registry(tmp_path, [{"name": "personal", "disallowed_tools": None}])
+    before = (tmp_path / ".runtime" / "workspaces.json").read_bytes()
+    _config(tmp_path)
+    assert (tmp_path / ".runtime" / "workspaces.json").read_bytes() == before
