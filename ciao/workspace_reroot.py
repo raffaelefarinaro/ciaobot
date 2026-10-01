@@ -32,10 +32,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from ciao.workspace_guide import (
     GUIDE_NAME,
@@ -2242,6 +2243,200 @@ def write_skills_triage(
             doc.write_text(format_skill_triage(triage, workspaces), encoding="utf-8", newline="")
             created.append(f"{primary_vault}/{_SKILL_TRIAGE_RELATIVE}")
     return created
+
+
+# -- Reading the sheet back --------------------------------------------------
+
+# The two halves of the sheet's lifecycle live here together on purpose: the
+# writer decides WHERE the sheet goes, so the reader that has to find it again
+# must ask the writer's own record rather than work the location out for itself.
+# Every surface that shows this sheet (the Home card) goes through
+# :func:`skill_triage_sheet`, so there is one answer to "where is it" and it is
+# the receipt's.
+
+
+def skill_triage_sheet(runtime_root: Path, install_root: Path) -> Path | None:
+    """The triage sheet the re-rooting wrote, or ``None`` if it wrote none.
+
+    Located from the migration receipt's ``created_files``, which is where
+    ``apply`` records exactly what :func:`write_skills_triage` created. That is
+    the only durable answer available: the sheet goes inside the primary
+    workspace's vault, and both the primary and that vault's leaf come from the
+    registry and the migration, not from anything a reader may assume. A reader
+    that spelled the path out would be a second source of truth for a location
+    this module decides, and the two drift silently (#810: the Home detector
+    looked for ``<runtime>/migration/skills-triage.md``, which nothing in
+    ``ciao/`` has ever written, so the one decision the re-rooting deliberately
+    refuses to guess was surfaced by nothing at all).
+
+    The return value is the receipt's claim, checked but not statted — it does
+    not ask whether the sheet is still there. Whether it exists is a separate
+    question for the caller, and keeping the two apart is what lets a caller
+    report "the migration recorded a sheet and it is gone" instead of quietly
+    agreeing with the receipt.
+
+    ``None`` means one thing only: the migration wrote no sheet. That covers no
+    receipt at all, and a receipt recording a refusal or a rehearsal — neither of
+    which reached the write, because the sheet is written inside the same
+    transaction the receipt commits. A receipt that is present and unreadable is
+    an **unknown** and raises :class:`ValueError`, so no caller can mistake it for
+    the clean case and report "nothing to decide" about a sheet it never read.
+
+    A claim that would leave the install is the same kind of unknown, and raises
+    for the same reason: the receipt is runtime state this process reads but does
+    not own, so its entries are checked rather than followed (see
+    :func:`_contained_sheet_path`). Following one unchecked is how a card ends up
+    naming a file outside the install, or a file that happens to end with the
+    right characters in a folder called ``evilWorkspace``.
+    """
+    receipt = read_receipt(Path(runtime_root))
+    if receipt is None:
+        if receipt_path(runtime_root).is_file() and peek_receipt(runtime_root) is None:
+            raise ValueError(
+                f"the re-rooting receipt at {receipt_path(runtime_root)} is not "
+                "readable JSON, so whether a triage sheet was written is unknown"
+            )
+        return None
+    created = receipt.get("created_files")
+    if not isinstance(created, list):
+        return None
+    recorded = [entry for entry in created if _claims_skill_triage_sheet(entry)]
+    if not recorded:
+        return None
+    # A completed receipt records one sheet, written once into the primary
+    # vault's Workspace folder. Two entries would mean the receipt is not the
+    # record this reader thinks it is, and picking one silently would be a guess.
+    if len(recorded) > 1:
+        raise ValueError(
+            f"the re-rooting receipt records {len(recorded)} triage sheets "
+            f"({', '.join(recorded)}), so which one to read is unknown"
+        )
+    return _contained_sheet_path(install_root, str(recorded[0]))
+
+
+def _claims_skill_triage_sheet(entry: object) -> bool:
+    """Whether one ``created_files`` entry is naming the triage sheet.
+
+    Matched on a **component boundary**, not on a string suffix. The writer's own
+    format always puts a folder in front of ``Workspace/Skill-Triage.md``, so
+    the separator is part of the claim: ``evilWorkspace/Skill-Triage.md`` ends
+    with the same characters and is a different file in a different folder, and a
+    reader that cannot tell those two apart is guessing. Non-strings are not
+    claims at all.
+    """
+    return isinstance(entry, str) and entry.endswith(f"/{_SKILL_TRIAGE_RELATIVE}")
+
+
+def _contained_sheet_path(install_root: Path, entry: str) -> Path:
+    """The claimed sheet path, or :class:`ValueError` if it is not one.
+
+    Three checks, because each closes a different way out of the install:
+
+    * **Relative POSIX, no traversal.** An absolute entry, a Windows separator,
+      or a ``.``/``..`` component is not a path this migration writes — it is a
+      path *through* the install, aimed at something else.
+    * **Contained after resolution.** The joined path is resolved (which follows
+      symlinks) and must still sit under the resolved install root, so a
+      component that is a symlink pointing out of the install cannot smuggle the
+      sheet somewhere else. Resolution is also what makes the check survive the
+      install root itself being reached through a symlink, which is normal on
+      macOS and common in test trees. Resolving to the root itself is refused
+      too: a claim that lands on the install directory is not a sheet.
+
+    Every failure raises rather than returning a path, because the caller's
+    honest options are "here is the sheet" and "I cannot tell" — and a reader
+    that normalises a hostile entry into a plausible-looking path has quietly
+    become the second source of truth this function exists to remove.
+    """
+    claimed = PurePosixPath(entry)
+    if claimed.is_absolute() or "\\" in entry:
+        raise ValueError(
+            f"the re-rooting receipt names the triage sheet as {entry!r}, which is "
+            "not a relative path inside the install"
+        )
+    if any(part in {".", ".."} for part in claimed.parts):
+        raise ValueError(
+            f"the re-rooting receipt names the triage sheet as {entry!r}, which "
+            "leaves the install it was written for"
+        )
+    root = Path(install_root).resolve()
+    sheet = (root / claimed).resolve()
+    if sheet == root or not sheet.is_relative_to(root):
+        raise ValueError(
+            f"the re-rooting receipt names the triage sheet as {entry!r}, which "
+            f"resolves to {sheet} — outside the install at {root}"
+        )
+    return sheet
+
+
+def undecided_skill_triage(sheet: Path) -> tuple[str, ...]:
+    """The skills in a triage sheet whose **Destination** cell is still blank.
+
+    The blank is the migration's decision, not an oversight: attributing a
+    customised skill to a root is a judgement about somebody's own work, and a
+    default here is exactly the guess the sheet exists to avoid. So this reads
+    the blank and nothing else — it never proposes a destination, never writes
+    one, and never reorders or drops a row.
+
+    Which makes the blank the card's completion evidence too: filling a cell in
+    is the operator's own record that the row is dealt with, so the count falls
+    as the sheet is answered and reaches zero when it is fully answered. A sheet
+    whose rows are all filled is not a permanent card.
+
+    A sheet with no table, no header, or no rows yields an empty tuple: nothing
+    unanswered is the honest answer for a document in any other shape, and a
+    malformed sheet must not raise a condition on the Home strip. A sheet that
+    cannot be **read** is a different answer and raises :class:`OSError`, because
+    an unreadable file says nothing about what is outstanding in it.
+
+    A row **shorter than the Destination column** is counted as undecided rather
+    than dropped. A truncated row is what a half-typed edit or a narrower column
+    looks like, and there is no reading of a row without a Destination cell that
+    says the decision was made — whereas skipping it says the card can reach zero
+    while a row the operator never answered is still sitting there. A row whose
+    name cell is empty is not a row at all and is skipped.
+    """
+    pending: list[str] = []
+    destination = -1
+    for line in Path(sheet).read_text(encoding="utf-8").splitlines():
+        cells = _triage_cells(line)
+        if not cells:
+            if destination >= 0:
+                # The table ended; the trailing "N skill(s) to triage." line and
+                # anything an operator appended below are not rows.
+                break
+            continue
+        lowered = [cell.strip("`* ").lower() for cell in cells]
+        if "destination" in lowered:
+            destination = lowered.index("destination")
+            continue
+        if destination < 0:
+            continue
+        if all(set(cell) <= set("-: ") for cell in cells):
+            continue  # the `| --- | --- |` separator under the header
+        name = cells[0].strip("`* ")
+        if not name:
+            continue
+        if len(cells) <= destination or not cells[destination]:
+            pending.append(name)
+    return tuple(pending)
+
+
+def _triage_cells(line: str) -> list[str]:
+    """One markdown table row's cells, or ``[]`` for a line that is not a row.
+
+    Split on **unescaped** pipes only. :func:`_one_cell` escapes a pipe inside a
+    description as ``\\|`` so a row survives the table, and the reference
+    catalog's descriptions are multi-sentence YAML block scalars that contain
+    them — ordinary content here, not an edge case. Splitting naively would move
+    the Destination column one to the right on exactly those rows and report a
+    filled cell as blank.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return []
+    body = stripped.strip("|")
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", body)]
 
 
 # -- The upgrade trigger ----------------------------------------------------
