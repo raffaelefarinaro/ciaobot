@@ -12,7 +12,6 @@ from ciao.os_support.private import is_private
 
 def test_linux_setup_preserves_configuration_without_desktop_side_effects(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.sys, "platform", "linux")
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CIAO_ENGINE_PATH", raising=False)
     workspace = tmp_path / "workspace"
     args = ["setup", "--workspace", str(workspace), "--port", "8544"]
