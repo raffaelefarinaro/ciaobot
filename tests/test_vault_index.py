@@ -716,3 +716,35 @@ def test_scan_vault_infers_a_custom_category_from_its_folder(tmp_path: Path):
     # Without the registry the shipped tables still answer for themselves, which
     # is what a caller that cannot reach a vault keeps.
     assert vi.canonical_type("client") == ""
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_related_ref_is_repointed_whatever_the_line_endings(tmp_path: Path, newline: str) -> None:
+    """A note saved with Windows line endings still has frontmatter (#696 C9).
+
+    The rewrites edit a note's exact bytes, and the shared FRONTMATTER_RE only
+    matched `---\\n`: a CRLF note's `related:` refs were never repointed when the
+    note they named was completed or re-homed.
+    """
+    from ciao.vault_rehome import rewrite_references
+
+    vault = tmp_path / "memory-vault"
+    # The note as it is before the move: refs resolve against what exists.
+    (vault / "projects" / "active" / "demo").mkdir(parents=True)
+    (vault / "projects" / "active" / "demo" / "demo.md").write_bytes(b"# Demo\n")
+    text = newline.join(["---", "type: note", "related: [projects/active/demo/demo]", "---", "# Hub", ""])
+    entries = vi.scan_vault(vault)
+    index = vi.build_filename_index(entries)
+
+    rewritten, changes = rewrite_references(
+        text,
+        "Notes/Hub.md",
+        "Notes/Hub.md",
+        {"projects/active/demo/demo": "projects/completed/demo/demo"},
+        index,
+        moved_by_resolved={"memory-vault/projects/active/demo/demo.md": "projects/completed/demo/demo"},
+    )
+
+    assert "related: [projects/completed/demo/demo]" in rewritten
+    assert changes
+    assert rewritten.count("\r\n") == text.count("\r\n")  # line endings left as they were

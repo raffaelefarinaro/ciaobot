@@ -157,7 +157,8 @@ def _walk_notes(
                 elif name.endswith(suffix):
                     yield child_rel, entry
 
-FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+# `\r?\n`, as in vault_links: a CRLF note's frontmatter is still frontmatter.
+FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 
 # Stored keys are relative paths spelled with `/` on every OS, the way the
