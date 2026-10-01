@@ -48,8 +48,12 @@ the installer says which one applies:
   - fish: `fish_add_path $HOME/.local/bin`.
   - Windows (PowerShell): the wizard substitutes your real directory for the
     `C:\Users\you` below —
-    `[Environment]::SetEnvironmentVariable("Path", 'C:\Users\you\.local\bin;' + [Environment]::GetEnvironmentVariable("Path","User"), "User")`
-    — then open a new terminal so the change takes effect.
+    `$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); $k.SetValue('Path', 'C:\Users\you\.local\bin' + $(if ($v) { ';' + $v }), [Microsoft.Win32.RegistryValueKind]::ExpandString)`
+    — then open a new terminal so the change takes effect. It reads the old
+    value unexpanded and writes it back as `REG_EXPAND_SZ`, so a PATH that
+    holds `%USERPROFILE%`-style entries keeps both those entries and its
+    registry type; `[Environment]::SetEnvironmentVariable` would freeze them
+    to today's expanded paths and change the type to `REG_SZ`.
 - Another `ciao` already exists (the name collides with Ciao Prolog, among
   others): the installer never overwrites it, so call Ciaobot's engine by its
   full path instead.

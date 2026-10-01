@@ -15,8 +15,10 @@ import pytest
 from ciao.os_support.shell_hints import path_hint, path_hint_note
 
 _POWERSHELL_USER_PATH = (
-    '[Environment]::SetEnvironmentVariable("Path", \'C:\\Tools\\bin;\' + '
-    '[Environment]::GetEnvironmentVariable("Path","User"), "User")'
+    "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', "
+    "$true); $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); "
+    r"$k.SetValue('Path', 'C:\Tools\bin' + $(if ($v) { ';' + $v }), "
+    "[Microsoft.Win32.RegistryValueKind]::ExpandString)"
 )
 
 
@@ -90,6 +92,22 @@ def test_windows_line_is_a_persistent_user_path_update(
         assert "$PATH" not in line
 
 
+def test_windows_hint_never_uses_the_env_setter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    # [Environment]::SetEnvironmentVariable reads the old value expanded and
+    # writes it back as REG_SZ, which would freeze every %VAR% in a
+    # REG_EXPAND_SZ user PATH and change its type under every other tool.
+    for persist in (False, True):
+        line = path_hint(r"C:\Tools\bin", persist=persist)
+        assert "SetEnvironmentVariable" not in line
+        assert "GetEnvironmentVariable" not in line
+        assert "DoNotExpandEnvironmentNames" in line
+        assert "RegistryValueKind]::ExpandString" in line
+
+
 def test_windows_single_quote_in_directory_is_doubled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -98,7 +116,10 @@ def test_windows_single_quote_in_directory_is_doubled(
     line = path_hint(r"C:\Users\O'Neil\bin", persist=True)
 
     # An unescaped ' would end the literal and swallow the rest of the path.
-    assert r"'C:\Users\O''Neil\bin;'" in line
+    assert r"'C:\Users\O''Neil\bin' + $(if ($v) { ';' + $v })" in line
+    assert line == _POWERSHELL_USER_PATH.replace(
+        r"'C:\Tools\bin'", r"'C:\Users\O''Neil\bin'"
+    )
 
 
 def test_note(monkeypatch: pytest.MonkeyPatch) -> None:
