@@ -104,6 +104,45 @@ jobs:
         NO_COLOR: '1'
       run: |
         { npm ci && npm test; } > ../windows-vitest.txt 2>&1 || true
+    - name: Build install.ps1 offline fixture
+      run: |
+        python - <<'EOF' || true
+        import pathlib, re, shutil, sys
+        sys.path.insert(0, ".")
+        from tests.test_engine_installer import VERSION, WHEEL_BYTES, WHEEL_NAME, _manifest_bytes
+        from tests.test_release_manifest import _keypair, _sign
+        out = pathlib.Path("ps1-fixture"); release = out / "release"
+        release.mkdir(parents=True, exist_ok=True)
+        raw = _manifest_bytes()
+        private_key, public_key, key_id = _keypair()
+        (release / "ciaobot-engine-manifest.json").write_bytes(raw)
+        (release / "ciaobot-engine-manifest.json.sig").write_text(_sign(raw, private_key, key_id), encoding="utf-8")
+        (release / WHEEL_NAME).write_bytes(WHEEL_BYTES)
+        text = pathlib.Path("scripts/install.ps1").read_text(encoding="utf-8")
+        text = re.sub(r"(\$ReleasePublicKey = ')[^']*(')", lambda m: m.group(1) + public_key + m.group(2), text)
+        (out / "install.ps1").write_text(text, encoding="utf-8")
+        print("fixture version", VERSION)
+        EOF
+    - name: install.ps1 offline verification and analyzer (advisory)
+      run: |
+        python -m pip install uv || true
+        {
+          echo "--- pwsh, file form ---"
+          pwsh -NoProfile -File ./ps1-fixture/install.ps1 -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun
+          echo "pwsh exit $?"
+          echo "--- Windows PowerShell 5.1, file form ---"
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-fixture/install.ps1 -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun
+          echo "powershell exit $?"
+          echo "--- Windows PowerShell 5.1, iex script-block form ---"
+          powershell -NoProfile -Command "& ([scriptblock]::Create((Get-Content -Raw ./ps1-fixture/install.ps1))) -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun"
+          echo "powershell iex exit $?"
+          echo "--- tampered manifest must be refused ---"
+          sed -i 's/"1.2.3"/"9.9.9"/' ./ps1-fixture/release/ciaobot-engine-manifest.json
+          pwsh -NoProfile -File ./ps1-fixture/install.ps1 -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun
+          echo "tampered exit $? (expected non-zero)"
+          echo "--- PSScriptAnalyzer ---"
+          pwsh -NoProfile -Command "if (Get-Command Invoke-ScriptAnalyzer -ErrorAction SilentlyContinue) { Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Warning,Error | Format-Table -AutoSize | Out-String -Width 200 } else { 'PSScriptAnalyzer not installed' }"
+        } > windows-install-ps1.txt 2>&1 || true
     - name: Summarize
       if: always()
       run: |
@@ -116,6 +155,7 @@ jobs:
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
           echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
           echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
+          echo "- install.ps1: $(grep -E 'exit ' windows-install-ps1.txt 2>/dev/null | paste -sd ';' -)"
           echo
           echo "Full logs and the failing-test list are in the \`windows-results\` artifact."
         } >> "$GITHUB_STEP_SUMMARY"
