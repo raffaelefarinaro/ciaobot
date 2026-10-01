@@ -9,12 +9,15 @@ manager's named seams instead of bypassing a test/integration patch.
 
 from __future__ import annotations
 
+import dataclasses
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
+from ciao import curation_run
 from ciao.config import CiaoConfig
 from ciao.models import BridgeMode
 from ciao.schedules import ScheduleEntry
@@ -36,9 +39,13 @@ class _ScheduleHost:
     """Typed-enough host implementing every dependency in the Protocol."""
 
     def __init__(self, tmp_path: Path, events: list[dict[str, object]]) -> None:
+        self.vault_root_calls: list[str | None] = []
         self._config = cast(
             CiaoConfig,
-            SimpleNamespace(workspace_root=tmp_path),
+            SimpleNamespace(
+                workspace_root=tmp_path,
+                workspace_vault_root=self._workspace_vault_root,
+            ),
         )
         self._chats: dict[str, ChatInfo] = {
             "chat-1": ChatInfo(
@@ -75,6 +82,10 @@ class _ScheduleHost:
     @property
     def events(self) -> EventsHub:
         return self._events_hub
+
+    def _workspace_vault_root(self, workspace: str | None) -> Path:
+        self.vault_root_calls.append(workspace)
+        return self._config.workspace_root / "vault"
 
     def _save(self, *, reason: str = "registry_mutation") -> None:
         del reason
@@ -371,3 +382,140 @@ async def test_dispatch_calls_manager_patches_instead_of_local_implementations(
 
     assert result["status"] == "ok"
     assert host.awaits == [("chat-1", 900.0)]
+
+
+def _curation_entry(*, archive_policy: str = "manual") -> ScheduleEntry:
+    return dataclasses.replace(
+        _entry(archive_policy=archive_policy),
+        schedule_id="system-memory-curation@personal",
+    )
+
+
+class _LeaseTakingStream(_Stream):
+    """A turn that takes and releases the curation lease while it streams.
+
+    ``_sched_started`` is sampled inside ``dispatch_schedule``, before the
+    stream is consumed, so the state file has to be written from inside
+    ``subscribe`` for the stamp to fall inside the run's own window. No sleep:
+    the lease stamps are compared against a second-resolution floor.
+    """
+
+    def __init__(self, events: list[dict[str, object]], vault: Path) -> None:
+        super().__init__(events)
+        self._vault = vault
+
+    async def subscribe(self):
+        lease = curation_run.begin_run(self._vault, holder="t")
+        curation_run.end_run(self._vault, holder=lease.holder)
+        for event in self._events:
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_curation_run_without_lease_records_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean turn that never took the lease did not do its job (#866).
+
+    ``ciao`` off the agent's PATH leaves the agent saying "nothing happened"
+    and ending the turn without a single error event, which the dispatcher can
+    only see as a healthy run.
+    """
+    host = _ScheduleHost(
+        tmp_path,
+        [{"type": "result", "text": "nothing happened", "is_error": False}],
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    rows: list[object] = []
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.job_runs.record_run",
+        lambda row: rows.append(row),
+    )
+
+    result = await dispatcher.dispatch_schedule(
+        _curation_entry(archive_policy="auto"),
+        "Run the routine.",
+        "opus",
+        "auto",
+        "claude",
+    )
+
+    assert result["status"] == "error"
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status == "error"
+    assert "curation lease was never taken" in row.error
+    # An unclean run must stay visible, not be swept into the archive.
+    assert host.archives == []
+
+
+@pytest.mark.asyncio
+async def test_curation_run_that_took_the_lease_stays_ok(
+    tmp_path: Path,
+) -> None:
+    host = _ScheduleHost(
+        tmp_path,
+        [{"type": "result", "text": "curated", "is_error": False}],
+    )
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True)
+    host.start_stream = (  # type: ignore[method-assign]
+        lambda chat_id, prompt, images=None, *, is_retry=False, unattended=False: cast(
+            ChatStream, _LeaseTakingStream(host._stream_events, vault)
+        )
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    result = await dispatcher.dispatch_schedule(
+        _curation_entry(), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert result["status"] == "ok"
+    assert host.vault_root_calls == ["personal"]
+
+
+@pytest.mark.asyncio
+async def test_curation_run_with_other_holder_live_lease_stays_ok(
+    tmp_path: Path,
+) -> None:
+    """Standing down because another run holds the lease is not a failure."""
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True)
+    started = datetime.now(UTC) - timedelta(seconds=5)
+    curation_run.begin_run(vault, holder="other", now=started)
+    host = _ScheduleHost(
+        tmp_path,
+        [{"type": "result", "text": "nothing happened", "is_error": False}],
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    result = await dispatcher.dispatch_schedule(
+        _curation_entry(), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert result["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_other_schedules_never_read_curation_state(
+    tmp_path: Path,
+) -> None:
+    """The lease check is scoped to the curation routine by schedule id."""
+    host = _ScheduleHost(
+        tmp_path,
+        [{"type": "result", "text": "done", "is_error": False}],
+    )
+
+    def _refuse(workspace: str | None) -> Path:
+        raise AssertionError(f"vault state read for {workspace!r}")
+
+    host._config.workspace_vault_root = _refuse  # type: ignore[method-assign]
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    result = await dispatcher.dispatch_schedule(
+        _entry(), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert result["status"] == "ok"
+    assert host.vault_root_calls == []
