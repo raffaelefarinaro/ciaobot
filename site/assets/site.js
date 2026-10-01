@@ -34,6 +34,21 @@
   });
 })();
 
+// Play the product demo automatically unless the visitor prefers reduced motion.
+// Native controls keep pause, replay and fullscreen available without JavaScript.
+(function () {
+  var video = document.querySelector('[data-product-demo]');
+  if (!video) return;
+  var motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  function syncMotion() {
+    video.autoplay = !motion.matches;
+    if (motion.matches) video.pause();
+    else video.play().catch(function () {}); // Autoplay may be blocked; controls remain available.
+  }
+  motion.addEventListener('change', syncMotion);
+  syncMotion();
+})();
+
 // A visitor-controlled example of conversation → note → recall on the home page.
 (function () {
   var board = document.querySelector('[data-memory-demo]');

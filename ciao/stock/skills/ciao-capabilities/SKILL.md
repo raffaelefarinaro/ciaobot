@@ -16,7 +16,7 @@ You are running inside Ciaobot. The app's feature surface is not otherwise visib
 
 ## The one-paragraph pitch
 
-Ciaobot is a local-first UI and UX layer for using Claude Code (and other backends) as a personal assistant and second brain. Chats, projects, files, schedules, memory, and archived knowledge live in one web app instead of being scattered across terminal sessions — and everything durable is plain markdown that works with any other tool even when Ciaobot is not running.
+Ciaobot is a local-first personal assistant and second brain: a persistent personal workspace for Claude Code and OpenCode. Your agents do the work; Ciaobot keeps project context, chats, files, schedules, and reviewable memory together. Notes and remembered knowledge stay in plain Markdown you own and can use without Ciaobot. Technically, it is a meta-harness around existing agent execution loops, not a replacement for them. Changing models or harnesses keeps the workspace, but does not make provider sessions, tools, or permissions interchangeable.
 
 ## Connecting providers
 

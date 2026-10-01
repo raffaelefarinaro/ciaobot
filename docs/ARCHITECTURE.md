@@ -2,6 +2,20 @@
 
 Orientation doc for the codebase. Read this before making any change in `ciao/`, `web/`, `scripts/`, or `deploy/`. After a change that affects layout, capabilities, env vars, endpoints, or commands, update this file, `docs/DEVELOPMENT.md`, and `INTEGRATIONS.md` so they match the repo.
 
+## A meta-harness for personal AI assistance
+
+Ciaobot is a **meta-harness**: a persistent personal workspace around existing agent harnesses, not a replacement model/tool execution loop. The layers are:
+
+1. **Ciaobot — context and continuity.** Workspace and project context, chats and transcripts, files and feedback, automations, memory extraction and review, and scope-enforcing application operations.
+2. **Agent harnesses — execution.** Claude Code through the Claude Agent SDK, and OpenCode through its V2 server, handle model interaction and tool execution using the user's configured provider access. Ciaobot starts and supervises these sessions through provider adapters.
+3. **Models and tools.** The configured cloud or local models, filesystem access, and integrations reached through each harness.
+
+The product is organised around one person's work and knowledge, not an autonomous company's org chart. Its continuity loop is **request → run → output → durable knowledge**: project context accompanies work, archived conversations can produce scoped Markdown facts, and uncertain facts wait for review.
+
+Provider-neutral application context and durable Markdown knowledge do not imply provider-session portability or identical tools, permissions, and capabilities. Switching harnesses preserves the personal workspace, not every detail of the execution environment. Application-operation guards are not a sandbox for arbitrary agent filesystem or credential access.
+
+For task-oriented reading paths, start with the [documentation hub](README.md).
+
 ## App repo layout
 
 ```

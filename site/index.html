@@ -41,7 +41,7 @@
     <section class="hero">
       <img class="hero-image" src="assets/img/hero.png" alt="The Ciaobot mascot saying Ciao!" width="1348" height="390">
       <h1>A personal assistant that remembers.</h1>
-      <p class="lead">Ciaobot is a second brain you talk to. You get things done in short conversations, and after each one it keeps what matters. Next time, it already knows.</p>
+      <p class="lead">A persistent personal workspace for the agents you already use. Get things done in short conversations, keep what matters, and build on it next time.</p>
       <div class="install">
         <p class="install-label">Install on a Mac with one line in the Terminal:</p>
         <div class="install-box">
@@ -55,23 +55,20 @@
         </p>
       </div>
       <figure class="shot">
-        <a href="assets/img/home.webp"><img src="assets/img/home.webp" alt="The Ciaobot Home page: a box to describe a task, the chats that are working or have new replies, and a What changed column, with projects and their chats in the sidebar" width="1600" height="1000"></a>
-        <figcaption>Home. Projects and chats on the left; a box to start a task, then the chats that are working or have new replies, in the middle.</figcaption>
+        <video data-product-demo src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" width="1280" height="760" muted loop playsinline controls preload="metadata" aria-label="Ciaobot demo: send a message, receive an answer, then archive the chat to start memory insights"></video>
+        <figcaption>Ask, get the answer, archive. Ciaobot then files what's worth keeping, with memory insights visible on Home.</figcaption>
       </figure>
     </section>
 
     <section id="idea" class="narrow">
-      <p class="eyebrow">The big idea</p>
-      <h2>Not a chatbot. An assistant with a memory.</h2>
-      <p>Most AI chat apps give you one long conversation that slowly fills up with everything. Either they forget, or they remember things at random, and you keep explaining the same background again.</p>
-      <p>Ciaobot works more like a good assistant with a notebook. You give it one task at a time. When the task is done, you close the conversation, and it writes down what's worth keeping in the right place.</p>
-      <p class="built-on">Built on the best, not reinvented: every chat runs on <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a> or <a href="https://opencode.ai/">opencode</a>, so each improvement they ship reaches Ciaobot too. <a href="models.html">How →</a></p>
+      <h2>Your agents do the work. Ciaobot keeps the context.</h2>
+      <p><a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a> and <a href="https://opencode.ai/">OpenCode</a> handle models and tools. Ciaobot adds projects, memory, files and recurring tasks, so you don't start from scratch each time.</p>
+      <p><strong>Change your AI, not your second brain.</strong> Your notes stay in Markdown you own. <a href="models.html#continuity">How it works →</a></p>
     </section>
 
     <section class="memory-demo" aria-labelledby="memory-demo-title">
       <div class="narrow">
-        <h2 id="memory-demo-title">Play through the memory loop</h2>
-        <p>One small example of how a finished conversation can help with the next one.</p>
+        <h2 id="memory-demo-title">Finish a chat. Keep what matters.</h2>
       </div>
       <div class="memory-board" data-memory-demo data-step="0">
         <div class="memory-board-top"><span class="memory-board-label">A little Ciaobot story</span><span class="memory-board-count" aria-hidden="true">01 / 03</span></div>
@@ -98,13 +95,13 @@
           <button class="memory-action" type="button">Finish the chat <span aria-hidden="true">→</span></button>
         </div>
       </div>
+      <p class="narrow">Confident facts can be filed automatically; uncertain ones wait for review. <a href="memory.html#control">See what it remembered →</a></p>
     </section>
 
     <section id="blocks">
       <div class="narrow">
-        <p class="eyebrow">Three building blocks</p>
         <h2>Workspaces, projects and chats</h2>
-        <p>A workspace holds several projects. A project holds several chats. You pick one at each level, and that choice is the context the assistant gets.</p>
+        <p>Separate the parts of your life. Give each project its background. Start a chat for each task.</p>
       </div>
 
       <div class="cascade" role="img" aria-label="The Personal workspace is picked, then the Wedding preparation project inside it, then the chat Book the venue visit inside that project. The workspace keeps its own memory, the project description travels with every message, and archiving the chat turns the useful parts into memory.">
@@ -157,21 +154,10 @@
         </div>
       </div>
 
-      <details class="example narrow" id="archive">
-        <summary>See it in action: one week later, it already knows</summary>
-        <div class="example-body">
-          <figure>
-            <video src="assets/img/archive.mp4" poster="assets/img/archive-poster.webp" autoplay muted loop playsinline aria-label="A follow-up message is sent in a Spanish-practice chat, the answer arrives, then the chat is archived and shows a memory insights row while Ciaobot extracts what to remember"></video>
-            <figcaption>Ask, get the answer, archive. Ciaobot then shows a <em>memory insights</em> row on Home while it files what's worth keeping.</figcaption>
-          </figure>
-          <p>A week later you ask <span class="prompt-inline">which venues are we still considering?</span> and it knows, without you digging up an old conversation. <a href="memory.html">How memory works →</a></p>
-        </div>
-      </details>
     </section>
 
     <section>
       <div class="narrow">
-        <p class="eyebrow">What it can do</p>
         <h2>Your assistant, not just a text box</h2>
       </div>
       <div class="grid grid-3">
@@ -185,19 +171,13 @@
     </section>
 
     <section class="narrow" id="together">
-      <p class="eyebrow">No manual needed</p>
-      <h2>Just ask it</h2>
-      <p>Ciaobot knows its own features. Ask it anything, in plain words:</p>
-      <div class="prompt">What can you do?</div>
-      <div class="prompt">Create a project called Learning Spanish. I'm a beginner and practise 20 minutes a day.</div>
-      <div class="prompt">Every Friday at 6pm, remind me to plan next week's workouts.</div>
-      <div class="prompt">Report a bug: the model picker is empty on my iPad.</div>
-      <div class="prompt">Request a feature on GitHub: let me snooze a chat until tomorrow morning.</div>
-      <p>Anything you can click in the app, you can also ask for in a chat, even filing a bug or a feature request on <a href="https://github.com/raffaelefarinaro/ciaobot/issues">GitHub</a>. Nothing is posted without your OK.</p>
+      <h2>Start with one task.</h2>
+      <p>Connect your agent, pick a project, and ask for what you need. Not sure where to begin? Ask Ciaobot, “What can you do?”</p>
       <div class="cta-row" style="justify-content:flex-start;margin-top:24px">
         <a class="btn btn-primary" href="guide.html">Get started</a>
         <a class="btn" href="https://github.com/raffaelefarinaro/ciaobot">View on GitHub</a>
       </div>
+      <p><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/README.md">Browse the documentation →</a></p>
     </section>
 
   </main>
