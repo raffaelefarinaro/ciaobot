@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from ciao import job_runs, subagent_tracking
 from ciao import schedules as schedule_support
 from ciao.config import CiaoConfig
+from ciao.curation_run import unstarted_run_reason
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import BridgeMode, ImageAttachment
 from ciao.provider_service import ProviderService, supported_providers
@@ -41,6 +42,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectInfo
 
 logger = logging.getLogger(__name__)
+
+# The one system routine whose job is verifiable from outside the chat: it is
+# told to take the curation lease first, so a clean turn that never took it did
+# nothing. Stored ids are workspace-qualified, so compare with `system_base_id`.
+MEMORY_CURATION_SCHEDULE_BASE_ID = "system-memory-curation"
 
 
 class ScheduleDispatchHost(Protocol):
@@ -677,6 +683,30 @@ class ScheduleDispatcher:
                         target_id,
                     )
             self._host._discard_schedule_drain_result(target_id)
+
+        if (
+            chat_service._schedule_run_clean(outcome)
+            and schedule_support.system_base_id(_sched_schedule_id)
+            == MEMORY_CURATION_SCHEDULE_BASE_ID
+        ):
+            vault = self._host._config.workspace_vault_root(
+                getattr(entry, "workspace", "") or None
+            )
+            reason = await asyncio.to_thread(
+                unstarted_run_reason, vault, _sched_started
+            )
+            if reason:
+                # The agent ended its turn cleanly but never took the lease,
+                # so the nightly care did not run. Report it as the failure
+                # it is: unclean (the chat stays visible), status "error",
+                # and the reason lands in the job-run log (issue #866).
+                outcome.is_error = True
+                outcome.final_text = reason
+                logger.warning(
+                    "Schedule %s ended without taking the curation lease: %s",
+                    _sched_schedule_id,
+                    reason,
+                )
 
         needs_user = False
         if getattr(entry, "archive_policy", "manual") == "auto" and chat_service._schedule_run_clean(outcome):

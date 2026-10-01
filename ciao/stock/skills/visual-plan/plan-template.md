@@ -105,7 +105,7 @@ Exit evidence: the plan is executable in one direction. It is not a menu of unde
 - Create an HTML companion only when the reviewer needs to inspect interaction, layout, state changes, or a diagram; draw any diagram as inline SVG in that companion. Author it by loading the stock `html-artifact` skill. If that skill is not installed, write the plan without the companion and say so; do not re-derive its sandbox rules from memory.
 - Keep the Markdown plan and companion aligned on names, statuses, and state IDs.
 
-Exit evidence: `file_surface` has been called for the Markdown plan, and each companion passes its format-specific checks.
+Exit evidence: `ciao file surface` has been run for the Markdown plan, and each companion passes its format-specific checks.
 
 ### C4. Review the artifact
 

@@ -882,7 +882,7 @@ def test_a_new_skill_draft_creates_syncs_and_then_settles(tmp_path: Path) -> Non
     assert synced == ["ran"]
     assert stored is not None
     assert stored.lifecycle == DRAFT_FILED
-    assert stored.issue_url.endswith("skills/invoice-recon/SKILL.md")
+    assert Path(stored.issue_url).as_posix().endswith("skills/invoice-recon/SKILL.md")
     written = config.agent_root("work") / "skills" / "invoice-recon" / "SKILL.md"
     assert written.read_text(encoding="utf-8") == _skill_text("invoice-recon")
     assert read_queue(config, "work") == []
@@ -941,7 +941,7 @@ def test_a_re_approve_after_a_failed_sync_resumes_and_settles(tmp_path: Path) ->
     assert calls == ["synced"]
     assert settled is not None and settled.lifecycle == DRAFT_FILED
     assert "creation was skipped" in settled.reason
-    assert settled.issue_url.endswith("skills/invoice-recon/SKILL.md")
+    assert Path(settled.issue_url).as_posix().endswith("skills/invoice-recon/SKILL.md")
     assert read_queue(config, "work") == []
 
 
@@ -962,7 +962,7 @@ def test_a_resume_will_not_overwrite_a_different_file_at_that_name(tmp_path: Pat
     existing = config.agent_root("work") / "skills" / "invoice-recon" / "SKILL.md"
     existing.write_text(
         "---\nname: invoice-recon\ndescription: d\n---\n\nsomething else\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     with pytest.raises(ValueError, match="already has a skills/invoice-recon entry"):
@@ -1005,7 +1005,7 @@ def test_a_refused_creation_settles_nothing(tmp_path: Path) -> None:
     draft = file_draft(config, "work", **_new_skill_payload(tmp_path))
     existing = config.agent_root("work") / "skills" / "invoice-recon" / "SKILL.md"
     existing.parent.mkdir(parents=True)
-    existing.write_text("---\nname: invoice-recon\ndescription: d\n---\n\nbody\n", encoding="utf-8")
+    existing.write_text("---\nname: invoice-recon\ndescription: d\n---\n\nbody\n", encoding="utf-8", newline="")
 
     with pytest.raises(ValueError, match="already has a skills/invoice-recon entry"):
         create_new_skill(
@@ -1131,10 +1131,10 @@ def test_route_for_skill_reads_the_filesystem_not_a_flag(tmp_path: Path) -> None
     root = config.agent_root("work")
     owned = root / "skills" / "notes"
     owned.mkdir(parents=True)
-    (owned / "SKILL.md").write_text("---\nname: notes\ndescription: d\n---\n\nb\n", encoding="utf-8")
+    (owned / "SKILL.md").write_text("---\nname: notes\ndescription: d\n---\n\nb\n", encoding="utf-8", newline="")
     installed = root / ".claude" / "skills" / "web-research"
     installed.mkdir(parents=True)
-    (installed / ".ciao-stock-skill").write_text("stock\n", encoding="utf-8")
+    (installed / ".ciao-stock-skill").write_text("stock\n", encoding="utf-8", newline="")
 
     assert route_for_skill(config, "work", "notes") == "owned"
     assert route_for_skill(config, "work", "web-research") == "upstream"
@@ -1149,7 +1149,7 @@ def test_learnings_present_is_the_gate_on_the_lesson_route(tmp_path: Path) -> No
 
     path = tmp_path / "memory-vault" / "work" / "Workspace" / "Learnings.md"
     path.parent.mkdir(parents=True)
-    path.write_text("## Active\n", encoding="utf-8")
+    path.write_text("## Active\n", encoding="utf-8", newline="")
     assert upstream_drafts.learnings_present(config, "work") is True
 
 
@@ -1164,7 +1164,7 @@ def test_a_sidecar_naming_another_workspace_is_not_read(tmp_path: Path) -> None:
     path = upstream_drafts.sidecar_path(config, "work", draft.id)
     path.write_text(
         path.read_text(encoding="utf-8").replace('"work"', '"elsewhere"'),
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     assert upstream_drafts.read_sidecar(path, "work") is None
@@ -1175,7 +1175,7 @@ def test_an_unreadable_sidecar_reads_as_no_record_rather_than_raising(tmp_path: 
     """A queue you cannot show is worse than one row short."""
     config = _config(tmp_path, "work")
     draft = file_draft(config, "work", **_stock_draft())
-    upstream_drafts.sidecar_path(config, "work", draft.id).write_text("{", encoding="utf-8")
+    upstream_drafts.sidecar_path(config, "work", draft.id).write_text("{", encoding="utf-8", newline="")
 
     assert upstream_drafts.read_sidecar(
         upstream_drafts.sidecar_path(config, "work", draft.id), "work"

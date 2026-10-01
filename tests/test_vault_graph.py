@@ -21,7 +21,7 @@ def client(tmp_path):
         "description: Note A.\n"
         "---\n"
         "# A\n\nSee [C](../work/C.md) too.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     (vault / "personal" / "B.md").write_text(
         "---\n"
@@ -29,7 +29,7 @@ def client(tmp_path):
         "description: Note B, the target.\n"
         "---\n"
         "# B\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     (vault / "work" / "C.md").write_text(
         "---\n"
@@ -37,7 +37,7 @@ def client(tmp_path):
         "description: Note C in Work.\n"
         "---\n"
         "# C\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     cfg = CiaoConfig(
@@ -114,7 +114,7 @@ def test_vault_graph_survives_a_note_that_cannot_be_stat_ed(client, tmp_path):
     symlink) must degrade to mtime 0 rather than failing the whole request."""
     vault = tmp_path / "memory-vault"
     (vault / "personal" / "Ghost.md").write_text(
-        "---\ntype: note\ndescription: Vanishes.\n---\n# Ghost\n", encoding="utf-8"
+        "---\ntype: note\ndescription: Vanishes.\n---\n# Ghost\n", encoding="utf-8", newline=""
     )
     # Replace the file with a dangling symlink: still indexed by name, but
     # stat() on it raises.
@@ -160,7 +160,7 @@ def test_vault_graph_frontmatter_updated_beats_old_mtime(client, tmp_path):
     vault = tmp_path / "memory-vault"
     (vault / "personal" / "Verified.md").write_text(
         "---\ntype: person\nupdated: 2099-01-01\n---\n# Verified\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     old = time.time() - 400 * 86400
     os.utime(vault / "personal" / "Verified.md", (old, old))
@@ -193,7 +193,7 @@ def test_vault_graph_never_flags_what_the_review_queue_never_lists(client, tmp_p
     for rel, note_type in notes.items():
         path = vault / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"---\ntype: {note_type}\n---\n# {path.stem}\n", encoding="utf-8")
+        path.write_text(f"---\ntype: {note_type}\n---\n# {path.stem}\n", encoding="utf-8", newline="")
         _age(path, 400)
 
     data = client.get("/api/vault/graph").json()
@@ -210,11 +210,11 @@ def test_vault_graph_stale_set_matches_unverified_candidates(client, tmp_path):
     vault = tmp_path / "memory-vault" / "personal"
     (vault / "People").mkdir()
     (vault / "People" / "Mo.md").write_text(
-        "---\ntype: person\ntags: [p]\n---\n# Mo\n\nSee [A](../A.md).\n", encoding="utf-8"
+        "---\ntype: person\ntags: [p]\n---\n# Mo\n\nSee [A](../A.md).\n", encoding="utf-8", newline=""
     )
     _age(vault / "People" / "Mo.md", 120)
     (vault / "Workspace").mkdir()
-    (vault / "Workspace" / "Queue.md").write_text("---\ntype: note\n---\n# Queue\n", encoding="utf-8")
+    (vault / "Workspace" / "Queue.md").write_text("---\ntype: note\n---\n# Queue\n", encoding="utf-8", newline="")
     _age(vault / "Workspace" / "Queue.md", 400)
     _age(vault / "B.md", 400)
 
@@ -237,7 +237,7 @@ def test_keep_clears_the_graph_stale_flag(client, tmp_path):
     vault = tmp_path / "memory-vault" / "personal"
     (vault / "People").mkdir()
     note = vault / "People" / "Mo.md"
-    note.write_text("---\ntype: person\ntags: [p]\nupdated: 2025-01-01\n---\n# Mo\n", encoding="utf-8")
+    note.write_text("---\ntype: person\ntags: [p]\nupdated: 2025-01-01\n---\n# Mo\n", encoding="utf-8", newline="")
 
     def mo():
         data = client.get("/api/vault/graph").json()
@@ -279,7 +279,7 @@ def _checked_client(tmp_path):
     (vault / "personal").mkdir(parents=True, exist_ok=True)
     for name in ("Checked", "Pending", "Untouched"):
         (vault / "personal" / f"{name}.md").write_text(
-            f"---\ntype: note\nupdated: 2025-01-01\n---\n# {name}\n", encoding="utf-8"
+            f"---\ntype: note\nupdated: 2025-01-01\n---\n# {name}\n", encoding="utf-8", newline=""
         )
     cfg = CiaoConfig(
         pwa_auth_token="test-secret",
@@ -372,7 +372,7 @@ def test_a_proposal_whose_note_moved_is_stale_again_and_says_it_is_dead(
     vault = cfg.workspace_vault_root("personal")
     (vault / "Checked.md").write_text(
         "---\ntype: note\nupdated: 2025-01-01\n---\n# Checked\n\nEdited by hand.\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     node = _graph_node(_checked, "Checked")

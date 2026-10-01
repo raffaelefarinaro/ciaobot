@@ -24,6 +24,6 @@ Use HTML when the reviewer needs to inspect interaction, layout, state changes, 
 
 ## Surfacing
 
-- Call `file_surface` explicitly for every artifact worth reviewing.
+- Run `ciao file surface <path>` explicitly for every artifact worth reviewing.
 - Only one file can be the active pinned surface at a time. Surface the canonical Markdown plan first, surface a companion when needed, then re-surface Markdown before asking for approval.
 - The output cards and links remain the durable way to move between files.
