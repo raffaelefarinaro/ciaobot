@@ -71,6 +71,57 @@ describe('SettingsMcpServers', () => {
     expect(wrapper.text()).toContain('needs .env')
   })
 
+  // The command line is built in one interpolation. Vue's whitespace
+  // condensing trims the leading space inside a <template>, so the old
+  // `{{ srv.command }}<template> {{ args }}</template>` markup ran the two
+  // together and a stdio server read as `Command: pythonserver.py`.
+  it("shows a stdio server's command and args separated by a space", () => {
+    const { wrapper } = mountPanel(m => {
+      m.status.value = {
+        ...STATUS,
+        project_servers: [
+          { name: 'local', source: 'project', transport: 'stdio', command: 'python', args: ['server.py'], ready: true },
+        ],
+      }
+    })
+    expect(wrapper.find('.skill-description').text()).toBe('Command: python server.py')
+    expect(wrapper.text()).not.toContain('pythonserver.py')
+  })
+
+  it('quotes args that contain spaces', () => {
+    const { wrapper } = mountPanel(m => {
+      m.status.value = {
+        ...STATUS,
+        project_servers: [
+          { name: 'local', source: 'project', transport: 'stdio', command: 'python', args: ['--name', 'a b'], ready: true },
+        ],
+      }
+    })
+    expect(wrapper.find('.skill-description').text()).toBe('Command: python --name "a b"')
+  })
+
+  it('shows only the command when there are no args', () => {
+    const noArgsKey = mountPanel(m => {
+      m.status.value = {
+        ...STATUS,
+        project_servers: [
+          { name: 'local', source: 'project', transport: 'stdio', command: 'python', ready: true },
+        ],
+      }
+    })
+    expect(noArgsKey.wrapper.find('.skill-description').text()).toBe('Command: python')
+
+    const emptyArgs = mountPanel(m => {
+      m.status.value = {
+        ...STATUS,
+        project_servers: [
+          { name: 'local', source: 'project', transport: 'stdio', command: 'python', args: [], ready: true },
+        ],
+      }
+    })
+    expect(emptyArgs.wrapper.find('.skill-description').text()).toBe('Command: python')
+  })
+
   it('reports "Add via chat" upward instead of navigating itself', async () => {
     const { wrapper } = mountPanel()
     await wrapper.findAll('.settings-card-header-actions button')[0].trigger('click')
