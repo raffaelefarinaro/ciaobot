@@ -8940,10 +8940,10 @@ def _update_task_coverage_gap(rows: list[dict[str, Any]]) -> dict[str, str]:
 
     The housekeeping card has to say *something* when the list is empty, and
     "no tasks" is not the same answer as "this install cannot substantiate one".
-    The shipped catalog defines no task yet, so the first branch is the one a
-    fresh install sees; the second is a real install whose tasks all resolve to
-    ``unknown``, which is the applicability layer refusing to claim a condition
-    it cannot check.
+    The first branch is a fresh install, where every shipped task legitimately
+    resolves to ``not_applicable``; the second is a real install whose tasks all
+    resolve to ``unknown``, which is the applicability layer refusing to claim a
+    condition it cannot check.
     """
     from ciao.update_tasks import UNKNOWN
 

@@ -20,7 +20,9 @@ from typing import Any
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
 from ciao.migration_notices import (
     UNMIGRATED_LINKS_NOTICE,
+    UNREHOMED_PEOPLE_NOTICE,
     VAULT_LOCATION_NOTICE,
+    rehomed_people_finding,
     resolve_links,
     vault_location_findings,
 )
@@ -1177,7 +1179,9 @@ def audit_upgrade_notices(
     lister = getattr(config, "workspace_names", None)
     if vault_raw is None or workspace_raw is None or not callable(lister):
         return {"notices": notices, "notices_found": 0, "errors": errors}
-    names = list(lister())
+    # The registry is read inside each probe rather than listed here: the re-home
+    # notice counts the workspaces to decide whether it applies (#833), and a
+    # count taken beside the caller is one that can drift from the rule using it.
 
     resolver = getattr(config, "workspace_vault_root", None)
     if not callable(resolver):
@@ -1234,42 +1238,27 @@ def audit_upgrade_notices(
     # to avoid. It can never auto-apply either: the judgement bucket is non-empty
     # by construction, and a note with no workspace-naming tag has no single
     # correct destination. A pending action like the link notice, never a defect.
-    # With one registered workspace every candidate comes back with an empty
-    # target and destination: `detect_misfiled_people` still buckets an untagged
-    # note as needs_judgement, but there is no counterpart to move it to, so the
-    # migration has nothing to do. Firing here would tell a fresh install its
-    # people are misfiled and offer no move, and an unactionable tile is how
-    # operators learn to ignore the whole strip.
-    if runtime_dir is not None and len(names) > 1:
-        try:
-            from ciao.vault_rehome import read_receipt
-
-            # `read_receipt` reports only a COMPLETED re-home: a missing status
-            # counts as complete (receipts predating the field record finished
-            # work, and gating on `status == "migrated"` made this notice a
-            # permanent false positive on exactly the installs that had done
-            # it), while an explicitly PARTIAL receipt does not. That second
-            # half is why this moved off `peek_receipt`: a run that half
-            # finished used to silence the notice as thoroughly as a completed
-            # one, so the operator was never told work remained.
-            if read_receipt(runtime_dir) is None:
-                notices.append({
-                    "type": "unrehomed_people",
-                    "workspace": "",
-                    "detail": (
-                        "Person notes may be filed in the wrong workspace, and "
-                        "none have been re-homed yet. A preview lists the "
-                        "candidates without moving anything."
-                    ),
-                    "remedy": (
-                        "Preview with `ciao vault-rehome` (dry-run by default), "
-                        "then apply with `ciao vault-rehome --apply`. Every move "
-                        "and link rewrite is recorded, so `ciao vault-unrehome "
-                        "--apply` restores the notes and their references."
-                    ),
-                })
-        except Exception:  # noqa: BLE001 — advisory section, never fail the audit
-            logger.warning("upgrade notices: person re-home check failed")
+    #
+    # The condition and the wording now live in `migration_notices`, shared with
+    # #833's `unrehomed-people` update task, so the report and the Home card
+    # cannot come to disagree about one install. What is *not* shared is the
+    # suppression: nothing in that module reads an update-task record, so
+    # dismissing the card silences the card and never this line. An exception
+    # there is still logged and dropped rather than failing the report — a
+    # diagnostic that cannot read one receipt is a report with one fewer notice,
+    # not an audit that stops.
+    try:
+        rehome = rehomed_people_finding(config, runtime_dir)
+    except Exception:  # noqa: BLE001 — advisory section, never fail the audit
+        logger.warning("upgrade notices: person re-home check failed")
+        rehome = None
+    if rehome is not None:
+        notices.append({
+            "type": UNREHOMED_PEOPLE_NOTICE,
+            "workspace": "",
+            "detail": rehome.detail,
+            "remedy": rehome.remedy,
+        })
 
     return {"notices": notices, "notices_found": len(notices), "errors": errors}
 
