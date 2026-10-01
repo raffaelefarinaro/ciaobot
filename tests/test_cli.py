@@ -1129,6 +1129,25 @@ def test_setup_summary_prints_the_windows_note(
     assert "  LINE\n  NOTE" in out
 
 
+def test_setup_summary_prints_no_note_without_a_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    workspace = tmp_path / "workspace"
+    token_path = workspace / ".runtime" / "setup-token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text("tok\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_path_export_hint", lambda: None)
+    monkeypatch.setattr(cli, "path_hint_note", lambda: "NOTE")
+
+    cli._print_setup_summary(workspace, 9443)
+
+    out = capsys.readouterr().out
+    # Nothing was added to PATH, so there is no change to wait for: the note
+    # must not hang on its own.
+    assert "PATH" not in out
+    assert "NOTE" not in out
+
+
 def test_setup_url_rotates_token_by_default(tmp_path: Path, capsys) -> None:
     workspace = tmp_path / "workspace"
     token_path = workspace / ".runtime" / "setup-token"

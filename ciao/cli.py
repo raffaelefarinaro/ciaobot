@@ -344,9 +344,11 @@ def _print_setup_summary(workspace: Path, port: int) -> None:
     if hint is not None:
         print("To run `ciao` from a shell, add its venv to PATH:")
         print(f"  {hint}")
-    note = path_hint_note()
-    if note:
-        print(f"  {note}")
+        # Only alongside the line it qualifies: with the bin dir already on PATH
+        # there is nothing to change and nothing to wait for.
+        note = path_hint_note()
+        if note:
+            print(f"  {note}")
 
 
 def _default_app_dir() -> Path:
