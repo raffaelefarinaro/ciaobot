@@ -185,7 +185,8 @@ refuses outright when:
 - the primary workspace is not registered, so the guide's regions and the skill
   catalog have nowhere to go;
 - the install has no git history to roll back to and one could not be created
-  (no `git` binary, or the snapshot commit failed).
+  (no `git` binary, a credential that could not be kept out of the snapshot, or
+  the snapshot commit failed).
 
 Clear the refusals, re-run the plan, and watch the list shrink. The ones that
 need you rather than a file move: a symlink or unregistered directory, and a
@@ -194,18 +195,33 @@ non-empty destination. Nothing is guessed about your own notes.
 **About backups.** You do not need to take one by hand. The command calls
 `ensure_rollback_history` first, which leaves a repository with at least one
 commit completely alone, gives a repository with no commits a snapshot commit,
-and creates a repository plus a `.gitignore` when there is none. **Read that
-sentence before you rely on it:** the credential-excluding `.gitignore` is
-written *only* in the "no repository at all" case. If the install already had a
-git repository with no commits — someone ran `git init` and never committed —
-the snapshot is taken without adding those exclusions, so a `.env`, a
-`secrets/` directory or anything else in `_SNAPSHOT_IGNORES` can end up in that
-commit. Check what the snapshot captured (`git show --stat HEAD`) before you
-continue, and add the exclusions yourself if it is not clean. What the gate
-needs from *you* is that your own uncommitted work is committed or stashed, with
-a message that says what it is. Do not stage the whole tree to satisfy the
-check: `git add -A` commits whatever happens to be lying around, and the vault
-history is the thing you will want to read if a migration goes wrong.
+and creates a repository when there is none. Both snapshotting branches first get
+a `.gitignore` carrying the exclusions in `_SNAPSHOT_IGNORES` — `.env`,
+`secrets/`, `.runtime/` and the rest — so a `.env` or a `secrets/` directory
+cannot be committed into the snapshot even when the install already had a git
+repository with no commits. The write is additive: an existing `.gitignore` of
+yours is kept and only the missing entries are appended.
+
+A `.gitignore` does not unstage anything, so those excluded paths are also
+dropped from git's **staging area** before the snapshot is taken — otherwise a
+`.env` you had already run `git add` on would go into the commit anyway. Nothing
+is deleted from disk: the files stay exactly where they are, they are only left
+out of the snapshot, and every other file you had staged is still in it.
+
+That is not taken on trust. A `.gitignore` of your own can re-admit a file the
+exclusions removed — a `!` line such as `!.env` placed after them, or a
+`sub/.gitignore` containing `!.env`, which applies to everything under `sub/` and
+is never read by the exclusion write. So the staging area is read back
+immediately before the commit, and **if anything in `_SNAPSHOT_IGNORES` is still
+staged the migration refuses** (`unstage_failed`, one of the refusals listed
+above) and makes no commit at all. Your files are still on disk either way;
+remove or move the `!` line and re-run.
+
+What the gate needs from *you* is that your own uncommitted work is committed or
+stashed, with a message that says what it is. Do not stage the whole tree yourself to satisfy the check:
+`git add -A` as a backup step commits whatever happens to be lying around, and
+the snapshot the command takes is not the whole tree either — the vault history
+is the thing you will want to read if a migration goes wrong.
 
 ### What it does when it runs
 
@@ -288,13 +304,14 @@ if no workspace is registered, or if any registered workspace has no
 missing. If a receipt already exists it prints that there is nothing to do.
 Then run `--repair`, which it tells you to, to rebuild the derived files.
 
-Its refusal message points at this document as the place to read about moving
-the vaults by hand. This document no longer teaches that, and you should not do
-it — so here is what the refusal actually means. The command has just told you
-the layout is **not** finished, and named the workspaces whose
-`<workspace>/memory-vault` is absent. Either the install is still on the shared
-layout, in which case run Step 1's `--apply` and let the commands do the move;
-or the layout is partly built by hand, in which case finish the directories the
+The refusal names the command rather than a manual move: it says which
+workspaces have no `<workspace>/memory-vault` yet, points at Step 1's `--apply`
+as the thing that does the move, points here for what `--apply` refuses on, and
+carries the one caveat the command cannot check for you — that `--apply` has to
+run from the engine that will serve this install, with the app stopped. It has
+just told you the layout is **not** finished. Either the install is still on the
+shared layout, in which case run `--apply` and let the commands do the move; or
+the layout is partly built by hand, in which case finish the directories the
 refusal listed, re-run `--mark-migrated`, and let `--repair` rebuild the derived
 files. What you should not do is re-derive the move yourself: that is the path
 this document was rewritten to stop teaching, and it is the path with no
@@ -523,30 +540,33 @@ filters the types the retention is about to claim out of its `unresolved` list,
 because nothing has been written yet and those are not your decision to make;
 so the list a preview asks you to categorise is only the list it can see.
 
-**No receipt is written by `--apply`, and the card does not clear from a
-re-scan.** Three facts, each of which the card's own button runs into:
+**`--apply` writes no receipt; the card is cleared by the card's own button.** Two
+commands, and only one of them can change what the card says:
 
-- `ciao vault-migrate --apply` renames the notes, keeps the retired categories
-  and records nothing. It never touches `<runtime>/` at all, so the CLI cannot
-  change what the card says.
-- The card's **Apply mechanical renames** button does write a receipt — but the
-  **unkeyed** `vault-vocabulary.json`, the pre-keying name. The card reads the
-  install-wide view, which is built from the **keyed** per-vault receipts and
-  consults the unkeyed file only on an install with exactly one vault. On a
-  re-rooted install the button's write is written and then not read, so pressing
-  it does not clear the card.
+- `ciao vault-migrate --apply` renames the notes, keeps the retired categories and
+  records nothing. It never touches `<runtime>/` at all, so the CLI cannot change
+  what the card says — not even when the renames it just made were the whole of
+  the card's complaint.
 - `sync-skills` writes the keyed per-vault receipts, but it is gated on the
   install-wide receipt being absent, and it skips any vault whose keyed receipt
   already exists. Once every vault has one, it does not re-scan, so a note
   written afterwards with a retired type is not picked up and the receipt is not
   refreshed.
 
-So do not expect the card to clear because you resolved the types. What the card
-is really reporting is "some vault has types with no canonical equivalent", and
-the honest ways to deal with that are to fix the `type:` lines (which the audit
-then agrees with) and, if you want the receipt itself to say so, delete that
-vault's receipt and re-run the migration for it. Treat the card as a pointer to
-work, not as a status light you can switch off.
+So the button is how a decision gets recorded. **Apply mechanical renames**
+re-migrates every vault whose receipt still lists `unresolved` types and
+**rewrites that vault's own keyed receipt** — the file the card's install-wide
+read is built from — so once you have fixed the `type:` lines (or the chat has
+fixed them for you), the next press re-scans, the types are gone from the
+receipt, and the card disappears. Two things it deliberately does not do: it does
+not write the pre-keying unkeyed `vault-vocabulary.json`, which the install-wide
+read consults only on a single-vault install, and it does not touch a vault
+whose receipt is already complete — that root's receipt is the record of its own
+migration, not this card's business. So the card reports work in the vaults it
+names; if you fix a `type:` line in a vault the card never named, delete that
+vault's receipt and let `sync-skills` migrate it again. Treat the card as a
+pointer to work, refreshed by its own button, not as a status light somebody
+else keeps in step with your edits.
 
 Note what this command does **not** have: there is no `vault-unmigrate`. The
 renames are gated on an exact current value, so an unwanted one is a one-line
