@@ -541,7 +541,9 @@ def test_claude_path_command_on_windows_is_a_powershell_line(monkeypatch) -> Non
     line = claude_path_command(r"C:\Users\me\.local\bin")
 
     assert line.startswith(
-        """[Environment]::SetEnvironmentVariable("Path", 'C:\\Users\\me\\.local\\bin;'"""
+        "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true);"
+        r" $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); "
+        r"$k.SetValue('Path', 'C:\Users\me\.local\bin'"
     )
     assert "export" not in line
 
