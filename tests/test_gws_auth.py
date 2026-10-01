@@ -398,7 +398,7 @@ def _install_gws(monkeypatch) -> None:
     """Make ``gws`` resolvable and the login-shell PATH known to the probe."""
     from ciao import tool_path
 
-    monkeypatch.setattr(tool_path, "resolve_tool", lambda name: "/usr/bin/gws")
+    monkeypatch.setattr(tool_path, "resolve_command", lambda name: ["/usr/bin/gws"])
     monkeypatch.setattr(tool_path, "login_shell_path", lambda: "/usr/bin")
 
 
@@ -439,7 +439,7 @@ def test_auth_status_parses_revoked(tmp_path: Path, monkeypatch) -> None:
 def test_auth_status_unavailable_when_gws_missing(tmp_path: Path, monkeypatch) -> None:
     from ciao import tool_path
 
-    monkeypatch.setattr(tool_path, "resolve_tool", lambda name: "")
+    monkeypatch.setattr(tool_path, "resolve_command", lambda name: [])
     cfg = _config(tmp_path)
     status = gws_auth.auth_status(cfg, "personal")
     assert status == {"available": False, "reason": "gws CLI not installed"}

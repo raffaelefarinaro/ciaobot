@@ -614,12 +614,17 @@ command that answers them:
   gone. Copy each cached copy from `.claude/skills/<name>/` or
   `.agents/skills/<name>/` into `skills/<name>/` and re-run `ciao sync-skills`.
   If no cached copy exists, the skill is gone and has to be re-added.
-- **"N skill(s) need a workspace"** — this card is raised by reading
-  `<runtime>/migration/skills-triage.md`. The re-rooting does not write that
-  file: it writes `Workspace/Skill-Triage.md` in the primary workspace's vault,
-  as above. The two paths do not meet, so **do not expect this card from the
-  migration** — answer the sheet yourself, and treat the card, if it ever
-  appears, as about a different file.
+- **"N skill(s) need a workspace"** — this card is raised from **the triage
+  sheet the separation wrote**, the `Workspace/Skill-Triage.md` in the primary
+  workspace's vault described above. It is found through the separation's
+  receipt, which records the file it created, so the card follows the sheet to
+  whatever folder your vault uses rather than looking for a path of its own.
+
+  The count is the number of rows whose **Destination** cell is still blank, so
+  it falls as you fill the sheet in and disappears once every row is answered.
+  There is no button and no command: the destinations are yours to decide, and
+  writing a destination you did not confirm is the exact guess the sheet exists
+  to prevent.
 
 Two drift cards per workspace — "has no folder" and "is missing generated
 assets" — are fixed by their run button, which is `ciao workspace-reroot

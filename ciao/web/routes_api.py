@@ -69,7 +69,7 @@ from ciao.workspaces import (
 )
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
-from ciao.tool_path import resolve_tool
+from ciao.tool_path import resolve_command
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
@@ -1058,7 +1058,12 @@ def _gws_integration_payload(config) -> dict:
     from ciao import gws_auth
 
     usage = _gws_profile_usage(config)
-    binary_path = resolve_tool("gws") or ""
+    try:
+        gws_command = resolve_command("gws")
+    except OSError:
+        gws_command = []  # on PATH but unusable: report it as not installed
+    # The tool itself: its executable, or the script node runs for it.
+    binary_path = gws_command[-1] if gws_command else ""
     try:
         health = gws_auth.read_health_cache(Path(config.state_path).parent)
     except Exception:

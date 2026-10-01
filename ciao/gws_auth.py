@@ -850,9 +850,13 @@ def auth_status(
     when available, ``token_valid`` / ``token_error`` / ``has_refresh_token``.
     Never logs the raw subprocess output.
     """
-    from ciao.tool_path import login_shell_path, resolve_tool
+    from ciao.tool_path import login_shell_path, resolve_command
 
-    if not resolve_tool("gws"):
+    try:
+        gws = resolve_command("gws")
+    except OSError as exc:
+        return {"available": False, "reason": str(exc)}
+    if not gws:
         return {"available": False, "reason": "gws CLI not installed"}
 
     env = _profile_env_for_status(config, profile)
@@ -861,7 +865,7 @@ def auth_status(
     env["PATH"] = login_shell_path()
     try:
         result = runner(
-            ["gws", "auth", "status"],
+            [*gws, "auth", "status"],
             capture_output=True,
             text=True,
             timeout=timeout,

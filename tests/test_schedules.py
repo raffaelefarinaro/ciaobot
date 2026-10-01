@@ -934,7 +934,7 @@ def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> 
     # Guardrail 2: judgment calls become reviewable questions, not deletions.
     assert "[review] Keep" in prompt
     assert "Memory-Proposals.md" in prompt
-    assert "memory_status" in prompt
+    assert "ciao memory status" in prompt
     # The old blanket ban must be gone, or the two instructions cancel out.
     assert "Do not edit the bounded" not in prompt
 

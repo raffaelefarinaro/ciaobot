@@ -26,8 +26,8 @@ OAuth setup: Settings → Workspaces (Google Workspace card). Credentials live i
 ## Connection status
 
 Before promising a Google call will work, check whether the active workspace's
-Google account is connected and its token is valid with the `gws_status` MCP
-tool. It reports the linked profile, whether credentials are present, the last
+Google account is connected and its token is valid with `ciao gws status`.
+It reports the linked profile, whether credentials are present, the last
 health-monitor token reading, and whether a re-login is needed. It is read-only
 and never runs `gws auth status` itself. If `needs_relogin` is true, tell the
 user to re-authenticate in Settings → Workspaces (Google Workspace card) — the
