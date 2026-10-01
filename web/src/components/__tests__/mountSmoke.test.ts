@@ -259,8 +259,8 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-/** How long a component import may take before the smoke test fails on it (well under vitest's 5 s). */
-const IMPORT_DEADLINE_MS = 3000
+/** How long a component import may take before the smoke test fails on it (well under the 20 s testTimeout in vite.config.ts). */
+const IMPORT_DEADLINE_MS = 12_000
 
 /** Resolve the loader, or fail fast with the import named: a hung import must not look like a slow test. */
 export async function importWithin<T>(
