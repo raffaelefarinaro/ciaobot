@@ -679,25 +679,44 @@ def test_the_home_task_is_narrower_than_the_audit_notice() -> None:
     )
 
 
-def test_the_skill_triage_paths_are_not_described_as_meeting() -> None:
-    """The detector and the migration read and write different files.
+def test_the_skill_triage_card_is_raised_from_the_sheet_the_migration_wrote() -> None:
+    """The card and the separation read and write the same file (#810).
 
-    `operator_actions._detect_skill_triage_pending` reads
-    `<runtime>/migration/skills-triage.md`; `workspace_reroot.write_skills_triage`
-    writes `Workspace/Skill-Triage.md` in the primary workspace's vault. A
-    document that implies the sheet raises the card is describing a connection
-    the code does not make, and a reader would wait for a card that cannot come.
+    `operator_actions._detect_skill_triage_pending` used to read
+    `<runtime>/migration/skills-triage.md`, while `workspace_reroot`
+    `.write_skills_triage` writes `Workspace/Skill-Triage.md` into the primary
+    workspace's vault. Nothing in `ciao/` ever wrote the runtime path, so the
+    card could not fire on any install, and the sheet the re-rooting
+    deliberately left blank — the one decision it refuses to guess — was surfaced
+    by nothing. The detector now resolves the sheet through the re-rooting
+    receipt's `created_files`, so a document that still says the paths do not
+    meet is teaching an operator not to wait for a card that does come.
+
+    The card's completion is the sheet itself: the count is the rows whose
+    Destination cell is blank, so it reaches zero once the sheet is answered.
+    A document promising a card that cannot clear, or one promising it clears
+    itself, is wrong in both directions.
     """
     doc = _flat()
 
     for fragment in (
+        "raised from **the triage sheet the separation wrote**",
+        "It is found through the separation's receipt, which records the file it created",
+        "Destination** cell is still blank",
+        "disappears once every row is answered",
+    ):
+        assert fragment in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md no longer describes the triage card as "
+            f"reading a file the separation never writes: {fragment!r}"
+        )
+    for gone in (
         "The two paths do not meet",
         "do not expect this card from the migration",
         "<runtime>/migration/skills-triage.md",
     ):
-        assert fragment in doc, (
-            "docs/VAULT_MIGRATION_PROMPT.md no longer keeps the two triage "
-            f"paths apart: {fragment!r}"
+        assert gone not in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md still describes the triage card and the "
+            f"separation as using different files: {gone!r}"
         )
 
 
