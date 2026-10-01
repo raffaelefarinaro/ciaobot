@@ -36,8 +36,8 @@ def workspace(tmp_path: Path) -> Path:
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "docs").mkdir()
-    (ws / "docs" / "readme.md").write_text("# hello\n", encoding="utf-8")
-    (ws / "script.py").write_text("print('ok')\n", encoding="utf-8")
+    (ws / "docs" / "readme.md").write_text("# hello\n", encoding="utf-8", newline="")
+    (ws / "script.py").write_text("print('ok')\n", encoding="utf-8", newline="")
     (ws / "photo.jpg").write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
     return ws
 
@@ -54,7 +54,7 @@ def test_excalidraw_extension_is_no_longer_served(workspace: Path) -> None:
     drawing = workspace / "diagram.excalidraw"
     drawing.write_text(
         '{"type":"excalidraw","version":2,"source":"https://excalidraw.com"}',
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "diagram.excalidraw"})
@@ -87,7 +87,7 @@ def test_missing_path_returns_400(workspace: Path) -> None:
 def test_traversal_relative_escape_is_served(workspace: Path, tmp_path: Path) -> None:
     # No workspace sandbox: a `../` relative path resolves and serves.
     outside = tmp_path / "secret.md"
-    outside.write_text("now readable", encoding="utf-8")
+    outside.write_text("now readable", encoding="utf-8", newline="")
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "../secret.md"})
     assert resp.status_code == 200
@@ -96,7 +96,7 @@ def test_traversal_relative_escape_is_served(workspace: Path, tmp_path: Path) ->
 
 def test_absolute_path_outside_workspace_is_served(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "other.md"
-    outside.write_text("served", encoding="utf-8")
+    outside.write_text("served", encoding="utf-8", newline="")
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": str(outside)})
     assert resp.status_code == 200
@@ -105,7 +105,7 @@ def test_absolute_path_outside_workspace_is_served(workspace: Path, tmp_path: Pa
 
 def test_symlink_escape_is_served(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside.md"
-    outside.write_text("via symlink", encoding="utf-8")
+    outside.write_text("via symlink", encoding="utf-8", newline="")
     link = workspace / "escape.md"
     link.symlink_to(outside)
     client = _make_client(workspace)
@@ -150,7 +150,7 @@ def test_repo_absolute_path_returns_content(workspace: Path, tmp_path: Path) -> 
     repos = tmp_path / "repos"
     repos.mkdir()
     (repos / "myrepo").mkdir()
-    (repos / "myrepo" / "README.md").write_text("# repo readme\n", encoding="utf-8")
+    (repos / "myrepo" / "README.md").write_text("# repo readme\n", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get(
@@ -167,7 +167,7 @@ def test_relative_paths_anchor_to_workspace_not_elsewhere(workspace: Path, tmp_p
     file elsewhere, avoiding shadowing surprises."""
     repos = tmp_path / "repos"
     repos.mkdir()
-    (repos / "REPO_ONLY_FILE.md").write_text("# repo (should not be served)\n", encoding="utf-8")
+    (repos / "REPO_ONLY_FILE.md").write_text("# repo (should not be served)\n", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "REPO_ONLY_FILE.md"})
@@ -182,7 +182,7 @@ def test_path_outside_all_roots_is_served(workspace: Path, tmp_path: Path) -> No
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     secret = elsewhere / "secret.md"
-    secret.write_text("served", encoding="utf-8")
+    secret.write_text("served", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": str(secret)})
@@ -196,7 +196,7 @@ def test_repo_still_enforces_extension_allowlist(workspace: Path, tmp_path: Path
     repos = tmp_path / "repos"
     repos.mkdir()
     secret = repos / ".env"
-    secret.write_text("API_KEY=super-secret", encoding="utf-8")
+    secret.write_text("API_KEY=super-secret", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": str(secret)})
@@ -210,7 +210,7 @@ def test_symlink_to_outside_is_served(workspace: Path, tmp_path: Path) -> None:
     repos = tmp_path / "repos"
     repos.mkdir()
     outside = tmp_path / "outside.md"
-    outside.write_text("now allowed", encoding="utf-8")
+    outside.write_text("now allowed", encoding="utf-8", newline="")
     link = repos / "escape.md"
     link.symlink_to(outside)
 
@@ -224,7 +224,7 @@ def test_fuzzy_suffix_match(workspace: Path) -> None:
     """A suffix path match resolves to the correct nested file."""
     nested_dir = workspace / "subdir" / "docs"
     nested_dir.mkdir(parents=True)
-    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8")
+    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "docs/target.md"})
@@ -236,7 +236,7 @@ def test_fuzzy_suffix_match_wrong_extension(workspace: Path) -> None:
     """A suffix path match with typo extension still resolves to the correct file."""
     nested_dir = workspace / "subdir" / "docs"
     nested_dir.mkdir(parents=True)
-    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8")
+    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "docs/target.nd"})
@@ -248,7 +248,7 @@ def test_fuzzy_filename_match(workspace: Path) -> None:
     """A bare filename match resolves to the correct nested file."""
     nested_dir = workspace / "subdir" / "docs"
     nested_dir.mkdir(parents=True)
-    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8")
+    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "target.md"})
@@ -260,7 +260,7 @@ def test_fuzzy_filename_match_wrong_extension(workspace: Path) -> None:
     """A bare filename match with wrong extension still resolves to the correct file."""
     nested_dir = workspace / "subdir" / "docs"
     nested_dir.mkdir(parents=True)
-    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8")
+    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "target.nd"})
@@ -272,7 +272,7 @@ def test_fuzzy_filename_match_no_extension(workspace: Path) -> None:
     """A bare filename match without any extension still resolves to the correct file."""
     nested_dir = workspace / "subdir" / "docs"
     nested_dir.mkdir(parents=True)
-    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8")
+    (nested_dir / "target.md").write_text("fuzzy target content", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "target"})
@@ -284,8 +284,8 @@ def test_fuzzy_match_multiple_options_sorts_by_closeness(workspace: Path) -> Non
     """Multiple matches are sorted by match quality, primary root, and shortest path."""
     (workspace / "dir1").mkdir()
     (workspace / "dir2").mkdir()
-    (workspace / "dir1" / "testfile.md").write_text("first option", encoding="utf-8")
-    (workspace / "dir2" / "testfile.md").write_text("second option", encoding="utf-8")
+    (workspace / "dir1" / "testfile.md").write_text("first option", encoding="utf-8", newline="")
+    (workspace / "dir2" / "testfile.md").write_text("second option", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "testfile.md"})
@@ -300,7 +300,7 @@ def test_absolute_outside_path_serves(workspace: Path, tmp_path: Path) -> None:
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     outside = elsewhere / "notes.md"
-    outside.write_text("from outside", encoding="utf-8")
+    outside.write_text("from outside", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": str(outside)})
@@ -314,7 +314,7 @@ def test_relative_path_still_anchors_to_workspace(workspace: Path, tmp_path: Pat
     NOT resolve to a same-named file living outside the workspace."""
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    (elsewhere / "unique_outside.md").write_text("not anchored here", encoding="utf-8")
+    (elsewhere / "unique_outside.md").write_text("not anchored here", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": "unique_outside.md"})
@@ -327,7 +327,7 @@ def test_extension_allowlist_still_enforced_outside_workspace(workspace: Path, t
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     secret = elsewhere / ".env"
-    secret.write_text("API_KEY=super-secret", encoding="utf-8")
+    secret.write_text("API_KEY=super-secret", encoding="utf-8", newline="")
 
     client = _make_client(workspace)
     resp = client.get("/api/workspace-file", params={"path": str(secret)})

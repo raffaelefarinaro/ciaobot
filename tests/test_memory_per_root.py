@@ -38,7 +38,7 @@ def _write_guide(root: Path, *, memory: list[str], profile: list[str]) -> None:
     guide = root / "CLAUDE.md"
     guide.parent.mkdir(parents=True, exist_ok=True)
     if not guide.exists():
-        guide.write_text("# Guide\n\n", encoding="utf-8")
+        guide.write_text("# Guide\n\n", encoding="utf-8", newline="")
     ensure_regions(guide)
     write_region(guide, "memory", memory)
     write_region(guide, "profile", profile)
@@ -149,7 +149,7 @@ def _seeded(tmp_path: Path) -> CiaoConfig:
         notes = config.workspace_vault_root(name)
         notes.mkdir(parents=True, exist_ok=True)
         (notes / f"{name}-note.md").write_text(
-            f"---\ntype: note\ntitle: {name}\n---\n# {name}\n", encoding="utf-8"
+            f"---\ntype: note\ntitle: {name}\n---\n# {name}\n", encoding="utf-8", newline=""
         )
     (tmp_path / ".runtime").mkdir(parents=True, exist_ok=True)
     _write_guide(config.workspace_root, memory=["one lesson"], profile=["terse"])
@@ -234,14 +234,14 @@ def test_a_named_workspace_audits_its_own_notes_and_not_the_others(
     # A defect that exists only in the work notes.
     (config.workspace_vault_root("work") / "broken.md").write_text(
         "---\ntype: note\ntitle: broken\n---\n[gone](./missing-target.md)\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     personal = _audit(config, workspace_name="personal", scope="workspace")
     work = _audit(config, workspace_name="work", scope="workspace")
 
-    assert personal["setup_audit"]["vault_root"].endswith("memory-vault/personal")
-    assert work["setup_audit"]["vault_root"].endswith("memory-vault/work")
+    assert Path(personal["setup_audit"]["vault_root"]).as_posix().endswith("memory-vault/personal")
+    assert Path(work["setup_audit"]["vault_root"]).as_posix().endswith("memory-vault/work")
     assert work["vault_hygiene"]["broken_markdown_links"], "the defect must be found"
     assert personal["vault_hygiene"]["broken_markdown_links"] == [], (
         "a personal run must not report a defect that only exists in work"

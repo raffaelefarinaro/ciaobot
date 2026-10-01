@@ -22,7 +22,7 @@ def _guide_with_regions(path: Path, *, memory: str = "", profile: str = "") -> P
         f"{profile}"
         "<!-- ciao:profile:end -->\n"
     )
-    path.write_text(body, encoding="utf-8")
+    path.write_text(body, encoding="utf-8", newline="")
     return path
 
 
@@ -54,7 +54,7 @@ def test_contains_invisible_unicode() -> None:
 
 def test_ensure_regions_appends_missing(tmp_path: Path) -> None:
     guide = tmp_path / "CLAUDE.md"
-    guide.write_text("# Guide\n\nHello.\n", encoding="utf-8")
+    guide.write_text("# Guide\n\nHello.\n", encoding="utf-8", newline="")
     added = mt.ensure_regions(guide)
     assert set(added) == {"memory", "profile"}
     text = guide.read_text(encoding="utf-8")
@@ -84,7 +84,7 @@ def test_migrate_region_caps_restamps_former_default(tmp_path: Path) -> None:
         "<!-- ciao:memory:end -->\n\n"
         "<!-- ciao:profile:start cap=1375 -->\n"
         "<!-- ciao:profile:end -->\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     assert mt.migrate_region_caps(guide) == ["memory"]
@@ -110,7 +110,7 @@ def test_migrate_region_caps_preserves_custom_caps(tmp_path: Path) -> None:
         "<!-- ciao:profile:start cap=800 -->\n"
         "<!-- ciao:profile:end -->\n"
     )
-    guide.write_text(original, encoding="utf-8")
+    guide.write_text(original, encoding="utf-8", newline="")
 
     assert mt.migrate_region_caps(guide) == []
     assert guide.read_text(encoding="utf-8") == original
@@ -122,7 +122,7 @@ def test_migrate_region_caps_is_idempotent_and_tolerates_absence(
     guide = tmp_path / "CLAUDE.md"
     guide.write_text(
         "# Guide\n\n<!-- ciao:memory:start cap=2200 -->\n<!-- ciao:memory:end -->\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
 
     assert mt.migrate_region_caps(guide) == ["memory"]
@@ -175,7 +175,7 @@ def test_read_region_accepts_legacy_user_alias(tmp_path: Path) -> None:
 
 def test_read_region_missing_markers_returns_empty(tmp_path: Path) -> None:
     guide = tmp_path / "CLAUDE.md"
-    guide.write_text("# Guide\n", encoding="utf-8")
+    guide.write_text("# Guide\n", encoding="utf-8", newline="")
     entries, diags = mt.read_region(guide, "memory")
     assert entries == []
     assert any(d.code == "missing" for d in diags)
@@ -187,14 +187,14 @@ def test_diagnose_duplicated_and_inverted(tmp_path: Path) -> None:
         "<!-- ciao:memory:start -->\n"
         "<!-- ciao:memory:start -->\n"
         "<!-- ciao:memory:end -->\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     diags = mt.diagnose_region(guide.read_text(encoding="utf-8"), "memory")
     assert any(d.code == "duplicated" for d in diags)
 
     guide.write_text(
         "<!-- ciao:memory:end -->\n<!-- ciao:memory:start -->\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     diags = mt.diagnose_region(guide.read_text(encoding="utf-8"), "memory")
     assert any(d.code == "inverted" for d in diags)
@@ -202,7 +202,7 @@ def test_diagnose_duplicated_and_inverted(tmp_path: Path) -> None:
 
 def test_write_region_refuses_bad_markers(tmp_path: Path) -> None:
     guide = tmp_path / "CLAUDE.md"
-    guide.write_text("# no markers\n", encoding="utf-8")
+    guide.write_text("# no markers\n", encoding="utf-8", newline="")
     with pytest.raises(ValueError):
         mt.write_region(guide, "memory", ["x"])
 
@@ -297,8 +297,8 @@ def test_migrate_legacy_files(tmp_path: Path) -> None:
     guide = _guide_with_regions(tmp_path / "CLAUDE.md")
     legacy = tmp_path / "legacy"
     legacy.mkdir()
-    (legacy / "memory.md").write_text("prefers dark mode\n", encoding="utf-8")
-    (legacy / "user.md").write_text("Name: Raffa\n", encoding="utf-8")
+    (legacy / "memory.md").write_text("prefers dark mode\n", encoding="utf-8", newline="")
+    (legacy / "user.md").write_text("Name: Raffa\n", encoding="utf-8", newline="")
     result = mt.migrate_legacy_files(guide, memory_dir=legacy)
     assert result["ok"] is True
     assert (legacy / "memory.md.migrated").is_file()
