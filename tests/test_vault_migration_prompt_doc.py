@@ -528,20 +528,88 @@ def test_the_vocabulary_card_clears_through_its_own_keyed_receipt() -> None:
     )
 
 
-def test_the_snapshot_gitignore_caveat_is_stated() -> None:
-    """The credential exclusions are only written when git init runs.
+def test_the_snapshot_exclusions_apply_to_both_snapshot_branches() -> None:
+    """The credential exclusions are written on every path that snapshots.
 
-    `ensure_rollback_history` calls `_write_snapshot_gitignore` on the
+    `ensure_rollback_history` used to call `_write_snapshot_gitignore` on the
     "not a repository" branch only, so an install that already had a repository
-    with no commits gets its snapshot without them.
+    with no commits got its snapshot with no exclusions at all. The document must
+    not tell a reader the old caveat still holds.
     """
     doc = _flat()
 
-    assert "is written *only* in the \"no repository at all\" case" in doc
-    for fragment in ("git init", "git show --stat HEAD", "can end up in that commit"):
+    assert "Both snapshotting branches first get a `.gitignore`" in doc, (
+        "the document must state that both snapshotting branches get the exclusions"
+    )
+    for fragment in (".env", "secrets/", "cannot be committed into the snapshot", "additive"):
         assert fragment in doc, (
             "docs/VAULT_MIGRATION_PROMPT.md no longer carries the snapshot "
-            f"caveat: {fragment!r}"
+            f"exclusion statement: {fragment!r}"
+        )
+    # The old caveat is now false and must be gone, not merely softened.
+    for gone in (
+        "is written *only* in the \"no repository at all\" case",
+        "git show --stat HEAD",
+    ):
+        assert gone not in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md still carries the withdrawn snapshot "
+            f"caveat: {gone!r}"
+        )
+
+
+def test_the_snapshot_unstages_the_excluded_paths_and_says_it_does() -> None:
+    """The document must state that a PRE-STAGED secret is left out too.
+
+    A `.gitignore` never unstages, so an owner who ran `git add .env` after
+    `git init` still got `.env` committed into the snapshot by the version that
+    wrote the exclusions on both branches. `ensure_rollback_history` now also
+    runs `git rm --cached` over `_SNAPSHOT_IGNORES`, which is invisible from the
+    outside in the one way that matters: it does not touch the working tree. A
+    reader who has staged their `.env` needs to know it will be dropped from the
+    commit and still be on disk afterwards, or they will refuse to run the
+    migration at all.
+    """
+    doc = _flat()
+
+    for fragment in (
+        "`.gitignore` does not unstage anything",
+        "dropped from git's **staging area** before the snapshot is taken",
+        "you had already run `git add` on would go into the commit anyway",
+        "Nothing is deleted from disk",
+        "every other file you had staged is still in it",
+    ):
+        assert fragment in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md does not tell the reader that a "
+            f"pre-staged secret is unstaged for the snapshot: {fragment!r}"
+        )
+
+
+def test_the_snapshot_verifies_itself_and_says_so() -> None:
+    """The document must state that the unstage is verified, and what it does.
+
+    The unstage is a best effort: an owner's `.gitignore` can put a credential
+    back on the very next `git add -A` (a `!.env` after our entry, or a
+    `sub/.gitignore` saying `!.env`, which nothing reads).
+    `ensure_rollback_history` re-reads the index before committing and returns
+    `unstage_failed` if anything is still staged. A reader who has a `!` line
+    needs to know the run refuses and leaves their files alone, or they will read
+    the refusal as damage.
+    """
+    doc = _flat()
+
+    for fragment in (
+        "That is not taken on trust",
+        "`!.env` placed after them",
+        "containing `!.env`, which applies to everything under `sub/`",
+        "the staging area is read back immediately before the commit",
+        "if anything in `_SNAPSHOT_IGNORES` is still staged the migration refuses",
+        "`unstage_failed`",
+        "makes no commit at all",
+        "Your files are still on disk either way",
+    ):
+        assert fragment in doc, (
+            "docs/VAULT_MIGRATION_PROMPT.md does not tell the reader that the "
+            f"snapshot is verified and refuses when it cannot be proven clean: {fragment!r}"
         )
 
 
