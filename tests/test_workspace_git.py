@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao.os_support.links import is_link, points_to
 from ciao.cli import ensure_vault_git, ensure_workspace_git, setup_workspace
 
 
@@ -615,7 +616,8 @@ def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
     )
 
     assert custom.read_text(encoding="utf-8") == "# custom override\n"
-    assert link.is_symlink() and link.resolve() == custom.resolve()
+    # A symlink on POSIX, a hard link with its sidecar on Windows (#819).
+    assert is_link(link) and points_to(link, custom)
 
 
 def test_setup_workspace_existing_mode_adopts_folder_as_vault(

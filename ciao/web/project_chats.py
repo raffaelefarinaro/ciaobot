@@ -7,7 +7,6 @@ import copy
 import inspect
 import json
 import logging
-import mimetypes
 import os
 import re
 import shutil
@@ -64,6 +63,7 @@ class UnknownModelError(ValueError):
 
 import yaml
 
+from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import job_runs, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
@@ -7343,7 +7343,7 @@ class ProjectChatManager:
         if len(data) > MAX_IMAGE_SIZE_BYTES:
             target.unlink(missing_ok=True)
             raise ValueError("Image too large")
-        mime = mimetypes.guess_type(filename)[0] or f"image/{ext.lstrip('.')}"
+        mime = guess_media_type(filename) or f"image/{ext.lstrip('.')}"
         return ImageAttachment(
             path=target.resolve(),
             mime_type=mime,
@@ -7376,7 +7376,7 @@ class ProjectChatManager:
         if self._config.media_root.resolve() not in resolved.parents:
             return None
         ext = target.suffix.lower()
-        mime = mimetypes.guess_type(ref)[0] or f"image/{ext.lstrip('.')}"
+        mime = guess_media_type(ref) or f"image/{ext.lstrip('.')}"
         return ImageAttachment(
             path=resolved,
             mime_type=mime,

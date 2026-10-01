@@ -239,7 +239,7 @@ def test_a_migrated_node_id_is_still_deletable(tmp_path: Path) -> None:
     install, so the Memory Map could delete nothing at all."""
     config = _install(tmp_path, migrated=True)
     entries, _ = scan_targets(config.vault_scan_targets())
-    node_id = str(entries[0].path)
+    node_id = entries[0].path_key  # the id the graph hands out: POSIX on every OS
     assert node_id.startswith("personal/memory-vault/")
 
     # The resolution the handler performs, exercised directly.

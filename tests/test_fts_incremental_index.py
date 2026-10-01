@@ -14,6 +14,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+import sys
+
 import pytest
 
 from ciao import fts_search
@@ -91,6 +93,7 @@ def test_an_edit_that_restores_the_indexed_mtime_is_still_picked_up(
     }
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows st_ctime is the creation time, so a same-length rewrite with its mtime restored is invisible to stat")
 def test_a_same_length_rewrite_under_the_indexed_mtime_is_still_picked_up(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
