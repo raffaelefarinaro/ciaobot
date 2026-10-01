@@ -7,7 +7,7 @@ argument-hint: <project, person, idea, or topic>
 
 Collect enough detail to create or improve a durable vault page in the active workspace's vault (the `<ciao-context>` block names it as `vault=<path>` — write under **that** path, and nowhere else).
 
-1. **Search before asking.** Run `vault_search` for the subject (try 2–3 reformulations — a nickname, a paraphrase, a distinctive noun). Improving an existing note beats creating a duplicate; recall is lexical, so an existing note may not surface on the obvious query.
+1. **Search before asking.** Run `ciao vault search "<subject>"` for the subject (try 2–3 reformulations — a nickname, a paraphrase, a distinctive noun). Improving an existing note beats creating a duplicate; recall is lexical, so an existing note may not surface on the obvious query.
 2. **Fill the biggest gaps.** Ask 1–3 targeted questions at a time — goal, done-ness, deadline/cadence, stakeholders, constraints. Stop asking once you have enough to avoid a stub; do not interrogate for completeness.
 3. **Write the note only when it clears the stub bar**, following the vault's own conventions:
    - `type:` comes from the **Categories** section of `<vault>/VOCABULARY.md` — the list this vault is configured with, which also names the folder each category's notes go in — and the note is written there. Never invent one; `ciao vault-lint` reports anything else as `unknown_type`. If nothing fits, use the closest listed value and raise the gap as a new-category proposal, so the owner can add the category once instead of you coining a synonym now.

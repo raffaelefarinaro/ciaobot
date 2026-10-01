@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from fnmatch import fnmatchcase
 from importlib import resources
@@ -234,3 +235,57 @@ def test_pyproject_packages_stock_data() -> None:
     assert "schedules.json" in package_data["ciao.stock"]
     assert "schedules/*.md" in package_data["ciao.stock"]
     assert "evals/*.json" in package_data["ciao.stock"]
+
+
+# Files that legitimately name control-plane operations (telemetry names).
+_OPERATION_NAME_EXEMPT = {
+    "skills/ciao-cli/SKILL.md",
+    "skills/ciao-cli/commands.json",
+    "evals/scenarios.json",
+}
+_AGENT_CLI_NOUNS = "memory|vault|note|file|chat|project|schedule|workspace|context|run|gws"
+_CLI_MENTION = re.compile(rf"\bciao ({_AGENT_CLI_NOUNS}) ([a-z][a-z-]*)")
+
+
+def _cli_commands() -> dict[str, str]:
+    path = Path(resources.files("ciao.stock")) / "skills" / "ciao-cli" / "commands.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _stock_instruction_files() -> list[tuple[str, str]]:
+    stock = Path(resources.files("ciao.stock"))
+    found = []
+    for path in sorted(stock.rglob("*")):
+        if not path.is_file() or path.suffix not in {".md", ".json"}:
+            continue
+        relative = path.relative_to(stock).as_posix()
+        if relative in _OPERATION_NAME_EXEMPT:
+            continue
+        found.append((relative, path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_stock_instructions_name_cli_commands_not_operation_names() -> None:
+    operations = {op for op in _cli_commands().values() if "_" in op}
+    assert "vault_search" in operations
+    for relative, text in _stock_instruction_files():
+        for op in sorted(operations):
+            assert not re.search(rf"(?<![\w-]){re.escape(op)}(?![\w-])", text), (
+                f"{relative} names the operation `{op}`; name its `ciao <noun> <verb>` command instead"
+            )
+
+
+def test_stock_instructions_only_mention_real_cli_commands() -> None:
+    commands = set(_cli_commands())
+    for relative, text in _stock_instruction_files():
+        for noun, verb in _CLI_MENTION.findall(text):
+            head = f"{noun} {verb}"
+            assert any(c == head or c.startswith(f"{head} ") for c in commands), (
+                f"{relative} mentions `ciao {head}`, which is not in ciao-cli/commands.json"
+            )
+
+
+def test_stock_workspace_guide_does_not_restate_injected_policy() -> None:
+    guide = resources.files("ciao.stock").joinpath("workspace", "AGENTS.md").read_text(encoding="utf-8")
+    assert "never restart the Ciaobot service" not in guide
+    assert "vault_search" not in guide and "file_surface" not in guide
