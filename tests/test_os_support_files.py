@@ -139,3 +139,55 @@ def test_windows_opens_every_descriptor_binary(
     fd = open_fd(missing, flags, 0o600, follow_symlinks=False)
     os.close(fd)
     assert calls == [(missing, flags | os.O_BINARY, 0o600)]
+
+
+# ── replace_file ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the retry is the Windows branch")
+def test_windows_replace_retries_the_refusal_a_concurrent_replace_causes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.os_support import files
+
+    src, dst = tmp_path / "new", tmp_path / "target"
+    src.write_bytes(b"new")
+    dst.write_bytes(b"old")
+    real = os.replace
+    refusals = {"left": 2}
+
+    def busy_then_free(a, b):
+        if refusals["left"]:
+            refusals["left"] -= 1
+            raise PermissionError(13, "Access is denied", str(b))
+        real(a, b)
+
+    monkeypatch.setattr(files.os, "replace", busy_then_free)
+    files.replace_file(src, dst)
+    assert dst.read_bytes() == b"new"
+    assert not src.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the retry is the Windows branch")
+def test_windows_replace_gives_up_after_its_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.os_support import files
+
+    def always_busy(a, b):
+        raise PermissionError(13, "Access is denied", str(b))
+
+    monkeypatch.setattr(files.os, "replace", always_busy)
+    monkeypatch.setattr(files, "_REPLACE_DEADLINE_S", 0.05)
+    with pytest.raises(PermissionError):
+        files.replace_file(tmp_path / "a", tmp_path / "b")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX branch is not defined on Windows")
+def test_posix_replace_is_os_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.os_support import files
+
+    calls = []
+    monkeypatch.setattr(files.os, "replace", lambda a, b: calls.append((a, b)))
+    files.replace_file("a", "b")
+    assert calls == [("a", "b")]

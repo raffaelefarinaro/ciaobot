@@ -303,12 +303,16 @@ def _extract_locked(
     # rename — a filesystem error, or another process recreating the target —
     # can put the previous skill back instead of leaving the operator with
     # neither: a force-import failure must not be data loss.
+    backup_dir: Path | None = None
     backup: Path | None = None
     if target.exists():
-        # A unique sibling dir for the previous install; mkdtemp both
-        # generates the unique name and creates the directory, and the
-        # rename moves the old skill into it in one step.
-        backup = Path(tempfile.mkdtemp(prefix=f".{name}.old-", dir=dest_root))
+        # A unique sibling dir holds the previous install; mkdtemp generates
+        # the unique name and creates it, and the rename moves the old skill
+        # INTO it. Not onto it: POSIX lets a directory replace an empty one,
+        # Windows refuses (FileExistsError), and a force import there always
+        # failed.
+        backup_dir = Path(tempfile.mkdtemp(prefix=f".{name}.old-", dir=dest_root))
+        backup = backup_dir / name
         target.rename(backup)
     try:
         tmp_target.rename(target)
@@ -318,6 +322,6 @@ def _extract_locked(
         _remove_path(tmp_target)
         raise
     finally:
-        if backup is not None and backup.exists():
-            _remove_path(backup)
+        if backup_dir is not None and backup_dir.exists():
+            _remove_path(backup_dir)
     return name, []

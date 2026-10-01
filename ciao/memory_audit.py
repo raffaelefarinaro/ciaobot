@@ -209,7 +209,11 @@ def _resolve(token: str, workspace_dir: Path) -> tuple[bool, bool]:
         return True, False
 
     expanded = Path(target).expanduser()
-    if expanded.is_absolute():
+    # Rooted counts as absolute: `/mnt/x` from a POSIX machine has no drive on
+    # Windows, so `is_absolute()` is False there, but it is still another
+    # machine's absolute path, not one relative to this workspace. On POSIX a
+    # path is rooted exactly when it is absolute.
+    if expanded.is_absolute() or expanded.root:
         try:
             home = Path.home().resolve()
         except (OSError, RuntimeError):

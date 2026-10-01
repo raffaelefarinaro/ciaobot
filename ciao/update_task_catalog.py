@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
@@ -578,7 +579,14 @@ def _prompt_defect(root: Path, resource: str) -> str:
                 return "prompt_not_confined"
         if not target.resolve().is_relative_to(root.resolve()):
             return "prompt_not_confined"
-        if not target.is_file():
+        # stat, not is_file: is_file() answers False for a name Windows cannot
+        # even parse (WinError 123), which would read as "missing" there and
+        # "unreadable" on POSIX. Only "no such file" is missing.
+        try:
+            mode = target.stat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            return "prompt_missing"
+        if not stat.S_ISREG(mode):
             return "prompt_missing"
         if not target.read_text(encoding="utf-8").strip():
             return "prompt_empty"
