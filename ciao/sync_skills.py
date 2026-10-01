@@ -404,7 +404,7 @@ def _write_stock_command_marker(command_path: Path, digest: str) -> None:
     # Atomic replace so a crash mid-write can never leave a truncated digest
     # behind (the digest is the managed copy's integrity check).
     tmp = marker.with_name(marker.name + ".tmp")
-    tmp.write_text(digest, encoding="utf-8")
+    tmp.write_text(digest, encoding="utf-8", newline="")
     os.replace(tmp, marker)
 
 
@@ -737,7 +737,7 @@ def _cleanup_legacy_codex_projections(workspace: Path) -> int:
         without_agents, partial_agents = _without_managed_codex_config(original)
         without_mcps, partial_mcps = _without_managed_codex_mcp_config(without_agents)
         if not partial_agents and not partial_mcps and without_mcps != original:
-            config_path.write_text(without_mcps, encoding="utf-8")
+            config_path.write_text(without_mcps, encoding="utf-8", newline="")
             pruned += 1
     return pruned
 
@@ -795,7 +795,7 @@ def _write_opencode_projection(target: Path, frontmatter: list[str], body: str) 
     try:
         if target.exists() and target.read_text(encoding="utf-8") == content:
             return True
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="")
     except OSError:
         return False
     return True
@@ -963,10 +963,10 @@ def _install_opencode_mcps(workspace: Path) -> tuple[int, int]:
     rendered = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
     try:
         if not config_path.exists() or config_path.read_text(encoding="utf-8") != rendered:
-            config_path.write_text(rendered, encoding="utf-8")
+            config_path.write_text(rendered, encoding="utf-8", newline="")
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(
-            json.dumps(sorted(managed), indent=2) + "\n", encoding="utf-8"
+            json.dumps(sorted(managed), indent=2) + "\n", encoding="utf-8", newline=""
         )
     except OSError:
         return 0, 0

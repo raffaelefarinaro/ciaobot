@@ -33,7 +33,7 @@ def write_setup_marker(
     runtime_root.mkdir(parents=True, exist_ok=True)
     stamp = (now or datetime.now(UTC)).isoformat(timespec="seconds")
     path = marker_path(runtime_root)
-    path.write_text(f"{stamp}\n", encoding="utf-8")
+    path.write_text(f"{stamp}\n", encoding="utf-8", newline="")
     return path
 
 

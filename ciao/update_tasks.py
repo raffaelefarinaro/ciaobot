@@ -969,7 +969,7 @@ def _write_document(path: Path, document: Mapping[str, Any]) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".update-tasks.", suffix=".tmp")
     temporary = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
         # Before the rename, so the file never appears carrying mkstemp's 0600
         # instead of the mode a vault sync and a hand read expect.

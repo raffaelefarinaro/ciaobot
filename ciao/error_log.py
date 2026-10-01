@@ -186,6 +186,6 @@ def clear_error_log(workspace_root: Path) -> None:
     """Truncate the error log so the next week starts fresh."""
     log_path = workspace_root / ".runtime" / ERROR_LOG_NAME
     try:
-        log_path.write_text("", encoding="utf-8")
+        log_path.write_text("", encoding="utf-8", newline="")
     except OSError:
         pass

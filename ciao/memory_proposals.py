@@ -476,10 +476,10 @@ def _log_consolidation(
             "# Memory Consolidations\n\n"
             "Undo log for bounded-memory edits: every removed or replaced "
             "entry is copied here first.\n",
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
     heading = f"\n## {date.today().isoformat()} — ciao:{region} ({label})\n"
-    with path.open("a", encoding="utf-8") as f:
+    with path.open("a", encoding="utf-8", newline="") as f:
         f.write(heading + f"- {_one_line(old_entry)}\n")
 
 
@@ -974,7 +974,7 @@ def write_entity_note(
     if path.exists():
         return "exists"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_entity_note(type_id, name, text), encoding="utf-8")
+    path.write_text(render_entity_note(type_id, name, text), encoding="utf-8", newline="")
     return "written"
 
 
@@ -1849,7 +1849,7 @@ def _record_decision(
         # re-queued. ``_has_decision`` still sees it, which is what keeps
         # ``once=True`` idempotent.
         entry["history_only"] = True
-    with log_path.open("a", encoding="utf-8") as handle:
+    with log_path.open("a", encoding="utf-8", newline="") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True
 

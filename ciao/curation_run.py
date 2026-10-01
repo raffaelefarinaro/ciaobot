@@ -1598,7 +1598,7 @@ def _load(path: Path) -> CurationState:
 def _store(path: Path, state: CurationState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.write.tmp")
-    tmp.write_text(json.dumps(state.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(state.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")
     os.replace(tmp, path)
 
 
@@ -1624,7 +1624,7 @@ def _state_lock(vault_root: Path) -> Iterator[None]:
         key = str(path)
     lock_path = lock_path_for(key)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+", encoding="utf-8")
+    handle = lock_path.open("a+", encoding="utf-8", newline="")
     try:
         lock_exclusive(handle.fileno())
         yield
@@ -1866,4 +1866,4 @@ def _write_full_pass_marker(vault_root: Path, *, today: date | None = None) -> N
             f"---\nlast_full_pass: {stamp}\n---\n\n# Curation log\n"
         )
     log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text(text, encoding="utf-8")
+    log.write_text(text, encoding="utf-8", newline="")

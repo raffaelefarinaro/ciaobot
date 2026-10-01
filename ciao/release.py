@@ -143,7 +143,7 @@ def _replace_once(pattern: str, text: str, replacement: str, *, path: Path) -> s
 
 
 def _dump_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
 
 
 def _update_changelog(existing: str, section: str) -> str:
@@ -219,7 +219,7 @@ def apply_release_files(
             f'version = "{version}"',
             path=files.pyproject,
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
     init_text = files.package_init.read_text(encoding="utf-8")
@@ -230,7 +230,7 @@ def apply_release_files(
             f'__version__ = "{version}"',
             path=files.package_init,
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
     web_package = _read_json(files.web_package)
@@ -251,7 +251,7 @@ def apply_release_files(
     )
     files.changelog.write_text(
         _update_changelog(existing_changelog, changelog_section),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     return files.tracked()
 
@@ -273,7 +273,7 @@ def _bump_service_worker_caches(files: ReleaseFiles, version: str) -> None:
             text,
         )
         if bumped != text:
-            path.write_text(bumped, encoding="utf-8")
+            path.write_text(bumped, encoding="utf-8", newline="")
 
 
 def _run(

@@ -669,7 +669,7 @@ def migrate_legacy_companion(
             ),
         }
         temporary = receipt_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="")
         os.replace(temporary, receipt_path)
     except OSError as exc:
         return ServiceResult(False, "migrate", str(exc), asdict(runtime))

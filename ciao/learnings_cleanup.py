@@ -1606,7 +1606,7 @@ def write_receipt(path: Path, receipt: dict[str, Any]) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(".json.tmp")
     try:
-        tmp.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8", newline="")
         tmp.replace(target)
     except OSError:
         tmp.unlink(missing_ok=True)

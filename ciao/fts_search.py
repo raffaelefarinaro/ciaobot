@@ -1195,7 +1195,7 @@ def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
             "paths": paths[:50],
         }
         with keyed_lock(f"search-hits:{path}"):
-            with path.open("a", encoding="utf-8") as f:
+            with path.open("a", encoding="utf-8", newline="") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             if path.stat().st_size > _HITS_MAX_BYTES:
                 lines = path.read_text(encoding="utf-8").splitlines()[-_HITS_KEEP_LINES:]
@@ -1203,7 +1203,7 @@ def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
                 # never observes a half-rewritten file, and a failed write
                 # leaves the previous log intact.
                 tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="")
                 os.replace(tmp, path)
     except Exception:  # noqa: BLE001 — telemetry must never break search
         logger.debug("Could not record search hits", exc_info=True)
