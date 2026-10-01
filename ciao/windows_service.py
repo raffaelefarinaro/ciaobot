@@ -11,6 +11,12 @@ output is not lost with the console that no longer exists.
 task is the exit code of ``/Query`` and the health of the engine is the engine's
 own port, probed by the caller. Every call is an argv list with a timeout, never
 a shell.
+
+This module also owns the lifecycle ``ciao service`` drives on Windows
+(``status``, ``start``, ``stop``, ``restart``) and answers in
+``macos_service.ServiceResult``, so the CLI prints one result shape on every
+platform. The macOS desktop shell and the engine updater have no Windows
+equivalent and are not stubbed here; the CLI refuses those outright.
 """
 
 from __future__ import annotations
@@ -19,7 +25,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path, PureWindowsPath
+from typing import Any
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape
+
+from ciao import macos_service
 
 TASK_NAME = "\\Ciaobot\\Engine"
 TASK_FILE_NAME = "Ciaobot-Engine.xml"
@@ -28,6 +38,9 @@ RESTART_INTERVAL = "PT1M"   # the schema minimum
 RESTART_COUNT = 999         # the schema maximum
 SCHTASKS_TIMEOUT_S = 30.0
 HANDOFF_DELAY_S = 3
+# The task schema's namespace: every element in the document is qualified, so a
+# reader has to qualify its search the same way or it finds nothing.
+TASK_NS = "{http://schemas.microsoft.com/windows/2004/02/mit/task}"
 # These three are `subprocess` attributes on Windows only. Reading them through
 # getattr keeps mypy (and the tests, which run on POSIX) honest about the
 # literal values rather than pretending the platform provides them.
@@ -257,3 +270,178 @@ def spawn_delayed_start(name: str = TASK_NAME) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def task_workspace(definition: Path) -> Path | None:
+    """The workspace the stored definition serves, or None if it says nothing.
+
+    The working directory is the one value in a task definition that answers
+    "which workspace is this task for?", which is what the repoint guards need.
+    Unreadable or malformed XML is None rather than an error: there is no
+    workspace to disagree with, and refusing to register would strand the user
+    behind a corrupt file.
+    """
+
+    try:
+        root = ElementTree.parse(str(definition)).getroot()
+    except (OSError, ElementTree.ParseError):
+        return None
+    element = root.find(
+        f"{TASK_NS}Actions/{TASK_NS}Exec/{TASK_NS}WorkingDirectory"
+    )
+    text = (element.text or "").strip() if element is not None else ""
+    return Path(text) if text else None
+
+
+# Asked of the user in every place where the answer is "there is no task yet".
+# One string, so `status`, `start`, `stop` and `restart` cannot drift into
+# telling the same person three different ways to register it.
+_NOT_REGISTERED = (
+    "Ciaobot engine task is not registered. "
+    "Run `ciao setup --workspace <path> --load-launchd --yes`."
+)
+
+
+def service_status(port: int) -> macos_service.ServiceResult:
+    """Registered (a ``/Query`` exit code) and reachable (the engine's own port).
+
+    Both facts are asked of the machine rather than parsed out of localized
+    output. The caller resolves ``port`` from the task workspace's ``.env``, the
+    way the macOS status resolves it from the plist.
+    """
+
+    try:
+        registered = task_exists()
+    except WindowsServiceError as exc:
+        return _failed("status", str(exc))
+    reachable = macos_service.server_reachable(port)
+    if reachable:
+        message = "Ciaobot engine is running."
+    elif registered:
+        message = f"Ciaobot engine is registered but not reachable (task {TASK_NAME})."
+    else:
+        message = _NOT_REGISTERED
+    return macos_service.ServiceResult(
+        True,
+        "status",
+        message,
+        {"registered": registered, "reachable": reachable, "task": TASK_NAME},
+    )
+
+
+def start_service(workspace: Path | None = None) -> macos_service.ServiceResult:
+    """Register the task for ``workspace`` when it is missing, then run it.
+
+    The repoint refusal is the caller's: it holds both the requested workspace
+    and the stored one, and refuses before anything is written here, so
+    reaching this function means the workspace is allowed to be the task's.
+
+    An already-registered task is started, never re-registered: rewriting it
+    would repoint the engine at this run's interpreter behind the guard's back,
+    and the guard has already established the workspace is the right one.
+    """
+
+    try:
+        registered = task_exists()
+    except WindowsServiceError as exc:
+        return _failed("start", str(exc))
+    if not registered:
+        if workspace is None:
+            # Nothing to register and no workspace to register for. Say so in
+            # our own words rather than surfacing a localized `/Run` error.
+            return _failed("start", _NOT_REGISTERED, {"setup_required": True})
+        try:
+            definition = write_task_definition(
+                workspace=Path(workspace).expanduser().resolve(),
+                python=os.environ.get("CIAO_ENGINE_PATH", "").strip() or None,
+                directory=default_task_dir(),
+            )
+            register_task(definition)
+        except (OSError, ValueError, WindowsServiceError) as exc:
+            return _failed("start", str(exc))
+    try:
+        start_task()
+    except WindowsServiceError as exc:
+        return _failed("start", str(exc))
+    return macos_service.ServiceResult(
+        True, "start", "Ciaobot engine started.", {"task": TASK_NAME}
+    )
+
+
+def stop_service(port: int, *, force: bool = False) -> macos_service.ServiceResult:
+    """``/End`` the task. Active chats need ``force``, as on macOS."""
+
+    guard = _active_chat_guard(port, "stop", force)
+    if guard is not None:
+        return guard
+    failure = _end_task("stop")
+    if failure is not None:
+        return failure
+    return macos_service.ServiceResult(
+        True, "stop", "Ciaobot engine stopped.", {"task": TASK_NAME}
+    )
+
+
+def restart_service(port: int, *, force: bool = False) -> macos_service.ServiceResult:
+    """End the task, then run it again. Active chats need ``force``, as on macOS."""
+
+    guard = _active_chat_guard(port, "restart", force)
+    if guard is not None:
+        return guard
+    # A task that was not running is not an error here: the point of a restart
+    # is that the engine runs afterwards, and `/Run` is what makes that true.
+    failure = _end_task("restart")
+    if failure is not None:
+        return failure
+    try:
+        start_task()
+    except WindowsServiceError as exc:
+        return _failed("restart", str(exc))
+    return macos_service.ServiceResult(
+        True, "restart", "Ciaobot engine restarted.", {"task": TASK_NAME}
+    )
+
+
+def _end_task(action: str) -> macos_service.ServiceResult | None:
+    """``/End``, tolerating a task that is registered but not running.
+
+    ``schtasks /End`` exits non-zero when the task has no running instance, so
+    "already stopped" and "no such task" look the same on the wire. ``/Query``
+    tells them apart: an unregistered task is a refusal the user can act on,
+    and a stopped one is the state they asked for. None means the end is done.
+    """
+
+    try:
+        stop_task()
+        return None
+    except WindowsServiceError as exc:
+        try:
+            registered = task_exists()
+        except WindowsServiceError:
+            return _failed(action, str(exc))
+        if registered:
+            return None
+        return _failed(action, _NOT_REGISTERED)
+
+
+def _failed(
+    action: str, message: str, details: dict[str, Any] | None = None
+) -> macos_service.ServiceResult:
+    return macos_service.ServiceResult(False, action, message, details or {})
+
+
+def _active_chat_guard(port: int, action: str, force: bool) -> macos_service.ServiceResult | None:
+    """A refusal while chats are active, else None. ``/End`` is a hard stop."""
+
+    if force:
+        return None
+    active = macos_service.active_chat_ids(port)
+    if not active:
+        return None
+    return macos_service.ServiceResult(
+        False,
+        action,
+        "Active chats must be confirmed before "
+        f"{'stopping' if action == 'stop' else 'restarting'} the engine.",
+        {"active_chat_ids": active, "requires_confirmation": True, "task": TASK_NAME},
+    )

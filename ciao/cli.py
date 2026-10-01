@@ -770,6 +770,17 @@ def _setup_registry_vaults(
     ]
 
 
+def _service_platform() -> bool:
+    """True where ``ciao setup`` installs a per-user background service.
+
+    macOS (a LaunchAgent) and Windows (a Task Scheduler logon task) both have
+    one; Linux does not, and there ``--load-launchd`` is refused rather than
+    silently ignored.
+    """
+
+    return sys.platform in ("darwin", "win32")
+
+
 def setup_workspace(
     workspace: Path | str,
     *,
@@ -798,7 +809,7 @@ def setup_workspace(
     # existing notes folder when the live LaunchAgent would be hijacked.
     # The later `_write_launchd_plist` guard is defense-in-depth; this one
     # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
-    write_launchd = sys.platform == "darwin" or launch_agents_dir is not None
+    write_launchd = _service_platform() or launch_agents_dir is not None
     if write_launchd and not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
@@ -813,7 +824,7 @@ def setup_workspace(
                 else backend.agents_dir()
             )
             if backend.is_live_agents_dir(_early_launch):
-                existing = _plist_workspace(_early_launch)
+                existing = _registered_service_workspace(_early_launch)
                 if existing is not None and existing != root:
                     raise RuntimeError(
                         f"Refusing to repoint live LaunchAgent from {existing} to {root}: "
@@ -1174,19 +1185,39 @@ def setup_workspace(
             if launch_agents_dir is not None
             else service_backend.current_backend().agents_dir()
         )
-        written.append(_write_launchd_plist(
-            workspace=root,
-            launch_agents_dir=launch_dir,
-            engine_path=resolved_engine,
-            runtime_root=runtime_root,
-            port=port,
-            path=os.environ.get("PATH", ""),
-            plist_name="com.ciao.server.plist",
-            confirm_repoint=confirm_repoint,
-        ))
-        # Explicit --launch-agents-dir also permits offline plist generation.
-        _remove_legacy_app_shortcuts(app_root_dir)
-        _disable_legacy_menubar_agent(launch_dir)
+        if sys.platform == "win32":
+            from ciao import windows_service
+
+            # The Windows definition is Task Scheduler XML written by the module
+            # that owns the task, not a plist. The repoint guard already ran
+            # above, through `_registered_service_workspace`.
+            #
+            # The renderer refuses values the task would only reject at logon:
+            # an interpreter that is not python*.exe, a UNC workspace, a
+            # missing USERNAME. Both setup callers report RuntimeError, so a
+            # bad value is a message and an exit code, never a traceback.
+            try:
+                written.append(windows_service.write_task_definition(
+                    workspace=root,
+                    python=resolved_engine,
+                    directory=launch_dir,
+                ))
+            except (ValueError, windows_service.WindowsServiceError) as exc:
+                raise RuntimeError(str(exc)) from exc
+        else:
+            written.append(_write_launchd_plist(
+                workspace=root,
+                launch_agents_dir=launch_dir,
+                engine_path=resolved_engine,
+                runtime_root=runtime_root,
+                port=port,
+                path=os.environ.get("PATH", ""),
+                plist_name="com.ciao.server.plist",
+                confirm_repoint=confirm_repoint,
+            ))
+            # Explicit --launch-agents-dir also permits offline plist generation.
+            _remove_legacy_app_shortcuts(app_root_dir)
+            _disable_legacy_menubar_agent(launch_dir)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -1229,16 +1260,61 @@ def _plist_workspace(launch_agents_dir: Path) -> Path | None:
         return None
 
 
+def _registered_service_workspace(definitions_dir: Path) -> Path | None:
+    """Workspace the installed service definition serves, if it says one.
+
+    The platform's own answer: the plist's ``CIAO_WORKSPACE`` on macOS, the
+    task XML's ``Exec/WorkingDirectory`` on Windows. Both resolve the path, so a
+    caller can compare it with a requested workspace.
+    """
+
+    if sys.platform == "win32":
+        from ciao import windows_service
+
+        # `unregister_task` leaves the XML on disk, so a definition is not proof
+        # a task exists: ask Task Scheduler. Refusing to repoint a task that was
+        # already deleted would strand the user behind a stale file.
+        try:
+            if not windows_service.task_exists():
+                return None
+        except windows_service.WindowsServiceError:
+            return None
+        workspace = windows_service.task_workspace(
+            definitions_dir.expanduser() / windows_service.TASK_FILE_NAME
+        )
+        try:
+            return workspace.expanduser().resolve() if workspace is not None else None
+        except OSError:
+            return workspace
+    return _plist_workspace(definitions_dir)
+
+
+def _service_definition(launch_dir: Path | str | None) -> Path | None:
+    """The service definition this platform keeps in ``launch_dir``, or None.
+
+    The server LaunchAgent on macOS, the Task Scheduler XML on Windows.
+    """
+
+    if launch_dir is None:
+        return None
+    if sys.platform == "win32":
+        from ciao import windows_service
+
+        return Path(launch_dir).expanduser() / windows_service.TASK_FILE_NAME
+    return Path(launch_dir).expanduser() / "com.ciao.server.plist"
+
+
 def _setup_command(args: argparse.Namespace) -> int:
     root = Path(args.workspace).expanduser().resolve()
-    if args.load_launchd and sys.platform != "darwin":
+    if args.load_launchd and not _service_platform():
         print(
-            "Error: --load-launchd requires macOS. On Linux use `ciao linux-service`.",
+            "Error: --load-launchd requires macOS or Windows. "
+            "On Linux use `ciao linux-service`.",
             file=sys.stderr,
         )
         return 2
     launch_dir = args.launch_agents_dir
-    if launch_dir is None and sys.platform == "darwin":
+    if launch_dir is None and _service_platform():
         launch_dir = service_backend.current_backend().agents_dir()
 
     # Guard against the two ways `ciao setup` silently hijacks the workspace:
@@ -1267,7 +1343,10 @@ def _setup_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        existing = _plist_workspace(Path(launch_dir)) if launch_dir is not None else None
+        existing = (
+            _registered_service_workspace(Path(launch_dir))
+            if launch_dir is not None else None
+        )
         if existing is not None and existing != root:
             allow_env = os.environ.get(
                 "CIAO_ALLOW_LAUNCH_AGENT_REPOINT", ""
@@ -1323,28 +1402,33 @@ def _setup_command(args: argparse.Namespace) -> int:
         )
     # One agent now: setup deletes the retired com.ciao.menubar plist rather
     # than writing it, so there is nothing else here to load.
-    server_plist = (
-        Path(launch_dir).expanduser() / "com.ciao.server.plist"
-        if launch_dir is not None else None
-    )
-    plists = [server_plist] if server_plist is not None and server_plist.is_file() else []
+    definition = _service_definition(launch_dir)
+    definitions = [definition] if definition is not None and definition.is_file() else []
     if args.load_launchd:
         rc = setup_rc
         backend = service_backend.current_backend()
-        for plist in plists:
+        for agent_definition in definitions:
             # Keep a real load failure visible to the installer and preserve
             # its status as the setup result - except that launchctl's own 3
             # would be read as the tolerated memory warning, so the installer
             # would continue with the agent never loaded. Anything load
             # returns is a hard failure: report it as 1.
-            lrc = backend.load_agent(plist)
+            lrc = backend.load_agent(agent_definition)
             if lrc:
                 rc = 1 if lrc == SETUP_MEMORY_FAILED_RC else lrc
         _print_setup_summary(root, _pwa_port_from_env(root, args.port))
         return rc
-    for plist in plists:
-        print(f"LaunchAgent not loaded. To load it: launchctl load -w {plist}")
-    if sys.platform.startswith("linux") and not plists:
+    for agent_definition in definitions:
+        if sys.platform == "win32":
+            print(
+                "Task not registered. To register it: "
+                f"ciao setup --workspace {root} --load-launchd"
+            )
+        else:
+            print(
+                f"LaunchAgent not loaded. To load it: launchctl load -w {agent_definition}"
+            )
+    if sys.platform.startswith("linux") and not definitions:
         print(
             "Workspace ready. Run `ciao run` from the workspace, or use "
             "`ciao linux-service` to render a systemd unit."
@@ -5379,12 +5463,15 @@ def _service_command(args: argparse.Namespace) -> int:
     as_json = bool(args.as_json)
     if getattr(args, "deprecated_alias", False) and not as_json:
         print("`ciao desktop-service` is deprecated; use `ciao service`.", file=sys.stderr)
+    if sys.platform == "win32":
+        return _windows_service_command(args, as_json)
     if sys.platform != "darwin":
         return macos_service.print_result(
             macos_service.ServiceResult(
                 False,
                 str(action),
-                "`ciao service` manages the macOS LaunchAgent. On Linux use `ciao linux-service` and systemctl.",
+                "`ciao service` manages the macOS LaunchAgent and the Windows "
+                "logon task. On Linux use `ciao linux-service` and systemctl.",
                 {},
             ),
             as_json=as_json,
@@ -5456,6 +5543,122 @@ def _service_command(args: argparse.Namespace) -> int:
             {},
         )
         return macos_service.print_result(parser_error, as_json=as_json)
+    return macos_service.print_result(result, as_json=as_json)
+
+
+# The macOS desktop shell and the engine updater. They have no Windows
+# equivalent yet, so they fail with a clean result instead of half-running.
+_WINDOWS_UNAVAILABLE_ACTIONS = (
+    "login",
+    "update-engine",
+    "migrate",
+    "migration-classify",
+    "rollback",
+)
+
+
+def _validate_service_workspace(workspace: Path) -> Path:
+    """Resolve and check a workspace the engine service may serve.
+
+    The two checks `_register_launchd_service` makes before writing a plist: a
+    Ciaobot workspace has a ``.env``, and the app's own source checkout never is
+    one. The macOS TCC check is left out -- it names launchd and macOS privacy
+    protection, neither of which exists on Windows.
+    """
+
+    root = workspace.expanduser().resolve()
+    if not (root / ".env").is_file():
+        raise RuntimeError(
+            f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
+        )
+    if _looks_like_source_checkout(root):
+        raise RuntimeError(
+            f"{root} looks like the Ciaobot source checkout, not a workspace. "
+            "Pass your workspace folder to --workspace."
+        )
+    return root
+
+
+def _windows_service_port() -> int:
+    """Port the Windows engine answers on: the task workspace's ``.env``, else the default."""
+
+    from ciao import macos_service, windows_service
+
+    workspace = windows_service.task_workspace(
+        windows_service.default_task_dir() / windows_service.TASK_FILE_NAME
+    )
+    if workspace is None:
+        return macos_service.DEFAULT_PORT
+    return _pwa_port_from_env(workspace, macos_service.DEFAULT_PORT)
+
+
+def _windows_service_command(args: argparse.Namespace, as_json: bool) -> int:
+    """`ciao service` on Windows: the engine's Task Scheduler logon task.
+
+    Only the generic lifecycle exists there. The macOS path answers with the
+    same `ServiceResult`, so plain and `--json` output are one shape everywhere.
+    """
+
+    from ciao import macos_service, windows_service
+
+    action = str(args.service_action)
+    if action == "status":
+        result = windows_service.service_status(_windows_service_port())
+    elif action == "start":
+        workspace = getattr(args, "workspace", None)
+        if workspace is not None:
+            requested: Path | None = None
+            try:
+                requested = _validate_service_workspace(Path(workspace))
+            except (RuntimeError, OSError) as exc:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(
+                        False, "start", str(exc), {"setup_required": True}
+                    ),
+                    as_json=as_json,
+                )
+            # Refuse to repoint a task that already serves another workspace,
+            # before anything is written. Same wording as the macOS path.
+            installed = _registered_service_workspace(
+                windows_service.default_task_dir()
+            )
+            if installed is not None and installed != requested:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(
+                        False,
+                        "start",
+                        f"The registered task serves {installed}, not {requested}. "
+                        f"Run `ciao setup --workspace {requested} --load-launchd --yes` to repoint it.",
+                        {
+                            "installed_workspace": str(installed),
+                            "requested_workspace": str(requested),
+                        },
+                    ),
+                    as_json=as_json,
+                )
+        result = windows_service.start_service(workspace)
+    elif action == "stop":
+        result = windows_service.stop_service(
+            _windows_service_port(), force=bool(args.force)
+        )
+    elif action == "restart":
+        result = windows_service.restart_service(
+            _windows_service_port(), force=bool(args.force)
+        )
+    elif action in _WINDOWS_UNAVAILABLE_ACTIONS:
+        result = macos_service.ServiceResult(
+            False,
+            action,
+            f"`ciao service {action}` is not available on Windows yet.",
+            {},
+        )
+    else:  # pragma: no cover - argparse constrains the action.
+        result = macos_service.ServiceResult(
+            False,
+            action,
+            "Unknown service action.",
+            {},
+        )
     return macos_service.print_result(result, as_json=as_json)
 
 

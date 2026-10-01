@@ -222,6 +222,9 @@ def test_macos_schedule_server_handoff_swallows_oserror(
     plist = home / "Library" / "LaunchAgents" / "com.ciao.server.plist"
     plist.parent.mkdir(parents=True)
     plist.write_text("plist", encoding="utf-8")
+    # The kickstart line needs a uid, and Windows has no os.getuid. This test is
+    # about the swallowed OSError, not about the platform, so it runs there too.
+    monkeypatch.setattr(macos_service.os, "getuid", lambda: 501, raising=False)
 
     def fail_popen(*args, **kwargs):
         raise OSError("cannot spawn")

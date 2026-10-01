@@ -1088,10 +1088,10 @@ def test_setup_workspace_early_guard_uses_the_backend(
     assert not target.exists(), "the early guard must refuse before creating anything"
 
 
-def test_setup_workspace_does_not_ask_for_a_backend_without_launchd(
+def test_setup_workspace_does_not_ask_for_a_backend_on_linux(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(cli, "sys", _PlatformShim(sys, "win32"))
+    monkeypatch.setattr(cli, "sys", _PlatformShim(sys, "linux"))
     monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
 
     def no_backend():
@@ -1103,6 +1103,38 @@ def test_setup_workspace_does_not_ask_for_a_backend_without_launchd(
 
     assert (tmp_path / "ws").is_dir()
     assert not any("LaunchAgents" in str(path) for path in written)
+
+
+def test_setup_workspace_asks_the_backend_where_a_service_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """macOS and Windows both have a background service, so setup writes its
+    definition by default (#845) and the definition dir comes from the backend.
+    """
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
+    agents = tmp_path / "LaunchAgents"
+    asked: list[str] = []
+
+    class _DarwinBackend(_RecordingBackend):
+        def agents_dir(self) -> Path:
+            asked.append("agents_dir")
+            return agents
+
+        def is_live_agents_dir(self, _path: Path) -> bool:
+            return False
+
+    monkeypatch.setattr(cli.service_backend, "current_backend", _DarwinBackend)
+
+    written = cli.setup_workspace(
+        tmp_path / "ws", app_dir=tmp_path / "Applications"
+    )
+
+    assert set(asked) == {"agents_dir"}
+    plist = agents / "com.ciao.server.plist"
+    # written lists the workspace files first; the definition is written last.
+    assert written[-1] == plist
+    assert plist.is_file()
 
 
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
