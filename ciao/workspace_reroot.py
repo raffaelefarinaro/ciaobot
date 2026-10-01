@@ -38,6 +38,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from ciao.git_proc import EXACT_BYTES
 from ciao.workspace_guide import (
     GUIDE_NAME,
     LEGACY_GUIDE_NAME,
@@ -357,7 +358,7 @@ def run_git(root: Path, *args: str) -> tuple[int, str]:
     import subprocess
 
     proc = subprocess.run(
-        ["git", "-C", str(root), *args],
+        ["git", *EXACT_BYTES, "-C", str(root), *args],
         capture_output=True,
         text=True, encoding="utf-8",
         check=False,
