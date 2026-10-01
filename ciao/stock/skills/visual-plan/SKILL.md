@@ -36,7 +36,7 @@ Also skip it for a routine working doc: notes, an analysis, a draft with no appr
    - document plus both when the task needs architecture and UI review.
 6. Write the Markdown plan with the resume block, checkpoint ledger, decisions, open questions, feedback log, implementation tasks, and verification gates. Copy `plan-template.md` into the user's project folder or `<vault>/Workspace/`, then tailor it to the task.
 7. Create only the visual companions that help answer the review question. Keep them grounded in real product labels, current app chrome, actual file paths, and stated assumptions. Follow `visual-output.md` for the decision rules, and delegate all HTML authoring (interactive surfaces and inline-SVG diagrams alike) to the stock `html-artifact` skill.
-8. Surface the Markdown plan with `file_surface`. Surface a companion separately when the user needs to inspect it.
+8. Surface the Markdown plan with `ciao file surface <path>`. Surface a companion separately when the user needs to inspect it.
 9. Ask for approval in the same handoff. Name the files and areas that implementation will touch.
 10. Stop before source edits until the user approves the plan.
 11. On resume, read the plan again, reconcile its status with the live repository, and continue from the first incomplete checkpoint.

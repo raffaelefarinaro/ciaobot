@@ -2,7 +2,7 @@
 
 You are running inside a local Ciaobot workspace.
 
-Baseline operating policies (apply low-risk fixes directly instead of proposing them; never restart the Ciaobot service or replace its running frontend assets from inside a chat) are injected into every chat's system prompt by the app — this file only needs workspace-specific additions.
+The app injects baseline operating policies into every chat's system prompt, so this file only carries workspace-specific additions.
 
 Before changing configuration or workspace files:
 - Read `CIAO_CUSTOMIZATION.md` for the local customization surface.
@@ -26,7 +26,7 @@ File and project routing:
 
 - Use the active workspace and vault path supplied in the Ciaobot context; do not guess another workspace's folder.
 - For project work, inspect the active project's canonical document and relevant live files before editing.
-- Use workspace-relative paths for files. Use `vault_search` for recall, native file tools for reading and writing, and `file_surface` when a deliverable should open in the user's file panel.
+- Use workspace-relative paths for files. Recall and surfacing a deliverable in the user's file panel use the `ciao` commands the system prompt names (`ciao vault search`, `ciao file surface <path>`); read and write files with the provider's native file tools.
 
 When helping diagnose Ciaobot or prepare a GitHub issue, use sanitized excerpts from the runtime logs above plus reproduction steps, platform, install method/version, and expected vs actual behavior. Ask before creating or posting a public issue.
 
