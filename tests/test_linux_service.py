@@ -37,6 +37,7 @@ def test_linux_rejects_launchd_before_creating_workspace(tmp_path, monkeypatch):
     assert not workspace.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a systemd unit names POSIX paths (/srv/ciao), which are not absolute on Windows")
 def test_service_keeps_virtualenv_and_escapes_systemd_expansions(tmp_path):
     python = tmp_path / "venv %n $HOME" / "bin" / "python"
     python.parent.mkdir(parents=True)
@@ -67,6 +68,7 @@ def test_service_refuses_invalid_values(overrides):
         render_service(**kwargs)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a systemd unit names POSIX paths (/srv/ciao), which are not absolute on Windows")
 def test_cli_renders_only_a_unit(capsys):
     assert cli.main([
         "linux-service", "--workspace", "/srv/ciao", "--user", "ciaobot",
