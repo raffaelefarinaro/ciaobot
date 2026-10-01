@@ -7,6 +7,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from ciao.git_proc import EXACT_BYTES
+
 from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger(__name__)
@@ -254,7 +256,7 @@ async def _commit_and_push(workspace: Path, message: str) -> tuple[bool, str]:
     async def _git(*args: str) -> tuple[int, str]:
         result = await asyncio.to_thread(
             subprocess.run,
-            ["git", *args],
+            ["git", *EXACT_BYTES, *args],
             cwd=str(workspace),
             capture_output=True,
             text=True,

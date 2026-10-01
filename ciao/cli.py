@@ -27,6 +27,7 @@ from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
 from ciao.jsonio import write_private_text
 from ciao.os_support.console import use_utf8_stdio
+from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.shell_hints import path_hint, path_hint_note
 from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 
@@ -572,6 +573,25 @@ def _ensure_workspace_gitignore(root: Path) -> None:
         handle.write(text)
 
 
+def _ensure_exact_bytes(root: Path) -> None:
+    """Have ``root``'s own git config store exact bytes (``core.autocrlf=false``).
+
+    Only when the repo does not set it already: a value the user chose for this
+    repo stands. See ``git_proc.EXACT_BYTES`` for why; the engine passes the same
+    setting on every call, so a repo this has not touched yet behaves the same.
+    """
+    current = subprocess.run(
+        ["git", "-C", str(root), "config", "--local", "--get", "core.autocrlf"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if current.returncode == 0:
+        return
+    subprocess.run(
+        ["git", "-C", str(root), "config", "--local", "core.autocrlf", "false"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+
+
 def ensure_workspace_git(root: Path) -> None:
     """Make sure the workspace is a git repository with a protective .gitignore.
 
@@ -585,25 +605,27 @@ def ensure_workspace_git(root: Path) -> None:
         return
     _ensure_workspace_gitignore(root)
     probe = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        ["git", *EXACT_BYTES, "-C", str(root), "rev-parse", "--is-inside-work-tree"],
         capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0 and probe.stdout.strip() == "true":
+        _ensure_exact_bytes(root)
         return
     init = subprocess.run(
-        ["git", "init", "-b", "main", str(root)],
+        ["git", *EXACT_BYTES, "init", "-b", "main", str(root)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if init.returncode != 0:
         print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
         return
+    _ensure_exact_bytes(root)
     subprocess.run(
-        ["git", "-C", str(root), "add", "-A"],
+        ["git", *EXACT_BYTES, "-C", str(root), "add", "-A"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     commit = subprocess.run(
         [
-            "git", "-C", str(root),
+            "git", *EXACT_BYTES, "-C", str(root),
             "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
             "commit", "-m", "Initialize Ciaobot workspace",
         ],
@@ -658,29 +680,31 @@ def ensure_vault_git(root: Path) -> None:
         print("git not found; skipping vault git init", file=sys.stderr)
         return
     probe = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        ["git", *EXACT_BYTES, "-C", str(root), "rev-parse", "--show-toplevel"],
         capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0:
         toplevel = Path(probe.stdout.strip())
         if toplevel == root:
             _ensure_vault_gitignore(root)
+            _ensure_exact_bytes(root)
         return
     _ensure_vault_gitignore(root)
     init = subprocess.run(
-        ["git", "init", "-b", "main", str(root)],
+        ["git", *EXACT_BYTES, "init", "-b", "main", str(root)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if init.returncode != 0:
         print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
         return
+    _ensure_exact_bytes(root)
     subprocess.run(
-        ["git", "-C", str(root), "add", "-A"],
+        ["git", *EXACT_BYTES, "-C", str(root), "add", "-A"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     commit = subprocess.run(
         [
-            "git", "-C", str(root),
+            "git", *EXACT_BYTES, "-C", str(root),
             "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
             "commit", "-m", "Initialize Ciaobot vault",
         ],
