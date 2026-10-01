@@ -387,3 +387,19 @@ def test_force_import_failure_preserves_the_previous_skill(
     # Nothing was left behind: no temp dirs, no backup dirs.
     leftovers = [p for p in tmp_path.iterdir() if p.name != "demo"]
     assert leftovers == []
+
+
+def test_force_import_replaces_an_installed_skill(tmp_path: Path) -> None:
+    """The success path on every OS (#696 C9): Windows refused to rename the old
+    skill onto the empty backup dir mkdtemp made, so every force import failed."""
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Existing\n---\n# existing\n", encoding="utf-8", newline=""
+    )
+    (tmp_path / "demo" / "asset.bin").write_bytes(b"previous")
+
+    extract_skill_zip(_skill_zip("demo"), tmp_path, overwrite=True)
+
+    assert "description: Demo skill" in (tmp_path / "demo" / "SKILL.md").read_text(encoding="utf-8")
+    assert not (tmp_path / "demo" / "asset.bin").exists()
+    assert [p.name for p in tmp_path.iterdir()] == ["demo"]  # no temp or backup dir left

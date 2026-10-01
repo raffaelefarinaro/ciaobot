@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.os_support.files import replace_file
 from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
 
 SCHEMA_VERSION = 1
@@ -155,7 +156,7 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(json.dumps(asdict(receipt), indent=2, sort_keys=True) + "\n")
         make_private(tmp)
-        os.replace(tmp, target)
+        replace_file(tmp, target)
     finally:
         # A no-op once the rename succeeded, a cleanup when it did not.
         tmp.unlink(missing_ok=True)

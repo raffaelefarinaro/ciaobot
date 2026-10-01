@@ -10,7 +10,10 @@ rather than approximately.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+import pytest
 
 from ciao.vault_index import (
     build_filename_index,
@@ -513,6 +516,7 @@ def test_a_retry_after_a_partial_run_can_undo_both_batches(tmp_path: Path) -> No
     assert _snapshot(vault) == before, "both batches restored, byte for byte"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod(0o000) cannot make a file unreadable on Windows")
 def test_a_completed_receipt_is_downgraded_when_a_note_stops_being_readable(
     tmp_path: Path,
 ) -> None:

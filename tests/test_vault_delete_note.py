@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+import sys
+
 import pytest
 from starlette.testclient import TestClient
 from ciao.config import CiaoConfig
@@ -94,6 +96,7 @@ def test_delete_note_cleanup_failure_returns_500_and_keeps_vault_intact(client, 
     assert (vault / "personal" / "B.md").read_text(encoding="utf-8") == b_before
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a read-only directory refusing writes is POSIX permission semantics (os.getuid, chmod)")
 def test_delete_note_unwritable_dir_aborts_before_touching_backlinks(client):
     """An unwritable target directory must fail BEFORE any backlink is rewritten.
 

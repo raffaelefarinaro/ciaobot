@@ -193,3 +193,36 @@ else:
         if not follow_symlinks:
             flags |= os.O_NOFOLLOW
         return os.open(path, flags, mode)
+
+
+# ── Replacing a file that another writer may be replacing too ─────────────
+# POSIX rename(2) is atomic against a concurrent rename onto the same target,
+# so `os.replace` is the whole story there and stays exactly that. On Windows
+# MoveFileEx with MOVEFILE_REPLACE_EXISTING fails with ERROR_ACCESS_DENIED
+# (PermissionError) while another process or thread is in the middle of its own
+# replace of the same target; the refusal is transient, so it is retried for a
+# short, bounded time and then raised. Every other error is raised at once.
+_REPLACE_DEADLINE_S = 2.0
+
+if sys.platform == "win32":
+    import time
+
+    def replace_file(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        """``os.replace``, retrying the transient refusal a concurrent replace causes."""
+        deadline = time.monotonic() + _REPLACE_DEADLINE_S
+        delay = 0.005
+        while True:
+            try:
+                os.replace(src, dst)
+                return
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.1)
+
+else:
+
+    def replace_file(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        """``os.replace``: atomic on POSIX even against a concurrent replace."""
+        os.replace(src, dst)
