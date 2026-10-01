@@ -418,9 +418,12 @@ def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
     assert "not installed" in claude["detail"]
     # The installer drops `claude` into ~/.local/bin, which a default macOS
     # PATH omits, so the wizard offers the PATH line as a second step.
-    # The OS's own line; its exact text per shell is pinned below and in
-    # tests/test_os_support_shell_hints.py.
-    assert claude["path_command"] == claude_path_command()
+    if sys.platform == "win32":
+        # A persistent user-PATH update through the registry (C10).
+        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
+        assert ".local" in claude["path_command"]
+    else:
+        assert "$HOME/.local/bin" in claude["path_command"]
 
 
 def test_setup_status_names_the_desktop_app_when_only_the_cli_is_missing(
@@ -490,7 +493,12 @@ def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
 
     claude = setup_status(config, env={})["providers"]["claude"]
 
-    assert claude["path_command"] == claude_path_command()
+    if sys.platform == "win32":
+        # A persistent user-PATH update through the registry (C10).
+        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
+        assert ".local" in claude["path_command"]
+    else:
+        assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
 
 
 def test_setup_status_offers_no_path_line_for_the_bundled_cli(tmp_path, monkeypatch) -> None:
@@ -657,10 +665,12 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
     # The platform's service definition: the plist, or the Task Scheduler XML
     # on Windows.
-    from ciao import cli
+    if sys.platform == "win32":
+        from ciao import windows_service
 
-    service = cli._service_definition(launch_agents)
-    assert service is not None and service.is_file()
+        assert (launch_agents / windows_service.TASK_FILE_NAME).is_file()
+    else:
+        assert (launch_agents / "com.ciao.server.plist").is_file()
     # The wizard no longer writes the retired rumps launcher bundle or its
     # LaunchAgent; Ciaobot.app is the menu bar.
     assert not (apps / "Ciaobot Server.app").exists()
