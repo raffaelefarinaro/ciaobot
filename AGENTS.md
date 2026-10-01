@@ -44,8 +44,12 @@ Verification:
      must agree: `web/package.json` `engines`, `SUPPORTED_RANGE` in
      `web/scripts/check-node.mjs`, and `docs/DEVELOPMENT.md`.
   4. `cd web && npm run build` after frontend changes.
-  PRs into `develop` only run these on Linux; the macOS job (browser tests and
-  an engine cold-start) runs after merge, so a PR going green is not proof the
+  PRs into `develop` run these on Linux, and the first three on Windows too:
+  the `windows` job (`windows-latest`) blocks on every module importing,
+  `python -m mypy ciao` (natively win32, so a POSIX-only call such as
+  `os.getuid` or `signal.SIGHUP` outside a platform branch fails it), the
+  full `pytest` suite and `npm test`. The macOS job (browser tests and an
+  engine cold-start) runs after merge, so a PR going green is not proof the
   macOS job will.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running — it just will not fail the build for you.

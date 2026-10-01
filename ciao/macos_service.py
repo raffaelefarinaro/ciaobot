@@ -26,6 +26,18 @@ LEGACY_EXECUTABLE = "CiaobotServer"
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def _getuid() -> int:
+    """This user's uid, the ``<uid>`` in launchd's ``gui/<uid>`` domain.
+
+    ``os.getuid`` does not exist on Windows, where this module is imported (its
+    ``ServiceResult`` and ``read_dotenv`` are shared) but no launchd path runs.
+    Read through ``getattr`` so mypy's win32 pass type-checks it too, and typed
+    locally because the ``getattr`` is ``Any`` (``no-any-return``).
+    """
+    getuid: Callable[[], int] = getattr(os, "getuid")
+    return getuid()
+
+
 def default_launch_agents_dir() -> Path:
     """Where LaunchAgent plists are written, honouring ``CIAO_LAUNCH_AGENTS_DIR``.
 
@@ -55,7 +67,7 @@ def bootout_agent(label: str) -> None:
     """Best-effort ``launchctl bootout gui/<uid>/<label>``; output is discarded."""
     try:
         subprocess.run(
-            ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+            ["launchctl", "bootout", f"gui/{_getuid()}/{label}"],
             check=False,
             capture_output=True,
         )
@@ -93,7 +105,7 @@ def schedule_server_handoff() -> bool:
     script = (
         "sleep 3; "
         f"/bin/launchctl load -w '{plist}' 2>/dev/null; "
-        f"/bin/launchctl kickstart gui/{os.getuid()}/{SERVER_LABEL} 2>/dev/null; "
+        f"/bin/launchctl kickstart gui/{_getuid()}/{SERVER_LABEL} 2>/dev/null; "
         "exit 0"
     )
     try:
@@ -269,7 +281,7 @@ def service_status(
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
     runtime = runtime or discover_runtime()
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     installed = Path(runtime.server_plist).is_file()
     try:
         loaded_result = _launchctl(
@@ -310,7 +322,7 @@ def start_service(
             "The server LaunchAgent is not installed. Run `ciao service start --workspace <dir>` to register it, or `ciao setup --workspace <dir> --load-launchd`.",
             {**asdict(runtime), "setup_required": True},
         )
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     domain = f"gui/{resolved_uid}"
     try:
         _launchctl(["enable", f"{domain}/{SERVER_LABEL}"], runner=runner)
@@ -343,7 +355,7 @@ def stop_service(
             "Active chats must be confirmed before stopping the engine.",
             {**asdict(runtime), "active_chat_ids": active, "requires_confirmation": True},
         )
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     try:
         completed = _launchctl(
             ["bootout", f"gui/{resolved_uid}/{SERVER_LABEL}"],
@@ -377,7 +389,7 @@ def restart_service(
             "Active chats must be confirmed before restarting the engine.",
             {**asdict(runtime), "active_chat_ids": active, "requires_confirmation": True},
         )
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     try:
         completed = _launchctl(
             ["kickstart", "-k", f"gui/{resolved_uid}/{SERVER_LABEL}"],
@@ -410,7 +422,7 @@ def set_login_enabled(
             "The server LaunchAgent is not installed.",
             {**asdict(runtime), "setup_required": True},
         )
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     verb = "enable" if enabled else "disable"
     try:
         completed = _launchctl(
@@ -582,7 +594,7 @@ def migrate_legacy_companion(
     old_plist = agents / f"{LEGACY_MENUBAR_LABEL}.plist"
     backup_plist = migration_dir / old_plist.name
     receipt_path = migration_dir / MIGRATION_RECEIPT
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     existing_receipt: dict[str, Any] = {}
     try:
         loaded_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))

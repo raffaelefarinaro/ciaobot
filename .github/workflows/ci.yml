@@ -76,11 +76,14 @@ jobs:
         cache-dependency-path: web/package-lock.json
     - name: Install Python dependencies
       run: python -m pip install -e '.[test]'
-    # Every step below records its result and carries on: the job is a
-    # measurement until C9, and one failing step must not hide the others.
+    # Blocking since C9 (#696): every module imports, mypy's win32 pass is
+    # clean, and the backend and frontend suites pass. Each gate writes its log
+    # and the job fails on it; the steps after a gate run on `!cancelled()`, so
+    # one red gate does not hide the others' results.
     - name: Import every ciao module
       run: |
-        python - <<'EOF' | tee windows-imports.txt || true
+        set -o pipefail
+        python - <<'EOF' | tee windows-imports.txt
         import importlib, pkgutil, traceback
         import ciao
         failed = 0
@@ -93,18 +96,31 @@ jobs:
                 last = traceback.extract_tb(exc.__traceback__)[-1]
                 print(f"FAIL {name}: {type(exc).__name__}: {exc} ({last.filename}:{last.lineno})")
         print(f"imported {len(names) - failed}/{len(names)} modules")
+        raise SystemExit(1 if failed else 0)
         EOF
     - name: Python static type check (win32)
-      run: python -m mypy ciao > windows-mypy.txt 2>&1 || true
+      if: ${{ !cancelled() }}
+      run: |
+        set -o pipefail
+        python -m mypy ciao 2>&1 | tee windows-mypy.txt
     - name: Windows backend tests
-      run: python -m pytest -n auto -q -rfE tests/ > windows-pytest.txt 2>&1 || true
+      if: ${{ !cancelled() }}
+      run: |
+        set -o pipefail
+        python -m pytest -n auto -q -rfE tests/ 2>&1 | tee windows-pytest.txt
     - name: Windows frontend tests
+      if: ${{ !cancelled() }}
       working-directory: web
       env:
         NO_COLOR: '1'
       run: |
-        { npm ci && npm test; } > ../windows-vitest.txt 2>&1 || true
+        set -o pipefail
+        { npm ci && npm test; } 2>&1 | tee ../windows-vitest.txt
+    # The install.ps1 steps below stay advisory: they record what the runner
+    # did, and a hosted runner with no interactive logon is not a verdict on
+    # the installer (see the end-to-end step).
     - name: Build install.ps1 offline fixture
+      if: ${{ !cancelled() }}
       run: |
         python - <<'EOF' || true
         import pathlib, re, shutil, sys
@@ -124,6 +140,7 @@ jobs:
         print("fixture version", VERSION)
         EOF
     - name: Build install.ps1 end-to-end fixture
+      if: ${{ !cancelled() }}
       run: |
         python - <<'EOF' || true
         # The offline fixture above is the bytes `the signed wheel`, which
@@ -161,6 +178,7 @@ jobs:
         print("e2e fixture", version, wheel.name)
         EOF
     - name: install.ps1 offline verification and analyzer (advisory)
+      if: ${{ !cancelled() }}
       run: |
         python -m pip install uv || true
         {
@@ -188,6 +206,7 @@ jobs:
     # datum this step exists to produce, not a failure. Nothing below can fail
     # the job, and the workspace is a throwaway under RUNNER_TEMP.
     - name: install.ps1 end-to-end install and uninstall (advisory)
+      if: ${{ !cancelled() }}
       # The step's shell is Git Bash, whose MSYS path conversion turns a
       # `/Query`, `/TN`, `/v` or `/End` argument into a Windows path before the
       # program ever sees it: `schtasks` and `reg` were being asked to read
@@ -249,7 +268,7 @@ jobs:
         # `tests/` keeps captured log lines that also start with ERROR out.
         grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt | sed -E 's/ - .*//' | sort -u > windows-failures.txt || true
         {
-          echo "### Windows (advisory, #696)"
+          echo "### Windows (#696)"
           echo
           echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
@@ -259,7 +278,18 @@ jobs:
           echo "- install.ps1 end-to-end: $(grep -oE '^(installed|task existed after install|uninstalled|task gone after uninstall): (yes|no)' windows-install-e2e.txt 2>/dev/null | paste -sd',' - | sed -E 's#,#, #g')"
           echo
           echo "Full logs and the failing-test list are in the \`windows-results\` artifact."
+          if [ -s windows-failures.txt ]; then
+            echo
+            echo "Failing tests:"
+            echo
+            sed 's/^/- /' windows-failures.txt
+          fi
         } >> "$GITHUB_STEP_SUMMARY"
+        # The gates above already fail the job; this names the tests that did.
+        if [ -s windows-failures.txt ]; then
+          echo "::error::$(wc -l < windows-failures.txt) Windows test(s) failed; see the job summary"
+          exit 1
+        fi
     - name: Upload results
       if: always()
       uses: actions/upload-artifact@v4

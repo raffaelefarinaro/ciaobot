@@ -121,7 +121,7 @@ unregisters the task, deletes its XML, uninstalls the uv tool, deletes the
 receipt, removes the `PATH` entry **only** if this installer added it (recorded
 in `%LOCALAPPDATA%\Ciaobot\install-state.json`, the two facts nothing else
 keeps), leaves `uv` in place, and prints where the workspace was kept. The
-advisory `windows` CI job runs the file under both PowerShell hosts with
+`windows` CI job's advisory install.ps1 steps run the file under both PowerShell hosts with
 `-DryRun` against a generated fixture, and then runs a real end-to-end
 install/`-Uninstall`/`-NoStart` against a wheel built from the branch, printing
 whether the task existed after each.
@@ -250,11 +250,16 @@ not run `ciao desktop uninstall` yet.
   but not on a PR into `develop`. Nothing builds the app any more, so there is
   no diff for it to react to; a macOS-only regression in a `develop` PR shows up
   on the post-merge push run instead.
-  The `windows` job (`windows-latest`, every PR and push) is advisory while the
-  native Windows port (#696) lands: it imports every `ciao` module, runs
-  `mypy ciao` (natively win32), `pytest -n auto tests/` and `npm test`, never
-  fails, and puts the four counts in the job summary. The full logs and the failing-test
-  list are in its `windows-results` artifact. It becomes blocking at #696's C9.
+  The `windows` job (`windows-latest`, every PR and push) is blocking since
+  #696's C9: it imports every `ciao` module, runs `mypy ciao` (natively win32),
+  `pytest -n auto tests/` and `npm test`, and fails on any of the four. Every
+  gate runs even after an earlier one failed, the job summary lists the four
+  counts and the failing tests by name, and the full logs are in its
+  `windows-results` artifact. Its install.ps1 steps (dry runs under both
+  PowerShell hosts, the analyzer, and a real end-to-end install and
+  `-Uninstall`) stay advisory: a hosted runner has no interactive logon, so a
+  task that does not start there is a datum, not a verdict. Known flaky
+  Windows tests are listed in #696's C9 tracking comment.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
