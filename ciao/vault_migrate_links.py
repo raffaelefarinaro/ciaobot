@@ -73,6 +73,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.git_proc import EXACT_BYTES
 from ciao.vault_index import (
     EXCLUDED_TOP_DIRS,
     build_filename_index,
@@ -286,7 +287,7 @@ def run_git(root: Path, *args: str) -> tuple[int, str]:
     """
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), *args],
+            ["git", *EXACT_BYTES, "-C", str(root), *args],
             capture_output=True,
             text=True, encoding="utf-8",
             check=False,

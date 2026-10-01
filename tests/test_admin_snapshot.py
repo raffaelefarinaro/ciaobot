@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 
 from ciao.git_mutation import repository_mutation, reset_mutation_locks
+from ciao.git_proc import EXACT_BYTES
 from ciao.web import routes_api
 from ciao.web.routes_api import admin_snapshot
 
@@ -118,8 +119,9 @@ def _record_git(
 
     def fake_run(cmd, *args, **kwargs):
         if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
-            verb = cmd[1]
-            calls.append(tuple(cmd[1:]))
+            rest = _without_exact_bytes(cmd[1:])
+            verb = rest[0]
+            calls.append(tuple(rest))
             if fail and verb in fail:
                 rc, out, err = fail[verb]
                 return subprocess.CompletedProcess(cmd, rc, out, err)
@@ -127,6 +129,12 @@ def _record_git(
 
     monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
     return calls
+
+
+def _without_exact_bytes(args: list[str]) -> list[str]:
+    """``args`` after the ``-c core.autocrlf=false`` every engine git carries."""
+    prefix = list(EXACT_BYTES)
+    return args[len(prefix):] if args[: len(prefix)] == prefix else args
 
 
 def _verbs(calls: list[tuple[str, ...]]) -> list[str]:
@@ -317,8 +325,9 @@ async def test_snapshot_cancellation_waits_for_git_before_unlock(
 
     def pausing_run(cmd, *args, **kwargs):
         if isinstance(cmd, list) and len(cmd) > 1 and cmd[0] == "git":
-            calls.append(tuple(cmd[1:]))
-            if cmd[1] == "commit":
+            rest = _without_exact_bytes(cmd[1:])
+            calls.append(tuple(rest))
+            if rest[0] == "commit":
                 # Bounded, so a failing assertion cannot leave this thread
                 # parked after the test has given up on it.
                 entered.set()

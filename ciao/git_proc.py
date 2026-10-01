@@ -31,6 +31,15 @@ from ciao.os_support.processes import ProcessTree, tree_spawn_options
 
 logger = logging.getLogger(__name__)
 
+#: Prepended to every git the engine runs on a workspace or vault repo, so the
+#: bytes it commits are the bytes on disk, on every OS (#696). The vault's
+#: revisions and hashes assume exactly that, and the engine writes exact bytes
+#: (``newline=""``); Git for Windows ships ``core.autocrlf=true`` in its system
+#: config, which would store a CRLF note as an LF blob. On macOS and Linux the
+#: default is already ``false``. ``ensure_workspace_git`` also writes it into the
+#: repo's own config, so the user's git in that repo agrees.
+EXACT_BYTES: tuple[str, ...] = ("-c", "core.autocrlf=false")
+
 #: Stderr detail returned when a git command exceeds its timeout. Callers match
 #: on this to decide whether a remote is unreachable, so keep it stable.
 GIT_TIMEOUT_DETAIL = "git command timed out"
@@ -101,7 +110,7 @@ def run_git_sync(
     """
     try:
         proc = subprocess.run(
-            ["git", *args],
+            ["git", *EXACT_BYTES, *args],
             cwd=str(workspace),
             capture_output=True,
             text=True, encoding="utf-8",
@@ -122,6 +131,7 @@ async def run_git(
     """
     proc = await asyncio.create_subprocess_exec(
         "git",
+        *EXACT_BYTES,
         *args,
         cwd=str(workspace),
         stdout=asyncio.subprocess.PIPE,

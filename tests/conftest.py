@@ -54,6 +54,22 @@ def _no_installed_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _git_stores_exact_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every git a test spawns stores exact bytes, as macOS and Linux git do.
+
+    Git for Windows ships ``core.autocrlf=true`` in its system config, so a
+    fixture repo a test committed with plain ``git`` held LF blobs under CRLF
+    files, and the engine (which passes ``git_proc.EXACT_BYTES``) then saw every
+    such file as modified. Environment config overrides every config file and
+    is overridden by an explicit ``git -c``; ``tests/test_git_exact_bytes.py``
+    sets it back to ``true`` to prove the engine does not rely on this.
+    """
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
+
+
+@pytest.fixture(autouse=True)
 def _reset_exported_dotenv() -> None:
     """Undo any workspace ``.env`` a test exported into ``os.environ``.
 
