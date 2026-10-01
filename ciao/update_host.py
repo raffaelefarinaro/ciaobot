@@ -9,9 +9,10 @@ recovery interpreter lives are all questions this module answers, so that
 
 One protocol, one implementation per platform. :class:`MacUpdateHost` wraps
 launchd, LaunchAgents and the POSIX environment layout exactly as `engine_update`
-did before the seam existed, and :func:`current_update_host` picks the host for
-this machine the way :func:`ciao.service_backend.current_backend` picks a
-service backend. Any platform without a host raises
+did before the seam existed, and :class:`ciao.windows_update.WindowsUpdateHost`
+does the same for Task Scheduler (#857). :func:`current_update_host` picks the
+host for this machine the way :func:`ciao.service_backend.current_backend` picks
+a service backend. Any platform without a host raises
 :class:`UnsupportedPlatformError`: that is the honest answer until one is
 written, not a fallback to the macOS one.
 """
@@ -986,7 +987,28 @@ def current_update_host() -> UpdateHost:
     """The update host for this platform. Reads ``sys.platform`` on every call."""
     if sys.platform == "darwin":
         return MacUpdateHost()
+    if sys.platform == "win32":
+        # Imported here: `windows_update` imports `engine_update`, which imports
+        # this module.
+        from ciao.windows_update import WindowsUpdateHost
+
+        return WindowsUpdateHost()
     raise UnsupportedPlatformError(
         f"Ciaobot has no update host for platform {sys.platform!r}; "
-        "the engine update transaction is macOS-only so far."
+        "the engine update transaction runs on macOS and Windows only."
     )
+
+
+def default_update_host(
+    *, launchctl: Launchctl | None = None, uid: int | None = None
+) -> UpdateHost:
+    """The host the transaction uses when its caller names none.
+
+    Windows gets its own host. Every other platform gets the macOS host, built
+    from the ``launchctl`` and ``uid`` the caller passed, exactly as the
+    transaction did before Windows had a host: the tests drive that host on
+    Linux CI through a fake ``launchctl``, and nothing else changes for them.
+    """
+    if sys.platform == "win32":
+        return current_update_host()
+    return MacUpdateHost(launchctl=launchctl, uid=uid)

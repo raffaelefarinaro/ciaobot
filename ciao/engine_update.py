@@ -43,9 +43,9 @@ from ciao.update_host import (
     RECOVER_LABEL,
     UPDATER_LABEL,
     Launchctl,
-    MacUpdateHost,
     UpdateHost,
     current_update_host,
+    default_update_host,
 )
 
 logger = logging.getLogger(__name__)
@@ -158,10 +158,11 @@ class Operation:
     """The durable record of one staging run, rewritten at every phase.
 
     ``env_freeze`` is what the staged environment was resolved to, recorded
-    while it is still only a directory nobody runs: the apply moves that very
-    env rather than resolving anything, so this is the one place the dependency
-    set of an update is ever known. Audit-only, and nothing in the apply reads
-    it — a record written before the field existed reads as ``""``.
+    while it is still only a directory nobody runs. On macOS the apply moves
+    that very env rather than resolving anything, so there it is audit-only. On
+    Windows the apply rebuilds the live env from the wheel offline, and these
+    are the pins it constrains that rebuild to (#857); a record written before
+    the field existed reads as ``""``, which the Windows apply refuses.
     """
 
     id: str
@@ -350,7 +351,7 @@ def find_uv(receipt_uv: str = "", *, host: UpdateHost | None = None) -> str:
     able to stage without uv is a hard, clearly-explained failure rather than a
     fallback that would install a differently-built env.
     """
-    platform = host or MacUpdateHost()
+    platform = host or default_update_host()
     candidates = [receipt_uv]
     which = shutil.which("uv")
     if which:
@@ -518,7 +519,7 @@ def _stage_locked(
         op.wheel_sha256 = digest
 
         advance("staging")
-        platform = host or MacUpdateHost()
+        platform = host or default_update_host()
         uv_bin = uv or find_uv(_receipt_uv(), host=platform)
         py = python_version or f"{sys.version_info.major}.{sys.version_info.minor}"
         # A real tool env, in a tool dir of this update's own, because the apply
@@ -841,7 +842,7 @@ def apply_update(
     root.mkdir(parents=True, exist_ok=True)
     make_private_dir(root)
     post = http_post or _post_json
-    platform = host or MacUpdateHost(launchctl=launchctl, uid=uid)
+    platform = host or default_update_host(launchctl=launchctl, uid=uid)
     base = f"http://localhost:{platform.engine_port() if port is None else port}"
     handle = acquire_lock(root)
     try:
@@ -1173,7 +1174,7 @@ def run_apply(
     root.mkdir(parents=True, exist_ok=True)
     post = http_post or _post_json
     get = http_get or _get_json
-    platform = host or MacUpdateHost(launchctl=launchctl, uid=uid)
+    platform = host or default_update_host(launchctl=launchctl, uid=uid)
     start = start_service or platform.start_engine
     base = f"http://localhost:{platform.engine_port() if port is None else port}"
     status_url = f"{base}/api/startup-status"
@@ -1230,6 +1231,14 @@ def run_apply(
             return record("no install receipt; there is no installed env to replace")
         if not op.wheel or not Path(op.wheel).is_file():
             return record("the staged wheel is gone; nothing to install")
+        if _sha256(Path(op.wheel))[0] != op.wheel_sha256:
+            # Re-checked here, while the engine still serves, because a host
+            # that rebuilds the env installs from this file: what it installs
+            # must be what staging verified against the signed manifest.
+            return record(
+                "the staged wheel no longer matches the digest recorded when it "
+                "was staged; run: ciao update stage"
+            )
         if not op.env_python or not Path(op.env_python).exists():
             return record("the staged environment is gone; nothing to install")
         if receipt.version != op.from_version:
@@ -1504,7 +1513,7 @@ def recover_interrupted_apply(
         record: Operation = op
         interrupted_at = record.phase
 
-        platform = host or MacUpdateHost(launchctl=launchctl, uid=uid)
+        platform = host or default_update_host(launchctl=launchctl, uid=uid)
         running = (
             updater_loaded()
             if updater_loaded is not None
@@ -1619,7 +1628,7 @@ def recover_apply(
     # path makes no HTTP request at all.
     del http_post
     get = http_get or _get_json
-    platform = host or MacUpdateHost(launchctl=launchctl, uid=uid)
+    platform = host or default_update_host(launchctl=launchctl, uid=uid)
     start = start_service or platform.start_engine
     base = f"http://localhost:{platform.engine_port() if port is None else port}"
     status_url = f"{base}/api/startup-status"
@@ -1845,7 +1854,7 @@ def main(argv: list[str] | None = None) -> int:
         # interrupts that can end a drain and the transaction they end are one
         # decision rather than two. Only the signal set is read here; the rest of
         # the host is the apply's own business.
-        platform = MacUpdateHost()
+        platform = default_update_host()
         # A drain can wait ten minutes, and closing the terminal or a supervisor
         # stopping the process is as ordinary a way to end that wait as Ctrl-C is.
         # The host names those signals, because which ones exist is a platform

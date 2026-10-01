@@ -59,9 +59,17 @@ def test_the_doc_names_the_task_and_files_the_code_writes() -> None:
     assert "install-receipt.json" in doc and "install-state.json" in doc
 
 
-def test_the_update_section_is_a_placeholder_until_857() -> None:
+def test_the_update_section_names_the_tasks_and_commands_the_updater_uses() -> None:
+    from ciao import windows_service
+
     doc = _read("docs/WINDOWS.md")
-    assert "Engine updates on Windows land with #857." in doc
+    section = doc[doc.index("## Update and rollback"): doc.index("## Uninstall")]
+    assert "land with #857" not in section
+    assert windows_service.UPDATER_TASK_NAME in section  # \Ciaobot\Updater
+    assert windows_service.RECOVER_TASK_NAME in section  # \Ciaobot\Recover
+    for command in ("ciao update stage", "ciao update apply", "ciao update status"):
+        assert command in section, command
+    assert "#857" not in _read("ciao/stock/skills/ciao-capabilities/SKILL.md")
 
 
 def test_architecture_describes_the_windows_lifecycle() -> None:

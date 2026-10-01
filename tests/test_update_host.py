@@ -366,7 +366,7 @@ def test_current_update_host_reads_platform_on_every_call(
     monkeypatch.setattr(sys, "platform", "darwin")
     first = current_update_host()
     second = current_update_host()
-    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "linux")
     with pytest.raises(UnsupportedPlatformError):
         current_update_host()
 
@@ -377,7 +377,37 @@ def test_current_update_host_reads_platform_on_every_call(
     assert first is not second
 
 
-@pytest.mark.parametrize("platform", ["linux", "win32", "cygwin", "freebsd14"])
+def test_current_update_host_is_windows_on_win32(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.windows_update import WindowsUpdateHost
+
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    assert isinstance(current_update_host(), WindowsUpdateHost)
+    assert isinstance(update_host.default_update_host(), WindowsUpdateHost)
+
+
+def test_default_update_host_is_the_macos_host_off_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Linux CI drives the transaction through the macOS host and a fake
+    # launchctl, as it did before Windows had a host: the caller's launchctl and
+    # uid are the host's.
+    calls: list[list[str]] = []
+
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    host = update_host.default_update_host(launchctl=launchctl, uid=777)
+
+    assert isinstance(host, MacUpdateHost)
+    host.stop_engine()
+    assert calls == [["bootout", "gui/777/com.ciao.server"]]
+
+
+@pytest.mark.parametrize("platform", ["linux", "cygwin", "freebsd14"])
 def test_current_update_host_refuses_a_platform_with_no_host(
     platform: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -983,4 +1013,23 @@ def test_fake_host_recover_apply_stands_down_while_a_swap_is_in_flight(
     # this tick is the normal case and the next one is seconds away.
     assert result is None
     assert [call[0] for call in host.calls] == ["engine_port", "swap_in_flight"]
+    assert engine.up is True
+
+
+def test_fake_host_run_apply_refuses_a_wheel_that_no_longer_matches_its_digest(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    host = FakeHost(engine, program=engine.live_env / "bin" / "python")
+    # The wheel changed on disk after staging verified it. A host that rebuilds
+    # the env installs from this file (Windows, #857), so the check is shared
+    # and runs before the engine is stopped.
+    with Path(op.wheel).open("ab") as handle:
+        handle.write(b"tampered")
+
+    result = _run_with_host(engine, op, state, receipt_path, host)
+
+    assert result.phase == "failed"
+    assert "no longer matches the digest" in result.error
+    assert "stop_engine" not in [call[0] for call in host.calls]
     assert engine.up is True
