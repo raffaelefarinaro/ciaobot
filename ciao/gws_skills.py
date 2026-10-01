@@ -18,12 +18,13 @@ is an injectable callable so the decision logic stays unit-testable.
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+from ciao.tool_path import resolve_command
 
 # Prefix that marks the skills we regenerate from the CLI. Any directory under
 # the stock skills folder starting with this is treated as a generated gws
@@ -208,10 +209,10 @@ def _normalize(text: str) -> str:
 
 def _gws_generate(dest: Path, *, gws_bin: str = "gws") -> None:
     """Default generator: run ``gws generate-skills`` in ``dest``."""
-    binary = shutil.which(gws_bin) or gws_bin
     try:
+        command = resolve_command(gws_bin) or [gws_bin]
         result = subprocess.run(
-            [binary, "generate-skills"],
+            [*command, "generate-skills"],
             cwd=str(dest),
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
@@ -229,10 +230,10 @@ def _gws_generate(dest: Path, *, gws_bin: str = "gws") -> None:
 
 def installed_gws_version(*, gws_bin: str = "gws", runner=subprocess.run) -> str | None:
     """Return the installed ``gws`` CLI version (e.g. ``0.22.5``) or None."""
-    binary = shutil.which(gws_bin) or gws_bin
     try:
+        command = resolve_command(gws_bin) or [gws_bin]
         result = runner(
-            [binary, "--version"],
+            [*command, "--version"],
             capture_output=True,
             text=True,
             check=False,

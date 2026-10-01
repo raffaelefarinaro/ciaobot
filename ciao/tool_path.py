@@ -31,6 +31,7 @@ import os
 from ciao.os_support.tool_path import (
     clear_terminal_path_cache,
     common_tool_dirs,
+    resolve_command as _resolve_command,
     resolve_executable as _resolve_executable,
     terminal_path,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "clear_terminal_path_cache",
     "common_tool_dirs",
     "login_shell_path",
+    "resolve_command",
     "resolve_on_terminal_path",
     "resolve_tool",
     "terminal_path",
@@ -96,3 +98,17 @@ def resolve_tool(cmd: str) -> str | None:
     a broken install is not reported as a tool that is not installed.
     """
     return _resolve_executable(cmd, path=login_shell_path())
+
+
+def resolve_command(cmd: str) -> list[str]:
+    """The argv prefix that spawns ``cmd`` on the terminal PATH, or ``[]``.
+
+    For callers that spawn an npm-installed tool: ``[exe]`` for an executable,
+    ``[node, script]`` for a Windows npm wrapper that hands a script to node
+    (see :mod:`ciao.os_support.tool_path`). Pass the tool's arguments after it
+    in the same list, so they never go through a shell.
+
+    Raises :class:`~ciao.os_support.tool_path.ToolResolutionError` (an
+    ``OSError``) when the tool is on PATH but cannot be run.
+    """
+    return _resolve_command(cmd, path=login_shell_path())
