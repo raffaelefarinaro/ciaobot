@@ -511,8 +511,8 @@ def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch)
 
     monkeypatch.setattr(
         routes_api,
-        "resolve_tool",
-        lambda name: "/usr/local/bin/gws" if name == "gws" else None,
+        "resolve_command",
+        lambda name: ["/usr/local/bin/gws"] if name == "gws" else [],
     )
     personal_dir = tmp_path / "secrets" / "gws-personal"
     personal_dir.mkdir(parents=True)
@@ -542,7 +542,7 @@ def test_gws_integration_starts_with_no_google_accounts(tmp_path, monkeypatch):
     """A fresh install shows an empty account list, not a personal/work pair."""
     from ciao.web import routes_api
 
-    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
     client, _config, _pcm = _client(tmp_path)
 
     data = client.get("/api/integrations/gws").json()
@@ -554,7 +554,7 @@ def test_gws_integration_starts_with_no_google_accounts(tmp_path, monkeypatch):
 def test_gws_profile_add_and_remove_round_trip(tmp_path, monkeypatch):
     from ciao.web import routes_api
 
-    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
     client, config, _pcm = _client(tmp_path)
 
     added = client.post(
@@ -591,7 +591,7 @@ def test_gws_profile_add_and_remove_round_trip(tmp_path, monkeypatch):
 def test_gws_profile_remove_unlinks_workspaces(tmp_path, monkeypatch):
     from ciao.web import routes_api
 
-    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
     client, config, _pcm = _client(tmp_path)
     client.post("/api/integrations/gws/profiles/add", json={"name": "acme"})
     workspace = next(iter(config.workspaces.values()))
@@ -608,7 +608,7 @@ def test_gws_profile_remove_unlinks_workspaces(tmp_path, monkeypatch):
 def test_gws_profile_add_rejects_an_unusable_name(tmp_path, monkeypatch):
     from ciao.web import routes_api
 
-    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
     client, _config, _pcm = _client(tmp_path)
 
     resp = client.post("/api/integrations/gws/profiles/add", json={"name": "///"})
@@ -619,7 +619,7 @@ def test_gws_profile_add_rejects_an_unusable_name(tmp_path, monkeypatch):
 def test_gws_profile_add_rejects_gws_service_names(tmp_path, monkeypatch):
     from ciao.web import routes_api
 
-    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: "")
+    monkeypatch.setattr(routes_api, "resolve_command", lambda name: [])
     client, _config, _pcm = _client(tmp_path)
 
     service_names = (

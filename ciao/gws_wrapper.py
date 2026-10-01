@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ciao.gws_auth import GWS_SERVICE_NAMES, profile_config_dir
-from ciao.tool_path import login_shell_path, resolve_tool
+from ciao.tool_path import login_shell_path, resolve_command
 
 
 def _configured_workspace_root(config) -> Path | None:
@@ -122,7 +122,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ciao gws: {exc}", file=sys.stderr)
         return 2
 
-    gws = resolve_tool("gws")
+    try:
+        gws = resolve_command("gws")
+    except OSError as exc:
+        print(f"ciao gws: {exc}", file=sys.stderr)
+        return 1
     if not gws:
         print(
             "ciao gws: the 'gws' CLI was not found on PATH. Install it from "
@@ -132,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        os.execve(gws, [gws, *rest], env)
+        os.execve(gws[0], [*gws, *rest], env)
     except OSError as exc:
         print(f"ciao gws: failed to run gws: {exc}", file=sys.stderr)
         return 1

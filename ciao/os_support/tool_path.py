@@ -40,6 +40,15 @@ whose executable is missing (or which launches no single executable) raises
 :class:`ToolResolutionError` rather than passing off an unusable tool as one that
 is not installed.
 
+``resolve_command()`` is for the callers that spawn an npm-installed tool: the
+argv prefix to run it, as a list, so its arguments never meet a shell. A real
+executable is ``[exe]``, exactly ``resolve_executable()``. A wrapper whose launch
+line hands a script to node (``@googleworkspace/cli``'s ``run.js``) is
+``[node.exe, script]``: node found on the same PATH, the script read off the
+launch line the same way, both required to exist. ``cmd.exe`` is never the
+answer, because it would split an unquoted path at a space and rewrite ``&``,
+``%`` and quotes in the tool's arguments. On POSIX it is ``[shutil.which]``.
+
 The helpers below the split are the same code both branches run, defined once
 rather than inside either of them: the PATHEXT search, the shim reader and the
 registry join are the interesting logic here, and hiding them in a branch would
@@ -202,6 +211,45 @@ def _shim_executable(shim: Path) -> str:
     if _suffix_of(target) != ".exe" or os.path.basename(target).lower() == _NODE:
         return ""
     return target
+
+
+# How a wrapper names node as its program: npm's .cmd templates use `_prog`
+# (its own node.exe, or plain `node`) or a bare `node` before the script, its
+# .ps1 template `node$exe` (`$basedir/node$exe` when node sits beside it).
+_NODE_PROGRAMS = {"%_prog%", "node", _NODE, "node$exe"}
+
+
+def _shim_node_script(shim: Path) -> str:
+    """The script a wrapper hands to node on its launch line, or "".
+
+    "" unless that line's program is node and a quoted script follows it; the
+    script is resolved against the wrapper's own directory, as
+    :func:`_shim_executable` resolves an executable.
+    """
+    marker = _LAUNCH_ARGUMENTS.get(shim.suffix.lower())
+    if marker is None:
+        return ""
+    try:
+        text = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in reversed(text.splitlines()):
+        if marker not in line:
+            continue
+        quoted = [token.strip() for token in _QUOTED_PATH.findall(line)]
+        head = line.split('"', 1)[0].split()
+        if head and head[-1].lower() in _NODE_PROGRAMS:
+            program, rest = head[-1], quoted
+        elif quoted:
+            program, rest = quoted[0], quoted[1:]
+        else:
+            return ""
+        name = program.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if program.lower() not in _NODE_PROGRAMS and name not in _NODE_PROGRAMS:
+            return ""
+        # A .ps1 spells its paths with "/"; normpath gives this OS's form.
+        return os.path.normpath(_expand_shim_dir(rest[0], str(shim.parent))) if rest else ""
+    return ""
 
 
 def _npm_bin_dir() -> Path | None:
@@ -370,6 +418,36 @@ if sys.platform == "win32":
         found = _search_pathext(cmd, path)
         return None if found is None else _unwrap_shim(cmd, found)
 
+    def resolve_command(cmd: str, *, path: str) -> list[str]:
+        """The argv prefix that runs ``cmd``, or ``[]`` when it is not on PATH.
+
+        ``[exe]`` for an executable or a wrapper around one; ``[node, script]``
+        for a wrapper that hands a script to node. Raises
+        :class:`ToolResolutionError` when a wrapper leads to neither, or its node
+        or script is not there; never answers with the wrapper itself.
+        """
+        found = _search_pathext(cmd, path)
+        if found is None:
+            return []
+        shim = Path(found)
+        if shim.suffix.lower() not in _LAUNCH_ARGUMENTS or _shim_executable(shim):
+            return [_unwrap_shim(cmd, found)]
+        script = _shim_node_script(shim)
+        if not script:
+            _unwrap_shim(cmd, found)  # raises, naming what the wrapper launches
+        if not os.path.isfile(script):
+            raise ToolResolutionError(
+                f"{found} is the wrapper for {cmd!r} and runs {script} with node, "
+                "which is not there. Install the tool again to repair it."
+            )
+        node = resolve_executable("node", path=path)
+        if not node:
+            raise ToolResolutionError(
+                f"{found} is the wrapper for {cmd!r} and runs {script} with node, "
+                "but node is not on PATH."
+            )
+        return [node, script]
+
 else:
     # Markers wrap the printed PATH so noisy shell rc files (which may echo
     # banners to stdout) don't corrupt the value we extract.
@@ -507,3 +585,8 @@ else:
     def resolve_executable(cmd: str, *, path: str) -> str | None:
         """Absolute path to ``cmd`` on ``path``, or None. See the module docstring."""
         return shutil.which(cmd, path=path)
+
+    def resolve_command(cmd: str, *, path: str) -> list[str]:
+        """The argv prefix that runs ``cmd``: ``[shutil.which]``, or ``[]``."""
+        found = resolve_executable(cmd, path=path)
+        return [found] if found else []

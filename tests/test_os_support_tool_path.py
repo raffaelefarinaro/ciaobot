@@ -115,6 +115,57 @@ if (Test-Path "$basedir/node$exe") {
 exit $ret
 """
 
+# What `npm install -g @googleworkspace/cli` (0.22.5) wrote on Windows 11,
+# verbatim: npm's current template, whose launch line hands `run.js` to node.
+GWS_CMD_SHIM = """@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\\node.exe" (
+  SET "_prog=%dp0%\\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@googleworkspace\\cli\\run.js" %*
+"""
+
+GWS_PS1_SHIM = """#!/usr/bin/env pwsh
+$basedir=Split-Path $MyInvocation.MyCommand.Definition -Parent
+
+$exe=""
+if ($PSVersionTable.PSVersion -lt "6.0" -or $IsWindows) {
+  # Fix case when both the Windows and Linux builds of Node
+  # are installed in the same directory
+  $exe=".exe"
+}
+$ret=0
+if (Test-Path "$basedir/node$exe") {
+  # Support pipeline input
+  if ($MyInvocation.ExpectingInput) {
+    $input | & "$basedir/node$exe"  "$basedir/node_modules/@googleworkspace/cli/run.js" $args
+  } else {
+    & "$basedir/node$exe"  "$basedir/node_modules/@googleworkspace/cli/run.js" $args
+  }
+  $ret=$LASTEXITCODE
+} else {
+  # Support pipeline input
+  if ($MyInvocation.ExpectingInput) {
+    $input | & "node$exe"  "$basedir/node_modules/@googleworkspace/cli/run.js" $args
+  } else {
+    & "node$exe"  "$basedir/node_modules/@googleworkspace/cli/run.js" $args
+  }
+  $ret=$LASTEXITCODE
+}
+exit $ret
+"""
+
 posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="the POSIX branch is not defined on Windows"
 )
@@ -713,9 +764,8 @@ def test_the_six_tools_resolve_to_files_on_this_machine() -> None:
     login_shell_path.cache_clear()
     path = login_shell_path()
     for cmd in ("claude", "opencode", "git", "gh", "uv", "gws"):
-        found = os_tool_path.resolve_executable(cmd, path=path)
-        if found is not None:
-            assert Path(found).is_file(), f"{cmd} -> {found}"
+        for part in os_tool_path.resolve_command(cmd, path=path):
+            assert Path(part).is_file(), f"{cmd} -> {part}"
     assert os_tool_path.resolve_executable("git", path=path) is not None
 
 
@@ -733,3 +783,129 @@ def test_no_subprocess_is_spawned_to_find_a_tool() -> None:
         tool_path.login_shell_path.cache_clear()
         assert tool_path.terminal_path()
         assert tool_path.resolve_tool("git")
+
+
+# ── resolve_command: the argv prefix for an npm-installed tool ─────────────
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "script"),
+    [
+        ("gws.cmd", GWS_CMD_SHIM, "node_modules/@googleworkspace/cli/run.js"),
+        ("gws.ps1", GWS_PS1_SHIM, "node_modules/@googleworkspace/cli/run.js"),
+        ("pkg.cmd", SCRIPT_PACKAGE_SHIM, "node_modules/pkg/bin/run.js"),
+    ],
+)
+def test_shim_node_script_reads_the_script_off_the_launch_line(
+    tmp_path: Path, name: str, text: str, script: str
+) -> None:
+    shim = tmp_path / name
+    shim.write_text(text, encoding="utf-8", newline="")
+    expected = os.sep.join([str(tmp_path), *script.split("/")])
+    assert os_tool_path._shim_node_script(shim) == expected
+
+
+def test_shim_node_script_is_empty_when_the_program_is_not_node(tmp_path: Path) -> None:
+    shim = tmp_path / "opencode.cmd"
+    shim.write_text(OPENCODE_CMD_SHIM, encoding="utf-8", newline="")
+    assert os_tool_path._shim_node_script(shim) == ""
+
+
+@posix_only
+def test_resolve_command_is_which_on_posix(tmp_path: Path) -> None:
+    binary = tmp_path / "ciao-test-tool"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | 0o111)
+    assert os_tool_path.resolve_command("ciao-test-tool", path=str(tmp_path)) == [str(binary)]
+    assert os_tool_path.resolve_command("definitely-not-real", path=str(tmp_path)) == []
+
+
+def _gws_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, script: bool = True) -> Path:
+    npm_dir = _fake_npm_dir(tmp_path, monkeypatch)
+    (npm_dir / "gws.cmd").write_text(GWS_CMD_SHIM, encoding="utf-8", newline="")
+    if script:
+        run_js = npm_dir / "node_modules" / "@googleworkspace" / "cli" / "run.js"
+        run_js.parent.mkdir(parents=True)
+        run_js.write_text("// entry point\n", encoding="utf-8")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    return npm_dir
+
+
+def _node_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "nodejs"
+    directory.mkdir()
+    (directory / "node.exe").write_bytes(b"MZ")
+    return directory
+
+
+@windows_only
+def test_resolve_command_runs_a_script_wrapper_with_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    npm_dir = _gws_install(tmp_path, monkeypatch)
+    node_dir = _node_dir(tmp_path)
+    path = os.pathsep.join([str(npm_dir), str(node_dir)])
+    command = os_tool_path.resolve_command("gws", path=path)
+    assert [os.path.normcase(part) for part in command] == [
+        os.path.normcase(node_dir / "node.exe"),
+        os.path.normcase(npm_dir / "node_modules" / "@googleworkspace" / "cli" / "run.js"),
+    ]
+    # The single-path resolver keeps refusing it: nothing that calls it changes meaning.
+    with pytest.raises(ToolResolutionError):
+        os_tool_path.resolve_executable("gws", path=path)
+
+
+@windows_only
+def test_resolve_command_raises_when_the_script_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    npm_dir = _gws_install(tmp_path, monkeypatch, script=False)
+    path = os.pathsep.join([str(npm_dir), str(_node_dir(tmp_path))])
+    with pytest.raises(ToolResolutionError, match="not there"):
+        os_tool_path.resolve_command("gws", path=path)
+
+
+@windows_only
+def test_resolve_command_raises_without_node_on_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    npm_dir = _gws_install(tmp_path, monkeypatch)
+    with pytest.raises(ToolResolutionError, match="node is not on PATH"):
+        os_tool_path.resolve_command("gws", path=str(npm_dir))
+
+
+@windows_only
+def test_resolve_command_unwraps_an_executable_wrapper_to_one_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    npm_dir = _fake_npm_dir(tmp_path, monkeypatch)
+    (npm_dir / "opencode.cmd").write_text(OPENCODE_CMD_SHIM, encoding="utf-8", newline="")
+    exe = _opencode_exe(npm_dir)
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    assert os_tool_path.resolve_command("opencode", path=str(npm_dir)) == [str(exe)]
+    assert os_tool_path.resolve_command("definitely-not-real", path=str(npm_dir)) == []
+
+
+@windows_only
+def test_an_installed_gws_runs_through_its_command_with_shell_characters() -> None:
+    """End to end on this machine: the resolved argv runs gws itself, and an
+    argument holding `&`, `%PATH%` and quotes reaches it unchanged."""
+    from ciao.tool_path import login_shell_path
+
+    login_shell_path.cache_clear()
+    command = os_tool_path.resolve_command("gws", path=login_shell_path())
+    if not command:
+        pytest.skip("gws is not installed on this machine")
+    version = subprocess.run(
+        [*command, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=60
+    )
+    assert version.returncode == 0, version.stderr
+    assert version.stdout.startswith("gws ")
+    tricky = 'a&b %PATH% "quoted"'
+    echoed = subprocess.run(
+        [*command, "schema", tricky], capture_output=True, text=True, encoding="utf-8", timeout=60
+    )
+    assert "%PATH%" in (echoed.stdout + echoed.stderr) or echoed.returncode != 0
+    assert "is not recognized as an internal or external command" not in echoed.stderr
