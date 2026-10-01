@@ -1,0 +1,6 @@
+# The repository is LF everywhere (#696). Without this, Git for Windows'
+# default `core.autocrlf=true` checks every text file out as CRLF: the stock
+# commands and skills the engine hashes and seeds, and the fixtures the tests
+# compare byte for byte, then differ from what is committed. Binary files are
+# detected and left alone.
+* text=auto eol=lf
