@@ -523,30 +523,33 @@ filters the types the retention is about to claim out of its `unresolved` list,
 because nothing has been written yet and those are not your decision to make;
 so the list a preview asks you to categorise is only the list it can see.
 
-**No receipt is written by `--apply`, and the card does not clear from a
-re-scan.** Three facts, each of which the card's own button runs into:
+**`--apply` writes no receipt; the card is cleared by the card's own button.** Two
+commands, and only one of them can change what the card says:
 
-- `ciao vault-migrate --apply` renames the notes, keeps the retired categories
-  and records nothing. It never touches `<runtime>/` at all, so the CLI cannot
-  change what the card says.
-- The card's **Apply mechanical renames** button does write a receipt — but the
-  **unkeyed** `vault-vocabulary.json`, the pre-keying name. The card reads the
-  install-wide view, which is built from the **keyed** per-vault receipts and
-  consults the unkeyed file only on an install with exactly one vault. On a
-  re-rooted install the button's write is written and then not read, so pressing
-  it does not clear the card.
+- `ciao vault-migrate --apply` renames the notes, keeps the retired categories and
+  records nothing. It never touches `<runtime>/` at all, so the CLI cannot change
+  what the card says — not even when the renames it just made were the whole of
+  the card's complaint.
 - `sync-skills` writes the keyed per-vault receipts, but it is gated on the
   install-wide receipt being absent, and it skips any vault whose keyed receipt
   already exists. Once every vault has one, it does not re-scan, so a note
   written afterwards with a retired type is not picked up and the receipt is not
   refreshed.
 
-So do not expect the card to clear because you resolved the types. What the card
-is really reporting is "some vault has types with no canonical equivalent", and
-the honest ways to deal with that are to fix the `type:` lines (which the audit
-then agrees with) and, if you want the receipt itself to say so, delete that
-vault's receipt and re-run the migration for it. Treat the card as a pointer to
-work, not as a status light you can switch off.
+So the button is how a decision gets recorded. **Apply mechanical renames**
+re-migrates every vault whose receipt still lists `unresolved` types and
+**rewrites that vault's own keyed receipt** — the file the card's install-wide
+read is built from — so once you have fixed the `type:` lines (or the chat has
+fixed them for you), the next press re-scans, the types are gone from the
+receipt, and the card disappears. Two things it deliberately does not do: it does
+not write the pre-keying unkeyed `vault-vocabulary.json`, which the install-wide
+read consults only on a single-vault install, and it does not touch a vault
+whose receipt is already complete — that root's receipt is the record of its own
+migration, not this card's business. So the card reports work in the vaults it
+names; if you fix a `type:` line in a vault the card never named, delete that
+vault's receipt and let `sync-skills` migrate it again. Treat the card as a
+pointer to work, refreshed by its own button, not as a status light somebody
+else keeps in step with your edits.
 
 Note what this command does **not** have: there is no `vault-unmigrate`. The
 renames are gated on an exact current value, so an unwanted one is a one-line

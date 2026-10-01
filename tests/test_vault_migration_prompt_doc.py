@@ -488,38 +488,40 @@ def test_the_per_root_vault_facts_are_stated_where_they_bite() -> None:
     assert "What *is* left after Step 1 is the receipt" in doc
 
 
-def test_the_vocabulary_card_is_not_described_as_clearing() -> None:
-    """No action reliably clears it, and the document must not say one does.
+def test_the_vocabulary_card_clears_through_its_own_keyed_receipt() -> None:
+    """The card has exactly one remedy, and the document must name it correctly.
 
-    The first version of this file asserted the opposite, from the plan's
-    evidence table rather than from the code, and the review caught it. The
-    truth is three separate facts: `--apply` writes no receipt at all; the card's
-    run button writes the *unkeyed* `vault-vocabulary.json`, which the
-    install-wide reader in `_install_receipt` consults only when the install has
-    exactly one vault; and `sync-skills` is gated on the install-wide receipt
-    being absent while `migrate_if_needed` skips any vault that already has a
-    keyed one, so it never re-scans. A document promising that a button press or
-    a `sync-skills` run clears the card sends the reader after a card that will
-    not go.
+    #814 fixed the writer: the run button used to write the **unkeyed**
+    `vault-vocabulary.json`, which the install-wide reader in `_install_receipt`
+    consults only when the install has exactly one vault, so on a re-rooted
+    install the press wrote a receipt and the card read nothing. Two facts are
+    still true and one is now false, and the document has to say which is which:
+    `--apply` writes no receipt at all; `sync-skills` is gated on the install-wide
+    receipt being absent while `migrate_if_needed` skips any vault that already
+    has a keyed one, so it never re-scans; and the button **does** clear the
+    card, by rewriting each reported vault's own keyed receipt. A document still
+    promising nothing clears it sends the reader after a card that goes away on
+    the next press.
     """
     doc = _flat()
 
-    assert "**No receipt is written by `--apply`, and the card does not clear from a re-scan.**" in doc
     for fragment in (
-        "the **unkeyed** `vault-vocabulary.json`, the pre-keying name",
-        "the button's write is written and then not read",
+        "`--apply` writes no receipt",
+        "**rewrites that vault's own keyed receipt**",
+        "the button is how a decision gets recorded",
+        "does not write the pre-keying unkeyed `vault-vocabulary.json`",
+        "does not touch a vault whose receipt is already complete",
         "it does not re-scan, so a note written afterwards with a retired type",
-        "do not expect the card to clear because you resolved the types",
-        "not as a status light you can switch off",
+        "not as a status light somebody",
     ):
         assert fragment in doc, (
             "docs/VAULT_MIGRATION_PROMPT.md no longer states this receipt fact: "
             f"{fragment!r}"
         )
-    # The claim the first version made must be gone outright, and so must any
-    # surviving wording that offers `sync-skills` as a re-scan.
-    assert "the card clears when one of those two runs" not in doc
-    assert "both of which re-scan and rewrite the receipt" not in doc
+    # The claim #800's correction installed, and the one #814 made false.
+    assert "the card does not clear from a re-scan" not in doc
+    assert "do not expect the card to clear because you resolved the types" not in doc
+    assert "the button's write is written and then not read" not in doc
     assert "not a way to make it notice a retired type" in doc, (
         "sync-skills is receipt-gated and does not re-scan; the document has to "
         "say so rather than leave the earlier 're-scan' wording standing"
