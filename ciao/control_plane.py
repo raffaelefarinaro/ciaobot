@@ -1769,7 +1769,7 @@ class CiaoControlPlane:
         # and `restore_completed` joins it because `restore` from the trash is
         # guarded on the same grounds, an undo of a disposition being exactly
         # as much of a decision as the disposition.
-        if action in {"decide", "trash", "restore", "delete", "complete", "restore_completed"}:
+        if action in review.ATTENDED_ONLY_ACTIONS:
             if self._unattended_turn(principal):
                 raise ControlPlaneError("unattended_forbidden", "Vault review mutations require an attended turn.")
         # `restore_completed` belongs here rather than below for the same reason

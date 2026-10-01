@@ -18,6 +18,7 @@ reintroduce a hard-cap claim or a different unattended rule.
 from __future__ import annotations
 
 import json
+import re
 from importlib import resources
 from pathlib import Path
 
@@ -445,3 +446,83 @@ def test_the_development_doc_covers_the_draft_commands() -> None:
     # And the lesson-routing carve-out in the proposal filer is documented, so a
     # reader does not read "one or the other" as a loosened check.
     assert "accepts a lesson with no `sources`" in doc
+
+
+# ── The care prompt may only name what the control plane allows (#882) ────
+
+
+def _care_prompt() -> str:
+    return next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+
+
+# verb as typed on the CLI -> the wire action agent_cli.resolve() sends.
+_VAULT_REVIEW_WIRE = {
+    "list": "list",
+    "show": "inspect",
+    "keep": "decide",
+    "trash": "trash",
+    "restore": "restore",
+    "complete": "complete",
+    "restore-completed": "restore_completed",
+    "delete": "delete",
+}
+
+
+def test_every_vault_review_verb_maps_to_the_wire_action_agent_cli_sends() -> None:
+    """Keeps _VAULT_REVIEW_WIRE honest: it is derived from agent_cli, not a guess."""
+    from ciao import agent_cli
+
+    parser = agent_cli.build_parser()
+    for verb, wire in _VAULT_REVIEW_WIRE.items():
+        argv = ["vault", "review", verb]
+        if verb == "show":
+            argv.append("Some/Note.md")
+        elif verb not in {"list"}:
+            argv += ["--candidate", "c1"]
+            if verb == "delete":
+                argv += ["--confirm", "c1"]
+        operation, arguments = agent_cli.resolve(parser.parse_args(argv))
+        assert operation == "vault_review"
+        assert arguments["action"] == wire, verb
+
+
+def test_unattended_care_prompt_only_names_vault_review_verbs_allowed_unattended() -> None:
+    """#882: the prompt must never tell an unattended run to do what the control plane refuses."""
+    from ciao.vault_review import ATTENDED_ONLY_ACTIONS
+
+    prompt = _care_prompt()
+    mentioned = set(re.findall(r"`?ciao vault review ([a-z]+(?:-[a-z]+)*)", prompt))
+    assert mentioned, "the prompt no longer names any vault review verb; update this guard"
+    unknown = mentioned - set(_VAULT_REVIEW_WIRE)
+    assert not unknown, f"unknown vault review verbs in the prompt: {sorted(unknown)}"
+    refused = {verb for verb in mentioned if _VAULT_REVIEW_WIRE[verb] in ATTENDED_ONLY_ACTIONS}
+    assert not refused, f"the unattended prompt tells the agent to run {sorted(refused)}, which unattended_forbidden refuses"
+
+
+def test_unattended_care_prompt_says_every_review_decision_is_attended_only() -> None:
+    from ciao.vault_review import ATTENDED_ONLY_ACTIONS
+
+    prompt = _care_prompt()
+    assert "Keep and archiving" not in prompt
+    assert "archiving non-destructively" not in prompt
+    sentence = next(s for s in prompt.split(". ") if "is refused unattended" in s)
+    for verb, wire in _VAULT_REVIEW_WIRE.items():
+        if wire in ATTENDED_ONLY_ACTIONS:
+            assert verb in sentence, f"the prompt does not say `{verb}` is attended-only"
+
+
+def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb() -> None:
+    """Catches a typo'd or removed `ciao <noun> <verb>` the run would hit as a usage error."""
+    from ciao import agent_cli
+
+    prompt = _care_prompt()
+    parser = agent_cli.build_parser()
+    for noun, verb in set(re.findall(r"`ciao (memory|context|chat|project|file|note) ([a-z]+(?:-[a-z]+)*)", prompt)):
+        argv = [noun, verb, "--help"]
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(argv)
+        assert excinfo.value.code == 0, f"`ciao {noun} {verb}` is not a command"
