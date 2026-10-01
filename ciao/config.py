@@ -1300,11 +1300,10 @@ class CiaoConfig:
         the per-workspace allowlist was silently inert: a workspace restricted
         to two servers could reach every server its root declares.
 
-        Omitted (the seeding path), it keeps the pre-re-rooting view — the
-        shared files only. That is deliberate there: seeding writes an allowlist
-        from what a workspace can reach TODAY, and reading a per-root file into
-        it would seed a brand-new workspace with everything its root declares,
-        turning the fail-closed ``None`` default into allow-all.
+        Omitted, it returns the shared files only; no production caller omits
+        it now (seeding passes each workspace's name). Every caller therefore
+        resolves the declaration from the same file the chat reads, which is
+        also the rule seeding writes an allowlist from.
         """
         workspace_root = self.workspace_root
         candidates = [
@@ -1456,10 +1455,12 @@ class CiaoConfig:
         is confined to metadata Ciaobot generates (the workspace registry), and
         there is exactly one correct outcome per workspace — what it can reach
         right now. A registered workspace whose allowlist is ``None`` and that
-        exists in the registry file is seeded with every server declared in
-        ``.mcp.json`` that its ``disallowed_tools`` does not already deny. A
-        brand-new workspace created in code (legacy fallback, no file) is not
-        touched and keeps its ``None`` fail-closed default.
+        exists in the registry file is seeded with every server declared for that
+        workspace (its own agent-root ``.mcp.json`` first, then the shared
+        files, as :meth:`_declared_mcp_server_names` resolves them) that its
+        ``disallowed_tools`` does not already deny. A brand-new workspace
+        created in code (legacy fallback, no file) is not touched and keeps its
+        ``None`` fail-closed default.
 
         This reads and rewrites the raw file so unrelated or unknown keys (e.g.
         a future field this release does not know) survive; the normal
@@ -1476,18 +1477,6 @@ class CiaoConfig:
             return
         if not isinstance(entries, list):
             return
-        declared = self._declared_mcp_server_names()
-        if declared is None:
-            # A corrupt .mcp.json cannot be mapped to names; leave the
-            # allowlist untouched and let deny resolution fail closed by name
-            # against the known universe instead.
-            return
-        if not declared:
-            # Nothing is declared, so the effective set is empty and ``None``
-            # already denies nothing to reach (both fail closed). Persisting
-            # ``[]`` here would rewrite the registry on every fresh install and
-            # break a setup-rerun's idempotency for no behavioural change.
-            return
         changed = False
         for entry in entries:
             if not isinstance(entry, dict):
@@ -1495,6 +1484,22 @@ class CiaoConfig:
             name = str(entry.get("name", "")).strip()
             workspace_config = self.workspace(name)
             if workspace_config is None or workspace_config.allowed_mcp_servers is not None:
+                continue
+            # Resolved per entry, from this workspace's own agent root first:
+            # on a composed install that file is the only declaration there is,
+            # so one global (install-level only) read found nothing and left
+            # every ``None`` allowlist unmigrated and fail-closed.
+            declared = self._declared_mcp_server_names(name)
+            if declared is None:
+                # A corrupt .mcp.json cannot be mapped to names; leave this
+                # allowlist untouched and let deny resolution fail closed by
+                # name against the known universe instead.
+                continue
+            if not declared:
+                # Nothing is declared for this workspace, so the effective set is
+                # empty and ``None`` already fails closed. Persisting ``[]`` would
+                # rewrite the registry on every fresh install and break a
+                # setup-rerun's idempotency for no behavioural change.
                 continue
             denied = set(workspace_config.disallowed_tools or ())
             seed = [s for s in declared if f"mcp__{s}" not in denied]
