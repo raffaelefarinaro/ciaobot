@@ -172,7 +172,7 @@ def _replace_version_value(text: str, version: str, *, path: Path) -> str:
     rebuilds the whole assignment and drops that formatting.
     """
     updated, count = re.subn(
-        r'^(version\s*=\s*)(["\'])([^"\']*)\2',
+        r'^([ \t]*version[ \t]*=[ \t]*)(["\'])([^"\']*)\2',
         lambda match: f"{match.group(1)}{match.group(2)}{version}{match.group(2)}",
         text,
         count=1,

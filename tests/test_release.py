@@ -271,7 +271,7 @@ def test_editable_lock_alignment_preserves_crlf_and_assignment_spacing(
         "\r\n"
         "[[package]]\r\n"
         'name = "ciao"\r\n'
-        'version   =    "0.2.0"  # keep me\r\n'
+        '  version   =    "0.2.0"  # keep me\r\n'
         'source = { editable = "." }\r\n'
         "\r\n"
         "[[package]]\r\n"
@@ -289,11 +289,12 @@ def test_editable_lock_alignment_preserves_crlf_and_assignment_spacing(
 
     after = lock_path.read_bytes()
     expected = before.replace(
-        b'version   =    "0.2.0"', b'version   =    "0.3.0"'
+        b'  version   =    "0.2.0"', b'  version   =    "0.3.0"'
     )
     assert after == expected
     # Every terminator stays CRLF: no lone LF was introduced.
     assert after.count(b"\n") == after.count(b"\r\n")
+    assert b'  version   =    "0.3.0"  # keep me' in after
     assert b'version = "4.4.0"' in after
     assert b"# keep me" in after
 
