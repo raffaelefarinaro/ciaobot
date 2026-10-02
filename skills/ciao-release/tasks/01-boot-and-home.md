@@ -6,17 +6,13 @@ get the session unlocked so tasks 02–05 run unattended.
 **Preconditions:** `/ciao-dev-install` has just finished. The engine is live on
 the operator's real workspace. The operator is at the machine.
 
-## Round 1 — navigate, stop at the door
+Screenshots go to `$TMPDIR/ciao-release-walk/<version>/`, named
+`NN-<task>-<step>.png`.
 
-```js
-const task = await taskSpace("ciaobot release walkthrough");
-console.log({ spaceId: task.spaceId });
-const page = task.page("p1");
-await page.goto("http://127.0.0.1:8443/");
-await page.waitForLoadState("domcontentloaded");
-console.log({ url: await page.url(), title: await page.title() });
-console.log(await page.snapshot());
-```
+## Step 1 — open the app, stop at the door
+
+Open `http://127.0.0.1:8443/` in a tab and wait for the document to load. Note
+the final URL and the page title.
 
 **Then stop and ask the operator to type the dashboard password into the visible
 browser window.** Do not read `PWA_AUTH_TOKEN` from the workspace `.env` and do
@@ -27,20 +23,10 @@ The `LoginView` is at `web/src/components/LoginView.vue`; the field is
 If the page is *not* a login form, say so and skip the unlock — an install with
 `PWA_AUTH_REQUIRED=false` has no door.
 
-## Round 2 — the app loads
+## Step 2 — the app loads
 
-```js
-const task = await taskSpace("ciaobot release walkthrough");
-const page = task.page("p1");
-await page.waitForSelector("loc=css:aside, loc=css:nav", { timeout: 20000 });
-const shot = await page.screenshot({ path: "/tmp/ciao-01-home.png", fullPage: false });
-console.log({ url: await page.url(), shot });
-console.log(await page.snapshot({ scope: "full_page" }));
-```
-
-A full-page snapshot on a cold boot is a lot of output. Take `scope: "full_page"`
-**once**, here, where you are establishing what the app looks like; use the
-default viewport snapshot from here on.
+After the operator has unlocked, wait up to ~20s for the sidebar or main
+navigation to appear, then take the first-paint screenshot.
 
 **What must be true:**
 
@@ -54,22 +40,16 @@ default viewport snapshot from here on.
 - `HousekeepingStrip` shows the package-update tile with an **"Update in
   Settings"** button leading, and release notes as the secondary link.
 
-## Round 3 — is the served build the build we cut?
+Read the whole page once here, where you are establishing what the app looks
+like; afterwards read only what is visible.
+
+## Step 3 — is the served build the build we cut?
 
 The engine can be serving a stale bundle. Compare the asset hash the *served*
-shell names against the one on disk:
-
-```js
-const task = await taskSpace("ciaobot release walkthrough");
-const page = task.page("p1");
-const served = await page.evaluate(() => {
-  const m = [...document.querySelectorAll("script[src],link[href]")]
-    .map((n) => n.getAttribute("src") || n.getAttribute("href") || "")
-    .filter((s) => s.includes("/assets/"));
-  return m;
-});
-console.log({ servedAssets: served });
-```
+shell names against the one on disk. Read the served names from the page by
+evaluating JavaScript in it: collect the `src` of every `script[src]` and the
+`href` of every `link[href]`, and keep those containing `/assets/`. Then, from
+the repo root:
 
 ```bash
 grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' ciao/web/static/index.html
@@ -78,10 +58,23 @@ grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' ciao/web/static/index.html
 They must match. A mismatch means `npm run build` ran before the last source
 change, or the install copied older package data — rebuild, reinstall, restart.
 
-## Report
+## Checkpoints
+
+- `01-boot-01-door.png` — the login form (or the app, if there is no door).
+  Look for: a sane centred form, no clipped field, no error banner.
+- `01-boot-02-home.png` — first paint after unlock. Look for: sidebar present
+  and not collapsed at this width, no spinner or offline view, no overlapping
+  cards, no clipped text, no stray toast, setup card absent,
+  `HousekeepingStrip` with "Update in Settings" leading.
+
+## Verdict
+
+Fill one: **pass** / **finding** / **blocked**.
+
+Record:
 
 - Engine answered, and the served asset hash matches disk.
-- Anything that looked wrong, wrong at this width, or slow to settle — with a
-  screenshot path.
+- Anything that looked wrong, wrong at this width, or slow to settle, with the
+  checkpoint it shows up in.
 
-Carry `spaceId` forward into task 02. Do not create a second TaskSpace.
+Keep using the same tab for task 02.

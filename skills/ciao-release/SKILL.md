@@ -199,7 +199,7 @@ live install preserving the workspace and password, restarts the service and
 watches the logs. Read that skill and follow it; do not improvise. Do it **after
 the final source change** so what you smoke-test is what gets cut.
 
-Then **drive the running app like a user**, with `ego-browser`, following the
+Then **drive the running app like a user**, with `browser-use`, following the
 task files in `tasks/`:
 
 ```
@@ -215,6 +215,34 @@ start of `tasks/01`. After that the session is unlocked and the rest run
 unattended. **Never read `PWA_AUTH_TOKEN` out of the workspace `.env` and type
 it yourself** — it puts the password in the transcript and in this task's
 context for no benefit.
+
+### Driving the app, and the walkthrough report
+
+The task files describe **what to do and what to look at**, not tool calls. Drive
+the app with the `browser-use` skill: reach the app in a tab, find controls by
+their accessibility role and visible name before falling back to coordinates, and
+wait for an observable state rather than a fixed delay.
+
+**Use the operator's own signed-in browser profile for the app, not a throwaway
+one.** If the app must open in a specific Chrome profile, start Chrome with that
+profile (`open -na "Google Chrome" --args --profile-directory="<dir>" <url>`;
+`~/Library/Application Support/Google/Chrome/Local State` lists the directories),
+then attach with `browser-use` and pick the tab by URL. `browser-use` cannot open
+a tab in a chosen profile itself.
+
+**Capture a screenshot at every checkpoint** a task names (and whenever something
+looks off), into a per-run folder such as `$TMPDIR/ciao-release-walk/<version>/`,
+named `NN-task-step.png`. Open each one and look at it. A passing assertion with a
+collapsed layout, clipped text, an overlapping popover, a stray toast or an empty
+state is still a finding.
+
+**Finish with a report the operator reviews**, built from those screenshots: one
+section per task, each with its checkpoints as embedded images, a one-line
+verdict (pass / finding / blocked), and the findings spelled out beside the image
+they came from. Build it as a self-contained HTML page with the `html-artifact`
+skill so it renders in the pinned panel, and keep the PNGs next to it. The report
+carries no secrets, no workspace data beyond what a screenshot shows of the
+operator's own app, and no names of people or profiles.
 
 These tasks are the undeterministic half of the check. The 8 Playwright specs in
 `web/e2e/specs/` pin down routing, sockets and named regressions; the model
@@ -313,7 +341,8 @@ even import `release.py`.
 - `cd web && npm ci` at least once so `vitest` exists.
 - Node on PATH per `.nvmrc`, **in the same shell** that runs the tool.
 - `gh` authenticated (for `--create-pr`).
-- `ego-browser` on PATH for Step 5.
+- `browser-use` on PATH for Step 5, attached to Chrome with remote debugging
+  on (`browser-use --doctor`).
 - A clean tree on `develop`.
 
 ## Known traps

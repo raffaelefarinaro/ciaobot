@@ -4,23 +4,14 @@
 the selected workspace. The reads and the writes were changed together on
 purpose, so this is where a partial change shows up.
 
-**Preconditions:** task 04 finished. Still the same TaskSpace.
+**Preconditions:** task 04 finished. Keep using the same tab. Screenshots go to
+`$TMPDIR/ciao-release-walk/<version>/` as `05-settings-<step>.png`.
 
-## Round 1 — walk the page
+## Step 1 — walk the page
 
 Settings is one long scrolling page with an "On this page" rail, not a tab bar.
-Walk it top to bottom and screenshot the whole thing once:
-
-```js
-const task = await taskSpace("ciaobot release walkthrough");
-const page = task.page("p1");
-await page.goto("http://127.0.0.1:8443/settings");
-await page.waitForLoadState("domcontentloaded");
-await page.waitForTimeout(1500);
-const shot = await page.screenshot({ path: "/tmp/ciao-05-settings.png", fullPage: true });
-console.log({ shot });
-console.log(await page.snapshot({ scope: "full_page" }));
-```
+Open `/settings`, give it about 1.5 seconds, and walk it top to bottom, taking a
+full-page screenshot once.
 
 **Every section must load without hanging:** General, Workspaces, Models &
 providers, Skills, Subagents, Commands, MCP servers. A section that never
@@ -36,29 +27,17 @@ Watch for:
   each model reviews independently, that `/critique` or the skill invokes it.
   A bare "Models asked for an adversarial review" is the pre-fix state.
 
-## Round 2 — the four asset lists are scoped to one workspace
+## Step 2 — the four asset lists are scoped to one workspace
 
 This is the point of the task. **Skills, Subagents, Commands and MCP servers all
 belong to the workspace selected in the sidebar.** Only one workspace is
 selected, so: switch the sidebar to another workspace, and all four lists must
 change together.
 
-```js
-const task = await taskSpace("ciaobot release walkthrough");
-const page = task.page("p1");
-const before = await page.evaluate(() => {
-  const t = (s) => [...document.querySelectorAll(s)].map((n) => n.textContent.trim());
-  return {
-    skills: t(".set-subrow-label, .stock-skill-name, .custom-skill-name").slice(0, 40),
-    rows: t("[id^='set-'], [id*='skill'], [id*='mcp']").length,
-  };
-});
-console.log({ before });
-```
-
-Then switch the workspace in the sidebar, let the active-workspace watcher
-refetch, and take `after` the same way. The lists must now describe the *other*
-workspace's agent root.
+Record the names visible in the four lists (for example by reading the text of
+the skill-name and row elements in the page), switch the workspace in the
+sidebar, let the active-workspace watcher refetch, and record them again. The
+lists must now describe the *other* workspace's agent root.
 
 **Watch for, precisely:**
 
@@ -73,7 +52,7 @@ workspace's agent root.
   is the primary root's `.mcp.json`. If the page describes a whole-install
   inventory, that is the copy regression.
 
-## Round 3 — a read-only consistency check
+## Step 3 — a read-only consistency check
 
 Do not create, edit or delete anything in Settings. Confirm instead that what
 the page shows is what the API says:
@@ -86,7 +65,21 @@ curl -s http://127.0.0.1:8443/api/admin/skills | head -c 400
 A 401 here is a pass, not a failure — the session cookie lives in the browser,
 not in your shell. A 500 is not.
 
-## Report
+## Checkpoints
+
+- `05-settings-01-full.png` — the whole view. Look for: every section present,
+  rail visible, backup card collapsed details, no clipped headings, no overlap.
+- `05-settings-02-assets-before.png` — the asset lists on the first workspace.
+  Look for: stock skills present, lists populated or a sensible empty state.
+- `05-settings-03-assets-after.png` — the same lists after the workspace
+  switch. Look for: all four changed, stock skills still present, no stale
+  rows, no stray toast.
+
+## Verdict
+
+Fill one: **pass** / **finding** / **blocked**.
+
+Record:
 
 - Which Settings sections loaded, which hung.
 - Before/after asset lists across a workspace switch, and whether all four
@@ -94,5 +87,4 @@ not in your shell. A 500 is not.
 - Whether stock skills were still present in the scoped list.
 - Any copy that describes a whole-install inventory.
 
-This is the last task. Close the task space when done, or leave it for the
-operator to look at.
+This is the last task. Leave the tab open for the operator to look at.

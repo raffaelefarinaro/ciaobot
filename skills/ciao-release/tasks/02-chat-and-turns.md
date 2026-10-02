@@ -3,52 +3,31 @@
 **Goal:** the core loop. Start a chat, send real turns, watch them stream, stop
 one. This is the path a user spends their day in.
 
-**Preconditions:** task 01 finished; the session is unlocked. `spaceId` in hand.
+**Preconditions:** task 01 finished; the session is unlocked, in the tab you
+already have open.
 
-Everything below is one TaskSpace, resumed each round. Task spaces, tabs and page
-labels persist between invocations; JavaScript variables do not.
+Keep using the same tab throughout. Screenshots go to
+`$TMPDIR/ciao-release-walk/<version>/` as `02-chat-<step>.png`.
 
 Use a chat title that is obviously a release smoke test, e.g.
 `Release smoke vX.Y.Z`. It makes the leftover obvious.
 
-## Round 1 — start a chat
+## Step 1 — start a chat
 
-```js
-const task = await taskSpace("ciaobot release walkthrough");
-const page = task.page("p1");
-await page.goto("http://127.0.0.1:8443/");
-await page.waitForLoadState("domcontentloaded");
-console.log(await page.snapshot());
-```
-
-From the snapshot, find the composer and the new-chat control
-(`aria-label="Start a new chat"` on `HomeIntake`/`PaneHeader`). Prefer
-accessibility roles and text over coordinates:
-
-```js
-// once you have the ref from the snapshot
-await page.click("@<composer>");
-await page.fill("@<composer>", "Reply with exactly: ok");
-await page.keyboard.press("Enter");
-await page.waitForURL(/.*\/chat\/.+/, { timeout: 15000 });
-console.log({ url: await page.url() });
-```
+Open the app root in the tab. Find the composer and the new-chat control
+(`aria-label="Start a new chat"` on `HomeIntake`/`PaneHeader`) by role and
+visible name rather than coordinates. Click into the composer, type
+`Reply with exactly: ok`, and press Enter. Wait until the URL becomes
+`/chat/<id>`.
 
 **Watch for:** the project picker. If the composer already names a project, the
 chat must start directly — asking *which* project again is the bug #724-era
 behaviour came from, and skipping it is the current intent. A picker appearing
 here is a finding.
 
-## Round 2 — the turn streams
+## Step 2 — the turn streams
 
-```js
-const task = await taskSpace("ciaobot release walkthrough");
-const page = task.page("p1");
-await page.waitForSelector("text=ok", { timeout: 120000 });
-const shot = await page.screenshot({ path: "/tmp/ciao-02-turn.png" });
-console.log({ shot, url: await page.url() });
-console.log(await page.snapshot());
-```
+Wait (up to ~2 minutes) until the reply `ok` renders in the transcript.
 
 **Watch for, in order of how badly it matters:**
 
@@ -60,22 +39,14 @@ console.log(await page.snapshot());
 - The transcript keeps its scroll position at the bottom, and does not jump
   mid-stream.
 
-## Round 3 — a second turn, then stop it
+## Step 3 — a second turn, then stop it
 
 Context continuity is the thing worth proving: the second turn should behave
 like a conversation, not a fresh session.
 
-```js
-const task = await taskSpace("ciaobot release walkthrough");
-const page = task.page("p1");
-await page.fill("loc=css:textarea", "Now reply with exactly: still here");
-await page.keyboard.press("Enter");
-await page.waitForTimeout(3000);
-// find the stop control in the snapshot and press it
-console.log(await page.snapshot());
-```
-
-Then press the stop control mid-stream and confirm:
+Type `Now reply with exactly: still here` in the composer and press Enter. Wait
+about three seconds so the reply is mid-stream, take the streaming screenshot,
+then find the stop control and press it. Confirm:
 
 - the turn ends promptly rather than running to completion,
 - the partial reply stays in the transcript (it is not discarded),
@@ -85,11 +56,29 @@ Then press the stop control mid-stream and confirm:
 dead is a different bug from one that ignores the click, and the report should
 not collapse them.
 
-## Report
+## Checkpoints
+
+- `02-chat-01-composer.png` — composer before sending. Look for: project picker
+  absent when a project is named, composer not clipped.
+- `02-chat-02-reply.png` — after the first reply. Look for: reply bubble
+  rendered and not empty, transcript at the bottom, no stray toast, no error
+  card.
+- `02-chat-03-streaming.png` — second turn mid-stream. Look for: stop control
+  visible, text streaming without layout jump, nothing overlapping the
+  composer.
+- `02-chat-04-stopped.png` — after stop. Look for: partial reply kept, composer
+  enabled, no leftover spinner.
+
+## Verdict
+
+Fill one: **pass** / **finding** / **blocked**.
+
+Record:
 
 - Did the turn complete, in how long?
 - Any toast, scroll jump, stuck spinner or error card.
-- Stop behaviour, stated per the three points above.
+- Stop behaviour, stated per the three points above (ends promptly; partial
+  reply kept; composer usable).
 - The chat URL, so the operator can open it.
 
 Leave this chat open. Task 03 archives it.
