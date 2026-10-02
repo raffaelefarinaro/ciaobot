@@ -98,6 +98,76 @@ def _workspace_env(source: Any) -> str:
     return str(source.get("CIAO_WORKSPACE", "") or "").strip()
 
 
+def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
+    """``base`` with the installed server's workspace and its ``.env`` applied.
+
+    The one answer to "which install is this shell talking to": a bare-shell
+    invocation (`ciao health get` from any directory) has no CIAO_WORKSPACE, and
+    the workspace the installed server's LaunchAgent points at is the install the
+    operator actually has — not a fresh bootstrap workspace manufactured beside
+    it. ``base`` naming a workspace already is that answer, and it is returned
+    untouched.
+
+    Read-only, like the ``export=False`` branch of :meth:`CiaoConfig.from_env`:
+    the discovered ``.env`` is overlaid into a private mapping rather than loaded
+    into ``os.environ``, because ``load_dotenv`` sets keys it has never seen and
+    nothing restores them, so a read-only diagnostic would change its caller's
+    environment. No file is created and no secret is minted. Precedence matches
+    ``load_dotenv``: the caller's environment wins over the file.
+    """
+    if _workspace_env(base):
+        return dict(base)
+    # Imported here, not at module scope: `ciao.macos_service` reads the plist
+    # and the tests patch `ciao.macos_service.discover_runtime`.
+    from ciao.macos_service import discover_runtime
+
+    try:
+        discovered = discover_runtime(environ=dict(base))
+    except Exception:  # noqa: BLE001 - plist missing/unreadable
+        discovered = None
+    if not discovered or not discovered.workspace or not Path(discovered.workspace).is_dir():
+        return dict(base)
+    # The discovered workspace's .env is what the running server reads; a
+    # bare-shell invocation must see the same values — auth settings first:
+    # `ciao run` against a stopped install must require the workspace's
+    # password, not fall back to an unauthenticated shell env. The discovered
+    # workspace is pinned absolutely so the file's relative CIAO_WORKSPACE=.
+    # cannot rebase onto the shell cwd. This must run before any field is
+    # parsed from the mapping, or it would see only the bare shell.
+    from dotenv import dotenv_values
+
+    discovered_workspace = str(discovered.workspace)
+    dotenv_path = Path(discovered_workspace) / ".env"
+    # Pinned even when that workspace has no `.env`: a LaunchAgent pointing at a
+    # directory means a server is installed there, and falling through to a
+    # freshly manufactured bootstrap root beside it is the failure discovery
+    # exists to prevent. (`from_env` used to pin only when the `.env` existed,
+    # while the CLI's own copy always pinned; this is the one rule for both.)
+    # A plist naming a directory that is no longer there is stale, and pinning it
+    # would recreate what the operator deleted (`_read_or_create_secret` mkdirs the
+    # runtime root), so the `is_dir()` guard above is part of this rule.
+    try:
+        overlay: dict[str, str] = {
+            key: value
+            for key, value in dotenv_values(dotenv_path).items()
+            if key and value is not None
+        }
+    except OSError:
+        overlay = {}
+    overlay["CIAO_WORKSPACE"] = discovered_workspace
+    merged: dict[str, str] = {**overlay, **base}
+    # Pinned again after the merge, not only in the overlay: discovery is
+    # entered for an *empty* CIAO_WORKSPACE as well as an unset one
+    # (`export CIAO_WORKSPACE=` in a shell profile), and the caller's
+    # environment wins the merge, so the empty string beat the pin. The result
+    # was the hybrid this pinning exists to prevent — the installed workspace's
+    # auth and provider settings applied to a freshly manufactured bootstrap
+    # root, because `bootstrap_mode` still saw no workspace.
+    if not _workspace_env(merged):
+        merged["CIAO_WORKSPACE"] = discovered_workspace
+    return merged
+
+
 def reset_exported_dotenv() -> None:
     """Drop every key ``from_env`` injected from a workspace ``.env``.
 
@@ -1580,61 +1650,11 @@ class CiaoConfig:
         else:
             source = os.environ
 
-        discovered_workspace = ""
         if env is None and not _workspace_env(source):
-            # A bare-shell CLI invocation (`ciao health get` from any directory)
-            # has no CIAO_WORKSPACE. Fall back to the workspace the installed
-            # server's LaunchAgent points at before dropping to bootstrap, so
-            # CLI diagnostics report on the install the operator actually has
-            # instead of manufacturing a fresh bootstrap workspace beside it.
-            # Gated on ``env is None``: explicit env dicts (every test, and any
-            # caller constructing a config) must keep their exact semantics.
-            from ciao.macos_service import discover_runtime
-
-            try:
-                discovered = discover_runtime(environ=dict(os.environ))
-            except Exception:  # noqa: BLE001 - plist missing/unreadable
-                discovered = None
-            if discovered and discovered.workspace:
-                discovered_workspace = discovered.workspace
-        if env is None and discovered_workspace:
-            # The discovered workspace's .env is what the running server reads;
-            # a bare-shell invocation must see the same values — auth settings
-            # first: `ciao run` against a stopped install must require the
-            # workspace's password, not fall back to an unauthenticated shell
-            # env. Values are overlaid into the source mapping rather than
-            # loaded into os.environ: a direct env write would leak into the
-            # process after this call (load_dotenv sets keys it has never seen,
-            # and nothing restores them), so a read-only diagnostic changed its
-            # caller's environment. Precedence matches load_dotenv: the process
-            # environment wins over the file, and the discovered workspace is
-            # pinned absolutely so the file's relative CIAO_WORKSPACE=. cannot
-            # rebase onto the shell cwd. This must run before any field below
-            # is parsed from ``source``, or it would see only the bare shell.
-            from dotenv import dotenv_values
-
-            dotenv_path = Path(discovered_workspace) / ".env"
-            if dotenv_path.exists():
-                try:
-                    dotenv_overlay = {
-                        key: value
-                        for key, value in dotenv_values(dotenv_path).items()
-                        if key and value is not None
-                    }
-                except OSError:
-                    dotenv_overlay = {}
-                dotenv_overlay["CIAO_WORKSPACE"] = discovered_workspace
-                source = {**dotenv_overlay, **source}
-                # Pinned again after the merge, not only in the overlay: discovery is
-                # entered for an *empty* CIAO_WORKSPACE as well as an unset one
-                # (`export CIAO_WORKSPACE=` in a shell profile), and the
-                # process environment wins the merge, so the empty string beat
-                # the pin. The result was the hybrid this pinning exists to
-                # prevent — the installed workspace's auth and provider
-                # settings applied to a freshly manufactured bootstrap root,
-                # because `bootstrap_mode` below still saw no workspace.
-                if not _workspace_env(source):
-                    source["CIAO_WORKSPACE"] = discovered_workspace
+            # A bare-shell CLI invocation has no CIAO_WORKSPACE: read the install the
+            # LaunchAgent points at (see `installed_workspace_env`). Gated on
+            # ``env is None``: explicit env dicts keep their exact semantics.
+            source = installed_workspace_env(source)
 
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
         pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
