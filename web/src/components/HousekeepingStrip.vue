@@ -581,10 +581,6 @@ watch(
     aria-labelledby="update-tasks-heading"
   >
      <h2 id="update-tasks-heading" class="update-tasks-heading">After this update</h2>
-     <p v-if="openUpdateTasks.length" class="update-tasks-lede">
-      Work this version of Ciaobot left behind for
-      {{ projectStore.activeWorkspace || 'this install' }}.
-    </p>
 
     <!-- The outcome of the last press, in a live region. The button that was
          pressed is often the thing that disappeared, so this is where the
@@ -844,13 +840,6 @@ watch(
   letter-spacing: -0.02em;
   color: var(--fg);
   width: fit-content;
-}
-
-.update-tasks-lede {
-  margin: var(--space-1) 0 0;
-  font-size: var(--text-sm);
-  color: var(--fg3);
-  max-width: 76ch;
 }
 
 .update-tasks-status {
