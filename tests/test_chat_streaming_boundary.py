@@ -47,6 +47,7 @@ class _PassHost:
         )
         self._chats = {"chat-1": self.chat}
         self._provider = provider
+        self._broker = ChatStreamBroker()
         self.saves = 0
         self.tool_events: list[ToolUseEvent] = []
 
@@ -345,6 +346,54 @@ async def test_an_unclean_terminal_turn_still_settles_a_memory_pass(
     assert host.chat.last_response == ""
     assert stream.done is True
     assert host._broker.get("chat-1") is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_outcome_is_aggregated_before_delivery() -> None:
+    """The outcome must be terminal-complete the instant the result is yielded.
+
+    The provider pass used to yield before aggregating, so a consumer that
+    inspected ``outcome.response_text``/``had_error`` on delivery saw the
+    previous turn's state. A normal completion is the simplest case, but a
+    stop normalization relies on the same ordering.
+    """
+    host = _PassHost(
+        _Provider(
+            [
+                AssistantTextDelta(type="text", text="hello"),
+                ResultEvent(
+                    type="result",
+                    result="done",
+                    session_id="s1",
+                    effective_model="sonnet",
+                    usage={"input_tokens": "1"},
+                    quota={"five_hour": "2"},
+                    cost_usd=0.5,
+                ),
+            ]
+        )
+    )
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    outcome = StreamOutcome()
+    request = AgentRequest(prompt="hello", model="opus", mode="auto")
+
+    seen: list[tuple[bool, str, bool]] = []
+    async for event in streaming.drive_stream(
+        chat_id="chat-1", request=request, outcome=outcome
+    ):
+        if isinstance(event, ResultEvent):
+            seen.append(
+                (
+                    outcome.response_text == "done",
+                    outcome.effective_model,
+                    outcome.had_error,
+                )
+            )
+
+    assert seen == [(True, "sonnet", False)]
+    assert outcome.cost_usd == 0.5
+    assert outcome.usage == {"input_tokens": "1"}
+    assert outcome.quota == {"five_hour": "2"}
 
 
 @pytest.mark.asyncio

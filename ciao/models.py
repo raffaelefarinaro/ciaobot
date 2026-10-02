@@ -266,6 +266,11 @@ class ResultEvent(StreamEvent):
     usage: dict[str, str] = field(default_factory=dict)
     quota: dict[str, str] = field(default_factory=dict)
     cost_usd: float | None = None
+    # True when the turn ended because the user pressed Stop and the provider's
+    # terminal frame carried no answer. It is a cancellation, not a failure:
+    # the partial text the user already saw is attached as the result and the
+    # frame is published as a non-error so no client paints an error bubble.
+    stopped: bool = False
     # True when the provider completed without a separate final-answer item
     # and the last substantive commentary was promoted as a visible fallback.
     fallback_final: bool = False

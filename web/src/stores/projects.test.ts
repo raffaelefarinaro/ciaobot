@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, test, vi, type Mock } from 'vitest'
 import { createPinia as newPinia, setActivePinia } from 'pinia'
 import type { ProjectInfo, ChatInfo, ChatMessage } from '../lib/types'
 import type { ServerRow } from '../lib/chatHistory'
@@ -1438,6 +1438,37 @@ describe('result frames and unread state', () => {
     })
 
     expect(store.unread[chatId]).toBe(1)
+  })
+
+  it('retains normalized stopped partial reply without an error or unread badge', () => {
+    // A clean provider-level Stop arrives as a normalized frame: stopped=true,
+    // is_error=false, and the partial text the user watched stream. The client
+    // must keep that text, finish streaming, and not paint an error or an
+    // unread marker for the half sentence the user cancelled.
+    const store = useProjectStore()
+    const chatId = 'c-stopped-normalized'
+    store.activeChatId = 'some-other-chat'
+    store.streaming[chatId] = true
+    store.messages[chatId] = [{ role: 'user', content: 'do the thing', timestamp: '' }]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Let me check the',
+        is_error: false,
+        stopped: true,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+      }),
+    })
+
+    const last = store.messages[chatId].at(-1)
+    expect(last?.content).toBe('Let me check the')
+    expect(last?.is_error).toBeFalsy()
+    expect(store.streaming[chatId]).toBe(false)
+    expect(store.unread[chatId]).toBeUndefined()
   })
 })
 

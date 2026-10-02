@@ -660,6 +660,57 @@ def test_claude_error_result_annotation_is_selective(
     assert _annotate_connection_host(annotated, "api.anthropic.com") == annotated
 
 
+def test_claude_empty_result_preserves_sdk_errors(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """An error ResultMessage with no ``result`` keeps its SDK diagnostics.
+
+    The CLI reports some failures (subtype ``error_during_execution``) with an
+    empty ``result`` and the actual messages in ``errors``. Dropping those left
+    the turn looking like a blank error with nothing for the user to act on.
+    """
+    from claude_agent_sdk import ResultMessage
+
+    msg = ResultMessage(
+        subtype="error_during_execution",
+        duration_ms=10,
+        duration_api_ms=10,
+        is_error=True,
+        num_turns=1,
+        session_id="sess-errors",
+        result="",
+        errors=["boom one", "", "boom two"],
+    )
+    result = claude_provider._convert_message(msg)[0]
+    assert result.is_error is True
+    # Nonempty strings are joined, blank entries dropped.
+    assert result.result == "boom one\nboom two"
+
+
+def test_claude_interrupt_empty_error_remains_empty(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """A bare interrupt stays empty in the adapter: cancellation is inferred
+    at the streaming boundary, never here."""
+    from claude_agent_sdk import ResultMessage
+
+    for errors in ([], None):
+        msg = ResultMessage(
+            subtype="error_during_execution",
+            duration_ms=10,
+            duration_api_ms=10,
+            is_error=True,
+            num_turns=1,
+            session_id="sess-interrupt",
+            result="",
+            errors=errors,
+            terminal_reason="aborted_streaming",
+        )
+        result = claude_provider._convert_message(msg)[0]
+        assert result.is_error is True
+        assert result.result == ""
+
+
 @pytest.mark.asyncio
 async def test_prompt_payload_is_async_iterable_without_images(
     claude_provider: ClaudeProvider,
