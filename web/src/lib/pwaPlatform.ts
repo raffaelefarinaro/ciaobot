@@ -1,10 +1,10 @@
 /**
- * Platform probes shared by the Settings notifications card and the Home setup
- * card, plus the manual install instructions for browsers that never offer a
- * programmatic prompt (Safari, Firefox, iOS).
+ * Platform probes shared by the Settings notifications card, the Home setup
+ * card and the Settings install guidance, plus the manual install instructions
+ * for browsers that never offer a programmatic prompt (Safari, Firefox, iOS).
  *
  * They were local functions in SettingsNotifications.vue; the Home card needs
- * the same answers, and one copy is the only way to keep the two surfaces from
+ * the same answers, and one copy is the only way to keep the surfaces from
  * drifting apart.
  */
 
@@ -18,6 +18,23 @@ export function isIos(): boolean {
 
 export function isMacDesktop(): boolean {
   return /macintosh|mac os x/i.test(navigator.userAgent) && !isIos()
+}
+
+export function isAndroid(): boolean {
+  return /android/i.test(navigator.userAgent)
+}
+
+/** Microsoft Edge, whose user agent still also says Chrome. */
+export function isEdge(): boolean {
+  return /edg\//i.test(navigator.userAgent)
+}
+
+/** Chromium on a computer: Chrome, or another browser on its engine. Phones are
+ *  excluded, where the same engine puts the install entry in a phone menu. */
+export function isChromiumDesktop(): boolean {
+  const ua = navigator.userAgent
+  if (isIos() || isAndroid()) return false
+  return /chrome|crios|chromium/i.test(ua)
 }
 
 export function isStandalone(): boolean {
