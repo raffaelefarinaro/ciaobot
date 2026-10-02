@@ -351,12 +351,13 @@ def _disabled_section(stdout: str) -> str | None:
     launchd's ``enabled``/``disabled`` words). Whatever launchd prints after the
     section is a section of its own and is left there.
 
-    Output with no such header is read as a bare dictionary — the shape older
-    launchd wrote, and the only shape a POSIX or Windows test can produce.
+    Output with no such header is not read. A ``{ … }`` body with no header is
+    not a shape macOS launchd emits, and reading one would report a sign-in
+    state from output this reader cannot account for.
 
     None means there is no complete section here, which is not the same as an
-    empty one: an opening brace whose section never closes is unreadable, not
-    "nothing is disabled".
+    empty one: output with no header, or an opening brace whose section never
+    closes, is unreadable, not "nothing is disabled".
     """
     lines = stdout.splitlines()
     for index, line in enumerate(lines):
@@ -386,9 +387,8 @@ def _disabled_section(stdout: str) -> str | None:
             body.append(entry[:closing])
             return None if entry[closing + 1 :].strip() else "\n".join(body)
         return None
-    text = stdout.strip()
-    if text.startswith("{") and text.endswith("}"):
-        return text[1:-1]
+    # No header anywhere in the output. That is not a listing in a shape this
+    # reader accepts, and it is not an empty one either: it is unreadable.
     return None
 
 
@@ -397,9 +397,11 @@ def _parse_disabled_listing(stdout: str) -> dict[str, bool] | None:
 
     Only launchd's own ``disabled services`` section is read (see
     ``_disabled_section``), and None means "this output cannot be read", which is
-    not the same as "nothing is disabled": a section that never closes, a
-    leftover line inside one, a value that is neither spelling launchd has used,
-    or one label listed twice with two different answers all mean the answer is
+    not the same as "nothing is disabled": output that carries no such section —
+    a bare ``{ … }`` body, an unrelated line, nothing at all — is not a listing
+    we may read, and neither is a section that never closes, a leftover line
+    inside one, a value that is neither spelling launchd has used, or one label
+    listed twice with two different answers. All of them mean the answer is
     unknown, and the caller reports that instead of guessing a position.
     """
     body = _disabled_section(stdout)

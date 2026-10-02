@@ -39,6 +39,19 @@ SERVER = macos_service.SERVER_LABEL
 TASK = windows_service.TASK_NAME
 
 
+def _section(*entries: tuple[str, str]) -> str:
+    """A ``disabled services`` section with *entries*, in the shape launchd prints.
+
+    Shorthand for the listings most tests want: one or two labels and their
+    words, wrapped in the blank line, the tab-indented header and the closing tab
+    a real Mac writes (``PRINT_DISABLED_REAL`` below is a full capture of one).
+    The bare ``{ … }`` body this wraps is not a shape the reader accepts, so a
+    test that means "no overrides" writes ``_section()``.
+    """
+    body = "".join(f'\t\t"{label}" => {word}\n' for label, word in entries)
+    return f"\n\tdisabled services = {{\n{body}\t}}\n"
+
+
 # --------------------------------------------------------------------------- #
 # Fakes. Each records its argv, so a test asserts what was run, not just that
 # something was.
@@ -48,7 +61,7 @@ TASK = windows_service.TASK_NAME
 class _Launchctl:
     """A ``launchctl`` that answers ``print-disabled`` from a script."""
 
-    def __init__(self, listing: str = "{\n}", *, returncode: int = 0) -> None:
+    def __init__(self, listing: str = _section(), *, returncode: int = 0) -> None:
         self.listing = listing
         self.returncode = returncode
         self.calls: list[list[str]] = []
@@ -224,7 +237,7 @@ def _status(
     _install_schtasks(monkeypatch, schtasks or _Schtasks())
     monkeypatch.setattr(service_login, "_uid", lambda: UID)
     monkeypatch.setattr(
-        service_login, "_launchctl_run", launchctl or _Launchctl("{\n}")
+        service_login, "_launchctl_run", launchctl or _Launchctl(_section())
     )
     monkeypatch.setattr(sys, "platform", platform)
     return service_login.login_status
@@ -254,7 +267,7 @@ def test_a_disabled_override_is_the_next_sign_in_state(
 ) -> None:
     _install(tmp_path, monkeypatch)
     login_status = _status(
-        monkeypatch, "darwin", launchctl=_Launchctl(f'{{\n\t"{SERVER}" => disabled\n}}')
+        monkeypatch, "darwin", launchctl=_Launchctl(_section((SERVER, "disabled")))
     )
     workspace = tmp_path / "workspace"
 
@@ -271,7 +284,7 @@ def test_an_enabled_override_is_the_next_sign_in_state(
 ) -> None:
     _install(tmp_path, monkeypatch)
     login_status = _status(
-        monkeypatch, "darwin", launchctl=_Launchctl(f'{{\n\t"{SERVER}" => enabled\n}}')
+        monkeypatch, "darwin", launchctl=_Launchctl(_section((SERVER, "enabled")))
     )
 
     status = login_status(tmp_path / "workspace")
@@ -285,7 +298,7 @@ def test_the_boolean_spelling_of_the_override_is_read_too(
     """Older launchd wrote ``"label" => true``, where true means disabled."""
     _install(tmp_path, monkeypatch)
     login_status = _status(
-        monkeypatch, "darwin", launchctl=_Launchctl(f'{{\n\t"{SERVER}" => true\n}}')
+        monkeypatch, "darwin", launchctl=_Launchctl(_section((SERVER, "true")))
     )
 
     assert login_status(tmp_path / "workspace").enabled is False
@@ -342,6 +355,21 @@ def test_a_following_launchd_section_does_not_close_the_disabled_one() -> None:
     assert listing[SERVER] is False
 
 
+def test_a_bare_dictionary_body_is_not_a_listing_we_read() -> None:
+    """No header, no answer — and not an empty one either.
+
+    launchd prints the section, so a `{ … }` body with no header is output no Mac
+    produces. Reading it would report the engine's next sign-in from a shape
+    nothing here can account for, and that guess is exactly what a start-at-sign-in
+    switch must not be built on.
+    """
+    assert service_login._parse_disabled_listing("{\n}") is None
+    assert (
+        service_login._parse_disabled_listing('{\n\t"com.ciao.server" => disabled\n}')
+        is None
+    )
+
+
 def test_the_real_listing_disabled_is_the_next_sign_in_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -364,7 +392,7 @@ def test_no_override_falls_back_to_the_plists_own_disabled_key(
     """An absent key is launchd's "not disabled", and a disabled *job* is not
     the question: the engine may well be running and still start at sign-in."""
     _install(tmp_path, monkeypatch, disabled=True)
-    login_status = _status(monkeypatch, "darwin", launchctl=_Launchctl("{\n}"))
+    login_status = _status(monkeypatch, "darwin", launchctl=_Launchctl(_section()))
 
     assert login_status(tmp_path / "workspace").enabled is False
 
@@ -373,7 +401,7 @@ def test_no_override_and_no_plist_key_means_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install(tmp_path, monkeypatch)
-    login_status = _status(monkeypatch, "darwin", launchctl=_Launchctl("{\n}"))
+    login_status = _status(monkeypatch, "darwin", launchctl=_Launchctl(_section()))
 
     assert login_status(tmp_path / "workspace").enabled is True
 
@@ -385,7 +413,7 @@ def test_other_labels_in_the_listing_are_not_our_business(
     login_status = _status(
         monkeypatch,
         "darwin",
-        launchctl=_Launchctl('{\n\t"com.apple.other" => disabled\n}'),
+        launchctl=_Launchctl(_section(("com.apple.other", "disabled"))),
     )
 
     assert login_status(tmp_path / "workspace").enabled is True
@@ -394,14 +422,12 @@ def test_other_labels_in_the_listing_are_not_our_business(
 @pytest.mark.parametrize(
     "listing",
     [
-        '{\n\t"com.ciao.server" => maybe\n}',   # a word we do not know
-        '{\n\t"com.ciao.server" => enabled\n',  # truncated
-        "com.ciao.server => enabled",             # not a dictionary
-        "",                                        # nothing at all
-        "{\n\tsomething unexpected here\n}",       # a line we cannot read
-        '{\n\t"com.ciao.server" => enabled\n\t"com.ciao.server" => disabled\n}',
-        # The same five failures in the shape launchd really prints: the section
-        # is there, and it is still not something we may read.
+        "com.ciao.server => enabled",             # not a listing at all
+        "",                                       # nothing at all
+        '{\n\t"com.ciao.server" => disabled\n}',  # a bare body, no section header
+        # Output that does carry the section, and is still not something we may
+        # read: an unknown word, an unclosed section, a line we cannot read, two
+        # answers for one label, a brace that is only prose.
         "\n\tdisabled services = {\n"
         f'\t\t"{SERVER}" => maybe\n'
         "\t}\n",
@@ -419,12 +445,9 @@ def test_other_labels_in_the_listing_are_not_our_business(
         "\t} and then some prose\n",                 # not a brace, only prose
     ],
     ids=[
-        "unknown-word",
-        "unterminated",
-        "not-a-dict",
+        "not-a-listing",
         "empty",
-        "unreadable-line",
-        "contradictory",
+        "bare-body-no-header",
         "section-unknown-word",
         "section-unterminated",
         "section-unreadable-line",
@@ -573,7 +596,7 @@ def test_the_read_uses_the_live_plist_dir_not_the_test_override(
     )
     monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(shadow))
     login_status = _status(
-        monkeypatch, "darwin", launchctl=_Launchctl(f'{{\n\t"{SERVER}" => enabled\n}}')
+        monkeypatch, "darwin", launchctl=_Launchctl(_section((SERVER, "enabled")))
     )
 
     status = login_status(tmp_path / "workspace")
@@ -662,7 +685,7 @@ def test_a_plist_for_another_workspace_is_reported_not_repointed(
     other.mkdir()
     _install(tmp_path, monkeypatch, workspace=other)
     login_status = _status(
-        monkeypatch, "darwin", launchctl=_Launchctl(f'{{\n\t"{SERVER}" => enabled\n}}')
+        monkeypatch, "darwin", launchctl=_Launchctl(_section((SERVER, "enabled")))
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -701,7 +724,7 @@ def test_a_plist_without_a_login_trigger_is_a_manual_configuration(
     the next sign-in, so reporting On would be a lie about the switch."""
     _install(tmp_path, monkeypatch, run_at_load=False, keep_alive=False)
     login_status = _status(
-        monkeypatch, "darwin", launchctl=_Launchctl(f'{{\n\t"{SERVER}" => enabled\n}}')
+        monkeypatch, "darwin", launchctl=_Launchctl(_section((SERVER, "enabled")))
     )
 
     status = login_status(tmp_path / "workspace")
@@ -723,7 +746,7 @@ def test_a_non_boolean_disabled_key_is_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install(tmp_path, monkeypatch, disabled="yes")
-    login_status = _status(monkeypatch, "darwin", launchctl=_Launchctl("{\n}"))
+    login_status = _status(monkeypatch, "darwin", launchctl=_Launchctl(_section()))
 
     status = login_status(tmp_path / "workspace")
 
@@ -737,7 +760,7 @@ def test_an_unanswerable_read_refuses_the_change_before_it_tries(
     """A disabled *job* is not the question, and an unreadable definition is
     not an answer. Neither may be turned into a switch."""
     _install(tmp_path, monkeypatch, disabled="yes")
-    launchctl = _Launchctl("{\n}")
+    launchctl = _Launchctl(_section())
     _status(monkeypatch, "darwin", launchctl=launchctl)
     monkeypatch.setattr(sys, "platform", "darwin")
 
@@ -758,7 +781,7 @@ def test_disabling_runs_only_launchctl_disable_and_re_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install(tmp_path, monkeypatch)
-    launchctl = _Launchctl(f'{{\n\t"{SERVER}" => disabled\n}}')
+    launchctl = _Launchctl(_section((SERVER, "disabled")))
     _status(monkeypatch, "darwin", launchctl=launchctl)
     monkeypatch.setattr(sys, "platform", "darwin")
 
@@ -778,12 +801,10 @@ def test_enabling_runs_only_launchctl_enable_and_re_reads(
     _install(tmp_path, monkeypatch)
     states = iter(
         [
-            f'{{\n\t"{SERVER}" => disabled\n}}',
-            f'{{\n\t"{SERVER}" => enabled\n}}',
+            _section((SERVER, "disabled")),
+            _section((SERVER, "enabled")),
         ]
     )
-    launchctl = _Launchctl("")
-    launchctl.listing = ""  # type: ignore[assignment]
 
     class _Scripted(_Launchctl):
         def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -826,7 +847,7 @@ def test_a_launchctl_failure_is_unavailable_not_a_refusal(
                     command, 1, stdout="", stderr="Could not disable service: 1: Operation not permitted"
                 )
             return subprocess.CompletedProcess(
-                command, 0, stdout=f'{{\n\t"{SERVER}" => enabled\n}}', stderr=""
+                command, 0, stdout=_section((SERVER, "enabled")), stderr=""
             )
 
     refusing = _Refusing()
@@ -859,7 +880,7 @@ def test_a_change_the_re_read_does_not_confirm_is_a_failure(
             if command[1] == "print-disabled":
                 # Never changes: the write's re-read still says disabled.
                 return subprocess.CompletedProcess(
-                    command, 0, stdout=f'{{\n\t"{SERVER}" => disabled\n}}', stderr=""
+                    command, 0, stdout=_section((SERVER, "disabled")), stderr=""
                 )
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -882,7 +903,7 @@ def test_a_write_over_an_unowned_plist_never_reaches_launchctl(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _install(tmp_path, monkeypatch, workspace=other)
-    launchctl = _Launchctl(f'{{\n\t"{SERVER}" => enabled\n}}')
+    launchctl = _Launchctl(_section((SERVER, "enabled")))
     _status(monkeypatch, "darwin", launchctl=launchctl)
     monkeypatch.setattr(sys, "platform", "darwin")
     before = (tmp_path / "LaunchAgents" / f"{SERVER}.plist").read_bytes()
@@ -899,7 +920,7 @@ def test_nothing_is_run_when_the_definition_has_no_login_trigger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install(tmp_path, monkeypatch, run_at_load=False, keep_alive=False)
-    launchctl = _Launchctl(f'{{\n\t"{SERVER}" => enabled\n}}')
+    launchctl = _Launchctl(_section((SERVER, "enabled")))
     _status(monkeypatch, "darwin", launchctl=launchctl)
     monkeypatch.setattr(sys, "platform", "darwin")
 
