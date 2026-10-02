@@ -1023,6 +1023,53 @@ def _skill_proposal_remove_parser() -> argparse.ArgumentParser:
     raise AssertionError("skill-proposal-remove is not registered")
 
 
+def test_a_proposal_that_links_learnings_asks_for_a_verification(
+    tmp_path: Path,
+) -> None:
+    """An applied on a learning-linked record is refused without a verification.
+
+    `settle_proposal` says so, and the prompt's own `--applied` line is what a
+    chat runs verbatim — so a prompt that carries no `--verification` names a
+    command that exits 1 and leaves the proposal queued.
+    """
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal(origins=(_origin(),)))
+
+    prompt = sp.render_improvement_prompt(stored)
+
+    assert (
+        "ciao skill-proposal-remove web-research --applied --verification "
+        f"'{sp.VERIFICATION_PLACEHOLDER}'"
+    ) in prompt
+    assert "links 1 learning finding(s)" in prompt
+
+
+def test_a_proposal_without_learnings_has_no_verification_step(
+    tmp_path: Path,
+) -> None:
+    """A proposal with no finding to retire needs no receipt, so the prompt for
+    one is unchanged: the same line, with nothing the chat has to fill in."""
+    config = _config(tmp_path)
+    stored = sp.upsert_proposal(config, _proposal())
+
+    prompt = sp.render_improvement_prompt(stored)
+
+    assert "--verification" not in prompt
+    assert "ciao skill-proposal-remove web-research --applied\n" in prompt + "\n"
+
+
+@pytest.mark.parametrize(
+    "doc", ["ciao/stock/skills/ciao-memory/SKILL.md", "docs/AGENT_CLI.md"]
+)
+def test_the_docs_spell_the_placeholder_the_cli_refuses(doc: str) -> None:
+    """An agent copies the example from the docs as readily as from the prompt,
+    and the CLI refuses the placeholder by exact match — so a doc that words it
+    differently is a placeholder that settles a finding as applied."""
+    text = (Path(__file__).resolve().parents[1] / doc).read_text(encoding="utf-8")
+
+    assert f"--verification '{sp.VERIFICATION_PLACEHOLDER}'" in text
+
+
 def test_the_prompt_falls_back_to_the_skills_directory_when_no_path_was_recorded(
     tmp_path: Path,
 ) -> None:
