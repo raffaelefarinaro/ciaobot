@@ -23,9 +23,11 @@ import { boot, horizontalOverflow, isolate } from '../support/app'
  *    resize.
  *
  * The copy is asserted here too, because a browser is the only place the
- * rendered sentence can be read: "that is the note's date" is a promise about
- * what the panel is *not* claiming, and the map is where a reader decides
- * whether to trust a node that has no amber ring on it.
+ * rendered sentence can be read: a fact carrying the note's date instead of its
+ * own is a promise about what the panel is *not* claiming, and the map is where
+ * a reader decides whether to trust a node that has no amber ring on it. It is
+ * also the only place a sentence's weight is honest — a reason stated once per
+ * reason reads differently on a real page than it does as a selector list.
  */
 
 const REVIEW = '/memory/review?show=revisit'
@@ -70,18 +72,26 @@ test.describe('a note holding one overdue fact', () => {
     await expect(row.locator('.vr-entry-section').first()).toContainText('Nadia')
     await expect(row.locator('.vr-entry-context').first()).toContainText('Based in Lisbon')
 
-    // Last CHECKED and last VERIFIED are different claims, and this entry's
-    // date is its own stamp — the panel says which one it is showing.
-    await expect(row.locator('.vr-entry-why').first()).toContainText('Last checked too long ago')
-    await expect(row.locator('.vr-entry-dates').first()).toContainText('2019-05-01')
-    await expect(row.locator('.vr-entry-dates').first()).toContainText("on the entry's own stamp")
+    // One head per reason, not one per fact: the two facts here are overdue for
+    // different amounts of work, and the panel says why once for each rather
+    // than printing a shared sentence on every row.
+    const heads = row.locator('.vr-entry-reason-head')
+    await expect(heads).toHaveCount(2)
+
+    // This entry's own stamp is past the horizon. The age is the one number that
+    // is per fact, so it stays on the fact it belongs to.
+    await expect(heads.first()).toContainText('Last checked too long ago')
+    await expect(heads.first()).toContainText('older than the review horizon')
+    await expect(row.locator('.vr-entry-age').first()).toContainText('unverified for 2698d')
 
     // The second kind: a stamp the note's freshness cannot vouch for. Its date
-    // is the file's — inherited, not its own — and the panel says so rather
-    // than presenting a date nobody could have checked anything on.
-    await expect(row.locator('.vr-entry-why').nth(1)).toContainText('not a usable date')
-    await expect(row.locator('.vr-entry-dates').nth(1)).toContainText("that is the")
-    await expect(row.locator('.vr-entry-dates').nth(1)).toContainText('this fact carries no stamp')
+    // is the file's — inherited, not its own — and the group's sentence says so
+    // once rather than presenting a date nobody could have checked anything on.
+    await expect(heads.nth(1)).toContainText('The check on it is not a usable date')
+    await expect(heads.nth(1)).toContainText('cannot be read as a date')
+    // The per-row restatement of that same sentence is gone, which is the whole
+    // point: it used to appear on every fact of this kind.
+    await expect(row.locator('.vr-entries')).not.toContainText('this fact carries no stamp')
   })
 
   test('the decision is linked, not duplicated, and a dead one says so', async ({ page }) => {
