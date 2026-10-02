@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@vueuse/core": "^14.4.0",
-    "dompurify": "^3.4.12",
+    "dompurify": "^3.4.16",
     "marked": "^18.0.6",
     "papaparse": "^5.5.4",
     "pinia": "^3.0.4",
