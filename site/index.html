@@ -42,12 +42,23 @@
       <img class="hero-image" src="assets/img/hero.png" alt="The Ciaobot mascot saying Ciao!" width="1348" height="390">
       <h1>A personal assistant that remembers.</h1>
       <p class="lead">A persistent personal workspace for the agents you already use. Get things done in short conversations, keep what matters, and build on it next time.</p>
-      <div class="install">
-        <p class="install-label">Install on a Mac with one line in the Terminal:</p>
+      <div class="install" data-install>
+        <div class="install-head">
+          <p class="install-label" data-install-label>Install on a Mac with one line in the Terminal:</p>
+          <label class="install-os" hidden>
+            <span class="visually-hidden">Platform</span>
+            <select data-install-os>
+              <option value="mac" data-label="Install on a Mac with one line in the Terminal:" data-cmd="curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh">macOS</option>
+              <option value="windows" data-label="Install on Windows 11 with one line in PowerShell:" data-cmd="irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex">Windows (preview)</option>
+            </select>
+          </label>
+        </div>
         <div class="install-box">
           <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
           <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
         </div>
+        <p class="install-note" data-install-note hidden>Windows is a preview: no administrator rights needed, and the engine starts when you sign in. <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md">Windows guide →</a></p>
+        <noscript><p class="install-note">On Windows 11, in PowerShell: <code>irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex</code> (preview, <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md">Windows guide</a>)</p></noscript>
         <p class="repo-stats" id="repo-stats" hidden>
           <span class="stat"><span aria-hidden="true">★</span> <strong data-stat="stars">–</strong> GitHub stars</span>
           <span aria-hidden="true">·</span>

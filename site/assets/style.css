@@ -320,6 +320,37 @@ th { color: var(--muted); font-weight: 600; }
   text-align: left;
 }
 .install-label { color: var(--muted); font-size: 14px; margin: 0 0 6px; text-align: center; }
+.install-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 10px;
+  margin: 0 0 6px;
+}
+.install-head .install-label { margin: 0; }
+.install-os select {
+  min-height: 44px;
+  padding: 0 32px 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-3);
+  color: var(--text);
+  font: 600 14px var(--sans);
+  cursor: pointer;
+}
+.install-os select:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 .install-box {
   display: flex;
   align-items: stretch;

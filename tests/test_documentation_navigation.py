@@ -97,3 +97,20 @@ def test_home_has_one_controllable_product_demo() -> None:
         path = video[attribute]
         assert path is not None
         assert (ROOT / "site" / path).is_file()
+
+
+def test_site_install_picker_offers_both_one_liners() -> None:
+    # The home page and the guide carry one install command per platform, chosen
+    # by site.js from the visitor's OS. The static text is the macOS command (no
+    # JavaScript), and a <noscript> line gives the Windows one.
+    mac = "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh"
+    windows = "irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex"
+    for relative in ("site/index.html", "site/guide.html"):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert "data-install" in text and "data-install-os" in text, relative
+        assert f'data-cmd="{mac}"' in text and f'data-cmd="{windows}"' in text, relative
+        assert f'<code id="install-cmd">{mac}</code>' in text, relative
+        assert "<noscript>" in text and windows in text.split("<noscript>", 1)[1], relative
+        assert "docs/WINDOWS.md" in text, relative
+    script = (ROOT / "site/assets/site.js").read_text(encoding="utf-8")
+    assert "[data-install-os]" in script and "option.dataset.cmd" in script
