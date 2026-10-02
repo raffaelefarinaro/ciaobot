@@ -30,7 +30,8 @@ web/
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /memory, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
                            CommandPaletteModal, and FileViewerModal)
-    components/settings/  panels split out of SettingsView.vue, plus the scoped CSS they share with it
+    components/settings/  panels split out of SettingsView.vue (the host's start-at-sign-in row is
+                           SettingsEngineLogin.vue), plus the scoped CSS they share with it
     stores/               Pinia stores (auth, projects, tasks, fileViewer), and store
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
