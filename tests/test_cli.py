@@ -2079,7 +2079,13 @@ def test_the_improvement_prompts_applied_command_settles_a_learning_linked_propo
             for line in prompt.splitlines()
             if "skill-proposal-remove" in line and "--applied" in line
         ).replace(
-            skill_proposals.VERIFICATION_PLACEHOLDER, "Gotchas: use the REST API"
+            skill_proposals.VERIFICATION_PLACEHOLDER,
+            # A skill file's readback is Markdown: backticks, `$` and an
+            # apostrophe. The prompt single-quotes the value, so what is typed
+            # here is the shell-escaped form, with `'` written as `'\''` —
+            # inside double quotes a chat that pasted it as-is would run the
+            # backticks as a command substitution and record that instead.
+            "Gotchas: use `gh api`, don'\\''t scrape",
         )
         argv = shlex.split(settle.strip())[1:]
     finally:
@@ -2093,7 +2099,10 @@ def test_the_improvement_prompts_applied_command_settles_a_learning_linked_propo
     assert settled is not None
     assert len(settled.origins) == 1
     assert settled.origins[0].state == skill_proposals.ORIGIN_APPLIED
-    assert settled.origins[0].verification == "Gotchas: use the REST API"
+    # The unescaped value, so this also pins that the shell quoting survives the
+    # round trip rather than the escaping ending up in the record.
+    assert settled.origins[0].verification == "Gotchas: use `gh api`, don't scrape"
+    assert settled.lifecycle == skill_proposals.APPLIED
 
 
 # -- skill-proposal-add ------------------------------------------------------

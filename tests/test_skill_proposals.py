@@ -1038,8 +1038,8 @@ def test_a_proposal_that_links_learnings_asks_for_a_verification(
     prompt = sp.render_improvement_prompt(stored)
 
     assert (
-        'ciao skill-proposal-remove web-research --applied --verification '
-        f'"{sp.VERIFICATION_PLACEHOLDER}"'
+        "ciao skill-proposal-remove web-research --applied --verification "
+        f"'{sp.VERIFICATION_PLACEHOLDER}'"
     ) in prompt
     assert "links 1 learning finding(s)" in prompt
 
