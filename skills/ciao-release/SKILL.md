@@ -206,8 +206,8 @@ task files in `tasks/`:
 tasks/01-boot-and-home.md        first paint, workspace, what-needs-you
 tasks/02-chat-and-turns.md       start a chat, real turns, streaming, stop
 tasks/03-archive-and-memory.md   archive, reopen, the archived footer
-tasks/04-projects-and-schedule.md  project create, mark complete, a schedule row
-tasks/05-settings-and-assets.md  every Settings tab loads, assets list
+tasks/04-projects-and-schedule.md  a plain app project, an isolated vault note completion, a schedule row
+tasks/05-settings-and-assets.md  every Settings route loads, the scoped asset lists
 ```
 
 The operator types the dashboard password once, into the visible browser, at the
