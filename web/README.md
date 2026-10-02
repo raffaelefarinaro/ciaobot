@@ -52,6 +52,18 @@ browser supports sharing that file type, alongside the existing Download.
 Safari/iOS may not expose the installed app as a share target; ordinary file
 attachment remains available there. PWA features need HTTPS or localhost.
 
+Permanent install guidance lives in Settings → Home → **Use Ciaobot as an app**
+(`components/settings/SettingsAppInstall.vue`), not in the Home setup reminder:
+that reminder can be closed for good, and its X is the only dismissal control
+it has. The card keeps the general facts — installing is optional, the browser
+already works, the host engine has to stay running, only a secure origin can
+install or get push — and puts the per-platform steps (Safari on Mac, Chrome on
+Mac/Windows, Edge on Windows, Safari on iPhone/iPad, Chrome on Android) behind
+one disclosure, each row linking the vendor's own guide. It reports the reader's
+current platform as a highlight, never a filter: all five rows are always on the
+page, and it only claims what this window can see (`isStandalone`), because a
+browser tab cannot know whether the app is installed on the device.
+
 
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
 
