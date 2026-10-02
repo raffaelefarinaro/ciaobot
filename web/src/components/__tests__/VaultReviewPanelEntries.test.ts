@@ -4,9 +4,10 @@
  *
  * A note is not the unit anybody keeps current, and this row is where a person
  * finds out which fact in one needs a look. What is pinned here is that the row
- * names the exact bullet, says whether the date on it is its own stamp or the
- * file's, reports a coverage gap plainly, and *links* the pending entry proposal
- * rather than offering a second decision of its own.
+ * names the exact bullet, states the reason it is on the list once per reason
+ * rather than once per fact, keeps the per-fact age where it is per fact,
+ * reports a coverage gap plainly, and *links* the pending entry proposal rather
+ * than offering a second decision of its own.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -125,27 +126,82 @@ describe('VaultReviewPanel — the facts inside a note', () => {
     wrapper.unmount()
   })
 
-  it('tells last-checked from last-verified when the entry has no stamp of its own', async () => {
-    // An unstamped entry inherits the note's date, and saying "checked
+  it('states a reason once for a note whose facts all share it', async () => {
+    // An unstamped fact inherits the note's date, and saying "checked
     // 2026-09-29" without saying whose date that is would read as a claim about
-    // the fact that was never made.
+    // the fact that was never made. What a fact with no stamp of its own means
+    // is the same for every such fact, though: a note with five of them used to
+    // say it five times, so the reason is stated once and the rows carry only
+    // what differs.
     const wrapper = await mountWith([
       candidate({
         evidence: {
           ...candidate().evidence,
           entry_verification: coverage({
-            stale_entries: [staleEntry({
-              reason: 'no-stamp', own_date: false, last_verified: '2026-09-29',
-              age_days: 1, detail: "nobody has recorded a [verified:] check on this entry",
-            })],
+            stale_entries: [
+              staleEntry({
+                reason: 'no-stamp', own_date: false, last_verified: '2026-09-29',
+                age_days: 1, detail: "nobody has recorded a [verified:] check on this entry",
+              }),
+              staleEntry({
+                identity: 'c'.repeat(64), line_number: 14, section: 'Address',
+                excerpt: '- Flat above the bakery', context: [],
+                reason: 'no-stamp', own_date: false, last_verified: '2026-09-29',
+                age_days: 1, detail: "nobody has recorded a [verified:] check on this entry",
+              }),
+            ],
           }),
         },
       }),
     ])
-    expect(wrapper.get('.vr-entry-why').text()).toContain('Never checked')
-    expect(wrapper.get('.vr-entry-dates').text()).toContain('that is the')
-    expect(wrapper.get('.vr-entry-dates').text()).toContain("note's")
-    expect(wrapper.get('.vr-entry-dates').text()).toContain('this fact carries no stamp')
+    // One head for the one reason, not one per fact.
+    const heads = wrapper.findAll('.vr-entry-reason-head')
+    expect(heads).toHaveLength(1)
+    expect(heads[0].text()).toContain('Never checked')
+    expect(heads[0].text()).toContain('carries the note’s date')
+    // Both facts are still named in full: grouping is about the shared sentence,
+    // not about dropping rows.
+    expect(wrapper.findAll('.vr-entry')).toHaveLength(2)
+    expect(wrapper.findAll('.vr-entry-text')[1].text()).toContain('Flat above the bakery')
+    // The per-row restatement of that same sentence is gone, along with the row
+    // that spelled out the note's date once per bullet.
+    expect(wrapper.text()).not.toContain('this fact carries no stamp')
+    expect(wrapper.find('.vr-entry-dates').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('gives each reason its own head, and keeps the age on the fact it belongs to', async () => {
+    // `age_days` is per fact and cannot live in a group's sentence — a figure
+    // above two facts would read as a claim about both — so the one row whose
+    // reason carries a number keeps it, and the row that does not has none.
+    const wrapper = await mountWith([
+      candidate({
+        evidence: {
+          ...candidate().evidence,
+          entry_verification: coverage({
+            stale_entries: [
+              staleEntry(),
+              staleEntry({
+                identity: 'd'.repeat(64), line_number: 14, section: 'Address',
+                excerpt: '- Flat above the bakery', context: [],
+                reason: 'no-stamp', own_date: false, last_verified: '2026-09-29',
+                age_days: 1, detail: "nobody has recorded a [verified:] check on this entry",
+              }),
+            ],
+          }),
+        },
+      }),
+    ])
+    const heads = wrapper.findAll('.vr-entry-reason-head')
+    // Two reasons, so two heads — the count follows the reasons, not the facts.
+    expect(heads).toHaveLength(2)
+    expect(heads[0].text()).toContain('Last checked too long ago')
+    expect(heads[0].text()).toContain('older than the review horizon')
+    expect(heads[1].text()).toContain('Never checked')
+    const rows = wrapper.findAll('.vr-entry')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].get('.vr-entry-age').text()).toBe('unverified for 2698d')
+    expect(rows[1].find('.vr-entry-age').exists()).toBe(false)
     wrapper.unmount()
   })
 

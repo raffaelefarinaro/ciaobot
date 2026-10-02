@@ -162,6 +162,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/admin/drain` | Close admission for new turns ahead of an engine update; returns `{draining, active_chat_ids}` (loopback-only, no session; used by `ciao update apply`) |
 | POST | `/api/admin/drain/cancel` | Reopen admission after an update's drain timed out; returns `{draining: false}` (loopback-only, no session; used by `ciao update apply`) |
 | GET | `/api/admin/status` | Read admin/deploy status |
+| GET | `/api/service/login` | Whether the engine service starts at the next sign-in, as the machine reports it |
+| PATCH | `/api/service/login` | Turn that start-at-sign-in state on or off for this engine's own service (`{"enabled": bool}`) |
 | GET | `/api/admin/skills` | List skills labelled as custom or stock; merged across every agent root, or one workspace's root with `?workspace=<name>` |
 | POST | `/api/admin/skills/add` | Deprecated: returns 410, replaced by `/api/skills/import` |
 | POST | `/api/skills/import` | Import a skill from a validated zip (multipart `file`; validates zip-slip, one SKILL.md, frontmatter). A SKILL.md over the 15KB context budget imports with a note on `warnings`/`message` |
@@ -822,6 +824,65 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup/s
 # click re-enters the same chat instead of starting a second agent.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/backup/setup-chat"
 ```
+
+**Engine start at sign-in**
+
+`GET /api/service/login` and `PATCH /api/service/login` report and change one
+thing: whether the *engine service that serves this request* starts when this
+user signs in. They are the next-sign-in state, not the running state — an
+engine stopped right now can still be set to start at the next sign-in, and a
+running engine can be set not to.
+
+Both are ordinary `/api/*` routes: signed session cookie required, and the PATCH
+also needs a same-origin `Origin`/`Referer`. Neither is in the public or
+loopback-only allowlist, so a local process without a session is refused.
+
+The body is exactly one key: `{"enabled": true}` or `{"enabled": false}`. A
+string, a number, `null`, an extra key, an empty object, or unparseable JSON is
+a 400, and the request never reaches the service layer.
+
+```bash
+# Read the verified state: {platform, supported, installed, enabled, can_change,
+# reason, setup_command}.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/service/login"
+
+# Turn it on / off. The response is the re-read state, not the request echoed.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/service/login" \
+  -H 'content-type: application/json' -d '{"enabled":true}'
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/service/login" \
+  -H 'content-type: application/json' -d '{"enabled":false}'
+```
+
+`installed` and `enabled` are tri-state, and `null` means *the machine did not
+say*. A definition that does not parse, a `launchctl print-disabled` listing
+that cannot be read, a Task Scheduler identity mangled by a lossy code page, a
+definition that names no workspace, a definition that serves a different
+workspace, a hand-written LaunchAgent with neither `RunAtLoad` nor `KeepAlive`,
+a task with no enabled logon trigger: each reports `null` with the reason in
+`reason` and `can_change: false`. Do not render a switch position out of a
+`null`; render the reason. `can_change` is the only field that licenses a
+write, and it is true only where the enabled bit is proven to be what decides.
+
+`platform` is `macos`, `windows`, `linux`, or `other`. On Linux, and on a
+platform with no service backend, `supported` is false and `reason` points at
+`docs/LINUX.md` (a systemd unit an administrator enables by hand).
+
+The engine identity is fixed and never taken from a request: the
+`com.ciao.server` LaunchAgent in the real per-user LaunchAgents directory on
+macOS, the registered `\Ciaobot\Engine` Task Scheduler task on Windows.
+`installed: false` (macOS, no plist) carries a `setup_command` to run instead;
+`setup_command` is always a fixed, non-executing hint. **These routes never
+create, register, start, stop, restart, bootstrap, or repoint a service, and
+never write a plist or task XML.** A service belonging to another workspace is
+reported and left alone.
+
+Status codes on PATCH: 200 with the re-read status; 409 with `error` plus the
+same status fields when the change is not this engine's to make (no service,
+another workspace's service, a definition that does not start at sign-in, an
+unanswerable query); 503 when the OS refused the change or the re-read did not
+confirm it. A change only counts as done when the machine's re-read says what
+was asked for — the 503 is the honest answer when it does not, and it is never
+papered over with the requested value.
 
 **Connecting a data folder to a private remote**
 

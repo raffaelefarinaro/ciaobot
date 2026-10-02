@@ -58,6 +58,30 @@ export function entryReasonLabel(reason: string): string {
   return ENTRY_REASON_WORDS[reason] || reason || 'needs a check'
 }
 
+/** Why an entry carries its reason, in one sentence, with no numbers.
+ *
+ * The same sentence for every fact sharing a reason code, and a note routinely
+ * holds five of them. Printed on each row it said the same thing five times to
+ * convey one fact, so the panel groups the facts by reason and states this once
+ * per group; what is left on a row is what actually differs, which is the
+ * excerpt and — for `aged` — the age.
+ *
+ * The per-fact numbers are deliberately absent here: `age_days` is per fact, and
+ * a sentence carrying one would read as a claim about every entry under it.
+ */
+const ENTRY_REASON_EXPLANATIONS: Record<string, string> = {
+  aged: 'Its own check is older than the review horizon.',
+  'no-stamp': 'Nobody has recorded a [verified:] check on it, so it carries the note’s date instead of its own.',
+  'unusable-stamp': 'The [verified:] stamp on it cannot be read as a date.',
+}
+
+/** The one sentence an entry reason stands for, or '' for a code this client
+ * has no words for — a newer server's reason is shown by its label alone rather
+ * than by a confident guess at what it means. */
+export function entryReasonExplanation(reason: string): string {
+  return ENTRY_REASON_EXPLANATIONS[reason] ?? ''
+}
+
 /** `2 blocks`, `1 block` — a count with its noun agreeing, for a sentence a
  * person reads rather than a table. */
 function plural(count: number, singular: string, plural_?: string): string {

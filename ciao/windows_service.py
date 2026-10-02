@@ -439,6 +439,39 @@ def task_command(name: str, *, runner: Schtasks = _schtasks) -> str | None:
     return command
 
 
+def query_task_xml(
+    name: str = TASK_NAME, *, runner: Schtasks = _schtasks
+) -> subprocess.CompletedProcess[str]:
+    """The *registered* task's XML, as Task Scheduler prints it.
+
+    The raw result rather than a parsed answer, because a caller that needs the
+    document has to be able to tell "the query failed" (which a missing task, a
+    denied access and a timeout all look like on the wire) from "the document
+    says something this caller cannot use". ``task_command`` answers one string
+    and so has no reason to keep them apart; ``ciao/service_login.py`` does.
+
+    The caller strips the XML declaration: schtasks prints in the console's OEM
+    code page, not the UTF-16 the declaration claims.
+    """
+    return runner("/Query", "/TN", name, "/XML", encoding="oem")
+
+
+def set_task_enabled(
+    enabled: bool, name: str = TASK_NAME, *, runner: Schtasks = _schtasks
+) -> None:
+    """Flip the registered task's enabled bit with ``/Change``.
+
+    The narrowest change Task Scheduler offers: it writes the enabled bit and
+    nothing else. It does not register, rewrite, run or end the task, so the
+    stored definition and the task's triggers survive untouched, and no engine
+    process is started or stopped by it. That is why this, and not ``/Run`` or
+    a re-``/Create``, is what the start-at-sign-in control is built on.
+    """
+    completed = runner("/Change", "/TN", name, "/Enable" if enabled else "/Disable")
+    if completed.returncode != 0:
+        raise _failure("/Change", completed)
+
+
 # Asked of the user in every place where the answer is "there is no task yet".
 # One string, so `status`, `start`, `stop` and `restart` cannot drift into
 # telling the same person three different ways to register it.

@@ -1369,8 +1369,10 @@ two years ago *and* a bullet checked this morning in the same list. The three
 selections are `aged`, `no-stamp` and `unusable-stamp`, and the reason string says
 which, because "unverified for 400d" about a bullet nobody ever stamped is a lie
 dressed as a number: the 400 days are the *file's*. `EntryVerdict.own_date` and the
-review panel's "that is the note's date, this fact carries no stamp of its own"
-exist for the same reason.
+review panel's "Nobody has recorded a [verified:] check on it, so it carries the
+note's date instead of its own" exist for the same reason — the panel states that
+once per reason rather than on every fact, since one explanation repeated per
+bullet says one thing as many times as there are facts.
 
 **Selection and the check state agree everywhere.** The detector has no check
 state — it is pure, over text — so the two filters live in the consumers, and both
