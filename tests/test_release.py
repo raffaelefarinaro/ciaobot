@@ -299,6 +299,49 @@ def test_editable_lock_alignment_preserves_crlf_and_assignment_spacing(
     assert b"# keep me" in after
 
 
+def test_editable_lock_alignment_refuses_decoy_version_in_multiline_string(
+    tmp_path: Path,
+) -> None:
+    """A ``version =`` line inside a multiline string must not be the target.
+
+    The narrow assignment regex matches the first such line in the block, which
+    can be one buried in a multi-line TOML string. Rewriting that decoy left the
+    parsed editable root at the old version while reporting success, so the
+    helper now re-parses the edited block and requires the package entry to
+    match the original with only its version changed.
+    """
+    _write_release_tree(tmp_path)
+    lock = (
+        "version = 1\n"
+        "revision = 3\n"
+        "\n"
+        "[[package]]\n"
+        'name = "ciao"\n'
+        'description = """\n'
+        'version = "decoy"\n'
+        '"""\n'
+        'version = "0.2.0"\n'
+        'source = { editable = "." }\n'
+        "\n"
+        "[[package]]\n"
+        'name = "anyio"\n'
+        'version = "4.4.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+    )
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_text(lock, encoding="utf-8")
+    lock_before = lock_path.read_bytes()
+    pyproject_before = (tmp_path / "pyproject.toml").read_bytes()
+
+    with pytest.raises(ReleaseError, match="uv.lock"):
+        apply_release_files(
+            tmp_path, version="0.3.0", changelog_section="## v0.3.0 - 2026-07-05\n"
+        )
+
+    assert lock_path.read_bytes() == lock_before
+    assert (tmp_path / "pyproject.toml").read_bytes() == pyproject_before
+
+
 def test_editable_lock_alignment_rejects_non_utf8(tmp_path: Path) -> None:
     """An undecodable lock fails as a path-bearing ReleaseError, before writes.
 

@@ -163,13 +163,22 @@ def _read_lock_text(path: Path) -> str:
         raise ReleaseError(f"lock file {path} is not valid UTF-8: {exc}") from exc
 
 
-def _replace_version_value(text: str, version: str, *, path: Path) -> str:
+def _replace_version_value(
+    text: str, version: str, *, path: Path, expected: dict
+) -> str:
     """Set the single top-level ``version`` value, preserving surrounding text.
 
     Only the quoted literal changes: the assignment prefix spacing, the quote
     style, a trailing comment and the line terminator all survive byte for byte.
     This is deliberately narrower than ``_replace_once``, whose replacement
     rebuilds the whole assignment and drops that formatting.
+
+    The narrow regex can match the wrong line: an assignment-looking line inside
+    a multi-line TOML string that appears before the real ``version`` would be
+    rewritten while the parsed root version never moved. So the edited block is
+    re-parsed and its ``[[package]]`` entry must equal ``expected`` with only
+    ``version`` substituted - otherwise this raises rather than returning a lock
+    whose root version silently stayed behind.
     """
     updated, count = re.subn(
         r'^([ \t]*version[ \t]*=[ \t]*)(["\'])([^"\']*)\2',
@@ -181,6 +190,24 @@ def _replace_version_value(text: str, version: str, *, path: Path) -> str:
     if count != 1:
         raise ReleaseError(
             f"expected one version assignment in {path}, replaced {count}"
+        )
+    try:
+        parsed = tomllib.loads(updated)
+    except tomllib.TOMLDecodeError as exc:
+        raise ReleaseError(
+            f"invalid TOML after version rewrite in {path}: {exc}"
+        ) from exc
+    entries = parsed.get("package")
+    if (
+        not isinstance(entries, list)
+        or len(entries) != 1
+        or not isinstance(entries[0], dict)
+    ):
+        raise ReleaseError(f"malformed [[package]] block after rewrite in {path}")
+    if entries[0] != {**expected, "version": version}:
+        raise ReleaseError(
+            f"refusing to rewrite {path}: the edited block does not match the "
+            "original package with only its version changed"
         )
     return updated
 
@@ -247,9 +274,12 @@ def _lock_blocks(lock_text: str, *, path: Path) -> list[tuple[str, dict | None]]
 
     Returns ``(block_text, package_entry)`` pairs in document order, where the
     leading top-level keys block and any non-package block carry ``None``.
-    Every block is re-parsed so a boundary-looking line buried in a multi-line
-    string cannot split a package in two: the split would leave an unterminated
-    TOML document, which raises here rather than yielding a corrupt edit.
+    The whole document is parsed first so a lock that is invalid as a whole
+    (e.g. a table duplicated across blocks) is refused rather than split and
+    rewritten. Every block is then re-parsed so a boundary-looking line buried
+    in a multi-line string cannot split a package in two: the split would leave
+    an unterminated TOML document, which raises here rather than yielding a
+    corrupt edit.
     """
     blocks: list[str] = []
     current: list[str] = []
@@ -260,6 +290,11 @@ def _lock_blocks(lock_text: str, *, path: Path) -> list[tuple[str, dict | None]]
         current.append(line)
     if current:
         blocks.append("".join(current))
+
+    try:
+        tomllib.loads(lock_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ReleaseError(f"invalid TOML in lock file {path}: {exc}") from exc
 
     parsed_blocks: list[tuple[str, dict | None]] = []
     for block in blocks:
@@ -330,7 +365,9 @@ def _align_editable_lock_version(files: ReleaseFiles, *, version: str) -> str:
 
     block_text, entry = blocks[block_index]
     blocks[block_index] = (
-        _replace_version_value(block_text, version, path=lock_path),
+        _replace_version_value(
+            block_text, version, path=lock_path, expected=editable
+        ),
         entry,
     )
     return "".join(block for block, _ in blocks)
