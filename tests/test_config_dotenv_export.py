@@ -231,3 +231,30 @@ def test_installed_workspace_env_without_an_install_returns_base(
     base = {"FOO": "1"}
 
     assert ciao_config.installed_workspace_env(base) == base
+
+
+def test_installed_workspace_env_ignores_a_stale_launch_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plist naming a deleted directory is stale, and must not be pinned.
+
+    The operator removed `~/Ciaobot` but never unloaded the agent. Pinning the
+    path it names is how the directory came back: `from_env` takes the
+    non-bootstrap branch (a workspace is set, no token), finds no token and calls
+    `_read_or_create_secret(<deleted>/.runtime/session-secret)`, whose `mkdir`
+    resurrects what was deleted. `scripts/install-engine.sh` likewise refuses to
+    trust a plist workspace that is not an existing directory. A live install
+    without a `.env` is still trusted — the LaunchAgent server's own `from_env`
+    treats it as a workspace, so pinning matches what the server sees.
+    """
+    gone = tmp_path / "gone"
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(gone), runtime_root=str(gone / ".runtime")
+        ),
+    )
+    base = {"FOO": "1"}
+
+    assert ciao_config.installed_workspace_env(base) == base
+    assert not gone.exists(), "a read-only lookup must not recreate the workspace"

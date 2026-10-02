@@ -3803,6 +3803,39 @@ def test_a_bare_shell_explicit_vault_root_is_named_by_the_installed_registry(
     assert name == "work"
 
 
+def test_a_bare_shell_explicit_vault_root_with_an_empty_workspace_mints_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exported empty `CIAO_WORKSPACE` must not turn a name lookup into a mint.
+
+    `export CIAO_WORKSPACE=` in a shell profile leaves the key present but empty,
+    so it survives the discovery helper (the caller's environment wins the merge)
+    and `setdefault` would leave it in place. `from_env` then has a token and no
+    workspace, which is exactly the bootstrap combination: it MINTED
+    `~/.ciao/bootstrap/.runtime/bootstrap-auth-token` and read a registry nobody
+    asked for, on a lookup whose whole contract is to read and name. On develop
+    the line was an unconditional assignment, so this never happened.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(workspace="", runtime_root=""),
+    )
+    vault = tmp_path / "v"
+
+    name = cli._resolve_workspace_and_vaults(_curation_args(vault_root=str(vault)))[3]
+
+    assert name == "v", "no registry knows this vault, so the directory's name is the answer"
+    # What the empty string cost: `bootstrap_mode` went True and `from_env` wrote
+    # `<bootstrap>/.runtime/bootstrap-auth-token`. Conftest redirects that root to
+    # `tmp_path/bootstrap` (an operator sees `~/.ciao/bootstrap`), so assert on it.
+    assert not (tmp_path / "bootstrap").exists(), "naming a vault must mint nothing"
+    assert not (home / ".ciao").exists()
+
+
 def test_curation_plan_with_a_per_root_vault_root_folds_under_the_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

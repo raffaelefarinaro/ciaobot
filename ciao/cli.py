@@ -1980,7 +1980,11 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
     # resolution `from_env()` applies to a bare shell — so a learnings run from
     # any directory reads the real registry and that install's `.env`.
     env = installed_workspace_env(os.environ)
-    env.setdefault("PWA_AUTH_TOKEN", "learnings-cli")
+    if not env.get("PWA_AUTH_TOKEN", "").strip():
+        # Not `setdefault`: the install's `.env` reaches this mapping now, and an
+        # empty `PWA_AUTH_TOKEN=` hand-written there would leave `from_env`
+        # without a token — minting the session secret this call must not mint.
+        env["PWA_AUTH_TOKEN"] = "learnings-cli"
     if not env.get("CIAO_WORKSPACE", "").strip():
         # No installed server to ask: the cwd, the old `./memory-vault` base.
         env["CIAO_WORKSPACE"] = str(Path.cwd())
@@ -3722,8 +3726,16 @@ def _resolve_workspace_and_vaults(
             # Neither names an install — a bare shell, so `workspace` above is the
             # cwd — and its registry knows no vault. Read the installed one.
             env_source = installed_workspace_env(os.environ)
-            env_source.setdefault("CIAO_WORKSPACE", str(workspace))
-        env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
+            if not env_source.get("CIAO_WORKSPACE", "").strip():
+                # Not `setdefault`: an exported empty `CIAO_WORKSPACE=` survives the
+                # helper (the process wins the merge), and `setdefault` would leave it
+                # in place — `from_env` then sees no workspace with a token, enters
+                # bootstrap mode and MINTS a bootstrap secret while resolving a name.
+                env_source["CIAO_WORKSPACE"] = str(workspace)
+        if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+            # Same reason as the workspace above, one level down: the install's
+            # `.env` is overlaid into this mapping and keeps its empty values.
+            env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
         config = CiaoConfig.from_env(env_source)
         name = _registered_owner(config, resolved) or resolved.name
     return workspace, resolved, resolved, name

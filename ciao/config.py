@@ -122,10 +122,10 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     from ciao.macos_service import discover_runtime
 
     try:
-        discovered = discover_runtime(environ=dict(os.environ))
+        discovered = discover_runtime(environ=dict(base))
     except Exception:  # noqa: BLE001 - plist missing/unreadable
         discovered = None
-    if not discovered or not discovered.workspace:
+    if not discovered or not discovered.workspace or not Path(discovered.workspace).is_dir():
         return dict(base)
     # The discovered workspace's .env is what the running server reads; a
     # bare-shell invocation must see the same values — auth settings first:
@@ -143,6 +143,9 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     # freshly manufactured bootstrap root beside it is the failure discovery
     # exists to prevent. (`from_env` used to pin only when the `.env` existed,
     # while the CLI's own copy always pinned; this is the one rule for both.)
+    # A plist naming a directory that is no longer there is stale, and pinning it
+    # would recreate what the operator deleted (`_read_or_create_secret` mkdirs the
+    # runtime root), so the `is_dir()` guard above is part of this rule.
     try:
         overlay: dict[str, str] = {
             key: value
