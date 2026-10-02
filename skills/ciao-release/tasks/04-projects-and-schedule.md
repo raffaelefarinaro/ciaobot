@@ -27,10 +27,12 @@ Create a project called `Release smoke vX.Y.Z`, then land on `/project/<id>`.
 nothing is left in a half-created state if you navigate away and back.
 
 **Leave this project exactly as created.** Do not press Complete (it is not
-offered) and do not Delete it. Its actions menu should show only *Delete
-project*; a *Complete* action here would mean the app has started treating a
-plain project as a vault entry, which is the confusion this task exists to
-avoid. Record the project id and the fact that it is untouched.
+offered) and do not Delete it. On the project page, its ••• actions menu should
+show only *Delete project*; a *Complete* action here would mean the app has
+started treating a plain project as a vault entry, which is the confusion this
+task exists to avoid. (The sidebar row's own menu is a different one and offers
+*Rename* + *Delete*, so scope this check to the project page.) Record the
+project id and the fact that it is untouched.
 
 ## Step 2 — complete an isolated synthetic vault project note
 
@@ -61,11 +63,17 @@ this exact candidate and marks it completable, before pressing anything:
 
 ```js
 const ws = '<smoke-workspace>';
-const body = await (await fetch(
-  `/api/vault/review?workspace=${encodeURIComponent(ws)}`
-)).json();
-console.log(body.candidates.filter(c =>
-  c.path.endsWith('release-smoke-vX-Y-Z-<unique>.md')));
+const res = await fetch(
+  `/api/vault/review?workspace=${encodeURIComponent(ws)}`,
+  { credentials: 'same-origin' },
+);
+if (!res.ok) {
+  console.log('review fetch failed:', res.status, await res.text());
+} else {
+  const body = await res.json();
+  console.log(body.candidates.filter(c =>
+    c.path.endsWith('release-smoke-vX-Y-Z-<unique>.md')));
+}
 ```
 
 The matching candidate must carry `completable: true` (it comes from the same

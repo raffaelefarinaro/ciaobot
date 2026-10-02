@@ -11,8 +11,8 @@ Screenshots go to `$TMPDIR/ciao-release-walk/<version>/`, named
 
 ## Step 1 — open the app, stop at the door
 
-Open the app at **the origin this install actually serves** — the URL
-`/ciao-dev-install` printed, or the address the installed service is bound to —
+Open the app at **the origin this install actually serves** — the URL the
+`/ciao-dev-install` skill printed, or the address the installed service is bound to —
 not a hard-coded `127.0.0.1:8443`. `PWA_HOST` defaults to `0.0.0.0` and
 `PWA_PORT` to `8443` (`INTEGRATIONS.md`), but the operator may have changed
 either, so read the running config rather than assume. Wait for the document to
@@ -28,7 +28,7 @@ If the page is *not* a login form, do **not** conclude the install has no door.
 The browser may simply be reusing an already-signed-in session: once a session
 cookie is present the route guard sends you straight to the app, and an
 authenticated session is not proof that authentication is off. Tell the two
-apart from the app itself — the PWA password card on Settings → Home reports
+apart from the app itself — the PWA password card on Settings → General reports
 `auth_required` (`GET /api/auth/settings`). Only `auth_required: false` means
 there is genuinely no password.
 
@@ -49,11 +49,15 @@ driven entirely by the browser: it hides when this window is an installed app
 (`isStandalone`), when notifications are already on or blocked, or after a
 dismissal stored in this browser (`ciao-setup-card-dismissed`). It does **not**
 auto-hide just because the engine is configured, so a card on screen is not by
-itself a regression. Look at the card's own state before deciding: if both steps
-read done (installed, and notifications on/blocked) yet the card is still
-showing, that is the self-hiding failure worth reporting; if a step is genuinely
-undone, the card is correct. Read the browser's state, do not assume the
-configured engine should have hidden it.
+itself a regression. The card's own state decides: `visible` is
+`touched || !complete`, so a card whose steps both read done legitimately stays
+on screen until it is touched in this session, and only then does a 2.5s timer
+hide it. Look at the card's own state before deciding: report the self-hiding
+failure only when both steps read done (installed, and notifications on/blocked)
+**and the card has been interacted with in this session** yet it is still
+showing after a moment; a card on screen before any interaction with both steps
+done is correct, and a genuinely unfinished step is correct too. Read the
+browser's state, do not assume the configured engine should have hidden it.
 
 **The package-update tile is conditional on a newer *published* release.**
 `HousekeepingStrip` shows it only when `/api/package/status` reports

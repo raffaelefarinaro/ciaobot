@@ -76,6 +76,22 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
     assert "global" in lowered
     assert "identical across workspaces" in lowered or "same global subagents" in lowered
 
+    # The default route is the label the UI actually renders: "General", not
+    # the internal tab id "Home" (ProjectSidebar.vue SETTINGS_NAV). The
+    # checkpoint name follows the label.
+    assert "`/settings` (General" in text
+    assert "Settings → Home" not in text
+    assert "05-settings-01-home.png" not in text
+    assert "05-settings-01-general.png" in text
+    # The old copy double-counted the label: the General tab "carries General".
+    assert "carries General" not in text
+
+    # The before/after half is honest on a single-workspace install.
+    assert "single-workspace" in lowered and "BLOCKED" in text
+
+    # The route-specific rail cannot be claimed where a route has none.
+    assert "more than one section" in lowered
+
 
 def test_project_walk_separates_app_create_from_vault_completion() -> None:
     """A plain app project has no Complete; completing a vault note is a separate, isolated flow.
@@ -141,6 +157,13 @@ def test_home_walk_requires_update_tile_only_for_newer_published_version() -> No
     # The setup card is browser/device state, not engine state.
     assert "setup card" in lowered or "device setup" in lowered
     assert "browser" in lowered
+
+    # A complete card legitimately stays until it is touched in this session
+    # (`visible = touched || !complete` in HomeSetupCard.vue), so the reporting
+    # rule must carry that interaction condition rather than firing on any
+    # complete card still on screen.
+    assert "interacted with in this session" in lowered
+    assert "touched" in lowered
 
     # The old unconditional assumptions are gone: the card was said to hide
     # itself for any configured install, and the update tile was assumed present.

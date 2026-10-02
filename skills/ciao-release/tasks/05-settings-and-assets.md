@@ -12,7 +12,7 @@ is where a partial change shows up.
 Settings is **not a single page that scrolls**. Each section has its own route,
 listed in the sidebar, and each renders only its own cards:
 
-`/settings` (Home, the default), `/settings/workspaces`, `/settings/models`,
+`/settings` (General, the default), `/settings/workspaces`, `/settings/models`,
 `/settings/skills`, `/settings/subagents`, `/settings/commands`,
 `/settings/mcp`.
 
@@ -21,14 +21,14 @@ load state to resolve** — do not sleep a fixed interval and call it loaded.
 `/settings/providers` is a redirect to `/settings/models#chat-providers`; it is
 not a section of its own.
 
-`/settings` (Home) carries General, Appearance, This host, memory backup,
-insights, Updates, the main workspace, workspace health, the PWA password card,
-Other devices, app install, notifications, keyboard shortcuts, open source (and
-Debug only in dev mode). Watch for:
+`/settings` (General) carries What can Ciaobot do?, Appearance, This host,
+memory backup, insights, Updates, the main workspace, workspace health, the PWA
+password card, Other devices, app install, notifications, keyboard shortcuts,
+open source (and Debug only in dev mode). Watch for:
 
 - The online backup card shows state and last successful upload; scope,
   repository and raw diagnostics sit behind a native `<details>` disclosure.
-- The "What can Ciaobot do?" card at the top of Home links out to the public
+- The "What can Ciaobot do?" card at the top links out to the public
   feature guide.
 - The critique panel on **Models** is *explained*, not just labelled — what a
   panel is, that each model reviews independently, that `/critique` or the skill
@@ -49,7 +49,9 @@ This is the point of the task. **Skills, Subagents, Commands and MCP servers all
 belong to the workspace selected in the sidebar.** Only one workspace is
 selected at a time, so: record the four lists on the current workspace, switch
 the sidebar to another workspace, let the active-workspace watcher refetch, and
-record them again.
+record them again. On a single-workspace install there is nothing to switch to:
+report the before/after checkpoint **BLOCKED** rather than inventing a second
+workspace.
 
 Record the names visible in the four lists (for example by reading the text of
 the skill-name and row elements in the page).
@@ -105,12 +107,13 @@ Do not create, edit or delete anything in Settings.
 
 ## Checkpoints
 
-- `05-settings-01-home.png` — `/settings` (Home). Look for: its own sections
-  present, rail listing this route's cards, backup card collapsed details, no
-  clipped headings, no overlap.
+- `05-settings-01-general.png` — `/settings` (General). Look for: its own
+  sections present, rail listing this route's cards, backup card collapsed
+  details, no clipped headings, no overlap.
 - `05-settings-02-route.png` — one additional route (e.g. `/settings/models` or
-  `/settings/skills`). Look for: only that route's cards, its own rail, load
-  state resolved, no other route's sections bleeding in.
+  `/settings/skills`). Look for: only that route's cards, its own rail where the
+  route has more than one section (`/settings/mcp` legitimately shows none),
+  load state resolved, no other route's sections bleeding in.
 - `05-settings-03-assets-before.png` — the four asset lists on the first
   workspace. Look for: stock skills present, lists populated or a sensible
   empty state.
