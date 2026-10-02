@@ -188,6 +188,19 @@ const GET_ROUTES = {
     pending_commits: 0,
     reason: 'up to date',
   }),
+  // Settings → Start at sign-in. Read-only on purpose: the panel's one write
+  // flips a real machine's launchd/Task Scheduler state, so the fixture answers
+  // the read and nothing else. An unknown GET would fall through to the `{}`
+  // catch-all, which this panel (rightly) refuses to read as a position.
+  '/api/service/login': () => ({
+    platform: 'macos',
+    supported: true,
+    installed: true,
+    enabled: true,
+    can_change: true,
+    reason: 'The engine service will start when this user signs in.',
+    setup_command: null,
+  }),
 }
 
 /** Path patterns, for the routes that carry an id. */
