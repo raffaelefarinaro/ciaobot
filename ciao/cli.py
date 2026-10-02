@@ -4568,18 +4568,30 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     # replace with the readback file's path; passed through unchanged it is not
     # evidence of anything, so it must not settle an origin as applied (#933).
     placeholder = skill_proposals.VERIFICATION_PLACEHOLDER
-    if placeholder in (args.verification.strip(), (args.verification_file or "").strip()):
+    flag = (
+        "--verification" if args.verification.strip() == placeholder
+        else "--verification-file" if (args.verification_file or "").strip() == placeholder
+        else ""
+    )
+    if flag:
         print(
-            f"--verification-file is still the prompt's placeholder {placeholder}; "
-            "write the lines you changed, as you read them back, to a file and "
-            "pass its path.",
+            f"{flag} is still the prompt's placeholder {placeholder}; write the lines "
+            "you changed, as you read them back, to a file and pass that file's path "
+            "to --verification-file.",
             file=sys.stderr,
         )
         return 1
     verification = args.verification.strip()
     if args.verification_file is not None:
         try:
-            verification = Path(args.verification_file).read_text(encoding="utf-8").strip()
+            # Decoded by BOM, not assumed UTF-8: the chat may be in Windows
+            # PowerShell, where `>` writes UTF-16LE with a BOM and
+            # `Out-File -Encoding utf8` leaves a UTF-8 BOM. `utf-8-sig` drops
+            # that BOM, and `str.strip()` would not — it is not whitespace —
+            # so a strict UTF-8 read records a U+FEFF that is not the readback.
+            raw = Path(args.verification_file).read_bytes()
+            encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+            verification = raw.decode(encoding).strip()
         except (OSError, UnicodeError) as exc:
             print(f"could not read --verification-file {args.verification_file}: {exc}", file=sys.stderr)
             return 2
@@ -7407,11 +7419,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--verification",
         default="",
         help=(
-            "What proves the lesson is in the skill: a managed write receipt id, or "
-            "the readback you recorded of the file. Required by --applied when the "
-            "proposal links a learning, because a finished chat and a row leaving "
-            "the queue are not evidence that anything landed. Use "
-            "--verification-file for anything but a short id."
+            "What proves the lesson is in the skill when it is a short shell-safe "
+            "value, such as a managed write receipt id. Required (or "
+            "--verification-file) by --applied when the proposal links a learning, "
+            "because a finished chat and a row leaving the queue are not evidence "
+            "that anything landed. A readback goes in --verification-file, never "
+            "here."
         ),
     )
     verification_group.add_argument(
@@ -7419,8 +7432,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "A file whose content proves the lesson is in the skill: the lines you "
-            "changed, as you read them back. Read as UTF-8; the readback never "
-            "travels as a shell argument, so no quoting applies in any shell."
+            "changed, as you read them back. Read as UTF-8 (or UTF-16 with a BOM); "
+            "the readback never travels as a shell argument, so no quoting applies "
+            "in any shell."
         ),
     )
     skill_proposal_parser.add_argument(

@@ -2298,6 +2298,85 @@ def test_the_improvement_prompts_placeholder_is_not_a_verification(
     assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
 
 
+def test_cli_skill_proposal_remove_names_the_flag_carrying_the_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal has to point at the flag the caller actually used.
+
+    A chat that ran the old `--verification READBACK_FILE` line was told
+    "--verification-file is still the prompt's placeholder" — a flag it never
+    passed. It cannot fix that message: the file it never named is the thing the
+    message names, and the value it did pass is the one that needs replacing. The
+    refusal is the only thing standing between the placeholder and a settled
+    origin, so it has to be actionable.
+    """
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+    finally:
+        reset_reroot_cache()
+
+    code = cli.main(
+        [
+            "skill-proposal-remove",
+            "web-research",
+            "--applied",
+            "--verification",
+            skill_proposals.VERIFICATION_PLACEHOLDER,
+        ]
+    )
+    assert code == 1
+    assert capsys.readouterr().err.startswith("--verification is still")
+
+    reread = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert reread is not None
+    assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
+
+
 def test_cli_skill_proposal_remove_rejects_both_verification_flags() -> None:
     """One proof, one door.
 
@@ -2390,6 +2469,182 @@ def test_cli_skill_proposal_remove_refuses_an_unreadable_verification_file(
     )
     assert code == 2
     assert "could not read --verification-file" in capsys.readouterr().err
+
+    reread = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert reread is not None
+    assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
+
+
+# The readback a Windows chat actually writes. Windows PowerShell 5.1's `>` and
+# `Out-File` write UTF-16LE with a BOM; `Out-File -Encoding utf8` and Notepad's
+# "UTF-8 with BOM" write UTF-8 with a BOM. Both are what `--verification-file`
+# has to read, on the platform the readback-in-a-file change was made for.
+_BOM_READBACK = "- Use `gh api`, don't scrape — $HOME"
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+def test_cli_skill_proposal_remove_reads_a_bom_verification_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    """A readback written by a Windows tool is still a readback.
+
+    Read as strict UTF-8 it is not: PowerShell's default `>` writes UTF-16LE with
+    a BOM, so the read raises `UnicodeDecodeError` and the command exits 2 — on
+    the exact platform the readback travels in a file for. And a UTF-8 BOM is
+    subtler: `str.strip()` does not remove U+FEFF, so a file read back with a
+    leading BOM records a character the skill does not carry, which is not the
+    exact readback the verification exists to prove.
+    """
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+        readback_file = tmp_path / f"readback-{encoding}.txt"
+        readback_file.write_bytes(_BOM_READBACK.encode(encoding))
+    finally:
+        reset_reroot_cache()
+
+    assert (
+        cli.main(
+            [
+                "skill-proposal-remove",
+                "web-research",
+                "--applied",
+                "--verification-file",
+                str(readback_file),
+            ]
+        )
+        == 0
+    )
+
+    settled = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert settled is not None
+    assert settled.origins[0].state == skill_proposals.ORIGIN_APPLIED
+    # Exactly what was written: no U+FEFF, no mojibake, no lost em dash.
+    assert settled.origins[0].verification == _BOM_READBACK
+    assert settled.lifecycle == skill_proposals.APPLIED
+
+
+def test_cli_skill_proposal_remove_refuses_an_empty_verification_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty readback file is not a readback.
+
+    A chat whose redirect failed, or which wrote the file before writing to it,
+    would otherwise settle a finding as applied with the empty string as its
+    proof — the record then reads as a lesson the skill carries, and nothing had
+    checked. `settle_proposal` only knows the string is non-empty; this is the
+    check that knows it is not the empty string.
+    """
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+        empty = tmp_path / "empty-readback.txt"
+        empty.write_text("\n", encoding="utf-8")
+    finally:
+        reset_reroot_cache()
+
+    code = cli.main(
+        [
+            "skill-proposal-remove",
+            "web-research",
+            "--applied",
+            "--verification-file",
+            str(empty),
+        ]
+    )
+    assert code == 2
+    assert "is empty" in capsys.readouterr().err
 
     reread = skill_proposals.parse_proposal(
         skill_proposals.proposal_path(config, "personal", "web-research"), "personal"

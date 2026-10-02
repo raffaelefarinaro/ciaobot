@@ -1499,11 +1499,12 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
             "",
             f"This proposal links {len(proposal.origins)} learning finding(s), so "
             "`--applied` needs a verification: write the lines you changed, exactly "
-            f"as you read them back from `{canonical}`, to a file (any path, such as "
-            f"a temporary file), and put that file's path in place of "
-            f"`{VERIFICATION_PLACEHOLDER}`. The readback travels in the file, not on "
-            "the command line, so no shell quoting applies. A finished chat is not "
-            "evidence that the lesson landed; the readback is.",
+            f"as you read them back from `{canonical}`, to a UTF-8 text file, and "
+            f"replace `{VERIFICATION_PLACEHOLDER}` with that file's path. Pick a path "
+            "with no spaces (a temporary file is fine); if it has spaces, wrap the "
+            "path in double quotes. The readback travels in the file, not on the "
+            "command line, so the readback itself needs no shell quoting. A finished "
+            "chat is not evidence that the lesson landed; the readback is.",
         ]
     lines += [
         "",

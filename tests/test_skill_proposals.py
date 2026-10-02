@@ -1033,6 +1033,11 @@ def test_a_proposal_that_links_learnings_asks_for_a_verification(
     command that exits 1 and leaves the proposal queued. The placeholder is a
     bare token and the readback goes in a file: free text has no shell-neutral
     quoting, and the chat may be typing into PowerShell.
+
+    The bare token is the *path* that gets substituted, so the prompt has to say
+    what kind of path is safe: unquoted, a path with a space splits into two
+    arguments in all three shells and argparse exits 2 on a readback that was
+    written correctly.
     """
     config = _config(tmp_path)
     stored = sp.upsert_proposal(config, _proposal(origins=(_origin(),)))
@@ -1045,6 +1050,8 @@ def test_a_proposal_that_links_learnings_asks_for_a_verification(
     ) in prompt
     assert "links 1 learning finding(s)" in prompt
     assert "'\\''" not in prompt
+    assert "no spaces" in prompt
+    assert "UTF-8" in prompt
 
 
 def test_a_proposal_without_learnings_has_no_verification_step(
