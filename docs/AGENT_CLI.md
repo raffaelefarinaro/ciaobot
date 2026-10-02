@@ -154,8 +154,8 @@ only — `ciao skill-proposal-remove NAME` settles, and a settled record stays
 settled while it keeps collecting evidence. It records which outcome it was:
 `--applied` when the change landed and was checked (a promotion, so History
 reads it as an accept; a proposal that links learning findings also needs
-`--verification '<the lines you changed, as you read them back from the file>'` with
-`--applied`, single-quoted), `--interrupted` when the work stopped part-way,
+`--verification-file FILE` (a file holding the lines you changed, as you read
+them back) with `--applied`), `--interrupted` when the work stopped part-way,
 which is neither and leaves the proposal queued with its chat bound to it, and
 the plain form for a decision against it. Never record `--applied` for a chat
 that simply finished: a turn ending is not a verified edit.

@@ -4546,11 +4546,14 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     unfinished edit is not an answer and must not archive an open question as
     though a person had rejected it.
 
-    ``--verification`` and ``--learning-id``/``--finding`` are how a record that
-    links learnings is settled honestly. ``--applied`` on such a record is
-    refused without a verification, because the two things this command can see
-    for itself — the chat finished, the row left the queue — are not the lesson
-    being in the skill. A selector settles one finding and leaves its siblings
+    ``--verification``/``--verification-file`` and
+    ``--learning-id``/``--finding`` are how a record that links learnings is
+    settled honestly. ``--applied`` on such a record is refused without a
+    verification, because the two things this command can see for itself — the
+    chat finished, the row left the queue — are not the lesson being in the
+    skill. A readback is free text, so it travels in ``--verification-file``,
+    never as an argument; ``--verification`` carries a short shell-safe value
+    such as a receipt id. A selector settles one finding and leaves its siblings
     queued, which is the point: a record is one row per skill, so a person who
     dealt with one of its findings has not dealt with the rest.
     """
@@ -4571,15 +4574,39 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     from ciao import skill_proposals
 
     # The improvement prompt hands a learning-linked proposal a placeholder to
-    # replace with the readback; passed through unchanged it is not evidence of
-    # anything, so it must not settle an origin as applied.
-    if args.verification.strip() == skill_proposals.VERIFICATION_PLACEHOLDER:
+    # replace with the readback file's path; passed through unchanged it is not
+    # evidence of anything, so it must not settle an origin as applied (#933).
+    placeholder = skill_proposals.VERIFICATION_PLACEHOLDER
+    flag = (
+        "--verification" if args.verification.strip() == placeholder
+        else "--verification-file" if (args.verification_file or "").strip() == placeholder
+        else ""
+    )
+    if flag:
         print(
-            "--verification is still the prompt's placeholder; replace it with "
-            "the lines you changed, as you read them back from the file.",
+            f"{flag} is still the prompt's placeholder {placeholder}; write the lines "
+            "you changed, as you read them back, to a file and pass that file's path "
+            "to --verification-file.",
             file=sys.stderr,
         )
         return 1
+    verification = args.verification.strip()
+    if args.verification_file is not None:
+        try:
+            # Decoded by BOM, not assumed UTF-8: the chat may be in Windows
+            # PowerShell, where `>` writes UTF-16LE with a BOM and
+            # `Out-File -Encoding utf8` leaves a UTF-8 BOM. `utf-8-sig` drops
+            # that BOM, and `str.strip()` would not — it is not whitespace —
+            # so a strict UTF-8 read records a U+FEFF that is not the readback.
+            raw = Path(args.verification_file).read_bytes()
+            encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+            verification = raw.decode(encoding).strip()
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read --verification-file {args.verification_file}: {exc}", file=sys.stderr)
+            return 2
+        if not verification:
+            print(f"--verification-file {args.verification_file} is empty", file=sys.stderr)
+            return 2
 
     if not skill_proposals.queue_dir(config, name).is_dir():
         print("No skill proposals are queued.", file=sys.stderr)
@@ -4675,7 +4702,7 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
             args.reason.strip(),
             via="cli",
             selectors=selectors,
-            verification=args.verification.strip(),
+            verification=verification,
         )
     except (OSError, ValueError) as exc:
         print(f"could not settle {target.skill}: {exc}", file=sys.stderr)
@@ -7392,14 +7419,31 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Free-text note recorded with the outcome (the History 'outcome' field).",
     )
-    skill_proposal_parser.add_argument(
+    # One proof, two doors: a readback is free text with no shell-neutral
+    # quoting, so it travels in a file, and only a short shell-safe value (a
+    # receipt id) may be an argument. Passing both is a contradiction, not a
+    # preference, so argparse refuses the combination.
+    verification_group = skill_proposal_parser.add_mutually_exclusive_group()
+    verification_group.add_argument(
         "--verification",
         default="",
         help=(
-            "What proves the lesson is in the skill: a managed write receipt id, or "
-            "the readback you recorded of the file. Required by --applied when the "
-            "proposal links a learning, because a finished chat and a row leaving "
-            "the queue are not evidence that anything landed."
+            "What proves the lesson is in the skill when it is a short shell-safe "
+            "value, such as a managed write receipt id. Required (or "
+            "--verification-file) by --applied when the proposal links a learning, "
+            "because a finished chat and a row leaving the queue are not evidence "
+            "that anything landed. A readback goes in --verification-file, never "
+            "here."
+        ),
+    )
+    verification_group.add_argument(
+        "--verification-file",
+        default=None,
+        help=(
+            "A file whose content proves the lesson is in the skill: the lines you "
+            "changed, as you read them back. Read as UTF-8 (or UTF-16 with a BOM); "
+            "the readback never travels as a shell argument, so no quoting applies "
+            "in any shell."
         ),
     )
     skill_proposal_parser.add_argument(
