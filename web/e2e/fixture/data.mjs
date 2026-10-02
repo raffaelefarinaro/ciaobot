@@ -146,6 +146,53 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
     : []),
 ]))
 
+/**
+ * Two open rows for the "After this update" group, which only a spec that opts
+ * in through `POST /__fixture__/update-tasks` ever sees. Two rather than one so
+ * the gap below the last card is measured against a real end of the section
+ * instead of a single card that also happens to be the last one.
+ *
+ * `applicability: 'applicable'` and an `offered` status are what the strip
+ * draws; a row the detector ruled out is filtered out before it renders, and
+ * neither a completed nor a dismissed one is.
+ */
+export const UPDATE_TASKS = [
+  {
+    id: 'review-legacy-rows',
+    revision: 1,
+    scope: 'workspace',
+    title: 'Review the rows your old notes left behind',
+    why: 'Rows retired into a folder no surface reads any more.',
+    since_version: '2.1.0',
+    status: 'offered',
+    applicability: 'applicable',
+    applicability_checked_at: '2026-09-01T10:00:00+00:00',
+    offered: true,
+    suppressed: false,
+    chat_id: '',
+    prompt_digest: '',
+    attempted_fingerprint: '',
+    updated_at: '2026-09-01T10:00:00+00:00',
+  },
+  {
+    id: 'confirm-backup-schedule',
+    revision: 1,
+    scope: 'workspace',
+    title: 'Confirm the memory backup schedule',
+    why: 'The old schedule points at a branch this install does not push to.',
+    since_version: '2.1.0',
+    status: 'offered',
+    applicability: 'applicable',
+    applicability_checked_at: '2026-09-01T10:00:00+00:00',
+    offered: true,
+    suppressed: false,
+    chat_id: '',
+    prompt_digest: '',
+    attempted_fingerprint: '',
+    updated_at: '2026-09-01T10:00:00+00:00',
+  },
+]
+
 export const SCHEDULES = [
   {
     schedule_id: 'alpha-daily-brief',
