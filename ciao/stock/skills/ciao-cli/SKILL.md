@@ -94,7 +94,7 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 | Command | Purpose | Guard |
 |---|---|---|
 | `skill-proposal-add NAME --input-file FILE` | File one supported improvement proposal for a skill in this workspace's `Workspace/Skill-Proposals/`, merging it into that skill's existing record. | `FILE` is JSON: `title`, `problem`, `change`, `rationale`, and a non-empty `sources` list whose entries carry `chat_id`, `archive`, `turn` and a short verbatim `excerpt`. Every field is text from a conversation, so it never travels as a shell argument. The target is resolved, not trusted: only a source this workspace owns under its own `skills/` directory is accepted, so a packaged skill, a provider mirror, a shared source and an unknown name are refused. Never write into the queue folder by hand, and never edit the skill here. |
-| `skill-proposal-remove NAME` | Settle a proposal once the decision is made (implemented, or decided against); `NAME` is the skill or a unique substring. | Records the decision and takes the row out of the queue. The record stays on disk, keeps accumulating evidence, and stays settled — re-filing the same finding does not reopen it. Only settle a proposal after its change is actually in place or decided against. |
+| `skill-proposal-remove NAME` | Settle a proposal once the decision is made (implemented, or decided against); `NAME` is the skill or proposal id exactly, or else a unique substring of the skill. | Records the decision and takes the row out of the queue. The record stays on disk, keeps accumulating evidence, and stays settled — re-filing the same finding does not reopen it. Only settle a proposal after its change is actually in place or decided against. |
 
 ### Files
 
