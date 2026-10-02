@@ -6,7 +6,9 @@ import { boot, COMPOSER, isolate } from '../support/app'
  * rail must sit beside the request column rather than under it, and the
  * sidebar's stacked top (workspace, New chat, destinations) must not collapse
  * back into one crowded row - which is what it did at the default 340px
- * sidebar before the rail was restacked.
+ * sidebar before the rail was restacked. The Home section gaps are here for the
+ * same reason: one owner for the gap between sections is a claim about real
+ * boxes, and only a real layout engine can check it.
  */
 test.use({ viewport: { width: 1440, height: 900 } })
 
@@ -63,6 +65,69 @@ test.describe('workbench layout', () => {
     expect(box).toEqual({ left: 0, over: 0 })
   })
 
+  test('Home separates its sections by one gap, whatever is open', async ({ page }) => {
+    // Every section root on Home used to carry its own top margin, so the space
+    // between the composer and whatever came next depended on which notices
+    // happened to be open: 12px next to a notice, 42px down to the recent list,
+    // and the two summing wherever both applied. `.home-main` owns the gap now,
+    // and this measures it in a real layout engine rather than trusting the
+    // stylesheet — jsdom gives every rect 0x0.
+    await page.request.post('/__fixture__/update-tasks')
+    await boot(page, '/', '.update-tasks')
+
+    const report = await page.evaluate(() => {
+      const main = document.querySelector('.home-main')
+      if (!main) throw new Error('missing .home-main')
+      const sections = Array.from(main.children).filter(
+        el => el.getBoundingClientRect().height > 0,
+      )
+      return {
+        rowGap: Number.parseFloat(getComputedStyle(main).rowGap),
+        names: sections.map(el => String(el.className).split(' ')[0]),
+        gaps: sections.slice(1).map((el, i) => {
+          const above = sections[i].getBoundingClientRect().bottom
+          return Math.round((el.getBoundingClientRect().top - above) * 100) / 100
+        }),
+      }
+    })
+
+    // The update group is on screen, which is what makes the pair the issue named
+    // measurable: the composer, then the group, then whatever is below it.
+    expect(report.names).toContain('home-intake')
+    expect(report.names).toContain('update-tasks')
+    expect(report.gaps).toHaveLength(report.names.length - 1)
+    // Every boundary is the one token — not just the two ends being equal, which
+    // a leftover section margin in the middle would still pass.
+    for (const [i, gap] of report.gaps.entries()) {
+      expect(gap, `${report.names[i]} → ${report.names[i + 1]}`).toBeCloseTo(report.rowGap, 0)
+    }
+  })
+
+  test('a Home with no update work has no phantom gap for it', async ({ page }) => {
+    // The group renders nothing at all when it has no open rows, so the gap the
+    // layout reserves must not survive it: a doubled gap above the recent list
+    // is the exact artefact a margin-only reset leaves behind.
+    await boot(page, '/', '.home-intake')
+    await expect(page.locator('.update-tasks')).toHaveCount(0)
+
+    const report = await page.evaluate(() => {
+      const main = document.querySelector('.home-main')!
+      const sections = Array.from(main.children).filter(
+        el => el.getBoundingClientRect().height > 0,
+      )
+      return {
+        rowGap: Number.parseFloat(getComputedStyle(main).rowGap),
+        names: sections.map(el => String(el.className).split(' ')[0]),
+        gaps: sections.slice(1).map((el, i) =>
+          Math.round((el.getBoundingClientRect().top - sections[i].getBoundingClientRect().bottom) * 100) / 100),
+      }
+    })
+    expect(report.names.length).toBeGreaterThan(1)
+    for (const [i, gap] of report.gaps.entries()) {
+      expect(gap, `${report.names[i]} → ${report.names[i + 1]}`).toBeCloseTo(report.rowGap, 0)
+    }
+  })
+
   test('the selected chat row is marked by its fill, not by an accent bar', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
@@ -81,6 +146,43 @@ test.describe('workbench layout', () => {
     expect(selected.shadow, 'the selected row still paints an inset bar').toBe('none')
     expect(selected.background).not.toBe(other.background)
     expect(selected.color).not.toBe(other.color)
+  })
+})
+
+/**
+ * Home's section gaps at phone width. The same three boxes, the same one token,
+ * on the layout that stacks the rail under the column — a `margin-top` on the
+ * recent list that the shared gap also applies would show up here as a double.
+ */
+test.describe('home section gaps on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test.beforeEach(async ({ page }, testInfo) => {
+    await isolate(page, `homegaps-${testInfo.workerIndex}`)
+  })
+
+  test('one gap between every section, at both widths', async ({ page }) => {
+    await page.request.post('/__fixture__/update-tasks')
+    await boot(page, '/', '.update-tasks')
+
+    const report = await page.evaluate(() => {
+      const main = document.querySelector('.home-main')!
+      const sections = Array.from(main.children).filter(
+        el => el.getBoundingClientRect().height > 0,
+      )
+      return {
+        rowGap: Number.parseFloat(getComputedStyle(main).rowGap),
+        names: sections.map(el => String(el.className).split(' ')[0]),
+        gaps: sections.slice(1).map((el, i) =>
+          Math.round((el.getBoundingClientRect().top - sections[i].getBoundingClientRect().bottom) * 100) / 100),
+      }
+    })
+    expect(report.names).toContain('update-tasks')
+    expect(report.gaps).toHaveLength(report.names.length - 1)
+    for (const [i, gap] of report.gaps.entries()) {
+      expect(gap, `${report.names[i]} → ${report.names[i + 1]}`).toBeCloseTo(report.rowGap, 0)
+    }
+    expect(report.rowGap).toBeGreaterThan(0)
   })
 })
 

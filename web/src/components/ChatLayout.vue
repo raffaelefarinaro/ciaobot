@@ -1501,10 +1501,28 @@ onBeforeUnmount(() => {
   gap: 48px;
 }
 
+/* One column, one gap. Every section root here used to carry its own top
+   margin, and the result was three different distances between the composer
+   and the next thing depending on which notices were open — 12px next to a
+   notice, 42px down to the recent list, and the two summed wherever both
+   applied. The gap lives here; the roots below hand theirs back. */
 .home-main {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* Section roots give up their outer margins so the gap is the only thing
+   separating them. `:deep()` because these are other components' root elements
+   (and HousekeepingStrip's are a fragment, which inherits no scope id). Card,
+   heading and row spacing inside each section is untouched. */
+.home-main > :deep(.housekeeping),
+.home-main > :deep(.update-tasks),
+.home-main > :deep(.home-setup),
+.home-main > :deep(.home-notice-reopen),
+.home-main > :deep(.home-recent) {
+  margin: 0 auto;
 }
 
 .home-workbench .home-main > .home-intake,

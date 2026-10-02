@@ -106,9 +106,9 @@
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && renderItems.length === 0 && !inputText.trim() }" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
-      <!-- Selecting a message (click or Enter) lifts it above a blurred veil
-         and shows its actions; clicking the veil or Esc puts it back. -->
-      <div v-if="tappedMessageKey" class="message-select-backdrop" aria-hidden="true" @click.stop="tappedMessageKey = null"></div>
+      <!-- Selecting a message (click or Enter) outlines it and shows its
+         actions, leaving the rest of the transcript readable; clicking the
+         message again or pressing Esc puts it back. -->
       <div class="messages-content">
       <Transition name="history-loading">
         <!-- Placeholder for the transcript, in the transcript's own shape: a
@@ -1987,12 +1987,10 @@ const tappedMessageKey = ref<string | null>(null)
 // the transcript once the scroll below has pulled it into view.
 const FOOTER_SCROLL_GAP = 12
 
-// Touch: tap a message to toggle its action icons. Ignored on hover-capable
-// devices (they use hover) and when the tap targets a link/button or a text
-// selection is in progress.
-// Click (any pointer) or Enter selects a message and shows its actions. A
-// click that lands on something interactive, on a comment highlight, or that
-// ends a text selection (the start of a comment) is left alone.
+// Click (any pointer) or Enter selects a message and shows its actions;
+// clicking the same message again puts them away. A click that lands on
+// something interactive, on a comment highlight, or that ends a text
+// selection (the start of a comment) is left alone.
 function toggleMessageActions(key: string, e: Event): void {
   const target = e.target as HTMLElement | null
   if (target?.closest('a, button, input, textarea, summary, .comment-highlight, [data-comment-id]')) return
@@ -5070,41 +5068,24 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 
 
-/* The veil under a selected message: the transcript blurs back, the
-   message and its actions stay sharp above it. */
-.message-select-backdrop {
-  position: fixed;
-  inset: 0;
-  /* Above the sidebar's workspace scope (40) so the whole app blurs back. */
-  z-index: 45;
-  background: color-mix(in srgb, var(--bg) 40%, transparent);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-  animation: message-veil-in 160ms var(--ease);
-}
-@keyframes message-veil-in { from { opacity: 0; } to { opacity: 1; } }
-
-.message-wrap--selected {
-  position: relative;
-  z-index: 46;
-}
+/* Selection marks one message and nothing else. An accent outline says which
+   turn the actions belong to; the surrounding transcript keeps its own
+   contrast, so reading on does not turn into a dimmed page. */
 .message-wrap--selected.user .message {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), 0 16px 40px rgb(0 0 0 / 28%);
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
 }
-/* Replies are plain prose, so a selected one gets a surface to lift. The
-   negative margin keeps the text from moving. */
+/* Replies are plain prose, so a selected one is outlined around a box the same
+   size as the selected card. The negative margin keeps the text from moving. */
 .message-wrap--selected.assistant .message-row {
   margin: -16px -18px;
   padding: 16px 18px;
   border-radius: 14px;
-  background: var(--bg2);
-  box-shadow: 0 0 0 1px var(--border-strong), 0 16px 40px rgb(0 0 0 / 28%);
+  outline: 1px solid var(--accent);
 }
-/* On a selected message the actions are the point: real controls on a
-   surface, full-strength text, not the quiet text links of an unselected
-   turn. One border, no shadow — the card is the only thing floating here,
-   and a shadowed chip under a shadowed card reads as three depths in
-   fifty pixels. */
+/* On a selected message the actions are the point: real controls with a
+   border, full-strength text, not the quiet text links of an unselected
+   turn. */
 .message-wrap--selected .message-action-btn {
   height: 34px;
   padding: 0 12px;
@@ -5129,9 +5110,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   outline: 2px solid var(--accent);
   outline-offset: 4px;
   border-radius: 8px;
-}
-@media (prefers-reduced-motion: reduce) {
-  .message-select-backdrop { animation: none; }
 }
 
 
@@ -5174,8 +5152,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 /* Touch: the row keeps its 28px visual but each button grows a 44px hit
    area around it, so taps land without spreading the transcript out. A
-   selected button is already 44px, so the extra halo only applies to the
-   unselected state, where the row is display:none anyway. */
+   selected button already is the 44px target, so it drops the halo
+   instead of carrying a second, larger one. */
 @media (pointer: coarse) {
   .message-action-btn::after {
     content: '';

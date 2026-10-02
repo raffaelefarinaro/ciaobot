@@ -12,13 +12,14 @@
  *   POST /__fixture__/drop-ws                        sever every events socket
  *   GET  /__fixture__/ws-count                       sockets opened so far
  *   POST /__fixture__/transcript                     give this session a chat history
+ *   POST /__fixture__/update-tasks                   give this session update tasks
  */
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
-import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, VERIFICATION_REVIEW, VERIFICATION_PROPOSALS, VERIFICATION_HISTORY, VERIFICATION_RECEIPT, VERIFICATION_ENTRY_RECEIPT, VERIFICATION_NODES, snapshotFrame } from './data.mjs'
+import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, UPDATE_TASKS, VERIFICATION_REVIEW, VERIFICATION_PROPOSALS, VERIFICATION_HISTORY, VERIFICATION_RECEIPT, VERIFICATION_ENTRY_RECEIPT, VERIFICATION_NODES, snapshotFrame } from './data.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
@@ -120,6 +121,14 @@ const GET_ROUTES = {
   '/api/schedules': () => SCHEDULES,
   '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': () => ({ actions: [] }),
+  // "After this update" is a second, per-workspace question, so it carries a
+  // query string and cannot live in the exact-path table. A spec that needs the
+  // section measured on screen opts in through POST /__fixture__/update-tasks;
+  // the default stays empty so the other specs keep the Home they already
+  // assert on.
+  '/api/update-tasks': (req) => (sessionOf(req).updateTasks
+    ? { tasks: UPDATE_TASKS }
+    : { tasks: [] }),
   // The three queues behind "To decide". A spec that wants the managed
   // verification states (a pending proposal linked from a review row, a dead
   // proposal, a settled verdict) opts in through POST /__fixture__/verification
@@ -314,6 +323,14 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req)
       state.transcript = body?.shape === 'opencode-fold' ? FOLD_TRANSCRIPT : TRANSCRIPT
       return sendJson(res, { ok: true, turns: state.transcript.length })
+    }
+    if (pathname === '/__fixture__/update-tasks') {
+      // Opt this session into having "After this update" on Home. Per session
+      // for the same reason the transcript is: the section must appear for the
+      // spec that measures the gaps around it without appearing for the specs
+      // beside it, which assert the Home they already know.
+      state.updateTasks = true
+      return sendJson(res, { ok: true, tasks: UPDATE_TASKS.length })
     }
     return sendJson(res, { error: 'unknown fixture route' }, 404)
   }
