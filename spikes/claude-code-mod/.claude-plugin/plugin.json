@@ -1,0 +1,1 @@
+{ "name": "ciao", "version": "0.1.0", "description": "Ciaobot inside Claude Code: projects, chats and home in a pane", "types": "./types/index.d.ts" }
