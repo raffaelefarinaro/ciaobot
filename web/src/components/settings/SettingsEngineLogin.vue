@@ -96,6 +96,12 @@
         </button>
       </p>
     </template>
+
+    <!-- A retry with nothing to show yet is a pending read like any other, so it
+         keeps a line on screen rather than going blank between the click and the
+         answer. Last in the chain on purpose: a read over a row that is already
+         there is a refresh, and that keeps the row. -->
+    <p v-else-if="loading" class="hint" role="status">Checking this host&hellip;</p>
   </div>
 </template>
 
@@ -125,8 +131,9 @@ type Tone = 'ok' | 'warn' | 'off'
 const status = ref<LoginStatus | null>(null)
 const loaded = ref(false)
 const loading = ref(false)
-// A failed read and a failed write are different things: a refresh must not
-// erase an unread refusal, and a refusal must not blank the row.
+// A failed read and a failed write are different things, so they live in
+// different slots: a read that fails keeps the last known state beside its own
+// error, and a write that fails keeps the row beside its own.
 const loadError = ref('')
 const actionError = ref('')
 const outcome = ref('')
@@ -224,6 +231,11 @@ const setupLead = computed(() => (
 
 async function load(): Promise<void> {
   loadError.value = ''
+  // Both of the last write's lines describe the row this read is about to
+  // replace, so a load clears them: a success line or a refusal that outlives
+  // the read would sit beside a newer answer and describe an older one.
+  outcome.value = ''
+  actionError.value = ''
   loading.value = true
   try {
     const next = readStatus(await api.get<LoginStatus>(LOGIN_ROUTE))

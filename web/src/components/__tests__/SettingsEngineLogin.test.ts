@@ -139,6 +139,29 @@ describe('SettingsEngineLogin when the host does not say', () => {
     expect(view.find('[role="alert"]').exists()).toBe(false)
   })
 
+  it('keeps a loading line through a first-load retry instead of going blank', async () => {
+    apiGet.mockRejectedValueOnce(new Error('the engine did not answer'))
+    const view = await mountPanel()
+    expect(view.get('[role="alert"]').text()).toContain('the engine did not answer')
+
+    // Held open on purpose: the gap between the click and the answer is where
+    // the card used to render nothing at all.
+    let resolve: (value: unknown) => void = () => {}
+    apiGet.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    await button(view, 'Check again').trigger('click')
+    await flushPromises()
+
+    expect(view.get('[role="status"]').text()).toContain('Checking this host')
+    // The failed read is gone with the retry, and no position is claimed while
+    // the host has not answered.
+    expect(view.find('[role="alert"]').exists()).toBe(false)
+    expect(view.find('.login-state').exists()).toBe(false)
+
+    resolve(status())
+    await flushPromises()
+    expect(view.text()).toContain('Does not start when I sign in')
+  })
+
   it('treats a body this page cannot read as a failed read, not as a position', async () => {
     // A partial payload is how "the machine did not say" would arrive by
     // accident: `enabled` missing is not `enabled: false`.
@@ -373,6 +396,39 @@ describe('SettingsEngineLogin when the change does not happen', () => {
     expect(view.find('[role="status"]').exists()).toBe(false)
     // Still changeable, so the control is there and still says the old thing.
     expect(button(view, 'Enable at sign-in').exists()).toBe(true)
+  })
+
+  it('drops the last write’s line when a read starts, so neither can outlive the row it described', async () => {
+    // A refusal is the reachable half of this; a success line is cleared by the
+    // same load, and both are gone here because the read is still in flight.
+    apiPatch.mockRejectedValue(
+      failure(409, 'the change is not this engine’s to make', {
+        enabled: false,
+        can_change: false,
+        reason: 'This definition was configured by hand.',
+      }),
+    )
+    const view = await mountPanel()
+    await button(view, 'Enable at sign-in').trigger('click')
+    await flushPromises()
+    expect(view.get('[role="alert"]').text()).toContain('the change is not this engine’s to make')
+
+    let resolve: (value: unknown) => void = () => {}
+    apiGet.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    await button(view, 'Check again').trigger('click')
+    await flushPromises()
+
+    // Nothing of the write is left beside the row it used to describe.
+    expect(view.find('[role="alert"]').exists()).toBe(false)
+    expect(view.find('[role="status"]').exists()).toBe(false)
+    // The row itself stays: a refresh keeps the position the machine last read.
+    expect(stateText(view)).toContain('Does not start when I sign in')
+
+    resolve(status({ can_change: true }))
+    await flushPromises()
+    expect(stateText(view)).toContain('Does not start when I sign in')
+    expect(button(view, 'Enable at sign-in').exists()).toBe(true)
+    expect(view.find('[role="alert"]').exists()).toBe(false)
   })
 
   it('keeps the position it had when the failure carries no status to show', async () => {
