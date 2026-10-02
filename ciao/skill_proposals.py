@@ -1463,7 +1463,7 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
         "If it does not, say so and why, and record the finding as no longer "
         "applying rather than editing on the strength of one that has expired:",
         "",
-        f"    ciao skill-proposal-remove {skill} --workspace . --not-applicable",
+        f"    ciao skill-proposal-remove {skill} --not-applicable",
         "",
         "If it does, make the smallest focused change that addresses the problem "
         "— not a rewrite, and not changes the proposal did not ask for.",
@@ -1472,22 +1472,24 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
         "itself tells a reader to run) and record the resolution so the queue "
         "stops asking:",
         "",
-        f"    ciao skill-proposal-remove {skill} --workspace . --applied",
+        f"    ciao skill-proposal-remove {skill} --applied",
         "",
         f"Use `--applied` only once the change is really in `{canonical}` and you "
         "have verified it. Add `--reason \"...\"` to either command to say in your "
         "own words what you found. If you stop part-way, say that instead:",
         "",
-        f"    ciao skill-proposal-remove {skill} --workspace . --interrupted",
+        f"    ciao skill-proposal-remove {skill} --interrupted",
         "",
         "That one is not a decision — it leaves the proposal queued and "
         "recoverable, which is what an unfinished edit should do. Never pass the "
         "proposal text as a shell argument.",
         "",
         "Before you finish, run `ciao sync-skills` so the providers see the "
-        "updated skill. No `--workspace` argument: this chat's working directory "
-        "is already this workspace's root, and `sync-skills` takes a path there, "
-        "not a workspace name.",
+        "updated skill. Neither command takes a `--workspace` argument: "
+        "`sync-skills` defaults to this chat's working directory, which is "
+        "already this workspace's root, and `skill-proposal-remove` finds this "
+        "workspace's queue from the chat's environment — its `--workspace` is "
+        "the install root, which this working directory usually is not.",
     ]
     return "\n".join(lines)
 

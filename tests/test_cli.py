@@ -1943,6 +1943,76 @@ def test_cli_skill_proposal_remove_refuses_not_applicable_with_another_outcome(
     assert record.lifecycle == skill_proposals.IMPLEMENTING
 
 
+def test_the_improvement_prompts_settle_command_works_from_the_agent_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prompt's own settle command, run verbatim from where a chat runs it.
+
+    `--workspace` on `skill-proposal-remove` is the install-root *path*, not a
+    workspace name, and a chat's working directory is the workspace's agent root.
+    So the prompt's `--workspace .` built a config rooted at the agent root, found
+    no registry there, fell back to the default `personal` workspace and looked
+    for a queue under `<agent root>/memory-vault/personal/...` — which does not
+    exist. The command exited 1 with "No skill proposals are queued.", the edit
+    still landed, and the proposal stayed queued, so the queue kept asking.
+    """
+    import shlex
+
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+
+        prompt = skill_proposals.render_improvement_prompt(stored)
+        settle = next(
+            line
+            for line in prompt.splitlines()
+            if "skill-proposal-remove" in line and "--applied" in line
+        )
+        argv = shlex.split(settle.strip())[1:]
+    finally:
+        reset_reroot_cache()
+
+    assert cli.main(argv) == 0
+
+    settled = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert settled is not None
+    assert settled.lifecycle == skill_proposals.APPLIED
+
+
 # -- skill-proposal-add ------------------------------------------------------
 
 
