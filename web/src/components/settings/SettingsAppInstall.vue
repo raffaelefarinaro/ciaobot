@@ -55,12 +55,14 @@
 import { isLoopbackPage } from '../../lib/loopback'
 import {
   isAndroid,
-  isChromiumDesktop,
   isEdge,
+  isGoogleChrome,
   isIos,
+  isIpadDesktopMode,
   isMacDesktop,
   isSafari,
   isStandalone,
+  isWindows,
 } from '../../lib/pwaPlatform'
 
 /** The one page that shows how to put HTTPS in front of a host, which is what
@@ -117,15 +119,31 @@ const INSTALL_ROUTES: InstallRoute[] = [
   },
 ]
 
-/** Which of the five routes this browser is on, or null when it is not one of
- *  them (Linux, ChromeOS, an unknown browser). A highlight, never a filter:
- *  the other four rows stay exactly as they are. */
+/** Which of the five routes this browser is actually on, or null when it is not
+ *  on any of them. A badge names a browser and an OS, so it has to hold for
+ *  both: Firefox on Android is not Chrome on Android, Edge on a Mac is not Edge
+ *  on Windows, Chrome on Linux is not Chrome on Mac or Windows, and another
+ *  Chromium browser is not Chrome. Those readers get no badge rather than a
+ *  wrong one, which is why this checks the platform first and the brand second
+ *  instead of accepting whichever probe fires. A highlight, never a filter:
+ *  the other rows stay exactly as they are. */
 function currentInstallRoute(): string | null {
-  if (isIos()) return 'safari-ios'
-  if (isAndroid()) return 'chrome-android'
-  if (isEdge()) return 'edge-windows'
-  if (isChromiumDesktop()) return 'chrome-desktop'
-  if (isMacDesktop() && isSafari()) return 'safari-mac'
+  // An iPad left in its default desktop browsing mode answers to none of the
+  // platform probes but one: a Macintosh Safari user agent with touch. It goes
+  // to the iPhone/iPad row because the Share sheet's Add to Home Screen is the
+  // route that works there, and never to the Mac row, which would send it
+  // looking for a Dock that this device does not have.
+  if (isIpadDesktopMode()) return 'safari-ios'
+  if (isIos()) return isSafari() ? 'safari-ios' : null
+  if (isAndroid()) return isGoogleChrome() ? 'chrome-android' : null
+  if (isWindows()) {
+    if (isEdge()) return 'edge-windows'
+    return isGoogleChrome() ? 'chrome-desktop' : null
+  }
+  if (isMacDesktop()) {
+    if (isSafari()) return 'safari-mac'
+    return isGoogleChrome() ? 'chrome-desktop' : null
+  }
   return null
 }
 
@@ -140,14 +158,18 @@ const standaloneDetail = standalone
 
 /** Browsers only install the app, and only allow push, on a secure origin:
  *  HTTPS, or the host's own localhost. Plain HTTP on a LAN address is neither,
- *  so the warning names that instead of offering steps that cannot work. */
+ *  so the warning names that instead of offering steps that cannot work. A
+ *  secure origin is the address meeting its half of the deal, never a claim
+ *  about this browser: which browsers can install from a secure address, and
+ *  which version of them, is not something a page can read, and browsers that
+ *  cannot are the ones most likely to be reading this. */
 const secureOrigin = window.isSecureContext === true
 const loopback = isLoopbackPage()
 const originState = secureOrigin
   ? loopback ? 'Secure: the host’s own localhost' : 'Secure: HTTPS'
   : 'Plain HTTP on the network'
 const originDetail = secureOrigin
-  ? 'This browser can install the app from this address.'
+  ? 'The address a browser needs before it will offer installing or notifications. Whether this browser can install the app here, and where that option lives, depends on the browser and its version.'
   : 'A browser only installs over HTTPS or on the host’s own localhost, so installing is not offered here and notifications cannot arrive.'
 </script>
 

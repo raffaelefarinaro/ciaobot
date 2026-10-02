@@ -24,17 +24,37 @@ export function isAndroid(): boolean {
   return /android/i.test(navigator.userAgent)
 }
 
+/** Windows, by user agent. The install routes name a platform as well as a
+ *  browser, and this is the one desktop platform no other probe asks about. */
+export function isWindows(): boolean {
+  return /windows/i.test(navigator.userAgent)
+}
+
+/** An iPad in Safari's default desktop browsing mode. It reports a Macintosh
+ *  Safari user agent with nothing in the string to say iPad, so it is invisible
+ *  to isIos() and indistinguishable to every probe above. The touch points give
+ *  it away: no Mac has a touchscreen, so a Macintosh user agent plus touch is
+ *  an iPad and nothing else. Narrow on purpose: the probes above are shared, and
+ *  a caller asking "is this a Mac" is not asking "is this an iPad pretending". */
+export function isIpadDesktopMode(): boolean {
+  return isMacDesktop() && navigator.maxTouchPoints > 1
+}
+
 /** Microsoft Edge, whose user agent still also says Chrome. */
 export function isEdge(): boolean {
   return /edg\//i.test(navigator.userAgent)
 }
 
-/** Chromium on a computer: Chrome, or another browser on its engine. Phones are
- *  excluded, where the same engine puts the install entry in a phone menu. */
-export function isChromiumDesktop(): boolean {
-  const ua = navigator.userAgent
-  if (isIos() || isAndroid()) return false
-  return /chrome|crios|chromium/i.test(ua)
+/** Google Chrome itself, and deliberately nothing else. A dozen browsers run on
+ *  Chromium's engine and every one of them keeps "Chrome/" and "Safari/537.36"
+ *  in its user agent, so the engine token alone cannot tell Chrome from Brave,
+ *  Vivaldi, Edge, Opera or Samsung Internet, which put install somewhere else.
+ *  Chrome puts no product token after Safari's, so that is the check: their own
+ *  name is appended and the string stops matching. It can only fail closed —
+ *  a browser that stops matching gets no highlight and every route stays on the
+ *  page — which is why a strict test is the right side to err on. */
+export function isGoogleChrome(): boolean {
+  return /(?:^| )Chrome\/\d+(?:\.\d+)*(?: Mobile)? Safari\/537\.36$/.test(navigator.userAgent)
 }
 
 export function isStandalone(): boolean {
