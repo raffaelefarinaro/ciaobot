@@ -2,15 +2,19 @@
 import { nextTick } from 'vue'
 import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
 
-defineProps<{ title: string; noticeKey: string; blocking?: boolean }>()
+defineProps<{ title: string; noticeKey: string; blocking?: boolean; closeLabel?: string }>()
+const emit = defineEmits<{ close: [] }>()
 const notices = useHomeNoticeWindows()
 
 async function close(key: string) {
+  emit('close')
   notices.close(key)
   await nextTick()
   // Closing removes the focused button. Leave keyboard users at the explicit
   // recovery control instead of sending the next Tab to the page start.
-  document.querySelector<HTMLButtonElement>('[data-home-notices-reopen]')?.focus()
+  const recovery = document.querySelector<HTMLButtonElement>('[data-home-notices-reopen]')
+  if (recovery) recovery.focus()
+  else document.querySelector<HTMLElement>('.home-main textarea, .home-main .home-chat-item')?.focus()
 }
 </script>
 
@@ -18,7 +22,7 @@ async function close(key: string) {
   <article class="home-notice-window" :class="{ 'home-notice-window--blocking': blocking }" data-home-notice-window>
     <header class="home-notice-header">
       <h2 class="home-notice-title">{{ title }}</h2>
-      <button type="button" class="btn-icon home-notice-close" :aria-label="`Close ${title} window`" :title="`Close ${title} window`" @click="close(noticeKey)">
+      <button type="button" class="btn-icon home-notice-close" :aria-label="closeLabel || `Close ${title} window`" :title="closeLabel || `Close ${title} window`" @click="close(noticeKey)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
       </button>
     </header>

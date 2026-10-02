@@ -118,13 +118,13 @@ function hide() {
 
 <template>
   <section v-if="visible && !noticeWindows.isClosed(SETUP_NOTICE_KEY)" class="home-setup" aria-label="Set up this device">
-    <HomeNoticeWindow title="Set up this device" :notice-key="SETUP_NOTICE_KEY">
+    <HomeNoticeWindow title="Set up this device" :notice-key="SETUP_NOTICE_KEY" close-label="Dismiss setup reminder on this device" @close="hide">
     <ol class="home-setup-steps">
       <li class="home-setup-step" :data-done="installDone">
         <div class="home-setup-text">
           <strong>Install the app</strong>
           <span v-if="installDone" class="hint">Installed</span>
-          <span v-else-if="!canPromptInstall" class="hint">{{ installInstructions() }} Already installed? Open the installed app, or hide this reminder for this browser.</span>
+          <span v-else-if="!canPromptInstall" class="hint">{{ installInstructions() }}</span>
         </div>
         <button
           v-if="!installDone && canPromptInstall"
@@ -151,7 +151,6 @@ function hide() {
       </li>
     </ol>
     <p v-if="error" class="action-result" role="alert">{{ error }}</p>
-    <button class="btn-small btn-chip home-setup-hide" type="button" @click="hide">Hide on this device</button>
     </HomeNoticeWindow>
   </section>
 </template>
@@ -181,5 +180,7 @@ function hide() {
   flex: 1 1 14rem;
 }
 .home-setup-step[data-done="true"] strong { color: var(--fg3); }
-.home-setup-hide { margin-top: var(--space-2); }
+@container (max-width: 560px) {
+  .home-setup-step > button { width: 100%; min-height: 44px; }
+}
 </style>

@@ -153,10 +153,11 @@ describe('HomeSetupCard', () => {
     expect(hasButton(view, 'Enable')).toBe(false)
   })
 
-  it('Hide persists per browser', async () => {
+  it('closing the setup window persists per browser without a second Hide button', async () => {
     const view = await mountCard()
 
-    await button(view, 'Hide on this device').trigger('click')
+    expect(hasButton(view, 'Hide on this device')).toBe(false)
+    await view.get('[aria-label="Dismiss setup reminder on this device"]').trigger('click')
     await flushPromises()
 
     expect(view.find('.home-setup').exists()).toBe(false)
@@ -184,15 +185,15 @@ describe('HomeSetupCard', () => {
     expect((await mountCard()).find('.home-setup').exists()).toBe(false)
   })
 
-  it('reopens a closed window without dismissing setup on this device', async () => {
+  it('does not reopen a dismissed setup window along with transient Home notices', async () => {
     const view = await mountCard()
-    await view.get('[aria-label="Close Set up this device window"]').trigger('click')
+    await view.get('[aria-label="Dismiss setup reminder on this device"]').trigger('click')
     await flushPromises()
     expect(view.find('.home-setup').exists()).toBe(false)
-    expect(localStorage.getItem(SETUP_CARD_DISMISSED_KEY)).toBeNull()
+    expect(localStorage.getItem(SETUP_CARD_DISMISSED_KEY)).toBe('1')
     resetHomeNoticeWindows()
     await flushPromises()
-    expect(view.find('.home-setup').exists()).toBe(true)
+    expect(view.find('.home-setup').exists()).toBe(false)
   })
 
   it('does not flash for a set-up device before the push probe resolves', async () => {
