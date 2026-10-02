@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -165,3 +166,95 @@ def test_a_whitespace_only_workspace_does_not_resolve_to_the_cwd(
     # An unusable value means "no workspace configured", which is bootstrap.
     assert config.workspace_root == (tmp_path / "home" / ".ciao" / "bootstrap").resolve()
     assert not any(p.name.strip() == "" for p in stood_here.iterdir())
+
+
+def test_installed_workspace_env_leaves_a_named_workspace_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that names a workspace has already answered the question.
+
+    Discovery exists for the bare shell, which has no answer to give. A caller's
+    own ``CIAO_WORKSPACE`` outranks whatever the LaunchAgent points at, so the
+    helper must not even ask — the explicit-env callers that pass one are the
+    ones this refactor exists to keep exact.
+    """
+
+    def _must_not_be_called(**_: object) -> None:
+        raise AssertionError("discovery must not run for a named workspace")
+
+    monkeypatch.setattr("ciao.macos_service.discover_runtime", _must_not_be_called)
+    base = {"CIAO_WORKSPACE": "/x", "FOO": "1"}
+
+    assert ciao_config.installed_workspace_env(base) == base
+
+
+def test_installed_workspace_env_overlays_the_installed_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare shell reads the install's ``.env``, and the process still wins.
+
+    The settings an install keeps only in its workspace ``.env`` — a custom
+    vault root, a custom runtime root — used to reach ``from_env`` from a bare
+    shell and not the explicit-env callers, because the inline copies of this
+    discovery skipped the overlay.
+    """
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / ".env").write_text(
+        "CIAO_VAULT_ROOT=memory-vault\nFOO=from-file\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(install), runtime_root=str(install / ".runtime")
+        ),
+    )
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    merged = ciao_config.installed_workspace_env({"FOO": "from-shell"})
+
+    assert merged["CIAO_WORKSPACE"] == str(install)
+    assert merged["CIAO_VAULT_ROOT"] == "memory-vault"
+    assert merged["FOO"] == "from-shell", "the process environment wins, as in load_dotenv"
+    # Read-only: the value lives in the returned mapping, never in the process.
+    assert os.environ.get("CIAO_VAULT_ROOT") is None
+
+
+def test_installed_workspace_env_without_an_install_returns_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No installed server to ask: the caller's environment is all there is."""
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(workspace="", runtime_root=""),
+    )
+    base = {"FOO": "1"}
+
+    assert ciao_config.installed_workspace_env(base) == base
+
+
+def test_installed_workspace_env_ignores_a_stale_launch_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plist naming a deleted directory is stale, and must not be pinned.
+
+    The operator removed `~/Ciaobot` but never unloaded the agent. Pinning the
+    path it names is how the directory came back: `from_env` takes the
+    non-bootstrap branch (a workspace is set, no token), finds no token and calls
+    `_read_or_create_secret(<deleted>/.runtime/session-secret)`, whose `mkdir`
+    resurrects what was deleted. `scripts/install-engine.sh` likewise refuses to
+    trust a plist workspace that is not an existing directory. A live install
+    without a `.env` is still trusted — the LaunchAgent server's own `from_env`
+    treats it as a workspace, so pinning matches what the server sees.
+    """
+    gone = tmp_path / "gone"
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(gone), runtime_root=str(gone / ".runtime")
+        ),
+    )
+    base = {"FOO": "1"}
+
+    assert ciao_config.installed_workspace_env(base) == base
+    assert not gone.exists(), "a read-only lookup must not recreate the workspace"
