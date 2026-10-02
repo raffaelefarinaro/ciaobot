@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  ageInWords, candidateLeaf, coverageSummary, entryReasonLabel, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel,
+  ageInWords, candidateLeaf, coverageSummary, entryReasonExplanation, entryReasonLabel, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel,
 } from './vaultReviewLabels'
 import type { VaultReviewEntryCoverage, VaultReviewEvidence } from './types'
 import { formatAgeDays } from './relativeTime'
@@ -73,6 +73,22 @@ describe('vault review labels', () => {
     expect(entryReasonLabel('aged')).toBe('last checked too long ago')
     expect(entryReasonLabel('something_newer')).toBe('something_newer')
     expect(entryReasonLabel('')).toBe('needs a check')
+  })
+
+  it('explains each entry reason once, in a sentence that carries no numbers', () => {
+    // Every fact sharing a reason shares this sentence, and the panel states it
+    // once per reason rather than once per fact. An `age_days` here would read
+    // as a claim about every fact under the head, so the age stays on its row.
+    expect(entryReasonExplanation('no-stamp'))
+      .toBe('Nobody has recorded a [verified:] check on it, so it carries the note’s date instead of its own.')
+    expect(entryReasonExplanation('unusable-stamp'))
+      .toBe('The [verified:] stamp on it cannot be read as a date.')
+    expect(entryReasonExplanation('aged'))
+      .toBe('Its own check is older than the review horizon.')
+    // A reason this client has no words for is shown by its label alone. A guess
+    // at a newer server's vocabulary would be a claim nobody wrote.
+    expect(entryReasonExplanation('something_newer')).toBe('')
+    expect(entryReasonExplanation('')).toBe('')
   })
 
   it('summarises coverage in counts, and never as a percentage', () => {

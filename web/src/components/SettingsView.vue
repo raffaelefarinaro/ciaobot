@@ -500,6 +500,10 @@
              computer. The one place to set the trusted HTTPS address. -->
         <SettingsDevices />
 
+        <!-- Installing is optional and the guidance is permanent: the Home setup
+             reminder can be closed for good, so Settings keeps the steps. -->
+        <SettingsAppInstall />
+
         <!-- Notifications. -->
         <SettingsNotifications />
 
@@ -2073,6 +2077,7 @@ import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
+import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'

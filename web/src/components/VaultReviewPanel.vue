@@ -6,10 +6,10 @@ import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProposalsStore } from '../stores/proposals'
 import { reviewPath } from '../stores/memoryMap'
-import type { VaultReviewCandidate, VaultReviewCheck, VaultReviewEntryProposal, VaultTrashedNote,
+import type { VaultReviewCandidate, VaultReviewCheck, VaultReviewEntryFinding, VaultReviewEntryProposal, VaultTrashedNote,
   VaultClearedNote } from '../lib/types'
 import {
-  candidateLeaf, coverageLabel, coverageSummary, entryReasonLabel, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel, verdictLabel,
+  candidateLeaf, coverageLabel, coverageSummary, entryReasonExplanation, entryReasonLabel, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel, verdictLabel,
 } from '../lib/vaultReviewLabels'
 import { askConfirm } from '../lib/confirm'
 import { startFileDiscussion } from '../lib/fileDiscussion'
@@ -256,6 +256,31 @@ function hasPendingProposal(candidate: VaultReviewCandidate): boolean {
  */
 function entryCoverageOf(candidate: VaultReviewCandidate) {
   return candidate.evidence.entry_verification ?? null
+}
+
+interface EntryGroup { reason: string; entries: VaultReviewEntryFinding[] }
+
+/** This note's overdue facts, grouped by the reason they share.
+ *
+ * A note's facts were listed one bullet at a time, each row repeating the
+ * server's explanation and the note's date in full — so a note whose five facts
+ * were all never checked showed the same two paragraphs five times to convey
+ * one fact. What a reason means is shared; what each fact *is* is not. Grouping
+ * puts the shared half in one head above the facts that share it, and leaves
+ * the row carrying only what differs: the excerpt, the section, the line around
+ * it, and (for `aged`, the only reason where the number is per fact) the age.
+ *
+ * First-seen order, and the server's order inside each group, so nothing moves
+ * because of this grouping.
+ */
+function entryGroups(candidate: VaultReviewCandidate): EntryGroup[] {
+  const groups: EntryGroup[] = []
+  for (const entry of entryCoverageOf(candidate)?.stale_entries ?? []) {
+    const group = groups.find(g => g.reason === entry.reason)
+    if (group) group.entries.push(entry)
+    else groups.push({ reason: entry.reason, entries: [entry] })
+  }
+  return groups
 }
 
 /** The entry this pending proposal is about, so a link can name it.
@@ -813,65 +838,66 @@ function clearedDate(note: VaultClearedNote): string {
                     cannot read as facts — so it is never counted as verified.
                   </template>
                 </p>
-                <ul v-if="entryCoverageOf(candidate)!.stale_entries.length" class="vr-entries-list">
-                  <li
-                    v-for="entry in entryCoverageOf(candidate)!.stale_entries"
-                    :key="entry.identity"
-                    class="vr-entry"
+                <!-- One group per reason, each stating that reason once. The two
+                     things every fact under a head has in common — why it is
+                     here, and (for a fact with no usable stamp of its own) that
+                     it is carrying the note's date rather than its own — used to
+                     be printed again on every row, so a note whose facts were
+                     all never checked said the same thing once per bullet. The
+                     per-fact rows below keep only what differs. -->
+                <template v-if="entryGroups(candidate).length">
+                  <div
+                    v-for="group in entryGroups(candidate)"
+                    :key="group.reason"
+                    class="vr-entry-group"
                   >
-                    <p class="vr-entry-why">
-                      <strong>{{ sentenceCase(entryReasonLabel(entry.reason)) }}</strong>
-                      <template v-if="entry.age_days !== null">
-                        — {{ entry.detail }}
-                      </template>
-                      <template v-else> — {{ entry.detail }}</template>
+                    <p class="vr-entry-reason-head">
+                      <strong>{{ sentenceCase(entryReasonLabel(group.reason)) }}</strong><template v-if="entryReasonExplanation(group.reason)"> — {{ entryReasonExplanation(group.reason) }}</template>
                     </p>
-                    <!-- Last CHECKED and last VERIFIED are different dates and
-                         showing only the first is how "checked yesterday" and
-                         "never checked" read as a contradiction. For an entry
-                         with no stamp of its own the two are the same date, and
-                         that is the fact worth saying out loud: the row is
-                         carrying the file's date, not the fact's. -->
-                    <p class="vr-entry-dates">
-                      <template v-if="entry.own_date">
-                        Last checked <code>{{ entry.last_verified }}</code>, on the entry's own stamp.
-                      </template>
-                      <template v-else-if="entry.last_verified">
-                        Last checked <code>{{ entry.last_verified }}</code> — that is the
-                        <em>note's</em> date; this fact carries no stamp of its own.
-                      </template>
-                      <template v-else>No date to check it against, and no stamp on the fact.</template>
-                    </p>
-                    <blockquote v-if="entry.section" class="vr-entry-section">in “{{ entry.section }}”</blockquote>
-                    <pre class="vr-entry-text"><code>{{ entry.excerpt }}</code></pre>
-                    <p v-if="entry.context.length" class="vr-entry-context">
-                      <span v-for="(line, li) in entry.context" :key="li" class="vr-entry-context-line">{{ line }}</span>
-                    </p>
-                    <p
-                      v-for="link in entryCoverageOf(candidate)!.proposals.filter(p => p.identity === entry.identity)"
-                      :key="link.proposal_id"
-                      class="vr-entry-decision"
-                    >
-                      <template v-if="link.conflicted">
-                        <span class="vr-entry-conflict">
-                          A decision for this fact was filed against text the note no longer
-                          holds, so it cannot be applied — Ciaobot will file a new one.
-                        </span>
-                      </template>
-                      <template v-else>
-                        Waiting in Suggested: {{ entryOperationLabel(link.operation) }} —
-                        checked <code>{{ link.checked_at }}</code><template v-if="link.citations">
-                          , on {{ link.citations }} citation{{ link.citations === 1 ? '' : 's' }}</template>.
-                      </template>
-                      <button
-                        type="button"
-                        class="mr-link vr-pending-link"
-                        title="Open the proposal in Suggested, where the change and its evidence are"
-                        @click="openEntryProposal(candidate, link)"
-                      >Open the proposal</button>
-                    </p>
-                  </li>
-                </ul>
+                    <ul class="vr-entries-list">
+                      <li
+                        v-for="entry in group.entries"
+                        :key="entry.identity"
+                        class="vr-entry"
+                      >
+                        <!-- The one number that is genuinely per fact, so it
+                             cannot live in the group's sentence: a figure there
+                             would read as a claim about every fact under it. -->
+                        <p v-if="group.reason === 'aged' && entry.age_days !== null" class="vr-entry-age">
+                          unverified for {{ entry.age_days }}d
+                        </p>
+                        <blockquote v-if="entry.section" class="vr-entry-section">in “{{ entry.section }}”</blockquote>
+                        <pre class="vr-entry-text"><code>{{ entry.excerpt }}</code></pre>
+                        <p v-if="entry.context.length" class="vr-entry-context">
+                          <span v-for="(line, li) in entry.context" :key="li" class="vr-entry-context-line">{{ line }}</span>
+                        </p>
+                        <p
+                          v-for="link in entryCoverageOf(candidate)!.proposals.filter(p => p.identity === entry.identity)"
+                          :key="link.proposal_id"
+                          class="vr-entry-decision"
+                        >
+                          <template v-if="link.conflicted">
+                            <span class="vr-entry-conflict">
+                              A decision for this fact was filed against text the note no longer
+                              holds, so it cannot be applied — Ciaobot will file a new one.
+                            </span>
+                          </template>
+                          <template v-else>
+                            Waiting in Suggested: {{ entryOperationLabel(link.operation) }} —
+                            checked <code>{{ link.checked_at }}</code><template v-if="link.citations">
+                              , on {{ link.citations }} citation{{ link.citations === 1 ? '' : 's' }}</template>.
+                          </template>
+                          <button
+                            type="button"
+                            class="mr-link vr-pending-link"
+                            title="Open the proposal in Suggested, where the change and its evidence are"
+                            @click="openEntryProposal(candidate, link)"
+                          >Open the proposal</button>
+                        </p>
+                      </li>
+                    </ul>
+                  </div>
+                </template>
                 <p v-else-if="entryCoverageOf(candidate)!.checked" class="vr-hint">
                   Every fact written as a list item in this note is current.
                 </p>
@@ -1379,6 +1405,11 @@ function clearedDate(note: VaultClearedNote): string {
   border-top: 1px solid var(--border);
 }
 
+/* One reason, then the facts that share it. The head is the only place a
+   reason is explained, so a second group needs air above it rather than a
+   border: the reader is being told something new, not shown a continuation. */
+.vr-entry-group + .vr-entry-group { margin-top: var(--space-3); }
+
 .vr-entries-list {
   margin: var(--space-2) 0 0;
   padding: 0;
@@ -1393,8 +1424,8 @@ function clearedDate(note: VaultClearedNote): string {
   border-left: 2px solid var(--border);
 }
 
-.vr-entry-why,
-.vr-entry-dates,
+.vr-entry-reason-head,
+.vr-entry-age,
 .vr-entry-section,
 .vr-entry-context,
 .vr-entry-decision {
@@ -1403,9 +1434,11 @@ function clearedDate(note: VaultClearedNote): string {
   line-height: 1.5;
 }
 
-.vr-entry-why { color: var(--fg2); }
-.vr-entry-why strong { color: var(--fg); }
-.vr-entry-dates,
+.vr-entry-reason-head { color: var(--fg2); }
+.vr-entry-reason-head strong { color: var(--fg); }
+/* The per-fact age is the only number left on a row, so it reads as metadata
+   beside the excerpt rather than as a second claim about the fact. */
+.vr-entry-age,
 .vr-entry-section { color: var(--fg3); }
 .vr-entry-section { font-style: italic; }
 

@@ -182,6 +182,7 @@ from ciao.web.routes_push import (
     push_subscription_check,
     push_unsubscribe,
 )
+from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -433,6 +434,15 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/admin/drain", admin_drain, methods=["POST"]),
         Route("/api/admin/drain/cancel", admin_drain_cancel, methods=["POST"]),
         Route("/api/admin/status", admin_status, methods=["GET"]),
+        # The engine's verified start-at-sign-in state, and the switch for it.
+        # Session-protected like every other /api route, and deliberately not
+        # in the public or loopback-only allowlists: it is a change to a
+        # per-user OS service, so it takes the ordinary authenticated,
+        # same-origin path. It can only read or flip the enabled bit of the
+        # service already installed for the engine's own workspace — it never
+        # registers, starts, stops or repoints a service.
+        Route("/api/service/login", service_login_status, methods=["GET"]),
+        Route("/api/service/login", service_login_update, methods=["PATCH"]),
         Route("/api/admin/skills", admin_skills, methods=["GET"]),
         Route("/api/admin/skills/add", admin_add_skill, methods=["POST"]),
         Route("/api/skills/import", skill_import, methods=["POST"]),
