@@ -103,6 +103,43 @@ test.describe('workbench layout', () => {
     }
   })
 
+  test('a Home section root keeps the column it is laid out in', async ({ page }) => {
+    // The shared gap reset used to read `margin: 0 auto`, and its inline half is
+    // not free: `.home-main` is a column flex container, so an auto inline margin
+    // on a child absorbs the free space on the cross axis. The chip (the one root
+    // with `align-self: flex-start`) floated to the middle of the column and the
+    // setup card — a root with no width of its own — collapsed to fit its text.
+    // Neither is a gap, so the gap assertions above stayed green throughout; only
+    // the edges say otherwise, and only a real layout engine has them.
+    //
+    // Its own fixture slice: opting in to update tasks writes a session flag the
+    // fixture keeps, and the describe's shared slice is also the one the "no
+    // update work" test needs to find no update work in.
+    await isolate(page, 'workbench-edges')
+    await page.request.post('/__fixture__/update-tasks')
+    await boot(page, '/', '.update-tasks')
+
+    // Closing a notice is how the recovery chip comes to be at all.
+    await page.locator('.update-tasks .home-notice-close').first().click()
+    await expect(page.locator('.home-notice-reopen')).toBeVisible()
+    await expect(page.locator('.home-setup')).toBeVisible()
+
+    const report = await page.evaluate(() => {
+      const main = document.querySelector('.home-main')!.getBoundingClientRect()
+      const read = (selector: string) => {
+        const r = document.querySelector(selector)!.getBoundingClientRect()
+        return { offset: Math.round(r.left - main.left), width: Math.round(r.width) }
+      }
+      return {
+        column: Math.round(main.width),
+        chip: read('.home-notice-reopen'),
+        setup: read('.home-setup'),
+      }
+    })
+    expect(report.chip.offset, 'the chip sits on the column edge, not in its middle').toBe(0)
+    expect(report.setup, 'the setup card is as wide as the column').toEqual({ offset: 0, width: report.column })
+  })
+
   test('a Home with no update work has no phantom gap for it', async ({ page }) => {
     // The group renders nothing at all when it has no open rows, so the gap the
     // layout reserves must not survive it: a doubled gap above the recent list

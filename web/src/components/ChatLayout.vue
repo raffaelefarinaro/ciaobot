@@ -1513,16 +1513,20 @@ onBeforeUnmount(() => {
   gap: var(--space-5);
 }
 
-/* Section roots give up their outer margins so the gap is the only thing
-   separating them. `:deep()` because these are other components' root elements
-   (and HousekeepingStrip's are a fragment, which inherits no scope id). Card,
+/* Section roots give up their *block* margins so the gap is the only thing
+   separating them — `margin-block`, not `margin`: these are flex items, and
+   inline `auto` margins on a flex item absorb all the free space on the cross
+   axis, which re-centres the chip and shrinks the setup card to fit-content.
+   Their own inline margins (the three capped shells) stay as they were.
+   `:deep()` because these are other components' root elements (and
+   HousekeepingStrip's are a fragment, which inherits no scope id). Card,
    heading and row spacing inside each section is untouched. */
 .home-main > :deep(.housekeeping),
 .home-main > :deep(.update-tasks),
 .home-main > :deep(.home-setup),
 .home-main > :deep(.home-notice-reopen),
 .home-main > :deep(.home-recent) {
-  margin: 0 auto;
+  margin-block: 0;
 }
 
 .home-workbench .home-main > .home-intake,
