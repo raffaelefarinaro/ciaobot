@@ -3045,9 +3045,22 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
 
 
 def _os_audit_command(args: argparse.Namespace) -> int:
+    from ciao.config import installed_workspace_env
     from ciao.os_audit import format_audit_markdown, run_os_audit
 
-    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    explicit_workspace = args.workspace is not None
+    # A bare shell has no CIAO_WORKSPACE, so the audit used to run over whatever
+    # directory the operator happened to be standing in. The install the
+    # LaunchAgent points at is the workspace they actually have, so discovery
+    # seeds the default below; an explicit --workspace is the operator naming a
+    # workspace and is left exactly as it was.
+    env_source: dict[str, str] = dict(os.environ)
+    if not explicit_workspace:
+        discovered = installed_workspace_env(os.environ)
+        if discovered.get("CIAO_WORKSPACE", "").strip():
+            env_source = discovered
+
+    workspace_raw = args.workspace or env_source.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
     # An explicit --workspace scopes the whole audit. Consulting the ambient
     # environment for the runtime and vault roots then lets an absolute
@@ -3056,14 +3069,13 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     # registry, its job runs, its migration receipts. Auditing a second
     # workspace from inside a running Ciaobot chat hits this every time, because
     # the chat exports CIAO_RUNTIME_ROOT for its own install.
-    explicit_workspace = args.workspace is not None
 
     def resolve_under_workspace(
         explicit: Path | None,
         env_name: str,
         default: str,
     ) -> Path:
-        env_raw = None if explicit_workspace else os.environ.get(env_name)
+        env_raw = None if explicit_workspace else env_source.get(env_name)
         raw = explicit or env_raw or default
         path = Path(raw).expanduser()
         if not path.is_absolute():
@@ -3093,15 +3105,18 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     )
     from ciao.config import CiaoConfig
 
-    config_source = dict(os.environ)
+    config_source = dict(env_source)
     config_source.update({
         "CIAO_WORKSPACE": str(workspace),
         "CIAO_VAULT_ROOT": str(vault),
         "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+    if not config_source.get("PWA_AUTH_TOKEN", "").strip():
         # Loading config for a read-only audit must not create a session
         # secret merely because the CLI was invoked outside the server env.
-        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "os-audit",
-    })
+        # Only when blank: forcing a stand-in over an empty value would hide
+        # the bootstrap combination this resolution exists to avoid.
+        config_source["PWA_AUTH_TOKEN"] = "os-audit"
     audit_config = CiaoConfig.from_env(config_source)
     # Defaults from the dispatch env so the per-workspace hygiene routine needs
     # no prompt templating: its packaged prompt is one static string, and the
@@ -3450,7 +3465,7 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     per registered workspace and reports over-cap per guide, not as one global
     number that hides which workspace is over budget.
     """
-    from ciao.config import CiaoConfig
+    from ciao.config import CiaoConfig, installed_workspace_env
     from ciao.memory_tool import DEFAULT_MEMORY_CHAR_LIMIT, DEFAULT_USER_CHAR_LIMIT
     from ciao.os_audit import (
         _aggregate_memory_guides,
@@ -3460,22 +3475,35 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         memory_actionable_count,
     )
 
-    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    explicit_workspace = args.workspace is not None
+    # A bare shell has no CIAO_WORKSPACE, so the audit used to read the guide
+    # and state under whatever directory the operator was in. Discovery seeds
+    # the installed root instead; an explicit --workspace is left as it was.
+    env_source: dict[str, str] = dict(os.environ)
+    if not explicit_workspace:
+        discovered = installed_workspace_env(os.environ)
+        if discovered.get("CIAO_WORKSPACE", "").strip():
+            env_source = discovered
+
+    workspace_raw = args.workspace or env_source.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
-    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault_raw = args.vault_root or env_source.get("CIAO_VAULT_ROOT") or "memory-vault"
     vault = Path(vault_raw).expanduser()
     if not vault.is_absolute():
         vault = workspace / vault
     vault = vault.resolve()
 
-    config_source = dict(os.environ)
+    config_source = dict(env_source)
     config_source.update({
         "CIAO_WORKSPACE": str(workspace),
         "CIAO_VAULT_ROOT": str(vault),
+    })
+    if not config_source.get("PWA_AUTH_TOKEN", "").strip():
         # Loading config for a read-only audit must not create a session
         # secret merely because the CLI was invoked outside the server env.
-        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "memory-audit",
-    })
+        # Only when blank: forcing a stand-in over an empty value would hide
+        # the bootstrap combination this resolution exists to avoid.
+        config_source["PWA_AUTH_TOKEN"] = "memory-audit"
     config = CiaoConfig.from_env(config_source)
 
     specs = _memory_guide_specs(config, workspace)
@@ -3687,13 +3715,17 @@ def _resolve_workspace_and_vaults(
     if not getattr(args, "vault_root", None) and not getattr(args, "workspace", None):
         if active:
             try:
-                from ciao.config import CiaoConfig
+                from ciao.config import CiaoConfig, installed_workspace_env
 
                 # A read-only resolution must not mint a session secret just
                 # because the CLI runs outside the server env (same rule as
-                # the memory-audit command).
-                env_source = dict(os.environ)
-                env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
+                # the memory-audit command). Discovery first: with
+                # `CIAO_ACTIVE_WORKSPACE` set and no `CIAO_WORKSPACE`, an
+                # explicit env skipped the install and `from_env` took the
+                # bootstrap branch, minting `~/.ciao/bootstrap/.runtime/...`.
+                env_source = installed_workspace_env(os.environ)
+                if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+                    env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
                 config = CiaoConfig.from_env(env_source)
                 if config.workspace(active) is not None:
                     return (
@@ -3712,6 +3744,7 @@ def _resolve_workspace_and_vaults(
         vault = workspace / vault
     resolved = vault.resolve()
     name: str | None = None
+    discovered_workspace: str | None = None
     if getattr(args, "vault_root", None):
         from ciao.config import CiaoConfig, installed_workspace_env
 
@@ -3732,12 +3765,21 @@ def _resolve_workspace_and_vaults(
                 # in place — `from_env` then sees no workspace with a token, enters
                 # bootstrap mode and MINTS a bootstrap secret while resolving a name.
                 env_source["CIAO_WORKSPACE"] = str(workspace)
+            else:
+                # Discovery found the install this bare shell is actually talking
+                # to, and that install root — not the cwd — is the workspace the
+                # vault is named after and its guide and state live under.
+                discovered_workspace = env_source["CIAO_WORKSPACE"].strip()
         if not env_source.get("PWA_AUTH_TOKEN", "").strip():
             # Same reason as the workspace above, one level down: the install's
             # `.env` is overlaid into this mapping and keeps its empty values.
             env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
         config = CiaoConfig.from_env(env_source)
         name = _registered_owner(config, resolved) or resolved.name
+    if discovered_workspace:
+        discovered_path = Path(discovered_workspace).expanduser().resolve()
+        if discovered_path != workspace:
+            workspace = discovered_path
     return workspace, resolved, resolved, name
 
 

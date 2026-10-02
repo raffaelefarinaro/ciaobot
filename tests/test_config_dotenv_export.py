@@ -168,6 +168,58 @@ def test_a_whitespace_only_workspace_does_not_resolve_to_the_cwd(
     assert not any(p.name.strip() == "" for p in stood_here.iterdir())
 
 
+def test_a_blank_runtime_root_falls_back_to_the_workspace_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blank ``CIAO_RUNTIME_ROOT=`` means unset, not the workspace root.
+
+    ``installed_workspace_env`` overlays the install ``.env`` and keeps its empty
+    values, so a hand-written blank reached ``from_env`` as an empty string and
+    ``Path("")`` resolved to the workspace root itself — putting ``state.json``
+    and ``workspaces.json`` beside the notes instead of under ``<ws>/.runtime``.
+    The ``vault_root`` line just above already treats blank as unset; this makes
+    the runtime root agree.
+    """
+    workspace = _workspace_with_env(tmp_path / "ws", "CIAO_RUNTIME_ROOT=\n")
+    (workspace / "memory-vault").mkdir()
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    config = CiaoConfig.from_env(export=False)
+
+    assert config.state_path.parent == (workspace / ".runtime").resolve()
+    assert config.state_path.parent != config.workspace_root
+
+
+def test_installed_workspace_env_pins_the_workspace_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty caller workspace is still pinned to the installed root.
+
+    Discovery is entered for an exported empty ``CIAO_WORKSPACE=`` as well as an
+    unset one, and the caller's environment wins the merge — so the pin has to be
+    the final word rather than the overlay's. A caller that already names a
+    workspace is still returned untouched, which
+    ``test_installed_workspace_env_leaves_a_named_workspace_alone`` covers.
+    """
+    install = tmp_path / "install"
+    install.mkdir()
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(install), runtime_root=str(install / ".runtime")
+        ),
+    )
+
+    for base in ({"FOO": "1"}, {"FOO": "1", "CIAO_WORKSPACE": ""}):
+        merged = ciao_config.installed_workspace_env(base)
+        assert merged["CIAO_WORKSPACE"] == str(install)
+        assert merged["FOO"] == "1"
+
+    named = {"CIAO_WORKSPACE": "/x", "FOO": "1"}
+    assert ciao_config.installed_workspace_env(named) == named
+
+
 def test_installed_workspace_env_leaves_a_named_workspace_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
