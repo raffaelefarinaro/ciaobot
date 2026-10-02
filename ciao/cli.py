@@ -1970,29 +1970,20 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
     Raises ``ValueError`` with a message to print; every caller turns that into
     exit 1 before anything is written.
     """
-    from ciao.config import CiaoConfig
+    from ciao.config import CiaoConfig, installed_workspace_env
 
     # A read-only resolution must not mint a session secret just because the CLI
     # runs outside the server env (the same rule the memory-audit command and
     # `_resolve_workspace_and_vaults` follow).
-    env = dict(os.environ)
+    #
+    # The install the server sees, overlaid under this process's env — the same
+    # resolution `from_env()` applies to a bare shell — so a learnings run from
+    # any directory reads the real registry and that install's `.env`.
+    env = installed_workspace_env(os.environ)
     env.setdefault("PWA_AUTH_TOKEN", "learnings-cli")
     if not env.get("CIAO_WORKSPACE", "").strip():
-        # A bare shell has no CIAO_WORKSPACE, and an explicit env makes from_env
-        # skip discovery and fall into the bootstrap root, whose registry knows no
-        # real vault. Ask the installed server's LaunchAgent, as `from_env()` would,
-        # else use the cwd (the old `./memory-vault` default's base).
-        from ciao.macos_service import discover_runtime
-
-        try:
-            discovered = discover_runtime(environ=dict(os.environ))
-        except Exception:  # noqa: BLE001 - plist missing/unreadable
-            discovered = None
-        if discovered and discovered.workspace:
-            env["CIAO_WORKSPACE"] = str(discovered.workspace)
-            env.setdefault("CIAO_RUNTIME_ROOT", discovered.runtime_root)
-        else:
-            env["CIAO_WORKSPACE"] = str(Path.cwd())
+        # No installed server to ask: the cwd, the old `./memory-vault` base.
+        env["CIAO_WORKSPACE"] = str(Path.cwd())
     config = CiaoConfig.from_env(env)
     # The receipt has to land in the same `.runtime` the update-task check reads
     # (`<state_path parent>/migration`), which is the one this registry came from —
@@ -3718,15 +3709,21 @@ def _resolve_workspace_and_vaults(
     resolved = vault.resolve()
     name: str | None = None
     if getattr(args, "vault_root", None):
-        from ciao.config import CiaoConfig
+        from ciao.config import CiaoConfig, installed_workspace_env
 
         # The registry this install root holds is the authority, as it is for
         # `_learnings_workspace`: an explicit vault the registry knows is named
         # by its owner, and only a vault it does not know falls back to the
         # directory's own name.
-        env_source = dict(os.environ)
+        if getattr(args, "workspace", None) or os.environ.get("CIAO_WORKSPACE", "").strip():
+            env_source = dict(os.environ)
+            env_source["CIAO_WORKSPACE"] = str(workspace)
+        else:
+            # Neither names an install — a bare shell, so `workspace` above is the
+            # cwd — and its registry knows no vault. Read the installed one.
+            env_source = installed_workspace_env(os.environ)
+            env_source.setdefault("CIAO_WORKSPACE", str(workspace))
         env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
-        env_source["CIAO_WORKSPACE"] = str(workspace)
         config = CiaoConfig.from_env(env_source)
         name = _registered_owner(config, resolved) or resolved.name
     return workspace, resolved, resolved, name

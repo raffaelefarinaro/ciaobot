@@ -10,6 +10,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -3770,6 +3771,36 @@ def test_an_unregistered_explicit_vault_root_keeps_its_directory_name(
 
     assert name == "memory-vault"
     assert resolved == other.resolve()
+
+
+def test_a_bare_shell_explicit_vault_root_is_named_by_the_installed_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `CIAO_WORKSPACE`, just a terminal and a `--vault-root`.
+
+    The owner lookup reads a registry, and from a bare shell the install root it
+    used was the cwd — so the registered owner was never found and the name fell
+    back to the vault directory's own name, `client-a`, which no operation that
+    consumes an entry identity resolves. The install the operator actually has
+    is the one the LaunchAgent points at, the same answer `_learnings_workspace`
+    and `from_env` now share.
+    """
+    root, vault = _registered_install(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(root), runtime_root=str(root / ".runtime")
+        ),
+    )
+
+    name = cli._resolve_workspace_and_vaults(_curation_args(vault_root=str(vault)))[3]
+
+    assert name == "work"
 
 
 def test_curation_plan_with_a_per_root_vault_root_folds_under_the_owner(

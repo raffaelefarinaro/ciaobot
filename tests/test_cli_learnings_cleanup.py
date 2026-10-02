@@ -1259,6 +1259,67 @@ def test_a_bare_shell_writes_the_receipt_to_the_installed_runtime(
     assert not (elsewhere / ".runtime").exists()
 
 
+def test_a_bare_shell_reads_the_installed_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A setting the install keeps in its `.env` reaches a bare-shell run.
+
+    The receipt reaching the installed runtime is only half of what the install
+    says: the runtime root it uses can be a setting of its own, and that setting
+    lives in the workspace `.env` the running server reads. The explicit env this
+    command hands `from_env` skips discovery entirely, so the inline copy of the
+    LaunchAgent lookup carried the workspace across and dropped the overlay — and
+    a receipt written under the default root is a review the update task never
+    sees. Relative, exactly as `.env` writes it: resolved against the install.
+    """
+    vault = _per_root_install(
+        tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD)
+    )
+    approval = _write_approval(tmp_path, _approvals(RETIRED_RECORD))
+    install = tmp_path / "install"
+    runtime = install / ".runtime"
+    # An install whose runtime root is its own keeps the registry there, so the
+    # workspace name still resolves: this run must reach the custom root AND
+    # still read the install, not fall back to the vault directory's name.
+    custom = install / "custom-runtime"
+    custom.mkdir()
+    (custom / "workspaces.json").write_text(
+        (runtime / "workspaces.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (install / ".env").write_text("CIAO_RUNTIME_ROOT=custom-runtime\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(install), runtime_root=str(runtime)
+        ),
+    )
+
+    assert cli.main(
+        [
+            "learnings-cleanup",
+            "--apply",
+            "--approval-file",
+            str(approval),
+            "--vault-root",
+            str(vault),
+        ]
+    ) == 0
+
+    receipt = next((custom / "migration").glob("learnings-cleanup-*.json"))
+    assert json.loads(receipt.read_text(encoding="utf-8"))["workspace"] == WORKSPACE
+    assert "Removed 1 entr(y/ies)." in capsys.readouterr().out
+    assert not (runtime / "migration").exists(), "the default root is not this install's"
+    assert not (elsewhere / ".runtime").exists()
+
+
 def test_an_unknown_active_workspace_is_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
