@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -472,15 +473,96 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
         chat,
         project,
     )
-    # The index write is dispatched as a tracked background task; let it run.
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if indexed:
-            break
+    # The index write is dispatched as a tracked background task. Wait on that
+    # task itself (not a fixed sleep budget): under a loaded runner the read can
+    # be admitted late, and the old 500 ms poll expired before it ran (#942).
+    pending = [
+        t
+        for t in pcm._detached_tasks
+        if t.get_name() == f"archive-index-{chat.chat_id}"
+    ]
+    assert pending, "postprocess did not schedule the index task"
+    await asyncio.gather(*pending)
 
     assert indexed == [archive_path], "archive indexing did not run"
     assert locks, "archive indexing did not take the shared FTS write lock"
     assert locks[0] == f"fts-index:{fts_search.get_db_path()}"
+
+
+@pytest.mark.asyncio
+async def test_archive_index_waits_for_the_detached_task_under_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#942: the wait is on the detached task, not a fixed time budget.
+
+    Reproduces the Windows CI flake on a fast machine: saturate the shared,
+    bounded vault-read executor so the archive index read cannot be admitted
+    within the old 500 ms poll, then run the real postprocess body. The fixed
+    budget would assert while indexing is merely late; awaiting the tracked
+    ``archive-index-<chat>`` task completes once the pool drains.
+    """
+    from ciao import async_reads, fts_search
+
+    async_reads.reset_vault_read_executor()
+    try:
+        pcm = _make_manager(tmp_path)
+        project = pcm.create_project("archive-index-load", workspace="work")
+        chat = pcm.create_chat(project.project_id, title="archive index load chat")
+
+        locks: list[str] = []
+        indexed: list[Path] = []
+        real_keyed_lock = async_reads.keyed_lock
+
+        def _recording_keyed_lock(key: str):
+            locks.append(key)
+            return real_keyed_lock(key)
+
+        def _recording_index_file(conn, vault_root, file_path, *, path_base=None):
+            indexed.append(Path(file_path))
+            return True
+
+        monkeypatch.setattr(async_reads, "keyed_lock", _recording_keyed_lock)
+        monkeypatch.setattr(fts_search, "index_file", _recording_index_file)
+
+        executor = async_reads.vault_read_executor()
+        blockers: list[threading.Event] = []
+        for i in range(executor.max_backlog):
+            event = threading.Event()
+            executor.submit(f"block-{i}", lambda e=event: e.wait(5), coalesce=False)
+            blockers.append(event)
+
+        archive_path = tmp_path / "archive.md"
+        archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
+        pcm.run_archive_postprocess(
+            chat.chat_id,
+            ArchiveOutcome(
+                path=archive_path,
+                turn_count=1,
+            ),
+            chat,
+            project,
+        )
+        pending = [
+            t
+            for t in pcm._detached_tasks
+            if t.get_name() == f"archive-index-{chat.chat_id}"
+        ]
+        assert pending, "postprocess did not schedule the index task"
+
+        # The pool is saturated, so the index read cannot have run yet.
+        await asyncio.sleep(0.05)
+        assert indexed == [], "indexed before the saturated pool was released"
+
+        # Release the pool; the tracked task then completes and indexes.
+        for event in blockers:
+            event.set()
+        await asyncio.gather(*pending)
+
+        assert indexed == [archive_path], "archive indexing did not run"
+        assert locks, "archive indexing did not take the shared FTS write lock"
+        assert locks[0] == f"fts-index:{fts_search.get_db_path()}"
+    finally:
+        async_reads.reset_vault_read_executor()
 
 
 def test_synchronous_archive_indexing_is_best_effort(
