@@ -254,6 +254,71 @@ def test_apply_release_files_aligns_editable_lock_without_dependency_changes(
     assert tmp_path / "uv.lock" in touched
 
 
+def test_editable_lock_alignment_preserves_crlf_and_assignment_spacing(
+    tmp_path: Path,
+) -> None:
+    """Only the quoted root version value changes; every other byte survives.
+
+    ``read_text`` normalizes CRLF to LF, so a Windows checkout was rewritten by
+    a release that only meant to bump metadata. The root assignment is also free
+    to carry its own spacing and a trailing comment, which a prefix-wide
+    replacement would collapse.
+    """
+    _write_release_tree(tmp_path)
+    lock = (
+        "version = 1\r\n"
+        "revision = 3\r\n"
+        "\r\n"
+        "[[package]]\r\n"
+        'name = "ciao"\r\n'
+        'version   =    "0.2.0"  # keep me\r\n'
+        'source = { editable = "." }\r\n'
+        "\r\n"
+        "[[package]]\r\n"
+        'name = "anyio"\r\n'
+        'version = "4.4.0"\r\n'
+        'source = { registry = "https://pypi.org/simple" }\r\n'
+    )
+    lock_path = tmp_path / "uv.lock"
+    lock_path.write_bytes(lock.encode("utf-8"))
+    before = lock_path.read_bytes()
+
+    apply_release_files(
+        tmp_path, version="0.3.0", changelog_section="## v0.3.0 - 2026-07-05\n"
+    )
+
+    after = lock_path.read_bytes()
+    expected = before.replace(
+        b'version   =    "0.2.0"', b'version   =    "0.3.0"'
+    )
+    assert after == expected
+    # Every terminator stays CRLF: no lone LF was introduced.
+    assert after.count(b"\n") == after.count(b"\r\n")
+    assert b'version = "4.4.0"' in after
+    assert b"# keep me" in after
+
+
+def test_editable_lock_alignment_rejects_non_utf8(tmp_path: Path) -> None:
+    """An undecodable lock fails as a path-bearing ReleaseError, before writes.
+
+    A ``UnicodeDecodeError`` escaping the release helper would be an opaque
+    crash rather than the requested path-bearing ``ReleaseError``, and running
+    it before the version writes is what keeps a bad lock from leaving a
+    half-updated tree.
+    """
+    _write_release_tree(tmp_path)
+    (tmp_path / "uv.lock").write_bytes(b"\xff\xfe[[package]]\n")
+    pyproject_before = (tmp_path / "pyproject.toml").read_bytes()
+
+    with pytest.raises(ReleaseError, match="uv.lock"):
+        apply_release_files(
+            tmp_path, version="0.3.0", changelog_section="## v0.3.0 - 2026-07-05\n"
+        )
+
+    assert (tmp_path / "pyproject.toml").read_bytes() == pyproject_before
+    assert (tmp_path / "uv.lock").read_bytes() == b"\xff\xfe[[package]]\n"
+
+
 def _lock_mutations() -> dict[str, str]:
     missing_version = UV_LOCK_FIXTURE.replace('version = "0.2.0"\n', "", 1)
     return {

@@ -146,6 +146,45 @@ def _replace_once(pattern: str, text: str, replacement: str, *, path: Path) -> s
     return updated
 
 
+def _read_lock_text(path: Path) -> str:
+    """Return the lock's exact bytes decoded as UTF-8, without newline translation.
+
+    ``Path.read_text`` opens in universal-newlines mode, so it rewrites CRLF to
+    LF in memory; writing that back would change a Windows checkout's dependency
+    bytes during a metadata-only bump. Decoding the raw bytes keeps every
+    terminator exactly as stored. An undecodable file is a release error naming
+    the path, not an escaping ``UnicodeDecodeError``.
+    """
+    try:
+        return path.read_bytes().decode("utf-8")
+    except OSError as exc:
+        raise ReleaseError(f"missing or unreadable lock file: {path}") from exc
+    except UnicodeDecodeError as exc:
+        raise ReleaseError(f"lock file {path} is not valid UTF-8: {exc}") from exc
+
+
+def _replace_version_value(text: str, version: str, *, path: Path) -> str:
+    """Set the single top-level ``version`` value, preserving surrounding text.
+
+    Only the quoted literal changes: the assignment prefix spacing, the quote
+    style, a trailing comment and the line terminator all survive byte for byte.
+    This is deliberately narrower than ``_replace_once``, whose replacement
+    rebuilds the whole assignment and drops that formatting.
+    """
+    updated, count = re.subn(
+        r'^(version\s*=\s*)(["\'])([^"\']*)\2',
+        lambda match: f"{match.group(1)}{match.group(2)}{version}{match.group(2)}",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise ReleaseError(
+            f"expected one version assignment in {path}, replaced {count}"
+        )
+    return updated
+
+
 def _dump_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
 
@@ -268,10 +307,7 @@ def _align_editable_lock_version(files: ReleaseFiles, *, version: str) -> str:
     if not isinstance(project_name, str) or not project_name:
         raise ReleaseError(f"could not find project.name in {files.pyproject}")
 
-    try:
-        lock_text = lock_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ReleaseError(f"missing or unreadable lock file: {lock_path}") from exc
+    lock_text = _read_lock_text(lock_path)
 
     blocks = _lock_blocks(lock_text, path=lock_path)
     matches = [
@@ -294,12 +330,7 @@ def _align_editable_lock_version(files: ReleaseFiles, *, version: str) -> str:
 
     block_text, entry = blocks[block_index]
     blocks[block_index] = (
-        _replace_once(
-            r'^version\s*=\s*"[^"]*"',
-            block_text,
-            f'version = "{version}"',
-            path=lock_path,
-        ),
+        _replace_version_value(block_text, version, path=lock_path),
         entry,
     )
     return "".join(block for block, _ in blocks)
