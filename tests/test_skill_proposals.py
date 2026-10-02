@@ -1058,6 +1058,18 @@ def test_a_proposal_without_learnings_has_no_verification_step(
     assert "ciao skill-proposal-remove web-research --applied\n" in prompt + "\n"
 
 
+@pytest.mark.parametrize(
+    "doc", ["ciao/stock/skills/ciao-memory/SKILL.md", "docs/AGENT_CLI.md"]
+)
+def test_the_docs_spell_the_placeholder_the_cli_refuses(doc: str) -> None:
+    """An agent copies the example from the docs as readily as from the prompt,
+    and the CLI refuses the placeholder by exact match — so a doc that words it
+    differently is a placeholder that settles a finding as applied."""
+    text = (Path(__file__).resolve().parents[1] / doc).read_text(encoding="utf-8")
+
+    assert f"--verification '{sp.VERIFICATION_PLACEHOLDER}'" in text
+
+
 def test_the_prompt_falls_back_to_the_skills_directory_when_no_path_was_recorded(
     tmp_path: Path,
 ) -> None:
