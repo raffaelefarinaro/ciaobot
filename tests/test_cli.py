@@ -1758,6 +1758,56 @@ def test_cli_skill_proposal_remove_refuses_ambiguous_match(
     assert len(list(queue.glob("*.md"))) == 2
 
 
+def test_cli_skill_proposal_remove_prefers_an_exact_skill_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The improvement prompt always passes the exact skill name, so `review`
+    must settle `review` even when `code-review` is queued beside it. Substring
+    alone made that settle ambiguous with no longer substring left to try."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    review = _skill_proposal_workspace(workspace, "review")
+    code_review = _skill_proposal_workspace(workspace, "code-review")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "review"]) == 0
+
+    record = skill_proposals.parse_proposal(review, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
+    # The sibling that only matched as a substring is untouched.
+    other = skill_proposals.parse_proposal(code_review, "personal")
+    assert other is not None
+    assert other.lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_still_refuses_an_ambiguous_substring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The unique-substring convenience is the second tier, not the only one: a
+    needle that names nothing exactly still refuses when it matches several."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    review = _skill_proposal_workspace(workspace, "review")
+    code_review = _skill_proposal_workspace(workspace, "code-review")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "revi"]) == 1
+
+    assert "more than one" in capsys.readouterr().err
+    # Nothing was settled.
+    for source in (review, code_review):
+        record = skill_proposals.parse_proposal(source, "personal")
+        assert record is not None
+        assert record.lifecycle == skill_proposals.PENDING
+
+
 def _accepted_skill_proposal(
     root: Path, name: str = "2026-08-09-defuddle"
 ) -> Path:

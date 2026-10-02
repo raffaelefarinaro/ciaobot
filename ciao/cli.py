@@ -4373,8 +4373,8 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
 
     The curation schedule reviews ``Workspace/Skill-Proposals/``; once a
     proposal's decision is made (implemented, or decided against) it is settled
-    here so the queue stops re-asking. NAME matches the record's skill or a
-    unique substring of it.
+    here so the queue stops re-asking. NAME matches the record's skill or id
+    exactly, or else a unique substring of the skill.
 
     Settled, not deleted: this used to unlink the file, which left no record that
     anyone had decided anything, so the next pass that saw the same evidence
@@ -4423,7 +4423,14 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
         return 1
 
     queued = skill_proposals.read_queue(config, name)
-    matches = [p for p in queued if needle.casefold() in p.skill.casefold()]
+    wanted = needle.casefold()
+    # An exact skill name or proposal id wins outright: the improvement prompt
+    # passes the exact name, and `review` must not be ambiguous merely because
+    # `code-review` is queued too. Only a needle that names nothing exactly
+    # falls back to the unique-substring convenience.
+    matches = [
+        p for p in queued if wanted in (p.skill.casefold(), p.id.casefold())
+    ] or [p for p in queued if wanted in p.skill.casefold()]
     if not matches:
         print(f"No skill proposal matched {needle!r}.", file=sys.stderr)
         return 1
