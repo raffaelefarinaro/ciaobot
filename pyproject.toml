@@ -11,6 +11,13 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
   "claude-agent-sdk[otel]==0.2.161",
+  # Runtime security pins for transitive dependencies (#953). `mcp` accepts
+  # PyJWT[crypto]>=2.10.1 and `pywebpush`->`requests` accepts urllib3>=1.26,<3,
+  # but a wheel install resolves published Requires-Dist rather than uv.lock, so
+  # the patched floor has to be declared here too. Drop these once the owners
+  # raise their own floors above the patched versions.
+  "PyJWT[crypto]==2.15.1",
+  "urllib3==2.8.0",
   # Agent-facing control plane shared by Claude Code and Codex.
   "mcp>=1.29.0,<2.0",
   "starlette==1.3.1",
