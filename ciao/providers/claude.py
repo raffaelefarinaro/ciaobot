@@ -1217,7 +1217,7 @@ class ClaudeProvider(BaseSDKProvider):
                 # error keeps a message instead of reading as an empty result.
                 # An empty ``errors`` list stays empty: cancellation is
                 # inferred by the caller, not invented here.
-                errors = getattr(msg, "errors", None) or []
+                errors = msg.errors or []
                 result_text = "\n".join(
                     error
                     for error in errors

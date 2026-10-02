@@ -391,6 +391,7 @@ class ChatStreaming:
                     nonlocal turn_assistant_text, turn_streamed_text
                     nonlocal question_paused, had_error
                     nonlocal had_provider_progress, turn_result_published
+                    nonlocal last_assistant_text
                     async for event in self._host.stream_chat(
                         chat_id,
                         run_prompt,
@@ -583,8 +584,10 @@ class ChatStreaming:
                                 # cancellation: it must not arm a retry, mark
                                 # had_error, or become the success-announcement
                                 # text. The published partial frame already
-                                # carries the text the user saw.
-                                pass
+                                # carries the text the user saw. Clear the
+                                # carry-over so a stopped follow-up cannot
+                                # re-announce the previous turn's answer.
+                                last_assistant_text = ""
                             elif event.is_error:
                                 had_error = True
                                 result_text = event.result or ""
@@ -646,6 +649,10 @@ class ChatStreaming:
                 except Exception as exc:
                     if stream.user_stopped:
                         logger.info("Stream stopped by user for chat %s", chat_id)
+                        # The abort acknowledgement is not an answer: clear any
+                        # carry-over so this turn cannot inherit and re-announce
+                        # the previous turn's text.
+                        last_assistant_text = ""
                         if not turn_result_published:
                             stream.publish(
                                 self._host._stop_result_payload(

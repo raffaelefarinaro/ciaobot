@@ -871,6 +871,130 @@ async def test_stop_followup_does_not_inherit_stopped_state(
     consumer.cancel()
 
 
+async def test_stopped_followup_does_not_reannounce_previous_answer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stopped follow-up must not re-announce the previous turn's answer.
+
+    ``last_assistant_text`` lives for the whole ``drive()`` session, so a
+    stopped follow-up that produced no answer of its own used to leave it
+    pointing at the prior turn's reply. The turn-done announce then fired
+    ``chat_result_ready`` plus a push for the already-seen answer the user had
+    just cancelled, and rewrote the chat's snippet and ``last_response_status``
+    as a fresh success.
+    """
+    release = asyncio.Event()
+    first_turn_release = asyncio.Event()
+
+    def script(request):
+        prompt = request.prompt
+
+        async def gen():
+            if "follow-up" in prompt:
+                yield AssistantTextDelta(type="text", text="partial answer")
+                await release.wait()
+                yield ResultEvent(
+                    type="result",
+                    result="",
+                    session_id="sess-native",
+                    is_error=True,
+                    effective_model="opus",
+                )
+                return
+            # Held open so the follow-up queues against a live stream.
+            await first_turn_release.wait()
+            yield ResultEvent(
+                type="result",
+                result="ok",
+                session_id="sess-native",
+                is_error=False,
+                effective_model="opus",
+            )
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-reannounce",
+        title="stop-reannounce",
+    )
+    assert pcm.queue_message(chat.chat_id, "follow-up") is True
+
+    published: list[dict] = []
+    pushes: list = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: pushes.append(a))
+
+    def spawn(coro, name: str):
+        if name.startswith("archive-proposal-helper") or name.startswith(
+            "memory-pass-"
+        ):
+            coro.close()
+            return None
+        return asyncio.create_task(coro, name=name)
+
+    monkeypatch.setattr(pcm, "_spawn_detached", spawn)
+
+    first_turn_release.set()
+    await _wait_for(
+        lambda: any(
+            e.get("type") == "text_delta" and e.get("text") == "partial answer"
+            for e in captured
+        )
+    )
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(lambda: stream.done)
+
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 2
+    assert results[0].get("text") == "ok"
+    assert "stopped" not in results[0]
+    assert results[1].get("stopped") is True
+    assert results[1].get("is_error") is False
+    assert results[1].get("text") == "partial answer"
+
+    # No announcement or push for the cancelled follow-up.
+    assert pushes == []
+    assert not any(ev.get("type") == "chat_result_ready" for ev in published)
+
+    # The cancelled turn is not recorded as this chat's fresh answer.
+    state = pcm._chats[chat.chat_id]
+    assert state.last_response_status == "empty"
+    assert state.last_snippet == ""
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    turns = stored["turns"]
+    assert len(turns) == 2
+    assert turns[0]["response"] == "ok"
+    assert "is_partial" not in turns[0]
+    assert turns[1]["response"] == "partial answer"
+    assert turns[1]["is_partial"] is True
+    assert turns[1]["is_error"] is False
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    assert [row["role"] for row in rows] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert rows[-1]["content"] == "partial answer"
+    assert rows[-1].get("partial") is True
+    assert "is_error" not in rows[-1]
+
+    consumer.cancel()
+
+
 async def test_cancel_after_terminal_does_not_duplicate_result_or_transcript(
     tmp_path: Path,
 ) -> None:
