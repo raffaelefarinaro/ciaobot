@@ -3198,7 +3198,7 @@ def test_two_concurrent_accepts_promote_the_row_once(
     from ciao.memory_proposals import append_learning
 
     # Seed the learning at (x1) so each promotion is visible as an increment.
-    append_learning(vault, _LEARNINGS_TEXT)
+    append_learning(vault, _LEARNINGS_TEXT, workspace="personal")
     assert _learnings_count(config) == 1
 
     entered = threading.Event()
@@ -3258,7 +3258,7 @@ def test_an_accept_revalidates_the_row_another_resolver_took(
     vault = config.workspace_vault_root("personal")
     from ciao.memory_proposals import append_learning
 
-    append_learning(vault, _LEARNINGS_TEXT)
+    append_learning(vault, _LEARNINGS_TEXT, workspace="personal")
     queue = vault / "Workspace" / "Memory-Proposals.md"
     real_probe = routes_api._accept_journal_writable
 

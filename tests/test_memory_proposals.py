@@ -914,7 +914,7 @@ def _one_active_record(vault: Path) -> LearningRecord:
 def test_append_learning_writes_structured_entry(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     assert mp.append_learning(
-        vault, "Airtable sort param returns 400; filter by field ID.", source="chat-a1"
+        vault, "Airtable sort param returns 400; filter by field ID.", workspace="vault", source="chat-a1"
     )
     record = _one_active_record(vault)
     assert record.text == "Airtable sort param returns 400; filter by field ID."
@@ -937,11 +937,11 @@ def test_append_learning_recurrence_counts_evidence_not_replays(
     """
     vault = tmp_path / "vault"
     fact = "Airtable sort param returns 400; filter by field ID."
-    assert mp.append_learning(vault, fact, source="chat-a1")
-    assert mp.append_learning(vault, fact, source="chat-b2")
+    assert mp.append_learning(vault, fact, workspace="vault", source="chat-a1")
+    assert mp.append_learning(vault, fact, workspace="vault", source="chat-b2")
     # Whitespace and case variations are still the same statement, and chat-b2
     # is still the source already counted, so this changes nothing.
-    assert mp.append_learning(vault, fact.upper(), source="chat-b2")
+    assert mp.append_learning(vault, fact.upper(), workspace="vault", source="chat-b2")
 
     text = _learnings(vault)
     assert text.count(fact) == 1
@@ -963,10 +963,12 @@ def test_append_learning_leaves_legacy_bullets_alone(tmp_path: Path) -> None:
     original = "# Learnings\n\n## Active\n- legacy plain learning bullet\n"
     path.parent.mkdir(parents=True)
     path.write_text(original, encoding="utf-8")
-    assert mp.append_learning(vault, "legacy plain learning bullet")
+    assert mp.append_learning(vault, "legacy plain learning bullet", workspace="vault")
     assert path.read_text(encoding="utf-8") == original
 
-    assert mp.append_learning(vault, "A brand new structured learning.", source="chat-x")
+    assert mp.append_learning(
+        vault, "A brand new structured learning.", workspace="vault", source="chat-x"
+    )
     text = path.read_text(encoding="utf-8")
     assert "- legacy plain learning bullet" in text
     assert "(x1) A brand new structured learning." in text
@@ -987,7 +989,7 @@ def test_a_remember_sighting_with_no_turn_records_the_request(
     """
     vault = tmp_path / "vault"
     fact = "Pin the Node version before running the suite."
-    assert mp.append_learning(vault, fact, request="req-7")
+    assert mp.append_learning(vault, fact, workspace="vault", request="req-7")
 
     record = _one_active_record(vault)
     assert record.count == 1
@@ -1017,14 +1019,14 @@ def test_a_remember_retry_does_not_inflate_recurrence(tmp_path: Path) -> None:
     """
     vault = tmp_path / "vault"
     fact = "Pin the Node version before running the suite."
-    assert mp.append_learning(vault, fact, request="req-7")
-    assert mp.append_learning(vault, fact, request="req-7")
+    assert mp.append_learning(vault, fact, workspace="vault", request="req-7")
+    assert mp.append_learning(vault, fact, workspace="vault", request="req-7")
 
     record = _one_active_record(vault)
     assert record.count == 1
     assert len(record.observations) == 1
     # A *different* request is a different sighting, and does count.
-    assert mp.append_learning(vault, fact, request="req-8")
+    assert mp.append_learning(vault, fact, workspace="vault", request="req-8")
     assert _one_active_record(vault).count == 2
 
 
@@ -1037,7 +1039,7 @@ def test_a_remember_may_carry_both_a_source_and_a_request(tmp_path: Path) -> Non
     """
     vault = tmp_path / "vault"
     fact = "Pin the Node version before running the suite."
-    assert mp.append_learning(vault, fact, source="chat-9", request="req-7")
+    assert mp.append_learning(vault, fact, workspace="vault", source="chat-9", request="req-7")
 
     record = _one_active_record(vault)
     assert [(o.source, o.request) for o in record.observations] == [("chat-9", "req-7")]
@@ -1055,7 +1057,9 @@ def test_a_request_is_not_a_source_and_does_not_manufacture_a_turn(
     if the writer had quietly rendered a `chat-*` source.
     """
     vault = tmp_path / "vault"
-    assert mp.append_learning(vault, "A lesson with no transcript behind it.", request="r1")
+    assert mp.append_learning(
+        vault, "A lesson with no transcript behind it.", workspace="vault", request="r1"
+    )
     text = _learnings(vault)
     assert "chat-" not in text
     assert "#1" not in text
