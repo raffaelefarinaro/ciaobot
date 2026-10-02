@@ -956,7 +956,14 @@ def test_migrate_client_disables_local_engine_and_never_sets_up(tmp_path: Path) 
     assert "service start" not in calls
     assert _install_receipt(harness)["service_backend"] == "none"
     assert _migration_receipt(harness)["phase"] == "migrated_client"
-    assert "https://mini.ts.net" in result.stdout
+    # The whole hand-over sentence, as install-engine.sh:1453 prints it, not a
+    # URL substring: a bare "https://mini.ts.net" would also match an unrelated
+    # line that merely has the address in it, and would pass even if the client
+    # explanation never reached the user.
+    assert (
+        "This Mac was a client of https://mini.ts.net. Open that address in your "
+        "browser and sign in there; this Mac no longer runs its own engine."
+    ) in result.stdout.splitlines()
 
 
 @runs_the_sh_installer
