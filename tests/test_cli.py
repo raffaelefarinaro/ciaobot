@@ -2190,13 +2190,18 @@ def test_the_improvement_prompts_applied_command_settles_a_learning_linked_propo
         # apostrophe. It travels in a file, so what the chat substitutes for the
         # placeholder is a path and the bytes are exactly what it wrote.
         readback = "- Use `gh api`, don't scrape; $HOME stays literal"
-        readback_file = tmp_path / "readback.txt"
+        # A directory with a space, substituted in double quotes as the prompt
+        # says: that is what keeps a Windows path's backslashes and the space
+        # intact through every shell (and through POSIX shlex on windows CI).
+        readback_dir = tmp_path / "read back"
+        readback_dir.mkdir()
+        readback_file = readback_dir / "readback.txt"
         readback_file.write_text(readback, encoding="utf-8")
         settle = next(
             line
             for line in prompt.splitlines()
             if "skill-proposal-remove" in line and "--applied" in line
-        ).replace(skill_proposals.VERIFICATION_PLACEHOLDER, str(readback_file))
+        ).replace(skill_proposals.VERIFICATION_PLACEHOLDER, f'"{readback_file}"')
         argv = shlex.split(settle.strip())[1:]
     finally:
         reset_reroot_cache()

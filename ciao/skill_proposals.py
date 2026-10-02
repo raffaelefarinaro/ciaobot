@@ -1500,11 +1500,13 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
             f"This proposal links {len(proposal.origins)} learning finding(s), so "
             "`--applied` needs a verification: write the lines you changed, exactly "
             f"as you read them back from `{canonical}`, to a UTF-8 text file, and "
-            f"replace `{VERIFICATION_PLACEHOLDER}` with that file's path. Pick a path "
-            "with no spaces (a temporary file is fine); if it has spaces, wrap the "
-            "path in double quotes. The readback travels in the file, not on the "
-            "command line, so the readback itself needs no shell quoting. A finished "
-            "chat is not evidence that the lesson landed; the readback is.",
+            f"replace `{VERIFICATION_PLACEHOLDER}` with that file's path in double "
+            'quotes, such as `"C:\\Users\\me\\AppData\\Local\\Temp\\readback.txt"` or '
+            '`"/tmp/readback.txt"`. Double quotes carry backslashes and spaces the same '
+            "way in bash, zsh and PowerShell; pick a path with no `$`, backtick or `\"` "
+            "in it (a temporary file is fine). The readback travels in the file, not "
+            "on the command line, so the readback itself needs no shell quoting. A "
+            "finished chat is not evidence that the lesson landed; the readback is.",
         ]
     lines += [
         "",

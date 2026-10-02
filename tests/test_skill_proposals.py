@@ -1050,7 +1050,7 @@ def test_a_proposal_that_links_learnings_asks_for_a_verification(
     ) in prompt
     assert "links 1 learning finding(s)" in prompt
     assert "'\\''" not in prompt
-    assert "no spaces" in prompt
+    assert "in double quotes" in prompt
     assert "UTF-8" in prompt
 
 
