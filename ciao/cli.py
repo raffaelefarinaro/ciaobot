@@ -4516,8 +4516,8 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
 
     The curation schedule reviews ``Workspace/Skill-Proposals/``; once a
     proposal's decision is made (implemented, or decided against) it is settled
-    here so the queue stops re-asking. NAME matches the record's skill or a
-    unique substring of it.
+    here so the queue stops re-asking. NAME matches the record's skill or id
+    exactly, or else a unique substring of the skill.
 
     Settled, not deleted: this used to unlink the file, which left no record that
     anyone had decided anything, so the next pass that saw the same evidence
@@ -4566,14 +4566,42 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
         return 1
 
     queued = skill_proposals.read_queue(config, name)
-    matches = [p for p in queued if needle.casefold() in p.skill.casefold()]
+    wanted = needle.casefold()
+    # Read across every lifecycle, not the queue: the queue is already settled
+    # records taken out of, so an exact name whose own proposal is settled would
+    # find nothing here and the substring tier below would settle a different
+    # skill that happens to contain it. Nobody read that proposal.
+    settled_exact = [
+        p
+        for p in skill_proposals.read_records(config, name)
+        if p.lifecycle in skill_proposals.SETTLED_LIFECYCLES
+        and wanted in (p.skill.casefold(), p.id.casefold())
+    ]
+    # An exact skill name or proposal id wins outright: the improvement prompt
+    # passes the exact name, and `review` must not be ambiguous merely because
+    # `code-review` is queued too. Only a needle that names nothing exactly
+    # falls back to the unique-substring convenience.
+    matches = [
+        p for p in queued if wanted in (p.skill.casefold(), p.id.casefold())
+    ] or [p for p in queued if wanted in p.skill.casefold()]
+    if settled_exact and not any(
+        wanted in (p.skill.casefold(), p.id.casefold()) for p in matches
+    ):
+        print(
+            f"{settled_exact[0].skill} is already settled "
+            f"({settled_exact[0].lifecycle}); nothing to do.",
+            file=sys.stderr,
+        )
+        return 1
     if not matches:
         print(f"No skill proposal matched {needle!r}.", file=sys.stderr)
         return 1
     if len(matches) > 1:
         print(
             f"The name matched more than one skill proposal; use a longer substring: "
-            + ", ".join(p.skill for p in matches),
+            # Names and ids both, because either one selects a single record and
+            # the CLI is the only place a caller can read this list.
+            + ", ".join(f"{p.skill} ({p.id})" for p in matches),
             file=sys.stderr,
         )
         return 1
@@ -7288,13 +7316,13 @@ def build_parser() -> argparse.ArgumentParser:
             "Records the decision for one proposal in a workspace's "
             "Workspace/Skill-Proposals/ and takes it out of the queue, after its "
             "decision is made (implemented, or decided against). The record stays "
-            "on disk and readable. NAME matches the proposal's skill or a unique "
-            "substring of it."
+            "on disk and readable. NAME matches the proposal's skill or id exactly, "
+            "or else a unique substring of the skill."
         ),
     )
     skill_proposal_parser.add_argument(
         "name",
-        help="Skill name or unique substring of the queued proposal to settle.",
+        help="Skill name or proposal id of the queued proposal to settle, or a unique substring of the skill name.",
     )
     skill_proposal_parser.add_argument(
         "--workspace",

@@ -146,6 +146,12 @@
           </div>
         </div>
 
+        <!-- Start at sign-in. The last host fact beside the program's own, and
+             a different thing from both: it changes whether the engine service
+             starts at the *next* sign-in, never the engine running now, and
+             never the optional app window SettingsAppInstall owns. -->
+        <SettingsEngineLogin />
+
         <!-- Memory backup. The unattended, one-way copy of the user's memory,
              right below the program's own repository controls so the two are
              read together and never confused. The panel owns its data and its
@@ -2079,6 +2085,7 @@ import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
+import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'

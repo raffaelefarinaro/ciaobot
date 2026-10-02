@@ -30,7 +30,8 @@ web/
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /memory, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
                            CommandPaletteModal, and FileViewerModal)
-    components/settings/  panels split out of SettingsView.vue, plus the scoped CSS they share with it
+    components/settings/  panels split out of SettingsView.vue (the host's start-at-sign-in row is
+                           SettingsEngineLogin.vue), plus the scoped CSS they share with it
     stores/               Pinia stores (auth, projects, tasks, fileViewer), and store
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
@@ -259,7 +260,7 @@ establish:
 | `browser-zoom.spec.ts` | Reflow under page zoom and at the largest in-app font scale, and that the viewport meta never disables pinch zoom. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. |
-| `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, and that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap. |
+| `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap, and that every boundary between Home's sections is the same gap token at desktop and at 390px (a per-section `margin-top` under a shared `gap` reads as a doubled gap, which no unit test can see). |
 | `chat-loading-layout.spec.ts` | That the held history-loading skeleton has separated rows within the chat pane at desktop and phone widths. |
 | `reply-not-folded.spec.ts` | That a short closing reply followed by a reasoning-only step renders as a bubble after a phase-less history replay (OpenCode shape) instead of being folded into the collapsed Activity trace (#630). The fold is a render heuristic, so only a real render shows it. |
 | `note-verification.spec.ts` | That a review row which defers to a pending verification proposal lands on the proposal *in focus*. The link sets a row id and navigates, the queue's rows arrive with a fetch, and the panel is still behind the review filter's `v-show` for the first frames — a `nextTick` reveal focuses a `display: none` element, which is a silent no-op that no unit test can see. Also the copy, which is the only place a reader learns a dismissal declines rather than verifies, and the 44px touch minimum on a disclosure that reports a whole note's before/after. |
@@ -270,7 +271,9 @@ specs beside it keep seeing the empty chat. `POST /__fixture__/verification` is
 the same idea for the managed note-verification payloads: the review queue, the
 proposal queue, the history ledger and the note graph all default to their empty
 or plain states, and a spec that needs a pending proposal, a dead one, or a
-settled verdict opts in.
+settled verdict opts in. `POST /__fixture__/update-tasks` is the same opt-in for
+the "After this update" group, which is empty by default because the Home gap
+journey has to measure the sections around it.
 
 Everything else stays in vitest. Adding to this suite is a trade, not a free
 win: each spec is roughly a hundred times slower than the equivalent unit test
