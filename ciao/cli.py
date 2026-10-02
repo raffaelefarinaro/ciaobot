@@ -4544,6 +4544,17 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
 
     from ciao import skill_proposals
 
+    # The improvement prompt hands a learning-linked proposal a placeholder to
+    # replace with the readback; passed through unchanged it is not evidence of
+    # anything, so it must not settle an origin as applied.
+    if args.verification.strip() == skill_proposals.VERIFICATION_PLACEHOLDER:
+        print(
+            "--verification is still the prompt's placeholder; replace it with "
+            "the lines you changed, as you read them back from the file.",
+            file=sys.stderr,
+        )
+        return 1
+
     if not skill_proposals.queue_dir(config, name).is_dir():
         print("No skill proposals are queued.", file=sys.stderr)
         return 1

@@ -2212,6 +2212,90 @@ def test_the_improvement_prompts_applied_command_settles_a_learning_linked_propo
     assert settled.lifecycle == skill_proposals.APPLIED
 
 
+def test_the_improvement_prompts_placeholder_is_not_a_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The prompt's own settle command, run with the placeholder left in place.
+
+    `settle_proposal` checks that a verification is present, not that it is
+    anything: a chat that ran the line verbatim settled every linked origin as
+    applied with the prompt's own placeholder as its "proof". The record then
+    read as a lesson the skill carries, which nothing had checked.
+    """
+    import shlex
+
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+
+        prompt = skill_proposals.render_improvement_prompt(stored)
+        # Verbatim, placeholder and all: this is the line as a chat that forgot
+        # to edit it types it.
+        settle = next(
+            line
+            for line in prompt.splitlines()
+            if "skill-proposal-remove" in line and "--applied" in line
+        )
+        argv = shlex.split(settle.strip())[1:]
+    finally:
+        reset_reroot_cache()
+
+    assert cli.main(argv) == 1
+    assert "still the prompt's placeholder" in capsys.readouterr().err
+
+    reread = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert reread is not None
+    # Nothing settled: the origin is still open, and the record is still the one
+    # the review queue is asking about.
+    assert len(reread.origins) == 1
+    assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert reread.origins[0].verification == ""
+    assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
+
+
 # -- skill-proposal-add ------------------------------------------------------
 
 
