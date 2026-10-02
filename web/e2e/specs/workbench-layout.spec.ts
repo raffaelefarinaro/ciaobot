@@ -14,7 +14,10 @@ test.use({ viewport: { width: 1440, height: 900 } })
 
 test.describe('workbench layout', () => {
   test.beforeEach(async ({ page }, testInfo) => {
-    await isolate(page, `workbench-${testInfo.workerIndex}`)
+    // A slice per test, not per worker: opting in to update tasks writes a
+    // session flag the fixture keeps, so a test that mutates must not share a
+    // slice with one that asserts the mutation is absent.
+    await isolate(page, `workbench-${testInfo.workerIndex}-${testInfo.title}`)
   })
 
   test('the review rail sits beside the command surface', async ({ page }) => {
@@ -111,11 +114,6 @@ test.describe('workbench layout', () => {
     // setup card — a root with no width of its own — collapsed to fit its text.
     // Neither is a gap, so the gap assertions above stayed green throughout; only
     // the edges say otherwise, and only a real layout engine has them.
-    //
-    // Its own fixture slice: opting in to update tasks writes a session flag the
-    // fixture keeps, and the describe's shared slice is also the one the "no
-    // update work" test needs to find no update work in.
-    await isolate(page, 'workbench-edges')
     await page.request.post('/__fixture__/update-tasks')
     await boot(page, '/', '.update-tasks')
 
