@@ -1919,8 +1919,19 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     return 1 if summary["failed"] else 0
 
 
-def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str]:
-    """``(vault root, workspace name)`` for a learnings command, in that order.
+def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
+    """``(vault root, workspace name, runtime root)`` for a learnings command.
+
+    The three belong together because all three are answers read from the same
+    resolved registry: a run that names the right workspace but writes its
+    receipt beside the shell's cwd is the #912 bug in the one place the name no
+    longer comes from a directory. The runtime root is therefore the one the
+    resolved registry was read from — the same ``state_path.parent`` that
+    ``update_tasks`` looks under ``migration/`` for receipts — so a bare-shell
+    receipt lands where the update-task check reads it instead of in
+    ``<cwd>/.runtime``. An explicit ``--runtime-root`` still wins, and with
+    ``CIAO_WORKSPACE`` set this is the directory ``_resolve_runtime_root(None)``
+    already gave, so server-spawned runs do not move.
 
     The registered name is the only identity scope a learning id is minted
     under, so every caller resolves the name through the real registry — the
@@ -1968,6 +1979,15 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str]:
         else:
             env["CIAO_WORKSPACE"] = str(Path.cwd())
     config = CiaoConfig.from_env(env)
+    # The receipt has to land in the same `.runtime` the update-task check reads
+    # (`<state_path parent>/migration`), which is the one this registry came from —
+    # not `_resolve_runtime_root(args.runtime_root)`, which only sees
+    # `os.environ` and answers `<cwd>/.runtime` for a bare shell.
+    runtime_root = (
+        _resolve_runtime_root(args.runtime_root)
+        if getattr(args, "runtime_root", None) is not None
+        else Path(config.state_path).parent
+    )
 
     name = (getattr(args, "workspace", None) or "").strip()
     if name:
@@ -1984,17 +2004,24 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str]:
                     f"`--vault-root {named}` is not workspace `{name}`'s vault "
                     f"(`{registered}`)."
                 )
-        return registered, name
+        return registered, name, runtime_root
     if getattr(args, "vault_root", None):
         vault = _resolve_vault_root(args.vault_root)
         for owner in config.workspace_names():
-            if Path(config.workspace_vault_root(owner)).resolve() == vault:
-                return vault, owner
+            try:
+                owned = Path(config.workspace_vault_root(owner)).resolve()
+            except ValueError:
+                # One workspace's registered vault being unusable — a symlinked
+                # folder, an empty root — says nothing about the workspace the
+                # operator named, so it must not fail their run.
+                continue
+            if owned == vault:
+                return vault, owner, runtime_root
         # An explicit directory the registry does not know is the one case where
         # the directory's own name stands in for the registered one, exactly as
         # `_resolve_workspace_and_vaults` prescribes: the operator pointed at a
         # directory in person and there is no workspace name to resolve.
-        return vault, vault.name
+        return vault, vault.name, runtime_root
     active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if active:
         # Refused, not repaired, exactly as an unknown `--workspace` is: a name
@@ -2010,7 +2037,7 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str]:
         resolved = active
     else:
         resolved = config.primary_workspace()
-    return Path(config.workspace_vault_root(resolved)).resolve(), resolved
+    return Path(config.workspace_vault_root(resolved)).resolve(), resolved, runtime_root
 
 
 def _learnings_migrate_command(args: argparse.Namespace) -> int:
@@ -2036,7 +2063,7 @@ def _learnings_migrate_command(args: argparse.Namespace) -> int:
     )
 
     try:
-        vault_root, workspace = _learnings_workspace(args)
+        vault_root, workspace, runtime_root = _learnings_workspace(args)
     except ValueError as exc:
         print(f"{exc}", file=sys.stderr)
         return 1
@@ -2081,9 +2108,7 @@ def _learnings_migrate_command(args: argparse.Namespace) -> int:
     receipt_path = ""
     if args.apply and not args.revert and summary.get("entries_migrated"):
         receipt_path = str(
-            write_receipt(
-                new_receipt_path(_resolve_runtime_root(args.runtime_root)), summary
-            )
+            write_receipt(new_receipt_path(runtime_root), summary)
         )
         summary["receipt_path"] = receipt_path
 
@@ -2433,7 +2458,7 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
     )
 
     try:
-        vault_root, workspace = _learnings_workspace(args)
+        vault_root, workspace, runtime_root = _learnings_workspace(args)
     except ValueError as exc:
         print(f"{exc}", file=sys.stderr)
         return 1
@@ -2575,7 +2600,7 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
     # *before* the document. A run that cannot record the reverse map removes
     # nothing, which is the whole point of having this be one call rather than a
     # write the command does afterwards.
-    receipt_path = new_receipt_path(_resolve_runtime_root(args.runtime_root))
+    receipt_path = new_receipt_path(runtime_root)
     result = apply_cleanup(
         vault_root,
         plan,

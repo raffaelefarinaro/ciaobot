@@ -1209,6 +1209,56 @@ def test_a_bare_shell_resolves_the_installed_registry(
     assert not (tmp_path / "home" / ".ciao").exists()
 
 
+def test_a_bare_shell_writes_the_receipt_to_the_installed_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No flags naming a runtime either: the receipt must reach the install.
+
+    `--runtime-root` is what the test above passed, and passing it hid the half of
+    #912 that round 1 left standing. `_resolve_runtime_root` reads only
+    `os.environ`, so with neither `CIAO_RUNTIME_ROOT` nor the flag it answers
+    `<cwd>/.runtime` — while `update_tasks` reads receipts from
+    `<install>/.runtime/migration`. A receipt in the shell's home is a review the
+    update task never sees, so the entry resurfaces forever: the run does its work
+    and the task that would retire it never completes.
+    """
+    vault = _per_root_install(
+        tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD)
+    )
+    approval = _write_approval(tmp_path, _approvals(RETIRED_RECORD))
+    runtime = tmp_path / "install" / ".runtime"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(tmp_path / "install"), runtime_root=str(runtime)
+        ),
+    )
+
+    assert cli.main(
+        [
+            "learnings-cleanup",
+            "--apply",
+            "--approval-file",
+            str(approval),
+            "--vault-root",
+            str(vault),
+        ]
+    ) == 0
+
+    receipt = next((runtime / "migration").glob("learnings-cleanup-*.json"))
+    assert json.loads(receipt.read_text(encoding="utf-8"))["workspace"] == WORKSPACE
+    assert "Removed 1 entr(y/ies)." in capsys.readouterr().out
+    assert not (elsewhere / ".runtime").exists()
+
+
 def test_an_unknown_active_workspace_is_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
