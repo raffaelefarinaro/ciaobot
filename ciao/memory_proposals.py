@@ -1225,6 +1225,7 @@ def append_learning(
     vault_root: Path,
     text: str,
     *,
+    workspace: str,
     source: str = "",
     request: str = "",
 ) -> bool:
@@ -1258,6 +1259,11 @@ def append_learning(
     that has no archived turn behind it. It is passed straight into the
     :class:`~ciao.learning_records.LearningObservation`, so the line renders a
     ``req:`` citation rather than an invented chat id.
+
+    ``workspace`` is the *registered* workspace name — the one the registry
+    knows this vault by, not the vault directory's own name — and it is the
+    scope a new entry's identity is minted under, so the id this write records
+    is the one every later reader resolves it by.
     """
     from ciao.memory_receipts import queue_lock, write_queue_atomically
 
@@ -1273,7 +1279,7 @@ def append_learning(
             text,
             source=source,
             request=request,
-            workspace=vault_root.name,
+            workspace=workspace,
         )
         if operation == "none":
             return True

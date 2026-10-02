@@ -192,7 +192,10 @@ describe('ChatPanel aligned layout', () => {
     // Click the reply (not a link or button inside it) to select it.
     await replies[0].get('.message-row').trigger('click')
     expect(replies[0].classes()).toContain('message-wrap--selected')
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(true)
+    // Selection marks one message and nothing else: no backdrop ever covers the
+    // transcript, so the turns around the selected one stay readable.
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
+    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
     const actions = replies[0].get('.message-actions')
     expect(actions.text()).toContain('Copy')
     expect(actions.text()).toContain('Fork from here')
@@ -202,10 +205,12 @@ describe('ChatPanel aligned layout', () => {
     // footer can bleed to the card's edges and share its left edge.
     expect(replies[0].findAll('.message-row > .message-actions')).toHaveLength(1)
 
-    // Esc deselects without closing the chat.
+    // Esc deselects without closing the chat, and still puts nothing over the
+    // transcript.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await nextTick()
     expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
     expect(wrapper.emitted('close')).toBeUndefined()
 
     // Enter on a focused message selects it too; the user's own offers Copy only.
@@ -218,9 +223,15 @@ describe('ChatPanel aligned layout', () => {
     // card, so a 44px touch target cannot reach into the turn below it.
     expect(request.findAll('.message-row > .message-actions')).toHaveLength(1)
 
-    // Clicking the veil deselects.
-    await wrapper.get('.message-select-backdrop').trigger('click')
+    // The reply is no longer selected and the request is, so at most one message
+    // carries the outline at a time.
+    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
+
+    // Clicking the selected message again deselects it: there is no veil to
+    // click off now, so the toggle has to live on the message.
+    await request.get('.message-row').trigger('click')
     expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -243,13 +254,18 @@ describe('ChatPanel aligned layout', () => {
     expect(scrollCalls.at(-1)).toEqual({ top: 112, behavior: 'smooth' })
 
     // A footer that already fits must not yank the transcript away from
-    // wherever the reader had scrolled to, so no scroll is issued.
+    // wherever the reader had scrolled to, so no scroll is issued. Deselect
+    // and re-select the same card, which is what clicking it again does.
     scrollCalls.length = 0
     card.element.getBoundingClientRect = () => ({ top: 200, bottom: 640 }) as DOMRect
-    wrapper.get('.message-select-backdrop').trigger('click')
+    await card.trigger('click')
+    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
     await card.trigger('click')
     await nextTick()
     expect(scrollCalls).toEqual([])
+    // Growing the card left the transcript alone; nothing was laid over it.
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
+    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
     wrapper.unmount()
   })
 

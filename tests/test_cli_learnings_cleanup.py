@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -192,8 +193,8 @@ def _learnings(vault: Path) -> str:
 
 def _run(*args: str) -> list[str]:
     # `--vault-root` is this *workspace's* vault root, exactly as it is for
-    # `learnings-migrate`, and the workspace name defaults to that directory's own
-    # name — which is the identity its learning ids were minted under.
+    # `learnings-migrate`. The workspace name is resolved through the registry:
+    # the default registry in this harness names `personal` → `memory-vault/personal`.
     return ["learnings-cleanup", *args, "--vault-root", f"memory-vault/{WORKSPACE}"]
 
 
@@ -925,3 +926,360 @@ def test_the_unattended_mode_says_when_there_is_nothing_to_retire(
     assert "0 removable" in out
     assert (vault / "Workspace" / "Learnings.md").read_bytes() == before
     assert not (tmp_path / ".runtime" / "migration").exists()
+
+
+# ── Which workspace a run is about (#912) ───────────────────────────────────
+#
+# On a per-root install every workspace's vault directory is called
+# `memory-vault`, so the directory's own name is not an identity: a receipt
+# written under it names a workspace the update-task check has never heard of,
+# and a fold keyed by it looks for a workspace segment the vault does not have.
+# The registered name is the only scope, and it comes from the registry.
+
+
+def _per_root_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    records: tuple[LearningRecord, ...],
+    settled: bool = True,
+) -> Path:
+    """The layout a re-rooted install has: one `memory-vault` per workspace.
+
+    Built by hand for the same reason as the rest of this module's fixtures —
+    the shape being claimed is the one a real per-root install has, and the
+    registry file is what every consumer of a workspace name reads. The
+    environment is pinned because `_resolve_vault_root` reads `CIAO_VAULT_ROOT`
+    and resolves a relative default against `CIAO_WORKSPACE`, so an ambient
+    value from the developer's shell would decide what this run is about.
+    """
+    install = tmp_path / "install"
+    vault = install / WORKSPACE / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    runtime = install / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": WORKSPACE, "vault_root": str(vault)}]), encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(runtime))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_ACTIVE_WORKSPACE", raising=False)
+    body = "".join(f"{render_learning(record)}\n" for record in records)
+    (vault / "Workspace" / "Learnings.md").write_text(
+        f"---\ntags: [ciao, learnings]\nupdated: 2020-01-01\n---\n"
+        f"# Learnings\n\n## Active\n\n{body}",
+        encoding="utf-8",
+    )
+    if settled:
+        _settle_in(vault, RETIRED_RECORD)
+    return vault
+
+
+def _settle_in(vault: Path, *records: LearningRecord, skill: str = "web-research") -> None:
+    """One settled finding per record, in *this* vault's proposal queue.
+
+    The same shape :func:`_settle` files, addressed from the vault rather than
+    from the workspace directory, because a per-root vault is not under the
+    shared `memory-vault/<workspace>` layout at all.
+    """
+    proposal = sp.SkillProposal(
+        id=sp.proposal_id(WORKSPACE, skill),
+        workspace=WORKSPACE,
+        skill=skill,
+        canonical_path=f"/agent/skills/{skill}/SKILL.md",
+        reviewed_revision="a" * 64,
+        title=f"Skill reflection: {skill}",
+        problem="Repeated fetch failures.",
+        change="Add a defuddle fallback.",
+        rationale="It handles blocked pages.",
+        sources=(
+            sp.SkillEvidence(
+                chat_id="s", archive="2026-08-09T10:00:00Z", turn="", excerpt="e"
+            ),
+        ),
+        lifecycle=sp.PENDING,
+        chat_id="",
+        updated_at="2026-08-09T10:00:00Z",
+        origins=tuple(
+            sp.SkillOrigin(
+                workspace=WORKSPACE,
+                learning_id=record.learning_id,
+                source_revision=entry_revision(record),
+                finding=f"the finding for {record.key}",
+                state=sp.ORIGIN_APPLIED,
+                verification="mrcpt_0123456789abcdef",
+            )
+            for record in records
+        ),
+    )
+    path = vault / "Workspace" / "Skill-Proposals" / f"{skill}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_queue_atomically(path, sp.render_proposal(proposal))
+
+
+def test_a_per_root_vault_resolves_its_registered_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--vault-root memory-vault` must still reconcile the workspace `personal`.
+
+    Both halves of the old bug are pinned by one run. The receipt named the
+    directory, so the update-task check — which compares receipts against
+    registered names — never saw the review as done; and the registry the fold
+    read was keyed `memory-vault`, so `workspace_vault_root` looked under
+    `memory-vault/personal` inside a vault that has no segments, read no
+    proposals at all, and reported every entry as never proposed.
+    """
+    vault = _per_root_install(
+        tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD)
+    )
+    approval = _write_approval(tmp_path, _approvals(RETIRED_RECORD))
+    runtime = tmp_path / "install" / ".runtime"
+
+    assert cli.main(
+        [
+            "learnings-cleanup",
+            "--apply",
+            "--approval-file",
+            str(approval),
+            "--runtime-root",
+            str(runtime),
+            "--vault-root",
+            str(vault),
+        ]
+    ) == 0
+
+    receipt = next((runtime / "migration").glob("learnings-cleanup-*.json"))
+    stored = json.loads(receipt.read_text(encoding="utf-8"))
+    assert stored["workspace"] == WORKSPACE
+    assert stored["vault_root"] == str(vault)
+    # The fold really read THIS vault's queue: the settled finding was found and
+    # the entry retired, while its unproposed neighbour is left alone.
+    assert "Removed 1 entr(y/ies)." in capsys.readouterr().out
+    assert render_learning(RETIRED_RECORD) not in _learnings(vault)
+    assert render_learning(UNPROPOSED_RECORD) in _learnings(vault)
+
+
+def test_workspace_alone_finds_the_registered_vault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Naming the workspace is enough — the vault comes from the registry.
+
+    The per-root case is where an operator is most likely to have to say which
+    workspace they mean, because the directory names say nothing: two of them
+    are `memory-vault`. That the settlement is found is also the proof that the
+    vault really was this one — the fold read the proposal queue under the
+    workspace segment the registry resolves, and a per-root vault has no
+    segments to fall back on.
+    """
+    vault = _per_root_install(
+        tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD)
+    )
+
+    assert cli.main(
+        [
+            "learnings-cleanup",
+            "--workspace",
+            WORKSPACE,
+            "--json",
+            "--runtime-root",
+            str(tmp_path / "install" / ".runtime"),
+        ]
+    ) == 0
+
+    plan = json.loads(capsys.readouterr().out)["plan"]
+    assert plan["workspace"] == WORKSPACE
+    assert plan["path"] == "Workspace/Learnings.md"
+    assert (vault / "Workspace" / "Skill-Proposals" / "web-research.md").is_file()
+    assert [row["learning_id"] for row in plan["removals"]] == [
+        RETIRED_RECORD.learning_id
+    ]
+    # The settlement is the fold's own answer about this vault's queue, so a
+    # removal here is a removal nothing else could have proposed.
+    assert "applied or dismissed" in plan["removals"][0]["detail"]
+    assert plan["counts"]["active"] == 2
+    assert plan["counts"]["remove"] == 1
+
+
+def test_an_unknown_workspace_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refused, not repaired.
+
+    Guessing a name for a workspace that is not registered would write a receipt
+    naming a workspace nothing resolves, which is the failure this whole command
+    path exists to remove. The message lists what *is* registered, so the
+    operator does not have to go and look.
+    """
+    _per_root_install(tmp_path, monkeypatch, records=(RETIRED_RECORD,))
+
+    assert cli.main(["learnings-cleanup", "--workspace", "nope"]) == 1
+
+    err = capsys.readouterr().err
+    assert "Unknown workspace `nope`" in err
+    assert WORKSPACE in err
+
+
+def test_a_vault_root_that_is_not_the_workspaces_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both names are explicit and they disagree, so the run does not happen.
+
+    Reconciling one vault under another workspace's name produces a receipt the
+    update-task check reads as that other workspace's review, over a document
+    the operator never looked at. Both paths are printed, because the fix is to
+    drop one of the two arguments.
+    """
+    vault = _per_root_install(tmp_path, monkeypatch, records=(RETIRED_RECORD,))
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+
+    assert cli.main(
+        ["learnings-cleanup", "--workspace", WORKSPACE, "--vault-root", str(other)]
+    ) == 1
+
+    err = capsys.readouterr().err
+    assert f"is not workspace `{WORKSPACE}`'s vault" in err
+    assert str(other) in err
+    assert str(vault) in err
+    assert _learnings(vault) == (
+        f"---\ntags: [ciao, learnings]\nupdated: 2020-01-01\n---\n"
+        f"# Learnings\n\n## Active\n\n{render_learning(RETIRED_RECORD)}\n"
+    )
+
+
+def test_a_bare_shell_resolves_the_installed_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The reported case: no `CIAO_WORKSPACE`, just a terminal.
+
+    A plain shell has no workspace in the environment, and handing `from_env` an
+    explicit dict makes it skip the LaunchAgent lookup a bare invocation gets, so
+    the run reads the bootstrap registry — which knows no vault, and mints a
+    secret under `~/.ciao/bootstrap`. Then `--vault-root memory-vault` resolves
+    to the directory's own name and the receipt is #912 all over again. The
+    install the operator actually has is what the running server's LaunchAgent
+    points at, so that is what this asks.
+    """
+    vault = _per_root_install(
+        tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD)
+    )
+    approval = _write_approval(tmp_path, _approvals(RETIRED_RECORD))
+    runtime = tmp_path / "install" / ".runtime"
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(tmp_path / "install"), runtime_root=str(runtime)
+        ),
+    )
+
+    assert cli.main(
+        [
+            "learnings-cleanup",
+            "--apply",
+            "--approval-file",
+            str(approval),
+            "--runtime-root",
+            str(runtime),
+            "--vault-root",
+            str(vault),
+        ]
+    ) == 0
+
+    receipt = next((runtime / "migration").glob("learnings-cleanup-*.json"))
+    assert json.loads(receipt.read_text(encoding="utf-8"))["workspace"] == WORKSPACE
+    assert "Removed 1 entr(y/ies)." in capsys.readouterr().out
+    assert render_learning(RETIRED_RECORD) not in _learnings(vault)
+    # A read-only name resolution must not manufacture an install beside the real
+    # one: the whole reason discovery is consulted is to avoid that bootstrap root.
+    assert not (tmp_path / "home" / ".ciao").exists()
+
+
+def test_a_bare_shell_writes_the_receipt_to_the_installed_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No flags naming a runtime either: the receipt must reach the install.
+
+    `--runtime-root` is what the test above passed, and passing it hid the half of
+    #912 that round 1 left standing. `_resolve_runtime_root` reads only
+    `os.environ`, so with neither `CIAO_RUNTIME_ROOT` nor the flag it answers
+    `<cwd>/.runtime` — while `update_tasks` reads receipts from
+    `<install>/.runtime/migration`. A receipt in the shell's home is a review the
+    update task never sees, so the entry resurfaces forever: the run does its work
+    and the task that would retire it never completes.
+    """
+    vault = _per_root_install(
+        tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD)
+    )
+    approval = _write_approval(tmp_path, _approvals(RETIRED_RECORD))
+    runtime = tmp_path / "install" / ".runtime"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(tmp_path / "install"), runtime_root=str(runtime)
+        ),
+    )
+
+    assert cli.main(
+        [
+            "learnings-cleanup",
+            "--apply",
+            "--approval-file",
+            str(approval),
+            "--vault-root",
+            str(vault),
+        ]
+    ) == 0
+
+    receipt = next((runtime / "migration").glob("learnings-cleanup-*.json"))
+    assert json.loads(receipt.read_text(encoding="utf-8"))["workspace"] == WORKSPACE
+    assert "Removed 1 entr(y/ies)." in capsys.readouterr().out
+    assert not (elsewhere / ".runtime").exists()
+
+
+def test_an_unknown_active_workspace_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A set-but-unregistered `CIAO_ACTIVE_WORKSPACE` is refused, not repaired.
+
+    The failure it stands in for is silent and destructive: the run reconciles the
+    *primary* workspace's `Learnings.md`, removes entries from it, and writes a
+    receipt naming it — because the registry it read was built somewhere else, or
+    the workspace was renamed. `_resolve_workspace_and_vaults` answers this the
+    same way, so the nightly planner and this command do not disagree about which
+    workspace a run is about.
+    """
+    vault = _per_root_install(tmp_path, monkeypatch, records=(RETIRED_RECORD,))
+    before = (vault / "Workspace" / "Learnings.md").read_bytes()
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "nope")
+
+    assert cli.main(["learnings-cleanup"]) == 1
+
+    err = capsys.readouterr().err
+    assert "CIAO_ACTIVE_WORKSPACE `nope` is not a registered workspace" in err
+    assert WORKSPACE in err
+    assert (vault / "Workspace" / "Learnings.md").read_bytes() == before
