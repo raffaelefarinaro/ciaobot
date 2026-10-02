@@ -402,7 +402,7 @@ wheels = [
 
 [[package]]
 name = "ciaobot"
-version = "1.0.1"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk", extra = ["otel"] },
