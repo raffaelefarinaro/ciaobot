@@ -94,9 +94,12 @@ class MemoryStorage {
   clear(): void { this.values.clear() }
 }
 
+const mounted: VueWrapper[] = []
+
 async function mountPanel(): Promise<{
   wrapper: VueWrapper
   store: ReturnType<typeof useProjectStore>
+  pinia: ReturnType<typeof createPinia>
 }> {
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -130,7 +133,8 @@ async function mountPanel(): Promise<{
     },
   })
   await flushPromises()
-  return { wrapper, store }
+  mounted.push(wrapper)
+  return { wrapper, store, pinia }
 }
 
 /** One turn that wrote a resume twice under two path spellings and edited a
@@ -180,6 +184,7 @@ describe('ChatPanel Outputs section', () => {
   })
 
   afterEach(() => {
+    for (const w of mounted.splice(0)) w.unmount()
     vi.restoreAllMocks()
     localStorage.clear()
   })
@@ -314,12 +319,11 @@ describe('ChatPanel Outputs section', () => {
     const rows = wrapper.findAll('.chat-work-output')
     expect(rows).toHaveLength(2)
     expect(new Set(rows.map(row => row.get('.chat-work-output-action').text())).size).toBe(2)
-    wrapper.unmount()
   })
 
   it('opens the file viewer from a row link, as the old pill did', async () => {
-    const { wrapper, store } = await mountPanel()
-    const viewer = useFileViewerStore()
+    const { wrapper, store, pinia } = await mountPanel()
+    const viewer = useFileViewerStore(pinia)
     const open = vi.spyOn(viewer, 'open').mockResolvedValue(undefined as never)
     store.messages['chat-1'] = turnWithOutputs()
     await flushPromises()
