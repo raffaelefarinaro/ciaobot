@@ -103,10 +103,10 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
 
     The one answer to "which install is this shell talking to": a bare-shell
     invocation (`ciao health get` from any directory) has no CIAO_WORKSPACE, and
-    the workspace the installed server's LaunchAgent points at is the install the
-    operator actually has — not a fresh bootstrap workspace manufactured beside
-    it. ``base`` naming a workspace already is that answer, and it is returned
-    untouched.
+    the workspace the installed server's service definition points at is the
+    install the operator actually has — not a fresh bootstrap workspace
+    manufactured beside it. ``base`` naming a workspace already is that answer,
+    and it is returned untouched.
 
     Read-only, like the ``export=False`` branch of :meth:`CiaoConfig.from_env`:
     the discovered ``.env`` is overlaid into a private mapping rather than loaded
@@ -117,15 +117,14 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     """
     if _workspace_env(base):
         return dict(base)
-    # Imported here, not at module scope: `ciao.macos_service` reads the plist
-    # and the tests patch `ciao.macos_service.discover_runtime`.
-    from ciao.macos_service import discover_runtime
+    # The platform branch, the definition it reads and the staleness guard all
+    # live in `ciao.install_discovery`; imported here so the seam stays the one
+    # place that knows the platform and the patch target the existing tests
+    # install (`ciao.macos_service.discover_runtime`) is still reached.
+    from ciao.install_discovery import discover_workspace
 
-    try:
-        discovered = discover_runtime(environ=dict(base))
-    except Exception:  # noqa: BLE001 - plist missing/unreadable
-        discovered = None
-    if not discovered or not discovered.workspace or not Path(discovered.workspace).is_dir():
+    discovered = discover_workspace(base)
+    if discovered is None:
         return dict(base)
     # The discovered workspace's .env is what the running server reads; a
     # bare-shell invocation must see the same values — auth settings first:
@@ -136,16 +135,17 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     # parsed from the mapping, or it would see only the bare shell.
     from dotenv import dotenv_values
 
-    discovered_workspace = str(discovered.workspace)
+    discovered_workspace = str(discovered)
     dotenv_path = Path(discovered_workspace) / ".env"
-    # Pinned even when that workspace has no `.env`: a LaunchAgent pointing at a
-    # directory means a server is installed there, and falling through to a
+    # Pinned even when that workspace has no `.env`: a service definition pointing
+    # at a directory means a server is installed there, and falling through to a
     # freshly manufactured bootstrap root beside it is the failure discovery
     # exists to prevent. (`from_env` used to pin only when the `.env` existed,
     # while the CLI's own copy always pinned; this is the one rule for both.)
-    # A plist naming a directory that is no longer there is stale, and pinning it
-    # would recreate what the operator deleted (`_read_or_create_secret` mkdirs the
-    # runtime root), so the `is_dir()` guard above is part of this rule.
+    # A definition naming a directory that is no longer there is stale, and pinning
+    # it would recreate what the operator deleted (`_read_or_create_secret` mkdirs
+    # the runtime root), so `discover_workspace`'s `is_dir()` guard is part of
+    # this rule.
     try:
         overlay: dict[str, str] = {
             key: value

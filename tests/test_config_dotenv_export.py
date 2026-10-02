@@ -310,3 +310,104 @@ def test_installed_workspace_env_ignores_a_stale_launch_agent(
 
     assert ciao_config.installed_workspace_env(base) == base
     assert not gone.exists(), "a read-only lookup must not recreate the workspace"
+
+
+def test_windows_bare_shell_discovers_the_task_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Windows task definition is the install a bare shell must adopt.
+
+    Before the platform seam `installed_workspace_env` asked only the macOS
+    LaunchAgent, so on Windows a bare-shell read-only command found nothing,
+    fell back to the cwd and could mint a bootstrap secret beside it. The
+    engine already records its workspace as the task's ``WorkingDirectory``, so
+    a bare shell reads that definition and overlays its ``.env`` — and mints
+    nothing while doing it.
+    """
+    from ciao import install_discovery, windows_service
+
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / ".env").write_text("PWA_AUTH_TOKEN=ws-secret\n", encoding="utf-8")
+    local = tmp_path / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    # The seam reads the LIVE task dir, so `CIAO_LAUNCH_AGENTS_DIR` is cleared:
+    # discovery reads what the engine wrote, not a test override.
+    monkeypatch.delenv("CIAO_LAUNCH_AGENTS_DIR", raising=False)
+    definition = local / "Ciaobot" / "service" / windows_service.TASK_FILE_NAME
+    definition.parent.mkdir(parents=True, exist_ok=True)
+    # A definition shaped like the renderer's, written by hand: `render_task_xml`
+    # refuses a POSIX workspace path (its `PureWindowsPath` check), and this test
+    # runs on every OS by forcing the branch it exercises.
+    definition.write_bytes(
+        (
+            '<?xml version="1.0" encoding="UTF-16"?>\n'
+            f'<Task version="1.2" xmlns="{windows_service.TASK_NS[1:-1]}">\n'
+            "  <Actions Context=\"Author\">\n    <Exec>\n"
+            f"      <WorkingDirectory>{install}</WorkingDirectory>\n"
+            "    </Exec>\n  </Actions>\n</Task>\n"
+        ).encode("utf-16")
+    )
+    monkeypatch.setattr(install_discovery, "_platform", lambda: "win32")
+    monkeypatch.delenv("PWA_AUTH_TOKEN", raising=False)
+
+    merged = ciao_config.installed_workspace_env({"FOO": "1"})
+
+    assert merged["CIAO_WORKSPACE"] == str(install)
+    assert merged["FOO"] == "1"
+    assert merged["PWA_AUTH_TOKEN"] == "ws-secret", "the install's .env is overlaid"
+    # Read-only: the value lives in the returned mapping, never in the process.
+    assert os.environ.get("PWA_AUTH_TOKEN") is None
+    # And nothing was manufactured beside the install.
+    assert not (tmp_path / "bootstrap").exists()
+
+
+def test_windows_bare_shell_without_a_task_mints_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No task definition means no install to discover, which is an honest None.
+
+    A missing file is not an error and must not become a fallback: pinning a
+    workspace nobody recorded is how `_read_or_create_secret` mkdirs a bootstrap
+    runtime root beside the shell. Discovery falls through to the preserved
+    macOS read, which on a real Windows machine finds no plist either, so the
+    mapping is returned unchanged.
+    """
+    from ciao import install_discovery
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    monkeypatch.delenv("CIAO_LAUNCH_AGENTS_DIR", raising=False)
+    monkeypatch.setattr(install_discovery, "_platform", lambda: "win32")
+    base = {"FOO": "1"}
+
+    assert ciao_config.installed_workspace_env(base) == base
+    assert not (tmp_path / "Local").exists(), "a read-only lookup creates nothing"
+
+
+def test_installed_workspace_env_still_discovers_on_macos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam keeps the macOS branch, and the patch target the suite relies on.
+
+    The existing tests patch ``ciao.macos_service.discover_runtime``; the seam
+    must keep calling it, and force the macOS branch exactly as the real
+    platform would, or the refactor would have silently moved discovery behind
+    a platform check the suite never satisfied.
+    """
+    from ciao import install_discovery
+
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / ".env").write_text("FOO=from-file\n", encoding="utf-8")
+    monkeypatch.setattr(install_discovery, "_platform", lambda: "darwin")
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(install), runtime_root=str(install / ".runtime")
+        ),
+    )
+
+    merged = ciao_config.installed_workspace_env({"FOO": "from-shell"})
+
+    assert merged["CIAO_WORKSPACE"] == str(install)
+    assert merged["FOO"] == "from-shell", "the process environment wins, as before"
