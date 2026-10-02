@@ -1486,12 +1486,10 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
         "stops asking:",
         "",
         applied,
-        "",
-        f"Use `--applied` only once the change is really in `{canonical}` and you "
-        "have verified it. Add `--reason \"...\"` to either command to say in your "
-        "own words what you found. If you stop part-way, say that instead:",
     ]
     if proposal.origins:
+        # Directly under the command it explains, so the "say that instead"
+        # paragraph below stays next to the `--interrupted` line it introduces.
         lines += [
             "",
             f"This proposal links {len(proposal.origins)} learning finding(s), so "
@@ -1501,6 +1499,10 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
             "the readback is.",
         ]
     lines += [
+        "",
+        f"Use `--applied` only once the change is really in `{canonical}` and you "
+        "have verified it. Add `--reason \"...\"` to either command to say in your "
+        "own words what you found. If you stop part-way, say that instead:",
         "",
         f"    ciao skill-proposal-remove {skill} --interrupted",
         "",
