@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from datetime import date
 from pathlib import Path
 
@@ -72,18 +73,49 @@ def _write_release_tree(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "web" / "package-lock.json").write_text(
-        '{\n'
+        "{\n"
         '  "name": "ciaobot-pwa",\n'
         '  "version": "0.1.0",\n'
         '  "packages": {\n'
         '    "": {\n'
         '      "name": "ciaobot-pwa",\n'
         '      "version": "0.1.0"\n'
-        '    }\n'
-        '  }\n'
-        '}\n',
+        "    }\n"
+        "  }\n"
+        "}\n",
         encoding="utf-8",
     )
+    (root / "uv.lock").write_text(UV_LOCK_FIXTURE, encoding="utf-8")
+
+
+# A minimal but realistic lock: a top-level comment, one dependency block that
+# must not move, and the editable root whose ``version`` the release aligns.
+UV_LOCK_FIXTURE = (
+    "version = 1\n"
+    "revision = 3\n"
+    "\n"
+    "# a dependency block; only the root metadata above may change\n"
+    "[[package]]\n"
+    'name = "ciao"\n'
+    'version = "0.2.0"\n'
+    'source = { editable = "." }\n'
+    "dependencies = [\n"
+    '    { name = "anyio" },\n'
+    "]\n"
+    "\n"
+    "[[package]]\n"
+    'name = "anyio"\n'
+    'version = "4.4.0"\n'
+    'source = { registry = "https://pypi.org/simple" }\n'
+    'sdist = { url = "https://files.pythonhosted.org/packages/anyio-4.4.0.tar.gz", '
+    'hash = "sha256:deadbeef", size = 123 }\n'
+)
+
+
+def _lock_versions(root: Path) -> dict[str, str]:
+    with (root / "uv.lock").open("rb") as handle:
+        lock = tomllib.load(handle)
+    return {pkg["name"]: pkg["version"] for pkg in lock["package"]}
 
 
 def test_bump_version_supports_semver_steps() -> None:
@@ -125,12 +157,14 @@ def test_apply_release_files_updates_versions_and_changelog(tmp_path: Path) -> N
     assert versions.package == "0.3.0"
     assert versions.pwa == "0.3.0"
     assert versions.package_lock == "0.3.0"
+    assert _lock_versions(tmp_path)["ciao"] == "0.3.0"
     assert (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8") == (
         "# Changelog\n\n"
         "## v0.3.0 - 2026-07-05\n\n"
         "### Added\n"
         "- feat: add release automation\n"
     )
+    assert tmp_path / "uv.lock" in touched
     assert tmp_path / "web" / "package-lock.json" in touched
 
 
@@ -187,6 +221,166 @@ def test_apply_release_files_prepends_existing_changelog(tmp_path: Path) -> None
     changelog = (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
     assert changelog.startswith("# Changelog\n\n## v0.3.0 - 2026-07-05\n\n- New\n\n")
     assert "## v0.2.0 - 2026-07-01" in changelog
+
+
+def test_apply_release_files_aligns_editable_lock_without_dependency_changes(
+    tmp_path: Path,
+) -> None:
+    """The lock's root metadata follows the bump; no dependency byte moves.
+
+    The release rewrites ``pyproject.toml``'s version but used to leave
+    ``uv.lock``'s editable root at the old one, so every ``uv --frozen`` step
+    failed after the tag. Alignment must touch exactly one version assignment.
+    """
+    _write_release_tree(tmp_path)
+    before = (tmp_path / "uv.lock").read_text(encoding="utf-8")
+
+    touched = apply_release_files(
+        tmp_path, version="0.3.0", changelog_section="## v0.3.0 - 2026-07-05\n"
+    )
+
+    after = (tmp_path / "uv.lock").read_text(encoding="utf-8")
+    expected = before.replace('version = "0.2.0"', 'version = "0.3.0"', 1)
+    assert after == expected
+    assert after.count('version = "0.3.0"') == 1
+
+    versions = _lock_versions(tmp_path)
+    assert versions["ciao"] == "0.3.0"
+    # The dependency block is untouched, version, source and hash intact.
+    assert versions["anyio"] == "4.4.0"
+    assert 'source = { registry = "https://pypi.org/simple" }' in after
+    assert "sha256:deadbeef" in after
+    assert "# a dependency block; only the root metadata above may change" in after
+    assert tmp_path / "uv.lock" in touched
+
+
+def _lock_mutations() -> dict[str, str]:
+    missing_version = UV_LOCK_FIXTURE.replace('version = "0.2.0"\n', "", 1)
+    return {
+        "malformed": '[[package]\nname = "ciao"\n',
+        "no_editable_root": UV_LOCK_FIXTURE.replace(
+            'source = { editable = "." }',
+            'source = { registry = "https://pypi.org/simple" }',
+        ),
+        "duplicate_root": UV_LOCK_FIXTURE + "\n[[package]]\n"
+        'name = "ciao"\n'
+        'version = "0.1.0"\n'
+        'source = { editable = "." }\n',
+        "missing_version": missing_version,
+    }
+
+
+@pytest.mark.parametrize("case", [*sorted(_lock_mutations()), "missing_lock"])
+def test_apply_release_files_rejects_invalid_editable_lock(
+    tmp_path: Path, case: str
+) -> None:
+    """A lock the release cannot align exactly fails closed before any write.
+
+    Writing new versions around a lock it could not fix would recreate the
+    ``uv --frozen`` failure this issue exists to close, so the validation runs
+    before the first release file is touched.
+    """
+    _write_release_tree(tmp_path)
+    if case == "missing_lock":
+        (tmp_path / "uv.lock").unlink()
+    else:
+        (tmp_path / "uv.lock").write_text(_lock_mutations()[case], encoding="utf-8")
+
+    snapshot = {
+        name: (tmp_path / name).read_text(encoding="utf-8")
+        for name in ("pyproject.toml", "ciao/__init__.py", "web/package.json")
+    }
+    lock_before = (
+        (tmp_path / "uv.lock").read_text(encoding="utf-8")
+        if (tmp_path / "uv.lock").exists()
+        else None
+    )
+
+    with pytest.raises(ReleaseError, match="uv.lock"):
+        apply_release_files(
+            tmp_path, version="0.3.0", changelog_section="## v0.3.0 - 2026-07-05\n"
+        )
+
+    for name, text in snapshot.items():
+        assert (tmp_path / name).read_text(encoding="utf-8") == text
+    if lock_before is not None:
+        assert (tmp_path / "uv.lock").read_text(encoding="utf-8") == lock_before
+
+
+def test_main_skip_dependency_check_aligns_and_stages_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--skip-dep-check`` still aligns and stages the editable lock root.
+
+    The whole point of the flag is to leave dependency bytes alone, so the
+    release cannot rely on the dependency updater to make the lock consistent.
+    With it skipped, the version bump alone must align the root metadata and
+    ``git add`` must include the lock.
+    """
+    _write_release_tree(tmp_path)
+    # main() requires the PWA versions to already match pyproject.toml.
+    (tmp_path / "web" / "package.json").write_text(
+        '{\n  "name": "ciaobot-pwa",\n  "version": "0.2.0"\n}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "web" / "package-lock.json").write_text(
+        "{\n"
+        '  "name": "ciaobot-pwa",\n'
+        '  "version": "0.2.0",\n'
+        '  "packages": {\n'
+        '    "": {\n'
+        '      "name": "ciaobot-pwa",\n'
+        '      "version": "0.2.0"\n'
+        "    }\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        release_mod,
+        "_run",
+        lambda cmd, **kwargs: commands.append(list(cmd)) or "",
+    )
+
+    def fake_git(root, args, check=False):
+        if args == ["branch", "--show-current"]:
+            return "release/v0.3.0"
+        return ""
+
+    monkeypatch.setattr(release_mod, "_git", fake_git)
+
+    dep_calls: list = []
+    monkeypatch.setattr(
+        release_mod,
+        "_apply_auto_dependency_updates",
+        lambda *a, **k: dep_calls.append(a) or [],
+    )
+
+    result = release_mod.main(
+        [
+            str(tmp_path),
+            "--bump",
+            "minor",
+            "--apply",
+            "--commit",
+            "--no-branch",
+            "--skip-dep-check",
+            "--skip-gws-skills",
+            "--skip-checks",
+        ]
+    )
+
+    assert result == 0
+    assert dep_calls == []
+    assert _lock_versions(tmp_path)["ciao"] == "0.3.0"
+    assert _lock_versions(tmp_path)["anyio"] == "4.4.0"
+    add_commands = [cmd for cmd in commands if cmd[:2] == ["git", "add"]]
+    assert len(add_commands) == 1
+    staged = set(add_commands[0][2:])
+    assert "uv.lock" in staged
+    assert "pyproject.toml" in staged
 
 
 def _is_audit_command(command: list[str]) -> bool:
