@@ -157,9 +157,17 @@ describe('the group itself', () => {
     wrapper.unmount()
   })
 
-  it('names the workspace the cards are about', async () => {
+  it('shows update cards without the redundant workspace lede', async () => {
+    // The heading and cards already identify the work and its scope; a lede
+    // restating the active workspace was the sentence this issue removed, and
+    // re-adding one under the heading would put it back on Home.
     const { wrapper } = await mountGroup([task()])
-    expect(wrapper.find('.update-tasks-lede').text()).toContain('personal')
+    expect(wrapper.find('#update-tasks-heading').text()).toBe('After this update')
+    expect(cards(wrapper)).toHaveLength(1)
+    expect(cards(wrapper)[0].text()).toContain('Rows retired into a folder no surface reads any more.')
+    expect(buttons(wrapper)).toContain('Start in chat')
+    expect(wrapper.find('.update-tasks-lede').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Work this version of Ciaobot left behind for')
     wrapper.unmount()
   })
 
