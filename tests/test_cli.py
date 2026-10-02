@@ -10,6 +10,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -3715,16 +3716,17 @@ def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
     assert identity in entries[0]["reason"], entries[0]["reason"]
 
 
-def test_an_explicit_vault_root_is_planned_under_the_directory_it_named(
+def test_an_explicit_vault_root_is_planned_under_its_registered_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--vault-root` is the one case where the directory's own name is the name.
+    """An explicit `--vault-root` the registry knows is named by its owner.
 
-    There is no registry to ask: the operator pointed at a directory in person,
-    with no workspace named anywhere. So the name is taken from the directory,
-    explicitly, rather than as a silent guess every caller inherits — and the
-    active workspace is not consulted, because an explicit argument outranks the
-    environment.
+    The operator named a directory, `client-a`, but the registry calls the
+    workspace that owns it `work` — and every operation the plan hands work to
+    resolves the vault through that registry, so `client-a` mints identities
+    nothing resolves. The active workspace is still not consulted, because an
+    explicit argument outranks the environment: naming it something else changes
+    nothing.
     """
     root, vault = _registered_install(tmp_path)
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
@@ -3735,7 +3737,91 @@ def test_an_explicit_vault_root_is_planned_under_the_directory_it_named(
         _curation_args(vault_root=str(vault))
     )
 
-    assert (resolved, name) == (vault.resolve(), "client-a")
+    assert (resolved, name) == (vault.resolve(), "work")
+
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "nope")
+
+    _workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args(vault_root=str(vault))
+    )
+
+    assert (resolved, name) == (vault.resolve(), "work")
+
+
+def test_an_unregistered_explicit_vault_root_keeps_its_directory_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `--vault-root` the registry does not know still keeps its directory name.
+
+    The owner lookup has to be able to answer "none": the operator pointed at a
+    directory in person, outside every registered workspace, and there is no
+    workspace name to resolve. The directory's own name is used explicitly rather
+    than left as nothing at all.
+    """
+    root, _vault = _registered_install(tmp_path)
+    other = tmp_path / "loose" / "memory-vault"
+    (other / "Workspace").mkdir(parents=True)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+
+    _workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args(vault_root=str(other))
+    )
+
+    assert name == "memory-vault"
+    assert resolved == other.resolve()
+
+
+def test_curation_plan_with_a_per_root_vault_root_folds_under_the_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `--vault-root` on a per-root install plans the entry pass, and folds by owner.
+
+    The layout this fixes: every workspace's vault directory is called
+    `memory-vault`, so planning under the directory's name put the stale-entry
+    pass's identities under a workspace the registry does not know — the pass was
+    reported as not planned at all. With the owner as the name it is planned, the
+    install root is still the workspace, and the fold registry is keyed by the
+    owner, so `workspace_vault_root` finds the vault it was built for.
+    """
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+
+    # The fold registry is keyed by whatever the plan hands `_curation_config`,
+    # so calling the helper directly would only prove the helper round-trips its
+    # own argument. Spying on it is what shows the owner, not the directory.
+    seen: list[str] = []
+    real_config = cli._curation_config
+
+    def _spy(workspace: Path, vault_: Path, name: str) -> Any:
+        seen.append(name)
+        return real_config(workspace, vault_, name)
+
+    monkeypatch.setattr(cli, "_curation_config", _spy)
+
+    payload, _worklist = cli._curation_plan(_curation_args(vault_root=str(vault)))
+
+    # Fails first on the unfixed code, so the identity check below is only
+    # reached once the plan is known to have been keyed by the owner.
+    assert seen == ["work"]
+    assert not any("stale-entry pass was not planned" in n for n in payload["notes"]), (
+        payload["notes"]
+    )
+    assert payload["workspace"] == str(root)
+    # And the pass that was planned minted its identity under that same name, so
+    # a managed `entry verify` resolves the one the plan hands it.
+    entries = [item for item in payload["items"] if item["pass"] == "stale_entry"]
+    assert len(entries) == 1, payload["items"]
+    from ciao import note_entries as ne
+
+    identity = ne.parse_note_entries(
+        (vault / "People" / "Ada.md").read_text(encoding="utf-8"),
+        note_path="People/Ada.md",
+        workspace="work",
+    ).entries[0].identity
+    assert identity in entries[0]["reason"], entries[0]["reason"]
 
 
 def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
