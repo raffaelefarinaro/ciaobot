@@ -10,6 +10,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -3681,14 +3682,39 @@ def test_curation_plan_with_a_per_root_vault_root_folds_under_the_owner(
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CIAO_WORKSPACE", str(root))
 
+    # The fold registry is keyed by whatever the plan hands `_curation_config`,
+    # so calling the helper directly would only prove the helper round-trips its
+    # own argument. Spying on it is what shows the owner, not the directory.
+    seen: list[str] = []
+    real_config = cli._curation_config
+
+    def _spy(workspace: Path, vault_: Path, name: str) -> Any:
+        seen.append(name)
+        return real_config(workspace, vault_, name)
+
+    monkeypatch.setattr(cli, "_curation_config", _spy)
+
     payload, _worklist = cli._curation_plan(_curation_args(vault_root=str(vault)))
 
+    # Fails first on the unfixed code, so the identity check below is only
+    # reached once the plan is known to have been keyed by the owner.
+    assert seen == ["work"]
     assert not any("stale-entry pass was not planned" in n for n in payload["notes"]), (
         payload["notes"]
     )
-    assert [i for i in payload["items"] if i["pass"] == "stale_entry"], payload["items"]
     assert payload["workspace"] == str(root)
-    assert cli._curation_config(root, vault, "work").workspace_names() == ["work"]
+    # And the pass that was planned minted its identity under that same name, so
+    # a managed `entry verify` resolves the one the plan hands it.
+    entries = [item for item in payload["items"] if item["pass"] == "stale_entry"]
+    assert len(entries) == 1, payload["items"]
+    from ciao import note_entries as ne
+
+    identity = ne.parse_note_entries(
+        (vault / "People" / "Ada.md").read_text(encoding="utf-8"),
+        note_path="People/Ada.md",
+        workspace="work",
+    ).entries[0].identity
+    assert identity in entries[0]["reason"], entries[0]["reason"]
 
 
 def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
