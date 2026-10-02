@@ -1,14 +1,16 @@
 """Regression guards for the Python runtime security pins (#953).
 
 PyJWT 2.13.0 mutated the caller's ``options`` dict in place when a token was
-decoded without signature verification (GHSA-gvp8-978c-rx2q, alert #61): the
-``decode`` path copied the caller's options and then wrote its own defaults —
-``verify_exp``, ``verify_aud`` and the rest — back into that same dict. An
-application that reuses one options dict across calls (the documented
-"peek at the payload, then verify" pattern) therefore found its explicit
-``verify_signature: True`` silently downgraded to the defaults on the second
-call. PyJWT 2.15.1 copies the options before applying defaults, so the dict
-handed in comes back byte-equivalent.
+decoded without signature verification (GHSA-gvp8-978c-rx2q, alert #61):
+``_merge_options`` never copied the dict, so it inserted its own defaults —
+``verify_exp``, ``verify_aud`` and the other claim checks — directly into the
+caller's options. An application that reuses one options dict across calls
+(the documented "peek at the payload, then verify" pattern) therefore found
+those claim checks still disabled on the second call: setting
+``verify_signature: True`` still verified the signature, but the token's
+expiry was no longer checked. Signature verification itself is unaffected.
+PyJWT 2.15.1 copies the options before applying defaults, so the dict handed
+in comes back byte-equivalent.
 
 Ciaobot itself never calls ``jwt.decode``: it mints opaque session tokens and
 delegates JWT to MCP, so this test guards the pinned version rather than a
@@ -27,7 +29,7 @@ import pytest
 
 
 def test_pyjwt_unverified_peek_does_not_mutate_reused_options() -> None:
-    key = b"ciaobot-test-key-0123456789abcdef"  # 32 bytes, HS256 minimum
+    key = b"ciaobot-test-key-0123456789abcdef"  # 33 bytes, HS256 minimum
     now = dt.datetime.now(tz=dt.timezone.utc)
     token = jwt.encode(
         {
