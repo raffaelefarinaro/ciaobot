@@ -1485,10 +1485,11 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
         "proposal text as a shell argument.",
         "",
         "Before you finish, run `ciao sync-skills` so the providers see the "
-        "updated skill. Neither command takes a `--workspace` argument: this "
-        "chat's environment already names the install and this workspace, "
-        "`--workspace` on both is an install-root *path*, and this chat's "
-        "working directory is the workspace's own root, not the install root.",
+        "updated skill. Neither command takes a `--workspace` argument: "
+        "`sync-skills` defaults to this chat's working directory, which is "
+        "already this workspace's root, and `skill-proposal-remove` finds this "
+        "workspace's queue from the chat's environment — its `--workspace` is "
+        "the install root, which this working directory is not.",
     ]
     return "\n".join(lines)
 
