@@ -27,6 +27,7 @@ from ciao.learning_records import (
     SECTION_HEADINGS,
     SECTION_PROMOTED,
     LearningRecord,
+    allocate_learning_id,
     parse_learnings,
 )
 
@@ -66,7 +67,9 @@ def _only(vault: Path, *, section: str = SECTION_ACTIVE) -> LearningRecord:
 def test_a_new_learning_is_filed_as_a_canonical_record(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
 
-    assert mp.append_learning(vault, "Retries need a fresh token.", source="chat-a1")
+    assert mp.append_learning(
+        vault, "Retries need a fresh token.", workspace="personal", source="chat-a1"
+    )
 
     record = _only(vault)
     assert record.text == "Retries need a fresh token."
@@ -87,10 +90,10 @@ def test_a_replay_of_the_same_source_changes_nothing(tmp_path: Path) -> None:
     """
     vault = _vault(tmp_path)
     fact = "Retries need a fresh token."
-    assert mp.append_learning(vault, fact, source="chat-a1")
+    assert mp.append_learning(vault, fact, workspace="personal", source="chat-a1")
     first = _text(vault)
 
-    assert mp.append_learning(vault, fact, source="chat-a1")
+    assert mp.append_learning(vault, fact, workspace="personal", source="chat-a1")
 
     assert _text(vault) == first
     record = _only(vault)
@@ -103,7 +106,7 @@ def test_a_sighting_from_a_new_source_counts_and_refreshes_last_seen(
 ) -> None:
     vault = _vault(tmp_path)
     fact = "Retries need a fresh token."
-    mp.append_learning(vault, fact, source="chat-a1")
+    mp.append_learning(vault, fact, workspace="personal", source="chat-a1")
     seen, _ = mp.render_learning_append(
         _text(vault), fact, workspace=vault.name, source="chat-b2", today="2026-03-04"
     )
@@ -132,7 +135,7 @@ def test_a_resolved_lesson_is_observed_but_never_reactivated(tmp_path: Path) -> 
         "— sources: chat-1\n",
     )
 
-    assert mp.append_learning(vault, "Pin the Node version.", source="chat-2")
+    assert mp.append_learning(vault, "Pin the Node version.", workspace="personal", source="chat-2")
 
     text = _text(vault)
     # Still under Promoted / Resolved, and only there.
@@ -152,7 +155,7 @@ def test_a_resolved_lesson_is_not_duplicated_into_active(tmp_path: Path) -> None
         "- [pin-node] [2026-01-01 → 2026-02-01] (x4) Pin the Node version.\n",
     )
 
-    assert mp.append_learning(vault, "Pin the Node version.", source="chat-2")
+    assert mp.append_learning(vault, "Pin the Node version.", workspace="personal", source="chat-2")
 
     text = _text(vault)
     assert text.count("Pin the Node version.") == 1
@@ -168,7 +171,7 @@ def test_an_unreadable_entry_is_never_rewritten(tmp_path: Path) -> None:
     broken = "- [2026-13-45] debugging: an impossible date"
     vault = _vault(tmp_path, f"# Learnings\n\n## Active\n{broken}\n")
 
-    assert mp.append_learning(vault, "an impossible date", source="chat-a1")
+    assert mp.append_learning(vault, "an impossible date", workspace="personal", source="chat-a1")
 
     assert broken in _text(vault)
 
@@ -177,12 +180,40 @@ def test_an_owner_written_bullet_gains_no_invented_recurrence(tmp_path: Path) ->
     """A plain bullet has no history, so it must not acquire an x1."""
     vault = _vault(tmp_path, "# Learnings\n\n## Active\n- Ask before deleting.\n")
 
-    assert mp.append_learning(vault, "Ask before deleting.", source="chat-a1")
+    assert mp.append_learning(vault, "Ask before deleting.", workspace="personal", source="chat-a1")
 
     record = _only(vault)
     assert record.count is None
     assert record.first_seen is None
     assert "(?)" in _text(vault)
+
+
+def test_append_learning_mints_under_the_given_workspace(tmp_path: Path) -> None:
+    """The identity scope is the name the caller passes, not the folder's own.
+
+    A per-root install gives every workspace a vault directory of the same name
+    (``memory-vault``), so a writer that scoped the id to the directory minted
+    the same id for ``work`` and ``personal``, and minted them under a name the
+    update-task detector — which mints under the registered one — can never
+    resolve. The id written here is the one that reader will be looking for.
+    """
+    vault = tmp_path / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+
+    assert mp.append_learning(
+        vault, "Blocked pages need a fallback.", workspace="personal", source="chat-a1"
+    )
+
+    document = parse_learnings(_text(vault), workspace="personal")
+    records = [e.record for e in document.entries if e.record is not None]
+    assert len(records) == 1, records
+    assert records[0].learning_id == allocate_learning_id(
+        "personal", "Blocked pages need a fallback."
+    )
+    # And explicitly not the id the folder's own name would have produced.
+    assert records[0].learning_id != allocate_learning_id(
+        "memory-vault", "Blocked pages need a fallback."
+    )
 
 
 # ---- the owner's bytes survive the write -----------------------------------
@@ -225,7 +256,7 @@ def test_a_crlf_file_keeps_its_line_endings_through_a_new_entry(
 ) -> None:
     vault = _crlf_vault(tmp_path)
 
-    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+    assert mp.append_learning(vault, "A brand new learning.", workspace="personal", source="chat-9")
 
     raw = _raw(vault)
     # The byte-order mark and every CRLF pair survive, so the lines this write
@@ -408,7 +439,7 @@ def test_a_crlf_file_keeps_its_line_endings_through_a_recurrence(
     """The update path rewrites a line in place, not the whole file's endings."""
     vault = _crlf_vault(tmp_path)
 
-    assert mp.append_learning(vault, "A b.", source="chat-9")
+    assert mp.append_learning(vault, "A b.", workspace="personal", source="chat-9")
 
     raw = _raw(vault)
     assert raw.startswith(b"\xef\xbb\xbf")
@@ -426,7 +457,7 @@ def test_a_crlf_file_gains_no_second_active_section(tmp_path: Path) -> None:
     """
     vault = _crlf_vault(tmp_path)
 
-    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+    assert mp.append_learning(vault, "A brand new learning.", workspace="personal", source="chat-9")
 
     text = _raw(vault).decode("utf-8")
     assert text.count("## Active") == 1
@@ -439,7 +470,7 @@ def test_a_new_entry_goes_under_active_not_at_the_end_of_the_file(
     """Where the entry lands is the observable difference above."""
     vault = _crlf_vault(tmp_path)
 
-    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+    assert mp.append_learning(vault, "A brand new learning.", workspace="personal", source="chat-9")
 
     text = _raw(vault).decode("utf-8")
     _, _, active = text.partition("## Active")
@@ -471,7 +502,7 @@ def test_the_write_goes_through_the_atomic_helper(
 
     monkeypatch.setattr(memory_receipts, "write_queue_atomically", _recording)
 
-    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+    assert mp.append_learning(vault, "A brand new learning.", workspace="personal", source="chat-9")
 
     assert [name for name, _ in written] == ["Learnings.md"]
     assert "A brand new learning." in written[0][1]
@@ -514,7 +545,7 @@ def test_the_write_is_serialized_against_the_migration(
             yield
 
     monkeypatch.setattr(memory_receipts, "queue_lock", _recording)
-    assert mp.append_learning(vault, "A brand new learning.", source="chat-9")
+    assert mp.append_learning(vault, "A brand new learning.", workspace="personal", source="chat-9")
 
     assert taken == ["Learnings.md"]
 
@@ -525,7 +556,7 @@ def test_the_write_is_serialized_against_the_migration(
 def test_the_preview_is_exactly_what_the_accept_writes(tmp_path: Path) -> None:
     """A card that previews one thing and writes another is worse than no card."""
     vault = _vault(tmp_path)
-    mp.append_learning(vault, "Pin the Node version.", source="chat-1")
+    mp.append_learning(vault, "Pin the Node version.", workspace="personal", source="chat-1")
 
     previewed, operation = mp.render_learning_append(
         mp.read_learnings(vault),
@@ -535,13 +566,13 @@ def test_the_preview_is_exactly_what_the_accept_writes(tmp_path: Path) -> None:
     )
 
     assert operation == "update"
-    assert mp.append_learning(vault, "Pin the Node version.", source="chat-2")
+    assert mp.append_learning(vault, "Pin the Node version.", workspace="personal", source="chat-2")
     assert _text(vault) == previewed
 
 
 def test_a_preview_of_a_sighting_already_counted_is_a_no_op(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    mp.append_learning(vault, "Pin the Node version.", source="chat-1")
+    mp.append_learning(vault, "Pin the Node version.", workspace="personal", source="chat-1")
 
     text, operation = mp.render_learning_append(
         mp.read_learnings(vault),
@@ -566,9 +597,9 @@ def test_curation_still_promotes_at_x3_through_the_shared_reader(
         "- [pin-node] [2026-01-01 → 2026-09-01] (x4) Pin the Node version.\n",
     )
     for _ in range(3):
-        mp.append_learning(vault, "Pin the Node version.", source="chat-1")
+        mp.append_learning(vault, "Pin the Node version.", workspace="personal", source="chat-1")
 
-    items = cr._learning_items(vault, today=date(2026, 9, 19))
+    items = cr._learning_items(vault, workspace="personal", today=date(2026, 9, 19))
 
     assert [item.pass_id for item in items] == [cr.PASS_LEARNINGS]
     # The key is a hash of the subject, so the subject is what has to be right.
@@ -581,11 +612,11 @@ def test_curation_still_promotes_at_x3_through_the_shared_reader(
 def test_curation_still_prunes_an_aging_x1(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     mp.append_learning(
-        vault, "Pin the Node version.", source="chat-1"
+        vault, "Pin the Node version.", workspace="personal", source="chat-1"
     )  # counts as today, so the entry is fresh
     _age_the_only_entry(vault, "2026-01-01")
 
-    items = cr._learning_items(vault, today=date(2026, 9, 19))
+    items = cr._learning_items(vault, workspace="personal", today=date(2026, 9, 19))
 
     assert [item.pass_id for item in items] == [cr.PASS_LEARNINGS]
     assert items[0].keys == (
@@ -601,7 +632,7 @@ def test_curation_does_not_replan_a_resolved_learning(tmp_path: Path) -> None:
         "- [pin-node] [2026-01-01 → 2026-09-01] (x4) Pin the Node version.\n",
     )
 
-    assert cr._learning_items(vault, today=date(2026, 9, 19)) == []
+    assert cr._learning_items(vault, workspace="personal", today=date(2026, 9, 19)) == []
 
 
 def test_curation_ignores_an_entry_with_no_recurrence(tmp_path: Path) -> None:
@@ -613,7 +644,7 @@ def test_curation_ignores_an_entry_with_no_recurrence(tmp_path: Path) -> None:
     """
     vault = _vault(tmp_path, "# Learnings\n\n## Active\n- Ask before deleting.\n")
 
-    assert cr._learning_items(vault, today=date(2026, 9, 19)) == []
+    assert cr._learning_items(vault, workspace="personal", today=date(2026, 9, 19)) == []
 
 
 def _age_the_only_entry(vault: Path, last_seen: str) -> None:

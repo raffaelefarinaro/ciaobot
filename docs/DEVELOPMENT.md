@@ -608,8 +608,11 @@ ciao learnings-cleanup --vault-root memory-vault/personal \
 ```
 
 `--vault-root` is this *workspace's* vault root, exactly as it is for
-`learnings-migrate`, and the workspace name defaults to that directory's own
-name — which is the identity its learning ids were minted under.
+`learnings-migrate`. The workspace name is the *registered* one: `--workspace`,
+else the workspace that owns `--vault-root`, else `CIAO_ACTIVE_WORKSPACE`, else
+the primary workspace. That name is the identity learning ids are minted under,
+so on a per-root install, where every vault directory is `memory-vault`, the
+directory's own name is never used for a vault the registry knows.
 
 **Per-entry revision.** What "unchanged since this finding was filed" means is
 *this line has not been touched*, and it is hashed as such:

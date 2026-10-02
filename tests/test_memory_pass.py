@@ -551,7 +551,10 @@ def test_a_remember_sighting_counts_as_something_to_route(
     vault = tmp_path / "memory-vault" / "work"
     vault.mkdir(parents=True, exist_ok=True)
     assert append_learning(
-        vault, "Pin the Node version before running the suite.", request="req-7"
+        vault,
+        "Pin the Node version before running the suite.",
+        workspace="work",
+        request="req-7",
     )
     _write_owned_skill(tmp_path, "notes")
     manager = _make_manager(tmp_path)
