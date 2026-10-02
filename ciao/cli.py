@@ -1951,6 +1951,22 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str]:
     # `_resolve_workspace_and_vaults` follow).
     env = dict(os.environ)
     env.setdefault("PWA_AUTH_TOKEN", "learnings-cli")
+    if not env.get("CIAO_WORKSPACE", "").strip():
+        # A bare shell has no CIAO_WORKSPACE, and an explicit env makes from_env
+        # skip discovery and fall into the bootstrap root, whose registry knows no
+        # real vault. Ask the installed server's LaunchAgent, as `from_env()` would,
+        # else use the cwd (the old `./memory-vault` default's base).
+        from ciao.macos_service import discover_runtime
+
+        try:
+            discovered = discover_runtime(environ=dict(os.environ))
+        except Exception:  # noqa: BLE001 - plist missing/unreadable
+            discovered = None
+        if discovered and discovered.workspace:
+            env["CIAO_WORKSPACE"] = str(discovered.workspace)
+            env.setdefault("CIAO_RUNTIME_ROOT", discovered.runtime_root)
+        else:
+            env["CIAO_WORKSPACE"] = str(Path.cwd())
     config = CiaoConfig.from_env(env)
 
     name = (getattr(args, "workspace", None) or "").strip()
@@ -1980,9 +1996,20 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str]:
         # directory in person and there is no workspace name to resolve.
         return vault, vault.name
     active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
-    resolved = (
-        active if active and config.workspace(active) else config.primary_workspace()
-    )
+    if active:
+        # Refused, not repaired, exactly as an unknown `--workspace` is: a name
+        # the registry does not know means the run is about the wrong workspace's
+        # data, and `--apply-settled` would remove entries from it while the
+        # receipt names the primary workspace instead. `_resolve_workspace_and_vaults`
+        # answers this the same way, so the planner and this command agree.
+        if config.workspace(active) is None:
+            raise ValueError(
+                f"CIAO_ACTIVE_WORKSPACE `{active}` is not a registered workspace. "
+                f"Registered: {', '.join(config.workspace_names())}."
+            )
+        resolved = active
+    else:
+        resolved = config.primary_workspace()
     return Path(config.workspace_vault_root(resolved)).resolve(), resolved
 
 

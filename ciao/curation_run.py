@@ -1423,6 +1423,9 @@ def build_worklist(
         collected.extend(entry_items)
         if stale_entry:
             notes.append(stale_entry)
+    # The scope does not affect this output — it only reads entry keys, never an
+    # id — and is threaded through anyway so no caller reaches for the vault
+    # directory's own name to fill it in.
     collected.extend(_learning_items(vault_root, workspace=workspace or "", today=today))
     if config is None:
         notes.append(

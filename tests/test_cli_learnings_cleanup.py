@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -192,8 +193,8 @@ def _learnings(vault: Path) -> str:
 
 def _run(*args: str) -> list[str]:
     # `--vault-root` is this *workspace's* vault root, exactly as it is for
-    # `learnings-migrate`, and the workspace name defaults to that directory's own
-    # name — which is the identity its learning ids were minted under.
+    # `learnings-migrate`. The workspace name is resolved through the registry:
+    # the default registry in this harness names `personal` → `memory-vault/personal`.
     return ["learnings-cleanup", *args, "--vault-root", f"memory-vault/{WORKSPACE}"]
 
 
@@ -1154,3 +1155,81 @@ def test_a_vault_root_that_is_not_the_workspaces_is_refused(
         f"---\ntags: [ciao, learnings]\nupdated: 2020-01-01\n---\n"
         f"# Learnings\n\n## Active\n\n{render_learning(RETIRED_RECORD)}\n"
     )
+
+
+def test_a_bare_shell_resolves_the_installed_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The reported case: no `CIAO_WORKSPACE`, just a terminal.
+
+    A plain shell has no workspace in the environment, and handing `from_env` an
+    explicit dict makes it skip the LaunchAgent lookup a bare invocation gets, so
+    the run reads the bootstrap registry — which knows no vault, and mints a
+    secret under `~/.ciao/bootstrap`. Then `--vault-root memory-vault` resolves
+    to the directory's own name and the receipt is #912 all over again. The
+    install the operator actually has is what the running server's LaunchAgent
+    points at, so that is what this asks.
+    """
+    vault = _per_root_install(
+        tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD)
+    )
+    approval = _write_approval(tmp_path, _approvals(RETIRED_RECORD))
+    runtime = tmp_path / "install" / ".runtime"
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(tmp_path / "install"), runtime_root=str(runtime)
+        ),
+    )
+
+    assert cli.main(
+        [
+            "learnings-cleanup",
+            "--apply",
+            "--approval-file",
+            str(approval),
+            "--runtime-root",
+            str(runtime),
+            "--vault-root",
+            str(vault),
+        ]
+    ) == 0
+
+    receipt = next((runtime / "migration").glob("learnings-cleanup-*.json"))
+    assert json.loads(receipt.read_text(encoding="utf-8"))["workspace"] == WORKSPACE
+    assert "Removed 1 entr(y/ies)." in capsys.readouterr().out
+    assert render_learning(RETIRED_RECORD) not in _learnings(vault)
+    # A read-only name resolution must not manufacture an install beside the real
+    # one: the whole reason discovery is consulted is to avoid that bootstrap root.
+    assert not (tmp_path / "home" / ".ciao").exists()
+
+
+def test_an_unknown_active_workspace_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A set-but-unregistered `CIAO_ACTIVE_WORKSPACE` is refused, not repaired.
+
+    The failure it stands in for is silent and destructive: the run reconciles the
+    *primary* workspace's `Learnings.md`, removes entries from it, and writes a
+    receipt naming it — because the registry it read was built somewhere else, or
+    the workspace was renamed. `_resolve_workspace_and_vaults` answers this the
+    same way, so the nightly planner and this command do not disagree about which
+    workspace a run is about.
+    """
+    vault = _per_root_install(tmp_path, monkeypatch, records=(RETIRED_RECORD,))
+    before = (vault / "Workspace" / "Learnings.md").read_bytes()
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "nope")
+
+    assert cli.main(["learnings-cleanup"]) == 1
+
+    err = capsys.readouterr().err
+    assert "CIAO_ACTIVE_WORKSPACE `nope` is not a registered workspace" in err
+    assert WORKSPACE in err
+    assert (vault / "Workspace" / "Learnings.md").read_bytes() == before
