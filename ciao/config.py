@@ -137,10 +137,16 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     from dotenv import dotenv_values
 
     discovered_workspace = str(discovered.workspace)
+    dotenv_path = Path(discovered_workspace) / ".env"
+    # Pinned even when that workspace has no `.env`: a LaunchAgent pointing at a
+    # directory means a server is installed there, and falling through to a
+    # freshly manufactured bootstrap root beside it is the failure discovery
+    # exists to prevent. (`from_env` used to pin only when the `.env` existed,
+    # while the CLI's own copy always pinned; this is the one rule for both.)
     try:
         overlay: dict[str, str] = {
             key: value
-            for key, value in dotenv_values(Path(discovered_workspace) / ".env").items()
+            for key, value in dotenv_values(dotenv_path).items()
             if key and value is not None
         }
     except OSError:
