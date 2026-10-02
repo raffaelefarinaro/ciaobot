@@ -4,8 +4,11 @@ plus event-broadcast coverage for project CRUD."""
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +39,19 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         transcript_store=transcripts,
         path=runtime / "web_projects.json",
     )
+
+
+async def _release_after(
+    blockers: list[threading.Event], delay: float
+) -> None:
+    """Release saturated pool workers after *delay* seconds.
+
+    Used by the #942 regression test so the old fixed-budget poll would expire
+    while the pool is still saturated, independently of the waiter under test.
+    """
+    await asyncio.sleep(delay)
+    for event in blockers:
+        event.set()
 
 
 class _EventCapture:
@@ -472,15 +488,121 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
         chat,
         project,
     )
-    # The index write is dispatched as a tracked background task; let it run.
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if indexed:
-            break
+    # The index write is dispatched as a tracked background task. Wait on that
+    # task itself (not a fixed sleep budget): under a loaded runner the read can
+    # be admitted late, and the old 500 ms poll expired before it ran (#942).
+    pending = [
+        t
+        for t in pcm._detached_tasks
+        if t.get_name() == f"archive-index-{chat.chat_id}"
+    ]
+    assert pending, "postprocess did not schedule the index task"
+    await asyncio.gather(*pending)
 
     assert indexed == [archive_path], "archive indexing did not run"
     assert locks, "archive indexing did not take the shared FTS write lock"
     assert locks[0] == f"fts-index:{fts_search.get_db_path()}"
+
+
+@pytest.mark.asyncio
+async def test_archive_index_waits_for_the_detached_task_under_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#942: the wait is on the detached task, not a fixed time budget.
+
+    Reproduces the Windows CI flake on a fast machine: saturate the shared,
+    bounded vault-read executor so the archive index read cannot be admitted
+    within the old 500 ms poll, then run the real postprocess body. The fixed
+    budget would assert while indexing is merely late; awaiting the tracked
+    ``archive-index-<chat>`` task completes once the pool drains.
+    """
+    from ciao import async_reads, fts_search
+
+    async_reads.reset_vault_read_executor()
+    blockers: list[threading.Event] = []
+    submitted: list[concurrent.futures.Future[None]] = []
+    release_task: asyncio.Task[None] | None = None
+    try:
+        pcm = _make_manager(tmp_path)
+        project = pcm.create_project("archive-index-load", workspace="work")
+        chat = pcm.create_chat(project.project_id, title="archive index load chat")
+
+        locks: list[str] = []
+        indexed: list[Path] = []
+        real_keyed_lock = async_reads.keyed_lock
+
+        def _recording_keyed_lock(key: str):
+            locks.append(key)
+            return real_keyed_lock(key)
+
+        def _recording_index_file(conn, vault_root, file_path, *, path_base=None):
+            indexed.append(Path(file_path))
+            return True
+
+        monkeypatch.setattr(async_reads, "keyed_lock", _recording_keyed_lock)
+        monkeypatch.setattr(fts_search, "index_file", _recording_index_file)
+
+        executor = async_reads.vault_read_executor()
+        for i in range(executor.max_backlog):
+            event = threading.Event()
+            submitted.append(
+                executor.submit(
+                    f"block-{i}",
+                    lambda e=event: e.wait(),
+                    coalesce=False,
+                )
+            )
+            blockers.append(event)
+
+        archive_path = tmp_path / "archive.md"
+        archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
+        pcm.run_archive_postprocess(
+            chat.chat_id,
+            ArchiveOutcome(
+                path=archive_path,
+                turn_count=1,
+            ),
+            chat,
+            project,
+        )
+        pending = [
+            t
+            for t in pcm._detached_tasks
+            if t.get_name() == f"archive-index-{chat.chat_id}"
+        ]
+        assert pending, "postprocess did not schedule the index task"
+
+        # Keep the pool saturated for longer than the old 500 ms budget.
+        # Releasing from a background coroutine (not before the wait) means a
+        # regression to the old 50 x 10 ms poll asserts on an empty ``indexed``
+        # here instead of passing by accident.
+        release_task = asyncio.ensure_future(_release_after(blockers, 0.75))
+
+        # The pool is saturated, so the index read cannot have run yet.
+        await asyncio.sleep(0.05)
+        assert indexed == [], "indexed before the saturated pool was released"
+
+        # The wait is on the tracked index task, never the clock.
+        await asyncio.gather(*pending)
+
+        assert indexed == [archive_path], "archive indexing did not run"
+        assert locks, "archive indexing did not take the shared FTS write lock"
+        assert locks[0] == f"fts-index:{fts_search.get_db_path()}"
+    finally:
+        if release_task is not None:
+            if not release_task.done():
+                release_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await release_task
+        # Always release every worker before tearing down, then join them:
+        # ``reset_vault_read_executor`` only cancels queued jobs and waits up
+        # to two seconds, so a still-running blocker would survive it.
+        for event in blockers:
+            event.set()
+        for future in submitted:
+            with contextlib.suppress(Exception):
+                future.result()
+        async_reads.reset_vault_read_executor()
 
 
 def test_synchronous_archive_indexing_is_best_effort(
