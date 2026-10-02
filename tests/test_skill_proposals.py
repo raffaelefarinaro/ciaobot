@@ -961,7 +961,7 @@ def test_the_prompt_carries_the_proposal_its_findings_and_its_revision(
     assert stored.reviewed_revision[:12] in prompt
     # The resolution, through the CLI that owns the settlement, and the
     # interrupted escape that keeps an unfinished edit recoverable.
-    assert "ciao skill-proposal-remove web-research --workspace . --applied" in prompt
+    assert "ciao skill-proposal-remove web-research --applied" in prompt
     assert "--interrupted" in prompt
     assert "Read the current skill first" in prompt
     assert "ciao sync-skills" in prompt
@@ -970,12 +970,14 @@ def test_the_prompt_carries_the_proposal_its_findings_and_its_revision(
 def test_the_prompt_runs_no_command_it_does_not_mean(tmp_path: Path) -> None:
     """A prompt is instructions, so every command in it has to do what it says.
 
-    Two ways it did not. ``sync-skills --workspace`` takes a PATH, and the chat's
+    Three ways it did not. ``sync-skills --workspace`` takes a PATH, and the chat's
     working directory is already the owning agent root, so passing the workspace
     NAME resolved to ``<root>/work`` and seeded a stray catalog there instead of
     syncing the real one. And the prompt told the chat to settle a finding "as not
     applicable" while the CLI exposed no way to record that — so the one branch a
     chat that concluded the finding had expired could not answer for itself.
+    ``--workspace`` on ``skill-proposal-remove`` is the install-root path too, so
+    ``--workspace .`` from the agent root resolved a queue that does not exist.
     """
     config = _config(tmp_path)
     stored = sp.upsert_proposal(config, _proposal(workspace="work"))
@@ -984,7 +986,8 @@ def test_the_prompt_runs_no_command_it_does_not_mean(tmp_path: Path) -> None:
 
     assert "sync-skills --workspace" not in prompt
     assert "ciao sync-skills" in prompt
-    assert "ciao skill-proposal-remove web-research --workspace . --not-applicable" in prompt
+    assert "ciao skill-proposal-remove web-research --not-applicable" in prompt
+    assert "skill-proposal-remove web-research --workspace" not in prompt
 
 
 def test_every_outcome_the_prompt_names_is_one_the_cli_can_record(
