@@ -154,17 +154,15 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
         }
     except OSError:
         overlay = {}
-    overlay["CIAO_WORKSPACE"] = discovered_workspace
-    merged: dict[str, str] = {**overlay, **base}
-    # Pinned again after the merge, not only in the overlay: discovery is
-    # entered for an *empty* CIAO_WORKSPACE as well as an unset one
+    # The pin is the merge's final word, not the overlay's: discovery is entered
+    # for an *empty* CIAO_WORKSPACE as well as an unset one
     # (`export CIAO_WORKSPACE=` in a shell profile), and the caller's
-    # environment wins the merge, so the empty string beat the pin. The result
-    # was the hybrid this pinning exists to prevent — the installed workspace's
-    # auth and provider settings applied to a freshly manufactured bootstrap
-    # root, because `bootstrap_mode` still saw no workspace.
-    if not _workspace_env(merged):
-        merged["CIAO_WORKSPACE"] = discovered_workspace
+    # environment wins the merge, so an empty string would otherwise beat the
+    # pin. The result was the hybrid this pinning exists to prevent — the
+    # installed workspace's auth and provider settings applied to a freshly
+    # manufactured bootstrap root, because `bootstrap_mode` still saw no
+    # workspace.
+    merged: dict[str, str] = {**overlay, **base, "CIAO_WORKSPACE": discovered_workspace}
     return merged
 
 
@@ -1705,7 +1703,7 @@ class CiaoConfig:
         else:
             vault_root = (workspace_root / "memory-vault").resolve()
         runtime_root = Path(
-            source.get("CIAO_RUNTIME_ROOT", str(runtime_default))
+            source.get("CIAO_RUNTIME_ROOT", "").strip() or str(runtime_default)
         ).expanduser()
         if not runtime_root.is_absolute():
             runtime_root = workspace_root / runtime_root

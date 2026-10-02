@@ -4374,6 +4374,135 @@ def test_a_bare_shell_explicit_vault_root_with_an_empty_workspace_mints_nothing(
     assert not (home / ".ciao").exists()
 
 
+def test_a_bare_shell_active_workspace_does_not_mint_a_bootstrap_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`CIAO_ACTIVE_WORKSPACE` alone must resolve through the install, not bootstrap.
+
+    A scheduled run exports the active workspace name without `CIAO_WORKSPACE`,
+    so the branch built `dict(os.environ)` and skipped discovery. With no
+    workspace, `from_env` took the bootstrap branch and wrote
+    `<bootstrap>/.runtime/bootstrap-auth-token`, then read a registry nobody
+    asked for. Routing through `installed_workspace_env` gives it the installed
+    root and its registry, and the token stand-in only when blank keeps it out of
+    bootstrap mode.
+    """
+    root, vault = _registered_install(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("CIAO_WORKSPACE", "CIAO_VAULT_ROOT", "CIAO_RUNTIME_ROOT", "PWA_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(root), runtime_root=str(root / ".runtime")
+        ),
+    )
+
+    workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args()
+    )
+
+    assert name == "work"
+    assert workspace == root.resolve()
+    assert resolved == vault.resolve()
+    # What bootstrap mode cost: `from_env` wrote the token under the redirect
+    # conftest installs (`tmp_path/bootstrap`), because discovery was skipped.
+    assert not (tmp_path / "bootstrap").exists(), "a read-only resolution must mint nothing"
+
+
+def test_a_bare_shell_vault_root_uses_the_installed_root_not_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install root, not the cwd, is the workspace a bare shell `--vault-root` is named after.
+
+    `_curation_context` passes this `workspace` to `guide_path(workspace)`, and
+    `_curation_config` puts `state_path` under `<workspace>/.runtime` — so
+    returning the cwd read the guide and wrote state beside the shell while the
+    run was named after the installed workspace.
+    """
+    root, vault = _registered_install(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT", "CIAO_ACTIVE_WORKSPACE", "PWA_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(root), runtime_root=str(root / ".runtime")
+        ),
+    )
+
+    workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args(vault_root=str(vault))
+    )
+
+    assert name == "work"
+    assert resolved == vault.resolve()
+    assert workspace == root.resolve(), "the installed root, not the cwd"
+
+
+def test_a_bare_shell_read_only_audit_targets_the_install_not_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`os-audit` and `memory-audit` read the install, not the directory you are in.
+
+    Both commands defaulted their workspace to the cwd, so from a bare shell they
+    audited whatever directory happened to be current. Discovery seeds the
+    installed root instead, and the token stand-in is applied only when blank so
+    the read-only resolution can never enter bootstrap mode.
+    """
+    root = tmp_path / "workspace"
+    _write_healthy_audit_workspace(root)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("CIAO_WORKSPACE", "CIAO_VAULT_ROOT", "CIAO_RUNTIME_ROOT", "PWA_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("CIAO_ACTIVE_WORKSPACE", raising=False)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(root), runtime_root=str(root / ".runtime")
+        ),
+    )
+
+    import ciao.os_audit as os_audit
+
+    seen: dict[str, Any] = {}
+    real_os_audit = os_audit.run_os_audit
+
+    def _spy(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return real_os_audit(**kwargs)
+
+    monkeypatch.setattr(os_audit, "run_os_audit", _spy)
+    cli.main(["os-audit", "--json"])
+
+    assert seen["workspace_dir"] == root.resolve()
+    assert seen["vault_root"] == (root / "memory-vault").resolve()
+    assert seen["runtime_dir"] == (root / ".runtime").resolve()
+
+    import ciao.os_audit as os_audit_mod
+
+    memory_seen: dict[str, Any] = {}
+    real_scan = os_audit_mod._scan_memory_guide
+
+    def _scan_spy(guide: Path, **kwargs: Any) -> dict[str, Any]:
+        memory_seen["workspace_dir"] = kwargs["workspace_dir"]
+        return real_scan(guide, **kwargs)
+
+    monkeypatch.setattr(os_audit_mod, "_scan_memory_guide", _scan_spy)
+    cli.main(["memory-audit", "--json"])
+
+    assert memory_seen["workspace_dir"] == root.resolve()
+    assert not (tmp_path / "bootstrap").exists(), "a read-only audit must mint nothing"
+    assert not (elsewhere / ".runtime").exists(), "nothing may be created under the cwd"
+
+
 def test_curation_plan_with_a_per_root_vault_root_folds_under_the_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
