@@ -75,7 +75,7 @@ describe('memoryInsights', () => {
     expect(row.passChatId).toBe('pass-1')
     expect(row.archivePath).toBe('chats/src.md')
     expect(row.phase).toBe('running')
-    expect(row.label).toBe('updating memory…')
+    expect(row.label).toBe('extracting…')
     expect(row.active).toBe(true)
     expect(row.blocking).toBe(false)
   })
@@ -131,7 +131,7 @@ describe('memoryInsights', () => {
   it('marks an archive POST in flight as archiving', () => {
     const [row] = run([source({ archive_path: 'chats/src.md' })], { isArchiving: id => id === 'src' })
     expect(row.phase).toBe('archiving')
-    expect(row.label).toBe('archiving…')
+    expect(row.label).toBe('extracting…')
   })
 
   it('never gives a pass a row of its own for its own auto-archive', () => {

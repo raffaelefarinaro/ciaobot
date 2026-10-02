@@ -74,6 +74,15 @@ describe('HomeRecentChats lanes and tiers', () => {
     wrapper.unmount()
   })
 
+  it('places chat signals above the right-aligned relative time', async () => {
+    const wrapper = await mountHome()
+    const row = wrapper.find('.home-chat-item:not(.home-chat-item--insight)')
+    expect(row.find('.home-chat-end .chat-signals').exists()).toBe(true)
+    expect(row.find('.home-chat-end .home-chat-time').exists()).toBe(true)
+    expect(row.find('.home-chat-heading .chat-signals').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   // The point of the scoped home: the workspace toggle swaps the lane's
   // content instead of revealing another column.
   it('swaps the lane content when the active workspace changes', async () => {
@@ -211,7 +220,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     expect(workLane.find('.home-insights .home-tier-label').text()).toBe('memory insights')
     // The row is named for the conversation, not for the pass's internal title.
     expect(rows[0].find('.home-chat-title').text()).toBe('Archived work chat')
-    expect(rows[0].find('.home-chat-tidy-note').text()).toBe('updating memory…')
+    expect(rows[0].find('.home-chat-tidy-note').text()).toBe('extracting…')
 
     // The pass is a chat, so it used to be a Working row of its own. It is not
     // in the tiers any more, and the same conversation is not listed twice.
@@ -253,7 +262,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     const rows = workLane.findAll('.home-insight-row')
     expect(rows).toHaveLength(2)
     expect(workLane.find('.home-lane-status-text').text()).toContain('2 updating memory')
-    expect(rows.map(row => row.find('.home-chat-tidy-note').text())).toEqual(['archiving…', 'archiving…'])
+    expect(rows.map(row => row.find('.home-chat-tidy-note').text())).toEqual(['extracting…', 'extracting…'])
 
     // The other workspace's chats stay hidden until it is switched to.
     expect(wrapper.text()).not.toContain('Needs an answer')

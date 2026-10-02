@@ -5,9 +5,12 @@ import { useProjectStore } from '../stores/projects'
 import { askConfirm } from '../lib/confirm'
 import type { OperatorAction, UpdateTaskRow } from '../lib/types'
 import { renderMarkdown } from '../lib/safeMarkdown'
+import HomeNoticeWindow from './HomeNoticeWindow.vue'
+import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
+const noticeWindows = useHomeNoticeWindows()
 
 const chatBusy = ref(false)
 
@@ -33,10 +36,15 @@ const scopedActions = computed(() => {
     (action) => !action.workspace || action.workspace === active,
   )
 })
+const visibleActions = computed(() => scopedActions.value.filter(action => !noticeWindows.isClosed(actionKey(action))))
+
+function actionKey(action: OperatorAction): string {
+  return `action:${action.workspace || 'shared'}:${action.id}`
+}
 
 const groups = computed(() => {
   const byWorkspace = new Map<string, OperatorAction[]>()
-  for (const action of scopedActions.value) {
+  for (const action of visibleActions.value) {
     const key = action.workspace || ''
     const bucket = byWorkspace.get(key)
     if (bucket) bucket.push(action)
@@ -65,7 +73,7 @@ onMounted(() => {
 // The strip has no permanent furniture: with zero actions it renders nothing at
 // all (the template guards on a non-empty list before creating any element).
 function hasActions(): boolean {
-  return housekeeping.actions.length > 0
+  return visibleActions.value.length > 0
 }
 
 async function runAction(action: OperatorAction): Promise<void> {
@@ -211,6 +219,21 @@ const visibleUpdateTasks = computed(() =>
     return task.applicability !== 'not_applicable'
   }),
 )
+const openUpdateTasks = computed(() => visibleUpdateTasks.value.filter(task => !noticeWindows.isClosed(updateKey(task))))
+
+function updateKey(task: UpdateTaskRow): string {
+  return `update:${projectStore.activeWorkspace || 'shared'}:${taskKey(task)}`
+}
+
+watch(
+  () => [
+    ...scopedActions.value.map(actionKey),
+    ...visibleUpdateTasks.value.map(updateKey),
+  ],
+  keys => noticeWindows.setAvailable('housekeeping', keys),
+  { immediate: true },
+)
+onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
 
 /** Whether the group draws anything at all.
  *
@@ -237,7 +260,7 @@ const visibleUpdateTasks = computed(() =>
  * The one place a failed check *is* reported is Settings → Update task history,
  * which fetches for itself and owns the error, its retry, and the empty state. */
 const showUpdateGroup = computed(
-  () => visibleUpdateTasks.value.length > 0 || groupStatus.value !== '',
+  () => openUpdateTasks.value.length > 0 || groupStatus.value !== '',
 )
 
 /** One task's key. A revision is a different record and a different card, so
@@ -480,16 +503,18 @@ watch(
       <p v-if="showHeadings" class="housekeeping-group">
         {{ group.workspace || 'shared' }}
       </p>
-      <article
-        v-for="action in group.actions"
-        :key="action.id"
-        class="housekeeping-tile"
-        :class="{ 'housekeeping-tile--blocking': action.blocking }"
-      >
-      <div class="housekeeping-body">
-        <p class="housekeeping-title">{{ action.title }}</p>
-        <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
-        <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
+       <HomeNoticeWindow
+         v-for="action in group.actions"
+         :key="action.id"
+         class="housekeeping-tile"
+         :class="{ 'housekeeping-tile--blocking': action.blocking }"
+         :title="action.title"
+         :notice-key="actionKey(action)"
+         :blocking="action.blocking"
+       >
+       <div class="housekeeping-body">
+         <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+         <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
       </div>
       <div class="housekeeping-actions">
         <!-- A view-led tile (the update tile) puts its view button first and
@@ -544,7 +569,7 @@ watch(
           @click="dismissAction(action)"
         >{{ action.dismiss_label }}</button>
         </div>
-      </article>
+       </HomeNoticeWindow>
     </template>
   </section>
 
@@ -555,8 +580,8 @@ watch(
     tabindex="-1"
     aria-labelledby="update-tasks-heading"
   >
-    <h2 id="update-tasks-heading" class="update-tasks-heading">After this update</h2>
-    <p class="update-tasks-lede">
+     <h2 id="update-tasks-heading" class="update-tasks-heading">After this update</h2>
+     <p v-if="openUpdateTasks.length" class="update-tasks-lede">
       Work this version of Ciaobot left behind for
       {{ projectStore.activeWorkspace || 'this install' }}.
     </p>
@@ -566,14 +591,15 @@ watch(
          result is announced once focus has landed back on the group. -->
     <p class="update-tasks-status" role="status">{{ groupStatus }}</p>
 
-    <article
-      v-for="task in visibleUpdateTasks"
-      :key="taskKey(task)"
-      class="housekeeping-tile update-task"
-    >
-      <div class="housekeeping-body">
-        <p class="housekeeping-title">{{ task.title }}</p>
-        <div class="housekeeping-detail">{{ task.why }}</div>
+     <HomeNoticeWindow
+       v-for="task in openUpdateTasks"
+       :key="taskKey(task)"
+       class="housekeeping-tile update-task"
+       :title="task.title"
+       :notice-key="updateKey(task)"
+     >
+       <div class="housekeeping-body">
+         <div class="housekeeping-detail">{{ task.why }}</div>
         <p class="update-task-meta">
           <span>{{ taskStateLine(task) }}</span>
           <span v-if="task.since_version">Since Ciaobot {{ task.since_version }}</span>
@@ -645,7 +671,7 @@ watch(
           @click="dismissTask(task)"
         >Hide it</button>
       </div>
-    </article>
+     </HomeNoticeWindow>
   </section>
 </template>
 
@@ -680,24 +706,23 @@ watch(
   display: flex;
   flex-direction: column;
   margin-block: var(--space-3);
+  gap: var(--space-3);
 }
 
 .housekeeping-tile {
+  min-width: 0;
+}
+.housekeeping-tile :deep(.home-notice-content) {
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-areas:
-    'body'
-    'actions';
+  grid-template-areas: 'body' 'actions';
   column-gap: var(--space-2);
   row-gap: var(--space-2);
   align-items: start;
-  padding: var(--space-2) 0;
-  border-top: 1px solid var(--border);
-  min-width: 0;
 }
 
 @media (min-width: 640px) {
-  .housekeeping-tile {
+  .housekeeping-tile :deep(.home-notice-content) {
     grid-template-columns: 1fr auto;
     grid-template-areas: 'body actions';
     align-items: center;
@@ -726,7 +751,7 @@ watch(
 }
 
 .housekeeping-detail {
-  margin: var(--space-1) 0 0;
+  margin: 0;
   font-size: var(--text-sm);
   color: var(--fg2);
 }
@@ -792,6 +817,7 @@ watch(
   margin-block: var(--space-3);
   display: flex;
   flex-direction: column;
+  gap: var(--space-3);
 }
 
 /* The group takes focus when a card it owns disappears (see keepFocus), and a

@@ -84,6 +84,7 @@ describe('HomeReviewSummary', () => {
 
   it('counts only the active workspace and refreshes on scope changes', async () => {
     const wrapper = mount(HomeReviewSummary)
+    expect(wrapper.get('#home-review-title').text()).toBe('At a glance')
     // Up-to-date queues drop out; only what needs a look is listed.
     let titles = wrapper.findAll('.home-review-title').map(node => node.text())
     expect(titles).toEqual(['1 memory proposal', '1 active automation'])

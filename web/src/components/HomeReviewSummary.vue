@@ -1,6 +1,6 @@
 <template>
   <section class="home-review-summary" aria-labelledby="home-review-title">
-    <h2 id="home-review-title">What changed</h2>
+    <h2 id="home-review-title">At a glance</h2>
 
     <!-- Only what needs a look: an up-to-date queue is not news, so it drops
          out instead of holding a row that says "nothing here". -->

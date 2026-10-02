@@ -87,11 +87,6 @@
                       class="home-chat-title"
                       :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
-                    <ChatSignals
-                      :chat-id="chat.chat_id"
-                      :density="entry.key === 'needsYou' || entry.key === 'unread' ? 'card' : 'row'"
-                      :hue="colorOf(chat)"
-                    />
                   </span>
                   <!-- Project plus a status phrase read from the same signals
                        that sorted the row into its tier, so the sub-line can
@@ -111,7 +106,14 @@
                     {{ store.chatLastSnippet(chat.chat_id) }}
                   </span>
                 </span>
-                <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+                <span class="home-chat-end">
+                  <ChatSignals
+                    :chat-id="chat.chat_id"
+                    :density="entry.key === 'needsYou' || entry.key === 'unread' ? 'card' : 'row'"
+                    :hue="colorOf(chat)"
+                  />
+                  <span class="home-chat-time">{{ relativeActivity(chat) }}</span>
+                </span>
               </button>
             </div>
 
@@ -1160,7 +1162,17 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
-/* Live step of a memory insight ("updating memory…"). Muted like the lane
+.home-chat-end {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 4px;
+  min-width: 5ch;
+}
+
+/* Live step of a memory insight ("extracting…"). Muted like the lane
    header's in-flight fragment: this is background work, never a demand. */
 .home-chat-tidy-note {
   min-width: 0;
