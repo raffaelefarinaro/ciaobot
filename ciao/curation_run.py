@@ -1004,7 +1004,9 @@ def _stale_entry_items(
 
 
 
-def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
+def _learning_items(
+    vault_root: Path, *, workspace: str, today: date
+) -> list[WorklistItem]:
     from ciao.learning_records import SECTION_ACTIVE, parse_learnings
 
     text = _read_text(vault_root / LEARNINGS_RELATIVE)
@@ -1017,7 +1019,7 @@ def _learning_items(vault_root: Path, *, today: date) -> list[WorklistItem]:
     # them every night is how a promoted learning gets promoted twice. The parser
     # says which section an entry is in, so that no longer depends on a heading
     # being spelled exactly `## Promoted`.
-    document = parse_learnings(text, workspace=vault_root.name)
+    document = parse_learnings(text, workspace=workspace)
     subjects: list[str] = []
     reasons: list[str] = []
     promote = prune = 0
@@ -1054,6 +1056,7 @@ def _learnings_cleanup_items(
     *,
     config: Any,
     today: date,
+    workspace: str,
 ) -> tuple[list[WorklistItem], str]:
     """The settled learnings this night may retire, and a note about the rest.
 
@@ -1091,7 +1094,7 @@ def _learnings_cleanup_items(
     try:
         plan = learnings_cleanup.plan_cleanup(
             root,
-            workspace=root.name,
+            workspace=workspace,
             config=config,
             today=today,
             max_removals=LEARNINGS_CLEANUP_MAX_ITEMS,
@@ -1420,15 +1423,26 @@ def build_worklist(
         collected.extend(entry_items)
         if stale_entry:
             notes.append(stale_entry)
-    collected.extend(_learning_items(vault_root, today=today))
+    # The scope does not affect this output — it only reads entry keys, never an
+    # id — and is threaded through anyway so no caller reaches for the vault
+    # directory's own name to fill it in.
+    collected.extend(_learning_items(vault_root, workspace=workspace or "", today=today))
     if config is None:
         notes.append(
             "learnings cleanup was not planned: this worklist was built without a "
             "workspace registry, and the settlement fold needs one"
         )
+    elif workspace is None:
+        # A registry is not enough on its own: the fold answers under the
+        # registered name, so a worklist that never resolved one has no scope to
+        # fold in even with the queue in reach.
+        notes.append(
+            "learnings cleanup was not planned: no registered workspace name "
+            "was resolved for this vault, and the settlement fold needs one"
+        )
     else:
         cleanup_items, cleanup_note = _learnings_cleanup_items(
-            vault_root, config=config, today=today
+            vault_root, workspace=workspace, config=config, today=today
         )
         collected.extend(cleanup_items)
         if cleanup_note:

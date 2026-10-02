@@ -1919,6 +1919,127 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     return 1 if summary["failed"] else 0
 
 
+def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
+    """``(vault root, workspace name, runtime root)`` for a learnings command.
+
+    The three belong together because all three are answers read from the same
+    resolved registry: a run that names the right workspace but writes its
+    receipt beside the shell's cwd is the #912 bug in the one place the name no
+    longer comes from a directory. The runtime root is therefore the one the
+    resolved registry was read from — the same ``state_path.parent`` that
+    ``update_tasks`` looks under ``migration/`` for receipts — so a bare-shell
+    receipt lands where the update-task check reads it instead of in
+    ``<cwd>/.runtime``. An explicit ``--runtime-root`` still wins, and with
+    ``CIAO_WORKSPACE`` set this is the directory ``_resolve_runtime_root(None)``
+    already gave, so server-spawned runs do not move.
+
+    The registered name is the only identity scope a learning id is minted
+    under, so every caller resolves the name through the real registry — the
+    same authority :func:`_resolve_workspace_and_vaults` reads — rather than
+    from the vault directory's own name. On a per-root install every workspace's
+    vault directory is called ``memory-vault``, so a name taken from the
+    directory is the same string for every workspace: receipts written under it
+    name a workspace the update-task check does not know, and the cleanup fold
+    looks for a vault under a segment that is not there.
+
+    Precedence, and each rule's reason:
+
+    - an explicit ``--workspace`` is the operator naming a workspace, so an
+      unknown name and a ``--vault-root`` that contradicts it are refused rather
+      than repaired — the run would otherwise write a receipt under one
+      identity while reconciling another;
+    - otherwise a ``--vault-root`` resolves to the workspace that owns it, so
+      the command an operator already had keeps working unchanged;
+    - otherwise the active workspace if there is one, else the primary.
+
+    Raises ``ValueError`` with a message to print; every caller turns that into
+    exit 1 before anything is written.
+    """
+    from ciao.config import CiaoConfig
+
+    # A read-only resolution must not mint a session secret just because the CLI
+    # runs outside the server env (the same rule the memory-audit command and
+    # `_resolve_workspace_and_vaults` follow).
+    env = dict(os.environ)
+    env.setdefault("PWA_AUTH_TOKEN", "learnings-cli")
+    if not env.get("CIAO_WORKSPACE", "").strip():
+        # A bare shell has no CIAO_WORKSPACE, and an explicit env makes from_env
+        # skip discovery and fall into the bootstrap root, whose registry knows no
+        # real vault. Ask the installed server's LaunchAgent, as `from_env()` would,
+        # else use the cwd (the old `./memory-vault` default's base).
+        from ciao.macos_service import discover_runtime
+
+        try:
+            discovered = discover_runtime(environ=dict(os.environ))
+        except Exception:  # noqa: BLE001 - plist missing/unreadable
+            discovered = None
+        if discovered and discovered.workspace:
+            env["CIAO_WORKSPACE"] = str(discovered.workspace)
+            env.setdefault("CIAO_RUNTIME_ROOT", discovered.runtime_root)
+        else:
+            env["CIAO_WORKSPACE"] = str(Path.cwd())
+    config = CiaoConfig.from_env(env)
+    # The receipt has to land in the same `.runtime` the update-task check reads
+    # (`<state_path parent>/migration`), which is the one this registry came from —
+    # not `_resolve_runtime_root(args.runtime_root)`, which only sees
+    # `os.environ` and answers `<cwd>/.runtime` for a bare shell.
+    runtime_root = (
+        _resolve_runtime_root(args.runtime_root)
+        if getattr(args, "runtime_root", None) is not None
+        else Path(config.state_path).parent
+    )
+
+    name = (getattr(args, "workspace", None) or "").strip()
+    if name:
+        if config.workspace(name) is None:
+            raise ValueError(
+                f"Unknown workspace `{name}`. Registered: "
+                f"{', '.join(config.workspace_names())}."
+            )
+        registered = Path(config.workspace_vault_root(name)).resolve()
+        if getattr(args, "vault_root", None):
+            named = _resolve_vault_root(args.vault_root)
+            if named != registered:
+                raise ValueError(
+                    f"`--vault-root {named}` is not workspace `{name}`'s vault "
+                    f"(`{registered}`)."
+                )
+        return registered, name, runtime_root
+    if getattr(args, "vault_root", None):
+        vault = _resolve_vault_root(args.vault_root)
+        for owner in config.workspace_names():
+            try:
+                owned = Path(config.workspace_vault_root(owner)).resolve()
+            except ValueError:
+                # One workspace's registered vault being unusable — a symlinked
+                # folder, an empty root — says nothing about the workspace the
+                # operator named, so it must not fail their run.
+                continue
+            if owned == vault:
+                return vault, owner, runtime_root
+        # An explicit directory the registry does not know is the one case where
+        # the directory's own name stands in for the registered one, exactly as
+        # `_resolve_workspace_and_vaults` prescribes: the operator pointed at a
+        # directory in person and there is no workspace name to resolve.
+        return vault, vault.name, runtime_root
+    active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if active:
+        # Refused, not repaired, exactly as an unknown `--workspace` is: a name
+        # the registry does not know means the run is about the wrong workspace's
+        # data, and `--apply-settled` would remove entries from it while the
+        # receipt names the primary workspace instead. `_resolve_workspace_and_vaults`
+        # answers this the same way, so the planner and this command agree.
+        if config.workspace(active) is None:
+            raise ValueError(
+                f"CIAO_ACTIVE_WORKSPACE `{active}` is not a registered workspace. "
+                f"Registered: {', '.join(config.workspace_names())}."
+            )
+        resolved = active
+    else:
+        resolved = config.primary_workspace()
+    return Path(config.workspace_vault_root(resolved)).resolve(), resolved, runtime_root
+
+
 def _learnings_migrate_command(args: argparse.Namespace) -> int:
     """Convert a workspace's legacy ``Learnings.md`` entries to canonical records.
 
@@ -1941,7 +2062,11 @@ def _learnings_migrate_command(args: argparse.Namespace) -> int:
         write_receipt,
     )
 
-    vault_root = _resolve_vault_root(args.vault_root)
+    try:
+        vault_root, workspace, runtime_root = _learnings_workspace(args)
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
     if not vault_root.is_dir():
         print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
         return 1
@@ -1970,7 +2095,7 @@ def _learnings_migrate_command(args: argparse.Namespace) -> int:
     else:
         summary = migrate_learnings_file(
             vault_root,
-            workspace=vault_root.name,
+            workspace=workspace,
             apply=args.apply,
         )
 
@@ -1983,9 +2108,7 @@ def _learnings_migrate_command(args: argparse.Namespace) -> int:
     receipt_path = ""
     if args.apply and not args.revert and summary.get("entries_migrated"):
         receipt_path = str(
-            write_receipt(
-                new_receipt_path(_resolve_runtime_root(args.runtime_root)), summary
-            )
+            write_receipt(new_receipt_path(runtime_root), summary)
         )
         summary["receipt_path"] = receipt_path
 
@@ -2334,12 +2457,15 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
         unmigrate_cleanup,
     )
 
-    vault_root = _resolve_vault_root(args.vault_root)
+    try:
+        vault_root, workspace, runtime_root = _learnings_workspace(args)
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
     if not vault_root.is_dir():
         print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
         return 1
-    workspace = args.workspace or vault_root.name
-    config = _curation_config(vault_root.parent, vault_root)
+    config = _curation_config(vault_root.parent, vault_root, workspace)
 
     # The three write flags are three different decisions, and a run may make one.
     # Refused up here, before any of them does any work, because the point of
@@ -2474,7 +2600,7 @@ def _learnings_cleanup_command(args: argparse.Namespace) -> int:
     # *before* the document. A run that cannot record the reverse map removes
     # nothing, which is the whole point of having this be one call rather than a
     # write the command does afterwards.
-    receipt_path = new_receipt_path(_resolve_runtime_root(args.runtime_root))
+    receipt_path = new_receipt_path(runtime_root)
     result = apply_cleanup(
         vault_root,
         plan,
@@ -4155,20 +4281,20 @@ def _curation_context(
     return workspace, vault, guide, budget, registry_root, name
 
 
-def _curation_config(workspace: Path, vault: Path) -> Any:
+def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
     """A one-workspace registry that resolves exactly the vault being planned.
 
     The skill-proposal queue and the upstream draft sidecar are addressed through
     ``config.workspace_vault_root(workspace)``, and the skills-cleanup fold needs
     both — so the registry has to name *this* vault, not the install-wide one the
-    server would have loaded. The vault directory's own name is the workspace
-    name, which is the same identity ``_learning_items`` already parses with, so
-    the cleanup pass and the promote/prune pass cannot disagree about which
-    learning an id belongs to.
+    server would have loaded. The registry is keyed by the registered workspace
+    name, which is the identity learning ids are minted under: keying it by the
+    vault directory's own name makes ``workspace_vault_root`` look for a segment
+    that is not there on a per-root install, where every workspace's vault
+    directory is called ``memory-vault``.
     """
     from ciao.config import CiaoConfig, WorkspaceConfig
 
-    name = vault.name
     return CiaoConfig(
         pwa_auth_token="curation",
         workspace_root=workspace,
@@ -4195,7 +4321,7 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         # The one pass that folds the proposal queue needs the registry; every
         # other pass reads files, and saying so is cheaper than making the whole
         # planner conditional.
-        config=_curation_config(workspace, vault),
+        config=_curation_config(workspace, vault, name) if name is not None else None,
         # Named where `scan_vault` renders it rather than restated here: a
         # drifted prefix makes every mtime `stat` miss silently, which reads as
         # "no note is stale" rather than as an error.
@@ -6364,7 +6490,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--vault-root",
         type=Path,
         default=None,
-        help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+        help="Vault root. Defaults to the workspace's registered vault.",
+    )
+    learnings_parser.add_argument(
+        "--workspace",
+        default=None,
+        help=(
+            "Registered workspace whose learnings are migrated. Defaults to the "
+            "workspace that owns --vault-root, else CIAO_ACTIVE_WORKSPACE, else "
+            "the primary workspace."
+        ),
     )
     learnings_parser.add_argument(
         "--runtime-root",
@@ -6421,15 +6556,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--vault-root",
         type=Path,
         default=None,
-        help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
+        help="Vault root. Defaults to the workspace's registered vault.",
     )
     cleanup_parser.add_argument(
         "--workspace",
         default=None,
         help=(
-            "Workspace name whose queue is folded. Defaults to the vault "
-            "directory's own name, which is the identity its learning ids were "
-            "minted under."
+            "Registered workspace whose learnings are reconciled. Defaults to "
+            "the workspace that owns --vault-root, else CIAO_ACTIVE_WORKSPACE, "
+            "else the primary workspace."
         ),
     )
     cleanup_parser.add_argument(

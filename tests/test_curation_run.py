@@ -1751,6 +1751,32 @@ def test_a_worklist_without_a_registry_says_the_pass_did_not_run(
     assert any("without a workspace registry" in note for note in worklist.notes)
 
 
+def test_learnings_cleanup_is_skipped_without_a_workspace_name(tmp_path: Path) -> None:
+    """A registry is not enough on its own: the fold answers in registered names.
+
+    The settlement is looked up under the workspace the registry knows this
+    vault by, so a worklist built with no registered name has no scope to fold
+    in — even with a registry in hand. Skipped and said out loud, never reported
+    as a workspace with nothing to retire.
+    """
+    vault = _settled_vault(tmp_path, _settled_learning("First lesson.", "first"))
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=None,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        config=_cleanup_config(tmp_path, vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert cr.PASS_LEARNINGS_CLEANUP not in {item.pass_id for item in worklist.items}
+    assert any("learnings cleanup was not planned" in note for note in worklist.notes)
+
+
 def test_the_cleanup_backlog_is_capped_and_reported(tmp_path: Path) -> None:
     """A backlog allowed to drain at full speed would take the whole night's
     budget on pass seven of nine, and the required weekly keys would never be
@@ -1876,8 +1902,6 @@ def test_the_pass_finds_nothing_after_the_unattended_mode_has_run(
         "--apply-settled",
         "--vault-root",
         str(vault),
-        "--workspace",
-        vault.name,
         "--runtime-root",
         str(tmp_path / ".runtime"),
     ]

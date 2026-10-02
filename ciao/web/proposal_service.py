@@ -1742,6 +1742,10 @@ def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
         append_learning(
             Path(vault),
             row["text"],
+            # The same registry name the vault was resolved under above: the
+            # identity is minted under it too, so the preview and this write
+            # cannot differ about which learning the line is.
+            workspace=row["workspace"],
             source=str(row.get("source") or ""),
             request=str(row.get("request") or ""),
         )
@@ -2610,7 +2614,10 @@ def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
     after, operation = render_learning_append(
         before,
         text,
-        workspace=vault.name,
+        # The registered name, not the vault directory's: the id the accept will
+        # mint is minted under it, and a preview that computed the identity
+        # differently would show a line the write never produces.
+        workspace=row["workspace"],
         source=str(row.get("source") or ""),
         # A `/remember` of a lesson carries a user-request id rather than an
         # archive turn, and the preview has to render the replacement with
