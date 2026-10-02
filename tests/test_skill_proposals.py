@@ -1030,7 +1030,9 @@ def test_a_proposal_that_links_learnings_asks_for_a_verification(
 
     `settle_proposal` says so, and the prompt's own `--applied` line is what a
     chat runs verbatim — so a prompt that carries no `--verification` names a
-    command that exits 1 and leaves the proposal queued.
+    command that exits 1 and leaves the proposal queued. The placeholder is a
+    bare token and the readback goes in a file: free text has no shell-neutral
+    quoting, and the chat may be typing into PowerShell.
     """
     config = _config(tmp_path)
     stored = sp.upsert_proposal(config, _proposal(origins=(_origin(),)))
@@ -1038,10 +1040,11 @@ def test_a_proposal_that_links_learnings_asks_for_a_verification(
     prompt = sp.render_improvement_prompt(stored)
 
     assert (
-        "ciao skill-proposal-remove web-research --applied --verification "
-        f"'{sp.VERIFICATION_PLACEHOLDER}'"
+        "ciao skill-proposal-remove web-research --applied --verification-file "
+        f"{sp.VERIFICATION_PLACEHOLDER}"
     ) in prompt
     assert "links 1 learning finding(s)" in prompt
+    assert "'\\''" not in prompt
 
 
 def test_a_proposal_without_learnings_has_no_verification_step(
@@ -1059,15 +1062,25 @@ def test_a_proposal_without_learnings_has_no_verification_step(
 
 
 @pytest.mark.parametrize(
-    "doc", ["ciao/stock/skills/ciao-memory/SKILL.md", "docs/AGENT_CLI.md"]
+    "doc",
+    [
+        "ciao/stock/skills/ciao-memory/SKILL.md",
+        "docs/AGENT_CLI.md",
+        "ciao/stock/skills/ciao-cli/SKILL.md",
+    ],
 )
-def test_the_docs_spell_the_placeholder_the_cli_refuses(doc: str) -> None:
-    """An agent copies the example from the docs as readily as from the prompt,
-    and the CLI refuses the placeholder by exact match — so a doc that words it
-    differently is a placeholder that settles a finding as applied."""
+def test_the_docs_name_the_verification_file(doc: str) -> None:
+    """An agent copies the example from the docs as readily as from the prompt.
+
+    A readback is free text, and free text has no shell-neutral quoting: a doc
+    that pastes the lines onto a command line has to teach POSIX-only escaping
+    that is wrong in PowerShell. All three have to name the flag that carries
+    the readback in a file instead.
+    """
     text = (Path(__file__).resolve().parents[1] / doc).read_text(encoding="utf-8")
 
-    assert f"--verification '{sp.VERIFICATION_PLACEHOLDER}'" in text
+    assert "--verification-file" in text
+    assert "'\\''" not in text
 
 
 def test_the_prompt_falls_back_to_the_skills_directory_when_no_path_was_recorded(

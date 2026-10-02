@@ -1410,10 +1410,12 @@ def _interrupt(
     return stopped
 
 
-#: The placeholder the improvement prompt puts after ``--verification``. Named so
-#: the test that runs the prompt's command can substitute it, and so it cannot
-#: be mistaken for a value a chat may pass through unchanged.
-VERIFICATION_PLACEHOLDER = "<the lines you changed, as you read them back from the file>"
+#: The placeholder the improvement prompt puts after ``--verification-file``. A
+#: bare token, so the line around it runs unquoted in bash, zsh and PowerShell
+#: alike, and the CLI refuses it verbatim so a chat that passed it through
+#: unchanged settles nothing. Named so the test that runs the prompt's command
+#: can substitute it.
+VERIFICATION_PLACEHOLDER = "READBACK_FILE"
 
 
 def render_improvement_prompt(proposal: SkillProposal) -> str:
@@ -1442,12 +1444,13 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
     # A proposal that links learnings cannot be marked applied without a
     # verification (settle_proposal refuses one), so the command that records the
     # resolution has to carry it — and say what to put there, or the chat runs
-    # the line verbatim and the proposal stays queued. Single-quoted: a skill file
-    # is Markdown, so the readback is full of backticks, and inside double quotes
-    # bash would run them as command substitution and record the result instead.
+    # the line verbatim and the proposal stays queued. The readback travels in a
+    # file, not on the command line: it is free text full of backticks, `$` and
+    # `'` (Markdown), and no quoting carries that the same way in bash, zsh and
+    # PowerShell.
     applied = f"    ciao skill-proposal-remove {skill} --applied"
     if proposal.origins:
-        applied += f" --verification '{VERIFICATION_PLACEHOLDER}'"
+        applied += f" --verification-file {VERIFICATION_PLACEHOLDER}"
     lines = [
         f"Improve the existing `{skill}` skill in the {proposal.workspace} workspace.",
         f"Work in this chat only; do not delegate this helper task.",
@@ -1495,12 +1498,12 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
         lines += [
             "",
             f"This proposal links {len(proposal.origins)} learning finding(s), so "
-            "`--applied` needs `--verification`: replace the placeholder with the "
-            "lines you changed, on one line exactly as you read them back from "
-            f"`{canonical}`, keeping the single quotes around them and writing any "
-            "`'` inside as `'\\''`. Single quotes, because a skill file's backticks "
-            "and `$` would run inside double quotes. A finished chat is not evidence "
-            "that the lesson landed; the readback is.",
+            "`--applied` needs a verification: write the lines you changed, exactly "
+            f"as you read them back from `{canonical}`, to a file (any path, such as "
+            f"a temporary file), and put that file's path in place of "
+            f"`{VERIFICATION_PLACEHOLDER}`. The readback travels in the file, not on "
+            "the command line, so no shell quoting applies. A finished chat is not "
+            "evidence that the lesson landed; the readback is.",
         ]
     lines += [
         "",

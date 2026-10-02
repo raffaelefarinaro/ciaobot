@@ -2130,6 +2130,9 @@ def test_the_improvement_prompts_applied_command_settles_a_learning_linked_propo
     verification, so the prompt's `--applied` line has to carry one and say what
     to put in it. It did not: the chat ran the line verbatim, got exit 1 with
     "needs a verification", and the proposal stayed queued.
+
+    The readback goes in a file, so the text is Markdown with backticks, `$` and
+    an apostrophe — none of which any shell would carry intact as an argument.
     """
     import shlex
 
@@ -2182,19 +2185,17 @@ def test_the_improvement_prompts_applied_command_settles_a_learning_linked_propo
         monkeypatch.chdir(config.agent_root("personal"))
 
         prompt = skill_proposals.render_improvement_prompt(stored)
+        # A skill file's readback is Markdown: backticks, `$` and an
+        # apostrophe. It travels in a file, so what the chat substitutes for the
+        # placeholder is a path and the bytes are exactly what it wrote.
+        readback = "- Use `gh api`, don't scrape; $HOME stays literal"
+        readback_file = tmp_path / "readback.txt"
+        readback_file.write_text(readback, encoding="utf-8")
         settle = next(
             line
             for line in prompt.splitlines()
             if "skill-proposal-remove" in line and "--applied" in line
-        ).replace(
-            skill_proposals.VERIFICATION_PLACEHOLDER,
-            # A skill file's readback is Markdown: backticks, `$` and an
-            # apostrophe. The prompt single-quotes the value, so what is typed
-            # here is the shell-escaped form, with `'` written as `'\''` —
-            # inside double quotes a chat that pasted it as-is would run the
-            # backticks as a command substitution and record that instead.
-            "Gotchas: use `gh api`, don'\\''t scrape",
-        )
+        ).replace(skill_proposals.VERIFICATION_PLACEHOLDER, str(readback_file))
         argv = shlex.split(settle.strip())[1:]
     finally:
         reset_reroot_cache()
@@ -2207,9 +2208,9 @@ def test_the_improvement_prompts_applied_command_settles_a_learning_linked_propo
     assert settled is not None
     assert len(settled.origins) == 1
     assert settled.origins[0].state == skill_proposals.ORIGIN_APPLIED
-    # The unescaped value, so this also pins that the shell quoting survives the
-    # round trip rather than the escaping ending up in the record.
-    assert settled.origins[0].verification == "Gotchas: use `gh api`, don't scrape"
+    # The exact text of the file, so this also pins that no shell quoting was
+    # needed to carry it and none of it was eaten on the way in.
+    assert settled.origins[0].verification == readback
     assert settled.lifecycle == skill_proposals.APPLIED
 
 
@@ -2294,6 +2295,107 @@ def test_the_improvement_prompts_placeholder_is_not_a_verification(
     assert len(reread.origins) == 1
     assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
     assert reread.origins[0].verification == ""
+    assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_rejects_both_verification_flags() -> None:
+    """One proof, one door.
+
+    `--verification` and `--verification-file` are the same evidence by two
+    routes, so passing both is a contradiction the parser has to refuse: a
+    silently-preferred winner would settle the finding with proof nobody chose.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "skill-proposal-remove",
+                "web-research",
+                "--applied",
+                "--verification",
+                "x",
+                "--verification-file",
+                "f",
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
+def test_cli_skill_proposal_remove_refuses_an_unreadable_verification_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A readback the command cannot read is not a readback.
+
+    Silently settling without one would record an applied learning with no proof
+    — the exact thing the verification is there to prevent — so a missing or
+    unreadable file is an error, and the origin stays open.
+    """
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+        missing = tmp_path / "no-such-readback.txt"
+    finally:
+        reset_reroot_cache()
+
+    code = cli.main(
+        [
+            "skill-proposal-remove",
+            "web-research",
+            "--applied",
+            "--verification-file",
+            str(missing),
+        ]
+    )
+    assert code == 2
+    assert "could not read --verification-file" in capsys.readouterr().err
+
+    reread = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert reread is not None
+    assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
     assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
 
 
