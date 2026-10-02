@@ -387,3 +387,22 @@ def test_register_query_delete_roundtrip_with_real_schtasks(tmp_path: Path) -> N
     finally:
         ws.unregister_task(name)
     assert not ws.task_exists(name)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a task definition names a Windows WorkingDirectory")
+def test_task_workspace_is_the_discovery_identity(tmp_path: Path) -> None:
+    """The WorkingDirectory is exactly what bare-shell discovery reads.
+
+    `ciao.install_discovery._discover_windows` calls `task_workspace` on the
+    live definition to answer "which install is this shell talking to?", so the
+    reader that identity rests on is pinned here: a definition written by the
+    renderer yields its workspace, and a definition that is not there yields
+    None rather than an error (no install to disagree with).
+    """
+    definition = tmp_path / ws.TASK_FILE_NAME
+    definition.write_bytes(
+        ws.render_task_xml(python=PYTHONW, workspace=WORKSPACE, user=USER).encode("utf-16")
+    )
+
+    assert ws.task_workspace(definition) == Path(WORKSPACE)
+    assert ws.task_workspace(tmp_path / "absent.xml") is None
