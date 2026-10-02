@@ -64,6 +64,13 @@ _TASK_NS = windows_service.TASK_NS
 _XML_DECLARATION = re.compile(r"^\s*<\?xml[^>]*\?>")
 # One `"label" => <word>` line of `launchctl print-disabled`.
 _DISABLED_ENTRY = re.compile(r'"(?P<label>[^"]*)"\s*=>\s*(?P<value>[A-Za-z]+)')
+# The header of the one section of that output we read. Real `launchctl
+# print-disabled gui/<uid>` does not answer with a bare dictionary: it answers
+# with a section, preceded by a blank line and a tab of its own —
+# `\tdisabled services = {`, one entry indented a level deeper, `\t}` — and a
+# launchd that also prints `login item associations = { … }` puts a second
+# top-level section after it, so the last `}` in the output is not ours.
+_DISABLED_SECTION_HEADER = re.compile(r"^[ \t]*disabled services[ \t]*=[ \t]*\{")
 # launchd has spelled the per-label override both ways: `"label" => disabled`
 # and the boolean `"label" => true` (where true means disabled).
 _DISABLED_WORDS = {
@@ -151,7 +158,15 @@ def _uid() -> int:
 def _launchctl_run(
     argv: Sequence[str], **kwargs: Any
 ) -> subprocess.CompletedProcess[str]:
-    """Run one bounded ``launchctl`` call: fixed argv, captured, no shell."""
+    """Run one bounded ``launchctl`` call: fixed argv, captured, no shell.
+
+    A timeout is reported the way ``windows_service._schtasks`` reports one: as
+    the failed-to-run the caller already handles, not as a
+    ``subprocess.TimeoutExpired`` raised out of a request thread. That matters on
+    the write path too — ``macos_service.set_login_enabled`` catches ``OSError``
+    and nothing else, so a launchctl that never answered would be a 500 there
+    rather than the 503 this module reports for a change it cannot confirm.
+    """
     options: dict[str, Any] = {
         "capture_output": True,
         "text": True,
@@ -159,7 +174,13 @@ def _launchctl_run(
         "timeout": _LAUNCHCTL_TIMEOUT_S,
     }
     options.update(kwargs)
-    return subprocess.run(list(argv), **options)
+    try:
+        return subprocess.run(list(argv), **options)
+    except subprocess.TimeoutExpired as exc:
+        raise OSError(
+            f"launchctl {' '.join(str(arg) for arg in argv)} timed out after "
+            f"{_LAUNCHCTL_TIMEOUT_S:g}s"
+        ) from exc
 
 
 def _query_task_xml() -> subprocess.CompletedProcess[str]:
@@ -320,19 +341,70 @@ def _starts_at_sign_in(plist: dict[str, Any]) -> bool:
     return plist.get("RunAtLoad") is True or bool(plist.get("KeepAlive"))
 
 
+def _disabled_section(stdout: str) -> str | None:
+    """The text between ``disabled services = {`` and the brace closing it.
+
+    Braces are counted from that header so the section ends at *its own* closing
+    brace: when launchd prints a following ``login item associations = { … }``,
+    that dictionary's brace is not allowed to close this one, and none of its
+    entries reach the parser (its values are opaque object references, not
+    launchd's ``enabled``/``disabled`` words). Whatever launchd prints after the
+    section is a section of its own and is left there.
+
+    Output with no such header is read as a bare dictionary — the shape older
+    launchd wrote, and the only shape a POSIX or Windows test can produce.
+
+    None means there is no complete section here, which is not the same as an
+    empty one: an opening brace whose section never closes is unreadable, not
+    "nothing is disabled".
+    """
+    lines = stdout.splitlines()
+    for index, line in enumerate(lines):
+        header = _DISABLED_SECTION_HEADER.match(line)
+        if header is None:
+            continue
+        body: list[str] = []
+        # The header's own brace is the one outstanding; anything a `}` closes
+        # from here is the section's, and a nested dictionary balances before
+        # it instead of ending the section.
+        depth = 0
+        for entry in [line[header.end() :], *lines[index + 1 :]]:
+            closing = -1
+            for column, character in enumerate(entry):
+                if character == "{":
+                    depth += 1
+                elif character == "}":
+                    depth -= 1
+                    if depth < 0:
+                        closing = column
+                        break
+            if closing < 0:
+                body.append(entry)
+                continue
+            # This line closed the section: keep everything before the brace
+            # that closed it, and refuse anything left on the line after it.
+            body.append(entry[:closing])
+            return None if entry[closing + 1 :].strip() else "\n".join(body)
+        return None
+    text = stdout.strip()
+    if text.startswith("{") and text.endswith("}"):
+        return text[1:-1]
+    return None
+
+
 def _parse_disabled_listing(stdout: str) -> dict[str, bool] | None:
     """``label -> disabled`` from ``launchctl print-disabled``, or None.
 
-    None means "this output cannot be read", which is not the same as "nothing
-    is disabled": an unterminated dictionary, a value that is neither spelling
-    launchd has used, or one label listed twice with two different answers all
-    mean the answer is unknown, and the caller reports that instead of
-    guessing a position.
+    Only launchd's own ``disabled services`` section is read (see
+    ``_disabled_section``), and None means "this output cannot be read", which is
+    not the same as "nothing is disabled": a section that never closes, a
+    leftover line inside one, a value that is neither spelling launchd has used,
+    or one label listed twice with two different answers all mean the answer is
+    unknown, and the caller reports that instead of guessing a position.
     """
-    text = stdout.strip()
-    if not (text.startswith("{") and text.endswith("}")):
+    body = _disabled_section(stdout)
+    if body is None:
         return None
-    body = text[1:-1]
     entries = _DISABLED_ENTRY.findall(body)
     # Every line has to be an entry this understands. A listing with a line
     # left over is a listing that may be hiding our own label in it.
@@ -351,13 +423,20 @@ def _parse_disabled_listing(stdout: str) -> dict[str, bool] | None:
 
 
 def _disabled_overrides(uid: int) -> tuple[dict[str, bool] | None, str]:
-    """launchd's per-label overrides, and why they are unreadable."""
+    """launchd's per-label overrides, and why they are unreadable.
+
+    ``TimeoutExpired`` is caught alongside ``OSError`` because this read answers
+    a status: a launchctl that exceeded the bound is a question the machine did
+    not answer, not a failure the request may raise. ``_launchctl_run`` already
+    turns it into an ``OSError``, and it is caught here too because the seam this
+    call goes through is a runner argument any caller can supply.
+    """
     domain = f"gui/{uid}"
     try:
         completed = macos_service._launchctl(
             ["print-disabled", domain], runner=_launchctl_run
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"launchctl print-disabled {domain} could not be run: {exc}"
     if completed.returncode != 0:
         detail = macos_service._command_error(completed) or f"exit {completed.returncode}"

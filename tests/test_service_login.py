@@ -115,6 +115,55 @@ class _Schtasks:
 
 
 # --------------------------------------------------------------------------- #
+# The real shape of `launchctl print-disabled gui/<uid>`
+# --------------------------------------------------------------------------- #
+
+# Captured verbatim on a real macOS host (uid 501, 2026-10-02):
+#
+#     $ launchctl print-disabled "gui/$(id -u)"
+#
+# Every character matters to the reader, which is why this is a capture and not
+# something written to look like one: a blank first line, a tab-indented
+# `disabled services = {` header, one entry indented a level deeper, and a
+# tab-indented closing brace. The output does not begin with a `{`, so a reader
+# that gates on that reports Unknown on a Mac that has answered perfectly.
+PRINT_DISABLED_REAL = (
+    "\n"
+    "\tdisabled services = {\n"
+    '\t\t"com.docker.helper" => enabled\n'
+    '\t\t"com.apple.ManagedClientAgent.enrollagent" => disabled\n'
+    '\t\t"com.ollama.ollama" => enabled\n'
+    '\t\t"com.meta.mqrd.launcher" => enabled\n'
+    '\t\t"com.ciao.menubar" => disabled\n'
+    '\t\t"com.apple.Siri.agent" => enabled\n'
+    '\t\t"com.apple.FolderActionsDispatcher" => disabled\n'
+    '\t\t"ing.paperclip.paperclipai" => enabled\n'
+    '\t\t"ai.openclaw.gateway" => disabled\n'
+    '\t\t"com.openai.chat-helper" => enabled\n'
+    f'\t\t"{SERVER}" => enabled\n'
+    '\t\t"com.apple.appleseed.seedusaged.postinstall" => disabled\n'
+    '\t\t"com.apple.ScriptMenuApp" => disabled\n'
+    '\t\t"com.logi.cp-dev-mgr" => enabled\n'
+    '\t\t"Ciaobot" => disabled\n'
+    "\t}\n"
+)
+
+# The capture above plus the second top-level section a launchd may print after
+# it. The section header, its indentation and its closing brace follow the same
+# convention the capture shows; the entries' values are the opaque
+# shared-file-list references launchd puts there, not `enabled`/`disabled` words.
+# It is the shape a slice-to-the-last-`}` reader gets wrong: that brace is the
+# last one in the output and it closes a dictionary that is not ours.
+PRINT_DISABLED_REAL_WITH_ASSOCIATIONS = PRINT_DISABLED_REAL + (
+    "\n"
+    "\tlogin item associations = {\n"
+    '\t\t"com.ciao.server" => <LSSharedFileListItemSR:0x600002c0a1c2>\n'
+    '\t\t"com.apple.loginwindow.autologinwindow" => <LSSharedFileListItemSR:0x600002c40d80>\n'
+    "\t}\n"
+)
+
+
+# --------------------------------------------------------------------------- #
 # Fixtures: a workspace, a plist dir, and the platform switches.
 # --------------------------------------------------------------------------- #
 
@@ -242,6 +291,73 @@ def test_the_boolean_spelling_of_the_override_is_read_too(
     assert login_status(tmp_path / "workspace").enabled is False
 
 
+def test_the_real_print_disabled_output_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The output this reader is written against, verbatim off a real Mac.
+
+    launchd answers with a section — a blank line, then an indented
+    `disabled services = {` header — so a reader that assumes a bare
+    dictionary reports Unknown here and refuses every change, on a machine that
+    has said exactly which services are disabled.
+    """
+    _install(tmp_path, monkeypatch)
+    login_status = _status(monkeypatch, "darwin", launchctl=_Launchctl(PRINT_DISABLED_REAL))
+
+    status = login_status(tmp_path / "workspace")
+
+    assert (status.platform, status.installed, status.enabled, status.can_change) == (
+        "macos",
+        True,
+        True,
+        True,
+    )
+    assert "will start" in status.reason
+
+
+def test_the_real_listing_reads_every_label_launchd_wrote() -> None:
+    """Not one entry, and not just ours: a reader that drops lines is a reader
+    that could drop ours."""
+    listing = service_login._parse_disabled_listing(PRINT_DISABLED_REAL)
+
+    assert listing is not None
+    assert len(listing) == 15
+    assert listing[SERVER] is False  # `enabled`, so not disabled
+    assert listing["Ciaobot"] is True
+    assert listing["com.docker.helper"] is False
+
+
+def test_a_following_launchd_section_does_not_close_the_disabled_one() -> None:
+    """`login item associations = { … }` may follow the section we read.
+
+    Its closing brace is the last one in the output, and its entries name the
+    same labels with opaque references rather than launchd's words. Slicing to
+    the last `}` would read both dictionaries as one and reject the whole
+    listing; taking the section's own closing brace reads the same 15 labels.
+    """
+    listing = service_login._parse_disabled_listing(PRINT_DISABLED_REAL_WITH_ASSOCIATIONS)
+
+    assert listing == service_login._parse_disabled_listing(PRINT_DISABLED_REAL)
+    assert listing is not None
+    assert listing[SERVER] is False
+
+
+def test_the_real_listing_disabled_is_the_next_sign_in_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same capture with our own label disabled, in the real shape."""
+    _install(tmp_path, monkeypatch)
+    listing = PRINT_DISABLED_REAL.replace(
+        f'"{SERVER}" => enabled', f'"{SERVER}" => disabled'
+    )
+    login_status = _status(monkeypatch, "darwin", launchctl=_Launchctl(listing))
+
+    status = login_status(tmp_path / "workspace")
+
+    assert (status.installed, status.enabled, status.can_change) == (True, False, True)
+    assert "will not start" in status.reason
+
+
 def test_no_override_falls_back_to_the_plists_own_disabled_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -278,14 +394,43 @@ def test_other_labels_in_the_listing_are_not_our_business(
 @pytest.mark.parametrize(
     "listing",
     [
-        "{\n\t\"com.ciao.server\" => maybe\n}",   # a word we do not know
-        "{\n\t\"com.ciao.server\" => enabled\n",  # truncated
+        '{\n\t"com.ciao.server" => maybe\n}',   # a word we do not know
+        '{\n\t"com.ciao.server" => enabled\n',  # truncated
         "com.ciao.server => enabled",             # not a dictionary
         "",                                        # nothing at all
         "{\n\tsomething unexpected here\n}",       # a line we cannot read
-        "{\n\t\"com.ciao.server\" => enabled\n\t\"com.ciao.server\" => disabled\n}",
+        '{\n\t"com.ciao.server" => enabled\n\t"com.ciao.server" => disabled\n}',
+        # The same five failures in the shape launchd really prints: the section
+        # is there, and it is still not something we may read.
+        "\n\tdisabled services = {\n"
+        f'\t\t"{SERVER}" => maybe\n'
+        "\t}\n",
+        "\n\tdisabled services = {\n"
+        f'\t\t"{SERVER}" => enabled\n',             # never closed
+        "\n\tdisabled services = {\n"
+        "\t\tsomething unexpected here\n"
+        "\t}\n",
+        "\n\tdisabled services = {\n"
+        f'\t\t"{SERVER}" => enabled\n'
+        f'\t\t"{SERVER}" => disabled\n'
+        "\t}\n",
+        "\n\tdisabled services = {\n"
+        f'\t\t"{SERVER}" => enabled\n'
+        "\t} and then some prose\n",                 # not a brace, only prose
     ],
-    ids=["unknown-word", "unterminated", "not-a-dict", "empty", "unreadable-line", "contradictory"],
+    ids=[
+        "unknown-word",
+        "unterminated",
+        "not-a-dict",
+        "empty",
+        "unreadable-line",
+        "contradictory",
+        "section-unknown-word",
+        "section-unterminated",
+        "section-unreadable-line",
+        "section-contradictory",
+        "section-trailing-prose",
+    ],
 )
 def test_a_print_disabled_listing_we_cannot_read_is_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing: str
@@ -329,6 +474,84 @@ def test_a_launchctl_that_cannot_be_run_is_unknown(
 
     assert status.enabled is None
     assert "no launchctl here" in status.reason
+
+
+def test_a_launchctl_that_times_out_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`TimeoutExpired` is not an `OSError`, so a wedged launchd would escape a
+    status read as an exception — a 500 for a question the machine did not
+    answer. It answers Unknown, with the bound in the reason."""
+    _install(tmp_path, monkeypatch)
+
+    def _wedged(_argv: Sequence[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            cmd=["launchctl", "print-disabled", f"gui/{UID}"],
+            timeout=service_login._LAUNCHCTL_TIMEOUT_S,
+        )
+
+    login_status = _status(monkeypatch, "darwin", launchctl=_wedged)
+
+    status = login_status(tmp_path / "workspace")
+
+    assert (status.installed, status.enabled, status.can_change) == (True, None, False)
+    assert "timed out" in status.reason
+    assert "unknown" in status.reason
+
+
+def test_the_launchctl_seam_reports_a_timeout_as_a_command_it_could_not_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`macos_service.set_login_enabled` catches `OSError` and nothing else, so
+    the bound has to be reported the way `_schtasks` reports its own: a failure
+    the caller already knows how to refuse, never a bare `TimeoutExpired`."""
+    argv = ["print-disabled", f"gui/{UID}"]
+
+    def _never_answers(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=["launchctl", *argv], timeout=10.0)
+
+    monkeypatch.setattr(service_login.subprocess, "run", _never_answers)
+
+    with pytest.raises(OSError) as raised:
+        service_login._launchctl_run(argv)
+
+    assert "launchctl print-disabled" in str(raised.value)
+    assert f"timed out after {service_login._LAUNCHCTL_TIMEOUT_S:g}s" in str(raised.value)
+
+
+def test_a_launchctl_that_wedges_during_the_change_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write path has a second caller that only catches `OSError`. A
+    launchctl that stops answering between the read and the change is a change
+    this module could not confirm: 503, not a 500 and not a claim."""
+    _install(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_login, "_uid", lambda: UID)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls: list[list[str]] = []
+
+    def _never_answers(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(arg) for arg in args[0]]
+        calls.append(argv)
+        if argv[1] != "disable":
+            return subprocess.CompletedProcess(argv, 0, stdout=PRINT_DISABLED_REAL, stderr="")
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=10.0)
+
+    monkeypatch.setattr(service_login.subprocess, "run", _never_answers)
+
+    with pytest.raises(service_login.LoginUnavailable) as raised:
+        service_login.set_login_enabled(tmp_path / "workspace", False)
+
+    assert "timed out" in str(raised.value)
+    assert raised.value.status is not None
+    assert raised.value.status.enabled is True
+    # Read, write, and the fresh read the refusal carries back. No kickstart,
+    # no bootstrap, no bootout.
+    assert [command[1] for command in calls] == [
+        "print-disabled",
+        "disable",
+        "print-disabled",
+    ]
 
 
 def test_the_read_uses_the_live_plist_dir_not_the_test_override(
