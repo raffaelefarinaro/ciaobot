@@ -1919,6 +1919,21 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     return 1 if summary["failed"] else 0
 
 
+def _registered_owner(config: Any, vault: Path) -> str | None:
+    """The registered workspace whose vault is exactly ``vault``, else ``None``."""
+    for owner in config.workspace_names():
+        try:
+            owned = Path(config.workspace_vault_root(owner)).resolve()
+        except ValueError:
+            # One workspace's registered vault being unusable — a symlinked
+            # folder, an empty root — says nothing about the workspace the
+            # operator named, so it must not fail their run.
+            continue
+        if owned == vault:
+            return str(owner)
+    return None
+
+
 def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
     """``(vault root, workspace name, runtime root)`` for a learnings command.
 
@@ -2007,16 +2022,9 @@ def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
         return registered, name, runtime_root
     if getattr(args, "vault_root", None):
         vault = _resolve_vault_root(args.vault_root)
-        for owner in config.workspace_names():
-            try:
-                owned = Path(config.workspace_vault_root(owner)).resolve()
-            except ValueError:
-                # One workspace's registered vault being unusable — a symlinked
-                # folder, an empty root — says nothing about the workspace the
-                # operator named, so it must not fail their run.
-                continue
-            if owned == vault:
-                return vault, owner, runtime_root
+        owner = _registered_owner(config, vault)
+        if owner is not None:
+            return vault, owner, runtime_root
         # An explicit directory the registry does not know is the one case where
         # the directory's own name stands in for the registered one, exactly as
         # `_resolve_workspace_and_vaults` prescribes: the operator pointed at a
@@ -3674,11 +3682,11 @@ def _resolve_workspace_and_vaults(
     operation that consumes an entry identity resolves the vault through this
     same registry and mints that identity under the name it knows: a caller that
     guessed the name from the directory would mint identities nothing resolves.
-    It is ``None`` when this invocation named a directory with no registry to ask
-    (``--workspace``/``--vault-root` from a shell), and the one case that may use
-    the directory's own name is an explicit ``--vault-root`` — where the operator
-    pointed at a directory and no workspace name exists to resolve. The entry pass
-    is skipped and reported in that case rather than planned under a guess.
+    For an explicit ``--vault-root`` it is the registered workspace that owns that
+    vault, and the directory's own name only when the registry does not know it.
+    It is ``None`` when no name was resolved at all (no ``--vault-root`` and no
+    registered ``CIAO_ACTIVE_WORKSPACE``). The entry pass is skipped and reported
+    in that case rather than planned under a guess.
     """
     active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if not getattr(args, "vault_root", None) and not getattr(args, "workspace", None):
@@ -3708,10 +3716,19 @@ def _resolve_workspace_and_vaults(
     if not vault.is_absolute():
         vault = workspace / vault
     resolved = vault.resolve()
-    # `--vault-root` is the operator naming a directory in person, with no
-    # workspace to resolve, and it is the ONLY case where the directory's own
-    # name stands in for the registry's. Anything else says it does not know.
-    name = resolved.name if getattr(args, "vault_root", None) else None
+    name: str | None = None
+    if getattr(args, "vault_root", None):
+        from ciao.config import CiaoConfig
+
+        # The registry this install root holds is the authority, as it is for
+        # `_learnings_workspace`: an explicit vault the registry knows is named
+        # by its owner, and only a vault it does not know falls back to the
+        # directory's own name.
+        env_source = dict(os.environ)
+        env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
+        env_source["CIAO_WORKSPACE"] = str(workspace)
+        config = CiaoConfig.from_env(env_source)
+        name = _registered_owner(config, resolved) or resolved.name
     return workspace, resolved, resolved, name
 
 
