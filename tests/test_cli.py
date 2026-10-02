@@ -1808,6 +1808,63 @@ def test_cli_skill_proposal_remove_still_refuses_an_ambiguous_substring(
         assert record.lifecycle == skill_proposals.PENDING
 
 
+def test_cli_skill_proposal_remove_does_not_settle_a_sibling_for_a_settled_exact_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The retry the improvement prompt produces must settle nothing, not the
+    next skill along. `read_queue` drops settled records, so an already-settled
+    `review` found nothing in the exact tier and the substring tier settled
+    `code-review` as applied — a decision nobody made."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    review = _skill_proposal_workspace(workspace, "review")
+    code_review = _skill_proposal_workspace(workspace, "code-review")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "review"]) == 0
+    # The same name again, as a retry or as `--applied` after `--not-applicable`.
+    assert cli.main(["skill-proposal-remove", "review", "--applied"]) == 1
+
+    assert "already settled" in capsys.readouterr().err
+    # The sibling is still queued, and the settled one is still the one decision.
+    sibling = skill_proposals.parse_proposal(code_review, "personal")
+    assert sibling is not None
+    assert sibling.lifecycle == skill_proposals.PENDING
+    settled = skill_proposals.parse_proposal(review, "personal")
+    assert settled is not None
+    assert settled.lifecycle == skill_proposals.DISMISSED
+
+
+def test_cli_skill_proposal_remove_matches_a_proposal_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An id is the only selector that cannot be ambiguous by name, so it has to
+    select: two queued skills whose names both contain the needle still leave one
+    answer when the caller holds `code-review`'s id rather than its name."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    review = _skill_proposal_workspace(workspace, "review")
+    code_review = _skill_proposal_workspace(workspace, "code-review")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    pid = skill_proposals.proposal_id("personal", "code-review")
+    assert cli.main(["skill-proposal-remove", pid]) == 0
+
+    target = skill_proposals.parse_proposal(code_review, "personal")
+    assert target is not None
+    assert target.lifecycle == skill_proposals.DISMISSED
+    # The skill whose name merely contains the needle is untouched.
+    other = skill_proposals.parse_proposal(review, "personal")
+    assert other is not None
+    assert other.lifecycle == skill_proposals.PENDING
+
+
 def _accepted_skill_proposal(
     root: Path, name: str = "2026-08-09-defuddle"
 ) -> Path:
