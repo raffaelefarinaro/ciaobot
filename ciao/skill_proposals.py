@@ -1489,7 +1489,7 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
         "`sync-skills` defaults to this chat's working directory, which is "
         "already this workspace's root, and `skill-proposal-remove` finds this "
         "workspace's queue from the chat's environment — its `--workspace` is "
-        "the install root, which this working directory is not.",
+        "the install root, which this working directory usually is not.",
     ]
     return "\n".join(lines)
 
