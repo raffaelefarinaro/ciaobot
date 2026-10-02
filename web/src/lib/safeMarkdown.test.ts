@@ -69,6 +69,34 @@ describe('safe markdown rendering', () => {
     expect(html).toContain('<quoted-text>')
   })
 
+  it('keeps allowed comment markup and safe links while stripping nested unsafe HTML', () => {
+    const html = renderMarkdown(
+      '<user-comment-reference>' +
+      '<reference-source>notes.md (line 3)</reference-source>' +
+      '<quoted-text><img src=x onerror=alert(1)> ' +
+      '<a href="javascript:alert(2)">bad</a> ' +
+      '<a href="https://example.com/guide">safe</a></quoted-text>' +
+      '<user-comment>please check this</user-comment>' +
+      '</user-comment-reference>',
+    )
+
+    // Unsafe event handlers and javascript: URLs nested inside the allowed
+    // quote card are still removed.
+    expect(html).not.toContain('onerror')
+    expect(html).not.toContain('javascript:')
+    expect(html).not.toContain('alert(1)')
+    expect(html).not.toContain('alert(2)')
+    // The app-owned quote-card tags survive so they can be styled.
+    expect(html).toContain('<user-comment-reference>')
+    expect(html).toContain('<reference-source>')
+    expect(html).toContain('<quoted-text>')
+    expect(html).toContain('<user-comment>')
+    expect(html).toContain('please check this')
+    // A safe https link keeps its href and gains the external-link attrs.
+    expect(html).toContain('href="https://example.com/guide"')
+    expect(html).toContain('rel="noopener noreferrer"')
+  })
+
   it('wraps tables in a keyboard-scrollable region', () => {
     const html = renderMarkdown([
       '| Question | Resolution |',
