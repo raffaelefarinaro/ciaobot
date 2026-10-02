@@ -103,7 +103,7 @@ async function mountGroup(rows: UpdateTaskRow[]) {
 }
 
 function buttons(wrapper: Awaited<ReturnType<typeof mountGroup>>['wrapper']) {
-  return wrapper.findAll('button').map((b) => b.text())
+  return wrapper.findAll('.update-task .housekeeping-actions button').map((b) => b.text())
 }
 
 function cards(wrapper: Awaited<ReturnType<typeof mountGroup>>['wrapper']) {
@@ -193,7 +193,7 @@ describe('the group itself', () => {
     expect(blocking.text()).toContain('Separate them now')
     expect(blocking.text()).not.toContain('Hide it')
     // And the ordinary strip's own controls are unchanged.
-    expect(blocking.findAll('button').map((b) => b.text())).toEqual(['Separate them now'])
+    expect(blocking.findAll('.housekeeping-actions button').map((b) => b.text())).toEqual(['Separate them now'])
     expect(cards(wrapper as never)).toHaveLength(1)
     wrapper.unmount()
   })

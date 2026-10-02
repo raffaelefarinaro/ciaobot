@@ -78,9 +78,9 @@ const BLOCKING_PHASES = new Set<MemoryInsightPhase>(['needsYou', 'attention'])
 /** The row's sentence for a phase that has one fixed phrasing. */
 function labelFor(phase: MemoryInsightPhase): string {
   switch (phase) {
-    case 'archiving': return 'archiving…'
+    case 'archiving': return 'extracting…'
     case 'queued': return 'queued for memory'
-    case 'running': return 'updating memory…'
+    case 'running': return 'extracting…'
     case 'done': return 'memory updated'
     case 'attention': return 'needs attention'
     case 'needsYou': return 'needs you'
@@ -170,4 +170,3 @@ export function activeInsightSummary(count: number): string {
   if (count < 1) return ''
   return `${count} updating memory`
 }
-

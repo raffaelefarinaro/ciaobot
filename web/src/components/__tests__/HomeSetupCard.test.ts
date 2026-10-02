@@ -5,6 +5,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import HomeSetupCard from '../HomeSetupCard.vue'
 import { enablePush } from '../../lib/push'
 import { SETUP_CARD_DISMISSED_KEY } from '../../lib/pwaPlatform'
+import { resetHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
 import {
   _resetInstallPromptForTests,
   canPromptInstall,
@@ -47,6 +48,7 @@ beforeEach(() => {
   state.pushEnabled = false
   state.pushSupported = true
   localStorage.clear()
+  resetHomeNoticeWindows()
   _resetInstallPromptForTests()
   listenForInstallPrompt(window)
   // jsdom has no matchMedia at all, so a stub left by an earlier test would
@@ -154,7 +156,7 @@ describe('HomeSetupCard', () => {
   it('Hide persists per browser', async () => {
     const view = await mountCard()
 
-    await button(view, 'Hide').trigger('click')
+    await button(view, 'Hide on this device').trigger('click')
     await flushPromises()
 
     expect(view.find('.home-setup').exists()).toBe(false)
@@ -178,6 +180,19 @@ describe('HomeSetupCard', () => {
 
     const view = await mountCard()
     expect(view.find('.home-setup').exists()).toBe(false)
+    wrapper?.unmount()
+    expect((await mountCard()).find('.home-setup').exists()).toBe(false)
+  })
+
+  it('reopens a closed window without dismissing setup on this device', async () => {
+    const view = await mountCard()
+    await view.get('[aria-label="Close Set up this device window"]').trigger('click')
+    await flushPromises()
+    expect(view.find('.home-setup').exists()).toBe(false)
+    expect(localStorage.getItem(SETUP_CARD_DISMISSED_KEY)).toBeNull()
+    resetHomeNoticeWindows()
+    await flushPromises()
+    expect(view.find('.home-setup').exists()).toBe(true)
   })
 
   it('does not flash for a set-up device before the push probe resolves', async () => {

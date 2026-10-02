@@ -134,6 +134,8 @@ start|status` on this computer, Retry, and automatic reconnect. It is modal
 (focus trapped, shortcuts suppressed), and it lifts without a reload when the
 engine returns.
 
+On Home, the review rail is titled **At a glance**. Actionable operator notices, update tasks, and device setup each sit in a separate, in-flow window with the pinned file tile's tonal surface, bordered header and close control. Closing a window only hides it until reload (or until **Show closed notices**); persistent Hide actions remain explicit. Chat-row signals sit right-aligned above the relative time in both wide and narrow panes. In-flight memory insight rows use one quiet **extracting…** label; blocked and completed phases retain distinct wording. A normal browser tab cannot know whether the app is separately installed, so setup explains that distinction instead of claiming installation is complete.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.

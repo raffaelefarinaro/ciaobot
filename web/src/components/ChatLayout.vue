@@ -110,6 +110,7 @@
               <div class="home-workbench">
                 <div class="home-main">
                   <HomeIntake />
+                  <HomeNoticeReopen />
                   <HousekeepingStrip />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
@@ -234,6 +235,7 @@
             <div class="home-workbench">
               <div class="home-main">
                 <HomeIntake />
+                <HomeNoticeReopen />
                 <HousekeepingStrip />
                 <HomeSetupCard />
                 <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
@@ -264,6 +266,7 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import HomeNoticeReopen from './HomeNoticeReopen.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
