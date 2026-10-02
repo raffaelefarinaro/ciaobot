@@ -1,79 +1,124 @@
 # 05 — Settings, and the asset lists
 
-**Goal:** Settings is the one page where four lists were recently re-scoped to
-the selected workspace. The reads and the writes were changed together on
-purpose, so this is where a partial change shows up.
+**Goal:** Settings is where four lists were recently re-scoped to the selected
+workspace. The reads and the writes were changed together on purpose, so this
+is where a partial change shows up.
 
 **Preconditions:** task 04 finished. Keep using the same tab. Screenshots go to
 `$TMPDIR/ciao-release-walk/<version>/` as `05-settings-<step>.png`.
 
-## Step 1 — walk the page
+## Step 1 — walk every Settings route
 
-Settings is one long scrolling page with an "On this page" rail, not a tab bar.
-Open `/settings`, give it about 1.5 seconds, and walk it top to bottom, taking a
-full-page screenshot once.
+Settings is **not a single page that scrolls**. Each section has its own route,
+listed in the sidebar, and each renders only its own cards:
 
-**Every section must load without hanging:** General, Workspaces, Models &
-providers, Skills, Subagents, Commands, MCP servers. A section that never
-resolves is a finding; do not wait on it more than once.
+`/settings` (Home, the default), `/settings/workspaces`, `/settings/models`,
+`/settings/skills`, `/settings/subagents`, `/settings/commands`,
+`/settings/mcp`.
 
-Watch for:
+Visit each route in turn. On each one, **wait for that route's own heading or
+load state to resolve** — do not sleep a fixed interval and call it loaded.
+`/settings/providers` is a redirect to `/settings/models#chat-providers`; it is
+not a section of its own.
+
+`/settings` (Home) carries General, Appearance, This host, memory backup,
+insights, Updates, the main workspace, workspace health, the PWA password card,
+Other devices, app install, notifications, keyboard shortcuts, open source (and
+Debug only in dev mode). Watch for:
 
 - The online backup card shows state and last successful upload; scope,
   repository and raw diagnostics sit behind a native `<details>` disclosure.
-- The "What can Ciaobot do?" section at the top of General links out to the
-  public feature guide.
-- The critique panel is *explained*, not just labelled — what a panel is, that
-  each model reviews independently, that `/critique` or the skill invokes it.
-  A bare "Models asked for an adversarial review" is the pre-fix state.
+- The "What can Ciaobot do?" card at the top of Home links out to the public
+  feature guide.
+- The critique panel on **Models** is *explained*, not just labelled — what a
+  panel is, that each model reviews independently, that `/critique` or the skill
+  invokes it. A bare "Models asked for an adversarial review" is the pre-fix
+  state.
+
+The **"On this page" rail is route-specific**: it is built from the cards the
+current tab rendered (`tocItems` in `web/src/components/SettingsView.vue`), so
+it lists the sections of *that* route, not the seven Settings sections on one
+scroll. A rail that names another route's cards is a finding.
+
+**Every section must load without hanging.** A section that never resolves is a
+finding; do not wait on it more than once.
 
 ## Step 2 — the four asset lists are scoped to one workspace
 
 This is the point of the task. **Skills, Subagents, Commands and MCP servers all
 belong to the workspace selected in the sidebar.** Only one workspace is
-selected, so: switch the sidebar to another workspace, and all four lists must
-change together.
+selected at a time, so: record the four lists on the current workspace, switch
+the sidebar to another workspace, let the active-workspace watcher refetch, and
+record them again.
 
 Record the names visible in the four lists (for example by reading the text of
-the skill-name and row elements in the page), switch the workspace in the
-sidebar, let the active-workspace watcher refetch, and record them again. The
-lists must now describe the *other* workspace's agent root.
+the skill-name and row elements in the page).
 
 **Watch for, precisely:**
 
-- All four change together. Scoping only the reads would be worse than the
-  original bug: a create would file an asset in a root the list never shows.
+- All four refetch together on the switch. Scoping only the reads would be worse
+  than the original bug: a create would file an asset in a root the list never
+  shows.
 - **Stock skills stay in every list.** `sync-skills` installs them into every
   agent root, so a scoped list still shows the built-ins. Their absence is a bug,
   not the scoping working.
-- The copy does not imply the tabs are workspace-filtered when they are not. The
-  distinction is real: `/api/admin/skills` merges every agent root,
-  `/api/agent-assets` reads the primary root plus `~/.claude`, and the MCP list
-  is the primary root's `.mcp.json`. If the page describes a whole-install
-  inventory, that is the copy regression.
+- **Global rows may legitimately be identical across workspaces.** Subagents and
+  commands with `scope: global` come from the operator's own `~/.claude`
+  directory, which every workspace's provider sees
+  (`ciao/web/agent_assets.py`: `list_subagents` / `list_command_assets`). Expect
+  the same Global subagents on both workspaces; do **not** require the two
+  workspaces' inventories to differ in count or names.
 
-## Step 3 — a read-only consistency check
+## Step 3 — a read-only consistency check against the scoped API
 
-Do not create, edit or delete anything in Settings. Confirm instead that what
-the page shows is what the API says:
+Compare each workspace-specific list to the scoped API **in the same browser
+session** (same origin, same session cookie), and name the endpoints the app
+actually calls (`web/src/components/SettingsView.vue`, `useMcpServers.ts`):
 
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8443/api/agent-assets
-curl -s http://127.0.0.1:8443/api/admin/skills | head -c 400
+- Skills — `/api/admin/skills?workspace=<name>`
+- Subagents — `/api/agent-assets?workspace=<name>` (`subagents`)
+- Commands — `/api/agent-assets?workspace=<name>` (`commands`)
+- MCP servers — `/api/mcp/status?workspace=<name>`
+
+Run the fetch inside the authenticated browser tab, where the session cookie
+lives:
+
+```js
+const ws = '<workspace>';
+for (const path of [
+  `/api/admin/skills?workspace=${encodeURIComponent(ws)}`,
+  `/api/agent-assets?workspace=${encodeURIComponent(ws)}`,
+  `/api/mcp/status?workspace=${encodeURIComponent(ws)}`,
+]) {
+  const res = await fetch(path, { credentials: 'same-origin' });
+  console.log(path, res.status, await res.json());
+}
 ```
 
-A 401 here is a pass, not a failure — the session cookie lives in the browser,
-not in your shell. A 500 is not.
+Do not read `PWA_AUTH_TOKEN`, do not copy cookies to a shell, and do not read
+the password. A bare `curl` from the shell is **not** evidence the endpoint
+works: no session cookie means a `401`, and a `401` only proves the request was
+rejected as unauthenticated — it says nothing about whether the route resolves a
+workspace. A `500` is a failure; a `401` is neither a pass nor a failure.
+
+Do not create, edit or delete anything in Settings.
 
 ## Checkpoints
 
-- `05-settings-01-full.png` — the whole view. Look for: every section present,
-  rail visible, backup card collapsed details, no clipped headings, no overlap.
-- `05-settings-02-assets-before.png` — the asset lists on the first workspace.
-  Look for: stock skills present, lists populated or a sensible empty state.
-- `05-settings-03-assets-after.png` — the same lists after the workspace
-  switch. Look for: all four changed, stock skills still present, no stale
-  rows, no stray toast.
+- `05-settings-01-home.png` — `/settings` (Home). Look for: its own sections
+  present, rail listing this route's cards, backup card collapsed details, no
+  clipped headings, no overlap.
+- `05-settings-02-route.png` — one additional route (e.g. `/settings/models` or
+  `/settings/skills`). Look for: only that route's cards, its own rail, load
+  state resolved, no other route's sections bleeding in.
+- `05-settings-03-assets-before.png` — the four asset lists on the first
+  workspace. Look for: stock skills present, lists populated or a sensible
+  empty state.
+- `05-settings-04-assets-after.png` — the same lists after the workspace switch.
+  Look for: all four refetched together, stock skills still present, Global rows
+  allowed to be unchanged, no stale rows, no stray toast.
+
+Redact credentials and account details from any screenshot.
 
 ## Verdict
 
@@ -81,10 +126,11 @@ Fill one: **pass** / **finding** / **blocked**.
 
 Record:
 
-- Which Settings sections loaded, which hung.
-- Before/after asset lists across a workspace switch, and whether all four
-  moved together.
+- Which Settings routes loaded, which hung.
+- Whether the "On this page" rail matched the route it was on.
+- Before/after asset lists across a workspace switch, and whether all four moved
+  together (Global rows explicitly allowed to stay the same).
 - Whether stock skills were still present in the scoped list.
-- Any copy that describes a whole-install inventory.
+- Any copy that describes a whole-install inventory when the page is scoped.
 
 This is the last task. Leave the tab open for the operator to look at.
