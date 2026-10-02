@@ -1410,6 +1410,12 @@ def _interrupt(
     return stopped
 
 
+#: The placeholder the improvement prompt puts after ``--verification``. Named so
+#: the test that runs the prompt's command can substitute it, and so it cannot
+#: be mistaken for a value a chat may pass through unchanged.
+VERIFICATION_PLACEHOLDER = "<the lines you changed, as you read them back from the file>"
+
+
 def render_improvement_prompt(proposal: SkillProposal) -> str:
     """The prompt the implementation chat is seeded with.
 
@@ -1433,6 +1439,15 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
     """
     skill = proposal.skill
     canonical = proposal.canonical_path or f"skills/{skill}/SKILL.md"
+    # A proposal that links learnings cannot be marked applied without a
+    # verification (settle_proposal refuses one), so the command that records the
+    # resolution has to carry it — and say what to put there, or the chat runs
+    # the line verbatim and the proposal stays queued. Single-quoted: a skill file
+    # is Markdown, so the readback is full of backticks, and inside double quotes
+    # bash would run them as command substitution and record the result instead.
+    applied = f"    ciao skill-proposal-remove {skill} --applied"
+    if proposal.origins:
+        applied += f" --verification '{VERIFICATION_PLACEHOLDER}'"
     lines = [
         f"Improve the existing `{skill}` skill in the {proposal.workspace} workspace.",
         f"Work in this chat only; do not delegate this helper task.",
@@ -1472,7 +1487,22 @@ def render_improvement_prompt(proposal: SkillProposal) -> str:
         "itself tells a reader to run) and record the resolution so the queue "
         "stops asking:",
         "",
-        f"    ciao skill-proposal-remove {skill} --applied",
+        applied,
+    ]
+    if proposal.origins:
+        # Directly under the command it explains, so the "say that instead"
+        # paragraph below stays next to the `--interrupted` line it introduces.
+        lines += [
+            "",
+            f"This proposal links {len(proposal.origins)} learning finding(s), so "
+            "`--applied` needs `--verification`: replace the placeholder with the "
+            "lines you changed, on one line exactly as you read them back from "
+            f"`{canonical}`, keeping the single quotes around them and writing any "
+            "`'` inside as `'\\''`. Single quotes, because a skill file's backticks "
+            "and `$` would run inside double quotes. A finished chat is not evidence "
+            "that the lesson landed; the readback is.",
+        ]
+    lines += [
         "",
         f"Use `--applied` only once the change is really in `{canonical}` and you "
         "have verified it. Add `--reason \"...\"` to either command to say in your "
