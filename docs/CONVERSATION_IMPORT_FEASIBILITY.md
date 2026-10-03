@@ -50,6 +50,44 @@ session. The issue's field list is narrower than the candidate schema above, so
 decided against. Nothing under a real `~/.claude` was read to build it; the
 adapter's tests run on synthetic fixtures under `tests/fixtures/import/`.
 
+**Update — C4 landed (#1012).** The "Recommended architecture" below is now
+code, and the two things this report left as a proposal and a prerequisite seam
+are the two things #1012 changed:
+
+* `ciao/import_extract.py` — `extract_facts(session, *, model,
+  destination_workspace, …)` runs **one** `providers.oneshot.run_oneshot` turn
+  over one `NormalizedSession`'s text and writes every accepted row through
+  `memory_proposals.append_proposals`, the same surface
+  `ciao memory-proposal-add` uses. There is no region, note, entity or learnings
+  write in it, no agent token and no chat, so the boundary is **no tools +
+  backend-only proposal writes** and not the prompt: the system prompt's
+  untrusted-transcript instruction is defense in depth for output quality, and a
+  test that asserted it would still pass with the prompt deleted.
+* the seam `ciao/providers/oneshot.py` gained so E1 is a test of a contract
+  rather than of an import name: an optional `options_hook`, called with the
+  constructed `ClaudeAgentOptions` just before the Claude turn starts. It sets
+  no option, no existing caller passes it, and it is **not** called on the
+  opencode path, whose deny-all is derived at session-create time — so nothing
+  here changes what a one-shot may do.
+
+Admission is backend code rather than wording, which is the part worth carrying
+forward to C7: a row's `source_anchor` is resolved against the session's own
+messages (an unresolved anchor is an invented citation), the
+`provider:session_id:anchor` tag is built from that message and checked with
+`assert_external_provenance`, the destination must be in
+`memory_proposals.DESTINATIONS`, and a date the model wrote into a fact is
+dropped — the date on an imported fact is the source message's own, appended as
+the `[as-of: …]` tag the accept path already parses, so import time is never
+passed off as verification time. A `ciaobot_own` or `ambiguous` session is
+refused by `classify_session` before any turn runs, and unreadable rows degrade
+to `ExtractionResult.skipped` rather than to an exception that loses the batch.
+`citations` stays empty and the anchor rides in `source_section`: the prose
+fallback named under
+[Provenance and old-versus-new](#provenance-and-old-versus-new) is what C4
+takes, so **C7 still owes `ciao/fact_candidates.py` the structured field**. The
+judgment gap (Q4) is unchanged and still open — nothing in #1012 claims to have
+closed it.
+
 ## What this report had to settle
 
 #980 asks four questions, and the parent #975 asks the same four:
