@@ -1,0 +1,80 @@
+{
+  "info": {
+    "id": "ses_9c3d4e5f60718293a4b5c6d7e8f90112",
+    "parentID": null,
+    "title": "Interrupted answer",
+    "agent": "build",
+    "model": {
+      "providerID": "synthetic",
+      "modelID": "synthetic-model-1"
+    },
+    "cost": 0.0006,
+    "tokens": {
+      "input": 2440,
+      "output": 41,
+      "reasoning": 12,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "time": {
+      "created": 1772443111000,
+      "updated": 1772443198000
+    },
+    "location": {
+      "directory": "/synthetic/workspace/release-checklist"
+    }
+  },
+  "messages": [
+    {
+      "id": "msg_000000000000000000000000000021",
+      "type": "user",
+      "text": "What is the rollback step?",
+      "files": [],
+      "agents": [],
+      "skills": [],
+      "time": {
+        "created": 1772443111000
+      }
+    },
+    {
+      "id": "msg_000000000000000000000000000022",
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "providerID": "synthetic",
+        "modelID": "synthetic-model-1"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "The rollback step is to re-tag the previous version."
+        }
+      ],
+      "time": {
+        "created": 1772443152000,
+        "streamed": 1772443180000,
+        "completed": 1772443190000
+      }
+    },
+    {
+      "id": "msg_000000000000000000000000000023",
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "providerID": "synthetic",
+        "modelID": "synthetic-model-1"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "The rollback step is to re-tag the previous version, and then"
+        }
+      ],
+      "time": {
+        "created": 1772443198000
+      }
+    }
+  ]
+}
