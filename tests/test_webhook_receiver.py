@@ -27,6 +27,7 @@ import ciao.webhooks
 from ciao.os_support.private import is_private
 from ciao.webhooks import (
     ACCEPTED,
+    DEDUPE_RETENTION_DAYS,
     FAILED,
     INTERRUPTED,
     LAUNCHED,
@@ -41,6 +42,7 @@ from ciao.webhooks import (
     WebhookReceiverError,
     WebhookStore,
     _RateWindow,
+    read_rows,
     reset_rate_limits,
 )
 
@@ -251,6 +253,29 @@ def test_the_dedupe_window_expires_into_a_new_attempt(tmp_path: Path) -> None:
     assert len(_rows(receiver)) == 2
 
 
+def test_the_dedupe_window_follows_the_receivers_own_clock(tmp_path: Path) -> None:
+    """Retention is measured against the clock the receiver was given.
+
+    Read against ``datetime.now`` instead, a receiver dated in the past finds
+    every receipt in its own journal outside the window, so the collapse cannot
+    be pinned at all — and an injected clock would mean something other than what
+    the window says it means.
+    """
+    store, _secret = _world(tmp_path)
+    clock = _Clock(datetime.now(UTC) - timedelta(days=DEDUPE_RETENTION_DAYS + 1))
+    receiver = _receiver(store, clock=clock, permissive=True)
+    trigger = _enabled(store)
+    first = receiver.receive(trigger, idempotency_key="k1", body=_BODY)
+
+    inside = receiver.receive(trigger, idempotency_key="k1", body=_BODY)
+
+    assert inside.id == first.id, "a retry inside the window must still collapse"
+    clock.advance(days=DEDUPE_RETENTION_DAYS + 1)
+    expired = receiver.receive(trigger, idempotency_key="k1", body=_BODY)
+    assert expired.id != first.id
+    assert len(_rows(receiver)) == 2
+
+
 # ── The sender-supplied body ───────────────────────────────────────────────
 
 
@@ -430,6 +455,33 @@ def test_every_appended_row_is_fsynced(tmp_path: Path, monkeypatch) -> None:
     assert receiver.get(receipt.id).status == ACCEPTED
 
 
+def test_a_torn_tail_does_not_swallow_the_next_receipt(tmp_path: Path) -> None:
+    """A crash mid-row leaves a fragment; the next row must not merge into it.
+
+    :func:`read_rows` skips an unparsable line precisely because a torn last line
+    is expected after a crash, which only holds if the next append starts a line
+    of its own: written straight onto the fragment, the accepted row and the
+    garbage become one unparsable line, the 202'd event has no readable row, and
+    a retry of its key is appended again as a fresh event.
+    """
+    store, _secret = _world(tmp_path)
+    receiver = _receiver(store)
+    trigger = _enabled(store)
+    receiver.journal.write_text('{"id":"wbrcpt_torn","tr', encoding="utf-8")
+
+    receipt = receiver.receive(trigger, idempotency_key="after", body=_BODY)
+    retry = receiver.receive(trigger, idempotency_key="after", body=_BODY)
+
+    # The fragment is closed off, not overwritten, and the receipt is on a line
+    # of its own that the reader can fold.
+    assert receiver.journal.read_text(encoding="utf-8").startswith(
+        '{"id":"wbrcpt_torn","tr\n'
+    )
+    assert [row["id"] for row in read_rows(receiver.journal)] == [receipt.id]
+    assert retry.id == receipt.id
+    assert retry.idempotency_key == "after"
+
+
 def test_a_crash_in_the_launch_window_is_recorded_interrupted(tmp_path: Path) -> None:
     """The ambiguous window is reviewable, never a silent replay."""
     store, _secret = _world(tmp_path)
@@ -513,6 +565,83 @@ def test_the_trim_bounds_the_journal_and_keeps_unsettled_rows(
     assert [p.name for p in tmp_path.iterdir() if ".trim" in p.name] == []
 
 
+def test_the_trim_keeps_an_unsettled_head_row_and_still_shrinks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Retention filters; it does not stop at the oldest unsettled row.
+
+    A prefix cut met this row first and broke out, so a single unsettled
+    ``accepted`` receipt at the head froze the byte trim for good: the journal
+    grew past the cap without bound and every later append re-read and rewrote
+    all of it.
+    """
+    store, _secret = _world(tmp_path)
+    receiver = _receiver(store, permissive=True)
+    trigger = _enabled(store)
+    # Just over two rows' worth, because a receipt carries the sender's event
+    # text: one open receipt plus one settled row is already over this.
+    cap = 1200
+    # Recorded first, so it is the line the trim meets at the head.
+    open_receipt = receiver.receive(trigger, idempotency_key="head", body=_BODY)
+    monkeypatch.setattr(ciao.webhooks, "RECEIPTS_MAX_BYTES", cap)
+    settled = [
+        receiver.receive(trigger, idempotency_key=f"old{index}", body=_BODY)
+        for index in range(6)
+    ]
+    for receipt in settled:
+        receiver.settle_failed(receipt.id, detail="done")
+
+    assert receiver.journal.stat().st_size <= cap, "the byte trim froze"
+    newest = receiver.receive(trigger, idempotency_key="new", body=_BODY)
+
+    # Still bounded, the settled history is what went, and the row that froze the
+    # old trim is readable.
+    assert receiver.journal.stat().st_size <= cap
+    assert len(_rows(receiver)) == 2
+    assert receiver.get(open_receipt.id).status == ACCEPTED
+    assert receiver.get(newest.id).status == ACCEPTED
+
+
+def test_the_trim_keeps_an_unsettled_row_older_than_the_row_cap(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The row cap bounds settled history; it may not bound what is in flight.
+
+    The old tail cut ran before the unsettled check, so an open receipt older
+    than the last ``RECEIPTS_KEEP_ROWS`` lines was deleted with the prefix — and
+    a retry of its key then became a second event.
+    """
+    store, _secret = _world(tmp_path)
+    receiver = _receiver(store, permissive=True)
+    trigger = _enabled(store)
+    open_receipt = receiver.receive(trigger, idempotency_key="old-open", body=_BODY)
+    settled = [
+        receiver.receive(trigger, idempotency_key=f"old{index}", body=_BODY)
+        for index in range(6)
+    ]
+    for receipt in settled:
+        receiver.settle_failed(receipt.id, detail="done")
+    # A byte cap the next append crosses (so the trim runs at all) and a row cap
+    # far below the settled row count, so the row cap is what bounds history here.
+    monkeypatch.setattr(
+        ciao.webhooks, "RECEIPTS_MAX_BYTES", receiver.journal.stat().st_size + 1
+    )
+    monkeypatch.setattr(ciao.webhooks, "RECEIPTS_KEEP_ROWS", 3)
+
+    newest = receiver.receive(trigger, idempotency_key="new", body=_BODY)
+
+    assert open_receipt.id in [row["id"] for row in read_rows(receiver.journal)]
+    assert receiver.get(open_receipt.id).status == ACCEPTED
+    # Two unsettled rows plus at most RECEIPTS_KEEP_ROWS settled ones, in the
+    # order they were written: the head row stayed at the head.
+    kept = _rows(receiver)
+    assert len(kept) <= 5
+    assert [row["id"] for row in kept] == [
+        row["id"] for row in read_rows(receiver.journal)
+    ]
+    assert kept[-1]["id"] == newest.id
+
+
 def test_an_unknown_receipt_id_is_refused(tmp_path: Path) -> None:
     store, _secret = _world(tmp_path)
     receiver = _receiver(store)
@@ -577,6 +706,42 @@ def test_a_journal_that_cannot_be_written_records_nothing(
 
     assert failure.value.code == "receipt_unavailable"
     assert failure.value.retryable is True
+
+
+def test_a_short_write_is_completed_rather_than_answered_202(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``os.write`` may write short; a half row is not a durable receipt."""
+    store, _secret = _world(tmp_path)
+    receiver = _receiver(store)
+    real_write = os.write
+
+    def dribble(descriptor, data):
+        return real_write(descriptor, bytes(data)[:4])
+
+    with monkeypatch.context() as dribbling:
+        dribbling.setattr(ciao.webhooks.os, "write", dribble)
+        receipt = receiver.receive(_enabled(store), idempotency_key="k1", body=_BODY)
+
+    assert [row["id"] for row in read_rows(receiver.journal)] == [receipt.id]
+
+
+def test_a_write_that_stops_making_progress_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Looping has to end somewhere: not all of it written is not recorded."""
+    store, _secret = _world(tmp_path)
+    receiver = _receiver(store)
+
+    with monkeypatch.context() as stalled:
+        stalled.setattr(ciao.webhooks.os, "write", lambda *_args, **_kwargs: 0)
+
+        with pytest.raises(WebhookReceiverError) as failure:
+            receiver.receive(_enabled(store), idempotency_key="k1", body=_BODY)
+
+    assert failure.value.code == "receipt_unavailable"
+    assert failure.value.retryable is True
+    assert read_rows(receiver.journal) == []
 
 
 def test_the_journal_is_owner_private(tmp_path: Path) -> None:

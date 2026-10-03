@@ -1374,13 +1374,59 @@ def read_rows(journal: Path) -> list[dict[str, Any]]:
     return [folded[rid] for rid in order]
 
 
+def _ends_mid_line(descriptor: int) -> bool:
+    """Whether the journal's last byte is not a newline.
+
+    A crash can leave a torn final line, and :func:`read_rows` skips an
+    unparsable line *because* that is expected. Appending straight onto the
+    fragment welds the two into one unparsable line, so the receipt the sender
+    was just told was accepted has no readable row and a retry of its key is
+    appended again as a fresh event. So the append opens a line of its own first
+    when it has to.
+
+    Read from the descriptor the append goes to, under the journal's lock.
+    ``O_APPEND`` moves every write to the end whatever the offset is, so seeking
+    here to look cannot redirect the row that follows.
+    """
+    size = os.fstat(descriptor).st_size
+    if size == 0:
+        return False
+    os.lseek(descriptor, size - 1, os.SEEK_SET)
+    return os.read(descriptor, 1) != b"\n"
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    """Write every byte of ``data`` to an ``O_APPEND`` descriptor, or raise.
+
+    ``os.write`` is allowed to write short and says how much it wrote; ignoring
+    that returns a durable-looking receipt for a row that is only half on disk,
+    and a half row is a row :func:`read_rows` skips. The journal's advisory lock
+    makes each write its own atomic append, so looping here cannot interleave
+    with another writer's row.
+    """
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError(
+                errno.ENOSPC, "the webhook receipt journal write made no progress"
+            )
+        remaining = remaining[written:]
+
+
 def _append(journal: Path, row: dict[str, Any]) -> None:
     """Append one receipt row, fsync it, and trim the journal if it grew.
 
-    A single ``os.write`` of one complete line under ``O_APPEND``, followed by
-    ``fsync`` on the descriptor: the writer holds the journal's advisory lock,
-    so no read-merge-write of the journal itself can race this. A crash can lose
-    this row and nothing earlier.
+    One ``O_APPEND`` write of a whole line followed by ``fsync`` on the
+    descriptor: the writer holds the journal's advisory lock, so no
+    read-merge-write of the journal itself can race this. A crash can lose this
+    row and nothing earlier.
+
+    Two things about that write are load-bearing, because a partial row is worse
+    than no row at all — the sender has already been told the event was accepted.
+    A torn tail from an earlier crash is closed off with a newline first (see
+    :func:`_ends_mid_line`), and a short write is completed rather than accepted
+    (see :func:`_write_all`).
 
     The trim runs here, while that lock is still held — releasing it first let a
     concurrent append land between the trim's read and its ``os.replace``, and
@@ -1390,8 +1436,10 @@ def _append(journal: Path, row: dict[str, Any]) -> None:
     line = json.dumps(payload, ensure_ascii=False) + "\n"
     try:
         journal.parent.mkdir(parents=True, exist_ok=True)
+        # O_RDWR, not O_WRONLY: the same descriptor has to answer whether the
+        # file's last byte is a newline.
         descriptor = open_private(
-            journal, os.O_WRONLY | os.O_APPEND, follow_symlinks=False
+            journal, os.O_RDWR | os.O_APPEND, follow_symlinks=False
         )
     except OSError as exc:
         raise ReceiptUnavailable(
@@ -1399,7 +1447,10 @@ def _append(journal: Path, row: dict[str, Any]) -> None:
             f"{exc.strerror or exc}"
         ) from None
     try:
-        os.write(descriptor, line.encode("utf-8"))
+        data = line.encode("utf-8")
+        if _ends_mid_line(descriptor):
+            data = b"\n" + data
+        _write_all(descriptor, data)
         os.fsync(descriptor)
     except OSError as exc:
         raise ReceiptUnavailable(
@@ -1412,38 +1463,66 @@ def _append(journal: Path, row: dict[str, Any]) -> None:
 
 
 def _trim_if_large(journal: Path) -> None:
-    """Keep the journal bounded, never dropping an unsettled receipt.
+    """Keep the journal bounded, never dropping a receipt that is still open.
 
     Runs under the journal's advisory lock, so a concurrent append cannot land
     between this read and the ``os.replace``. Best-effort: a trim that fails is
-    logged and skipped, and the next append tries again. Dropping a receipt
-    that is still ``accepted`` or ``launched`` would lose the only evidence that
-    an event is in flight, so a non-terminal id stops the trim instead.
+    logged and skipped, and the next append tries again.
+
+    Retention is by filtering, not by cutting a prefix off the tail. Every line
+    whose id is unsettled survives wherever it sits, and the *newest* settled
+    lines fill the budget from the tail backwards; original order is kept. A
+    prefix cut fails twice over, and both failures are real: it met the oldest
+    line first, so a single unsettled ``accepted`` row at the head froze the byte
+    trim for good (every later append then re-read and rewrote the whole file,
+    which makes the "bounded in bytes" claim false and each append O(n)), and it
+    dropped everything past the last :data:`RECEIPTS_KEEP_ROWS` lines before the
+    unsettled check, so an unsettled row older than the cut was deleted — and a
+    retry of its key then became a second event.
+
+    The byte budget is shared and spent on unsettled rows first: an unsettled row
+    is kept whatever it costs, because it is the only evidence that an event is
+    in flight, so it is settled history — never the open receipt — that gives way
+    when the two cannot both fit. That is what keeps the cap a bound on the file
+    rather than a hope, and :data:`MAX_PENDING_RECEIPTS` per trigger is what
+    keeps the number of such rows finite.
     """
     try:
         if not journal.exists() or journal.stat().st_size < RECEIPTS_MAX_BYTES:
             return
         raw = journal.read_text(encoding="utf-8", errors="replace")
         lines = [line for line in raw.split("\n") if line.strip()]
+        sizes = [len(line.encode("utf-8")) + 1 for line in lines]
+        ids = [str((_safe_row(line) or {}).get("id") or "") for line in lines]
         # An id's effective status is its *last* row anywhere in the journal,
-        # not just in the retained tail: a `launched` row with no terminal row
-        # can sit before the cut, so computing unsettled ids from the retained
-        # lines alone would find nothing and the trim would drop it.
+        # not just among the lines this trim might drop: a `launched` row with
+        # no terminal row can sit before any cut, so computing unsettled ids
+        # from a candidate tail alone would find nothing and the trim would drop
+        # it.
         unsettled = {
             str(row.get("id") or "")
             for row in read_rows(journal)
             if str(row.get("status") or "") not in _TERMINAL_RECEIPT_STATES
         }
-        kept = lines[-RECEIPTS_KEEP_ROWS:]
-        total = sum(len(line.encode("utf-8")) + 1 for line in kept)
-        head = 0
-        while head < len(kept) - 1 and total > RECEIPTS_MAX_BYTES:
-            first = _safe_row(kept[head]) or {}
-            if str(first.get("id") or "") in unsettled:
-                break
-            total -= len(kept[head].encode("utf-8")) + 1
-            head += 1
-        payload = "\n".join(kept[head:]).rstrip() + "\n"
+        budget = RECEIPTS_MAX_BYTES - sum(
+            size for size, rid in zip(sizes, ids, strict=True) if rid in unsettled
+        )
+        retained: set[int] = set()
+        settled_rows = 0
+        settled_bytes = 0
+        for index in range(len(lines) - 1, -1, -1):
+            if ids[index] in unsettled:
+                retained.add(index)
+                continue
+            too_many = settled_rows >= RECEIPTS_KEEP_ROWS
+            too_wide = settled_bytes + sizes[index] > budget
+            if too_many or too_wide:
+                continue
+            retained.add(index)
+            settled_rows += 1
+            settled_bytes += sizes[index]
+        kept = [line for index, line in enumerate(lines) if index in retained]
+        payload = "\n".join(kept).rstrip() + "\n"
         descriptor, temp_name = mkstemp_private(
             dir=journal.parent, prefix=f".{journal.name}.", suffix=".trim"
         )
@@ -1829,7 +1908,7 @@ class WebhookReceiver:
         digest = _digest(body)
         with self._journal_locked():
             rows = read_rows(self._journal)
-            existing = _find_receipt(rows, trigger.trigger_id, key)
+            existing = _find_receipt(rows, trigger.trigger_id, key, now=self._moment())
             if existing is not None:
                 if existing.body_digest != digest:
                     raise IdempotencyConflict(existing.id)
@@ -1981,22 +2060,36 @@ class WebhookReceiver:
             generation += 1
         return candidate
 
-    def _stamp(self) -> str:
-        """The ISO-8601 UTC stamp a receipt carries, from the injected clock."""
+    def _moment(self) -> datetime:
+        """Now, from the injected clock, as an aware UTC datetime.
+
+        One place that normalizes the clock, because :meth:`_stamp` and the
+        dedupe window both have to agree about what time it is: a naive clock
+        reading means UTC here rather than an exception, since a caller that
+        injected one meant it.
+        """
         moment = self._clock()
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=UTC)
-        return moment.astimezone(UTC).isoformat(timespec="seconds")
+        return moment.astimezone(UTC)
+
+    def _stamp(self) -> str:
+        """The ISO-8601 UTC stamp a receipt carries, from the injected clock."""
+        return self._moment().isoformat(timespec="seconds")
 
 
 def _find_receipt(
-    rows: list[dict[str, Any]], trigger_id: str, key: str
+    rows: list[dict[str, Any]], trigger_id: str, key: str, *, now: datetime
 ) -> WebhookReceipt | None:
     """The live receipt for ``(trigger_id, key)``, or None.
 
     "Live" is the dedupe window: a receipt older than
     :data:`DEDUPE_RETENTION_DAYS` is not a retry target, it is history. Latest
     attempt wins, since a key may have more than one after the window passed.
+
+    ``now`` is the receiver's own clock, so the window is measured against the
+    same time the stamps were written with rather than against a second,
+    independent reading of the wall clock.
     """
     live: WebhookReceipt | None = None
     for row in rows:
@@ -2006,13 +2099,13 @@ def _find_receipt(
         ):
             continue
         receipt = WebhookReceipt.from_row(row)
-        if _within_retention(receipt.created_at):
+        if _within_retention(receipt.created_at, now=now):
             live = receipt
     return live
 
 
-def _within_retention(created_at: str) -> bool:
-    """Whether a receipt's ``created_at`` is inside the dedupe window.
+def _within_retention(created_at: str, *, now: datetime) -> bool:
+    """Whether a receipt's ``created_at`` is inside the dedupe window at ``now``.
 
     An unparsable stamp is treated as outside the window: the conservative
     direction here is a second attempt (which the pending bound and the sender's
@@ -2025,7 +2118,7 @@ def _within_retention(created_at: str) -> bool:
         return False
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
-    return moment >= datetime.now(UTC) - timedelta(days=DEDUPE_RETENTION_DAYS)
+    return moment >= now - timedelta(days=DEDUPE_RETENTION_DAYS)
 
 
 def _pending_for(rows: list[dict[str, Any]], trigger_id: str) -> int:

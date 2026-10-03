@@ -185,7 +185,10 @@ async def webhook_receive(request: Request) -> JSONResponse:
             INVALID_IDEMPOTENCY_KEY, "an Idempotency-Key header is required.", 400
         )
     declared = request.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+    # `str.isdigit` is true for non-ASCII digits (`"²"`, `"٣"`) which `int()`
+    # then refuses with a ValueError, so a 500 for a header h11/httptools would
+    # not normally let through. ASCII-only is the check that matches the parser.
+    if declared.isascii() and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
         return _too_large()
     # Chunked, because a request with no `Content-Length` declares nothing and a
     # cap that trusts the header is no cap at all.

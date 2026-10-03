@@ -418,7 +418,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
         # Webhook trigger management (A2). The literal `rotate` segment
         # precedes the bare `{trigger_id}` pattern so rotation is not read
-        # as a trigger id. No ingress here: no /hooks/*, no bearer auth.
+        # as a trigger id. Management routes only; the receiver is
+        # `routes_hooks.py`.
         Route("/api/webhooks", webhook_list, methods=["GET"]),
         Route("/api/webhooks", webhook_create, methods=["POST"]),
         Route(
