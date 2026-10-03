@@ -193,7 +193,7 @@ def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
 #: One store refusal becomes one application error code. The codes are what the
 #: agent CLI's ``error.code`` and the session routes' status mapping read, so
 #: this table is the only place a ``TaskBoardError.code`` is given a meaning;
-#: adding a store code without a row here is a 500 by construction rather than a
+#: a store code with no row here surfaces as ``task_read_failed`` rather than a
 #: silent default.
 _TASK_ERROR_CODES: dict[str, tuple[str, bool]] = {
     # TaskBoardError.code -> (ControlPlaneError code, retryable)
