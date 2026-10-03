@@ -182,7 +182,10 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
         # What the memory pass really does, and where a person reviews it.
         assert "proposal" in welcome
         assert "**Memory · To decide**" in welcome
-        assert "undo from **Memory · History**" in welcome
+        assert "**Memory · History**" in welcome
+        # Undo is offered where the receipt is, and only as long as the note is
+        # still as the pass left it — a note edited since is refused.
+        assert "undo it while the note is still as the pass left it" in welcome
         # No promise that past conversations are read, imported or filed.
         assert "import" not in welcome.lower()
         # The interview still opens the chat, and memory comes before it.
