@@ -1080,6 +1080,35 @@ def _is_frontmatter_opener(line: _Line) -> bool:
     return line.index == 0 and line.view.rstrip() == "---"
 
 
+def _continues_frontmatter_value(line: _Line) -> bool:
+    """True when ``line`` continues a frontmatter value rather than ending it.
+
+    Frontmatter is not only ``key: value`` lines. A list-valued key — ``tags:``,
+    ``related:``, ``aliases:`` — puts an indented block sequence under it, and a
+    value may nest a mapping one level deeper still::
+
+        tags:
+          - travel
+          - name: Ipek
+            role: sister
+
+    Every one of those lines is indented, and that is what tells them apart from
+    the body a thematic break would open. An indented list item or an indented
+    ``key: value`` continues the value; the indented run below one continues it
+    too, which is what lets a nested mapping item be read instead of ending the
+    block.
+
+    A *non-indented* line is never a continuation. That is the whole point: a
+    note that opens with a thematic break puts real body content at column zero,
+    and reading a bullet there as the start of the frontmatter would swallow it.
+    """
+    if line.indent == 0:
+        return False
+    return _LIST_ITEM_RE.match(line.view) is not None or bool(
+        _FRONTMATTER_KEY_RE.match(line.view.lstrip(" \t"))
+    )
+
+
 def _frontmatter_end(lines: list[_Line]) -> int | None:
     """Index of the line closing a frontmatter block, or ``None``.
 
@@ -1090,18 +1119,29 @@ def _frontmatter_end(lines: list[_Line]) -> int | None:
     between them read as frontmatter and silently dropped. Refusing to guess is
     the whole point; ``None`` leaves the caller treating the opener as the rule
     it almost certainly is and reading the body.
+
+    Once a key has been seen, its indented block-sequence value (see
+    :func:`_continues_frontmatter_value`) is frontmatter too. Without that, a
+    ``tags:`` list put an indented ``- item`` where a key was expected, the
+    block was judged a rule, and the walk read the note's own metadata as
+    facts.
     """
     if not lines or not _is_frontmatter_opener(lines[0]):
         return None
+    seen_key = False
     for index in range(1, len(lines)):
         line = lines[index]
         if line.indent == 0 and line.view.rstrip() in _FRONTMATTER_DELIMITERS:
             return index
         if line.blank:
             continue
-        if not _FRONTMATTER_KEY_RE.match(line.view):
-            # Real content where a key was expected: this `---` was a rule.
-            return None
+        if _FRONTMATTER_KEY_RE.match(line.view):
+            seen_key = True
+            continue
+        if seen_key and _continues_frontmatter_value(line):
+            continue
+        # Real content where a key was expected: this `---` was a rule.
+        return None
     # An unterminated block is reported by the caller; the body is still read.
     return None
 

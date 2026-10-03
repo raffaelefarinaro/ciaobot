@@ -275,6 +275,66 @@ def test_frontmatter_needs_to_look_like_frontmatter() -> None:
     )
 
 
+def test_frontmatter_with_list_valued_keys_is_frontmatter() -> None:
+    """A list-valued frontmatter key is frontmatter, not facts in the note.
+
+    ``tags:``/``related:``/``aliases:`` open a block sequence on the indented
+    lines below them, and an indented ``- item`` matches no key, so the block
+    was judged a thematic break, every YAML item was read as a note entry, and
+    the review surface showed the note's own metadata as facts to decide on.
+    The indented continuation belongs to the value above it, nested mapping
+    items and quoted scalars included.
+    """
+    text = (
+        "---\n"
+        "title: Zurich visit\n"
+        "tags:\n"
+        "  - travel\n"
+        "  - family\n"
+        "related:\n"
+        "  - People/Ipek\n"
+        "aliases:\n"
+        '  - "ZRH trip"\n'
+        "nested:\n"
+        "  - name: Ipek\n"
+        "    role: sister\n"
+        "---\n"
+        "\n"
+        "- a real fact\n"
+    )
+    span = ne.frontmatter_span(text)
+    assert span is not None
+    # The span is the opener through the terminator line's own newline.
+    assert text[span[0] : span[1]].startswith("---\n")
+    assert text[span[0] : span[1]].endswith("---\n")
+
+    doc = _parse(text)
+    assert _texts(doc) == ["- a real fact"]
+    assert doc.diagnostics == ()
+    # The frontmatter is uncovered, not dropped: coverage still adds up and
+    # every YAML item is exactly part of what was not read as an entry.
+    assert doc.entry_chars + doc.uncovered_chars == doc.total_chars
+    uncovered = "".join(doc.original[start:end] for start, end in doc.uncovered)
+    for item in (
+        "title: Zurich visit",
+        "tags:",
+        "- travel",
+        "- family",
+        "- People/Ipek",
+        '"ZRH trip"',
+        "- name: Ipek",
+        "role: sister",
+    ):
+        assert item in uncovered, item
+
+    # The rule case is unchanged: a list-shaped block only stays frontmatter
+    # once a key has been seen. A leading `---` whose first content is a body
+    # bullet is a thematic break, not a block that happened to open with one.
+    rule = _parse("---\n- a fact\n\n---\n- b\n")
+    assert _texts(rule) == ["- a fact", "- b"]
+    assert ne.DIAG_UNCLOSED_FRONTMATTER in rule.diagnostics
+
+
 # ── The verification stamp ────────────────────────────────────────────────
 
 
