@@ -183,6 +183,13 @@ from ciao.web.routes_push import (
     push_unsubscribe,
 )
 from ciao.web.routes_service_login import service_login_status, service_login_update
+from ciao.web.routes_webhooks import (
+    webhook_create,
+    webhook_delete,
+    webhook_list,
+    webhook_rotate,
+    webhook_update,
+)
 from ciao.web.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -408,6 +415,16 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
+        # Webhook trigger management (A2). The literal `rotate` segment
+        # precedes the bare `{trigger_id}` pattern so rotation is not read
+        # as a trigger id. No ingress here: no /hooks/*, no bearer auth.
+        Route("/api/webhooks", webhook_list, methods=["GET"]),
+        Route("/api/webhooks", webhook_create, methods=["POST"]),
+        Route(
+            "/api/webhooks/{trigger_id}/rotate", webhook_rotate, methods=["POST"]
+        ),
+        Route("/api/webhooks/{trigger_id}", webhook_update, methods=["PATCH"]),
+        Route("/api/webhooks/{trigger_id}", webhook_delete, methods=["DELETE"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),
