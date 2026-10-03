@@ -62,7 +62,7 @@
             </li>
             <li>
               <strong>Archive into a second brain.</strong>
-              <span>When you archive a chat, a memory pass reads it and files what should be remembered.</span>
+              <span>Archive a chat and it remembers what should be: your preferences, the people and projects you mention. Notes are sorted by category, and you can change those categories any time after setup.</span>
             </li>
             <li>
               <strong>Files, with history.</strong>

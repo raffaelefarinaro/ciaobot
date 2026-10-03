@@ -9,7 +9,9 @@
  * a switch flipped off in the list is still off after a save made in the drawer,
  * that a builtin is offered no way to delete itself while a custom one is, and
  * that a refusal from the server reaches the person as the server's own sentence
- * rather than as a silent no-op.
+ * rather than as a silent no-op. And that the panel's explanation of memory is
+ * reading rather than a control: it names the two layers, survives a failed
+ * load, and leaves the registry exactly as it found it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -395,5 +397,70 @@ describe('MemoryCategoriesPanel', () => {
     expect(wrapper.find('.cat-drawer').exists()).toBe(false)
     expect(document.activeElement).toBe(opener.element)
     wrapper.unmount()
+  })
+
+  it('explains regions and note categories without changing or saving the registry', async () => {
+    // The reading is education, not a control: it teaches what a bounded region
+    // and a note category are, with examples, and it lives above the controls so
+    // the user's own list is the only thing that can change the registry.
+    const wrapper = await mountPanel([...STOCK, ...SYSTEM])
+
+    const why = wrapper.get('.cat-why')
+    expect(why.text()).toContain('How memory is organized')
+    expect(why.text()).toContain('Profile & preferences')
+    expect(why.text()).toContain('bounded')
+    expect(why.text()).toContain('Notes, by category')
+    // One example of each kind, so the distinction is concrete rather than named.
+    expect(why.text()).toContain('jargon-free')
+    expect(why.text()).toContain('who someone is')
+    // A category organizes future notes; it is not an instruction to remember all.
+    expect(why.text()).toContain('future')
+    expect(why.text()).toContain('no empty folder is created')
+
+    // Static text: reading it neither saves nor requests anything.
+    expect(apiPatch).not.toHaveBeenCalled()
+
+    // And the effective rows are untouched, custom label included.
+    const labels = rowsOf(wrapper).map((r) => r.find('.cat-name-btn').text())
+    expect(labels).toEqual(['Person', 'Place', 'Customer', 'Project'])
+    wrapper.unmount()
+  })
+
+  it('keeps category education readable when loading or failing', async () => {
+    // The explanation is true whether or not the list has arrived, so it stays
+    // on screen through a load in flight…
+    let release: (answer: EntityTypesResponse) => void = () => {}
+    apiGet.mockImplementation((url: string) =>
+      url.includes('/api/memory/entity-types')
+        ? new Promise<EntityTypesResponse>((resolve) => { release = resolve })
+        : Promise.resolve({}),
+    )
+    const wrapper = mount(MemoryCategoriesPanel, { attachTo: document.body })
+    await nextTick()
+
+    expect(wrapper.find('.cat-loading').exists()).toBe(true)
+    expect(wrapper.get('.cat-why').text()).toContain('Notes, by category')
+    // …and it never reads as a claim about a vault with nothing in it.
+    expect(wrapper.text()).not.toContain('no categories yet')
+
+    // A failed first load: the reading stays, the server's sentence and a Retry
+    // are what the empty region offers instead of a quiet "no categories".
+    wrapper.unmount()
+    apiGet.mockRejectedValue(new Error('vault unavailable'))
+    const failed = mount(MemoryCategoriesPanel, { attachTo: document.body })
+    await flushPromises()
+    await nextTick()
+
+    expect(failed.get('.cat-why').text()).toContain('Profile & preferences')
+    expect(failed.get('.cat-failed-text').text()).toBe('vault unavailable')
+    expect(failed.get('.cat-failed').get('.cat-btn').text()).toBe('Retry')
+    expect(failed.text()).not.toContain('no categories yet')
+    expect(apiPatch).not.toHaveBeenCalled()
+    failed.unmount()
+
+    // The promise the loading mount left behind is settled, so a late resolve
+    // cannot write into a component that is gone.
+    release(body(STOCK))
+    await flushPromises()
   })
 })

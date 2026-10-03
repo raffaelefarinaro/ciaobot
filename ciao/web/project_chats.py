@@ -78,6 +78,7 @@ from ciao.context.capsule import (
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
+from ciao.entity_types import load_entity_types
 from ciao.model_tiers import is_tier
 from ciao.models import (
     THINKING_LEVELS,
@@ -260,6 +261,26 @@ _PROVIDER_DISCONNECT_MAX_ATTEMPTS = 3
 
 
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
+
+# Markdown's ASCII punctuation set: every character that can open a link, an
+# image, an HTML tag or emphasis once a message is rendered as Markdown. A
+# category label is user-typed text, so it is escaped rather than trusted (#979)
+# — a label naming a link must not become one.
+_MARKDOWN_ESCAPE_TABLE = {
+    ord(char): "\\" + char
+    for char in "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+}
+
+
+def _plain_markdown(value: str) -> str:
+    """*value* with every Markdown metacharacter backslash-escaped.
+
+    The one escape CommonMark defines, applied to the whole punctuation set, so
+    a value carrying `[text](url)`, ``<img …>`` or `*emphasis*` is read as the
+    plain text it was written as. For anything the user typed that goes into a
+    message the app renders.
+    """
+    return value.translate(_MARKDOWN_ESCAPE_TABLE)
 
 
 @contextmanager
@@ -1253,6 +1274,37 @@ class ProjectChatManager:
             if project is not None
             else self._config.vault_root
         )
+        # The categories to name, read once for both welcome shapes (#979). The
+        # message needs them escaped, the agent instruction does not.
+        categories, category_names = self._onboarding_memory_categories(
+            project.workspace if project is not None else ""
+        )
+        category_line = (
+            f"filed under the categories this workspace uses: {categories}. "
+            if categories
+            else "filed under the categories this workspace uses. "
+        )
+        # One block, both shapes: the two layers of memory are the same whichever
+        # vault the user pointed us at, and the seeded message is the first place
+        # a new user meets them (#979).
+        memory_intro = (
+            "**How your memory is organized, in two layers:**\n"
+            "- **Profile & preferences** — a small, bounded set of facts about "
+            "you: who you are, how you like to work. It is loaded into your "
+            "conversations, so you never have to repeat yourself.\n"
+            f"- **Notes, by category** — everything else lives in portable notes "
+            f"you own, {category_line}\n\n"
+            "Adding, renaming or turning a category off is a change to how "
+            "**future** notes are organized, not a request to remember "
+            "everything: [See or customize memory categories](/memory/categories).\n\n"
+            "When you archive a chat, a memory pass reads it. What the pass is "
+            "confident about is filed into your notes; what it is not arrives as "
+            "a proposal you can accept or dismiss in **Memory · To decide**. What "
+            "it files shows up in **Memory · History**, where you can see the "
+            "change and undo it while the note is still as the pass left it. "
+            "Turning insights off only stops new passes — it never deletes what "
+            "is already saved."
+        )
 
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
@@ -1267,14 +1319,16 @@ class ProjectChatManager:
                 f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
                 f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `AGENTS.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"5. **Initial memory curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then run an initial curation in this chat: search for duplicates, update the relevant project canonical docs, create durable person/entity notes only for confirmed facts, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
-                f"6. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
-                f"7. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"6. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
+                f"7. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
+                f"8. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
                 f"I've connected workspace **{workspace_name}** to your existing folder at `{vault_root}`. "
-                f"I'll first inspect what is already there, then help curate the clear, durable knowledge into Ciaobot's current structure while preserving the rest. "
+                f"I'll first inspect what is already there, then help curate the clear, durable knowledge into Ciaobot's current structure while preserving the rest.\n\n"
+                f"{memory_intro}\n\n"
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To get started, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
@@ -1289,14 +1343,16 @@ class ProjectChatManager:
                 f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
                 f"2. **Core files**: Setup has already seeded the workspace-level `AGENTS.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `AGENTS.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"3. **Onboarding interview and curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, project facts to project canonical docs, people to `People/`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
-                f"4. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
-                f"5. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"4. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
+                f"5. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
+                f"6. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, explain that you are starting logical workspace **{workspace_name}** at `{vault_root}`, and ask the first onboarding questions to bootstrap their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
                 f"Welcome! I've initialized logical workspace **{workspace_name}** at `{vault_root}` from scratch. "
-                f"I'm ready to customize the current vault structure and curate your durable knowledge with you. "
+                f"I'm ready to customize the current vault structure and curate your durable knowledge with you.\n\n"
+                f"{memory_intro}\n\n"
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To begin, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
@@ -1309,6 +1365,54 @@ class ProjectChatManager:
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_msg},
         ]
+
+    def _onboarding_memory_categories(self, workspace: str) -> tuple[str, str]:
+        """The workspace's enabled, non-hidden category labels, in registry order.
+
+        Returns the list twice: first escaped, for the welcome message the app
+        renders as Markdown, then plain, for the agent instruction the model
+        reads as prose — an escaped join would show up there as `Q\\&A` noise
+        (#979).
+
+        A read-only snapshot of the effective list the Categories page edits
+        (#979), so the seeded welcome can name the categories this vault really
+        has instead of a second copy of the shipped list. Read through
+        ``load_entity_types``, so a disabled builtin, a custom category and a
+        renamed label are all answered by the registry: nothing here
+        duplicates the categories or the shipped folder names.
+
+        The root is ``agent_vault_root`` — the one that owns ``entity-types.yaml``
+        and ``VOCABULARY.md``, and the one ``GET``/``PATCH
+        /api/memory/entity-types`` reads. That is a DIFFERENT directory from the
+        workspace's notes root named in the welcome above on an install that has
+        not re-rooted (``memory-vault/personal`` vs ``memory-vault``), and there
+        is deliberately no notes-root fallback: reading there would report the
+        stock categories while the owner's own Categories page shows their edits
+        — the invisible-edit bug ``proposal_service._entity_roots`` exists to
+        prevent. With no vault file the loader serves the shipped list, which is
+        the honest answer for a brand-new vault.
+
+        Writes nothing and creates no directory: seeding a welcome chat must not
+        touch the vault. Whitespace in a label is collapsed first, so a label
+        typed across two lines stays one line of prose, and the labels are
+        escaped after that, because the message is rendered as Markdown and a
+        label is user-typed text.
+        """
+        if not workspace or not self._is_known_workspace(workspace):
+            return "", ""
+        try:
+            registry = load_entity_types(self._config.agent_vault_root(workspace))
+        except (ValueError, OSError) as exc:
+            logger.warning(
+                "Could not read the memory categories for %s: %s", workspace, exc
+            )
+            return "", ""
+        labels = [
+            " ".join(entry.label.split())
+            for entry in registry.entries()
+            if entry.enabled and not entry.hidden and entry.label.strip()
+        ]
+        return ", ".join(_plain_markdown(label) for label in labels), ", ".join(labels)
 
     def _ensure_general_vault_folder(self, workspace: str) -> None:
         """Create ``projects/active/general/general.md`` if it doesn't exist.
