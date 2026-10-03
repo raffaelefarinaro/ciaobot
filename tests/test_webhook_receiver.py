@@ -31,6 +31,7 @@ from ciao.webhooks import (
     FAILED,
     INTERRUPTED,
     LAUNCHED,
+    LAUNCHING,
     MAX_BODY_BYTES,
     MAX_EVENT_TEXT_CHARS,
     MAX_IDEMPOTENCY_KEY_LENGTH,
@@ -491,8 +492,8 @@ def test_a_crash_in_the_launch_window_is_recorded_interrupted(tmp_path: Path) ->
 
     # The allocation is durable before the model turn; a process that dies after
     # it leaves exactly this row and no terminal row.
-    assert receiver.begin_launch(receipt.id).status == LAUNCHED
-    assert [row["status"] for row in _rows(receiver)] == [ACCEPTED, LAUNCHED]
+    assert receiver.begin_launch(receipt.id).status == LAUNCHING
+    assert [row["status"] for row in _rows(receiver)] == [ACCEPTED, LAUNCHING]
 
     stranded = receiver.recover_interrupted()
 
@@ -516,8 +517,75 @@ def test_begin_launch_is_idempotent_for_the_same_receipt(tmp_path: Path) -> None
     second = receiver.begin_launch(receipt.id)
 
     assert first.id == second.id
-    assert second.status == LAUNCHED
-    assert [row["status"] for row in _rows(receiver)] == [ACCEPTED, LAUNCHED]
+    assert second.status == LAUNCHING
+    assert [row["status"] for row in _rows(receiver)] == [ACCEPTED, LAUNCHING]
+
+
+def test_settle_launched_records_the_success_and_its_chat(tmp_path: Path) -> None:
+    """The outcome is its own row, so a success is not a crash at the next boot."""
+    store, _secret = _world(tmp_path)
+    receiver = _receiver(store)
+    receipt = receiver.receive(_enabled(store), idempotency_key="k1", body=_BODY)
+    receiver.begin_launch(receipt.id)
+
+    launched = receiver.settle_launched(receipt.id, chat_id="chat-abc")
+    # Idempotent, and a retry cannot rewrite the chat the first settle recorded.
+    again = receiver.settle_launched(receipt.id, chat_id="chat-something-else")
+
+    assert launched.status == LAUNCHED
+    assert launched.detail == "chat chat-abc"
+    assert again.status == LAUNCHED
+    assert again.detail == "chat chat-abc"
+    assert [row["status"] for row in _rows(receiver)] == [
+        ACCEPTED,
+        LAUNCHING,
+        LAUNCHED,
+    ]
+    # A success is not ambiguous, so recovery leaves it alone...
+    assert receiver.recover_interrupted() == []
+    # ...and the chat id is what a later read answers with.
+    assert receiver.get(receipt.id).detail == "chat chat-abc"
+
+
+def test_a_settled_launch_cannot_be_relaunched_or_claimed_as_accepted(
+    tmp_path: Path,
+) -> None:
+    store, _secret = _world(tmp_path)
+    receiver = _receiver(store)
+    receipt = receiver.receive(_enabled(store), idempotency_key="k1", body=_BODY)
+    receiver.settle_launched(receiver.begin_launch(receipt.id).id, chat_id="c1")
+
+    # A second allocation would be a second turn behind one event, and claiming
+    # success without an allocation on disk would be the guess this journal
+    # exists to prevent.
+    with pytest.raises(WebhookReceiverError):
+        receiver.begin_launch(receipt.id)
+    other = receiver.receive(_enabled(store), idempotency_key="k2", body=_BODY)
+    with pytest.raises(WebhookReceiverError):
+        receiver.settle_launched(other.id, chat_id="c2")
+    assert receiver.get(receipt.id).status == LAUNCHED
+    assert receiver.get(other.id).status == ACCEPTED
+
+
+def test_a_launched_receipt_hands_its_pending_slot_back(tmp_path: Path) -> None:
+    """The bound counts what is open, and a successful launch is not open.
+
+    Twenty settled successes used to fill the trigger's pending slots, and the
+    twenty-first arrival was refused ``too_many_pending``.
+    """
+    store, _secret = _world(tmp_path)
+    receiver = _receiver(store, permissive=True)
+    trigger = _enabled(store)
+
+    for index in range(MAX_PENDING_RECEIPTS):
+        receipt = receiver.receive(trigger, idempotency_key=f"k{index}", body=_BODY)
+        receiver.settle_launched(
+            receiver.begin_launch(receipt.id).id, chat_id=f"chat-{index}"
+        )
+
+    accepted = receiver.receive(trigger, idempotency_key="one-more", body=_BODY)
+
+    assert accepted.status == ACCEPTED
 
 
 def test_settle_failed_is_terminal_and_idempotent(tmp_path: Path) -> None:

@@ -11,7 +11,9 @@ middleware does not run for a ``/hooks/`` path is owned by the route, and a
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -401,6 +403,75 @@ def test_a_202_carries_a_durable_receipt_and_no_output(
     assert rows[0]["idempotency_key"] == "k1"
     assert rows[0]["event_text"] == _BODY["text"]
     assert secret not in resp.text
+
+
+def test_the_receiver_answers_202_without_waiting_for_the_launch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The response is a receipt, not a launch result.
+
+    The launch is scheduled off the request path (#1020), so a turn that takes
+    minutes cannot hold a sender's connection open, and the sender learns
+    nothing about it from the response. What it *does* learn is the receipt: the
+    launch allocation is on disk before the model turn starts, so a chat exists
+    by the time ``start_stream`` is called even though the response has already
+    gone out.
+    """
+    client, config, _cookies = _world(tmp_path, monkeypatch)
+    trigger_id, secret = _trigger(config)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _Pcm:
+        """A chat manager that records its calls and blocks inside the turn."""
+
+        def list_projects(self, workspace: str | None = None) -> list[Any]:
+            del workspace
+            return [
+                SimpleNamespace(
+                    project_id="proj-general", name="General", workspace="personal"
+                )
+            ]
+
+        def create_chat(self, project_id, title="New Chat", **kwargs) -> Any:
+            calls.append(("create_chat", project_id, kwargs))
+            return SimpleNamespace(chat_id="chat-webhook-1", project_id=project_id)
+
+        def start_stream(self, chat_id, prompt, **kwargs) -> None:
+            calls.append(("start_stream", chat_id, kwargs))
+            entered.set()
+            # Stands in for a turn that runs for minutes. The 202 must already
+            # have been delivered while this is blocked.
+            release.wait(timeout=30)
+            finished.set()
+
+    client.app.state.project_chat_manager = _Pcm()
+    try:
+        with client:
+            resp = _post(client, trigger_id, secret=secret)
+            assert resp.status_code == 202
+            assert resp.json()["status"] == "accepted"
+            assert entered.wait(timeout=30), "the launch was never scheduled"
+            # The response is out while the turn is still inside start_stream.
+            assert not finished.is_set()
+            rows = [
+                json.loads(line)
+                for line in _journal(config).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            # The allocation is durable before the turn, so a crash here would be
+            # `interrupted` rather than a receipt that looks un-run.
+            assert [row["status"] for row in rows] == ["accepted", "launching"]
+            release.set()
+            assert finished.wait(timeout=30)
+    finally:
+        release.set()
+    assert [name for name, _target, _kwargs in calls] == ["create_chat", "start_stream"]
+    # No `unattended`: the turn is an ordinary one, so an approval card raised in
+    # it is an ordinary approval card.
+    assert calls[1][2] == {}
 
 
 def test_a_retry_is_answered_with_the_same_receipt(tmp_path: Path, monkeypatch) -> None:

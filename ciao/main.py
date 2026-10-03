@@ -1074,6 +1074,36 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
 
         asyncio.create_task(_run_catch_up())
 
+        # A webhook event accepted before the restart is still `accepted`: the
+        # event happened and nothing ran yet. Dispatch what is left, once, and
+        # record the receipts a crash left in the ambiguous window (`launching`
+        # with no outcome) as `interrupted` for a person instead of replaying
+        # them. Bounded, so a journal that accumulated accepted rows while
+        # nothing dispatched them cannot start a turn per row at boot.
+        from ciao.web.routes_webhooks import webhook_store as _webhook_store
+        from ciao.webhook_dispatch import resume_pending
+        from ciao.webhooks import WebhookReceiver
+
+        async def _resume_webhook_dispatches() -> None:
+            try:
+                store = _webhook_store(config)
+                summary = await resume_pending(
+                    WebhookReceiver(store.path), store, pcm
+                )
+                if summary.launched or summary.failed or summary.interrupted:
+                    logger.warning(
+                        "Webhook dispatch resume settled %d receipt(s): %d "
+                        "launched, %d failed, %d interrupted",
+                        summary.launched + summary.failed + summary.interrupted,
+                        summary.launched,
+                        summary.failed,
+                        summary.interrupted,
+                    )
+            except Exception:
+                logger.exception("Webhook dispatch resume failed")
+
+        asyncio.create_task(_resume_webhook_dispatches())
+
     # ── Memory backup ────────────────────────────────────────
     # Backs up the same repo the sync flow targets (the repo containing the
     # vault root, falling back to the workspace root) every five minutes:
