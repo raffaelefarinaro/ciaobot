@@ -290,3 +290,131 @@ def test_archiving_a_workspace_revokes_its_triggers(
 
     assert store.authenticate(trigger["trigger_id"], secret) is None
     assert store.get(trigger["trigger_id"]).enabled is False
+
+
+def test_restoring_the_name_cannot_reactivate_a_revoked_secret(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The verifier is gone, so the archived workspace's name comes back empty."""
+    client, cookies, config = _world(tmp_path, monkeypatch)
+    store = _store(config)
+
+    def _enabled(workspace: str) -> tuple[dict, str]:
+        created = client.post(
+            "/api/webhooks",
+            json={
+                "workspace": workspace,
+                "name": f"{workspace} intake",
+                "instructions": "File the intake note",
+            },
+            cookies=cookies,
+        )
+        assert created.status_code == 201, created.text
+        trigger, secret = created.json()["trigger"], created.json()["secret"]
+        enabled = client.patch(
+            f"/api/webhooks/{trigger['trigger_id']}",
+            json={"expected_revision": trigger["revision"], "enabled": True},
+            cookies=cookies,
+        )
+        assert enabled.status_code == 200, enabled.text
+        return trigger, secret
+
+    work, work_secret = _enabled("work")
+    personal, personal_secret = _enabled("personal")
+    assert store.authenticate(work["trigger_id"], work_secret) is not None
+
+    archived = client.post("/api/workspaces/work/archive", cookies=cookies)
+    assert archived.status_code == 200, archived.text
+
+    revoked = store.get(work["trigger_id"])
+    assert store.authenticate(work["trigger_id"], work_secret) is None
+    # Another workspace's triggers are not this archive's business.
+    assert store.authenticate(personal["trigger_id"], personal_secret) is not None
+
+    reenable = client.patch(
+        f"/api/webhooks/{work['trigger_id']}",
+        json={"expected_revision": revoked.revision, "enabled": True},
+        cookies=cookies,
+    )
+    assert reenable.status_code == 400, reenable.text
+    assert "rotate its secret before enabling it" in reenable.json()["error"]
+
+
+def test_a_failed_revocation_refuses_the_archive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An archive that cannot destroy the verifiers is not an archive."""
+    client, cookies, config = _world(tmp_path, monkeypatch)
+    store = _store(config)
+    vault = Path(config.workspace_vault_root("work"))
+    assert vault.is_dir()
+
+    created = client.post(
+        "/api/webhooks",
+        json={
+            "workspace": "work",
+            "name": "Work intake",
+            "instructions": "File the intake note",
+        },
+        cookies=cookies,
+    )
+    assert created.status_code == 201, created.text
+    trigger, secret = created.json()["trigger"], created.json()["secret"]
+    enabled = client.patch(
+        f"/api/webhooks/{trigger['trigger_id']}",
+        json={"expected_revision": trigger["revision"], "enabled": True},
+        cookies=cookies,
+    )
+    assert enabled.status_code == 200, enabled.text
+
+    real_revoke = WebhookStore.revoke_workspace
+    failing = {"on": True}
+
+    def _disk_full(self: WebhookStore, workspace: str) -> int:
+        if failing["on"]:
+            raise OSError(28, "No space left on device")
+        return real_revoke(self, workspace)
+
+    monkeypatch.setattr(WebhookStore, "revoke_workspace", _disk_full)
+    response = client.post("/api/workspaces/work/archive", cookies=cookies)
+
+    assert response.status_code == 500, response.text
+    assert "webhook triggers could not be revoked" in response.json()["error"]
+    # Rolled back like every other failure after the move: still registered,
+    # folder in place, and nothing archived - so the archive can be retried.
+    assert "work" in config.workspaces
+    assert vault.is_dir()
+    # And the trigger it refused to revoke still authorizes, rather than the
+    # archive having quietly claimed it did.
+    assert store.authenticate(trigger["trigger_id"], secret) is not None
+
+    failing["on"] = False
+    retried = client.post("/api/workspaces/work/archive", cookies=cookies)
+    assert retried.status_code == 200, retried.text
+    assert store.authenticate(trigger["trigger_id"], secret) is None
+
+
+def test_the_five_routes_need_the_session_cookie(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client, cookies, _config = _world(tmp_path, monkeypatch)
+    # (verb, path, state-changing) for list, create, update, rotate, delete.
+    calls = (
+        ("get", "/api/webhooks?workspace=personal", False),
+        ("post", "/api/webhooks", True),
+        ("patch", f"/api/webhooks/{'0' * 32}", True),
+        ("post", f"/api/webhooks/{'0' * 32}/rotate", True),
+        ("delete", f"/api/webhooks/{'0' * 32}?expected_revision=1", True),
+    )
+
+    for verb, path, changes_state in calls:
+        request = getattr(client, verb)
+        # No cookie at all, and a cookie nobody signed.
+        assert request(path).status_code == 401, path
+        assert request(path, cookies={SESSION_COOKIE: "forged"}).status_code == 401, path
+        if changes_state:
+            # Signed, but asked for by a page on another site.
+            cross = request(
+                path, cookies=cookies, headers={"origin": "https://elsewhere.example"}
+            )
+            assert cross.status_code == 403, path

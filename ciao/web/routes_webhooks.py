@@ -6,10 +6,15 @@ auth, no request recipe — that is the A3 child's design. Every route reads the
 session cookie through the shared ``AuthMiddleware`` like every other
 ``/api/*`` route; a raw secret appears only in the create and rotate
 responses, exactly once, and never in a list, an error, or a log.
+
+``project_id`` is shape-checked here and nowhere else: the store validates its
+form, not that the workspace has such a project. Binding it to a real project
+is the dispatch service's job (A4), which must check it before a trigger runs.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -25,15 +30,23 @@ from ciao.webhooks import (
 )
 
 
-def _store(request: Request) -> WebhookStore:
+def webhook_store(config: Any) -> WebhookStore:
     """The engine's trigger store: ``<runtime>/webhooks.json``.
+
+    The one place that path is built. Exported because the workspace-archive
+    hook in ``routes_api`` revokes the same file, and two spellings of it would
+    be free to drift.
 
     Constructed per call. The store is cheap and cross-process-safe by design
     (every mutation re-reads the file under its locks), so no ``app.state``
     wiring is needed.
     """
-    config = request.app.state.config
     return WebhookStore(Path(config.state_path).parent / "webhooks.json")
+
+
+def _store(request: Request) -> WebhookStore:
+    """The request's trigger store. See :func:`webhook_store`."""
+    return webhook_store(request.app.state.config)
 
 
 def _store_error(exc: WebhookStoreError) -> JSONResponse:
@@ -76,7 +89,9 @@ async def webhook_list(request: Request) -> JSONResponse:
         return JSONResponse({"error": error}, status_code=400)
     workspace = str(request.query_params.get("workspace", "")).strip()
     try:
-        rows = _store(request).list(workspace)
+        # In a thread: every store call takes a file lock and fsyncs, which is
+        # the event loop's time to spend, not its own.
+        rows = await asyncio.to_thread(_store(request).list, workspace)
     except WebhookStoreError as exc:
         return _store_error(exc)
     return JSONResponse({"triggers": [row.to_dict() for row in rows]})
@@ -101,7 +116,7 @@ async def webhook_create(request: Request) -> JSONResponse:
     if body.get("mode") is not None:
         arguments["mode"] = body.get("mode")
     try:
-        trigger, secret = _store(request).create(**arguments)
+        trigger, secret = await asyncio.to_thread(_store(request).create, **arguments)
     except WebhookStoreError as exc:
         return _store_error(exc)
     return JSONResponse(
@@ -122,7 +137,7 @@ async def webhook_update(request: Request) -> JSONResponse:
         if field in body:
             arguments[field] = body[field]
     try:
-        updated = _store(request).update(trigger_id, **arguments)
+        updated = await asyncio.to_thread(_store(request).update, trigger_id, **arguments)
     except WebhookStoreError as exc:
         return _store_error(exc)
     return JSONResponse({"trigger": updated.to_dict()})
@@ -136,8 +151,10 @@ async def webhook_rotate(request: Request) -> JSONResponse:
     trigger_id = str(request.path_params.get("trigger_id", ""))
     expected_revision: Any = body.get("expected_revision")
     try:
-        updated, secret = _store(request).rotate_secret(
-            trigger_id, expected_revision=expected_revision
+        updated, secret = await asyncio.to_thread(
+            _store(request).rotate_secret,
+            trigger_id,
+            expected_revision=expected_revision,
         )
     except WebhookStoreError as exc:
         return _store_error(exc)
@@ -155,7 +172,11 @@ async def webhook_delete(request: Request) -> Response:
             status_code=400,
         )
     try:
-        _store(request).delete(trigger_id, expected_revision=expected_revision)
+        await asyncio.to_thread(
+            _store(request).delete,
+            trigger_id,
+            expected_revision=expected_revision,
+        )
     except WebhookStoreError as exc:
         return _store_error(exc)
     return Response(status_code=204)
