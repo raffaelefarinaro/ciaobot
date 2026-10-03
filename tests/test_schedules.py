@@ -116,28 +116,16 @@ def test_system_schedules_load_from_stock_not_runtime(tmp_path: Path) -> None:
     assert any(item.schedule_id == "system-memory-curation" for item in schedules)
 
 
-def test_stock_memory_curation_schedule_invokes_the_skill(tmp_path: Path) -> None:
-    """The schedule prompt dispatches to the memory-curation skill.
-
-    The procedure itself — canonical-doc folding, memory-pass routing —
-    lives in the skill file, where test_stock_package asserts its contract.
-    """
-    from importlib import resources
-
+def test_stock_memory_curation_schedule_contains_the_procedure(tmp_path: Path) -> None:
+    """The schedule itself carries canonical-doc and memory-pass routing."""
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
-    assert "memory-curation" in entry.prompt
-    skill = (
-        resources.files("ciao.stock")
-        .joinpath("skills", "memory-curation", "SKILL.md")
-        .read_text(encoding="utf-8")
-    )
-    assert "canonical doc" in skill.lower()
+    assert "canonical doc" in entry.prompt.lower()
     # The post-archive writer is the memory pass; the one-shot insights stage
     # this used to name was deleted in #627.
-    assert "memory pass" in skill.lower()
-    assert "session-insights" not in skill.lower()
+    assert "memory pass" in entry.prompt.lower()
+    assert "session-insights" not in entry.prompt.lower()
 
 
 def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
@@ -933,49 +921,33 @@ def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> 
     allowed behind two guardrails: every removal is logged to the undo file,
     and uncertain removals become [review] yes/no questions instead.
     """
-    from importlib import resources
-
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
-    # The contract lives in the skill the prompt dispatches to.
-    assert "memory-curation" in entry.prompt
-    skill = (
-        resources.files("ciao.stock")
-        .joinpath("skills", "memory-curation", "SKILL.md")
-        .read_text(encoding="utf-8")
-    )
+    prompt = entry.prompt
     # Promotion stays forbidden; consolidation is required when needed.
-    assert "Do not promote new facts into the bounded" in skill
-    assert "consolidate that region now" in skill
+    assert "Do not promote new facts into the bounded" in prompt
+    assert "consolidate that region now" in prompt
     # Guardrail 1: nothing is dropped without an undo log entry.
-    assert "Workspace/Memory-Consolidations.md" in skill
-    assert "undo log" in skill
+    assert "Workspace/Memory-Consolidations.md" in prompt
+    assert "undo log" in prompt
     # Guardrail 2: judgment calls become reviewable questions, not deletions.
-    assert "[review] Keep" in skill
-    assert "Memory-Proposals.md" in skill
-    assert "memory_status" in skill
+    assert "[review] Keep" in prompt
+    assert "Memory-Proposals.md" in prompt
+    assert "ciao memory status" in prompt
     # The old blanket ban must be gone, or the two instructions cancel out.
-    assert "Do not edit the bounded" not in skill
-    assert "Do not edit the bounded" not in entry.prompt
+    assert "Do not edit the bounded" not in prompt
 
 
-def test_workspace_care_skill_runs_overdue_structured_os_audit(tmp_path: Path) -> None:
+def test_workspace_care_runs_overdue_structured_os_audit(tmp_path: Path) -> None:
     """Workspace care owns both nightly memory and the overdue weekly audit."""
-    from importlib import resources
-
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
-    skill = (
-        resources.files("ciao.stock")
-        .joinpath("skills", "memory-curation", "SKILL.md")
-        .read_text(encoding="utf-8")
-    )
-    assert "ciao vault-index --write" in skill
-    assert "ciao os-audit --json --scope workspace" in skill
-    assert "last_full_pass" in skill
-    assert skill.index("vault-index --write") < skill.index("os-audit --json")
+    assert "ciao vault-index --write" in entry.prompt
+    assert "ciao os-audit --json --scope workspace" in entry.prompt
+    assert "last_full_pass" in entry.prompt
+    assert entry.prompt.index("vault-index --write") < entry.prompt.index("os-audit --json")
 
 
 def test_user_schedule_description_round_trips(tmp_path: Path) -> None:

@@ -93,42 +93,6 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
     </button>
     <div class="chat-column">
-    <!-- Context bar: what this chat is attached to — its automations. These
-         were sibling banner blocks, each a v-for, so a chat with all of them
-         opened with its first message below the fold. Collapsed it is one line
-         of counted chips; expanded it is the same detail rows with the same
-         actions. -->
-    <!-- Only when the Work details rail is hidden: with the rail shown, the
-         chat's automations live there instead of above the transcript. -->
-    <div v-if="contextRelations.length && !railShown && !inspectorOpen" class="ctx-bar" :class="{ 'ctx-bar--open': contextExpanded }">
-      <button
-        type="button"
-        class="ctx-summary"
-        :aria-expanded="contextExpanded"
-        @click="contextExpanded = !contextExpanded"
-      >
-        <span class="ctx-chevron" aria-hidden="true">{{ contextExpanded ? '▾' : '▸' }}</span>
-        <span>Automation controls</span>
-      </button>
-      <div v-if="contextExpanded" class="ctx-detail">
-        <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
-          <!-- Interval entries keep the cycle glyph loops used; everything else
-               keeps the clock, so the cadence reads before the text does. -->
-          <span v-if="s.frequency === 'interval'" class="loop-banner-ico" aria-hidden="true">&#10227;</span>
-          <AppIcon v-else class="loop-banner-ico" name="clock" :size="18" />
-          <span class="loop-banner-text">
-            <strong>{{ s.title || 'Automation' }}</strong>
-            · {{ scheduleCadence(s) }}
-            · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.last_status === 'busy'"> (waiting, chat busy)</template>
-            <template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
-          </span>
-          <button class="btn-small" @click="toggleScheduleEnabled(s)">{{ s.enabled ? 'Pause' : 'Resume' }}</button>
-          <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
-          <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
-        </div>
-      </div>
-    </div>
-
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads
          as a conversation that began mid-thought; this names the conversation
@@ -142,9 +106,9 @@
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && renderItems.length === 0 && !inputText.trim() }" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
-      <!-- Selecting a message (click or Enter) lifts it above a blurred veil
-         and shows its actions; clicking the veil or Esc puts it back. -->
-      <div v-if="tappedMessageKey" class="message-select-backdrop" aria-hidden="true" @click.stop="tappedMessageKey = null"></div>
+      <!-- Selecting a message (click or Enter) outlines it and shows its
+         actions, leaving the rest of the transcript readable; clicking the
+         message again or pressing Esc puts it back. -->
       <div class="messages-content">
       <Transition name="history-loading">
         <!-- Placeholder for the transcript, in the transcript's own shape: a
@@ -256,7 +220,7 @@
                     <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
                   </a>
                 </div>
-                <div v-html="renderMarkdown(item.msg.content)"></div>
+                <div v-html="renderUserMessage(item.msg.content)"></div>
               </div>
               <!-- The time shows only on the selected (tapped) message, so the
                    transcript stays quiet. -->
@@ -653,7 +617,6 @@
       >
         <AgentContextSection
           :project="project"
-          :entities="lastUserEntities"
           :context-pct="contextPct"
           @open-file="openInspectorFile"
         />
@@ -1042,41 +1005,9 @@
               {{ isContinuing ? 'Continuing...' : 'Continue in new chat' }}
             </button>
           </div>
-          <!-- What Ciaobot took from this conversation. Runs as a live line
-               while the pipeline works, then settles and stays: the archived
-               chat is the permanent record of what was learned from it, and
-               nothing else in the app ever reported this. -->
-          <p
-            v-if="archiveTidying"
-            class="archived-postprocess"
-            aria-live="polite"
-          >
-            <span class="archived-postprocess-dot" aria-hidden="true" />
-            {{ archiveTidyLabel }}…
-          </p>
-          <div
-            v-else-if="archiveTidySummary"
-            class="archived-postprocess-row"
-          >
-            <p
-              class="archived-postprocess"
-              :class="{ failed: archiveTidyFailed }"
-              aria-live="polite"
-            >{{ archiveTidySummary }}</p>
-            <button
-              v-if="archiveNeedsRetry"
-              class="btn-sm archived-postprocess-retry"
-              type="button"
-              :disabled="archiveRetrying"
-              :aria-label="`Retry unfinished post-archive steps for ${chat.title}`"
-              @click="retryArchiveSteps"
-            >{{ archiveRetrying ? 'Retrying…' : 'Retry unfinished steps' }}</button>
-          </div>
           <!-- The memory pass this chat spawned, if one did. The pass lives in
                a project the sidebar hides, so this is the durable way back to
-               it — and the one thing here that opens another chat rather than
-               re-running work on this one, which is why it stays out of the
-               retry row above. -->
+               it. -->
           <button
             v-if="archiveMemoryPassChatId"
             class="btn-sm archive-memory-pass-btn"
@@ -1268,7 +1199,6 @@
       <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
         <AgentContextSection
           :project="project"
-          :entities="lastUserEntities"
           :context-pct="contextPct"
           @open-file="openInspectorFile"
         />
@@ -1344,13 +1274,6 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { isApplePlatform } from '../lib/platform'
-import {
-  isPostprocessing,
-  postprocessFailed,
-  postprocessLabel,
-  postprocessNeedsRetry,
-  postprocessSummary,
-} from '../lib/postprocessView'
 import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
@@ -1363,7 +1286,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { useModalFocus } from '../composables/useModalFocus'
-import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, Schedule, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1371,7 +1294,7 @@ import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCop
 import AppIcon from './AppIcon.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
-import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
+import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
@@ -1385,6 +1308,7 @@ import {
   fileCardDirname,
   fileCardIcon,
   findFinalAnswerIndex,
+  isInterruptedTail,
   formatTokenUsage,
   isImageFilePath,
   isScratchPath,
@@ -1680,35 +1604,12 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => store.activeChat!)
 
-// Post-archive pipeline, reported in the archived-chat footer. Reads through the
-// chat record rather than a transient flag so the settled summary is still there
-// when this chat is reopened weeks later.
 const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_id))
-const archiveTidying = computed(() => isPostprocessing(archivePostprocess.value))
-const archiveTidyLabel = computed(() => postprocessLabel(archivePostprocess.value))
-const archiveTidySummary = computed(() => postprocessSummary(archivePostprocess.value))
-const archiveTidyFailed = computed(() => postprocessFailed(archivePostprocess.value))
-// Whether the archived chat's pipeline still has stages to finish. A partial
-// completion (crash, provider failure) is retryable from here, so the user does
-// not have to hunt for the Home lane.
-const archiveNeedsRetry = computed(() => postprocessNeedsRetry(archivePostprocess.value))
-// The memory pass this chat spawned, recorded on its own postprocess record
-// because the pass outlives the archive job that queued it. Present from the
+// The memory pass this chat spawned, recorded on its own postprocess record.
+// Present from the
 // moment the pass is enqueued, so the link works while it is still running and
 // after the pass is archived.
 const archiveMemoryPassChatId = computed(() => memoryPassChatId(archivePostprocess.value))
-const archiveRetrying = ref(false)
-async function retryArchiveSteps(): Promise<void> {
-  if (archiveRetrying.value) return
-  archiveRetrying.value = true
-  try {
-    await store.retryInsights(chat.value.chat_id)
-  } catch (e) {
-    store.pushErrorToast('Could not retry unfinished steps', errorMessage(e))
-  } finally {
-    archiveRetrying.value = false
-  }
-}
 function openMemoryPass(): void {
   if (archiveMemoryPassChatId.value) void store.switchChat(archiveMemoryPassChatId.value)
 }
@@ -1777,45 +1678,6 @@ const chatSchedules = computed(() => {
   return taskStore.schedules.filter(s =>
     (sid && s.schedule_id === sid) || (cid && s.web_chat_id === cid),
   )
-})
-
-// ── Context bar ─────────────────────────────────────────────────────
-// One counted chip per relation, so the v-for banner blocks can never again
-// push the transcript below the fold. Detail rows live behind the disclosure.
-const contextExpanded = ref(false)
-
-interface ContextRelation {
-  key: string
-  label: string
-  glyph?: string
-  live?: boolean
-}
-
-const contextRelations = computed<ContextRelation[]>(() => {
-  const rels: ContextRelation[] = []
-  // Interval entries get their own chip with the cycle glyph: "this chat
-  // re-runs itself" is a different fact from "something fires here at 09:00",
-  // and collapsing them into one count hid it.
-  const intervals = chatSchedules.value.filter(s => s.frequency === 'interval')
-  const timed = chatSchedules.value.filter(s => s.frequency !== 'interval')
-  if (intervals.length) {
-    const label = intervals.length === 1
-      ? `every ${intervals[0].interval_minutes}m`
-      : `${intervals.length} interval runs`
-    rels.push({
-      key: 'intervals',
-      label,
-      glyph: '↻',
-      live: intervals.some(s => s.enabled),
-    })
-  }
-  if (timed.length) {
-    const label = timed.length === 1
-      ? `scheduled ${scheduleCadence(timed[0])}`
-      : `${timed.length} schedules`
-    rels.push({ key: 'schedules', label })
-  }
-  return rels
 })
 
 // ── Action dock ─────────────────────────────────────────────────────
@@ -1907,66 +1769,6 @@ onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
 })
 
-// Lightweight 30-second tick powering the "next in Xm" countdown in the
-// automation banner. Only runs while this chat has a live automation.
-const loopNow = ref(Date.now())
-let loopTick: ReturnType<typeof setInterval> | null = null
-watch(chatSchedules, (scheds) => {
-  const hasScheduled = scheds.some(s => s.enabled && s.next_run)
-  if (hasScheduled && !loopTick) {
-    loopNow.value = Date.now()
-    loopTick = setInterval(() => { loopNow.value = Date.now() }, 30_000)
-  } else if (!hasScheduled && loopTick) {
-    clearInterval(loopTick)
-    loopTick = null
-  }
-}, { immediate: true })
-onBeforeUnmount(() => { if (loopTick) clearInterval(loopTick) })
-
-// ── Automation banner helpers ──
-const scheduleRunningId = ref<string | null>(null)
-function scheduleCadence(s: Schedule): string {
-  const time = s.daily_time_utc ? s.daily_time_utc.slice(0, 5) : ''
-  switch (s.frequency) {
-    case 'daily': return time ? `daily ${time}` : 'daily'
-    case 'weekly': {
-      const days = s.days_of_week && s.days_of_week.length
-        ? s.days_of_week.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join('/')
-        : ''
-      return days ? `weekly ${days}${time ? ' ' + time : ''}` : 'weekly'
-    }
-    case 'monthly': return s.day_of_month ? `monthly on day ${s.day_of_month}` : 'monthly'
-    case 'once': return s.run_at_date ? `once ${s.run_at_date}` : 'once'
-    case 'interval': return `every ${s.interval_minutes}m`
-    case 'manual': return 'manual'
-    default: return s.frequency
-  }
-}
-function scheduleCountdown(s: Schedule): string {
-  if (!s.next_run) return ''
-  const diffMs = new Date(s.next_run).getTime() - loopNow.value
-  if (diffMs <= 0) return 'soon'
-  const mins = Math.ceil(diffMs / 60_000)
-  if (mins < 60) return `in ${mins}m`
-  const hrs = Math.floor(mins / 60)
-  const rm = mins % 60
-  return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
-}
-async function runScheduleNow(s: Schedule) {
-  scheduleRunningId.value = s.schedule_id
-  try {
-    await taskStore.runScheduleNow(s.schedule_id)
-  } catch {
-    // An interval run into a chat that is already streaming is refused rather
-    // than queued. Nothing to surface here beyond clearing the button.
-  } finally {
-    scheduleRunningId.value = null
-  }
-}
-
-async function toggleScheduleEnabled(s: Schedule) {
-  await taskStore.updateSchedule(s.schedule_id, { enabled: !s.enabled })
-}
 const project = computed(() => store.activeProject)
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
@@ -2065,16 +1867,6 @@ const contextPct = computed<number | null>(() => {
     return Number.isFinite(pct) && pct > 0 ? pct : null
   }
   return null
-})
-
-// The newest user message's entity matches: undefined before the first
-// message, [] when it matched nothing.
-const lastUserEntities = computed(() => {
-  const msgs = store.activeMessages
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role === 'user') return msgs[i].context_entities ?? []
-  }
-  return undefined
 })
 
 const runningSubagents = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
@@ -2191,43 +1983,24 @@ const forkLoadingKey = ref<string | null>(null)
 // On touch devices there is no hover, so a tap on the bubble reveals the
 // per-message action icons. Holds the key of the message whose actions are open.
 const tappedMessageKey = ref<string | null>(null)
-// Breathing room left between a selected turn's bottom edge and the bottom of
-// the transcript once the scroll below has pulled it into view.
-const FOOTER_SCROLL_GAP = 12
 
-// Touch: tap a message to toggle its action icons. Ignored on hover-capable
-// devices (they use hover) and when the tap targets a link/button or a text
-// selection is in progress.
-// Click (any pointer) or Enter selects a message and shows its actions. A
-// click that lands on something interactive, on a comment highlight, or that
-// ends a text selection (the start of a comment) is left alone.
+// Click (any pointer) or Enter selects a message and shows its actions;
+// clicking the same message again puts them away. A click that lands on
+// something interactive, on a comment highlight, or that ends a text
+// selection (the start of a comment) is left alone.
 function toggleMessageActions(key: string, e: Event): void {
   const target = e.target as HTMLElement | null
   if (target?.closest('a, button, input, textarea, summary, .comment-highlight, [data-comment-id]')) return
   if (window.getSelection()?.toString()) return
   const opening = tappedMessageKey.value !== key
   tappedMessageKey.value = opening ? key : null
-  if (opening) nextTick(scrollSelectedMessageIntoView)
-}
-
-// Selecting a message grows it: the action footer was not in the layout a
-// moment ago, so on the last turn of a phone-sized transcript the footer lands
-// under the composer, half its buttons and all of the turn facts. Bring the
-// whole selected turn back into view — downward only, so a footer that already
-// fits never yanks the transcript away from where the reader was.
-//
-// Measured with rects against the scroll box rather than offsetTop/offsetHeight
-// on the turn: the card is the turn's child and hangs 16px below it (the
-// selected card's negative bottom margin), so the turn's own box under-reports
-// the bottom by exactly the 16px that matters here.
-function scrollSelectedMessageIntoView(): void {
-  const root = messagesEl.value
-  const card = root?.querySelector<HTMLElement>('.message-wrap--selected .message-row') ?? null
-  if (!root || !card) return
-  const viewportBottom = root.getBoundingClientRect().top + root.clientHeight
-  const overflow = card.getBoundingClientRect().bottom - (viewportBottom - FOOTER_SCROLL_GAP)
-  if (overflow <= 0) return
-  root.scrollTo({ top: root.scrollTop + overflow, behavior: 'smooth' })
+  // Selecting grows the card by its action footer, and the open-time bottom
+  // pin re-anchors `scrollTop` to the new bottom on its next frame, so the
+  // transcript would slide under the reader. A real pointer already releases
+  // the pin (the pointerdown listener below); this makes the guarantee hold
+  // for a click that arrives without one — a synthetic or keyboard-driven
+  // selection — by stopping the pin before Vue flushes the grown card.
+  releasePin()
 }
 
 function onSelectedMessageKeydown(e: KeyboardEvent): void {
@@ -3691,11 +3464,17 @@ watch(() => chat.value?.chat_id, (id) => notifyChatFocused(id))
 const knownFilePaths = computed(() => touchedFiles.value.map(f => f.file_path))
 
 const mdCache = new Map<string, string>()
+// User bubbles render through a different pipeline (raw HTML is escaped, see
+// lib/safeMarkdown.ts), so the two renderings cannot share one text-keyed cache.
+const userMdCache = new Map<string, string>()
 const MAX_MD_CACHE_SIZE = 500
 // Rendered output depends on the known-file-path set (for linkification), so
 // drop the cache whenever that set actually changes — keying on text alone is
 // then safe, and avoids a stale render when paths change without the text.
-watch(() => knownFilePaths.value.join('|'), () => mdCache.clear())
+watch(() => knownFilePaths.value.join('|'), () => {
+  mdCache.clear()
+  userMdCache.clear()
+})
 
 function renderMarkdown(text: string): string {
   if (!text) return ''
@@ -3709,6 +3488,20 @@ function renderMarkdown(text: string): string {
     if (firstKey !== undefined) mdCache.delete(firstKey)
   }
   mdCache.set(text, rendered)
+  return rendered
+}
+
+function renderUserMessage(text: string): string {
+  if (!text) return ''
+  const cached = userMdCache.get(text)
+  if (cached !== undefined) return cached
+
+  const rendered = renderSafeUserMarkdown(text, knownFilePaths.value)
+  if (userMdCache.size >= MAX_MD_CACHE_SIZE) {
+    const firstKey = userMdCache.keys().next().value
+    if (firstKey !== undefined) userMdCache.delete(firstKey)
+  }
+  userMdCache.set(text, rendered)
   return rendered
 }
 
@@ -3925,9 +3718,10 @@ const renderData = computed<{
     const finalMsg = finalIdx >= 0 ? buffer[finalIdx] : null
     const trailing = finalIdx >= 0 ? buffer.slice(finalIdx + 1) : []
 
-    // If the last assistant text is followed by `_thinking` blocks, the turn
-    // was interrupted mid-thought. Fold everything into a trace so the user
-    // doesn't see a standalone bubble that's actually mid-reasoning.
+    // If narration is followed by `_thinking` blocks, the turn was interrupted
+    // mid-thought. Fold everything into a trace so the user doesn't see a
+    // standalone bubble that's actually mid-reasoning. A substantive reply
+    // followed by a reasoning-only step is still the answer.
     //
     // BUT: trailing-only `_activity` (tool calls) does NOT mean the turn was
     // interrupted. A model commonly emits its final answer text and then runs
@@ -3935,8 +3729,7 @@ const renderData = computed<{
     // text. In that case the answer text is the real reply and must render as
     // a normal assistant bubble; the trailing tools just join the trace.
 
-    const trailingHasThinking = trailing.some(m => m.tool_name === '_thinking')
-    if (trailingHasThinking && finalMsg) {
+    if (finalMsg && isInterruptedTail(finalMsg, trailing)) {
       const traceSubs = takeForegroundSubs(currentTurnIndex)
       items.push(withKey({
         kind: 'trace',
@@ -4125,10 +3918,9 @@ watch(
 // Force-scroll to bottom when switching to a different chat.
 watch(() => store.activeChatId, () => {
   isNearBottom.value = true
-  // Both disclosures are per-chat state; carrying them across a switch meant a
-  // chat you never expanded opened with its dock and context bar already open.
+  // The dock disclosure is per-chat state; carrying it across a switch meant a
+  // chat you never expanded opened with its dock already open.
   dockExpanded.value = false
-  contextExpanded.value = false
   nextTick(() => {
     if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
     // Hold the bottom while the incoming transcript's height settles, rather
@@ -5033,6 +4825,14 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* Geometry copied from .message.user / .message.assistant deliberately: the
    whole point is that the placeholder occupies the same box as the row that
    replaces it. */
+.history-skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  min-width: 0;
+}
+
 .skel-msg {
   display: flex;
   flex-direction: column;
@@ -5071,6 +4871,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   align-items: center;
   gap: 8px;
   width: 98%;
+  box-sizing: border-box;
   padding: 9px 12px;
   border: 1px dashed var(--border);
   border-left: 3px solid color-mix(in srgb, var(--accent2) 45%, transparent);
@@ -5234,10 +5035,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 /* The footer band under a reply: a hairline below the prose, bled to the
    card's own edges and re-inset to the text column, so the buttons share the
-   prose's left edge rather than hanging outside the card. 20px of air above
-   the rule (4 here + the card's 16px padding), 10px below the buttons. */
+   prose's left edge rather than hanging outside the card. 16px of air above
+   the rule (4 here + the card's 12px padding), 10px below the buttons. The
+   -12px bottom cancels the card's vertical bleed so the band, and the outline
+   around it, stay inside the turn instead of crossing into the next one. */
 .message-wrap--selected.assistant .message-actions {
-  margin: 4px -18px -16px;
+  margin: 4px -18px -12px;
   padding: 10px 18px;
   border-top: 1px solid var(--border);
 }
@@ -5250,41 +5053,29 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 
 
-/* The veil under a selected message: the transcript blurs back, the
-   message and its actions stay sharp above it. */
-.message-select-backdrop {
-  position: fixed;
-  inset: 0;
-  /* Above the sidebar's workspace scope (40) so the whole app blurs back. */
-  z-index: 45;
-  background: color-mix(in srgb, var(--bg) 40%, transparent);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-  animation: message-veil-in 160ms var(--ease);
-}
-@keyframes message-veil-in { from { opacity: 0; } to { opacity: 1; } }
-
-.message-wrap--selected {
-  position: relative;
-  z-index: 46;
-}
+/* Selection marks one message and nothing else. An accent outline says which
+   turn the actions belong to; the surrounding transcript keeps its own
+   contrast, so reading on does not turn into a dimmed page. */
 .message-wrap--selected.user .message {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), 0 16px 40px rgb(0 0 0 / 28%);
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
 }
-/* Replies are plain prose, so a selected one gets a surface to lift. The
-   negative margin keeps the text from moving. */
+/* Replies are plain prose, so a selected one is outlined around a box the same
+   size as the selected card. The negative margin keeps the text from moving.
+   The card bleeds 12px vertically rather than 16px: the transcript's turn gap
+   is 14px, so a 16px bleed drew the accent outline over the bubble above and
+   below (the comment reference card is the surface the user sees it clash
+   with). Padding and negative margin cancel, so the prose still does not move;
+   the outline just clears the neighbouring turn. */
 .message-wrap--selected.assistant .message-row {
-  margin: -16px -18px;
-  padding: 16px 18px;
+  margin: -12px -18px;
+  padding: 12px 18px;
   border-radius: 14px;
-  background: var(--bg2);
-  box-shadow: 0 0 0 1px var(--border-strong), 0 16px 40px rgb(0 0 0 / 28%);
+  outline: 1px solid var(--accent);
 }
-/* On a selected message the actions are the point: real controls on a
-   surface, full-strength text, not the quiet text links of an unselected
-   turn. One border, no shadow — the card is the only thing floating here,
-   and a shadowed chip under a shadowed card reads as three depths in
-   fifty pixels. */
+/* On a selected message the actions are the point: real controls with a
+   border, full-strength text, not the quiet text links of an unselected
+   turn. */
 .message-wrap--selected .message-action-btn {
   height: 34px;
   padding: 0 12px;
@@ -5309,9 +5100,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   outline: 2px solid var(--accent);
   outline-offset: 4px;
   border-radius: 8px;
-}
-@media (prefers-reduced-motion: reduce) {
-  .message-select-backdrop { animation: none; }
 }
 
 
@@ -5354,8 +5142,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 /* Touch: the row keeps its 28px visual but each button grows a 44px hit
    area around it, so taps land without spreading the transcript out. A
-   selected button is already 44px, so the extra halo only applies to the
-   unselected state, where the row is display:none anyway. */
+   selected button already is the 44px target, so it drops the halo
+   instead of carrying a second, larger one. */
 @media (pointer: coarse) {
   .message-action-btn::after {
     content: '';
@@ -6441,73 +6229,11 @@ details[open] > .activity-summary::before {
   flex-wrap: wrap;
 }
 
-/* A footnote, not a component: no card, no border, no background. It reports
-   work the user did not ask for and does not need to act on, so it stays in the
-   muted register even once it has something to say. */
-.archived-postprocess {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-  color: var(--fg3);
-  text-align: center;
-  flex-wrap: wrap;
-}
-
-/* The single exception to the muted rule: a failed step is only ever visible
-   here, so it is allowed to say so. */
-.archived-postprocess.failed { color: var(--warning); }
-
-/* Partial completion is actionable, so the row pairs the muted summary with a
-   retry control that meets the 44px touch target. */
-.archived-postprocess-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
-.archived-postprocess-retry {
-  min-height: 44px;
-  min-width: 44px;
-  cursor: pointer;
-}
-
-.archived-postprocess-retry:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* The link back to the memory pass this chat spawned. It sits on its own line
-   under the postprocess rows — the pass is a separate chat, not a stage of this
-   one's pipeline, so it reads as its own action. 44px like every control in
-   this footer. */
+/* The link back to the memory pass this chat spawned. 44px like every control
+   in this footer. */
 .archive-memory-pass-btn {
   min-height: 44px;
   min-width: 44px;
-}
-
-.archived-postprocess-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--fg3);
-  flex: 0 0 auto;
-  animation: archived-postprocess-breathe 2.6s ease-in-out infinite;
-}
-
-@keyframes archived-postprocess-breathe {
-  0%, 100% { opacity: 0.35; }
-  50%      { opacity: 0.9; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .archived-postprocess-dot { animation: none; opacity: 0.75; }
 }
 
 .image-btn {
@@ -7057,12 +6783,21 @@ details[open] > .activity-summary::before {
   .thinking-chip { min-height: var(--touch); }
 }
 
-.chat-archive-btn {
+/* PaneHeader squares every header .btn-icon to 30px, which crushed this
+   labelled button: the icon shrank to nothing and the word spilled out. The
+   doubled class outranks that rule so the button sizes to icon + label. */
+.chat-archive-btn.btn-icon {
+  box-sizing: border-box;
   gap: var(--space-2);
+  width: auto;
   height: 34px;
+  min-width: 0;
+  margin: 0;
   padding: 0 14px;
   white-space: nowrap;
 }
+.chat-archive-btn.btn-icon::before { inset: 0; }
+.chat-archive-btn svg { flex-shrink: 0; }
 @media (pointer: coarse) { .chat-archive-btn { min-height: var(--touch); } }
 
 .model-picker-dropdown {
@@ -7177,6 +6912,16 @@ details[open] > .activity-summary::before {
   }
   .chat-archive-btn {
     color: var(--fg2);
+  }
+  /* The label is hidden here, so the button is icon-only and must carry the
+     touch minimum itself. The base `.chat-archive-btn.btn-icon { height: 34px }`
+     outranks App.vue's `.btn-icon { min-height: var(--touch) }`, and the
+     `pointer: coarse` rule below never fires on a fine-pointer device at a
+     narrow viewport, so without this the button measures 46x34 and
+     narrow-viewport.spec.ts fails. min-height beats the fixed height. */
+  .chat-archive-btn.btn-icon {
+    min-width: var(--touch);
+    min-height: var(--touch);
   }
   .chat-archive-btn:hover { color: var(--fg); }
   .chat-archive-label { display: none; }
@@ -7527,84 +7272,6 @@ details[open] > .activity-summary::before {
   :deep(.comment-highlight--pulse) { animation: none; }
 }
 
-/* ── Automation banner ── */
-/* ── Context bar ─────────────────────────────────────────────────────
-   Collapsed: one line of counted chips. Expanded: the detail rows, which
-   keep the original .loop-banner-row layout and actions. */
-.ctx-bar {
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--border);
-}
-.ctx-summary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  min-height: var(--touch);
-  padding: var(--space-2) 0;
-  border: 0;
-  background: none;
-  color: var(--fg2);
-  font-family: var(--font);
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-  flex-wrap: wrap;
-  min-height: var(--touch);
-}
-.ctx-summary:hover { background: var(--bg3); }
-.ctx-summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-.ctx-chevron { color: var(--fg3); flex-shrink: 0; }
-.ctx-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: 2px var(--space-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  color: var(--fg2);
-  white-space: nowrap;
-}
-.ctx-chip-glyph {
-  color: var(--fg3);
-  font-weight: 700;
-  line-height: 1;
-}
-/* A live automation is the one thing here that is actively happening. */
-.ctx-chip-glyph.live { color: var(--accent); }
-.ctx-detail {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: 0 var(--space-4) var(--space-2);
-}
-.loop-banner-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-/* Explicit size: inheriting --text-sm left the glyph the same size as the
-   banner text, where the title and Start/Stop buttons overpowered it. Matches
-   the sidebar nav icons so the heartbeat reads at a glance. */
-.loop-banner-ico { color: var(--accent); font-weight: 700; font-size: 18px; line-height: 1; flex-shrink: 0; }
-.loop-banner-text {
-  flex: 1;
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.loop-banner-text strong { color: var(--fg); }
-
-/* Chat-level unread is title weight everywhere; chatUnread() is binary so a
-   digit could only ever read "1". */
-.loop-banner-manage { text-decoration: none; }
 </style>
 
 <style scoped src="./chatTrace.css"></style>

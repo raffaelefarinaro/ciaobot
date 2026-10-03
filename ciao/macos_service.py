@@ -26,6 +26,18 @@ LEGACY_EXECUTABLE = "CiaobotServer"
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def _getuid() -> int:
+    """This user's uid, the ``<uid>`` in launchd's ``gui/<uid>`` domain.
+
+    ``os.getuid`` does not exist on Windows, where this module is imported (its
+    ``ServiceResult`` and ``read_dotenv`` are shared) but no launchd path runs.
+    Read through ``getattr`` so mypy's win32 pass type-checks it too, and typed
+    locally because the ``getattr`` is ``Any`` (``no-any-return``).
+    """
+    getuid: Callable[[], int] = getattr(os, "getuid")
+    return getuid()
+
+
 def default_launch_agents_dir() -> Path:
     """Where LaunchAgent plists are written, honouring ``CIAO_LAUNCH_AGENTS_DIR``.
 
@@ -44,6 +56,68 @@ def default_launch_agents_dir() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / "Library" / "LaunchAgents"
+
+
+def live_launch_agents_dir() -> Path:
+    """The real per-user LaunchAgents dir, ignoring ``CIAO_LAUNCH_AGENTS_DIR``."""
+    return Path.home() / "Library" / "LaunchAgents"
+
+
+def bootout_agent(label: str) -> None:
+    """Best-effort ``launchctl bootout gui/<uid>/<label>``; output is discarded."""
+    try:
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{_getuid()}/{label}"],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        pass
+
+
+def load_agent(definition: Path) -> int:
+    """``launchctl unload`` (a quiet probe) then ``launchctl load -w``; return load's status."""
+    # The unload is a probe: during an install the agent is normally
+    # not loaded, and launchctl says so on stderr ("Unload failed: 5:
+    # Input/output error"). check=False swallows the status but not the
+    # output, and install.sh redirects only stdout - so that expected
+    # non-event was the first line a user saw when re-running the
+    # installer over a configured workspace, ahead of the success lines.
+    subprocess.run(
+        ["launchctl", "unload", str(definition)],
+        check=False,
+        stderr=subprocess.DEVNULL,
+    )
+    return subprocess.run(
+        ["launchctl", "load", "-w", str(definition)],
+        check=False,
+    ).returncode
+
+
+def schedule_server_handoff() -> bool:
+    """Spawn a detached helper that loads and kickstarts the server agent.
+
+    Returns False when the live plist is missing or the spawn fails.
+    """
+    plist = live_launch_agents_dir() / f"{SERVER_LABEL}.plist"
+    if not plist.exists():
+        return False
+    script = (
+        "sleep 3; "
+        f"/bin/launchctl load -w '{plist}' 2>/dev/null; "
+        f"/bin/launchctl kickstart gui/{_getuid()}/{SERVER_LABEL} 2>/dev/null; "
+        "exit 0"
+    )
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", script],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +140,7 @@ class ServiceResult:
         return asdict(self)
 
 
-def _read_dotenv(path: Path) -> dict[str, str]:
+def read_dotenv(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -119,7 +193,7 @@ def discover_runtime(
         or ""
     ).strip()
     workspace = Path(workspace_raw).expanduser().resolve() if workspace_raw else None
-    dotenv = _read_dotenv(workspace / ".env") if workspace else {}
+    dotenv = read_dotenv(workspace / ".env") if workspace else {}
 
     raw_port = str(
         dotenv.get("PWA_PORT")
@@ -176,7 +250,7 @@ def _command_error(completed: subprocess.CompletedProcess[str]) -> str:
     return (completed.stderr or completed.stdout or "").strip()
 
 
-def _active_chat_ids(port: int, *, timeout: float = 2.0) -> list[str]:
+def active_chat_ids(port: int, *, timeout: float = 2.0) -> list[str]:
     try:
         with urllib.request.urlopen(
             f"http://localhost:{port}/api/active-chats",
@@ -189,7 +263,7 @@ def _active_chat_ids(port: int, *, timeout: float = 2.0) -> list[str]:
     return [str(value) for value in values] if isinstance(values, list) else []
 
 
-def _server_reachable(port: int, *, timeout: float = 2.0) -> bool:
+def server_reachable(port: int, *, timeout: float = 2.0) -> bool:
     try:
         with urllib.request.urlopen(
             f"http://localhost:{port}/api/startup-status",
@@ -207,7 +281,7 @@ def service_status(
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
     runtime = runtime or discover_runtime()
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     installed = Path(runtime.server_plist).is_file()
     try:
         loaded_result = _launchctl(
@@ -217,8 +291,8 @@ def service_status(
         loaded = loaded_result.returncode == 0
     except OSError:
         loaded = False
-    reachable = _server_reachable(runtime.port)
-    active = _active_chat_ids(runtime.port) if reachable else []
+    reachable = server_reachable(runtime.port)
+    active = active_chat_ids(runtime.port) if reachable else []
     return ServiceResult(
         ok=True,
         action="status",
@@ -248,7 +322,7 @@ def start_service(
             "The server LaunchAgent is not installed. Run `ciao service start --workspace <dir>` to register it, or `ciao setup --workspace <dir> --load-launchd`.",
             {**asdict(runtime), "setup_required": True},
         )
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     domain = f"gui/{resolved_uid}"
     try:
         _launchctl(["enable", f"{domain}/{SERVER_LABEL}"], runner=runner)
@@ -273,7 +347,7 @@ def stop_service(
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
     runtime = runtime or discover_runtime()
-    active = _active_chat_ids(runtime.port)
+    active = active_chat_ids(runtime.port)
     if active and not force:
         return ServiceResult(
             False,
@@ -281,7 +355,7 @@ def stop_service(
             "Active chats must be confirmed before stopping the engine.",
             {**asdict(runtime), "active_chat_ids": active, "requires_confirmation": True},
         )
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     try:
         completed = _launchctl(
             ["bootout", f"gui/{resolved_uid}/{SERVER_LABEL}"],
@@ -307,7 +381,7 @@ def restart_service(
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
     runtime = runtime or discover_runtime()
-    active = _active_chat_ids(runtime.port)
+    active = active_chat_ids(runtime.port)
     if active and not force:
         return ServiceResult(
             False,
@@ -315,7 +389,7 @@ def restart_service(
             "Active chats must be confirmed before restarting the engine.",
             {**asdict(runtime), "active_chat_ids": active, "requires_confirmation": True},
         )
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     try:
         completed = _launchctl(
             ["kickstart", "-k", f"gui/{resolved_uid}/{SERVER_LABEL}"],
@@ -348,7 +422,7 @@ def set_login_enabled(
             "The server LaunchAgent is not installed.",
             {**asdict(runtime), "setup_required": True},
         )
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     verb = "enable" if enabled else "disable"
     try:
         completed = _launchctl(
@@ -381,7 +455,7 @@ def update_engine(
     from ciao.package_version import update_package
 
     runtime = runtime or discover_runtime()
-    active = _active_chat_ids(runtime.port)
+    active = active_chat_ids(runtime.port)
     if active and not force:
         return ServiceResult(
             False,
@@ -520,7 +594,7 @@ def migrate_legacy_companion(
     old_plist = agents / f"{LEGACY_MENUBAR_LABEL}.plist"
     backup_plist = migration_dir / old_plist.name
     receipt_path = migration_dir / MIGRATION_RECEIPT
-    resolved_uid = os.getuid() if uid is None else uid
+    resolved_uid = _getuid() if uid is None else uid
     existing_receipt: dict[str, Any] = {}
     try:
         loaded_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -571,7 +645,7 @@ def migrate_legacy_companion(
             not moved_app_to
             and desktop_installed
             and old_app is not None
-            and _server_reachable(runtime.port)
+            and server_reachable(runtime.port)
         ):
             trash = Path.home() / ".Trash" if trash_dir is None else Path(trash_dir)
             trash.mkdir(parents=True, exist_ok=True)
@@ -607,7 +681,7 @@ def migrate_legacy_companion(
             ),
         }
         temporary = receipt_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="")
         os.replace(temporary, receipt_path)
     except OSError as exc:
         return ServiceResult(False, "migrate", str(exc), asdict(runtime))

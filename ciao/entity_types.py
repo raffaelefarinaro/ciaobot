@@ -3,7 +3,7 @@
 The kinds of notes the agent keeps were hardcoded in six places that had to be
 edited in step: ``vault_index``'s ``DIR_TYPE_MAP`` / ``CANONICAL_TYPES`` /
 ``TYPE_ALIASES``, ``config``'s ``_WORKSPACE_EVIDENCE_DIRS``,
-``context.entity_tagger._CATEGORY_PARTS``, ``vault_lint``'s orphan-candidate
+``vault_lint``'s orphan-candidate
 folders and ``memory_audit``'s ``STALE_NOTE_THRESHOLDS_DAYS``. Nothing showed
 the user that list, and adding a category was an edit in five modules with no
 schema to fill in.
@@ -67,10 +67,9 @@ is the record *of* the thing — a person, a project, a place, an idea, a
 resource — and a note otherwise, including a product, a feature or an
 automation, whose note describes the thing rather than being it.
 
-**Three views are not fully derivable**, because the wire format they feed
+**Two views are not fully derivable**, because the wire format they feed
 predates this file and must not change. They are stock-only and documented at
-their definitions: :data:`_LEGACY_DIR_TYPE_MAP`, :data:`_ORPHAN_EXTRA_DIRS` and
-:data:`_CATEGORY_PART_FOLDERS`.
+their definitions: :data:`_LEGACY_DIR_TYPE_MAP` and :data:`_ORPHAN_EXTRA_DIRS`.
 
 ``config._WORKSPACE_EVIDENCE_DIRS`` is the one consumer that asks for the
 **stock** registry rather than a vault's, and that is structural rather than a
@@ -103,6 +102,7 @@ import re
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, replace
+from functools import cache
 from importlib import resources
 from pathlib import Path
 
@@ -113,6 +113,15 @@ logger = logging.getLogger(__name__)
 #: The stock list, read from the package it ships in (see ``schedules.json``
 #: for the same pattern).
 STOCK_FILENAME = "entity-types.yaml"
+
+#: Categories stock used to ship. Not part of the effective list; see
+#: :func:`retired_stock_entries`.
+RETIRED_FILENAME = "retired-entity-types.yaml"
+
+#: Ids stock used to ship as categories and now resolves as an alias of another
+#: one. A vault row for one of them is ignored: kept, it would be a category
+#: whose id is also an alias, which no list may hold.
+_FOLDED_INTO_ALIAS: frozenset[str] = frozenset({"log"})
 
 #: The same name inside a vault: the override file is a peer of the generated
 #: ``INDEX.md`` / ``VOCABULARY.md``, not a stock file with a per-vault copy.
@@ -137,28 +146,10 @@ _KINDS = frozenset({KIND_ENTITY, KIND_NOTE})
 # workspace name, so dropping a key silently changes workspace inference.
 _LEGACY_DIR_TYPE_MAP: dict[str, str] = {"active": "project", "completed": "project"}
 
-# The lower-case spellings the orphan linter also watches. ``projects`` is the
-# historical name of the ``Projects`` folder, ``references`` is a real category's
-# own folder; an entry expresses one folder per category, and neither name can be
-# derived from the entries, so the two extras are spelled out here.
-_ORPHAN_EXTRA_DIRS: frozenset[str] = frozenset({"projects", "references"})
-
-# The folders an ``INDEX.md`` bullet may name, in both cases. This is the wire
-# format of ``context.entity_tagger``: a bullet carries the folder as the indexer
-# wrote it, and the tagger maps that part back to a category. Deriving it from
-# every entry's folder would silently widen the tagger to the lower-case folders
-# (``products``, ``references``, …) and change what an ``INDEX.md`` line resolves
-# to, so the set is fixed here and a new category does not join it without a
-# decision.
-_CATEGORY_PART_FOLDERS: tuple[str, ...] = (
-    "People",
-    "Projects",
-    "Places",
-    "Ideas",
-    "Resources",
-    "Documents",
-    "Workspace",
-)
+# The lower-case spelling the orphan linter also watches. ``projects`` is the
+# historical name of the ``Projects`` folder; an entry expresses one folder per
+# category, so the name cannot be derived from the entries and is spelled out here.
+_ORPHAN_EXTRA_DIRS: frozenset[str] = frozenset({"projects"})
 
 
 class EntityTypeFileError(ValueError):
@@ -187,6 +178,8 @@ class EntityType:
     stale_after_days: int = 0
     enabled: bool = True
     builtin: bool = True
+    core: bool = False
+    hidden: bool = False
 
     @property
     def is_entity(self) -> bool:
@@ -221,7 +214,6 @@ class EntityTypeRegistry:
         "_aliases",
         "_by_id",
         "_canonical_types",
-        "_category_parts",
         "_dir_type_map",
         "_entries",
         "_entity_folders",
@@ -256,11 +248,6 @@ class EntityTypeRegistry:
             if entry.stale_after_days > 0
         }
         self._orphan_dirs: frozenset[str] = frozenset(self._entity_folders) | _ORPHAN_EXTRA_DIRS
-        self._category_parts: dict[str, str] = {
-            case: folder
-            for folder in _CATEGORY_PART_FOLDERS
-            for case in (folder, folder.lower())
-        }
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -320,17 +307,6 @@ class EntityTypeRegistry:
         """
         return self._orphan_dirs
 
-    def category_parts(self) -> dict[str, str]:
-        """``INDEX.md`` path part -> category label, in the case variants.
-
-        With the stock list this is exactly
-        ``context.entity_tagger._CATEGORY_PARTS``. Built from
-        :data:`_CATEGORY_PART_FOLDERS` rather than from the entries: it is the
-        tagger's wire format, and a new category must not silently change which
-        ``INDEX.md`` lines resolve to a category.
-        """
-        return self._category_parts
-
 
 def _read_stock() -> list[EntityType]:
     """The shipped categories, parsed once per process.
@@ -347,6 +323,25 @@ def _read_stock() -> list[EntityType]:
     except (yaml.YAMLError, EntityTypeFileError) as exc:
         logger.error("stock %s is malformed, ignoring it: %s", STOCK_FILENAME, exc)
         return []
+
+
+@cache
+def _retired_stock_entries() -> tuple[EntityType, ...]:
+    text = resources.files("ciao.stock").joinpath(RETIRED_FILENAME).read_text(encoding="utf-8")
+    return tuple(stated.entry for stated in _parse(yaml.safe_load(text), builtin=False, partial=False))
+
+
+def retired_stock_entries() -> list[EntityType]:
+    """The categories stock no longer ships, as custom entries.
+
+    For the upgrade step that copies one into a vault that still has notes of
+    that type (``vault_migration.retain_retired_stock_types``). They are not
+    builtin: once written into a vault file they are the user's own categories,
+    which is what they become. A file that does not parse is our bug, so it is
+    raised rather than swallowed, unlike the stock list that must not take the
+    process down on import.
+    """
+    return list(_retired_stock_entries())
 
 
 def _parse(payload: object, *, builtin: bool, partial: bool) -> list[_Stated]:
@@ -397,7 +392,10 @@ def _entry(raw: Mapping[str, object], *, builtin: bool, partial: bool) -> _State
                 raise EntityTypeFileError(f"missing {required}")
 
     values: dict[str, object] = dict(_DEFAULTS)
-    stated = {name for name in known if name in raw and name not in {"id", "builtin"}}
+    # `core` and `hidden` describe the app, not the user's vault: only the file
+    # we ship may state them, so an override that does is ignored, like `builtin`.
+    loader_set = {"id", "builtin"} if not partial else {"id", "builtin", "core", "hidden"}
+    stated = {name for name in known if name in raw and name not in loader_set}
     for name in stated:
         values[name] = raw[name]
 
@@ -417,6 +415,8 @@ def _entry(raw: Mapping[str, object], *, builtin: bool, partial: bool) -> _State
         stale_after_days=_as_days(values["stale_after_days"]),
         enabled=_as_bool(values["enabled"], "enabled"),
         builtin=builtin,
+        core=_as_bool(values["core"], "core"),
+        hidden=_as_bool(values["hidden"], "hidden"),
     )
     return _Stated(entry, frozenset(stated))
 
@@ -465,24 +465,38 @@ def _merge(stock: Sequence[EntityType], overrides: Sequence[_Stated]) -> list[En
     so the list a user reads back has the categories they added at the end rather
     than shuffled into the middle.
     """
-    pending = {stated.entry.id: stated for stated in overrides}
+    pending = {
+        stated.entry.id: stated
+        for stated in overrides
+        if stated.entry.id not in _FOLDED_INTO_ALIAS
+    }
     merged: list[EntityType] = []
     for entry in stock:
         stated = pending.pop(entry.id, None)
         merged.append(entry if stated is None else _apply(entry, stated))
-    return merged + [stated.entry for stated in pending.values()]
+    # A row for a category stock used to ship is still an edit of that category
+    # (`enabled: false` on Document), so it lands on the retired definition and
+    # stays a complete custom entry instead of a label-less one.
+    retired = {entry.id: entry for entry in _retired_stock_entries()}
+    custom = [
+        _apply(retired[stated.entry.id], stated) if stated.entry.id in retired else stated.entry
+        for stated in pending.values()
+    ]
+    return merged + custom
 
 
 def _apply(stock_entry: EntityType, stated: _Stated) -> EntityType:
     """The stock entry with the keys the vault file stated, and nothing else.
 
-    ``id`` is the merge key and ``builtin`` is decided by where an entry came
-    from, so neither is ever taken from a file.
+    ``id`` is the merge key, ``builtin`` is decided by where an entry came from,
+    and ``core`` / ``hidden`` belong to the shipped entry, so none is ever taken
+    from a vault file (``enabled`` on a core entry is ignored for the same reason).
     """
-    return replace(
-        stock_entry,
-        **{name: getattr(stated.entry, name) for name in stated.stated},
-    )
+    # A core category is one the app writes or reads by a hardcoded folder, so
+    # `enabled: false` is not an instruction it can follow: the file, or a
+    # client that sends the whole list back, cannot switch it off.
+    names = stated.stated - {"enabled"} if stock_entry.core else stated.stated
+    return replace(stock_entry, **{name: getattr(stated.entry, name) for name in names})
 
 
 # One registry per vault, keyed by the vault directory, holding the mtime the
@@ -616,9 +630,11 @@ def clear_entity_types_cache() -> None:
 # something the loader overwrites.
 
 #: The fields a vault file stores, in the order it writes them: the entry's own
-#: field order minus ``builtin``, so a hand-written override, the stock file
+#: field order minus ``builtin``, ``core`` and ``hidden``, so a hand-written override, the stock file
 #: and a saved form all read the same way.
-_FILE_FIELDS: tuple[str, ...] = tuple(name for name in _DEFAULTS if name != "builtin")
+_FILE_FIELDS: tuple[str, ...] = tuple(
+    name for name in _DEFAULTS if name not in {"builtin", "core", "hidden"}
+)
 
 
 def _row(entry: EntityType) -> dict[str, object]:
@@ -678,6 +694,8 @@ def effective_payload(
             {
                 **_row(entry),
                 "builtin": entry.builtin,
+                "core": entry.core,
+                "hidden": entry.hidden,
                 "note_count": counts.get(entry.id, 0),
             }
         )
@@ -853,7 +871,7 @@ def write_vault_file(vault: Path, entries: Sequence[EntityType]) -> Path:
     fd, tmp_name = tempfile.mkstemp(dir=root, prefix=".entity-types.", suffix=".tmp")
     temporary = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
         # Before the rename, so the file never appears at the target carrying
         # mkstemp's 0600 instead of the mode it had.

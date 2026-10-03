@@ -8,7 +8,10 @@ These pin AI-05's acceptance criteria:
 * a crash between the receipt and the file update recovers to one consistent
   operation;
 * undo refuses a changed destination, cannot remove unrelated later facts, and
-  leaves unsupported legacy operations view-only.
+  leaves unsupported legacy operations view-only;
+* the journal, its lock and the trim temp are private files, the temp can only
+  ever be created rather than opened, and the trim is bounded in bytes as well
+  as in rows without dropping a pending receipt.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import pytest
 from ciao import memory_proposals as mp
 from ciao import memory_receipts as mr
 from ciao import memory_tool as mt
+from ciao.os_support.private import is_private
 
 
 def _guide(tmp_path: Path, memory: list[str] | None = None) -> Path:
@@ -92,17 +96,17 @@ def test_update_region_lock_failure_raises_and_leaves_the_region(tmp_path, monke
 
 def test_guide_lock_is_reportable_not_unbounded(tmp_path):
     """A held lock times out into MemoryLockError rather than hanging."""
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive, unlock
 
     guide = _guide(tmp_path)
     lock_path = guide.with_name(f"{guide.name}.lock")
     holder = lock_path.open("a+", encoding="utf-8")
-    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    lock_exclusive(holder.fileno())
     try:
         with pytest.raises(mt.MemoryLockError):
             mt.guide_lock(guide, timeout_s=0.2)
     finally:
-        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        unlock(holder.fileno())
         holder.close()
 
 
@@ -234,7 +238,10 @@ def test_trim_keeps_a_pending_receipt_that_predates_the_cut(tmp_path, monkeypatc
 
 def test_trim_drops_only_terminal_receipts(tmp_path, monkeypatch):
     """With every dropped id terminal, trimming proceeds."""
-    monkeypatch.setattr(mr, "MAX_BYTES", 1)
+    # A cap the *retained* tail fits inside (two 64-byte rows), so this exercises
+    # the row-count budget on its own; `test_trim_bounds_a_byte_heavy_journal`
+    # is where the byte budget is pinned.
+    monkeypatch.setattr(mr, "MAX_BYTES", 150)
     monkeypatch.setattr(mr, "KEEP_LINES", 2)
     journal = _journal(tmp_path)
     for i in range(5):
@@ -253,7 +260,7 @@ def test_trim_runs_while_holding_the_journal_lock(tmp_path, monkeypatch):
     The probe: intercept `_trim_if_large` and confirm the journal lock is still
     held at that moment (a non-blocking exclusive flock must fail).
     """
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive, unlock
 
     journal = _journal(tmp_path)
     lock = journal.with_name(journal.name + ".lock")
@@ -264,11 +271,11 @@ def test_trim_runs_while_holding_the_journal_lock(tmp_path, monkeypatch):
     def probe(path: Path) -> None:
         with lock.open("a+", encoding="utf-8") as handle:
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_exclusive(handle.fileno(), blocking=False)
             except BlockingIOError:
                 observed.append(True)
                 return
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle.fileno())
         observed.append(False)
 
     monkeypatch.setattr(mr, "_trim_if_large", probe)
@@ -294,7 +301,7 @@ def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monke
     The sibling test proves the lock is *held* during the trim; this one
     proves what that buys, by racing a real appender against it.
     """
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive, unlock
     import time
 
     monkeypatch.setattr(mr, "MAX_BYTES", 1)  # every append trims
@@ -313,7 +320,7 @@ def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monke
         # the race under test rather than exercise it.
         lock = journal.with_name(journal.name + ".lock")
         with lock.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            lock_exclusive(handle.fileno())
             try:
                 with journal.open("a", encoding="utf-8") as fh:
                     fh.write(
@@ -323,7 +330,7 @@ def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monke
                         + "\n"
                     )
             finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                unlock(handle.fileno())
 
     real_replace = os.replace
     started: list[threading.Thread] = []
@@ -347,6 +354,162 @@ def test_trim_cannot_delete_a_row_a_concurrent_append_just_wrote(tmp_path, monke
     ids = {r["id"] for r in mr.read_receipts(journal)}
     assert "mrcpt_concurrent" in ids, "the trim deleted a receipt appended while it ran"
     assert "mrcpt_trimmer" in ids
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "umask"), reason="no POSIX permissions on this platform"
+)
+def test_a_new_journal_and_its_lock_are_private(tmp_path):
+    """A receipt images whole note bodies, so the journal is not shared.
+
+    A note may be 0600 while the journal holding its before *and* after image
+    was created 0666 minus the umask, and the journal lives inside the vault
+    beside the queue — so on a multi-user machine every local account could read
+    what the note's own permissions forbid. The journal, its lock and the trim
+    temp are created 0600; a file that already exists keeps the mode its owner
+    chose, because a background append is not a reason to re-chmod anything.
+    """
+    journal = _journal(tmp_path)
+    # A permissive umask is the case that mattered: under the usual 022 the
+    # `Path.open("a")` this replaced produced 0644, and the 0666 it produces
+    # here is what a user with umask 000 got.
+    previous = os.umask(0o000)
+    try:
+        mr._append(journal, {"id": "mrcpt_private", "status": mr.APPLIED, "ts": "t"})
+    finally:
+        os.umask(previous)
+
+    assert is_private(journal)
+    lock = journal.with_name(journal.name + ".lock")
+    assert is_private(lock)
+
+    # A journal the owner deliberately shared keeps the permissions they set,
+    # and an append does not quietly narrow it.
+    shared = journal.with_name("Shared-Receipts.jsonl")
+    shared.write_text("", encoding="utf-8")
+    os.chmod(shared, 0o644)
+    assert not is_private(shared)
+    mr._append(shared, {"id": "mrcpt_shared", "status": mr.APPLIED, "ts": "t2"})
+    assert not is_private(shared)
+    assert [row["id"] for row in mr.read_receipts(shared)] == ["mrcpt_shared"]
+
+
+def test_trim_bounds_a_byte_heavy_journal_and_spares_a_pending_row(
+    tmp_path, monkeypatch
+):
+    """The cap is bytes, not rows, and a pending row outranks the cap.
+
+    `KEEP_LINES` is a budget of rows, but a receipt images a whole note, so a
+    journal of a few large rows stayed far above `MAX_BYTES` — the size the trim
+    exists to bound — and every later append re-ran the same read-and-rewrite
+    over the same over-long file. The trim now also drops whole rows from the
+    front until the remainder serializes within the cap, and an unresolved
+    receipt is still worth more than the cap: the byte cut stops at it rather
+    than dropping it, which is why the file can legitimately stay over.
+    """
+    cap = 2000
+    monkeypatch.setattr(mr, "MAX_BYTES", cap)
+    monkeypatch.setattr(mr, "KEEP_LINES", 50)  # the row budget never fires here
+    journal = _journal(tmp_path)
+    blob = "x" * 1500
+
+    # An unresolved receipt first, so the byte cut walks into it.
+    mr._append(
+        journal,
+        {"id": "mrcpt_pending_huge", "status": mr.PREPARED, "ts": "t0", "image": blob},
+    )
+    for i in range(2):
+        mr._append(
+            journal,
+            {
+                "id": f"mrcpt_done_{i}",
+                "status": mr.APPLIED,
+                "ts": f"t{i}",
+                "image": blob,
+            },
+        )
+
+    # Over the cap, and the trim cannot fix it without losing a `prepared` row.
+    assert journal.stat().st_size > cap
+    assert mr.find_receipt(journal, "mrcpt_pending_huge")["status"] == mr.PREPARED
+    assert {row["id"] for row in mr.read_receipts(journal)} == {
+        "mrcpt_pending_huge",
+        "mrcpt_done_0",
+        "mrcpt_done_1",
+    }
+
+    # It settles, and the next appends are what the byte cut is for.
+    mr._append(journal, {"id": "mrcpt_pending_huge", "status": mr.APPLIED, "ts": "t3"})
+    temp_private: list[bool] = []
+    real_replace = os.replace
+
+    def probe(src, dst):  # type: ignore[no-untyped-def]
+        if str(dst) == str(journal):
+            temp_private.append(is_private(src))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", probe)
+    mr._append(
+        journal,
+        {"id": "mrcpt_done_2", "status": mr.APPLIED, "ts": "t4", "image": blob},
+    )
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    assert journal.stat().st_size <= cap
+    rows = mr.read_receipts(journal)
+    assert {row["id"] for row in rows} == {"mrcpt_pending_huge", "mrcpt_done_2"}
+    assert all(row["status"] == mr.APPLIED for row in rows)
+    # Whole rows only: the retained journal is still parseable line for line.
+    assert journal.read_text(encoding="utf-8").count("\n") == len(rows)
+    # The trim temp holds the same note bodies and is no wider than the journal
+    # it replaces, and leaves nothing behind.
+    assert temp_private and set(temp_private) == {True}
+    assert is_private(journal)
+    assert not list(journal.parent.glob("*.trim.tmp"))
+
+
+def test_trim_temp_is_created_not_reused(tmp_path, monkeypatch):
+    """The trim temp can only ever be a file this trim created.
+
+    The whole retained journal — note bodies included — is written to the temp
+    before the `os.replace`, so an open that follows whatever sits at that name
+    hands the contents of an arbitrary file to anyone who can read it, and one
+    that truncates it destroys a file the vault did not lose. The stale temp is
+    therefore unlinked explicitly first, and the open that follows is
+    `O_EXCL` and refuses links (`follow_symlinks=False`): it can only create,
+    never open what is already there, and never write through a link planted
+    in the window between the two.
+    """
+    monkeypatch.setattr(mr, "MAX_BYTES", 1)  # every append trims
+    monkeypatch.setattr(mr, "KEEP_LINES", 50)  # ...but drops nothing
+    journal = _journal(tmp_path)
+    for i in range(3):
+        mr._append(
+            journal, {"id": f"mrcpt_flag_{i}", "status": mr.APPLIED, "ts": f"t{i}"}
+        )
+
+    opened: list[tuple[Path, int, bool]] = []
+    real_open_private = mr._open_private
+
+    def record(
+        path: Path, *, flags: int, mode: int = 0o600, follow_symlinks: bool = True
+    ) -> int:
+        opened.append((path, flags, follow_symlinks))
+        return real_open_private(
+            path, flags=flags, mode=mode, follow_symlinks=follow_symlinks
+        )
+
+    monkeypatch.setattr(mr, "_open_private", record)
+    mr._append(journal, {"id": "mrcpt_flag_3", "status": mr.APPLIED, "ts": "t3"})
+
+    temps = [entry for entry in opened if entry[0].name.endswith(".trim.tmp")]
+    assert temps, "the trim never opened its temp"
+    for _path, flags, follow_symlinks in temps:
+        assert flags & os.O_EXCL, "the temp open must fail on an existing name"
+        assert not follow_symlinks, "the temp open must refuse a symlink"
+        assert not flags & os.O_TRUNC, "an existing file is unlinked, not truncated"
+    # The trim still did its job through those flags.
+    assert {r["id"] for r in mr.read_receipts(journal)} == {"mrcpt_flag_3"}
 
 
 def test_recovery_applied_when_crash_landed_after_the_write(tmp_path):
@@ -896,7 +1059,7 @@ def test_undo_holds_the_queue_lock_across_read_and_replace(tmp_path):
 
 def test_queue_lock_refuses_to_write_when_held(tmp_path):
     """A held lock is reportable, not silently ignored."""
-    import fcntl
+    from ciao.os_support.locks import lock_exclusive, unlock
     import threading
     import time
 
@@ -906,7 +1069,7 @@ def test_queue_lock_refuses_to_write_when_held(tmp_path):
     lock_path = mr._queue_lock_path(str(queue.resolve()))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+", encoding="utf-8")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    lock_exclusive(handle.fileno())
     acquired = threading.Event()
 
     def contender() -> None:
@@ -919,7 +1082,7 @@ def test_queue_lock_refuses_to_write_when_held(tmp_path):
     t = threading.Thread(target=contender)
     t.start()
     t.join(timeout=10)
-    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    unlock(handle.fileno())
     handle.close()
     assert not acquired.is_set()
     time.sleep(0)
@@ -2171,3 +2334,20 @@ def test_removal_landed_counts_instead_of_matching():
     )
     assert mr._removal_landed(before, before, [("Use Python", "memory")]) is False
     assert mr._removal_landed(before, one_left, []) is False
+
+
+def test_write_queue_atomically_stores_the_text_exactly(tmp_path):
+    """The text is what goes on disk: a CRLF document stays CRLF and LF stays LF
+    on every OS (a Windows text-mode write used to turn `\r\n` into `\r\r\n`)."""
+    for name, text in [("crlf.md", "# L\r\n\r\n- [a] x\r\n"), ("lf.md", "# L\n\n- [a] x\n")]:
+        path = tmp_path / name
+        mr.write_queue_atomically(path, text)
+        assert path.read_bytes() == text.encode("utf-8")
+
+
+def test_the_guide_writer_stores_the_text_exactly(tmp_path):
+    for name, text in [("crlf.md", "# Guide\r\nline\r\n"), ("lf.md", "# Guide\nline\n")]:
+        path = tmp_path / name
+        path.write_bytes(b"old\n")
+        mt.write_guide_atomically(path, text)
+        assert path.read_bytes() == text.encode("utf-8")

@@ -7,7 +7,6 @@ import copy
 import inspect
 import json
 import logging
-import mimetypes
 import os
 import re
 import shutil
@@ -61,16 +60,12 @@ class UnknownModelError(ValueError):
     ``invalid_request`` (#259).
     """
 
-try:  # pragma: no cover - Ciaobot targets Unix; fallback keeps imports portable.
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None  # type: ignore[assignment]
 
 import yaml
 
+from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import job_runs, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
-from ciao.archive_jobs import ArchiveJob
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -83,6 +78,7 @@ from ciao.context.capsule import (
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
+from ciao.entity_types import load_entity_types
 from ciao.model_tiers import is_tier
 from ciao.models import (
     THINKING_LEVELS,
@@ -94,12 +90,20 @@ from ciao.models import (
     StreamEvent,
     ToolUseEvent,
 )
+from ciao.os_support.files import open_fd
+from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
-from ciao.schedules import ScheduleEntry, ScheduleStore
+from ciao.schedules import (
+    ScheduleEntry,
+    ScheduleStore,
+    publish_automations_changed,
+    settle_runs_for_archived_chat,
+)
 from ciao.sessions import StateStore
 from ciao.subagent_tracking import SubagentInfo
+from ciao.tool_path import prepend_engine_path
 from ciao.transcripts import (
     TranscriptStore,
     TurnJournal,
@@ -259,20 +263,38 @@ _PROVIDER_DISCONNECT_MAX_ATTEMPTS = 3
 
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
 
+# Markdown's ASCII punctuation set: every character that can open a link, an
+# image, an HTML tag or emphasis once a message is rendered as Markdown. A
+# category label is user-typed text, so it is escaped rather than trusted (#979)
+# — a label naming a link must not become one.
+_MARKDOWN_ESCAPE_TABLE = {
+    ord(char): "\\" + char
+    for char in "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+}
+
+
+def _plain_markdown(value: str) -> str:
+    """*value* with every Markdown metacharacter backslash-escaped.
+
+    The one escape CommonMark defines, applied to the whole punctuation set, so
+    a value carrying `[text](url)`, ``<img …>`` or `*emphasis*` is read as the
+    plain text it was written as. For anything the user typed that goes into a
+    message the app renders.
+    """
+    return value.translate(_MARKDOWN_ESCAPE_TABLE)
+
 
 @contextmanager
 def _state_file_lock(path: Path) -> Iterator[None]:
     """Serialize read/merge/write cycles across overlapping server processes."""
     lock_path = path.with_name(f"{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with lock_path.open("a+", encoding="utf-8", newline="") as handle:
+        lock_exclusive(handle.fileno())
         try:
             yield
         finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle.fileno())
 
 
 # Legacy IDs from the removed auto-imported Claude Code CLI view.
@@ -475,16 +497,12 @@ class ChatInfo:
     # UI. Resolution helpers may auto-archive only after their target proposal
     # IDs have durably left the queue; discussion helpers always remain manual.
     helper: dict = field(default_factory=dict)
-    # What the post-archive pipeline is doing, or did. Archiving a chat kicks
-    # off the trajectory stage (ciao/insights.py:run_archive_pipeline) and enqueues
-    # a memory pass chat, and until now none of that was visible anywhere in the
-    # app. Lives on the chat rather than in job_runs because it has to survive a
-    # restart and the run-log's own rotation: an archived chat opened next month
-    # should still be able to say what Ciaobot took from it.
+    # What the memory pass queued by archiving this chat is doing, or did.
+    # Lives on the chat so it survives a restart: an archived chat opened next
+    # month should still be able to say what Ciaobot took from it.
     #
-    # {"state": "running"|"done", "step": "<job id>",
-    #  "steps": {"<job id>": {"status": ..., "extra": {...}}},
-    #  "started_at": iso, "updated_at": iso}
+    # {"steps": {"memory_pass": {"status": ..., "extra": {"chat_id": ...}}},
+    #  "updated_at": iso}
     postprocess: dict = field(default_factory=dict)
 
     def to_dict(self, *, local: bool | None = None) -> dict:
@@ -534,15 +552,12 @@ class ChatInfo:
 class ArchiveOutcome:
     """Result of archiving a chat.
 
-    Carries enough metadata for the route handler to enqueue the post-archive
-    memory pass and run the trajectory stage without re-loading the transcript
-    or re-reading the JSONL (the JSONL is deleted as part of archiving).
+    Carries enough for the caller to enqueue the post-archive memory pass
+    without re-loading the transcript.
     """
 
     path: Path
-    session_id: str
     turn_count: int
-    filtered_jsonl: str | None
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -1033,7 +1048,7 @@ class ProjectChatManager:
             "chats": chat_mutations,
         }
         try:
-            with audit_path.open("a", encoding="utf-8") as handle:
+            with audit_path.open("a", encoding="utf-8", newline="") as handle:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -1112,7 +1127,7 @@ class ProjectChatManager:
                 f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             )
             try:
-                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8", newline="")
                 tmp.replace(self._path)
                 self._append_registry_audit(
                     revision=revision,
@@ -1163,44 +1178,9 @@ class ProjectChatManager:
         except ValueError:
             return ""
         try:
-            return str(root.relative_to(Path(self._config.workspace_root)))
+            return root.relative_to(Path(self._config.workspace_root)).as_posix()
         except ValueError:
             return str(root)
-
-    def _entity_index_is_per_root(self, workspace: str = "") -> bool:
-        """Whether ``_entity_index_root`` resolved a per-root index.
-
-        A per-root index covers exactly one workspace, so its entries need no
-        prefix filtering; a shared one still does. Derived from the same
-        ``agent_root`` receipt the root itself comes from, so the two answers
-        cannot disagree.
-        """
-        if not workspace:
-            return False
-        try:
-            return Path(self._config.agent_root(workspace)) != Path(
-                self._config.workspace_root
-            )
-        except (AttributeError, ValueError):
-            return False
-
-    def _entity_index_root(self, workspace: str = "") -> Path:
-        """Return the root that owns the vault entity index.
-
-        Entity hints resolve against the INDEX.md that covers this chat, which
-        is ``agent_vault_root(workspace)``: the ONE shared index before the
-        re-rooting, and this root's own index after it. Deliberately not
-        ``_workspace_vault_root`` — before the migration that is a subtree of the
-        shared vault holding no index at all, which reads as "no entities" rather
-        than failing. Workspace scoping within a shared index is still applied
-        inside ``find_entities`` via its ``workspace`` argument.
-        """
-        if workspace:
-            try:
-                return self._config.agent_vault_root(workspace)
-            except (AttributeError, ValueError):
-                logger.debug("could not resolve the agent vault root for %r", workspace)
-        return Path(self._config.vault_root)
 
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.
@@ -1295,6 +1275,87 @@ class ProjectChatManager:
             if project is not None
             else self._config.vault_root
         )
+        # The categories to name, read once for both welcome shapes (#979). The
+        # message needs them escaped, the agent instruction does not.
+        categories, category_names = self._onboarding_memory_categories(
+            project.workspace if project is not None else ""
+        )
+        category_line = (
+            f"filed under the categories this workspace uses: {categories}. "
+            if categories
+            else "filed under the categories this workspace uses. "
+        )
+        # One block, both shapes: the two layers of memory are the same whichever
+        # vault the user pointed us at, and the seeded message is the first place
+        # a new user meets them (#979).
+        memory_intro = (
+            "**How your memory is organized, in two layers:**\n"
+            "- **Profile & preferences** — a small, bounded set of facts about "
+            "you: who you are, how you like to work. It is loaded into your "
+            "conversations, so you never have to repeat yourself.\n"
+            f"- **Notes, by category** — everything else lives in portable notes "
+            f"you own, {category_line}\n\n"
+            "Adding, renaming or turning a category off is a change to how "
+            "**future** notes are organized, not a request to remember "
+            "everything: [See or customize memory categories](/memory/categories).\n\n"
+            "When you archive a chat, a memory pass reads it. What the pass is "
+            "confident about is filed into your notes; what it is not arrives as "
+            "a proposal you can accept or dismiss in **Memory · To decide**. What "
+            "it files shows up in **Memory · History**, where you can see the "
+            "change and undo it while the note is still as the pass left it. "
+            "Turning insights off only stops new passes — it never deletes what "
+            "is already saved."
+        )
+        # One block, both shapes, for the same reason as `memory_intro` (#987):
+        # the known state, the interview and the starting-knowledge pass are the
+        # same job whichever vault the user pointed us at, and a second copy of
+        # either would drift from the other the first time one is edited.
+        # Read-only and skippable throughout — a summary of what Ciaobot already
+        # knows, then questions the user may decline, then a seed from confirmed
+        # facts only. It reads no provider history, moves nothing, and writes no
+        # category; curating past conversations stays the separate, consent-gated
+        # memory job (#975's later children), reachable from Memory at any time.
+        known_state = (
+            "Before asking anything, report a short, read-only summary of what "
+            "this workspace already holds, taken from Ciaobot's own state only: "
+            "the vault's notes, the category registry, the entity notes "
+            "(people, resources) and the project docs. The point is to name what "
+            "exists so the interview neither re-asks nor re-files what is already "
+            "known; on a brand-new vault the summary is simply that there is "
+            "nothing there yet. It reads no provider history and starts no "
+            "extraction. Keep this summary a summary, not a migration: no moves, "
+            "no deletes, no category writes, no entity-folder creation."
+        )
+        interview = (
+            "Ask the user 2-3 important questions per turn, in this order. "
+            "**(a) Purpose and scope**: what this workspace is for, what should "
+            "live in it, and what should stay out of it — route that answer to "
+            "the workspace/project context (the `AGENTS.md` workspace guide or "
+            "the General project doc), never to a bounded region, because it is "
+            "scope rather than a personal fact. "
+            "**(b) How to work with them**: tone, length, language, when to "
+            "challenge a plan, formatting — route that to the `ciao:profile` "
+            "region. "
+            "**(c) Operating context and preferences**: tools, environment, "
+            "recurring constraints — route that to the `ciao:memory` region. "
+            "Ask their name and role too; both belong in the `ciao:profile` "
+            "region. Keep it conversational and skippable: 2-3 short questions "
+            "per turn, never a numbered interrogation, never a gate. If the user "
+            "declines a question, move on without inventing an answer. Do not "
+            "scan past chats, do not import anything, and do not write category "
+            "files."
+        )
+        starting_knowledge = (
+            "After the interview, run a **starting-knowledge pass** from "
+            "confirmed facts only. If they have not already said, ask which key "
+            "people, active projects and top resources they want seeded (2-3 "
+            "short questions, skippable, no invented answers), then file: key "
+            "people to `People/`, active projects to their own project docs, and "
+            "at most a few top resources to `Resources/`. Create an entity "
+            "folder only when a confirmed fact needs it, never an empty one, "
+            "and put anything you are not sure about in "
+            "`Workspace/Memory-Proposals.md` instead of filing it."
+        )
 
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
@@ -1304,19 +1365,22 @@ class ProjectChatManager:
                 f"`{vault_root}`\n\n"
                 f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
                 f"Your task is to onboard the user and adapt this existing folder into the current Ciaobot vault layout:\n"
-                f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable.\n"
+                f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable. {known_state}\n"
                 f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout.\n"
                 f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
                 f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `AGENTS.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
-                f"5. **Initial memory curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then run an initial curation in this chat: search for duplicates, update the relevant project canonical docs, create durable person/entity notes only for confirmed facts, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
-                f"6. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
-                f"7. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"5. **Initial memory curation**: {interview} Then run an initial curation in this chat: search for duplicates, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
+                f"6. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
+                f"7. **Starting knowledge**: {starting_knowledge}\n"
+                f"8. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
+                f"9. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
                 f"I've connected workspace **{workspace_name}** to your existing folder at `{vault_root}`. "
-                f"I'll first inspect what is already there, then help curate the clear, durable knowledge into Ciaobot's current structure while preserving the rest. "
+                f"I'll first inspect what is already there, then help curate the clear, durable knowledge into Ciaobot's current structure while preserving the rest.\n\n"
+                f"{memory_intro}\n\n"
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To get started, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
@@ -1330,15 +1394,19 @@ class ProjectChatManager:
                 f"Your task is to bootstrap the current vault structure and core documentation:\n"
                 f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
                 f"2. **Core files**: Setup has already seeded the workspace-level `AGENTS.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `AGENTS.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
-                f"3. **Onboarding interview and curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, project facts to project canonical docs, people to `People/`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
-                f"4. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
-                f"5. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"3. **Known state first**: {known_state}\n"
+                f"4. **Onboarding interview and curation**: {interview} Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
+                f"5. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
+                f"6. **Starting knowledge**: {starting_knowledge}\n"
+                f"7. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
+                f"8. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, explain that you are starting logical workspace **{workspace_name}** at `{vault_root}`, and ask the first onboarding questions to bootstrap their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
                 f"Welcome! I've initialized logical workspace **{workspace_name}** at `{vault_root}` from scratch. "
-                f"I'm ready to customize the current vault structure and curate your durable knowledge with you. "
+                f"I'm ready to customize the current vault structure and curate your durable knowledge with you.\n\n"
+                f"{memory_intro}\n\n"
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To begin, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
@@ -1351,6 +1419,54 @@ class ProjectChatManager:
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_msg},
         ]
+
+    def _onboarding_memory_categories(self, workspace: str) -> tuple[str, str]:
+        """The workspace's enabled, non-hidden category labels, in registry order.
+
+        Returns the list twice: first escaped, for the welcome message the app
+        renders as Markdown, then plain, for the agent instruction the model
+        reads as prose — an escaped join would show up there as `Q\\&A` noise
+        (#979).
+
+        A read-only snapshot of the effective list the Categories page edits
+        (#979), so the seeded welcome can name the categories this vault really
+        has instead of a second copy of the shipped list. Read through
+        ``load_entity_types``, so a disabled builtin, a custom category and a
+        renamed label are all answered by the registry: nothing here
+        duplicates the categories or the shipped folder names.
+
+        The root is ``agent_vault_root`` — the one that owns ``entity-types.yaml``
+        and ``VOCABULARY.md``, and the one ``GET``/``PATCH
+        /api/memory/entity-types`` reads. That is a DIFFERENT directory from the
+        workspace's notes root named in the welcome above on an install that has
+        not re-rooted (``memory-vault/personal`` vs ``memory-vault``), and there
+        is deliberately no notes-root fallback: reading there would report the
+        stock categories while the owner's own Categories page shows their edits
+        — the invisible-edit bug ``proposal_service._entity_roots`` exists to
+        prevent. With no vault file the loader serves the shipped list, which is
+        the honest answer for a brand-new vault.
+
+        Writes nothing and creates no directory: seeding a welcome chat must not
+        touch the vault. Whitespace in a label is collapsed first, so a label
+        typed across two lines stays one line of prose, and the labels are
+        escaped after that, because the message is rendered as Markdown and a
+        label is user-typed text.
+        """
+        if not workspace or not self._is_known_workspace(workspace):
+            return "", ""
+        try:
+            registry = load_entity_types(self._config.agent_vault_root(workspace))
+        except (ValueError, OSError) as exc:
+            logger.warning(
+                "Could not read the memory categories for %s: %s", workspace, exc
+            )
+            return "", ""
+        labels = [
+            " ".join(entry.label.split())
+            for entry in registry.entries()
+            if entry.enabled and not entry.hidden and entry.label.strip()
+        ]
+        return ", ".join(_plain_markdown(label) for label in labels), ", ".join(labels)
 
     def _ensure_general_vault_folder(self, workspace: str) -> None:
         """Create ``projects/active/general/general.md`` if it doesn't exist.
@@ -1385,7 +1501,7 @@ class ProjectChatManager:
             "Catch-all home for ad-hoc chats and scheduled automations.\n"
         )
         try:
-            target.write_text(body, encoding="utf-8")
+            target.write_text(body, encoding="utf-8", newline="")
         except OSError as exc:
             logger.warning("Could not seed %s: %s", target, exc)
 
@@ -1404,7 +1520,7 @@ class ProjectChatManager:
     def _display_path(self, path: Path) -> str:
         """Return a UI/file-viewer path for workspace or external vault files."""
         try:
-            return str(path.relative_to(self._config.workspace_root))
+            return path.relative_to(self._config.workspace_root).as_posix()
         except ValueError:
             return str(path)
 
@@ -1607,7 +1723,7 @@ class ProjectChatManager:
             updated = chat_service._set_frontmatter_description(current, project.context)
             if updated is None or updated == current:
                 return False
-            doc.write_text(updated, encoding="utf-8")
+            doc.write_text(updated, encoding="utf-8", newline="")
         except OSError as exc:
             logger.warning("Failed to sync context into %s: %s", doc, exc)
             return False
@@ -1783,7 +1899,7 @@ class ProjectChatManager:
 
             # Reconstruct archive path relative to workspace root
             try:
-                rel_archive_path = str(transcript_path.relative_to(self._config.workspace_root))
+                rel_archive_path = transcript_path.relative_to(self._config.workspace_root).as_posix()
             except ValueError:
                 rel_archive_path = str(transcript_path)
 
@@ -1977,9 +2093,9 @@ class ProjectChatManager:
                 )
                 if latest is not None:
                     try:
-                        chat.archive_path = str(
-                            latest.relative_to(self._config.workspace_root)
-                        )
+                        chat.archive_path = latest.relative_to(
+                            self._config.workspace_root
+                        ).as_posix()
                     except ValueError:
                         chat.archive_path = str(latest)
             healed += 1
@@ -2371,9 +2487,9 @@ class ProjectChatManager:
                 # the frontmatter lives.
                 for candidate in (dst / f"{vault_folder}.md", dst / "README.md"):
                     if candidate.exists():
-                        text = candidate.read_text()
+                        text = candidate.read_text(encoding="utf-8")
                         text = re.sub(r"(?m)^(status:\s*)active\s*$", r"\1completed", text)
-                        candidate.write_text(text)
+                        candidate.write_text(text, encoding="utf-8", newline="")
                         break
                 vault_moved = True
 
@@ -2454,9 +2570,9 @@ class ProjectChatManager:
         # Flip status frontmatter back to active in the main markdown.
         for candidate in (dst / f"{stem}.md", dst / "README.md"):
             if candidate.exists():
-                text = candidate.read_text()
+                text = candidate.read_text(encoding="utf-8")
                 text = re.sub(r"(?m)^(status:\s*)completed\s*$", r"\1active", text)
-                candidate.write_text(text)
+                candidate.write_text(text, encoding="utf-8", newline="")
                 break
 
         # Force auto-discovery so the PWA project is recreated and a
@@ -3241,12 +3357,6 @@ class ProjectChatManager:
         # Archive intentionally keeps them: archived chats are read-only but
         # their history viewer should still work.
         self._snapshots.delete_chat(chat_id)
-        # Deleting an archived chat must cancel/tombstone its pending archive
-        # job: a running task would otherwise finish and write derived memory
-        # for a chat that no longer exists, and a startup resume could revive
-        # it. The tombstone is durable even if the in-process task is mid-write.
-        # The row is already out of `self._chats`, so hand it over explicitly.
-        self._cancel_archive_job(chat_id, chat)
         self._delete_archived_transcript(chat_id)
         self._save(reason="user_chat_delete")
         self._events.publish({
@@ -3322,48 +3432,17 @@ class ProjectChatManager:
     # ── Session management ───────────────────────────────────────────────
 
     def _read_archive_inputs(
-        self, chat_id: str, ctx: ChatContext, chat: ChatInfo, agent_root: Path
-    ) -> tuple[int, str | None, Path | None]:
+        self, ctx: ChatContext, chat: ChatInfo
+    ) -> tuple[int, Path | None]:
         """Disk half of archiving one chat, safe to run off the event loop.
 
-        Everything here is file I/O keyed by this chat's own context and session
-        id — read the turn count and the filtered JSONL, then render and write
-        the markdown archive. It touches no shared in-memory state and no
-        asyncio primitives, which is what lets ``archive_chat`` hand it to a
-        worker thread. ``agent_root`` is resolved by the caller on the loop for
-        that reason.
-
-        Ordering matters: the turn count has to be taken before
-        ``archive_session`` consumes the in-progress transcript, and the
-        filtered JSONL before the caller deletes the session blob.
-
-        The Claude SDK writes a chat's session blob under the agent root the
-        chat actually ran in, so that root — not ``workspace_root`` — is what
-        finds it. Resolving it against the install root instead returned None
-        for every workspace-scoped chat, and a None here is indistinguishable
-        from "nothing to extract": ``run_archive_postprocess`` skipped insights,
-        the project-doc fold, the trajectory and memory proposals in silence,
-        with no job run and no log line.
+        Everything here is file I/O keyed by this chat's own context — read the
+        turn count, then render and write the markdown archive. It touches no
+        shared in-memory state and no asyncio primitives, which is what lets
+        ``archive_chat`` hand it to a worker thread. The turn count has to be
+        taken before ``archive_session`` consumes the in-progress transcript.
         """
         turn_count = self._transcripts.peek_turn_count(ctx, chat.provider)
-        filtered_jsonl: str | None = None
-        if chat.session_id and chat.provider == "claude":
-            from ciao.insights import filter_session_jsonl
-            try:
-                filtered_jsonl = filter_session_jsonl(
-                    self._config.workspace_root,
-                    chat.session_id,
-                    agent_root=agent_root,
-                )
-            except Exception:  # noqa: BLE001 — never fail archive over transcript prep
-                logger.exception(
-                    "Failed to pre-filter JSONL for chat %s", chat_id
-                )
-                filtered_jsonl = None
-        elif chat.provider == "opencode":
-            filtered_jsonl = self._transcripts.current_filtered_jsonl(
-                ctx, chat.provider
-            ) or None
         result = self._transcripts.archive_session(
             ctx=ctx,
             active_model=chat.model,
@@ -3371,7 +3450,7 @@ class ProjectChatManager:
             session_id=chat.session_id,
             provider=chat.provider,
         )
-        return turn_count, filtered_jsonl, result
+        return turn_count, result
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         """Serialize concurrent archive requests for one chat."""
@@ -3407,10 +3486,9 @@ class ProjectChatManager:
         storage (Claude SDK JSONL blob or an opencode session). The markdown
         transcript in the vault is the durable record.
 
-        Returns the archive path plus a pre-filtered JSONL string captured
-        before blob deletion, so the caller can run the trajectory stage and
-        hand the transcript to the memory pass without racing against the disk
-        reclaim. None means the chat does not exist, or had nothing to write.
+        Returns the archive path and turn count, so the caller can hand the
+        transcript to the memory pass. None means the chat does not exist, or
+        had nothing to write.
         """
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -3422,9 +3500,8 @@ class ProjectChatManager:
         # every streaming turn until it finished, so it runs in a worker
         # thread. Awaited before anything else happens, so the chat_archived
         # event still fires in the same place it always did.
-        agent_root = self._agent_root_for_chat(chat_id)
-        turn_count, filtered_jsonl, result = await asyncio.to_thread(
-            self._read_archive_inputs, chat_id, ctx, chat, agent_root
+        turn_count, result = await asyncio.to_thread(
+            self._read_archive_inputs, ctx, chat
         )
         # The await above is a suspension point, so the chat may have been
         # deleted while the transcript was being written. Marking a row that is
@@ -3443,7 +3520,7 @@ class ProjectChatManager:
         chat.archived = True
         if result is not None:
             try:
-                chat.archive_path = str(result.relative_to(self._config.workspace_root))
+                chat.archive_path = result.relative_to(self._config.workspace_root).as_posix()
             except ValueError:
                 chat.archive_path = str(result)
         self._save()
@@ -3453,14 +3530,15 @@ class ProjectChatManager:
             "project_id": chat.project_id,
             "archive_path": chat.archive_path,
         })
+        # Not keyed on `chat.schedule_id`: an interval entry bound to an
+        # existing chat records it as its run chat without stamping the chat.
+        if self.schedule_store is not None and settle_runs_for_archived_chat(
+            self.schedule_store, chat_id
+        ):
+            publish_automations_changed(self)
         if result is None:
             return None
-        return ArchiveOutcome(
-            path=result,
-            session_id=chat.session_id,
-            turn_count=turn_count,
-            filtered_jsonl=filtered_jsonl,
-        )
+        return ArchiveOutcome(path=result, turn_count=turn_count)
 
     # ── Archive pipeline seams ────────────────────────────────────────────
 
@@ -3473,152 +3551,14 @@ class ProjectChatManager:
             self._archive_pipeline = pipeline
             return pipeline
 
-    @property
-    def _postprocessing(self) -> set[str]:
-        return self._archive_pipeline_for().postprocessing
-
-    @_postprocessing.setter
-    def _postprocessing(self, value: set[str]) -> None:
-        state = self._archive_pipeline_for().postprocessing
-        state.clear()
-        state.update(value)
-
-    @property
-    def _archive_jobs(self) -> dict[str, ArchiveJob]:
-        return self._archive_pipeline_for().jobs
-
-    @_archive_jobs.setter
-    def _archive_jobs(self, value: dict[str, ArchiveJob]) -> None:
-        jobs = self._archive_pipeline_for().jobs
-        jobs.clear()
-        jobs.update(value)
-
-    @property
-    def _archive_tasks(self) -> dict[str, asyncio.Task[object]]:
-        return self._archive_pipeline_for().tasks
-
-    @_archive_tasks.setter
-    def _archive_tasks(self, value: dict[str, asyncio.Task[object]]) -> None:
-        tasks = self._archive_pipeline_for().tasks
-        tasks.clear()
-        tasks.update(value)
-
-    def attach_job_runs_publisher(self) -> None:
-        """Route live archive job events into the manager."""
-        self._archive_pipeline_for().attach_job_runs_publisher()
-
-    def _on_job_event(self, event: dict[str, object]) -> None:
-        return self._archive_pipeline_for()._on_job_event(event)
-
-    def _apply_job_event(self, chat_id: str, event: dict[str, object]) -> None:
-        return self._archive_pipeline_for()._apply_job_event(chat_id, event)
-
     def _publish_postprocess(self, chat: ChatInfo) -> None:
         return self._archive_pipeline_for()._publish_postprocess(chat)
-
-    def postprocessing_chat_ids(self) -> list[str]:
-        return self._archive_pipeline_for().postprocessing_chat_ids()
-
-    def _begin_postprocess(self, chat_id: str, expected: list[str]) -> None:
-        return self._archive_pipeline_for()._begin_postprocess(chat_id, expected)
-
-    def _end_postprocess(self, chat_id: str) -> None:
-        return self._archive_pipeline_for()._end_postprocess(chat_id)
-
-    async def _tracked_postprocess(
-        self, chat_id: str, coro: Coroutine[object, object, object]
-    ) -> None:
-        return await self._archive_pipeline_for()._tracked_postprocess(chat_id, coro)
-
-    def retry_insights(self, chat_id: str) -> str:
-        return self._archive_pipeline_for().retry_insights(chat_id)
-
-    def retry_archive_steps(self, chat_id: str) -> dict[str, object]:
-        return self._archive_pipeline_for().retry_archive_steps(chat_id)
-
-    def archive_job_view(self, chat_id: str) -> dict[str, object] | None:
-        return self._archive_pipeline_for().archive_job_view(chat_id)
 
     def _delete_archived_transcript(self, chat_id: str) -> None:
         return self._archive_pipeline_for()._delete_archived_transcript(chat_id)
 
-    def _cancel_archive_job(
-        self, chat_id: str, chat: ChatInfo | None = None
-    ) -> None:
-        return self._archive_pipeline_for()._cancel_archive_job(chat_id, chat)
-
-    def _archive_path_for_chat(self, chat: ChatInfo) -> Path:
-        return self._archive_pipeline_for()._archive_path_for_chat(chat)
-
-    def _job_inputs(
-        self,
-        chat: ChatInfo,
-        project: ProjectInfo | None,
-        *,
-        filtered_jsonl: str = "",
-        session_id: str = "",
-    ) -> dict[str, object]:
-        return self._archive_pipeline_for()._job_inputs(
-            chat,
-            project,
-            filtered_jsonl=filtered_jsonl,
-            session_id=session_id,
-        )
-
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
         return self._archive_pipeline_for()._insights_model_for(chat, workspace)
-
-    def _persist_job_inputs(
-        self, job: ArchiveJob, inputs: dict[str, object]
-    ) -> None:
-        return self._archive_pipeline_for()._persist_job_inputs(job, inputs)
-
-    def _restore_job_inputs(
-        self, chat: ChatInfo, project: ProjectInfo | None, job: ArchiveJob
-    ) -> dict[str, object]:
-        return self._archive_pipeline_for()._restore_job_inputs(chat, project, job)
-
-    def _new_job_for_chat(
-        self, chat: ChatInfo, inputs: dict[str, object]
-    ) -> ArchiveJob:
-        return self._archive_pipeline_for()._new_job_for_chat(chat, inputs)
-
-    def _resume_job(
-        self, chat_id: str, archive_path: Path
-    ) -> tuple[ArchiveJob, dict[str, object]] | tuple[None, None]:
-        return self._archive_pipeline_for()._resume_job(chat_id, archive_path)
-
-    def _launch_job(
-        self,
-        chat_id: str,
-        job: ArchiveJob,
-        inputs: dict[str, object],
-        *,
-        stages: list[str] | None = None,
-    ) -> None:
-        return self._archive_pipeline_for()._launch_job(
-            chat_id, job, inputs, stages=stages
-        )
-
-    async def _run_job(
-        self,
-        chat_id: str,
-        job: ArchiveJob,
-        inputs: dict[str, object],
-        *,
-        stages: list[str] | None = None,
-    ) -> None:
-        return await self._archive_pipeline_for()._run_job(
-            chat_id, job, inputs, stages=stages
-        )
-
-    def _overlay_job_postprocess(self, chat_id: str, job: ArchiveJob) -> None:
-        return self._archive_pipeline_for()._overlay_job_postprocess(chat_id, job)
-
-    async def resume_interrupted_jobs(self, *, max_concurrency: int = 2) -> int:
-        return await self._archive_pipeline_for().resume_interrupted_jobs(
-            max_concurrency=max_concurrency
-        )
 
     def run_archive_postprocess(
         self,
@@ -3968,15 +3908,13 @@ class ProjectChatManager:
         self,
         chat: ChatInfo,
         *,
-        prompt: str = "",
         unattended: bool = False,
     ) -> str:
         """Build context prefix for a web chat message.
 
         One provider-neutral capsule is prepended before the user prompt.
         Stable routing facts are sent once per native provider session; the
-        date, entity hints, retrieval routing, and unattended marker remain
-        dynamic. The hidden envelope is retained so transcript renderers can
+        date and the unattended marker are sent on every turn. The hidden envelope is retained so transcript renderers can
         strip it without exposing routing metadata in the visible bubble.
         """
         project = self._projects.get(chat.project_id)
@@ -3992,18 +3930,13 @@ class ProjectChatManager:
             or chat.handover_context_pending
         )
         handover = self._format_handover_context(chat)
-        vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
-            prompt=prompt,
-            entity_index_owns_workspace=self._entity_index_is_per_root(workspace),
             workspace=workspace,
             gws_profile=gws_profile,
             project_name=project_name,
             project_context=project_context,
             canonical_doc=canonical_doc,
-            vault_root=vault_root,
             workspace_vault_root=self._workspace_vault_display(workspace),
-            legacy_entity_workspace=self._config.legacy_entity_workspace(),
             unattended=unattended,
             handover=handover,
             include_stable=include_stable,
@@ -4040,18 +3973,13 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        vault_root = self._entity_index_root(workspace)
         capsule = build_context_capsule(
-            prompt="",
-            entity_index_owns_workspace=self._entity_index_is_per_root(workspace),
             workspace=workspace,
             gws_profile=gws_profile,
             project_name=project_name,
             project_context=project_context,
             canonical_doc=canonical_doc,
-            vault_root=vault_root,
             workspace_vault_root=self._workspace_vault_display(workspace),
-            legacy_entity_workspace=self._config.legacy_entity_workspace(),
             include_stable=True,
         )
         if not capsule:
@@ -4380,18 +4308,9 @@ class ProjectChatManager:
         return project_ids, chat_ids
 
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
-        """Chats in *workspace* with a turn, subagent or archive job running.
-
-        An archive job (the trajectory stage) keeps writing into the workspace
-        after the chat itself is archived, so it counts too: finishing after the
-        folder moved would recreate the folder at its old path, outside the
-        archive, and block the restore.
-        """
+        """Chats in *workspace* with a turn or subagent running."""
         _project_ids, chat_ids = self.workspace_scope(workspace)
         busy = set(self.active_chat_ids())
-        busy.update(
-            cid for cid, task in self._archive_tasks.items() if not task.done()
-        )
         return sorted(cid for cid in busy if cid in chat_ids)
 
     def workspace_counts(self, workspace: str) -> dict[str, int]:
@@ -4519,6 +4438,11 @@ class ProjectChatManager:
         env: dict[str, str] = {}
         project = self._projects.get(chat.project_id)
         env["CIAO_WORKSPACE"] = str(self._config.workspace_root)
+        # The running engine's own executable directory goes at the front of the
+        # agent's PATH so a ``ciao <command>`` the agent runs is THIS engine's
+        # CLI, not a stale install earlier on the user's PATH. The user's PATH
+        # stays behind it, so their own tools still resolve (#989).
+        env["PATH"] = prepend_engine_path()
         workspace = project.workspace if project else ""
         # The vault this chat's CLI commands should read and write. Exported
         # explicitly rather than inherited, because there is one process-level
@@ -4538,9 +4462,6 @@ class ProjectChatManager:
             logger.debug("could not resolve the agent vault root for %r", workspace)
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
-        env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
-            self._config.legacy_entity_workspace()
-        )
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
         env["CIAO_MODEL"] = chat.model
@@ -4654,7 +4575,7 @@ class ProjectChatManager:
         }
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
+            with path.open("a", encoding="utf-8", newline="") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:
             logger.exception("Failed writing agent tool telemetry")
@@ -4675,7 +4596,7 @@ class ProjectChatManager:
         ``unattended`` marks an automation-driven turn, which changes
         the permission mode (see ``_effective_mode_for_chat``).
         """
-        prefix = self._build_prompt_prefix(chat, prompt=prompt, unattended=unattended)
+        prefix = self._build_prompt_prefix(chat, unattended=unattended)
         context_digest, context_session_id = self._stable_context_marker(chat)
         if not prefix:
             context_digest = ""
@@ -7303,7 +7224,13 @@ class ProjectChatManager:
 
         for p in self._projects.values():
             if p.workspace == workspace and p.name == "General":
-                if not wanted:
+                # A system routine carries no project name on purpose: it is
+                # dispatched without a `web_project_id` (stock definition), so
+                # there is nothing stale to repair and General IS its intended
+                # home. Warning here fired on every Workspace-care tick — a
+                # standing false positive that trained the operator to ignore
+                # the one signal meant for a genuinely dead target.
+                if not wanted and getattr(entry, "scope", "") != "system":
                     logger.warning(
                         "Schedule target %s is stale and records no project name; "
                         "falling back to %s General. Re-pick the project to repair it.",
@@ -7423,12 +7350,12 @@ class ProjectChatManager:
         markdown = convert_document(source)
         while True:
             try:
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                fd = open_fd(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
             except FileExistsError:
                 target = vault_dir / f"{stem}-{n}.md"
                 n += 1
                 continue
-            with os.fdopen(fd, "w", encoding="utf-8") as output:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as output:
                 output.write(markdown)
             break
         return {"original_path": str(source.resolve()), "markdown_path": str(target.resolve())}
@@ -7545,7 +7472,7 @@ class ProjectChatManager:
                 n += 1
         while True:
             try:
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+                fd = open_fd(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
             except FileExistsError:
                 target = vault_dir / f"{Path(base).stem}-{n}{ext}"
                 n += 1
@@ -7585,7 +7512,7 @@ class ProjectChatManager:
         if len(data) > MAX_IMAGE_SIZE_BYTES:
             target.unlink(missing_ok=True)
             raise ValueError("Image too large")
-        mime = mimetypes.guess_type(filename)[0] or f"image/{ext.lstrip('.')}"
+        mime = guess_media_type(filename) or f"image/{ext.lstrip('.')}"
         return ImageAttachment(
             path=target.resolve(),
             mime_type=mime,
@@ -7618,7 +7545,7 @@ class ProjectChatManager:
         if self._config.media_root.resolve() not in resolved.parents:
             return None
         ext = target.suffix.lower()
-        mime = mimetypes.guess_type(ref)[0] or f"image/{ext.lstrip('.')}"
+        mime = guess_media_type(ref) or f"image/{ext.lstrip('.')}"
         return ImageAttachment(
             path=resolved,
             mime_type=mime,

@@ -12,13 +12,14 @@
  *   POST /__fixture__/drop-ws                        sever every events socket
  *   GET  /__fixture__/ws-count                       sockets opened so far
  *   POST /__fixture__/transcript                     give this session a chat history
+ *   POST /__fixture__/update-tasks                   give this session update tasks
  */
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
-import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, snapshotFrame } from './data.mjs'
+import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, UPDATE_TASKS, VERIFICATION_REVIEW, VERIFICATION_PROPOSALS, VERIFICATION_HISTORY, VERIFICATION_RECEIPT, VERIFICATION_ENTRY_RECEIPT, VERIFICATION_NODES, snapshotFrame } from './data.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
@@ -61,6 +62,53 @@ const TRANSCRIPT = [
     usage: { input_tokens: 18, output_tokens: 6478, context_pct: '39.2%' },
     turn_index: 1,
   },
+]
+
+/**
+ * A settled reply followed by the user's comment-reference turn: the sent
+ * `<user-comment-reference>` card (see lib/commentContext.ts) sits immediately
+ * under the reply it annotates. It exists so a browser spec can select the
+ * reply and measure that its accent outline does not cross the reference card
+ * below it (#968), which jsdom's 0x0 rects cannot see.
+ */
+const COMMENT_TRANSCRIPT = [
+  { role: 'user', content: 'First request.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  {
+    role: 'assistant',
+    content: 'First answer, long enough to wrap on a phone-sized transcript.',
+    sent_at: '2026-01-01T09:50:20Z',
+    duration_ms: 20000,
+    effective_model: 'synthetic-model',
+    usage: { input_tokens: 18, output_tokens: 6478, context_pct: '39.2%' },
+    turn_index: 0,
+  },
+  {
+    role: 'user',
+    content: [
+      '<user-comment-reference>',
+      '<reference-source>assistant message, paragraph 1</reference-source>',
+      '<quoted-text>First answer, long enough to wrap on a phone-sized transcript.</quoted-text>',
+      '<user-comment>we already have this</user-comment>',
+      '</user-comment-reference>',
+      '',
+      'and a note that rides along with it',
+    ].join('\n'),
+    sent_at: '2026-01-01T09:52:00Z',
+    turn_index: 1,
+  },
+]
+
+/**
+ * One OpenCode-shaped turn as the server replays it: a phase-less text row per
+ * part, then tool work, then a short reply that opens like narration, then a
+ * reasoning-only step. Guards the reply against being folded into Activity.
+ */
+const FOLD_TRANSCRIPT = [
+  { role: 'user', content: 'Update both files.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  { role: 'assistant', content: `Both files need the same change. ${'Detail. '.repeat(30)}` },
+  { role: 'system', content: 'Edit a.vue', tool_name: '_activity' },
+  { role: 'assistant', content: 'Good — updated both files.', sent_at: '2026-01-01T09:50:20Z', turn_index: 0 },
+  { role: 'system', content: 'wrapping up', tool_name: '_thinking' },
 ]
 
 const sessions = new Map()
@@ -107,10 +155,25 @@ const GET_ROUTES = {
   '/api/schedules': () => SCHEDULES,
   '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': () => ({ actions: [] }),
-  '/api/proposals': () => ({ rows: PROPOSALS }),
-  '/api/proposals/history': () => ({ rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
-  '/api/vault/graph': () => ({ workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
-  '/api/vault/review': () => ({ candidates: [], trashed: [], cleared: [] }),
+  // "After this update" is a second, per-workspace question, so it carries a
+  // query string and cannot live in the exact-path table. A spec that needs the
+  // section measured on screen opts in through POST /__fixture__/update-tasks;
+  // the default stays empty so the other specs keep the Home they already
+  // assert on.
+  '/api/update-tasks': (req) => (sessionOf(req).updateTasks
+    ? { tasks: UPDATE_TASKS }
+    : { tasks: [] }),
+  // The three queues behind "To decide". A spec that wants the managed
+  // verification states (a pending proposal linked from a review row, a dead
+  // proposal, a settled verdict) opts in through POST /__fixture__/verification
+  // rather than replacing these defaults for everybody: the other review specs
+  // assert the empty and the plain states, which must stay the default.
+  '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
+  '/api/proposals/history': (req) => (sessionOf(req).verification ? VERIFICATION_HISTORY : { rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
+  '/api/vault/graph': (req) => (sessionOf(req).verification
+    ? { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
+    : { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
+  '/api/vault/review': (req) => (sessionOf(req).verification ? VERIFICATION_REVIEW : { candidates: [], trashed: [], cleared: [] }),
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   '/api/models': () => ({
     models: ['synthetic-model'],
@@ -125,7 +188,6 @@ const GET_ROUTES = {
   '/api/settings/routines': () => ({
     insights_model: '',
     insights_enabled: true,
-    trajectories_enabled: false,
     critique_models: '',
     provider_default_models: {},
     provider_default_modes: {},
@@ -138,7 +200,6 @@ const GET_ROUTES = {
     backends: { anthropic: true, opencode: false },
     workspace_context: { workspace_root: '/fixture/workspace', vault_root: '/fixture/workspace/memory-vault' },
   }),
-  '/api/automation': () => ({ jobs: [], proposal_outcomes: null }),
   '/api/settings/providers': () => ({
     connections: {
       claude: { name: 'claude', label: 'Claude Code', short_label: 'Claude', ok: true, auth: 'ok', command: 'claude', version: '2.0.0', account: 'fixture@example.com' },
@@ -170,6 +231,19 @@ const GET_ROUTES = {
     pending_commits: 0,
     reason: 'up to date',
   }),
+  // Settings → Start at sign-in. Read-only on purpose: the panel's one write
+  // flips a real machine's launchd/Task Scheduler state, so the fixture answers
+  // the read and nothing else. An unknown GET would fall through to the `{}`
+  // catch-all, which this panel (rightly) refuses to read as a position.
+  '/api/service/login': () => ({
+    platform: 'macos',
+    supported: true,
+    installed: true,
+    enabled: true,
+    can_change: true,
+    reason: 'The engine service will start when this user signs in.',
+    setup_command: null,
+  }),
 }
 
 /** Path patterns, for the routes that carry an id. */
@@ -180,6 +254,11 @@ const GET_PATTERNS = [
   // POST /__fixture__/transcript rather than giving every spec one.
   [/^\/api\/chats\/[^/]+\/messages$/, (req) => sessionOf(req).transcript || []],
   [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
+  // The receipt behind a settled verification's accept, so the History card's
+  // Undo is the real affordance a `note_apply` carries rather than an
+  // assertion about one.
+  [/^\/api\/memory\/receipts\/mrcpt_fixture_2$/, () => VERIFICATION_RECEIPT],
+  [/^\/api\/memory\/receipts\/mrcpt_fixture_entry$/, () => VERIFICATION_ENTRY_RECEIPT],
 ]
 
 /**
@@ -275,13 +354,34 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/__fixture__/ws-count') {
       return sendJson(res, { connections: state.connections, open: state.sockets.size })
     }
+    if (pathname === '/__fixture__/verification') {
+      // Opt this session into the managed-verification payloads. Per session for
+      // the same reason the transcript is: one server serves every worker, and a
+      // spec that emptied the review queue would be visible to a spec running
+      // beside it.
+      state.verification = true
+      return sendJson(res, { ok: true, candidates: VERIFICATION_REVIEW.candidates.length, history: VERIFICATION_HISTORY.rows.length })
+    }
     if (pathname === '/__fixture__/transcript') {
       // Opt this session's chat into having a transcript. The default is an
       // empty history so the other specs see the same chat they saw before; the
       // action-footer journey needs real turns to select, ending at the bottom
       // of the transcript, to reproduce a footer falling under the composer.
-      state.transcript = TRANSCRIPT
-      return sendJson(res, { ok: true, turns: TRANSCRIPT.length })
+      const body = await readBody(req)
+      state.transcript = body?.shape === 'opencode-fold'
+        ? FOLD_TRANSCRIPT
+        : body?.shape === 'comment'
+          ? COMMENT_TRANSCRIPT
+          : TRANSCRIPT
+      return sendJson(res, { ok: true, turns: state.transcript.length })
+    }
+    if (pathname === '/__fixture__/update-tasks') {
+      // Opt this session into having "After this update" on Home. Per session
+      // for the same reason the transcript is: the section must appear for the
+      // spec that measures the gaps around it without appearing for the specs
+      // beside it, which assert the Home they already know.
+      state.updateTasks = true
+      return sendJson(res, { ok: true, tasks: UPDATE_TASKS.length })
     }
     return sendJson(res, { error: 'unknown fixture route' }, 404)
   }

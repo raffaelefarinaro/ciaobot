@@ -16,14 +16,15 @@ import re
 import sys
 from pathlib import Path
 
+from ciao import agent_paths
+
 UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 
 
 def claude_projects_dir(workspace_root: Path) -> Path:
-    slug = str(workspace_root.resolve()).replace("/", "-").lstrip("-")
-    return Path.home() / ".claude" / "projects" / f"-{slug}"
+    return agent_paths.claude_projects_dir(workspace_root.resolve())
 
 
 def archived_session_ids(vault_chats_root: Path) -> set[str]:

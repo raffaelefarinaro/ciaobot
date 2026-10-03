@@ -5,6 +5,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import HomeSetupCard from '../HomeSetupCard.vue'
 import { enablePush } from '../../lib/push'
 import { SETUP_CARD_DISMISSED_KEY } from '../../lib/pwaPlatform'
+import { resetHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
 import {
   _resetInstallPromptForTests,
   canPromptInstall,
@@ -47,6 +48,7 @@ beforeEach(() => {
   state.pushEnabled = false
   state.pushSupported = true
   localStorage.clear()
+  resetHomeNoticeWindows()
   _resetInstallPromptForTests()
   listenForInstallPrompt(window)
   // jsdom has no matchMedia at all, so a stub left by an earlier test would
@@ -151,10 +153,11 @@ describe('HomeSetupCard', () => {
     expect(hasButton(view, 'Enable')).toBe(false)
   })
 
-  it('Hide persists per browser', async () => {
+  it('closing the setup window persists per browser without a second Hide button', async () => {
     const view = await mountCard()
 
-    await button(view, 'Hide').trigger('click')
+    expect(hasButton(view, 'Hide on this device')).toBe(false)
+    await view.get('[aria-label="Dismiss setup reminder on this device"]').trigger('click')
     await flushPromises()
 
     expect(view.find('.home-setup').exists()).toBe(false)
@@ -177,6 +180,19 @@ describe('HomeSetupCard', () => {
     })
 
     const view = await mountCard()
+    expect(view.find('.home-setup').exists()).toBe(false)
+    wrapper?.unmount()
+    expect((await mountCard()).find('.home-setup').exists()).toBe(false)
+  })
+
+  it('does not reopen a dismissed setup window along with transient Home notices', async () => {
+    const view = await mountCard()
+    await view.get('[aria-label="Dismiss setup reminder on this device"]').trigger('click')
+    await flushPromises()
+    expect(view.find('.home-setup').exists()).toBe(false)
+    expect(localStorage.getItem(SETUP_CARD_DISMISSED_KEY)).toBe('1')
+    resetHomeNoticeWindows()
+    await flushPromises()
     expect(view.find('.home-setup').exists()).toBe(false)
   })
 

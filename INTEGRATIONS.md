@@ -6,6 +6,14 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 
 ## Install
 
+### Windows 11 (preview)
+
+```powershell
+irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
+```
+
+The installer is per user and needs no administrator rights. It installs the engine into a `uv tool` environment, puts `ciao.exe` on your user `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the per-user logon task `\Ciaobot\Engine` and starts it. Options are `-Workspace`, `-NoStart` and `-Uninstall`; because `iex` cannot take arguments, pass them through a script block. The full guide, including logs and troubleshooting, is [docs/WINDOWS.md](docs/WINDOWS.md). Engine updates on Windows are not available yet (#857).
+
 ### Upgrading from the macOS app
 
 v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine.
@@ -41,14 +49,24 @@ commands in this document work in a terminal. Two cases need a manual step, and
 the installer says which one applies:
 
 - `~/.local/bin` is not on your `PATH`: add it. The setup wizard shows the
-  exact copyable line for your shell; the variants are:
+  exact copyable line for your OS and shell; the variants are:
   - zsh (default): `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc`
   - bash (login shells read `~/.bash_profile`, not `~/.bashrc`):
     `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile && source ~/.bash_profile`
   - fish: `fish_add_path $HOME/.local/bin`.
+  - Windows (PowerShell): the wizard substitutes your real directory for the
+    `C:\Users\you` below —
+    `$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); $k.SetValue('Path', 'C:\Users\you\.local\bin' + $(if ($v) { ';' + $v }), [Microsoft.Win32.RegistryValueKind]::ExpandString)`
+    — then open a new terminal so the change takes effect. It reads the old
+    value unexpanded and writes it back as `REG_EXPAND_SZ`, so a PATH that
+    holds `%USERPROFILE%`-style entries keeps both those entries and its
+    registry type; `[Environment]::SetEnvironmentVariable` would freeze them
+    to today's expanded paths and change the type to `REG_SZ`.
 - Another `ciao` already exists (the name collides with Ciao Prolog, among
   others): the installer never overwrites it, so call Ciaobot's engine by its
   full path instead.
+
+On Windows the installer does not write a shim: `ciao.exe` lives in the `uv tool` bin directory (`uv tool dir --bin`), which the installer adds to the user `PATH`.
 
 Provider logins do not depend on the shim: the setup wizard hands out each
 provider's own login command (`claude auth login`, `opencode auth login`).
@@ -61,9 +79,13 @@ or unidentifiable installs with an explicit upgrade message, and chat startup
 fails closed rather than probing retired V1 routes.
 
 ```bash
-npm install -g opencode-ai@latest   # or: brew install sst/tap/opencode
+npm install -g @opencode/cli        # works on Windows too
+# or: brew install anomalyco/tap/opencode-v2
+# or: curl -fsSL https://opencode.ai/v2/install | bash
 ciao auth opencode                  # opens `opencode auth login`
 ```
+
+The npm package `opencode-ai` and the `sst/tap` Homebrew tap are OpenCode 1 and do not work with Ciaobot, and `opencode upgrade` does not move a 1.x install to 2.x. If you installed OpenCode 1 that way, run `npm uninstall -g opencode-ai` first, because it also provides an `opencode` command.
 
 OpenCode is bring-your-own-provider: it authenticates against whichever model
 backends you connect, and Ciaobot lists enabled models from active providers
@@ -180,7 +202,7 @@ cp ~/.notebooklm/storage_state.json .notebooklm-auth.json
 
 ### `opencli`: Website CLI
 
-CLI with 50+ website adapters (YouTube, LinkedIn, GitHub, etc.). Optional manual install for workspace-specific workflows — not used by the stock `web-research` skill (that uses defuddle).
+CLI with 50+ website adapters (YouTube, LinkedIn, GitHub, etc.). Optional manual install for workspace-specific workflows. Not required: URL reading uses the provider's own web-fetch tool, and GitHub URLs go through `gh`.
 
 ```bash
 npm install -g @jackwener/opencli
@@ -257,7 +279,7 @@ Copy `.env.example` to `.env` and fill in the engine-level settings first:
 
 **Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is on by default; see `PWA_AUTH_REQUIRED` below for the opt-out.
 
-`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, and renders `~/Library/LaunchAgents/com.ciao.server.plist`. Open `http://localhost:<port>` and follow the setup wizard; the first-run link is printed with the `?setup=<token>` one-time token, which the server redeems once on localhost, sets the signed session cookie, then deletes. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
+`ciao setup` writes the initial `.env` into the selected workspace, seeds skills (including `ciao-memory`), commands, schedules, agent-readable workspace docs (`AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, and renders `~/Library/LaunchAgents/com.ciao.server.plist`. No stock subagents ship; the main agent can delegate independent work or use custom subagents. Open `http://localhost:<port>` and follow the setup wizard; the first-run link is printed with the `?setup=<token>` one-time token, which the server redeems once on localhost, sets the signed session cookie, then deletes. By default setup prints the launchd load command without starting the service; use `--load-launchd` on macOS to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
 **Runtime:** `CIAO_WORKSPACE`, `PWA_PORT`. `CIAO_PORT` does not control the
 port the server binds; it is a legacy fallback used to *locate* a running
@@ -355,7 +377,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
   outside the login-shell `PATH`. The path is used for provider startup and
   authentication; an invalid path is reported as unavailable.
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
-  CLI runs. It is still read by `ciao/cli.py`, but nothing sets it any more
+  CLI runs. It is still read by `ciao/cli.py`, and on Windows `ciao service start` uses it as the interpreter (`python.exe` or `pythonw.exe`) when it has to register the logon task, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
 - `CIAO_DESKTOP_SERVER_URL` (development only): overrides runtime discovery for
   a local development-server target.
@@ -390,8 +412,8 @@ See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recover
 - `CIAO_LOG_LEVEL`: root log level for the server (default `info`). Accepts standard names (`debug`, `info`, `warning`, `error`) or numeric values. Setting it to `debug` also attaches a rotating `.runtime/server_debug.log` (10 MB × 2 backups) capturing every DEBUG+ record — provider stderr noise, lifecycle events, uvicorn request logs — which the dev-mode `/api/debug/issues` report and the `{{ISSUE_REPORT}}` placeholder surface alongside the error tail so failures can be traced beyond their final error line.
 - File viewer path policy: the file/binary/image viewers and the in-PWA editor have **no workspace sandbox**. They read (and, for the editor and snapshot-restore, write) any path on disk. Relative paths still anchor to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only remaining guards, so secrets in allowlisted files elsewhere on the machine are reachable from an authenticated PWA session.
 - `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND`: optional override for `gws`; the server defaults it to `file` at startup for headless auth.
-- `CIAO_INSIGHTS_DISABLED`: **retired and no longer read after one-time migration.** On the first upgraded server start, its value is copied into the persisted **Automatic session insights** switch in Settings → Automations; an existing Settings value wins. Remove it from `.env` after that migration. The retired startup-backfill opt-in remains inert.
-- `CIAO_TRAJECTORIES_DISABLED`: **retired and no longer read after one-time migration.** Its value is copied into the persisted **Automatic trajectory capture** switch in Settings → Automations; an existing Settings value wins. Remove it from `.env` after that migration.
+- `CIAO_INSIGHTS_DISABLED`: **retired and no longer read after one-time migration.** On the first upgraded server start, its value is copied into the persisted **Session insights** switch in Settings → General; an existing Settings value wins. Remove it from `.env` after that migration. The retired startup-backfill opt-in remains inert.
+- `CIAO_TRAJECTORIES_DISABLED`: **removed and no longer read.** Trajectory capture is gone; remove it from `.env`.
 - `ciao gws-auth-helper <profile>`: interactive headless OAuth re-authentication when `gws auth login` cannot open a browser.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json`, which works for any name; the default model is now a per-provider operator setting (Settings → Models), not a per-workspace one. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
 - `CIAO_MEMORY_DIR`: legacy override for the old `~/.ciao/memory.md` + `user.md` directory during the one-release migration window. Default `~/.ciao`. Not used for new writes; safe to unset after migration.
@@ -449,8 +471,3 @@ Ciaobot runs on macOS under launchd.
 Auto-skills update, auto-CLI update, and similar behaviors belong in server startup code (`ciao/main.py`), not in Claude Code's `settings.json` hooks.
 
 Enabled schedules also receive one startup catch-up check. If the latest expected occurrence was missed while the server was unavailable, it runs immediately once; older skipped intervals are not replayed, and the scheduled prompt receives the current run context rather than a backdated occurrence date.
-
-The Settings → Automations view receives per-job capability metadata from
-`GET /api/automation`: `uses_model` identifies model-backed work and
-`produces_outcome` identifies durable or user-visible results. These flags are
-static registry metadata and remain available before a job has run.

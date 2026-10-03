@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from ciao import gws_auth
+from ciao.os_support.private import is_private
 
 
 def _config(tmp_path: Path) -> SimpleNamespace:
@@ -295,8 +296,8 @@ def test_store_credentials_writes_0600_and_retires_stale(tmp_path: Path) -> None
     creds = json.loads(creds_path.read_text())
     assert creds["refresh_token"] == "rtok"
     assert creds["email"] == "me@example.com"
-    assert (creds_path.stat().st_mode & 0o777) == 0o600
-    assert (config_dir.stat().st_mode & 0o777) == 0o700
+    assert is_private(creds_path)
+    assert is_private(config_dir)
     # Stale encrypted copy is moved aside so gws doesn't keep using it.
     assert not (config_dir / "credentials.enc").exists()
     assert (config_dir / "credentials.enc.old").exists()
@@ -397,7 +398,7 @@ def _install_gws(monkeypatch) -> None:
     """Make ``gws`` resolvable and the login-shell PATH known to the probe."""
     from ciao import tool_path
 
-    monkeypatch.setattr(tool_path, "resolve_tool", lambda name: "/usr/bin/gws")
+    monkeypatch.setattr(tool_path, "resolve_command", lambda name: ["/usr/bin/gws"])
     monkeypatch.setattr(tool_path, "login_shell_path", lambda: "/usr/bin")
 
 
@@ -438,7 +439,7 @@ def test_auth_status_parses_revoked(tmp_path: Path, monkeypatch) -> None:
 def test_auth_status_unavailable_when_gws_missing(tmp_path: Path, monkeypatch) -> None:
     from ciao import tool_path
 
-    monkeypatch.setattr(tool_path, "resolve_tool", lambda name: "")
+    monkeypatch.setattr(tool_path, "resolve_command", lambda name: [])
     cfg = _config(tmp_path)
     status = gws_auth.auth_status(cfg, "personal")
     assert status == {"available": False, "reason": "gws CLI not installed"}

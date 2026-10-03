@@ -9,7 +9,6 @@ import functools
 import json
 import logging
 import math
-import mimetypes
 import os
 import posixpath
 import re
@@ -28,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable
 # Imported lazily inside the handlers (see `_housekeeping_context`); only
 # the annotations need the name at module scope.
 if TYPE_CHECKING:
-    from ciao import operator_actions
+    from ciao import operator_actions, update_tasks
 
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
@@ -37,16 +36,19 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao.git_proc import EXACT_BYTES
+from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import proposal_actions
 from ciao import proposal_kinds
+from ciao import service_backend
 from ciao import backup_service
-from ciao import proposal_outcomes
 from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
+from ciao.os_support.private import make_private_dir
 from ciao.web.auth import is_loopback_client
 from ciao.web.document_conversion import is_anydoc_document
 from ciao.config import (
@@ -59,6 +61,7 @@ from ciao.config import (
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
+    agent_root_for,
     persist_workspaces,
     workspace_from_request,
     workspace_provider_options,
@@ -67,7 +70,7 @@ from ciao.workspaces import (
 )
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
-from ciao.tool_path import resolve_tool
+from ciao.tool_path import resolve_command
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
@@ -470,7 +473,7 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
             return JSONResponse(
                 {
                     "error": (
-                        f"a chat in '{name}' is still working or being archived; "
+                        f"a chat in '{name}' is still working; "
                         "let it finish or stop it, then archive the workspace"
                     )
                 },
@@ -837,7 +840,7 @@ def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
         "echo\n"
         "echo 'Authentication finished. You can close this window.'\n"
         "exit $status\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     script.chmod(0o700)
     subprocess.Popen(
@@ -1056,7 +1059,12 @@ def _gws_integration_payload(config) -> dict:
     from ciao import gws_auth
 
     usage = _gws_profile_usage(config)
-    binary_path = resolve_tool("gws") or ""
+    try:
+        gws_command = resolve_command("gws")
+    except OSError:
+        gws_command = []  # on PATH but unusable: report it as not installed
+    # The tool itself: its executable, or the script node runs for it.
+    binary_path = gws_command[-1] if gws_command else ""
     try:
         health = gws_auth.read_health_cache(Path(config.state_path).parent)
     except Exception:
@@ -1124,7 +1132,7 @@ async def gws_save_client_secret(request: Request) -> JSONResponse:
         try:
             # the dir holds only this profile's Google OAuth material; tighten
             # it for installs whose older setup left it group/world-readable
-            config_dir.chmod(0o700)
+            make_private_dir(config_dir)
         except OSError as exc:
             logger.warning("Failed to tighten %s permissions: %s", config_dir, exc)
         path = config_dir / "client_secret.json"
@@ -2358,8 +2366,7 @@ async def chat_archive(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     # Capture chat/project metadata BEFORE archive_chat() mutates the chat
-    # (it flips ``archived=True`` but leaves project_id intact; pull project
-    # info too so the trajectory record carries workspace + context).
+    # (it flips ``archived=True`` but leaves project_id intact).
     chat_meta = pcm.get_chat(chat_id)
     project_meta = (
         pcm.get_project(chat_meta.project_id) if chat_meta is not None else None
@@ -2371,70 +2378,14 @@ async def chat_archive(request: Request) -> JSONResponse:
         "ok": True,
         "archived_to": str(outcome.path) if outcome is not None else None,
         # The initiating client clears the active pane as soon as this response
-        # arrives. Return the lifecycle record as well as publishing it over
-        # /ws/events, so that client cannot miss the first "running" state in
-        # the archive/event race.
+        # arrives. Return the memory-pass record as well as publishing it over
+        # /ws/events, so that client cannot miss it in the archive/event race.
         "postprocess": (
             dict(chat_meta.postprocess)
             if chat_meta and chat_meta.postprocess
             else None
         ),
     })
-
-
-async def chat_retry_insights(request: Request) -> JSONResponse:
-    """Resume unfinished post-archive stages for a single archived chat.
-
-    Re-runs whatever is still pending/failed on the archive's manifest — the
-    session trajectory is the only stage left. Returns the retry status and the
-    manifest view so the archived-chat panel can render partial completion. A
-    pipeline already running for the chat is left alone.
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    result = pcm.retry_archive_steps(chat_id)
-    status = result["status"]
-    if status == "not_found":
-        return JSONResponse({"error": "not found"}, status_code=404)
-    if status == "not_archived":
-        return JSONResponse(
-            {"error": "chat is not archived", "chat_id": chat_id}, status_code=409
-        )
-    if status == "no_archive":
-        return JSONResponse(
-            {"error": "no archive file for this chat", "chat_id": chat_id}, status_code=409
-        )
-    if status == "running":
-        return JSONResponse(
-            {"status": "running", "chat_id": chat_id, "job": result["job"]},
-            status_code=202,
-        )
-    if status == "complete":
-        return JSONResponse({"status": "complete", "chat_id": chat_id, "job": result["job"]})
-    if status == "blocked":
-        return JSONResponse(
-            {"status": "blocked", "chat_id": chat_id, "job": result["job"]}
-        )
-    return JSONResponse(
-        {"status": "started", "chat_id": chat_id, "job": result["job"]},
-        status_code=202,
-    )
-
-
-async def chat_archive_job(request: Request) -> JSONResponse:
-    """The persisted post-archive manifest for one archived chat.
-
-    Returns the per-stage statuses, the unfinished list and any blocked reason
-    so a surface can report partial completion without a live pipeline. A chat
-    with no manifest (archived before this feature, or never processed) returns
-    ``{"job": null}`` rather than 404: the absence is a normal state, not an
-    error.
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    if pcm.get_chat(chat_id) is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"job": pcm.archive_job_view(chat_id)})
 
 
 _MSG_PAGE_DEFAULT_LIMIT = 50
@@ -3209,7 +3160,7 @@ def _collect_vault_markdown_paths(config) -> list[str]:
             except OSError:
                 continue
             try:
-                display = str(resolved.relative_to(workspace))
+                display = resolved.relative_to(workspace).as_posix()
             except ValueError:
                 display = str(resolved)
             if display in seen:
@@ -3230,7 +3181,7 @@ def _collect_vault_markdown_paths(config) -> list[str]:
             except OSError:
                 continue
             try:
-                display = str(resolved.relative_to(workspace))
+                display = resolved.relative_to(workspace).as_posix()
             except ValueError:
                 display = str(resolved)
             if display in seen:
@@ -3463,6 +3414,13 @@ async def vault_backlinks(request: Request) -> JSONResponse:
     return JSONResponse({"backlinks": backlinks})
 
 
+# How many overdue entries one Memory Map node names inline. The counts beside
+# them are uncapped, so the cap costs the reader nothing but a "+N more" — and
+# the alternative is a node card the height of a note with fifty overdue
+# bullets, inside a graph that is a picture of the whole vault.
+_MAP_ENTRY_FINDINGS = 3
+
+
 async def vault_graph(request: Request) -> JSONResponse:
     """Return the vault as a note graph for the Memory Map page.
 
@@ -3471,6 +3429,12 @@ async def vault_graph(request: Request) -> JSONResponse:
     already merged and resolved to real paths by ``vault_index.scan_vault``.
     Optional ``?workspace=`` scopes to one logical workspace; cross-workspace
     edges are dropped rather than left dangling.
+
+    Each node also carries ``entry_coverage``: what
+    :func:`ciao.memory_audit.note_entry_coverage` found inside it, one level in
+    from the node's own age. A note is not the unit a person keeps current, and
+    a map that could only say "this note is current" would show a re-stamped
+    person note as clean while it held an address from 2019.
     """
     config = request.app.state.config
     workspace = request.query_params.get("workspace", "").strip() or None
@@ -3499,7 +3463,7 @@ async def vault_graph(request: Request) -> JSONResponse:
         workspaces = sorted({e.workspace for e in entries if e.workspace})
     scoped = filter_entries(entries, workspace=workspace) if workspace else entries
     graph = _build_graph(scoped)
-    by_path = {str(e.path) for e in scoped}
+    by_path = {e.path_key for e in scoped}
 
     # `mtime` lets the Memory Map seed its local view from the note you touched
     # most recently, which is a far more useful entry point than "whatever the
@@ -3526,35 +3490,253 @@ async def vault_graph(request: Request) -> JSONResponse:
     # disagree with the queue it sends the user to. Notes the queue never lists
     # (Workspace/ files, templates, completed projects) and exempt types
     # (logs, journals) keep their age but are never flagged.
+    #
+    # On top of that, the managed verification state: a note somebody has
+    # actually checked recently is not "unchecked" however old its own
+    # `updated:` says, and one with a proposal waiting on it is not unchecked
+    # either — it is being decided, which is the whole difference between a
+    # queue asking a question and a queue asking it twice. The check state lives
+    # in the vault the notes came from, so it is read per target root rather
+    # than once for the install.
+    from ciao import memory_receipts as mr
     from ciao.memory_audit import note_verification
-    from ciao.vault_review import never_queued
+    from ciao.note_verification import NoteCheck, _check_settles, read_note_checks
+    from ciao.vault_review import never_queued, verification_evidence
 
     current_date = datetime.now(UTC).date()
+    # The check state is filed per workspace, under the root
+    # `note_verification`'s own writer uses (`config.workspace_vault_root`), and
+    # one workspace is read once however many notes it holds. The scan targets
+    # are NOT the answer: on the shared-vault layout a target is the whole
+    # install while a workspace's notes live under it, so a target would look in
+    # a directory the pass never wrote to and find nothing — silently, which is
+    # exactly how a checked note goes on being flagged as unchecked.
+    checks_by_workspace: dict[str, dict[str, Any]] = {}
+    vault_by_workspace: dict[str, Path | None] = {}
 
-    def _staleness(e) -> tuple[bool, int | None, int | None]:
+    def _checks_for(e) -> dict[str, Any]:
+        """The check state for this entry's workspace, read once."""
+        workspace = str(e.workspace or "")
+        if workspace not in checks_by_workspace:
+            try:
+                root: Path | None = Path(config.workspace_vault_root(workspace))
+            except (AttributeError, ValueError, OSError):
+                root = None
+            vault_by_workspace[workspace] = root
+            checks_by_workspace[workspace] = (
+                read_note_checks(root) if root is not None else {}
+            )
+        return checks_by_workspace[workspace]
+
+    def _check_for(e) -> tuple[NoteCheck | None, str, str]:
+        """This note's recorded check, its key in the state, and its revision.
+
+        The body is read only for a note that HAS a check, which is a small
+        fraction of a vault and none of a fresh one: a note nobody has verified
+        has nothing to compare against, and hashing every body would be a second
+        full read of the vault on the map's own hot path.
+        """
+        checks = _checks_for(e)
+        if not checks:
+            return None, "", ""
+        target = absolute.get(e.path_key)
+        root = vault_by_workspace[str(e.workspace or "")]
+        if target is None or root is None:
+            return None, "", ""
+        try:
+            relative = target.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None, "", ""
+        check = checks.get(relative)
+        if check is None:
+            return None, relative, ""
+        try:
+            text = target.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Unreadable is not "no check": the check is real, this node simply
+            # cannot say whether it still describes the note. Reporting it as
+            # settled would hide the note; reporting it as stale would claim a
+            # judgement nobody made. An empty revision below makes
+            # `verification_evidence` read it as a conflict, which is the
+            # honest middle.
+            return check, relative, ""
+        return check, relative, mr.content_revision(text)
+
+    def _entry_coverage_for(e) -> dict[str, Any] | None:
+        """One node's per-entry freshness, from the audit's own detector.
+
+        ``None`` for a node whose body could not be read, which is the honest
+        answer: this node cannot say what is inside the note, and a coverage
+        figure of zero would read as "nothing to check".
+
+        The counts come from :func:`ciao.memory_audit.note_entry_coverage`, the
+        same function the nightly ``stale_entry`` pass and ``os-audit`` call, so
+        the map, the audit and the plan cannot disagree about which bullet is
+        overdue. A node whose note is exempt (a journal is as true as the day it
+        was written) or one the review queue would never show still reports its
+        counts — the map has always shown an exempt note's age — but the map's
+        own "unchecked" flag stays off it, exactly as it does for notes.
+
+        The findings list is capped: the map is a picture of the whole vault, and
+        a note with fifty overdue bullets must not become a fifty-row card. The
+        counts beside it are the uncapped truth.
+        """
+        from ciao.memory_audit import note_entry_coverage
+
+        target = absolute.get(e.path_key)
+        if target is None:
+            return None
+        try:
+            text = target.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        try:
+            relative = target.relative_to(
+                Path(config.workspace_vault_root(str(e.workspace or ""))).resolve()
+            ).as_posix()
+        except (AttributeError, ValueError, OSError):
+            relative = e.path_key
+        coverage, selected, _document = note_entry_coverage(
+            text,
+            note_type=e.type or "",
+            updated=e.updated or "",
+            mtime=_mtime(e.path_key),
+            note_path=relative,
+            rendered=e.path_key,
+            title=e.title,
+            workspace=str(e.workspace or ""),
+            today=current_date,
+        )
+        if never_queued(e.path_key):
+            return None
+        return {
+            "entries": coverage.entries,
+            "checked": coverage.checked,
+            "exempt": coverage.exempt,
+            "unverified": coverage.unverified,
+            "uncovered": coverage.uncovered,
+            "stale": coverage.stale,
+            # Whether this note's TYPE never ages out — a `log`, a `journal`, a
+            # `Workspace/` queue. Carried so a client can say so, because
+            # `uncovered` on a journal is a different statement from `uncovered`
+            # on a person note: the first is a record of what happened and is not
+            # meant to be verified at all, the second is a fact nobody has read.
+            # Without it the only way to tell them apart is to keep a copy of
+            # the exempt set in the browser.
+            "note_exempt": coverage.note_exempt,
+            "coverage_ratio": round(coverage.coverage_ratio, 4),
+            "fully_verified": coverage.fully_verified,
+            "stale_entries": [
+                {
+                    "identity": verdict.identity,
+                    "excerpt": verdict.excerpt,
+                    "reason": verdict.reason_code,
+                    "detail": verdict.reason,
+                    "age_days": verdict.age_days,
+                    "last_verified": (
+                        verdict.last_verified.isoformat()
+                        if verdict.last_verified
+                        else ""
+                    ),
+                    "own_date": verdict.own_date,
+                }
+                for verdict in selected[:_MAP_ENTRY_FINDINGS]
+            ],
+            "more_stale_entries": max(0, len(selected) - _MAP_ENTRY_FINDINGS),
+        }
+
+    def _staleness_fields(e) -> dict[str, Any]:
+        """One node's aging, and what the managed pass concluded about it.
+
+        ``stale`` is the age rule, and the check state only ever *clears* it. A
+        note somebody checked inside its cooldown is not "unchecked" however old
+        its own ``updated:`` reads, and neither is one a proposal is waiting on:
+        in both cases the question has been asked and the queue has deliberately
+        stopped asking. Leaving the flag on would put this map and the queue it
+        links to into open disagreement about the same notes, which is the one
+        thing the shared predicate above exists to prevent.
+
+        The check rides along either way, so the map can say *why* a note is not
+        being asked about again rather than silently dropping it off the
+        "unchecked" count.
+
+        ``entry_coverage`` is the same honesty one level in, and the reason a
+        ``stale`` note is not the only thing this route can say. A note whose
+        ``updated:`` was re-stamped yesterday clears the flag above while still
+        holding a fact from two years ago; without this block the map would show
+        that note as clean, and the reader would have no way to learn otherwise
+        from the surface that sent them there. It never *raises* the flag — the
+        flag is the whole-note verdict, and the entry worklist is where a stale
+        bullet becomes a plan — it reports beside it.
+        """
         verification = note_verification(
-            e.type or "", e.updated or "", _mtime(str(e.path)), today=current_date
+            e.type or "", e.updated or "", _mtime(e.path_key), today=current_date
         )
         if verification is None:
-            return False, None, None
-        stale = verification.stale and not never_queued(str(e.path))
-        # The horizon travels with the flag so the map can name the rule
-        # without keeping its own copy of the thresholds table.
-        return stale, verification.age_days, verification.threshold_days
+            return {
+                "stale": False,
+                "age_days": None,
+                "threshold_days": None,
+                "check": None,
+                # Reported even here. A note with no usable date has no age to
+                # show, but its *entries* can each carry their own `[verified:]`
+                # stamp and be current or not on that — the one case where the
+                # whole-note answer is "I cannot tell" and the entry answer is
+                # not.
+                "entry_coverage": _entry_coverage_for(e),
+            }
+        check, relative, revision = _check_for(e)
+        state = (
+            verification_evidence(check, revision, relative)
+            if check is not None
+            else None
+        )
+        stale = verification.stale and not never_queued(e.path_key)
+        node_check: dict[str, Any] | None = None
+        if check is not None:
+            settled = _check_settles(check, revision, today=current_date)
+            if settled:
+                stale = False
+            node_check = {
+                "outcome": check.outcome,
+                "checked_at": check.checked_at.isoformat(),
+                "retry_after": check.retry_after.isoformat(),
+                "coverage": check.coverage,
+                "reason": check.reason,
+                "citations": len(check.evidence),
+                "receipt_id": check.receipt_id,
+                # A check inside its cooldown is a note asked and answered; one
+                # with a proposal pinned to it has been asked and is WAITING for
+                # an answer. Two different things to say out loud, and the map
+                # has a link for the second.
+                "settled": settled,
+                "pending": bool(settled and check.proposal_id),
+                "proposal_id": check.proposal_id,
+                "conflicted": bool(state and state.get("conflicted")),
+            }
+        return {
+            "stale": stale,
+            # The horizon travels with the flag so the map can name the rule
+            # without keeping its own copy of the thresholds table.
+            "age_days": verification.age_days,
+            "threshold_days": verification.threshold_days,
+            "check": node_check,
+            "entry_coverage": _entry_coverage_for(e),
+        }
 
     nodes = [
         {
-            "id": str(e.path),
+            "id": e.path_key,
             "title": e.title,
             "type": e.type,
             "tags": e.tags,
             "aliases": e.aliases,
             "description": e.description,
             "workspace": e.workspace,
-            "degree": len(graph.get(str(e.path), ())),
-            "mtime": _mtime(str(e.path)),
+            "degree": len(graph.get(e.path_key, ())),
+            "mtime": _mtime(e.path_key),
             "updated": e.updated,
-            **dict(zip(("stale", "age_days", "threshold_days"), _staleness(e))),
+            **_staleness_fields(e),
         }
         for e in scoped
     ]
@@ -3604,7 +3786,12 @@ async def vault_review(request: Request) -> JSONResponse:
     # `reopen` belongs here too: it looks its row up in the ledger, never in
     # `candidates`, so the pre-action scan was thrown away — and that scan
     # reads every note in the vault three times, twice per click.
-    if action in {"restore", "delete", "reopen"}:
+    # `restore_completed` is the same shape for a completed project: it moved out
+    # of the queue, so the pre-action scan could not find it either, and it
+    # repoints links on the way back, which a candidate lookup would not allow.
+    # `complete` is deliberately NOT here — it acts on a live candidate, and the
+    # regenerated list is how the item is found at all.
+    if action in {"restore", "delete", "reopen", "restore_completed"}:
         candidates = []
     else:
         candidates = await asyncio.to_thread(
@@ -3644,6 +3831,14 @@ async def vault_review(request: Request) -> JSONResponse:
         except (ValueError, OSError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse({"ok": True, "result": result, **await _vault_review_snapshot(root, workspace)})
+    if action == "restore_completed":
+        try:
+            result = await asyncio.to_thread(
+                functools.partial(review.restore_completed, root, candidate_id_value, workspace=workspace)
+            )
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse({"ok": True, "result": result, **await _vault_review_snapshot(root, workspace)})
     if action in {"restore", "delete"}:
         try:
             result = review.restore_note(root, candidate_id_value) if action == "restore" else review.delete_permanently(root, candidate_id_value, confirm=str(payload.get("confirm", "")))
@@ -3658,6 +3853,14 @@ async def vault_review(request: Request) -> JSONResponse:
             result = review.record_decision(root, item, str(payload.get("disposition", "")), actor="user")
         elif action == "trash":
             result = review.trash_note(root, item)
+        elif action == "complete":
+            # Through a thread, unlike `trash` and `decide` beside it: a
+            # completion moves the note, rewrites every note that links to it and
+            # scans the vault to find them. Run on the event loop that is several
+            # hundred file reads inside one request.
+            result = await asyncio.to_thread(
+                functools.partial(review.complete_project_note, root, item)
+            )
         else:
             return JSONResponse({"error": "unsupported action"}, status_code=400)
     except (ValueError, OSError) as exc:
@@ -4109,7 +4312,7 @@ async def workspace_binary(request: Request) -> Response:
         media_type = "application/pdf"
         filename = f"{orig_stem}.pdf"
     else:
-        media_type, _ = mimetypes.guess_type(resolved.name)
+        media_type = guess_media_type(resolved.name)
         if media_type is None:
             _FALLBACK_MIMES = {
                 ".pdf": "application/pdf",
@@ -4160,7 +4363,7 @@ async def workspace_image(request: Request) -> Response:
     if resolved.stat().st_size > _WORKSPACE_IMAGE_MAX_BYTES:
         return JSONResponse({"error": "file too large"}, status_code=413)
 
-    media_type, _ = mimetypes.guess_type(resolved.name)
+    media_type = guess_media_type(resolved.name)
     if media_type is None:
         # Fallback: SVGs and a few uncommon types occasionally miss the
         # mimetypes DB depending on platform. Map from the extension.
@@ -4401,7 +4604,7 @@ async def workspace_file_write(request: Request) -> Response:
 
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content)
+        resolved.write_text(content, encoding="utf-8", newline="")
     except OSError as exc:
         return JSONResponse({"error": f"write failed: {exc}"}, status_code=500)
 
@@ -4516,38 +4719,6 @@ async def list_schedules(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     schedules = sm.list_entries()
     return JSONResponse([_enrich_schedule(s, pcm) for s in schedules])
-
-
-async def list_automation(request: Request) -> JSONResponse:
-    """Status of background automations for the Settings → Automation page.
-
-    Reads the job-run log and returns one entry per automation this machine
-    can actually run (jobs that never ran still appear), each with its last
-    run, recent history, and aggregate stats. Scheduled jobs whose schedule is
-    not installed here are omitted — nothing would ever trigger them.
-    Read-only.
-
-    ``?include=outcomes`` answers ``{"jobs": [...], "proposal_outcomes":
-    {...}}`` instead of the bare list, adding the memory-proposal
-    promoted-vs-dismissed tally the page renders next to the job stats. The
-    default stays a bare list so existing consumers keep working unchanged.
-    """
-    from ciao import job_runs
-
-    installed: set[str] | None = None
-    try:
-        sm = request.app.state.schedule_manager
-        installed = {entry.schedule_id for entry in sm.list_entries()}
-    except Exception:  # noqa: BLE001 — no schedule manager: filter nothing
-        installed = None
-
-    summary = job_runs.automation_summary(installed_schedules=installed)
-    if request.query_params.get("include", "") != "outcomes":
-        return JSONResponse(summary)
-    return JSONResponse({
-        "jobs": summary,
-        "proposal_outcomes": proposal_outcomes.tally_cached(),
-    })
 
 
 async def create_schedule(request: Request) -> JSONResponse:
@@ -4917,12 +5088,7 @@ def _routines_payload(config, app_settings) -> dict:
     return {
         # Overrides as stored ("" = automatic default).
         "insights_model": s.insights_model,
-        # The HTTPS origin other devices should use, as stored ("" = none).
-        "trusted_url": s.trusted_url,
         "insights_enabled": config.insights_enabled,
-        "trajectories_enabled": config.trajectories_enabled,
-        "push_all_devices": s.push_all_devices,
-
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
@@ -5246,23 +5412,7 @@ def _schedule_launchd_server_handoff() -> bool:
     retries. Returns False when the plist is missing or the spawn fails, in
     which case the caller falls back to the in-place re-exec restart.
     """
-    plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.server.plist"
-    if not plist.exists():
-        return False
-    script = (
-        "sleep 3; "
-        f"/bin/launchctl load -w '{plist}' 2>/dev/null; "
-        f"/bin/launchctl kickstart gui/{os.getuid()}/com.ciao.server 2>/dev/null; "
-        "exit 0"
-    )
-    try:
-        subprocess.Popen(
-            ["/bin/sh", "-c", script],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
+    if not service_backend.current_backend().schedule_server_handoff():
         return False
     print(
         "\nSetup complete — Ciaobot is moving to the background service.\n"
@@ -5685,12 +5835,12 @@ async def admin_snapshot(request: Request) -> JSONResponse:
             return JSONResponse({"error": exc.detail}, status_code=500)
 
         try:
-            result = await _snapshot_git(["git", "add", "-A"], cwd=ws, timeout=30)
+            result = await _snapshot_git(["git", *EXACT_BYTES, "add", "-A"], cwd=ws, timeout=30)
             if result.returncode != 0:
                 return JSONResponse({"error": f"git add failed: {result.stderr}"}, status_code=500)
 
             status = await _snapshot_git(
-                ["git", "status", "--porcelain"], cwd=ws, timeout=10
+                ["git", *EXACT_BYTES, "status", "--porcelain"], cwd=ws, timeout=10
             )
             # Checked before the emptiness test: a failing status is empty
             # stdout, and reading that as a clean tree is how a snapshot
@@ -5703,7 +5853,7 @@ async def admin_snapshot(request: Request) -> JSONResponse:
             from datetime import UTC, datetime
             ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
             commit = await _snapshot_git(
-                ["git", "commit", "-m", f"pwa snapshot {ts}"], cwd=ws, timeout=30
+                ["git", *EXACT_BYTES, "commit", "-m", f"pwa snapshot {ts}"], cwd=ws, timeout=30
             )
             # No push after a failed commit: a rejected commit (no identity, a
             # full disk, a pre-commit hook) leaves nothing recorded, and
@@ -5711,7 +5861,7 @@ async def admin_snapshot(request: Request) -> JSONResponse:
             if commit.returncode != 0:
                 return JSONResponse({"error": f"git commit failed: {commit.stderr}"}, status_code=500)
 
-            push = await _snapshot_git(["git", "push"], cwd=ws, timeout=60)
+            push = await _snapshot_git(["git", *EXACT_BYTES, "push"], cwd=ws, timeout=60)
 
             return JSONResponse({
                 "ok": True,
@@ -6080,18 +6230,29 @@ async def admin_deploy(request: Request) -> JSONResponse:
 async def admin_skills(request: Request) -> JSONResponse:
     """List skills known to Ciaobot, labelled as custom or GitHub/package.
 
-    Merged across every agent root. Reading `workspace_root` alone showed
-    `{custom: 0, github: 0, stock: 29}` on a migrated install — measured — while
-    19 custom and 7 upstream skills sat in the primary root's catalog. The page
-    looked empty.
+    With `?workspace=<name>`, only that workspace's own agent root. The PWA
+    Settings → Skills tab passes the active workspace, so the list is the
+    catalog the user can actually act on: editing or deleting a row writes
+    into the same root. Stock skills still appear, because `sync-skills`
+    installs them into every agent root.
+
+    Without the parameter the listing stays merged across every agent root,
+    which is what the audit and CLI callers want. Reading `workspace_root`
+    alone showed `{custom: 0, github: 0, stock: 29}` on a migrated install —
+    measured — while 19 custom and 7 upstream skills sat in the primary
+    root's catalog, so a bare install root is never the answer.
 
     A skill of the same name in two roots is reported once, with the workspaces
     that hold it, because the page is a catalog rather than a per-root listing
     and two rows for one name reads as a duplicate rather than as sharing.
     """
     config = request.app.state.config
-    targets = getattr(config, "agent_root_targets", None)
-    roots = list(targets()) if callable(targets) else [(config.workspace_root, "")]
+    requested = request.query_params.get("workspace", "").strip()
+    if requested and config.workspace(requested):
+        roots = [(agent_root_for(config, requested), requested)]
+    else:
+        targets = getattr(config, "agent_root_targets", None)
+        roots = list(targets()) if callable(targets) else [(config.workspace_root, "")]
 
     merged: dict[str, dict] = {}
     counts: dict[str, int] = {}
@@ -6793,7 +6954,17 @@ def abs_ts_gap(left: str, right: str) -> float:
 
 
 def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
-    """The `change` pointer one decision row carries, from its receipt."""
+    """The `change` pointer one decision row carries, from its receipt.
+
+    ``undoable`` comes from the receipt protocol's own predicate, so an Undo
+    button appears exactly where an undo would be honoured: a ``note_apply``
+    from an accepted note edit carries its before image and is reversible, while
+    a retirement has no ``note_apply`` at all (it moved a file, and the reverse
+    of that is Vault Review's restore, not a receipt undo) and so is reported
+    without one. ``changed`` is the other half of the honesty: a re-stamp of a
+    note that already carried today's date writes nothing, and a row claiming
+    otherwise would be describing an edit that never happened.
+    """
     from ciao.memory_receipts import is_undoable
 
     return {
@@ -6806,6 +6977,34 @@ def _change_payload(receipt: dict[str, Any]) -> dict[str, Any]:
         "changed": bool(receipt.get("changed", True)),
         "ts": str(receipt.get("ts", "")),
     }
+
+
+#: A retirement is reversible, but not by an undo: the note went to the review
+#: trash and comes back through Vault Review's restore, which has its own
+#: ledger. Said as data rather than inferred in the client so a row can explain
+#: where the way back is without the UI holding a rule about dispositions.
+_TRASH_PREFIX = "Workspace/.vault-trash/"
+
+
+def _restore_hint(row: dict[str, Any]) -> str:
+    """How a decision that left no undoable receipt is reversed, or "".
+
+    Only a `note_edit` retirement qualifies. It is the one decision in this
+    ledger that moves a note without a ``note_apply`` receipt — `trash_note`
+    journals to the review ledger, not the memory journal — so
+    ``_attach_change_receipts`` finds no receipt for it and History would
+    otherwise print "No change snapshot available", which is a different claim:
+    the change is recorded, it just is not an undo. The way back is the trash.
+    """
+    if str(row.get("kind") or "") != "note_edit":
+        return ""
+    if str(row.get("action") or "") != "accepted":
+        return ""
+    destination = str(row.get("destination") or "")
+    if not destination.startswith(_TRASH_PREFIX):
+        return ""
+    return "restore"
+
 
 
 def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
@@ -6884,6 +7083,120 @@ def _attach_change_receipts(vault: Path, rows: list[dict[str, Any]]) -> None:
             continue
         claimed.add(str(found.get("id", "")))
         row["change"] = _change_payload(found)
+
+
+def _attach_note_edit_detail(
+    config: Any, workspace: str, rows: list[dict[str, Any]]
+) -> None:
+    """Point each `note_edit` decision at the filed record behind it.
+
+    The decision sidecar records the bullet's one line — what was noticed — and
+    nothing else, because that text is the dedupe key and the only field the
+    queue needs. Everything a reader of History needs to judge the decision is
+    in the note-edit sidecar: the note it is about, the exact before/after it
+    was going to write, the evidence the verdict rested on, how much of the note
+    the check covered, and whether it was ever settled. So a `note_edit` row is
+    resolved back to its record and given that block.
+
+    Without it a verified note edit in History reads as one opaque sentence with
+    a destination — "the office move is in Notes" — with no way to see what was
+    about to be written, what it was written on the strength of, or that a
+    conflict was recorded as a conflict rather than as an applied change.
+
+    **An entry operation is shown at the entry's own scale.** Its `scope` is
+    ``entry``, and ``entry_before``/``entry_after`` are the exact text of the one
+    list item the accept replaced or removed — recovered from the recorded splice
+    by :func:`ciao.note_edit_proposals.entry_replacement`, so it is the entry
+    and not a guess about where in the note the entry was. Without them a
+    `retire_entry` would show as a whole-note before/after pair that differs only
+    by one line, and a reader could not see what was actually removed.
+
+    The undo is unchanged and deliberately so: an entry write goes through the
+    same whole-note ``note_apply`` receipt transaction as any other managed
+    write, so restoring the receipt restores the file byte for byte — including a
+    retirement, which is therefore reversible here even though it removed
+    something. A record whose replacement cannot be recovered keeps the note-level
+    before/after and says so, rather than showing an entry diff it cannot trust.
+
+    A row whose sidecar cannot be read is left exactly as it is, with no
+    ``note_edit`` key. That is the same contract as a missing receipt: History
+    renders "no snapshot available" rather than inventing one, and a corrupt
+    record for one proposal must not stop the rest of the page.
+    """
+    if not any(str(row.get("kind") or "") == "note_edit" for row in rows):
+        return
+    from ciao.note_edit_proposals import (
+        ENTRY_OPERATIONS,
+        NoteEditError,
+        entry_replacement,
+        list_sidecars,
+    )
+
+    try:
+        records = {
+            record.proposal_id: record
+            for record in list_sidecars(config, workspace)
+            if record.proposal_id
+        }
+    except (NoteEditError, OSError):
+        # A vault whose sidecar directory cannot be listed at all. Left
+        # unannotated rather than fatal: the decision itself is still on record,
+        # and one unreadable sidecar store must not blank the page.
+        return
+    for row in rows:
+        if str(row.get("kind") or "") != "note_edit":
+            continue
+        record = records.get(str(row.get("proposal_id") or ""))
+        if record is None:
+            continue
+        entry_scope = record.operation in ENTRY_OPERATIONS
+        before = entry_after = ""
+        recovery_error = ""
+        if entry_scope:
+            start, end = record.entry_span
+            before = record.before[start:end]
+            try:
+                after = entry_replacement(record)
+            except NoteEditError as exc:
+                after = ""
+                recovery_error = str(exc)
+            entry_after = after
+        row["note_edit"] = {
+            "id": record.id,
+            "relative_path": record.relative_path,
+            "operation": record.operation,
+            "outcome": record.outcome,
+            "coverage": record.coverage,
+            "before": record.before,
+            "after": record.after,
+            "reason": record.reason,
+            "evidence": [citation.as_dict() for citation in record.evidence],
+            "settled": record.settled,
+            "accepted": record.accepted,
+            "receipt_id": record.receipt_id,
+            # `note` or `entry`. The unit is the whole point: a `retire_entry`
+            # leaves every other fact in the file, and calling it a note edit
+            # would overstate what was written.
+            "scope": "entry" if entry_scope else "note",
+            "entry_identity": record.entry_identity,
+            "entry_fingerprint": record.entry_fingerprint,
+            "entry_span": [record.entry_span[0], record.entry_span[1]],
+            "entry_before": before,
+            # Empty for a retirement *and* for a record whose splice could not
+            # be inverted. The two are told apart by `entry_removed`, because
+            # "removed" and "we could not work out what it would have been" are
+            # very different things to show where a diff would be.
+            "entry_after": entry_after,
+            "entry_removed": entry_scope
+            and not recovery_error
+            and record.operation == "retire_entry",
+            "entry_recovery_error": recovery_error,
+            # A record the owner decided reads differently from one still open,
+            # and the two must not be confusable: a settled accept is what
+            # History links an undo to, a settled dismissal is why nothing
+            # changed, and an unsettled one is a decision that has not happened.
+            "pending": not record.settled,
+        }
 
 
 # The archive tree is `<logs_root>/Chats/<chat-id>/<provider>/<stem>.md`, and a
@@ -6984,6 +7297,7 @@ async def proposals_history(request: Request) -> JSONResponse:
         await asyncio.to_thread(
             _attach_change_receipts, vault_for_receipts, workspace_rows
         )
+        _attach_note_edit_detail(config, workspace, workspace_rows)
         rows.extend(workspace_rows)
 
     # Newest first; undated legacy rows (empty ts) sort last within that order.
@@ -7006,6 +7320,9 @@ async def proposals_history(request: Request) -> JSONResponse:
         path = index.get(str(row.get("source", "")))
         if path:
             row["source_path"] = path
+        hint = _restore_hint(row)
+        if hint:
+            row["reversible_by"] = hint
     return JSONResponse(
         {
             "rows": served,
@@ -7342,7 +7659,6 @@ async def dismiss_older_than(request: Request) -> JSONResponse:
                     text=swept_text,
                     kind=swept_kind,
                     via="pwa",
-                    workspace=workspace,
                     source=swept_source,
                     outcome="swept",
                 )
@@ -7544,11 +7860,22 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 # before the bullet goes. A refusal that could not be written
                 # aborts the batch whole rather than half-resolving it.
                 for row in entry["rows"]:
-                    if row.get("kind") != "category":
+                    if row.get("kind") not in {"category", "note_edit"}:
                         continue
-                    refusal = await asyncio.to_thread(
-                        proposal_service.decline_category_row, config, row
-                    )
+                    if row["kind"] == "category":
+                        refusal = await asyncio.to_thread(
+                            proposal_service.decline_category_row, config, row
+                        )
+                    else:
+                        # A settled note edit, not a permanent one: the check's
+                        # cooldown is what holds the note, and it expires. See
+                        # `ciao.note_edit_proposals.settle_note_edit`.
+                        refusal = await asyncio.to_thread(
+                            proposal_service._settle_note_edit,
+                            config,
+                            row,
+                            accepted=False,
+                        )
                     if refusal:
                         return JSONResponse(
                             {
@@ -7624,6 +7951,17 @@ async def proposals_batch(request: Request) -> JSONResponse:
                             promotion = proposal_service._accept_category_row(config, row)
                         except entity_types.EntityTypeFileError as exc:
                             promotion = proposal_service.AcceptOutcome(ok=False, error=str(exc))
+                    elif accept.action == "note_edit":
+                        # An explicit branch, not a fall-through: this accept
+                        # rewrites one note through the revision-checked
+                        # note-receipt transaction (or trashes it), so a row it
+                        # cannot perform has to say so. Left to the branch below
+                        # it reported "no destination yet", which is the
+                        # `[review]` answer and describes nothing about a
+                        # proposal whose destination is the note the row names.
+                        promotion = await asyncio.to_thread(
+                            proposal_service._accept_note_edit_row, config, row
+                        )
                     else:
                         # route_manually: nothing to perform, and the row stays.
                         promotion = proposal_service.AcceptOutcome(
@@ -7714,7 +8052,6 @@ async def proposals_batch(request: Request) -> JSONResponse:
                     text=str(row.get("text") or ""),
                     kind=str(row.get("kind") or ""),
                     via="pwa",
-                    workspace=entry["workspace"],
                     source=str(row.get("source") or ""),
                     destination=destination,
                     outcome=(
@@ -7922,6 +8259,19 @@ async def proposal_action(request: Request) -> JSONResponse:
         # the only thing that keeps the next pass from filing it again. A refusal
         # that could not be written keeps its row.
         decline_error = proposal_service.decline_category_row(config, row)
+        if decline_error:
+            return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
+
+    if action == "dismiss" and row.get("kind") == "note_edit":
+        # The same rule, and for the same reason: the queue row IS the proposal,
+        # so the settlement has to be on record before the bullet goes. Without
+        # it the check would keep holding the note for a month with nothing in
+        # the queue to settle, and the sidecar would still read as pending. It is
+        # NOT a permanent refusal, though — the settled record leaves the check's
+        # own cooldown running, so an edited note is proposed again.
+        decline_error = await asyncio.to_thread(
+            proposal_service._settle_note_edit, config, row, accepted=False
+        )
         if decline_error:
             return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
 
@@ -8142,6 +8492,25 @@ async def proposal_action(request: Request) -> JSONResponse:
                         },
                         status_code=409,
                     )
+            elif accept.action == "note_edit":
+                # Off the event loop: the accept reads a note, takes the
+                # per-file receipt lock and, for a retirement, moves the file
+                # and appends the review ledger — several hundred file reads
+                # inside one request on a large vault. A conflict is a 409 with
+                # the row untouched, so the owner can re-read the note the
+                # preview now names and decide again.
+                promoted = await asyncio.to_thread(
+                    proposal_service._accept_note_edit_row, config, promote_row
+                )
+                if not promoted.ok:
+                    return JSONResponse(
+                        {
+                            "error": promoted.error or "could not apply the note edit",
+                            "id": pid,
+                            "conflict": bool(promoted.conflict),
+                        },
+                        status_code=409,
+                    )
             else:
                 # route_manually: a [review] row has no known destination, so an
                 # accept would be a guess wearing a button.
@@ -8213,7 +8582,6 @@ async def proposal_action(request: Request) -> JSONResponse:
                 text=str(row.get("text") or ""),
                 kind=str(row.get("kind") or ""),
                 via="pwa",
-                workspace=ctx["workspace"],
                 source=str(row.get("source") or ""),
                 destination=proposal_service._decision_destination(accept.action, row, promoted),
                 outcome="duplicate" if promoted.duplicate else "written",
@@ -8234,7 +8602,6 @@ async def proposal_action(request: Request) -> JSONResponse:
             text=str(row.get("text") or ""),
             kind=str(row.get("kind") or ""),
             via="pwa",
-            workspace=ctx["workspace"],
             source=str(row.get("source") or ""),
             proposal_id=pid,
         )
@@ -8339,6 +8706,24 @@ def _housekeeping_context(request: Request) -> "operator_actions.DetectionContex
     )
 
 
+def _refresh_links_scan(app: Any, context: "operator_actions.DetectionContext") -> None:
+    """Keep the wikilink verdict warm without a poll ever waiting on it.
+
+    One notice on the strip needs a fact no cheap read can supply: whether a
+    note in the vault still holds a wikilink. Establishing it walks the vault, so
+    it cannot run inside the detector pass — this strip is polled every 60s and on
+    every window focus. `migration_notices.start_links_scan` puts the walk on the
+    bounded off-loop executor, starts it detached, and owns the task from there
+    (one in flight, its failure observed, cancelled at shutdown); this call
+    returns immediately and the strip answers from whatever the last scan stored.
+    Same trade `_cached_update_hint` makes for the release lookup: a cold engine
+    reports no card until the first scan lands, and the next poll picks it up.
+    """
+    from ciao import migration_notices
+
+    migration_notices.start_links_scan(app.state, context.config, context.runtime)
+
+
 async def list_housekeeping(request: Request) -> JSONResponse:
     """Return every detectable operator action for the home strip.
 
@@ -8348,7 +8733,9 @@ async def list_housekeeping(request: Request) -> JSONResponse:
     """
     from ciao import operator_actions
 
-    actions = operator_actions.detect_actions(_housekeeping_context(request))
+    context = _housekeeping_context(request)
+    _refresh_links_scan(request.app, context)
+    actions = operator_actions.detect_actions(context)
     return JSONResponse({"actions": [action.as_dict() for action in actions]})
 
 
@@ -8432,6 +8819,339 @@ async def dismiss_housekeeping_action(request: Request) -> JSONResponse:
     )
 
 
+# ── Update tasks: the offered list, and the launch that starts one ───────────
+
+#: The actor stamped on an attempt this API started. The service's own default
+#: is ``operator`` (a decision somebody made); a call that arrived over HTTP is
+#: a client, and the state file — which travels between machines and is the only
+#: place that claim survives a restart — is where the difference is worth
+#: recording.
+ACTOR_PWA = "pwa"
+
+
+def _update_task_workspace(request: Request) -> str:
+    """The workspace this request is about, or an empty string.
+
+    Required rather than defaulted. An update task's applicability and its
+    state are per workspace, and the chat it launches needs a host project that
+    lives in one, so a request that did not name a workspace has said nothing
+    about which install record it means. Defaulting to the primary workspace
+    would answer a question nobody asked with a guess — the same refusal the
+    launch service makes on its own.
+    """
+    return str(request.query_params.get("workspace") or "").strip()
+
+
+async def _update_task_rows(request: Request, workspace: str) -> list[dict[str, Any]]:
+    """Every task this install supports for ``workspace``, one row each.
+
+    Built from ``update_tasks.evaluate``, so the applicability answer is the
+    cached, detector-backed one and this route never runs a detector itself. No
+    ``change_token`` is passed: this caller has no honest way to say whether the
+    workspace changed, so the answer falls back to the freshness window rather
+    than being invalidated by a guess. The state file is still read on every
+    call, so a dismissal or a launch takes effect at once.
+    """
+    from ciao import __version__
+    from ciao import update_tasks
+
+    statuses = await update_tasks.evaluate(
+        request.app.state.config,
+        workspace=workspace,
+        installed_version=__version__,
+    )
+    return [_update_task_row(status) for status in statuses]
+
+
+async def _with_update_task_rows(
+    request: Request, workspace: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Attach the freshly listed update tasks to a reply that changed one.
+
+    The rows travel with a state-changing answer so a client cannot render a
+    card for a decision this call just made. They are also the last thing
+    computed, and a detector pass that fails there would turn a decision that
+    landed — a chat that exists with the packaged prompt running in it — into a
+    bare 500 carrying no ``chat_id``, which is the one answer that sends the
+    operator back to press Start. So a failure to build them is logged and the
+    key is left off: the reply says what this route did, and
+    ``GET /api/update-tasks`` recomputes the list. Absent rather than empty on
+    purpose, because ``[]`` would claim the workspace has no tasks, which is a
+    different statement and the one a card would believe.
+    """
+    try:
+        payload["tasks"] = await _update_task_rows(request, workspace)
+    except Exception:  # noqa: BLE001 — the decision this route made has landed
+        logger.exception("Could not list the update tasks for %s", workspace)
+    return payload
+
+
+def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
+    """One task, its lifecycle, and the chat its attempt is in.
+
+    ``status`` is the durable answer and ``applicability`` is the computed one,
+    and they are reported separately because they say different things: a task
+    can be ``applicable`` and ``dismissed`` (the operator decided against work
+    that does apply), or ``not_applicable`` and ``completed``. A row with no
+    record at all reports ``offered``, which is also what an absent record means.
+
+    Two timestamps, deliberately not merged. ``applicability_checked_at`` is when
+    a detector last produced this row's answer, and inside the freshness window it
+    keeps the stamp of the call that computed it rather than the moment it was
+    served — so a client can say "nobody has looked since" honestly.
+    ``updated_at`` is when the *record* was written, which is a decision or an
+    attempt, not a check. A surface that rendered one of them under the other's
+    name would claim a task was re-checked when an operator merely declined it.
+    """
+    task = status.task
+    state = status.state
+    return {
+        "id": task.id,
+        "revision": task.revision,
+        "scope": task.scope,
+        "title": task.title,
+        "why": task.why,
+        "since_version": task.since_version,
+        "status": state.lifecycle if state is not None else "offered",
+        "applicability": status.applicability.status,
+        "applicability_checked_at": status.applicability.checked_at,
+        "offered": status.offered,
+        "suppressed": status.suppressed,
+        "chat_id": state.chat_id if state is not None else "",
+        "prompt_digest": state.prompt_digest if state is not None else "",
+        "attempted_fingerprint": (
+            state.attempted_fingerprint if state is not None else ""
+        ),
+        "updated_at": state.updated_at if state is not None else "",
+    }
+
+
+def _update_task_coverage_gap(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Why nothing is being offered, or an empty dict when something is.
+
+    The housekeeping card has to say *something* when the list is empty, and
+    "no tasks" is not the same answer as "this install cannot substantiate one".
+    The first branch is a fresh install, where every shipped task legitimately
+    resolves to ``not_applicable``; the second is a real install whose tasks all
+    resolve to ``unknown``, which is the applicability layer refusing to claim a
+    condition it cannot check.
+    """
+    from ciao.update_tasks import UNKNOWN
+
+    if any(row["offered"] for row in rows):
+        return {}
+    if not rows:
+        return {
+            "reason": "no_eligible_task",
+            "detail": (
+                "the packaged catalog defines no update task this engine version "
+                "supports"
+            ),
+        }
+    if all(row["applicability"] == UNKNOWN for row in rows):
+        return {
+            "reason": "not_substantiated",
+            "detail": (
+                "every eligible task answered unknown, so none is offered rather "
+                "than offered on a claim this install cannot make"
+            ),
+        }
+    return {
+        "reason": "nothing_offered",
+        "detail": "no eligible task applies right now, or the operator decided",
+    }
+
+
+async def list_update_tasks(request: Request) -> JSONResponse:
+    """The update tasks this install has for one workspace, and their state.
+
+    A detector pass, not a launch: nothing here creates a chat, writes state or
+    sends a prompt. Every row carries the lifecycle a caller renders (``offered``
+    through ``dismissed``), the applicability answer behind it, when that answer
+    was last computed, and the chat an earlier launch is in — so a card can offer
+    "Resume" without the browser holding the id. ``coverage_gap`` is present only
+    when nothing is being offered, and says which of the two reasons that is.
+    """
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    rows = await _update_task_rows(request, workspace)
+    gap = _update_task_coverage_gap(rows)
+    return JSONResponse(
+        {"tasks": rows, "coverage_gap": gap} if gap else {"tasks": rows}
+    )
+
+
+async def start_update_task(request: Request) -> JSONResponse:
+    """Start this task's chat, or hand back the one its last start created.
+
+    Idempotent per ``(task, revision)``, and the reply says which happened:
+    ``resumed`` false means this call created the chat, and true means a live one
+    already existed and nothing was created — so a double click, a second tab, a
+    retry after a dropped response and a restart all land in the same chat. A
+    live chat is not the same as a dispatched prompt, and the record is what says
+    which one this is: a ``failed`` attempt is retried by sending the packaged
+    prompt into that same chat (still ``resumed``, because nothing was minted),
+    and a ``dismissed`` or reopened-``offered`` one is un-declined in place — the
+    chat is kept, the record is written ``in_progress``, and nothing is re-sent,
+    because an operator pressing Start on a task they declined is a decision to
+    un-decline it, not to run the task a second time.
+
+    A refused task — unknown id, one this engine version cannot support, no host
+    workspace, no chat manager, a state record that cannot be written before the
+    turn starts, or a record that already says ``completed`` at this revision — is
+    409, never 500; a chat that exists but whose turn could not be dispatched is
+    500 *with* the ``chat_id``, because that is the one case a retry must not turn
+    into a second chat, and the retry sends the prompt into it. Nothing that
+    happens after the turn started turns this into a refusal or a bare 500: a
+    record that will not take the ``in_progress`` write is logged and still
+    answered with the chat, and a detector pass that cannot list the tasks leaves
+    the reply without its ``tasks`` key.
+
+    The prompt is the packaged one for this revision, read on the server. There
+    is no request field for prompt text and there will not be one.
+    """
+    from ciao import __version__
+    from ciao.web import update_task_launch
+
+    task_id = request.path_params["task_id"]
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        # Not off the event loop, unlike most state work here: `start_stream`
+        # creates an asyncio task and is only legal where a loop is running.
+        outcome = update_task_launch.launch_task(
+            task_id,
+            config=request.app.state.config,
+            pcm=getattr(request.app.state, "project_chat_manager", None),
+            workspace=workspace,
+            installed_version=__version__,
+            actor=ACTOR_PWA,
+        )
+    except update_task_launch.UpdateTaskLaunchError as exc:
+        logger.exception("Update task %s could not start its chat", task_id)
+        return JSONResponse(
+            {"ok": False, "task_id": task_id, "chat_id": exc.chat_id, "error": str(exc)},
+            status_code=500,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
+        )
+    return JSONResponse(
+        await _with_update_task_rows(
+            request,
+            workspace,
+            {
+                "ok": True,
+                "task_id": task_id,
+                "chat_id": outcome["chat_id"],
+                "resumed": outcome["resumed"],
+                "result": outcome,
+            },
+        )
+    )
+
+
+async def dismiss_update_task(request: Request) -> JSONResponse:
+    """Record "not this one" for this task at this revision.
+
+    Takes an optional ``{"reason": "..."}`` body, stored as the record's
+    evidence, and re-lists the tasks in the same response so the client cannot
+    render a card for something the operator just declined. An unknown or
+    unsupported id is 409: refusing to record a decision against a task this
+    engine does not support is the honest answer, and it is a refusal rather
+    than a failure. So is a record that already says ``completed`` at this
+    revision — the same 409 a start answers, and for the same reason: overwriting
+    a verdict would put a later start back in reach of this record, which is the
+    one outcome both routes refuse to make.
+
+    The chat the task was in is carried into the record, with one exception: a
+    ``failed`` record's chat exists and is empty, because the dispatch never
+    reached it, and ``failed`` is the only thing saying so. Carrying that chat
+    would let a later start find it, send nothing into it and report the task as
+    running, so a dismissal of one drops it and the next start creates a fresh
+    chat and dispatches the packaged prompt into that.
+    """
+    from ciao import __version__
+    from ciao.web import update_task_launch
+
+    task_id = request.path_params["task_id"]
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    try:
+        result = update_task_launch.dismiss_task(
+            task_id,
+            config=request.app.state.config,
+            workspace=workspace,
+            installed_version=__version__,
+            reason=str(body.get("reason") or ""),
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
+        )
+    return JSONResponse(
+        await _with_update_task_rows(
+            request,
+            workspace,
+            {
+                "ok": True,
+                "task_id": task_id,
+                "result": result,
+            },
+        )
+    )
+
+
+async def reopen_update_task(request: Request) -> JSONResponse:
+    """Undo a dismissal for this task at this revision, and re-offer it.
+
+    Only ``dismissed`` is reopened: the other lifecycles are an attempt in
+    flight or a verdict already reached, and overriding either is a decision
+    nobody asked this route to make. So reopening an offered or in-progress task
+    succeeds and writes nothing, which the returned record shows.
+    """
+    from ciao import __version__
+    from ciao.web import update_task_launch
+
+    task_id = request.path_params["task_id"]
+    workspace = _update_task_workspace(request)
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    try:
+        result = update_task_launch.reopen_task(
+            task_id,
+            config=request.app.state.config,
+            workspace=workspace,
+            installed_version=__version__,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "task_id": task_id, "error": str(exc)}, status_code=409
+        )
+    return JSONResponse(
+        await _with_update_task_rows(
+            request,
+            workspace,
+            {
+                "ok": True,
+                "task_id": task_id,
+                "result": result,
+            },
+        )
+    )
+
+
 async def addresses_endpoint(request: Request) -> JSONResponse:
     """Where other devices can open this engine, trusted HTTPS first.
 
@@ -8440,46 +9160,25 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
     """
     from ciao.network_addresses import (
         is_loopback_url,
-        normalize_trusted_url,
         server_addresses,
         tailscale_serve_urls,
     )
 
     config = request.app.state.config
     port = int(getattr(config, "pwa_port", 8443) or 8443)
-    app_settings = getattr(request.app.state, "app_settings", None)
-    stored = getattr(getattr(app_settings, "settings", None), "trusted_url", "") or ""
-    # Re-validate what was stored: app_settings.json can be hand-edited, and a
-    # token smuggled into the stored value must never reach the QR code. A
-    # value the setter would have refused is treated as no trusted URL at all.
-    try:
-        trusted = normalize_trusted_url(stored)
-    except ValueError:
-        trusted = ""
     entries: list[dict[str, object]] = []
-    if trusted:
+    # Tailscale Serve's HTTPS name never appears on an interface, so it is
+    # asked for directly.
+    for url in await asyncio.to_thread(tailscale_serve_urls, port):
         entries.append(
             {
-                "url": trusted,
+                "url": url,
                 "kind": "trusted",
-                "source": "manual",
+                "source": "tailscale",
                 "secure": True,
                 "loopback": False,
             }
         )
-    # Tailscale Serve's HTTPS name never appears on an interface, so it is
-    # asked for directly. A typed address that matches it stays "manual".
-    for url in await asyncio.to_thread(tailscale_serve_urls, port):
-        if url != trusted:
-            entries.append(
-                {
-                    "url": url,
-                    "kind": "trusted",
-                    "source": "tailscale",
-                    "secure": True,
-                    "loopback": False,
-                }
-            )
     urls = await asyncio.to_thread(server_addresses, port)
     for url in urls:
         if is_loopback_url(url):
@@ -8488,4 +9187,4 @@ async def addresses_endpoint(request: Request) -> JSONResponse:
     for url in urls:
         if is_loopback_url(url):
             entries.append({"url": url, "kind": "loopback", "secure": False, "loopback": True})
-    return JSONResponse({"port": port, "trusted_url": trusted or None, "addresses": entries})
+    return JSONResponse({"port": port, "addresses": entries})

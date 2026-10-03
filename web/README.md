@@ -30,7 +30,8 @@ web/
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /memory, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
                            CommandPaletteModal, and FileViewerModal)
-    components/settings/  panels split out of SettingsView.vue, plus the scoped CSS they share with it
+    components/settings/  panels split out of SettingsView.vue (the host's start-at-sign-in row is
+                           SettingsEngineLogin.vue), plus the scoped CSS they share with it
     stores/               Pinia stores (auth, projects, tasks, fileViewer), and store
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
@@ -51,6 +52,18 @@ logout clears pending shares. The file viewer offers native Share where the
 browser supports sharing that file type, alongside the existing Download.
 Safari/iOS may not expose the installed app as a share target; ordinary file
 attachment remains available there. PWA features need HTTPS or localhost.
+
+Permanent install guidance lives in Settings → Home → **Use Ciaobot as an app**
+(`components/settings/SettingsAppInstall.vue`), not in the Home setup reminder:
+that reminder can be closed for good, and its X is the only dismissal control
+it has. The card keeps the general facts — installing is optional, the browser
+already works, the host engine has to stay running, only a secure origin can
+install or get push — and puts the per-platform steps (Safari on Mac, Chrome on
+Mac/Windows, Edge on Windows, Safari on iPhone/iPad, Chrome on Android) behind
+one disclosure, each row linking the vendor's own guide. It reports the reader's
+current platform as a highlight, never a filter: all five rows are always on the
+page, and it only claims what this window can see (`isStandalone`), because a
+browser tab cannot know whether the app is installed on the device.
 
 
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
@@ -116,10 +129,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - **Headless primitives migration.** `ConfirmDialog.vue`, `PromptDialog.vue`, `NewChatPicker.vue`, and `FileViewerModal.vue` use `reka-ui`'s unstyled Dialog primitives for modal semantics, focus trapping, Escape/outside dismissal, and focus restoration while keeping token-based markup, themes, and 44px controls. `CommentComposePopover.vue` keeps its app-specific Teleport, dismissal, and visual-viewport placement, but uses a Reka focus scope so it composes safely inside the file-viewer dialog. `ModelSelector.vue` uses a non-modal Reka Popover (with its searchable listbox kept inside the popover) and delegates fixed collision placement to Reka's Popper, including the triggerless mobile sheet. `ProjectSidebar.vue` uses Reka DropdownMenu roots, items, and submenus: the visible action buttons provide keyboard/touch entry points, while a right-click supplies a virtual pointer reference. The hover-preview read surfaces in `ChatCommentPopover.vue` and `PinnedFilePanel.vue` deliberately use a non-trapping, app-specific `FocusScope` plus measured positioning instead of Popover because hover must not steal focus and a click can pin the surface. The file viewer's internal read-comment popup uses a trapped nested `FocusScope` because it is a dialog-in-dialog with its own Escape and focus-return boundary. These bridges keep hover/pin state, local dismissal, focus return, and visual-viewport clamping; do not replace them with a focus-stealing modal primitive without changing that contract. Use `@vueuse/core` for small browser-state helpers when it removes custom lifecycle code; keep iOS visual-viewport measurement and clamping in `lib/viewport.ts` and `composables/useViewportHeight.ts`. Prefer Reka for new accessible overlays, retain hand-rolled code for app-specific layout or measurement, and do not add Tailwind or a themed UI kit.
 - One Vue SFC per pane. Keep `<script setup lang="ts">`, template, scoped `<style>`.
 - Load states are separate states. A list that fetches (`ProposalReviewPanel`, `ProposalHistoryList`, the Memory Map) must distinguish first-load in flight, first-load failure (inline error + Retry, never an empty-state claim), a failed refresh over existing rows (keep the rows, mark them stale, offer Retry), a filter hiding a non-empty set (offer to clear filters), and a genuinely empty set. Never derive "there is nothing here" from a filtered array alone — a failed or pending GET would then read as a cleared queue. Load errors live in their own store slot (`loadError`), apart from action errors (`error`), so a list refresh cannot clear an unread accept/dismiss failure. `useTaskStore` exposes the same contract for schedules through `scheduleLoading`, `scheduleLoadError`, and `schedulesLoaded`; Home, Project, and Automations consume that shared truth rather than maintaining competing local interpretations.
+- **A review row's available actions come from the payload, not from a re-derivation.** `VaultReviewPanel.vue` draws **Complete** in place of **Retire** when the candidate carries `completable: true`, and never draws both: a project that finished and a project that is wrong are different findings, and the user has to be able to tell them apart. The flag is computed in `ciao/vault_review.py` from the same helpers `complete_project_note` gates on, so the button that renders is a click the engine will honour. The PWA has no alias table and no view of the `projects/` layouts, so a client-side `evidence.type === 'project'` test is a second definition free to disagree with the first — and the disagreement is a refusal on a row that still looks actionable. The lede and the Discuss seed follow the same flag, so a project row is never asked whether it should be thrown away.
 - The core work model is **request → run → output → durable knowledge**. `HomeIntake.vue` starts an ordinary project chat and preserves unsent text per workspace; `HomeReviewSummary.vue` uses active-workspace counts and labels checking/current/stale/empty/failed state explicitly and, on the Today surface, sits in the `.home-workbench` side rail beside the request column (stacking below it at a 980px container width); `ChatPanel.vue` keeps the transcript dominant and opens a conditional, keyboard-operable Context / Activity / Output inspector. New UI should reinforce those relationships rather than introduce another top-level inbox or artifact silo.
 - **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters it out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Work details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind.
 - Project, Memory, and file rows are native buttons or links whenever they perform work. Context menus use `role="menu"` / `role="menuitem"`, open focus on the first action, support Arrow/Home/End/Escape, and restore the trigger. Pointer-only rows and right-click-only actions are not acceptable.
-- Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content.
+- Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content. User chat bubbles use `renderUserMarkdown`, which escapes raw HTML (except the comment-context tags) so typed text shows as typed; assistant output uses `renderMarkdown`.
 - Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
 - **`ChatPanel.vue` ownership boundary.** The panel is being split in
@@ -191,8 +205,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   handlers, unread and attention counts, the send path with its queue, deferred
   and unacked sends, the streaming timeline, toasts and package status.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
-  way, one tab at a time, into `components/settings/`. The MCP tab is the first
-  one out. `composables/useMcpServers.ts` owns the MCP state and every
+  way, one tab at a time, into `components/settings/`. General begins with a
+  short capability-help section linking to the public feature guide and inviting
+  users to ask Ciaobot directly in any chat; it appears in the generated
+  "On this page" navigation. The MCP tab is the first one out.
+  `composables/useMcpServers.ts` owns the MCP state and every
   `/api/mcp/*` call — the status, the per-server edit drafts, the expansion
   map, the secret inputs, the tool probes and the add form. It imports no
   store, no router and no lifecycle hook: the API client, `notifySaved`,
@@ -206,6 +223,16 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   run from its `onMounted` for every tab. `/api/mcp/usage` is fetched even
   though no template renders it: the operator reads that endpoint by hand to
   decide which MCP tools to prune. Do not drop the call.
+  **Skills, Subagents, Commands and MCP servers are scoped to one workspace** —
+  the one selected in the sidebar, named `assetScope` in `SettingsView` and
+  passed to `useMcpServers` as its `workspace` option. The name rides every read
+  AND every write, because a workspace's agent assets and its `.mcp.json`/`.env`
+  live in that workspace's own agent root: an unscoped request resolves the
+  install root, which on a re-rooted install is a different directory from the
+  one the list just showed. `assetScope` is the single place to change if that
+  ever moves; a `watch` on `projectStore.activeWorkspace` refetches all four.
+  `useMcpServers` takes the workspace as an option rather than reading a store,
+  to stay composable and unit-testable without Pinia.
   Shared settings styling lives in `components/settings/settingsPanels.css`,
   loaded by both sides with `<style scoped src>` — a parent's scoped rules
   never reach a child, and the alternative is silently unstyled markup. New
@@ -223,22 +250,30 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
 ### Browser suite (`npm run test:e2e`)
 
-`e2e/` holds a deliberately small Playwright suite — six spec files, eighteen
-tests, about three seconds — that covers only the things a jsdom mount **cannot**
+`e2e/` holds a deliberately small Playwright suite that covers only the things a jsdom mount **cannot**
 establish:
 
 | Spec | What only a real browser can decide |
 | --- | --- |
 | `workspace-shortcuts.spec.ts` | Where a typed character actually lands. The `1`-`9` shortcuts must follow the visible sidebar order and stay inert while a text field is focused; jsdom reports a focused textarea that no keystroke is routed to. Also walks Tab through the primary nav, which is how a click-only control gets caught. |
-| `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and has to be scrolled back on screen rather than left under the composer. |
+| `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and selection must leave the transcript's `scrollTop` alone; the fixture's opt-in `comment` shape then measures that the selected card's accent outline does not bleed across the turn gap onto the comment-reference card below it. |
 | `browser-zoom.spec.ts` | Reflow under page zoom and at the largest in-app font scale, and that the viewport meta never disables pinch zoom. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. |
-| `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, and that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap. |
+| `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap, and that every boundary between Home's sections is the same gap token at desktop and at 390px (a per-section `margin-top` under a shared `gap` reads as a doubled gap, which no unit test can see). |
+| `chat-loading-layout.spec.ts` | That the held history-loading skeleton has separated rows within the chat pane at desktop and phone widths. |
+| `reply-not-folded.spec.ts` | That a short closing reply followed by a reasoning-only step renders as a bubble after a phase-less history replay (OpenCode shape) instead of being folded into the collapsed Activity trace (#630). The fold is a render heuristic, so only a real render shows it. |
+| `note-verification.spec.ts` | That a review row which defers to a pending verification proposal lands on the proposal *in focus*. The link sets a row id and navigates, the queue's rows arrive with a fetch, and the panel is still behind the review filter's `v-show` for the first frames — a `nextTick` reveal focuses a `display: none` element, which is a silent no-op that no unit test can see. Also the copy, which is the only place a reader learns a dismissal declines rather than verifies, and the 44px touch minimum on a disclosure that reports a whole note's before/after. |
 
 The fixture serves an empty chat history by default. A spec that needs real
 turns to select opts in per session with `POST /__fixture__/transcript`, so the
-specs beside it keep seeing the empty chat.
+specs beside it keep seeing the empty chat. `POST /__fixture__/verification` is
+the same idea for the managed note-verification payloads: the review queue, the
+proposal queue, the history ledger and the note graph all default to their empty
+or plain states, and a spec that needs a pending proposal, a dead one, or a
+settled verdict opts in. `POST /__fixture__/update-tasks` is the same opt-in for
+the "After this update" group, which is empty by default because the Home gap
+journey has to measure the sections around it.
 
 Everything else stays in vitest. Adding to this suite is a trade, not a free
 win: each spec is roughly a hundred times slower than the equivalent unit test

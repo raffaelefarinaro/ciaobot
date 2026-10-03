@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao.os_support.links import is_link, points_to
 from ciao.cli import ensure_vault_git, ensure_workspace_git, setup_workspace
 
 
@@ -12,6 +13,16 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(root), *args], capture_output=True, text=True
     )
+
+
+def _ignored(root: Path, path: str) -> bool:
+    """Whether git refuses to track ``path`` here.
+
+    Asked of git rather than read off the file: what these rules are *for* is
+    which lines git honours and in what order, and that is a question only git
+    answers correctly.
+    """
+    return _git(root, "check-ignore", "-q", path).returncode == 0
 
 
 def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
@@ -31,7 +42,14 @@ def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
     assert len(log.stdout.strip().splitlines()) == 1
 
     gitignore = (root / ".gitignore").read_text(encoding="utf-8")
-    for entry in (".env", ".runtime/", ".claude/", ".agents/", "*.log"):
+    for entry in (
+        ".env",
+        "**/.runtime/*",
+        "!/.runtime/schedules.json",
+        ".claude/",
+        ".agents/",
+        "*.log",
+    ):
         assert entry in gitignore.splitlines()
 
     tracked = _git(root, "ls-files").stdout.splitlines()
@@ -40,6 +58,215 @@ def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
     assert "CLAUDE.md" in tracked
     assert ".gitignore" in tracked
     assert ".env" not in tracked
+
+
+def test_the_workspace_gitignore_re_includes_the_automation_store(
+    tmp_path: Path,
+) -> None:
+    """The template has to be in git's grammar, not just list the entry.
+
+    The backup scope commits `.runtime/schedules.json` and refuses every other
+    path under that root, so the ignore rules have to say the same thing — and
+    a `.runtime/` line cannot: git never descends into an ignored directory, so
+    a re-include written beside it is dead and the automations stay outside the
+    backup while the status page lists them inside it. Asserted against git
+    rather than against the text, because the text is the thing that was wrong
+    twice (#734).
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    runtime = root / ".runtime"
+    runtime.mkdir()
+    (runtime / "schedules.json").write_text('{"schedules": []}\n', encoding="utf-8")
+    (runtime / "custom_providers.json").write_text("{}\n", encoding="utf-8")
+    # Nested runtime directories, which the old unanchored `.runtime/` covered
+    # and a root-anchored `.runtime/*` would not. These hold credentials.
+    for relative in ("client/.runtime", "a/b/.runtime", "sub/.runtime"):
+        (root / relative).mkdir(parents=True)
+    (root / "client" / ".runtime" / "bootstrap-auth-token").write_text(
+        "token\n", encoding="utf-8"
+    )
+    (root / "a" / "b" / ".runtime" / "x").write_text("state\n", encoding="utf-8")
+    (root / "sub" / ".runtime" / "schedules.json").write_text("{}\n", encoding="utf-8")
+
+    ensure_workspace_git(root)
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    # The re-include has to follow the glob it overrides; the reverse order is
+    # ignored like any other line.
+    assert lines.index("**/.runtime/*") < lines.index("!/.runtime/schedules.json")
+    assert ".runtime/" not in lines
+
+    assert not _ignored(root, ".runtime/schedules.json"), "the store must be tracked"
+    assert _ignored(root, ".runtime/custom_providers.json"), "the rest must not be"
+    assert _ignored(root, "client/.runtime/bootstrap-auth-token")
+    assert _ignored(root, "a/b/.runtime/x")
+    # A nested store is not the carve-out: the negation is pinned to the root,
+    # so this stays ignored with everything else in that directory.
+    assert _ignored(root, "sub/.runtime/schedules.json")
+
+    # ...and it is therefore actually committable, which is the whole point.
+    assert _git(root, "add", "-A").returncode == 0
+    tracked = _git(root, "ls-files").stdout.splitlines()
+    assert ".runtime/schedules.json" in tracked
+    assert ".runtime/custom_providers.json" not in tracked
+
+
+def test_the_template_still_ignores_nested_runtime_directories(tmp_path: Path) -> None:
+    """A separate assertion for the regression the previous fix introduced.
+
+    ``.runtime/*`` contains a slash, so git anchors it to the repository root
+    and it stops matching ``client/.runtime`` — silently, with every test that
+    only looked at the root still green. The scoped backup refuses those paths
+    either way, but the manual sync path still stages the whole tree, so a
+    nested `bootstrap-auth-token` would leave the machine. Asked of git, since
+    that is the only thing that got the spelling wrong (#734).
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    for relative in ("client/.runtime", "a/b/.runtime", "sub/.runtime"):
+        (root / relative).mkdir(parents=True)
+        (root / relative / "x").write_text("state\n", encoding="utf-8")
+
+    ensure_workspace_git(root)
+
+    for path in (
+        "client/.runtime/x",
+        "a/b/.runtime/x",
+        "sub/.runtime/x",
+        ".runtime/x",
+    ):
+        assert _ignored(root, path), path
+    # And nothing nested shows up in what a blanket add would stage.
+    staged = _git(root, "add", "-A", "-n").stdout
+    assert ".runtime/" not in staged
+
+
+def test_a_bare_runtime_directory_rule_is_repaired_in_place(tmp_path: Path) -> None:
+    """An install scaffolded before #734 has `.runtime/` in its `.gitignore`,
+    and appending the pair beside it would not help: the directory rule wins
+    because git never looks inside. Only a rewrite makes the carve-out real, so
+    that is what happens — narrowly, in place, and without touching anything
+    else the operator wrote.
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    assert _git(root.parent, "init", "-b", "trunk", str(root)).returncode == 0
+    (root / ".gitignore").write_text(
+        "# mine\n.runtime/\nnode_modules/\n", encoding="utf-8"
+    )
+    runtime = root / ".runtime"
+    runtime.mkdir()
+    (runtime / "schedules.json").write_text("{}", encoding="utf-8")
+
+    ensure_workspace_git(root)
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".runtime/" not in lines
+    assert lines.count("**/.runtime/*") == 1
+    assert lines.count("!/.runtime/schedules.json") == 1
+    assert lines.index("**/.runtime/*") < lines.index("!/.runtime/schedules.json")
+    # The operator's own lines are untouched, in place and in order.
+    assert lines[:2] == ["# mine", "**/.runtime/*"]
+    assert "node_modules/" in lines
+    # The repair is what makes the carve-out real, not just the spelling.
+    assert not _ignored(root, ".runtime/schedules.json")
+    # The repair is idempotent, so a second setup rewrites nothing.
+    before = (root / ".gitignore").read_text(encoding="utf-8")
+    ensure_workspace_git(root)
+    assert (root / ".gitignore").read_text(encoding="utf-8") == before
+
+
+def test_every_hand_written_spelling_of_the_runtime_rule_is_repaired(
+    tmp_path: Path,
+) -> None:
+    """`.runtime`, `/.runtime` and `/.runtime/` are the spellings a person
+    writes, and each of them ignores the directory well enough that a re-include
+    appended beside it is dead — the carve-out would then silently fail on that
+    install while the status page listed the file as backed up.
+
+    Checked against git rather than against the text, because a rule that looks
+    right in the file and does nothing is the whole failure mode here.
+    """
+    for index, spelling in enumerate((".runtime", "/.runtime", "/.runtime/")):
+        root = tmp_path / f"ws-{index}"
+        root.mkdir()
+        assert _git(root.parent, "init", "-b", "trunk", str(root)).returncode == 0
+        (root / ".gitignore").write_text(f"{spelling}\n", encoding="utf-8")
+        (root / ".runtime").mkdir()
+        (root / ".runtime" / "schedules.json").write_text("{}", encoding="utf-8")
+
+        ensure_workspace_git(root)
+
+        assert not _ignored(root, ".runtime/schedules.json"), spelling
+        assert _ignored(root, ".runtime/state.json"), spelling
+        lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+        assert lines.count("**/.runtime/*") == 1, spelling
+        assert spelling not in lines, spelling
+
+
+def test_a_duplicate_runtime_rule_yields_one_pair(tmp_path: Path) -> None:
+    """A file carrying the rule twice is repaired once, not twice.
+
+    The second line is dropped rather than rewritten: the pair already covers
+    everything it covered, so keeping it would only leave a rule in the file
+    that contradicts the pair's ordering.
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    assert _git(root.parent, "init", "-b", "trunk", str(root)).returncode == 0
+    (root / ".gitignore").write_text(".runtime/\n.runtime/\n", encoding="utf-8")
+
+    ensure_workspace_git(root)
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert lines.count("**/.runtime/*") == 1
+    assert lines.count("!/.runtime/schedules.json") == 1
+    assert ".runtime/" not in lines
+
+
+def test_a_windows_line_ending_survives_the_repair(tmp_path: Path) -> None:
+    """The repair rewrites the file it appends to, so it has to leave the line
+    ending it found.
+
+    A CRLF `.gitignore` is a Windows editor's file, and the read would otherwise
+    have translated it to LF before the check could see it — so the file comes
+    back with a whole-file diff the operator never asked for, on a file whose
+    only intended change is two lines.
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    assert _git(root.parent, "init", "-b", "trunk", str(root)).returncode == 0
+    (root / ".gitignore").write_bytes(b"# mine\r\n.runtime/\r\n")
+
+    ensure_workspace_git(root)
+
+    written = (root / ".gitignore").read_bytes()
+    assert b"\r\n" in written
+    assert b"\n" not in written.replace(b"\r\n", b"")
+    assert written.startswith(b"# mine\r\n**/.runtime/*\r\n")
+
+
+def test_a_nested_runtime_rule_is_not_the_workspace_rule(tmp_path: Path) -> None:
+    """Only Ciaobot's own root-level line is rewritten.
+
+    `client/.runtime/` is somebody else's directory, in somebody else's
+    project: replacing it with a re-include would put that project's runtime
+    state back into a snapshot, which is the opposite of what this repair is
+    for. The template's own `**/` glob is what ignores it, not a rewrite.
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    assert _git(root.parent, "init", "-b", "trunk", str(root)).returncode == 0
+    (root / ".gitignore").write_text("client/.runtime/\n", encoding="utf-8")
+    (root / "client" / ".runtime").mkdir(parents=True)
+    (root / "client" / ".runtime" / "x").write_text("state\n", encoding="utf-8")
+
+    ensure_workspace_git(root)
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "client/.runtime/"
+    assert _ignored(root, "client/.runtime/x")
 
 
 def test_ensure_workspace_git_is_idempotent(tmp_path: Path) -> None:
@@ -68,7 +295,7 @@ def test_ensure_workspace_git_leaves_existing_repo_alone(tmp_path: Path) -> None
     lines = gitignore.splitlines()
     assert lines[:3] == ["# mine", "node_modules/", ".env"]
     assert lines.count(".env") == 1
-    for entry in (".runtime/", ".claude/", ".agents/", "*.log"):
+    for entry in ("**/.runtime/*", "!/.runtime/schedules.json", ".claude/", "*.log"):
         assert entry in lines
 
 
@@ -182,7 +409,13 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
 
     tracked = _git(ws, "ls-files").stdout.splitlines()
     assert ".env" not in tracked
-    assert not any(path.startswith(".runtime/") for path in tracked)
+    # The runtime root is ignored except for the automation store, so a fresh
+    # install's own initial commit carries that one file and nothing else under
+    # `.runtime/` (#734). The assertion used to be a flat "no `.runtime/` path":
+    # true while the whole directory was ignored, and the thing that made the
+    # backup scope's carve-out inert on exactly the installs this scaffolds.
+    runtime_tracked = [p for p in tracked if p.startswith(".runtime/")]
+    assert all(p == ".runtime/schedules.json" for p in runtime_tracked), runtime_tracked
     assert not any(path.startswith(".claude/") for path in tracked)
     assert not any(path.startswith(".agents/") for path in tracked)
     assert "personal/AGENTS.md" in tracked
@@ -360,10 +593,7 @@ def test_setup_workspace_rerun_supports_a_configured_vault_alias(
 def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
     tmp_path: Path,
 ) -> None:
-    """sync-skills turns a stock .claude/agents/<name>.md entry into a
-    symlink once a workspace promotes it to a custom copy under
-    subagents/<name>.md. A setup re-run must not write the packaged stock
-    bytes through that symlink and silently overwrite the custom content."""
+    """Setup mirrors a custom agent without overwriting its source on reruns."""
     ws = tmp_path / "workspace"
     setup_workspace(
         ws,
@@ -372,15 +602,12 @@ def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
     )
     # Per-root: the catalog and its generated mirror both live in the workspace.
     root = ws / "personal"
-    installed = sorted(p.name for p in (root / ".claude" / "agents").glob("*.md"))
-    assert installed, "setup_workspace should seed at least one stock agent"
-    name = installed[0]
+    name = "memory.md"
+    assert not (root / ".claude" / "agents" / name).exists()
 
     custom = root / "subagents" / name
     custom.write_text("# custom override\n", encoding="utf-8")
     link = root / ".claude" / "agents" / name
-    link.unlink()
-    link.symlink_to(custom)
 
     setup_workspace(
         ws,
@@ -389,6 +616,8 @@ def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
     )
 
     assert custom.read_text(encoding="utf-8") == "# custom override\n"
+    # A symlink on POSIX, a hard link with its sidecar on Windows (#819).
+    assert is_link(link) and points_to(link, custom)
 
 
 def test_setup_workspace_existing_mode_adopts_folder_as_vault(

@@ -73,6 +73,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.git_proc import EXACT_BYTES
 from ciao.vault_index import (
     EXCLUDED_TOP_DIRS,
     build_filename_index,
@@ -258,7 +259,7 @@ def write_receipt(runtime_root: Path, summary: dict[str, Any]) -> Path:
         "failed": failed,
     }
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
     tmp.replace(path)
     return path
 
@@ -286,9 +287,9 @@ def run_git(root: Path, *args: str) -> tuple[int, str]:
     """
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), *args],
+            ["git", *EXACT_BYTES, "-C", str(root), *args],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             check=False,
         )
     except OSError as exc:  # git vanished between the which() and the call
@@ -705,7 +706,7 @@ def migrate_vault_links(vault_root: Path, *, apply: bool = False) -> dict[str, A
             continue
         if apply:
             try:
-                md_path.write_text(new_text, encoding="utf-8")
+                md_path.write_text(new_text, encoding="utf-8", newline="")
             except OSError as exc:
                 summary["failed"].append({"path": relative.as_posix(), "error": str(exc)})
                 continue
@@ -805,7 +806,7 @@ def unmigrate_vault_links(
             continue
         if apply:
             try:
-                note.write_text(restored, encoding="utf-8")
+                note.write_text(restored, encoding="utf-8", newline="")
             except OSError as exc:
                 summary["failed"].append({"path": path_key, "error": str(exc)})
                 continue

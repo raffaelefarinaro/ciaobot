@@ -202,7 +202,7 @@ def test_preview_of_a_learning_shows_the_recurrence_bump(tmp_path: Path) -> None
 
     config = _vault(tmp_path)
     vault = Path(config.workspace_vault_root("personal"))
-    append_learning(vault, "Vitest skips component files on old Node.")
+    append_learning(vault, "Vitest skips component files on old Node.", workspace="personal")
     client = _client(config)
     row = _row(client, "learnings")
 
@@ -749,7 +749,10 @@ def test_accepting_a_learning_writes_the_source_the_card_showed(
     vault = Path(config.workspace_vault_root("personal"))
     # Filed from a different chat, so the accepted row's own source is what
     # the entry is missing and the bump has to add.
-    append_learning(vault, "Vitest skips component files on old Node.", source="chat-7")
+    append_learning(
+        vault, "Vitest skips component files on old Node.", workspace="personal",
+        source="chat-7",
+    )
     client = _client(config)
     row = _row(client, "learnings")
     preview = client.get(f"/api/proposals/{row['id']}/preview").json()["preview"]

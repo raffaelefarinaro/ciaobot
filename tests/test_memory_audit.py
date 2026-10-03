@@ -428,7 +428,7 @@ def test_stale_notes_exempts_event_and_queue_types() -> None:
         _entry("memory-vault/Workspace/Learnings.md", "workspace"),
     ]
 
-    report = find_stale_notes(entries, mtimes={str(e.path): old for e in entries}, today=today)
+    report = find_stale_notes(entries, mtimes={e.path_key: old for e in entries}, today=today)
 
     assert report["stale_notes"] == []
     assert report["notes_checked"] == 0
@@ -444,7 +444,7 @@ def test_stale_notes_thresholds_vary_by_type() -> None:
         _entry("memory-vault/Idea/shower-thought.md", "idea"),
     ]
 
-    report = find_stale_notes(entries, mtimes={str(e.path): mtime for e in entries}, today=today)
+    report = find_stale_notes(entries, mtimes={e.path_key: mtime for e in entries}, today=today)
 
     flagged = {f["type"]: f for f in report["stale_notes"]}
     assert set(flagged) == {"project"}
@@ -763,12 +763,72 @@ def test_find_stale_notes_uses_the_shared_predicate_for_aliased_exempt_types() -
         _entry("memory-vault/People/Mo.md", "Person"),
     ]
     report = find_stale_notes(
-        entries, mtimes={str(e.path): _days_ago(120, today=today) for e in entries}, today=today
+        entries, mtimes={e.path_key: _days_ago(120, today=today) for e in entries}, today=today
     )
 
     assert [f["path"] for f in report["stale_notes"]] == ["memory-vault/People/Mo.md"]
     assert report["stale_notes"][0]["threshold_days"] == 90
     assert report["notes_exempt"] == 1
+
+
+def test_the_curation_stale_pass_agrees_with_the_audit_on_aliased_exempt_types(
+    tmp_path: Path,
+) -> None:
+    """The nightly plan calls this predicate, so it inherits its answers.
+
+    A fourth copy of the threshold table would be a fourth thing to keep in
+    agreement with the other three surfaces that already share this one
+    (`os-audit`, the Memory Map's `stale` flag, the review queue's `unverified`
+    signal). The aliased exempt type is the case that would break first: a
+    `hackathon-log` is a dated record that never ages, and a plan that flagged
+    it would send the nightly run to re-verify a log entry every month forever.
+
+    Run through `build_worklist` rather than the private helper, because what
+    matters is the plan the nightly run acts on, not the selection function.
+    """
+    from ciao import curation_run as cr
+    from ciao.entity_types import load_entity_types
+    from ciao.vault_index import scan_vault
+
+    today = datetime.date(2026, 9, 25)
+    vault = tmp_path / "memory-vault"
+    (vault / "Journal").mkdir(parents=True)
+    (vault / "People").mkdir(parents=True)
+    (vault / "Workspace").mkdir(parents=True)
+    (vault / cr.CURATION_LOG_RELATIVE).write_text(
+        f"---\nlast_full_pass: {today.isoformat()}\n---\n\n# Curation log\n", encoding="utf-8"
+    )
+    (vault / "Journal" / "hack.md").write_text(
+        "---\ntype: hackathon-log\nupdated: 2020-01-01\n---\n\n# Hack\n\nA dated record.\n",
+        encoding="utf-8",
+    )
+    (vault / "People" / "Mo.md").write_text(
+        "---\ntype: Person\nupdated: 2024-01-01\n---\n\n# Mo\n\nDurable fact.\n",
+        encoding="utf-8",
+    )
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Workspace\n", encoding="utf-8")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=load_entity_types(vault),
+        workspace_dir=tmp_path,
+        today=today,
+    )
+    stale = [item for item in worklist.items if item.pass_id == cr.PASS_STALE_NOTE]
+
+    # The same note the audit lists, keyed by the same vault-relative path it
+    # resolves to — and the aliased exempt type is not among them.
+    audit = find_stale_notes(
+        [e for e in scan_vault(vault)],
+        vault_root=vault,
+        today=today,
+        registry=load_entity_types(vault),
+    )
+    assert [f["path"] for f in audit["stale_notes"]] == ["memory-vault/People/Mo.md"]
+    assert [item.keys[0] for item in stale] == [cr.item_key(cr.PASS_STALE_NOTE, "People/Mo.md")]
 
 
 def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
@@ -804,7 +864,7 @@ def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
         _entry("memory-vault/Clients/Beta.md", "client"),
         _entry("memory-vault/Journal/day.md", "journal"),
     ]
-    mtimes = {str(e.path): _days_ago(20, today=today) for e in entries}
+    mtimes = {e.path_key: _days_ago(20, today=today) for e in entries}
 
     categories.write_text(customer, encoding="utf-8")
     entity_types.clear_entity_types_cache()
@@ -833,3 +893,103 @@ def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
     assert note_threshold_days(
         "customer", registry=entity_types.load_entity_types(vault)
     ) == STALE_NOTE_DEFAULT_DAYS
+
+
+# --- the entry excerpt and its context are prose, not source ---------------
+
+
+def _entry_verdicts(text: str, *, today: datetime.date | None = None):
+    """Every selected entry verdict for one note body."""
+    from ciao.memory_audit import note_entry_coverage
+
+    _cov, selected, _doc = note_entry_coverage(
+        text,
+        note_type="person",
+        updated="2019-01-01",
+        mtime=0.0,
+        note_path="People/Alice.md",
+        rendered="memory-vault/People/Alice.md",
+        workspace="work",
+        today=today or datetime.date(2026, 9, 30),
+    )
+    return selected
+
+
+def test_entry_excerpt_strips_markdown_markers_to_prose() -> None:
+    """A card renders the excerpt as text, so the source markers are noise.
+
+    `1. **Learn.** People…` used to reach the boxed fact exactly as written,
+    `**`, marker and all. The excerpt is what the reader sees; the entry text
+    stays the identity key, so this is display only.
+    """
+    selected = _entry_verdicts(
+        "- Lives in Porto [verified: 2026-09-28]\n"
+        "1. **Learn.** People leave each session knowing more.\n"
+    )
+    learned = next(v for v in selected if "Learn" in v.excerpt)
+    assert learned.excerpt == "Learn. People leave each session knowing more."
+    assert "**" not in learned.excerpt
+    assert not learned.excerpt.startswith("1.")
+
+
+def test_entry_excerpt_drops_backticks_link_urls_and_stays_capped() -> None:
+    selected = _entry_verdicts(
+        "- See [the docs](https://example.dev/deep/path) for `timeout_s`.\n"
+        "- " + "word " * 80 + "\n"
+    )
+    linked = next(v for v in selected if "docs" in v.excerpt)
+    assert linked.excerpt == "See the docs for timeout_s."
+    long = next(v for v in selected if v.excerpt.startswith("word"))
+    assert long.excerpt.endswith(" …")
+
+
+def test_entry_identity_and_fingerprint_ignore_the_excerpt_strip() -> None:
+    """The strip is display only: the same source text mints the same identity."""
+    from ciao import note_entries as ne
+
+    source = "1. **Learn.** People leave each session knowing more.\n"
+    selected = _entry_verdicts(source)
+    entry = ne.parse_note_entries(
+        source, note_path="People/Alice.md", workspace="work"
+    ).entries[0]
+    assert selected[0].identity == entry.identity
+    assert selected[0].fingerprint == entry.fingerprint
+
+
+def test_sibling_bullets_are_not_reprinted_as_context() -> None:
+    """A dense list has no prose between bullets, so a neighbour is the next fact.
+
+    Reprinting it in grey made one fact read as two or three claims; the walk
+    now skips any line inside another entry's span and stops at the prose above.
+    """
+    text = (
+        "# Address\n"
+        "\n"
+        "Intro line.\n"
+        "\n"
+        "- First fact [verified: 2020-01-01]\n"
+        "- Second fact [verified: 2020-01-01]\n"
+        "- Third fact [verified: 2020-01-01]\n"
+    )
+    selected = _entry_verdicts(text)
+    assert len(selected) == 3
+    excerpts = {v.excerpt for v in selected}
+    for verdict in selected:
+        assert all(line not in excerpts for line in verdict.context)
+    assert all(verdict.context == ("Intro line.",) for verdict in selected)
+
+
+def test_prose_and_a_heading_neighbour_still_show_as_context() -> None:
+    """Skipping siblings must not empty the context of a fact that has real prose."""
+    text = (
+        "# Address\n"
+        "\n"
+        "## Landlord\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "\n"
+        "Verified with the agency.\n"
+    )
+    verdict = _entry_verdicts(text)[0]
+    assert "## Landlord" in verdict.context
+    assert "Verified with the agency." in verdict.context

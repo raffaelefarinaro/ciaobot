@@ -19,18 +19,16 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ciao.config import CiaoConfig
-from ciao.context.entity_tagger import context_entities
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
     ChatContext,
     ImageAttachment,
     ModelCapabilityQuestionEvent,
-    ContextEntitiesEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
@@ -67,6 +65,28 @@ CAPABILITY_IMAGE_MESSAGE = (
     "Image input not sent — this model can't see images. "
     "Pick a model that supports images and re-send."
 )
+
+# SDK/CLI internals that must never reach a rendered or durable turn. A user
+# Stop can make the CLI end the turn on one of these diagnostics (and exit
+# non-zero) rather than on a clean partial; the strings are not answers.
+_SDK_INTERNAL_DIAGNOSTIC_MARKERS = (
+    "ede_diagnostic",
+    "resulterror",
+    "exit code",
+)
+
+# What a non-stop failure reads as once its SDK-internal text is dropped. The
+# turn is still an error; it just does not expose an internal diagnostic.
+_SDK_INTERNAL_ERROR_MESSAGE = (
+    "The model turn failed before it produced an answer. "
+    'Send "continue" to retry.'
+)
+
+
+def _is_sdk_internal_diagnostic(text: str) -> bool:
+    """True when *text* is an SDK/CLI internal rather than a user answer."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _SDK_INTERNAL_DIAGNOSTIC_MARKERS)
 
 
 class ChatStreamingHost(Protocol):
@@ -243,6 +263,11 @@ class StreamOutcome:
     events: list[StreamEvent] = field(default_factory=list)
     response_text: str = ""
     had_error: bool = False
+    # True when the terminal result was a user stop normalized from the
+    # provider's empty error frame. Distinct from `had_error`: the pass is a
+    # cancellation, so transcript, announcement and retry decisions must all
+    # treat it as non-error and partial.
+    stopped: bool = False
     effective_model: str = ""
     usage: dict[str, str] = field(default_factory=dict)
     quota: dict[str, str] = field(default_factory=dict)
@@ -388,6 +413,7 @@ class ChatStreaming:
                     nonlocal turn_assistant_text, turn_streamed_text
                     nonlocal question_paused, had_error
                     nonlocal had_provider_progress, turn_result_published
+                    nonlocal last_assistant_text
                     async for event in self._host.stream_chat(
                         chat_id,
                         run_prompt,
@@ -444,13 +470,6 @@ class ChatStreaming:
                                 payload["sent_at"] = sent_at_rec
                             if duration_ms is not None:
                                 payload["duration_ms"] = duration_ms
-                        if (
-                            payload
-                            and isinstance(event, ContextEntitiesEvent)
-                            and run_turn_index is not None
-                        ):
-                            # Ties the matches to their user bubble.
-                            payload["turn_index"] = run_turn_index
                         if payload:
                             stream.publish(payload)
                             if isinstance(event, ResultEvent):
@@ -582,7 +601,16 @@ class ChatStreaming:
                                         "schedule_capture failed for %s", fp
                                     )
                         if isinstance(event, ResultEvent):
-                            if event.is_error:
+                            if event.stopped:
+                                # A normalized user stop settles the turn as a
+                                # cancellation: it must not arm a retry, mark
+                                # had_error, or become the success-announcement
+                                # text. The published partial frame already
+                                # carries the text the user saw. Clear the
+                                # carry-over so a stopped follow-up cannot
+                                # re-announce the previous turn's answer.
+                                last_assistant_text = ""
+                            elif event.is_error:
                                 had_error = True
                                 result_text = event.result or ""
                                 if chat_service._is_retryable_quota_error(result_text):
@@ -631,17 +659,22 @@ class ChatStreaming:
                         raise
                     stream.force_closing = False
                     logger.info("Turn force-closed by user stop for chat %s", chat_id)
-                    turn_assistant_text = turn_streamed_text
-                    stream.publish(
-                        self._host._stop_result_payload(
-                            chat_id,
-                            turn_index=current_turn_index,
-                            text=turn_streamed_text,
+                    if not turn_result_published:
+                        turn_assistant_text = turn_streamed_text
+                        stream.publish(
+                            self._host._stop_result_payload(
+                                chat_id,
+                                turn_index=current_turn_index,
+                                text=turn_streamed_text,
+                            )
                         )
-                    )
                 except Exception as exc:
                     if stream.user_stopped:
                         logger.info("Stream stopped by user for chat %s", chat_id)
+                        # The abort acknowledgement is not an answer: clear any
+                        # carry-over so this turn cannot inherit and re-announce
+                        # the previous turn's text.
+                        last_assistant_text = ""
                         if not turn_result_published:
                             stream.publish(
                                 self._host._stop_result_payload(
@@ -669,13 +702,22 @@ class ChatStreaming:
                         stderr = getattr(exc, "stderr", None)
                         if stderr and str(stderr) not in error_msg:
                             error_msg = f"{error_msg}\n{stderr}"
+                        # Retry classification reads the raw message; the
+                        # rendered/durable text must never expose an SDK
+                        # internal such as ``[ede_diagnostic] ...`` or an exit
+                        # code. A user-facing provider error is unchanged.
+                        display_error = (
+                            _SDK_INTERNAL_ERROR_MESSAGE
+                            if _is_sdk_internal_diagnostic(error_msg)
+                            else error_msg
+                        )
                         error_chat = self._host._chats.get(chat_id)
                         error_model = error_chat.model if error_chat else ""
                         error_session = error_chat.session_id if error_chat else ""
                         stream.publish(
                             {
                                 "type": "result",
-                                "text": error_msg,
+                                "text": display_error,
                                 "is_error": True,
                                 "effective_model": error_model,
                                 "usage": {},
@@ -698,7 +740,7 @@ class ChatStreaming:
                                 self._host._transcripts.record_turn(
                                     error_request,
                                     ctx=ChatContext.for_web(chat_id),
-                                    response_text=error_msg,
+                                    response_text=display_error,
                                     effective_model=error_model,
                                     session_id=error_chat.session_id or None,
                                     usage={},
@@ -962,24 +1004,59 @@ class ChatStreaming:
         if chat is None:
             raise ValueError(f"Chat '{chat_id}' not found")
         provider = self._host._get_provider(chat_id)
+        # The broker stream that owns this provider pass. Stop sets
+        # ``user_stopped`` on the stream before the provider reacts, so an
+        # explicit stop is read from the same object the drive loop cancels.
+        stream = self._host._broker.get(chat_id)
+        # Top-level (non-subagent) text seen so far, so an explicit stop that
+        # ends on an empty provider terminal still persists what the user saw.
+        streamed_text = ""
 
         async for event in provider.execute_streaming(request):
-            outcome.events.append(event)
-            yield event
-            sdk_sid = provider.current_session_id
-            if sdk_sid:
-                changed = False
-                if sdk_sid != chat.session_id:
-                    self._host._rotate_session_id(chat, sdk_sid)
-                    changed = True
-                changed = (
-                    self._host._commit_context_marker(chat, request, sdk_sid) or changed
+            if (
+                isinstance(event, AssistantTextDelta)
+                and event.parent_tool_use_id is None
+            ):
+                streamed_text += event.text
+            if (
+                isinstance(event, ResultEvent)
+                and chat.provider == "claude"
+                and stream is not None
+                and stream.user_stopped
+                and event.is_error
+                and (not event.result or _is_sdk_internal_diagnostic(event.result))
+            ):
+                # A user Stop makes the SDK end on an error frame that is not
+                # an answer: either empty (#952) or a non-empty SDK/CLI
+                # diagnostic (``[ede_diagnostic] ...``, ``ResultError``, exit
+                # code). Normalize it at this boundary, before journaling or
+                # publication, into a non-error partial carrying the text that
+                # was already streamed. Substantive errors and normal
+                # completions are untouched, and a genuine non-stop failure
+                # stays an error.
+                event = replace(
+                    event,
+                    result=streamed_text,
+                    is_error=False,
+                    stopped=True,
                 )
-                if changed:
-                    self._host._save()
+            elif (
+                isinstance(event, ResultEvent)
+                and chat.provider == "claude"
+                and event.is_error
+                and _is_sdk_internal_diagnostic(event.result)
+            ):
+                # A non-stop failure whose only text is an SDK internal must
+                # not become the durable/rendered reply. Keep it an error, but
+                # replace the internal with actionable prose.
+                event = replace(event, result=_SDK_INTERNAL_ERROR_MESSAGE)
+            # Aggregate the terminal state before yielding: a consumer that
+            # inspects the outcome the moment this event is delivered (the
+            # boundary contract) must already see response/usage/error flags.
             if isinstance(event, ResultEvent):
                 outcome.response_text = event.result
                 outcome.had_error = bool(event.is_error)
+                outcome.stopped = bool(event.stopped)
                 outcome.effective_model = event.effective_model or chat.model
                 if (
                     chat.provider == "opencode"
@@ -991,19 +1068,6 @@ class ChatStreaming:
                 outcome.usage = event.usage
                 outcome.quota = event.quota
                 outcome.cost_usd = event.cost_usd or 0.0
-                if event.session_id:
-                    changed = False
-                    if event.session_id != chat.session_id:
-                        self._host._rotate_session_id(chat, event.session_id)
-                        changed = True
-                    changed = (
-                        self._host._commit_context_marker(
-                            chat, request, event.session_id
-                        )
-                        or changed
-                    )
-                    if changed:
-                        self._host._save()
             elif isinstance(event, ToolUseEvent):
                 outcome.tool_events.append(
                     {
@@ -1013,6 +1077,35 @@ class ChatStreaming:
                     }
                 )
                 self._host._record_agent_tool_use(chat, request, event)
+            outcome.events.append(event)
+            # Session bookkeeping is aggregated before delivery too, so the
+            # consumer that inspects the outcome on the terminal event sees the
+            # rotated session and committed context marker.
+            sdk_sid = provider.current_session_id
+            if sdk_sid:
+                changed = False
+                if sdk_sid != chat.session_id:
+                    self._host._rotate_session_id(chat, sdk_sid)
+                    changed = True
+                changed = (
+                    self._host._commit_context_marker(chat, request, sdk_sid) or changed
+                )
+                if changed:
+                    self._host._save()
+            if isinstance(event, ResultEvent) and event.session_id:
+                changed = False
+                if event.session_id != chat.session_id:
+                    self._host._rotate_session_id(chat, event.session_id)
+                    changed = True
+                changed = (
+                    self._host._commit_context_marker(
+                        chat, request, event.session_id
+                    )
+                    or changed
+                )
+                if changed:
+                    self._host._save()
+            yield event
 
     def record_stopped_turn(
         self,
@@ -1024,10 +1117,14 @@ class ChatStreaming:
     ) -> None:
         """Persist a force-stopped provider pass as a partial transcript turn."""
         try:
+            # Only the top-level turn's deltas are the user-visible answer.
+            # Subagent text carries a parent_tool_use_id and belongs to the
+            # subagent transcript, not this reply.
             streamed = "".join(
-                getattr(event, "text", "") or ""
+                event.text
                 for event in outcome.events
-                if type(event).__name__ == "AssistantTextDelta"
+                if isinstance(event, AssistantTextDelta)
+                and event.parent_tool_use_id is None
             )
             self._host._transcripts.record_turn(
                 request,
@@ -1048,6 +1145,44 @@ class ChatStreaming:
         except Exception:
             logger.exception(
                 "Failed to persist force-stopped turn for chat %s", chat_id
+            )
+
+    def _persist_terminal_turn(
+        self,
+        *,
+        chat_id: str,
+        chat: ChatInfo,
+        request: AgentRequest,
+        outcome: StreamOutcome,
+        terminal: ResultEvent,
+        journal: TurnJournal,
+    ) -> None:
+        """Persist a terminal that reached the outcome before an abort landed.
+
+        Used on the cancellation and exception paths so the exchange is
+        durable exactly once with the terminal's actual flags instead of a
+        duplicate stopped-partial turn.
+        """
+        try:
+            self._host._transcripts.record_turn(
+                request,
+                ctx=ChatContext.for_web(chat_id),
+                response_text=terminal.result,
+                effective_model=outcome.effective_model or chat.model,
+                session_id=chat.session_id or None,
+                usage=outcome.usage,
+                quota=outcome.quota,
+                input_kind="text",
+                context_label=chat.title,
+                provider=chat.provider,
+                tool_events=outcome.tool_events,
+                is_error=bool(terminal.is_error),
+                is_partial=bool(terminal.stopped),
+            )
+            journal.mark_committed()
+        except Exception:
+            logger.exception(
+                "Failed to persist terminal turn for chat %s", chat_id
             )
 
     async def stream_chat(
@@ -1082,13 +1217,6 @@ class ChatStreaming:
             images=images,
             resume_session=chat.session_id or None,
             unattended=unattended,
-        )
-        # Which notes this message was matched to, for the Work details rail.
-        # Always sent (an empty list included) so the rail drops the previous
-        # message's matches instead of showing them against this one.
-        yield ContextEntitiesEvent(
-            type="context_entities",
-            entities=context_entities(request.prompt),
         )
 
         response_text = ""
@@ -1198,12 +1326,66 @@ class ChatStreaming:
                 async for event in _journalled_stream():
                     yield event
             except asyncio.CancelledError:
-                self._host._record_stopped_turn(
-                    chat_id, chat, request, outcome, journal
+                terminal = next(
+                    (
+                        event
+                        for event in outcome.events
+                        if isinstance(event, ResultEvent)
+                    ),
+                    None,
                 )
+                if terminal is not None:
+                    # The provider's terminal already reached the outcome
+                    # before the cancellation landed. Persist that turn with
+                    # its actual flags instead of synthesizing a second,
+                    # stopped partial turn for the same exchange.
+                    self._persist_terminal_turn(
+                        chat_id=chat_id,
+                        chat=chat,
+                        request=request,
+                        outcome=outcome,
+                        terminal=terminal,
+                        journal=journal,
+                    )
+                else:
+                    self._host._record_stopped_turn(
+                        chat_id, chat, request, outcome, journal
+                    )
+                raise
+            except Exception:
+                owning_stream = self._host._broker.get(chat_id)
+                terminal = next(
+                    (
+                        event
+                        for event in outcome.events
+                        if isinstance(event, ResultEvent)
+                    ),
+                    None,
+                )
+                if owning_stream is not None and owning_stream.user_stopped:
+                    # An ordinary exception under an explicit stop is the
+                    # provider's abort acknowledgement, not a failure: keep the
+                    # partial (or a terminal that already reached the outcome)
+                    # durable before re-raising to the drive loop's existing
+                    # Stop terminal handler. Non-stop exceptions propagate
+                    # unchanged.
+                    if terminal is not None:
+                        self._persist_terminal_turn(
+                            chat_id=chat_id,
+                            chat=chat,
+                            request=request,
+                            outcome=outcome,
+                            terminal=terminal,
+                            journal=journal,
+                        )
+                    else:
+                        self._host._record_stopped_turn(
+                            chat_id, chat, request, outcome, journal
+                        )
                 raise
             response_text = outcome.response_text
             had_error = outcome.had_error
+            stopped = outcome.stopped
             effective_model = outcome.effective_model
             usage = outcome.usage
             quota = outcome.quota
@@ -1227,6 +1409,10 @@ class ChatStreaming:
                 provider=chat.provider,
                 tool_events=tool_events,
                 is_error=had_error,
+                # A normalized stopped result is an incomplete reply: it is
+                # durable but flagged partial so a reload renders it as cut
+                # short rather than as a finished answer.
+                is_partial=stopped,
             )
             journal.mark_committed()
         finally:

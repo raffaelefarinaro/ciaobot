@@ -123,7 +123,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore, type NewChatRuntime } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
-import { openNewChatPicker } from '../lib/newChat'
+import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 import { isApplePlatform } from '../lib/platform'
 import { isMemoryProject } from '../lib/memoryPass'
 import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
@@ -163,6 +163,12 @@ const defaultProject = computed(() => {
     // app-owned one would otherwise name it as where the next chat starts.
     ?? store.projects.find(project => project.workspace === workspace && !isMemoryProject(project))
 })
+watch(
+  () => defaultProject.value?.project_id ?? '',
+  id => { homeNewChatProjectId.value = id },
+  { immediate: true },
+)
+onBeforeUnmount(() => { homeNewChatProjectId.value = '' })
 const defaultProjectLabel = computed(() => defaultProject.value?.name || 'Choose a project')
 
 // The provider the workspace starts new chats on; names the default row.

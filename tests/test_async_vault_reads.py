@@ -17,6 +17,7 @@ that moved them off the event loop:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import statistics
 import threading
@@ -39,6 +40,11 @@ from ciao.web import routes_api
 
 SLOW_READ_SECONDS = 0.4
 HEARTBEAT_INTERVAL = 0.01
+
+# Ticks the heartbeat must serve while the parked callers wait. The wait below
+# is on the heartbeat itself, not on a wall-clock window, so this is a floor on
+# a real signal rather than a measurement of how fast the machine is.
+REQUIRED_TICKS = 5
 
 
 @pytest.fixture(autouse=True)
@@ -486,33 +492,45 @@ def test_waiter_resumes_without_blocking_the_event_loop() -> None:
         blockers.append(event)
 
     ticks = 0
+    heartbeat_ready = asyncio.Event()
 
     async def _heartbeat() -> None:
         nonlocal ticks
         while True:
             ticks += 1
+            # Signal the loop served a real tick, not just a wall-clock window.
+            if ticks >= REQUIRED_TICKS:
+                heartbeat_ready.set()
             await asyncio.sleep(0.005)
 
-    async def _scenario() -> int:
+    async def _scenario() -> tuple[int, bool]:
         heartbeat = asyncio.ensure_future(_heartbeat())
         tasks = [
             asyncio.ensure_future(run_read(f"wait-{i}", lambda i=i: i))
             for i in range(executor.max_backlog + 3)
         ]
-        await asyncio.sleep(0.1)
-        ticks_while_waiting = ticks
-        for event in blockers:
-            event.set()
+        try:
+            # Wait on the heartbeat, not on the clock: a timeout here means the
+            # loop really was blocked (a genuine failure, not a slow machine).
+            await asyncio.wait_for(heartbeat_ready.wait(), timeout=5.0)
+            ticks_while_waiting = ticks
+            # Every worker holds a blocker, so the parked callers cannot have
+            # run: the ticks were served while they were genuinely parked.
+            parked_still_waiting = not any(task.done() for task in tasks)
+        finally:
+            for event in blockers:
+                event.set()
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
         await asyncio.gather(*tasks)
-        heartbeat.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await heartbeat
-        return ticks_while_waiting
+        return ticks_while_waiting, parked_still_waiting
 
-    ticks_while_waiting = asyncio.run(_scenario())
+    ticks_while_waiting, parked_still_waiting = asyncio.run(_scenario())
 
     # The loop kept ticking while callers were parked on the backlog.
-    assert ticks_while_waiting >= 5
+    assert ticks_while_waiting >= REQUIRED_TICKS
+    assert parked_still_waiting is True
 
 
 # -- acceptance: cancellation and recovery ----------------------------------

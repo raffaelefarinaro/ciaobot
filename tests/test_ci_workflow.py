@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -167,11 +168,12 @@ def test_release_smoke_only_runs_with_a_published_version() -> None:
     assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
 
 
-def test_publish_attaches_only_the_five_engine_assets() -> None:
-    # #653: the release carries the engine and nothing else. Exactly five
-    # assets - the installer under both names, the wheel, and the manifest with
-    # its signature - each pinned here so a re-added app asset is a failing
-    # test rather than a surprise in a published release.
+def test_publish_attaches_only_the_six_engine_assets() -> None:
+    # #653: the release carries the engine and nothing else. Exactly six
+    # assets - the macOS installer under both names, the Windows installer, the
+    # wheel, and the manifest with its signature - each pinned here so a
+    # re-added app asset is a failing test rather than a surprise in a published
+    # release.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
     ).read_text(encoding="utf-8")
@@ -180,23 +182,161 @@ def test_publish_attaches_only_the_five_engine_assets() -> None:
           gh release upload "$TAG" \\
             install.sh \\
             scripts/install-engine.sh \\
+            scripts/install.ps1 \\
             dist/ciaobot-*.whl \\
             ciaobot-engine-manifest.json \\
             ciaobot-engine-manifest.json.sig \\
             --clobber
 """
     assert attached in workflow, (
-        "publish.yml no longer attaches exactly the five engine assets"
+        "publish.yml no longer attaches exactly the six engine assets"
     )
 
-    # Both names are attached, from the one script, and both are proven present
-    # on the release where the tag is still known - a missing asset would
-    # otherwise only surface as a failed install on a user's machine.
+    # Every name is attached and proven present on the release where the tag is
+    # still known - a missing asset would otherwise only surface as a failed
+    # install on a user's machine. install.ps1 is uploaded as the file itself,
+    # so /releases/latest/download/install.ps1 resolves without a rename.
     assert "cp scripts/install-engine.sh install.sh" in workflow
     assert "s/__VERIFIER_SHA256__/" not in workflow
     assert "verifier_name" not in workflow
     assert "grep -qx install.sh" in workflow
     assert "grep -qx install-engine.sh" in workflow
+    assert "grep -qx install.ps1" in workflow
+
+
+def test_windows_job_checks_the_install_ps1_advisorily() -> None:
+    # #838: the Windows installer can only be exercised on a Windows runner,
+    # and the whole `windows` job is a measurement until C9 - a step that could
+    # fail it would take every other measurement down with it.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "scripts/install.ps1" in workflow
+    assert "-ReleaseDir ./ps1-fixture/release -DryRun" in workflow
+    assert "Invoke-ScriptAnalyzer" in workflow
+    assert "windows-install-ps1.txt" in workflow
+    # The offline fixture is built from the same helpers the test suite uses, so
+    # it has to import them from a checkout root.
+    assert 'sys.path.insert(0, ".")' in workflow
+    assert "from tests.test_engine_installer import" in workflow
+
+    # Every step that touches the installer redirects into its own log and ends
+    # in `|| true`: the job may report a refusal, never fail on one. #853 added
+    # a second pair of steps (the end-to-end fixture and the end-to-end
+    # install/uninstall run), so the property is checked per step rather than by
+    # pinning whichever one happens to be last.
+    steps = workflow.split("    - name: Build install.ps1 offline fixture")[1]
+    steps = steps.split("    - name: Summarize")[0]
+    assert steps.count("|| true") >= 2
+    # Each run step's own `run` block ends with its own log redirection and
+    # `|| true`; a step that lost either would fail the job on a refusal. A step
+    # may carry keys other than `run` between its name and its `run` block - the
+    # end-to-end step sets `env:` there - so everything up to `run: |` is
+    # skipped rather than assumed to be a single line.
+    run_blocks = re.findall(
+        r"(?ms)^    - name: ([^\n]+)\n(?:^(?!      run: \|\n)[^\n]*\n)*?      run: \|\n"
+        r"(.*?)(?=^    - name:|\Z)",
+        steps,
+    )
+    assert run_blocks, "no install.ps1 run steps found in the windows job"
+    for name, body in run_blocks:
+        # The comment block introducing the *next* step is captured with this
+        # one's body; it is not part of the command.
+        body = re.sub(r"(?m)^\s*#.*$", "", body)
+        lines = [line.strip() for line in body.rstrip().splitlines() if line.strip()]
+        if lines[0].startswith("python - <<"):
+            # A heredoc step: the guard is on the command that opens it, the way
+            # the offline fixture step has always done it.
+            assert lines[0].endswith("|| true"), (
+                f"the '{name}' step would fail the windows job: it does not end in '|| true'"
+            )
+            continue
+        last = lines[-1]
+        assert last.endswith("2>&1 || true"), (
+            f"the '{name}' step would fail the windows job: it does not end in '|| true'"
+        )
+        assert last.startswith("} > windows-"), (
+            f"the '{name}' step does not redirect its output to a windows-*.txt log"
+        )
+    names = [name for name, _ in run_blocks]
+    assert "install.ps1 offline verification and analyzer (advisory)" in names
+    assert "install.ps1 end-to-end install and uninstall (advisory)" in names
+    assert "} > windows-install-ps1.txt 2>&1 || true" in steps
+    assert "} > windows-install-e2e.txt 2>&1 || true" in steps
+    # The end-to-end run reports whether the task existed after install and
+    # after uninstall, and never fails on either answer: an InteractiveToken
+    # task may not register or start on a hosted runner, and that is the datum.
+    e2e = dict(run_blocks)["install.ps1 end-to-end install and uninstall (advisory)"]
+    # The four markers the summary line and a human reader both grep for. They
+    # are worded so that reading the log says what happened in one word each:
+    # `installed` is the engine's own entry point, `uninstalled` is the absence
+    # of the uv tool, and the two task lines are the schtasks probe either side
+    # of -Uninstall. A step that failed before installing prints "installed: no"
+    # and nothing pretends otherwise.
+    for marker in (
+        '"installed: yes"',
+        '"task existed after install: yes"',
+        '"uninstalled: yes',
+        '"task gone after uninstall: yes',
+        "workspace kept:",
+        "task registered after -NoStart:",
+        "-NoStart",
+    ):
+        assert marker in e2e, f"the end-to-end run no longer reports {marker!r}"
+
+    # The summary line greps the same four markers, so a reader of the job
+    # summary sees whether the installer ran at all without opening the artifact.
+    summary = workflow.split("    - name: Summarize")[1]
+    assert (
+        "^(installed|task existed after install|uninstalled|task gone after uninstall): (yes|no)"
+        in summary
+    )
+    assert "install.ps1 end-to-end:" in summary
+    # The comments in this step quote `::add-mask::` while explaining why it is not
+    # used; every check here is about the commands, not the prose about them.
+    commands = "\n".join(
+        line for line in e2e.splitlines() if not line.strip().startswith("#")
+    )
+    # Q3: the one-time setup URL is a credential and belongs in no log, least of
+    # all in windows-install-e2e.txt, which is uploaded as an artifact. The token
+    # is only known after the installer prints it, so it cannot be masked before
+    # the fact: `::add-mask::` on its own masks the empty string and protects
+    # nothing. The install output is redacted on the way into the file instead,
+    # and the exit code is the installer's, taken from PIPESTATUS before the
+    # pipe overwrites it.
+    assert "add-mask" not in commands, (
+        "the setup URL token is redacted, not masked: it is unknown until the "
+        "installer prints it, so no mask can cover it"
+    )
+    assert r"sed -E 's#(Open Ciaobot: ).*#\1[redacted]#'" in commands
+    assert "${PIPESTATUS[0]}" in commands, (
+        "the install's exit code must come from PIPESTATUS, not from sed's"
+    )
+    # The version the installer is given is cut from the wheel *file name*. The
+    # path has to go through basename first: `cut -d- -f2` on
+    # `ps1-e2e/release/ciaobot-1.2.3-py3-none-any.whl` yields
+    # `e2e/release/ciaobot`, which the installer refuses as invalid, and the step
+    # then reports "no" for everything having installed nothing.
+    assert 'basename "$(ls ps1-e2e/release/*.whl' in commands
+    assert "| head -1 | cut -d- -f2)" not in commands
+
+    # The step's shell is Git Bash, whose MSYS path conversion rewrites the
+    # `/Query`, `/TN` and `/v` arguments of the schtasks and reg probes below
+    # into Windows paths: both programs were then asked about paths, printed
+    # nothing, and reported "no" while the task and the PATH entry were there -
+    # the install log said it had added the PATH entry and the very next line
+    # contradicted it. MSYS_NO_PATHCONV=1 is what makes the probes measure the
+    # machine instead of the shell, and it has to be on this step specifically:
+    # `env:` scopes it to the run that needs it.
+    step = workflow.split(
+        "    - name: install.ps1 end-to-end install and uninstall (advisory)"
+    )[1].split("\n    - name:")[0]
+    assert "env:" in step, "the end-to-end step carries no env: mapping"
+    assert re.search(r"(?m)^        MSYS_NO_PATHCONV: '1'$", step), (
+        "the end-to-end step runs under Git Bash without MSYS_NO_PATHCONV, so its "
+        "schtasks and reg probes read paths and report the shell, not the machine"
+    )
 
 
 def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:

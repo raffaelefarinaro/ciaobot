@@ -5,6 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import HousekeepingStrip from '../HousekeepingStrip.vue'
+import HomeNoticeReopen from '../HomeNoticeReopen.vue'
+import { resetHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import type { OperatorAction } from '../../lib/types'
 
@@ -31,6 +33,7 @@ describe('HousekeepingStrip', () => {
   let pinia: ReturnType<typeof createPinia>
 
   beforeEach(() => {
+    resetHomeNoticeWindows()
     pinia = createPinia()
     setActivePinia(pinia)
     const housekeeping = useHousekeepingStore()
@@ -68,18 +71,36 @@ describe('HousekeepingStrip', () => {
     expect(tiles.length).toBe(3)
 
     // Run-only tile: no chat button.
-    const aButtons = tiles[0].findAll('button')
+    const aButtons = tiles[0].findAll('.housekeeping-actions button')
     expect(aButtons.length).toBe(1)
     expect(aButtons[0].text()).toBe('Install')
 
     // Chat-only tile: one button seeded from chat_label.
-    const bButtons = tiles[1].findAll('button')
+    const bButtons = tiles[1].findAll('.housekeeping-actions button')
     expect(bButtons.length).toBe(1)
     expect(bButtons[0].text()).toBe('Fix in chat')
 
     // Both-buttons tile.
-    const cButtons = tiles[2].findAll('button')
+    const cButtons = tiles[2].findAll('.housekeeping-actions button')
     expect(cButtons.length).toBe(2)
+    wrapper.unmount()
+  })
+
+  it('closes one window without dismissing its action and reopens it on Home', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [action({ id: 'a' }), action({ id: 'b', title: 'Another condition' })]
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    const reopen = mount(HomeNoticeReopen)
+    await nextTick()
+    await wrapper.get('[aria-label="Close A condition needs you window"]').trigger('click')
+    await nextTick()
+    expect(wrapper.findAll('.housekeeping-tile')).toHaveLength(1)
+    expect(store.actions).toHaveLength(2)
+    expect(reopen.text()).toBe('Show 1 closed notice')
+    await reopen.get('button').trigger('click')
+    await nextTick()
+    expect(wrapper.findAll('.housekeeping-tile')).toHaveLength(2)
+    reopen.unmount()
     wrapper.unmount()
   })
 
@@ -89,7 +110,7 @@ describe('HousekeepingStrip', () => {
     const runSpy = vi.spyOn(store, 'run').mockResolvedValue({ ok: true, summary: '' })
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
-    const runButton = wrapper.find('button')
+    const runButton = wrapper.find('.housekeeping-actions button')
     expect(runButton.text()).toBe('Run')
     await runButton.trigger('click')
     expect(runSpy).toHaveBeenCalledWith('a')
@@ -213,9 +234,9 @@ describe('the update tile', () => {
       workspace: '',
       link_label: 'Release notes',
       link_url: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest',
-      chat_label: 'How to install',
-      chat_prompt: 'A new Ciaobot version is available.',
-      primary: 'chat',
+      view_label: 'Update in Settings',
+      view_route: '/settings',
+      primary: 'view',
     })
   }
 
@@ -223,7 +244,7 @@ describe('the update tile', () => {
     return wrapper.findAll('.housekeeping-actions > *')
   }
 
-  it('leads with the filled chat button and demotes release notes', async () => {
+  it('leads with the filled settings button and demotes release notes', async () => {
     useHousekeepingStore().actions = [updateAction()]
     const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
     await nextTick()
@@ -231,7 +252,7 @@ describe('the update tile', () => {
     const [first, second] = controls(wrapper)
     expect(controls(wrapper)).toHaveLength(2)
     expect(first.element.tagName).toBe('BUTTON')
-    expect(first.text()).toBe('How to install')
+    expect(first.text()).toBe('Update in Settings')
     expect(first.classes()).toContain('btn-primary')
     expect(first.classes()).not.toContain('btn-chip')
     expect(second.element.tagName).toBe('A')
@@ -250,7 +271,7 @@ describe('the update tile', () => {
     expect(first.element.tagName).toBe('A')
     expect(first.classes()).toContain('btn-primary')
     expect(second.element.tagName).toBe('BUTTON')
-    expect(second.classes()).toContain('btn-chip')
+    expect(second.classes()).toContain('btn-primary')
     wrapper.unmount()
   })
 })
@@ -284,13 +305,13 @@ describe('a tile that names an existing surface', () => {
     const wrapper = mount(HousekeepingStrip)
     await nextTick()
 
-    expect(wrapper.findAll('button').map((b) => b.text())).toEqual(['Discuss'])
+    expect(wrapper.findAll('.housekeeping-actions button').map((b) => b.text())).toEqual(['Discuss'])
   })
 })
 
 describe('scoping to the active workspace', () => {
   const tileTitles = (wrapper: ReturnType<typeof mount>) =>
-    wrapper.findAll('.housekeeping-title').map((t) => t.text())
+    wrapper.findAll('.home-notice-title').map((t) => t.text())
 
   it('hides other workspaces tiles, shows shared plus current unlabeled', async () => {
     // Another workspace's pile is not this tab's business. The strip used to

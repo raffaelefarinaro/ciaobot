@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -14,9 +13,11 @@ from typing import Any, Iterable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao.os_support.links import is_link, link_source, remove_link
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
 from ciao.workspace_guide import guide_path, legacy_guide_path, migrate_root
+from ciao.workspaces import agent_root_for, resolve_workspace_name
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def _read_text(path: Path) -> str:
 
 def _relative_or_absolute(path: Path, root: Path) -> str:
     try:
-        return str(path.relative_to(root))
+        return path.relative_to(root).as_posix()
     except ValueError:
         return str(path)
 
@@ -103,31 +104,34 @@ def _frontmatter_body(text: str) -> tuple[dict[str, str], str]:
 def _iter_markdown_files(root: Path) -> Iterable[Path]:
     if not root.is_dir():
         return []
-    return sorted(path for path in root.glob("*.md") if path.is_file() or path.is_symlink())
+    return sorted(path for path in root.glob("*.md") if path.is_file() or is_link(path))
 
 
-def _mirror_vault_root(config: Any) -> Path:
+def _mirror_vault_root(config: Any, workspace: str = "") -> Path:
     """The vault that receives a Settings-written mirror doc.
 
-    Settings has no workspace context — it edits install-wide assets — so after
-    the re-rooting the mirror goes to the PRIMARY root's vault, the same choice
+    Scoped to the workspace whose agent root the asset is written into, so the
+    mirror note lands in the same vault the agent reads. An empty or
+    unregistered `workspace` falls back to the PRIMARY root, the same choice
     P10.4 and P10.5 made for the shared guide and the skill catalog. Before the
     re-rooting `agent_vault_root` returns the shared vault, so nothing changes.
     """
-    primary = getattr(config, "primary_workspace", None)
     resolver = getattr(config, "agent_vault_root", None)
-    if callable(primary) and callable(resolver):
-        try:
-            name = primary()
-            if name:
+    if callable(resolver):
+        name = str(workspace or "").strip()
+        if not name:
+            primary = getattr(config, "primary_workspace", None)
+            name = primary() if callable(primary) else ""
+        if name:
+            try:
                 return Path(resolver(name))
-        except (ValueError, OSError):
-            pass
+            except (ValueError, OSError):
+                pass
     return Path(config.vault_root)
 
 
-def _vault_mirror_path(config: Any, category: str, name: str) -> Path:
-    return _mirror_vault_root(config) / "Workspace" / category / f"{name}.md"
+def _vault_mirror_path(config: Any, category: str, name: str, workspace: str = "") -> Path:
+    return _mirror_vault_root(config, workspace) / "Workspace" / category / f"{name}.md"
 
 
 def _write_vault_mirror(
@@ -139,8 +143,9 @@ def _write_vault_mirror(
     description: str,
     canonical_path: Path,
     body: str,
+    workspace: str = "",
 ) -> Path:
-    mirror = _vault_mirror_path(config, category, name)
+    mirror = _vault_mirror_path(config, category, name, workspace)
     mirror.parent.mkdir(parents=True, exist_ok=True)
     rel = _relative_or_absolute(canonical_path, Path(config.workspace_root))
     mirror.write_text(
@@ -161,7 +166,7 @@ def _write_vault_mirror(
                 "",
             ]
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     return mirror
 
@@ -173,7 +178,7 @@ def _write_subagent_file(path: Path, *, name: str, description: str, content: st
             _frontmatter_string({"name": name, "description": description}),
             content.strip(),
         ]) + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
 
@@ -193,18 +198,18 @@ def _write_command_file(
             _frontmatter_string(fields),
             content.strip(),
         ]) + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
 
 def _installed_name_conflict(installed_path: Path, target_path: Path) -> bool:
     """True when creating ``target_path`` would replace an installed asset."""
-    if not installed_path.exists() and not installed_path.is_symlink():
+    if not installed_path.exists() and not is_link(installed_path):
         return False
-    if not installed_path.is_symlink():
+    if not is_link(installed_path):
         return True
     try:
-        return installed_path.resolve() != target_path.resolve()
+        return link_source(installed_path) != target_path.resolve()
     except FileNotFoundError:
         return True
 
@@ -415,7 +420,7 @@ def workspace_health(config: Any) -> dict:
 
         workspace_guide = guide_path(root)
         legacy_guide = legacy_guide_path(root)
-        if legacy_guide.exists() or legacy_guide.is_symlink():
+        if legacy_guide.exists() or is_link(legacy_guide):
             # Both providers read AGENTS.md now, and Claude Code only falls
             # back to it when no CLAUDE.md is present — so a surviving
             # CLAUDE.md keeps the old file winning and the rename never takes
@@ -455,7 +460,7 @@ def workspace_health(config: Any) -> dict:
             for source in _iter_markdown_files(source_dir):
                 link = link_dir / source.name
                 try:
-                    synced = link.is_symlink() and link.resolve() == source.resolve()
+                    synced = is_link(link) and link_source(link) == source.resolve()
                 except OSError:
                     synced = False
                 if not synced:
@@ -482,7 +487,9 @@ def workspace_health(config: Any) -> dict:
             if not link_dir.exists():
                 continue
             for path in link_dir.rglob("*"):
-                if path.is_symlink() and not path.exists():
+                # A dangling link, or (Windows) a hard-linked mirror whose
+                # recorded source is gone.
+                if is_link(path) and not (path.exists() and link_source(path).exists()):
                     add(
                         f"broken-{label}-{path.name}{id_suffix}",
                         f"Broken generated {label} link",
@@ -500,9 +507,16 @@ def workspace_health(config: Any) -> dict:
     return {"status": overall, "checks": [asdict(check) for check in checks]}
 
 
-def list_subagents(config: Any) -> list[AgentAsset]:
-    root = Path(config.workspace_root)
-    vault_root = Path(config.vault_root)
+def list_subagents(config: Any, workspace: str = "") -> list[AgentAsset]:
+    """Subagents in one workspace's agent root, plus the user's global ones.
+
+    `workspace` scopes the owned assets to the root the caller's writes land
+    in, so a row listed here is the row an edit or delete will reach. The
+    `~/.claude` pass stays global on purpose: those are the operator's own
+    CLI installs, which every workspace's provider can see.
+    """
+    root = agent_root_for(config, workspace)
+    vault_root = _mirror_vault_root(config, workspace)
     items: list[AgentAsset] = []
     from ciao.sync_skills import _is_managed_stock_agent
 
@@ -550,9 +564,13 @@ def _stock_command_sources() -> dict[str, str]:
     return out
 
 
-def list_command_assets(config: Any) -> list[CommandAsset]:
-    root = Path(config.workspace_root)
-    vault_root = Path(config.vault_root)
+def list_command_assets(config: Any, workspace: str = "") -> list[CommandAsset]:
+    """Slash commands in one workspace's agent root, plus global ones.
+
+    Same scoping contract as :func:`list_subagents`.
+    """
+    root = agent_root_for(config, workspace)
+    vault_root = _mirror_vault_root(config, workspace)
     items: list[CommandAsset] = []
     stock_sources = _stock_command_sources()
 
@@ -579,13 +597,35 @@ def list_command_assets(config: Any) -> list[CommandAsset]:
     return sorted(_dedupe_by_name(items), key=lambda item: item.name)
 
 
+def _workspace_from_query(config: Any, request: Request) -> tuple[str, str]:
+    """``(workspace, error)`` for a bodyless request such as a DELETE.
+
+    Deletes carry no JSON body, so the workspace rides the query string. An
+    unregistered name is an error here rather than a fallback: silently
+    resolving to the install root would make a delete hit a file in a
+    different workspace than the one the list showed.
+    """
+    try:
+        return resolve_workspace_name(config, request.query_params.get("workspace", "")), ""
+    except ValueError as exc:
+        return "", str(exc)
+
+
 async def agent_assets_endpoint(request: Request) -> JSONResponse:
-    """GET /api/agent-assets — Settings inventory for subagents, commands, and health."""
+    """GET /api/agent-assets — Settings inventory for subagents, commands, and health.
+
+    `?workspace=<name>` scopes the subagent and command lists to that
+    workspace's agent root, which is where the matching writes land. The
+    health block stays install-wide: it reports the state of the whole
+    machine's roots, not one workspace's catalog.
+    """
     config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
     try:
         return JSONResponse({
-            "subagents": [asdict(item) for item in list_subagents(config)],
-            "commands": [asdict(item) for item in list_command_assets(config)],
+            "workspace": workspace if workspace and config.workspace(workspace) else "",
+            "subagents": [asdict(item) for item in list_subagents(config, workspace)],
+            "commands": [asdict(item) for item in list_command_assets(config, workspace)],
             "health": workspace_health(config),
         })
     except Exception:  # noqa: BLE001
@@ -600,12 +640,15 @@ async def create_subagent_endpoint(request: Request) -> JSONResponse:
         name = _normalize_asset_name(str(body.get("name", "")))
         description = str(body.get("description", "")).strip()
         prompt = str(body.get("prompt", "")).strip()
+        # A write names its destination: an unregistered workspace is refused
+        # rather than redirected to the install root.
+        workspace = resolve_workspace_name(config, str(body.get("workspace", "")))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if not description or not prompt:
         return JSONResponse({"error": "description and prompt are required"}, status_code=400)
 
-    root = Path(config.workspace_root)
+    root = agent_root_for(config, workspace)
     target = root / "subagents" / f"{name}.md"
     if target.exists():
         return JSONResponse({"error": f"subagent '{name}' already exists"}, status_code=409)
@@ -624,12 +667,14 @@ async def create_subagent_endpoint(request: Request) -> JSONResponse:
         description=description,
         canonical_path=target,
         body=prompt,
+        workspace=workspace,
     )
     sync_workspace_skills(root, refresh_upstream=False)
     return JSONResponse({
         "ok": True,
         "asset": asdict(_agent_asset_from_file(
-            target, root=root, source="workspace", scope="custom", editable=True, vault_root=Path(config.vault_root),
+            target, root=root, source="workspace", scope="custom", editable=True,
+            vault_root=_mirror_vault_root(config, workspace),
         )),
         "path": _relative_or_absolute(target, root),
         "vault_path": _relative_or_absolute(mirror, root),
@@ -644,12 +689,13 @@ async def create_command_endpoint(request: Request) -> JSONResponse:
         description = str(body.get("description", "")).strip()
         argument_hint = str(body.get("argument_hint", "")).strip()
         prompt = str(body.get("prompt", "")).strip()
+        workspace = resolve_workspace_name(config, str(body.get("workspace", "")))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if not description or not prompt:
         return JSONResponse({"error": "description and prompt are required"}, status_code=400)
 
-    root = Path(config.workspace_root)
+    root = agent_root_for(config, workspace)
     target = root / "commands" / f"{name}.md"
     if target.exists():
         return JSONResponse({"error": f"command '{name}' already exists"}, status_code=409)
@@ -673,12 +719,14 @@ async def create_command_endpoint(request: Request) -> JSONResponse:
         description=description,
         canonical_path=target,
         body=_body_without_frontmatter(content),
+        workspace=workspace,
     )
     sync_workspace_skills(root, refresh_upstream=False)
     return JSONResponse({
         "ok": True,
         "asset": asdict(_command_asset_from_file(
-            target, root=root, source="workspace", scope="custom", editable=True, vault_root=Path(config.vault_root),
+            target, root=root, source="workspace", scope="custom", editable=True,
+            vault_root=_mirror_vault_root(config, workspace),
         )),
         "path": _relative_or_absolute(target, root),
         "vault_path": _relative_or_absolute(mirror, root),
@@ -687,19 +735,17 @@ async def create_command_endpoint(request: Request) -> JSONResponse:
 
 async def update_subagent_endpoint(request: Request) -> JSONResponse:
     config = request.app.state.config
-    root = Path(config.workspace_root)
     try:
         name = _normalize_asset_name(request.path_params["name"])
+        body = await request.json()
+        workspace = resolve_workspace_name(config, str(body.get("workspace", "")))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    root = agent_root_for(config, workspace)
     target = root / "subagents" / f"{name}.md"
     if not target.exists():
         return JSONResponse({"error": f"custom subagent '{name}' not found"}, status_code=404)
     current_fm, current_body = _frontmatter_body(_read_text(target))
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        body = {}
     description = str(body.get("description", current_fm.get("description", ""))).strip()
     content = str(body.get("content", body.get("prompt", current_body))).strip()
     if not description or not content:
@@ -713,12 +759,14 @@ async def update_subagent_endpoint(request: Request) -> JSONResponse:
         description=description,
         canonical_path=target,
         body=content,
+        workspace=workspace,
     )
     sync_workspace_skills(root, refresh_upstream=False)
     return JSONResponse({
         "ok": True,
         "asset": asdict(_agent_asset_from_file(
-            target, root=root, source="workspace", scope="custom", editable=True, vault_root=Path(config.vault_root),
+            target, root=root, source="workspace", scope="custom", editable=True,
+            vault_root=_mirror_vault_root(config, workspace),
         )),
         "path": _relative_or_absolute(target, root),
         "vault_path": _relative_or_absolute(mirror, root),
@@ -727,19 +775,17 @@ async def update_subagent_endpoint(request: Request) -> JSONResponse:
 
 async def update_command_endpoint(request: Request) -> JSONResponse:
     config = request.app.state.config
-    root = Path(config.workspace_root)
     try:
         name = _normalize_asset_name(request.path_params["name"])
+        body = await request.json()
+        workspace = resolve_workspace_name(config, str(body.get("workspace", "")))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    root = agent_root_for(config, workspace)
     target = root / "commands" / f"{name}.md"
     if not target.exists():
         return JSONResponse({"error": f"custom command '{name}' not found"}, status_code=404)
     current_fm, current_body = _frontmatter_body(_read_text(target))
-    try:
-        body = await request.json()
-    except json.JSONDecodeError:
-        body = {}
     description = str(body.get("description", current_fm.get("description", ""))).strip()
     argument_hint = str(body.get("argument_hint", current_fm.get("argument-hint", ""))).strip()
     content = str(body.get("content", body.get("prompt", current_body))).strip()
@@ -759,12 +805,14 @@ async def update_command_endpoint(request: Request) -> JSONResponse:
         description=description,
         canonical_path=target,
         body=content,
+        workspace=workspace,
     )
     sync_workspace_skills(root, refresh_upstream=False)
     return JSONResponse({
         "ok": True,
         "asset": asdict(_command_asset_from_file(
-            target, root=root, source="workspace", scope="custom", editable=True, vault_root=Path(config.vault_root),
+            target, root=root, source="workspace", scope="custom", editable=True,
+            vault_root=_mirror_vault_root(config, workspace),
         )),
         "path": _relative_or_absolute(target, root),
         "vault_path": _relative_or_absolute(mirror, root),
@@ -772,19 +820,26 @@ async def update_command_endpoint(request: Request) -> JSONResponse:
 
 
 def _delete_generated_link(link: Path, target: Path) -> None:
-    if not link.is_symlink():
+    if not is_link(link):
         return
     try:
-        if link.resolve() != target.resolve():
+        if link_source(link) != target.resolve():
             return
     except FileNotFoundError:
         pass
-    link.unlink(missing_ok=True)
+    remove_link(link)
 
 
 async def delete_subagent_endpoint(request: Request) -> JSONResponse:
     config = request.app.state.config
-    root = Path(config.workspace_root)
+    # A delete names no body, so the workspace rides the query string. It
+    # resolves exactly like the list that showed the row: an unregistered
+    # name is refused rather than falling back to the install root, where it
+    # would remove a different workspace's file.
+    workspace, workspace_error = _workspace_from_query(config, request)
+    if workspace_error:
+        return JSONResponse({"error": workspace_error}, status_code=400)
+    root = agent_root_for(config, workspace)
     try:
         name = _normalize_asset_name(request.path_params["name"])
     except ValueError as exc:
@@ -793,7 +848,7 @@ async def delete_subagent_endpoint(request: Request) -> JSONResponse:
     if not target.exists():
         return JSONResponse({"error": f"custom subagent '{name}' not found"}, status_code=404)
     target.unlink()
-    _vault_mirror_path(config, "Subagents", name).unlink(missing_ok=True)
+    _vault_mirror_path(config, "Subagents", name, workspace).unlink(missing_ok=True)
     _delete_generated_link(root / ".claude" / "agents" / f"{name}.md", target)
     sync_workspace_skills(root, refresh_upstream=False)
     return JSONResponse({"ok": True, "name": name})
@@ -801,7 +856,10 @@ async def delete_subagent_endpoint(request: Request) -> JSONResponse:
 
 async def delete_command_endpoint(request: Request) -> JSONResponse:
     config = request.app.state.config
-    root = Path(config.workspace_root)
+    workspace, workspace_error = _workspace_from_query(config, request)
+    if workspace_error:
+        return JSONResponse({"error": workspace_error}, status_code=400)
+    root = agent_root_for(config, workspace)
     try:
         name = _normalize_asset_name(request.path_params["name"])
     except ValueError as exc:
@@ -810,7 +868,7 @@ async def delete_command_endpoint(request: Request) -> JSONResponse:
     if not target.exists():
         return JSONResponse({"error": f"custom command '{name}' not found"}, status_code=404)
     target.unlink()
-    _vault_mirror_path(config, "Commands", name).unlink(missing_ok=True)
+    _vault_mirror_path(config, "Commands", name, workspace).unlink(missing_ok=True)
     _delete_generated_link(root / ".claude" / "commands" / f"{name}.md", target)
     sync_workspace_skills(root, refresh_upstream=False)
     return JSONResponse({"ok": True, "name": name})

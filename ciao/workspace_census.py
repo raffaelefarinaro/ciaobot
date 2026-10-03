@@ -121,7 +121,7 @@ def _walk_dir(
             if dpath.is_symlink():
                 symlinks.append(
                     {
-                        "path": str(dpath.relative_to(root)),
+                        "path": dpath.relative_to(root).as_posix(),
                         "target": _symlink_target(dpath),
                     }
                 )
@@ -131,7 +131,7 @@ def _walk_dir(
             if fpath.is_symlink():
                 symlinks.append(
                     {
-                        "path": str(fpath.relative_to(root)),
+                        "path": fpath.relative_to(root).as_posix(),
                         "target": _symlink_target(fpath),
                     }
                 )
@@ -201,7 +201,7 @@ def survey_vault(
     for path in md_paths:
         by_stem[path.stem].append(path)
     census.duplicate_stems = {
-        stem: [str(p.relative_to(root)) for p in paths]
+        stem: [p.relative_to(root).as_posix() for p in paths]
         for stem, paths in by_stem.items()
         if len(paths) > 1
     }
@@ -212,7 +212,7 @@ def survey_vault(
         except (OSError, UnicodeDecodeError):
             continue
         if FRONTMATTER_RE.match(text) is None:
-            census.no_frontmatter.append(str(path.relative_to(root)))
+            census.no_frontmatter.append(path.relative_to(root).as_posix())
 
     return census
 

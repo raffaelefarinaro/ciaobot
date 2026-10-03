@@ -7,7 +7,6 @@ import json
 import os
 import plistlib
 import shutil
-import stat
 import subprocess
 import time
 import urllib.error
@@ -18,19 +17,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import sys
+
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import ciao.engine_update as engine_update
+import ciao.update_host as update_host
 from ciao.engine_update import (
     OPERATION_NAME,
     PREVIOUS_ENV_NAME,
-    RECOVER_LABEL,
-    RECOVER_PLIST_NAME,
     SERVER_LABEL,
-    UPDATER_LABEL,
-    UPDATER_PLIST_NAME,
     Operation,
     UpdateError,
     UpdateInProgress,
@@ -47,9 +45,17 @@ from ciao.engine_update import (
     stage_update,
     write_operation,
 )
+from ciao.update_host import (
+    RECOVER_LABEL,
+    RECOVER_PLIST_NAME,
+    UPDATER_LABEL,
+    UPDATER_PLIST_NAME,
+    MacUpdateHost,
+)
 from ciao import install_receipt, macos_service
 from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
 from ciao.release_manifest import artifact_entry, build_manifest
+from ciao.os_support.private import is_private
 
 # The minisign helpers are copied from tests/test_release_manifest.py rather
 # than imported, so a change there cannot silently change what these tests
@@ -70,6 +76,15 @@ RELEASE_BASE = "https://example.test/releases/download"
 TOOL_NAME = "ciaobot"
 TOOL_DIR_NAME = "ciao_bot"
 ENTRY_POINTS = ("ciao", "ciaobot")
+
+
+# MacUpdateHost: launchd's gui/<uid> domain (os.getuid), SIGHUP, and the POSIX
+# shebang entry-point shims a macOS env carries. These tests patch
+# sys.platform to darwin to drive it from any OS; on Windows those calls do not
+# exist. The Windows update host (#857) carries its own tests.
+mac_update_host = pytest.mark.skipif(
+    sys.platform == "win32", reason="drives MacUpdateHost (launchd gui/<uid>, SIGHUP, shebang shims)"
+)
 
 
 def _fake_wheel(path: Path, version: str) -> Path:
@@ -186,6 +201,7 @@ def fake_run() -> tuple[Any, list[list[str]]]:
     return run, calls
 
 
+@mac_update_host
 def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run) -> None:
     run, calls = fake_run
     envs: list[dict[str, str] | None] = []
@@ -238,8 +254,8 @@ def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run)
 
     assert read_operation(tmp_path / "state") == op
     record = tmp_path / "state" / "operation.json"
-    assert stat.S_IMODE(record.stat().st_mode) == 0o600
-    assert stat.S_IMODE((tmp_path / "state").stat().st_mode) == 0o700
+    assert is_private(record)
+    assert is_private(tmp_path / "state")
     # The staged env is really on disk, not just described by the record.
     assert (env_dir / "bin" / "python").exists()
 
@@ -326,6 +342,7 @@ def test_stage_update_rejects_wheel_digest_mismatch(
     assert op.phase == "failed"
 
 
+@mac_update_host
 def test_stage_update_rejects_version_check_mismatch(
     tmp_path: Path, release: FakeRelease
 ) -> None:
@@ -364,6 +381,7 @@ def test_stage_update_already_current_writes_no_record(
     assert not (tmp_path / "state" / "1.2.3").exists()
 
 
+@mac_update_host
 def test_stage_update_lock_blocks_concurrent_run(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -400,6 +418,7 @@ def test_stage_update_lock_blocks_concurrent_run(
     )
 
 
+@mac_update_host
 def test_stage_update_copies_previous_receipt(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -434,6 +453,7 @@ def test_stage_update_copies_previous_receipt(
     assert Path(op.previous_receipt).read_bytes() == receipt_path.read_bytes()
 
 
+@mac_update_host
 def test_find_uv_prefers_receipt_then_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -518,6 +538,7 @@ def test_cli_status_without_record(capsys: pytest.CaptureFixture[str]) -> None:
 # not in `str(exc)`, which is only "returned non-zero exit status 1". The record
 # must keep the real explanation, or `ciao update status` and the UI show an
 # operator an unexplained failure. (Round 1 review finding.)
+@mac_update_host
 def test_stage_update_keeps_uv_stderr_in_failed_record(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -821,7 +842,7 @@ def _staged(
         updated_at="2026-09-25T10:00:00+00:00",
         stage_dir=str(stage_dir),
         wheel=str(wheel),
-        wheel_sha256="deadbeef",
+        wheel_sha256=hashlib.sha256(wheel.read_bytes()).hexdigest(),
         env_python=str(staged_python),
         previous_receipt=str(previous_receipt),
     )
@@ -926,7 +947,7 @@ def _recorder(calls: list[str]) -> Any:
 
 def _install_recovery_agent(state: Path, op: Operation) -> Path:
     """The durable agent's plist, as `apply_update` writes it before the stop."""
-    return engine_update._write_recover_plist(
+    return update_host._write_recover_plist(
         op, op.env_python or str(Path(op.stage_dir) / "env" / "bin" / "python"), state
     )
 
@@ -938,7 +959,7 @@ def _agent_program(state: Path) -> str:
     not exist is not a net — so it is read where launchd reads it, rather than
     out of whatever the test last computed.
     """
-    plist, _ = engine_update._recovery_plists(state)
+    plist, _ = update_host._recovery_plists(state)
     with plist.open("rb") as handle:
         return plistlib.load(handle)["ProgramArguments"][0]
 
@@ -1121,7 +1142,7 @@ def _interrupted(
     staged env still in place.
     """
     op, state, receipt_path, engine = _staged(root, phase=phase)
-    engine_update._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
+    update_host._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
     return op, state, receipt_path, engine
 
 
@@ -1181,7 +1202,7 @@ def test_apply_drains_then_bootstraps_updater(tmp_path: Path) -> None:
         )
     )
     assert plist_path.is_file()
-    assert stat.S_IMODE(plist_path.stat().st_mode) == 0o600
+    assert is_private(plist_path)
 
     plist = plistlib.loads(plist_path.read_bytes())
     assert plist["Label"] == UPDATER_LABEL
@@ -1330,6 +1351,7 @@ def test_run_apply_offline_apply_succeeds(tmp_path: Path) -> None:
     assert (engine.live_env / "uv-receipt.toml").is_file()
 
 
+@mac_update_host
 def test_run_apply_entry_point_shims_point_at_the_new_env(tmp_path: Path) -> None:
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     bin_dir = tmp_path / "bin"
@@ -1387,6 +1409,7 @@ def test_run_apply_falls_back_to_rollback_when_shims_cannot_be_written(
     assert engine.up is True
 
 
+@mac_update_host
 def test_run_apply_refuses_an_entry_point_the_staged_path_survives_in(
     tmp_path: Path,
 ) -> None:
@@ -1853,6 +1876,7 @@ def test_cli_apply_rejects_an_unusable_drain_timeout(
     assert engine_update._drain_timeout_arg("1") == 1.0
 
 
+@mac_update_host
 def test_cli_apply_reports_an_interrupted_apply(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2180,7 +2204,7 @@ def test_apply_installs_a_durable_recovery_agent(tmp_path: Path) -> None:
     # of it would be fixing the fire with the fuel.
     recover_plist = state / RECOVER_PLIST_NAME
     assert recover_plist.is_file()
-    assert stat.S_IMODE(recover_plist.stat().st_mode) == 0o600
+    assert is_private(recover_plist)
     plist = plistlib.loads(recover_plist.read_bytes())
     assert plist["Label"] == RECOVER_LABEL
     assert plist["ProgramArguments"] == [
@@ -2214,7 +2238,7 @@ def test_apply_installs_a_durable_recovery_agent(tmp_path: Path) -> None:
     login_plist = _login_recover_plist()
     assert login_plist.is_file()
     assert login_plist.read_bytes() == recover_plist.read_bytes()
-    assert stat.S_IMODE(login_plist.stat().st_mode) == 0o600
+    assert is_private(login_plist)
 
 
 def test_apply_installs_the_recovery_agent_before_the_engine_is_stopped(
@@ -2548,7 +2572,7 @@ def test_swap_in_flight_reads_the_loaded_job_arguments(
     def launchctl(_args: list[str]) -> subprocess.CompletedProcess[str]:
         return printed
 
-    assert engine_update._swap_in_flight(launchctl, 501) is expected
+    assert MacUpdateHost(launchctl=launchctl, uid=501).swap_in_flight() is expected
 
 
 def test_swap_in_flight_is_false_for_a_job_launchd_does_not_have() -> None:
@@ -2563,7 +2587,7 @@ def test_swap_in_flight_is_false_for_a_job_launchd_does_not_have() -> None:
     # A job launchd has never heard of cannot be running a swap, and answering
     # True here would strand every interrupted swap on a machine whose updater
     # never loaded.
-    assert engine_update._swap_in_flight(launchctl, 501) is False
+    assert MacUpdateHost(launchctl=launchctl, uid=501).swap_in_flight() is False
 
 
 @pytest.mark.parametrize("settled", ["applied", "rollback_failed"])
@@ -2665,7 +2689,7 @@ def test_run_recover_replaces_a_recreated_live_env(
     # `uv` got as far as recreating the env, which is the crash this is about:
     # the old install is retained under `previous-env` *and* a new live env is on
     # disk, so "is the live env gone?" cannot tell whether the move happened.
-    engine_update._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
+    update_host._move_env(engine.live_env, Path(op.stage_dir) / PREVIOUS_ENV_NAME)
     _write_env(engine.live_env, TO_VERSION)
     installed = read_receipt(receipt_path)
     assert installed is not None
@@ -2858,7 +2882,7 @@ def test_loaded_program_argument_reads_launchctl_output(
 ) -> None:
     # The formats launchd has used for a loaded job's program, and the two answers
     # that must never refuse an update: no program, and no output at all.
-    assert engine_update._loaded_program_argument(printed) == expected
+    assert update_host._loaded_program_argument(printed) == expected
 
 
 @pytest.mark.parametrize(
@@ -2887,7 +2911,7 @@ def test_loaded_program_argument_reads_launchctl_output(
 def test_loaded_tokens_reads_a_jobs_arguments(
     printed: str, expected: list[str]
 ) -> None:
-    assert engine_update._loaded_tokens(printed, "arguments") == expected
+    assert update_host._loaded_tokens(printed, "arguments") == expected
 
 
 def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:

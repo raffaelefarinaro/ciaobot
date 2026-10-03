@@ -88,8 +88,8 @@ BACKUP_INTERVAL_S = 300
 #: conflict is picked up on the next tick at the latest.
 BACKOFF_MULTIPLIER = 12
 
-#: The job id the Automation page has carried this work under since the push
-#: loop was introduced. Kept so the row continues rather than resetting, and so
+#: The job id this work has been recorded under since the push loop was
+#: introduced. Kept so its run history continues rather than resetting, and so
 #: ``job_runs_latest.json`` never serves a duplicate.
 JOB_ID = "branch_backup"
 JOB_LABEL = "Memory backup"
@@ -113,6 +113,14 @@ JOB_LABEL = "Memory backup"
 #   file inside the scope, a repository another git operation holds, a branch
 #   that diverged from ``origin`` (the commit is on a per-commit backup ref, so
 #   it is off this machine, but the shared branch still needs a human).
+#
+# A coverage gap — git already tracks paths the scope refuses to commit — is
+# deliberately *not* a state. It is a permanent fact about a repository that is
+# also a checkout, not a fault of any one run and not something a Settings
+# toggle resolves, so reporting it as ``needs_attention`` wrote a permanently
+# red row that meant "nothing was wrong" and then de-duplicated every repeat as
+# "the same failure as the previous attempt", which hid the healthy runs
+# entirely (#733). It is reported on its own field, ``coverage_gap``.
 STATE_NOT_CONFIGURED = "not_configured"
 STATE_READY = "ready"
 STATE_PENDING = "pending"
@@ -179,8 +187,16 @@ class BackupStatus:
     pending_changes: int = 0
     #: Local commits on ``branch`` that ``origin/branch`` does not have.
     pending_commits: int = 0
+    #: How many paths git already tracks that the backup scope refuses to commit,
+    #: so an unattended backup cannot carry them online. A count and not a
+    #: state: it is a standing property of a repository that is also a checkout,
+    #: it never fails a run, and it is reported here (and in the run's ``extra``)
+    #: so a surface can say it without reading ``reason`` or inventing a
+    #: failure it did not observe. See the note on the state list above.
+    coverage_gap: int = 0
     #: Plain-language explanation of ``state`` — the failure detail, the gap, or
-    #: which of the three reasons a ``paused`` state is reporting.
+    #: which of the three reasons a ``paused`` state is reporting. Human prose on
+    #: purpose: it is read, never parsed.
     reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -286,19 +302,72 @@ def _scope_summary(config) -> str:
     workspace adds, the trailing slash) is dropped, and a vault that *is* the
     data root — whose scope is everything under it — is named as such instead
     of being listed among the trees it already contains.
+
+    A file carved out of a refused directory is named by its whole path
+    (``.runtime/schedules.json``), because that is the pathspec the commit gets
+    and collapsing it to a directory name would read as a claim the scope does
+    not make. The matching ``ineligible`` entry then says ``.runtime/*``, so
+    the two surfaces agree about which part of that directory is refused
+    (#734) — a status page that called the whole of ``.runtime`` excluded while
+    committing a file inside it would be confidently wrong.
     """
     prefixes = backup_scope.eligible_relpaths(config)
     if _WHOLE_ROOT_PREFIX in prefixes:
         return _WHOLE_ROOT_NAME
     names: list[str] = []
     for prefix in prefixes:
+        if prefix in backup_scope.ALLOWED_FILES:
+            # Rendered below, whole: the directory loop would name its parent.
+            continue
         segments = [part for part in prefix.split("/") if part and part != "*"]
         durable = next((s for s in segments if s in backup_scope.DURABLE_ROOTS), None)
         if durable is None:
             durable = segments[0]
         if durable not in names:
             names.append(durable)
-    return ", ".join(names)
+    names.extend(name for name in backup_scope.ALLOWED_FILES if name in prefixes)
+    line = ", ".join(names)
+    missing = _missing_bare_roots(config, prefixes)
+    if not missing:
+        return line
+    return f"{line}; not a top-level {' or '.join(f'{name}/' for name in missing)} folder"
+
+
+def _missing_bare_roots(config, prefixes: tuple[str, ...]) -> list[str]:
+    """The durable roots with no top-level prefix in this install's scope.
+
+    A root reaches the top of the data root only when the data root *is* an
+    agent root — which the default shared-vault layout is, and the per-workspace
+    layout is not. Where one does not, a bare ``commands/`` there is refused
+    while ``personal/commands/`` is not, and the status has to say which is
+    which rather than list a scope the owner will find empty (#734).
+
+    Deliberate, not an omission: widening the base to the data root would put a
+    developer checkout's application source in scope, and the answer for an
+    install keeping its catalog at the root is a workspace subfolder.
+
+    The vault is excluded from the comparison because it is a scope base by
+    provenance wherever it sits: its directory name is the operator's choice
+    (``CIAO_VAULT_ROOT``), so the install that keeps its notes in ``brain``
+    must not be told its notes are out of scope.
+    """
+    vault_name = Path(config.vault_root).name
+    top_level = {prefix.rstrip("/") for prefix in prefixes if "/" not in prefix.rstrip("/")}
+    return [
+        root
+        for root in backup_scope.DURABLE_ROOTS
+        if root != vault_name and root not in top_level
+    ]
+
+
+def _gap_count(report: dict) -> int:
+    """How many tracked paths the backup scope refuses, as one number.
+
+    The preflight carries the list; a status, a Settings surface and a job-run
+    row all want the count, and none of them should be recovering it from a
+    sentence.
+    """
+    return len(list(report.get("tracked_excluded") or []))
 
 
 def _coverage_gap(tracked_excluded: list[str]) -> str:
@@ -307,6 +376,9 @@ def _coverage_gap(tracked_excluded: list[str]) -> str:
     The paths are truncated: a developer checkout reports its whole application
     source, and a status line is not the place for three hundred of them. The
     full set is in the preflight the run already read.
+
+    Prose for a reader only. The count behind it is ``coverage_gap``, and no
+    surface parses this sentence (#733).
     """
     if not tracked_excluded:
         return ""
@@ -389,6 +461,9 @@ class BackupService:
         #: persistent fault is counted rather than re-logged every tick.
         self._last_failure = ""
         self._repeat_failures = 0
+        #: The last coverage-gap count written to the log, so a permanent
+        #: condition is announced once rather than on every tick.
+        self._logged_gap = 0
         #: A guided setup was dispatched and its answer is still owed. Process
         #: state, not a store: see ``begin_guided_setup``.
         self._guided_setup = False
@@ -508,6 +583,7 @@ class BackupService:
             remote=remote,
             pending_changes=len(report.get("eligible") or []),
             pending_commits=unpushed,
+            coverage_gap=_gap_count(report),
         )
 
     # ── the run ─────────────────────────────────────────────────────────────
@@ -608,6 +684,20 @@ class BackupService:
                 )
 
             report, unpushed = await self._inspect(root, branch)
+            # A coverage gap is a standing condition rather than a transient
+            # one: the commit is path-limited, so nothing outside the scope can
+            # ride along, but a repository that is also a checkout is only ever
+            # partly backed up and the owner has to be told. Read once here and
+            # reported by every return that got this far — as ``coverage_gap``,
+            # and in the reason of a landed one, never as a state — so a read
+            # and a run can never disagree about whether the repository is fully
+            # covered.
+            excluded = list(report.get("tracked_excluded") or [])
+            gap = _coverage_gap(excluded)
+            # The count every return below reports, derived through the same
+            # helper ``status()`` uses rather than as a bare ``len`` at each
+            # site: one place that says how the coverage gap is counted.
+            gap_count = _gap_count(report)
             blocked = _hard_blockers(report)
             if blocked:
                 # A credential-shaped file inside the scope. Nothing is staged,
@@ -622,17 +712,11 @@ class BackupService:
                     remote=remote,
                     pending_changes=len(report.get("eligible") or []),
                     pending_commits=unpushed,
+                    coverage_gap=gap_count,
                 )
 
             committed = False
             eligible = list(report.get("eligible") or [])
-            # A coverage gap is a standing condition rather than a transient
-            # one: the commit is path-limited, so nothing outside the scope can
-            # ride along, but a repository that is also a checkout is only ever
-            # partly backed up and the owner has to be told. Derived once here
-            # and reported by every successful return, so a read and a run can
-            # never disagree about whether the repository is fully covered.
-            gap = _coverage_gap(list(report.get("tracked_excluded") or []))
             if eligible:
                 try:
                     committed = await local_session.commit_scoped(
@@ -650,6 +734,7 @@ class BackupService:
                         remote=remote,
                         pending_changes=len(eligible),
                         pending_commits=unpushed,
+                        coverage_gap=gap_count,
                     )
             self._run_extra["committed"] = committed
 
@@ -665,11 +750,12 @@ class BackupService:
                     }
                 )
                 return self._status(
-                    _landed_state(gap),
+                    STATE_READY,
                     reason=_landed_reason(committed, gap),
                     branch=branch,
                     remote=remote,
                     pending_commits=0,
+                    coverage_gap=gap_count,
                 )
 
             ok, detail = await local_session.push_branch(root, branch=branch)
@@ -692,6 +778,7 @@ class BackupService:
                     branch=branch,
                     remote=remote,
                     pending_commits=unpushed,
+                    coverage_gap=gap_count,
                 )
             if local_session.is_diverged_backup(detail):
                 # A real merge conflict with ``origin/<branch>``: the commit did
@@ -713,6 +800,7 @@ class BackupService:
                     reason=detail,
                     branch=branch,
                     remote=remote,
+                    coverage_gap=gap_count,
                 )
             self._store.update(
                 {
@@ -723,10 +811,11 @@ class BackupService:
                 }
             )
             return self._status(
-                _landed_state(gap),
+                STATE_READY,
                 reason=_landed_reason(committed, gap),
                 branch=branch,
                 remote=remote,
+                coverage_gap=gap_count,
             )
 
     def _record(
@@ -736,8 +825,13 @@ class BackupService:
 
         An identical repeat is a ``skip`` rather than a second error: a remote
         that stayed unreachable for a day would otherwise write the same error
-        row every hour, and the Automation page would show a red failure that
-        has been true since yesterday rather than a count of how long.
+        row every hour, and the run log would report a failure that has been
+        true since yesterday rather than a count of how long.
+
+        A coverage gap is not one of those failures. The run did its work, so it
+        is recorded as the success it is, with the gap riding along in ``extra``
+        — the Automation row can show a repository that is only partly covered
+        without the row claiming anything broke (#733).
         """
         run.extra.update(self._run_extra)
         run.extra["state"] = status.state
@@ -745,6 +839,8 @@ class BackupService:
         run.extra["source"] = source
         run.extra["pending_changes"] = status.pending_changes
         run.extra["pending_commits"] = status.pending_commits
+        run.extra["coverage_gap"] = status.coverage_gap
+        self._log_coverage_gap(status)
         if status.state in _FAILURE_STATES:
             if status.reason and status.reason == self._last_failure:
                 self._repeat_failures += 1
@@ -759,6 +855,34 @@ class BackupService:
                 logger.warning("Memory backup failed: %s", status.reason)
             return
         self._clear_failure(run, status)
+
+    def _log_coverage_gap(self, status: BackupStatus) -> None:
+        """Say the gap once, and again only when the count moves.
+
+        The condition is permanent, so a line per run would be 288 a day at the
+        five-minute cadence and would bury the failures it shares the log with.
+        The first sighting and every later change are the two moments a reader
+        needs; a gap that goes away and comes back is a new sighting, so a run
+        that finds no gap clears what was remembered — otherwise a gap returning
+        at the number it had before would go unmentioned for the rest of the
+        process's life.
+
+        The line says what the gap is and nothing about the run around it. It
+        is written before the failure branch, so a run that also failed would
+        otherwise open with a claim about the backup being current that the
+        WARNING immediately below contradicts.
+        """
+        if not status.coverage_gap:
+            self._logged_gap = 0
+            return
+        if status.coverage_gap == self._logged_gap:
+            return
+        self._logged_gap = status.coverage_gap
+        logger.info(
+            "Memory backup coverage gap: %d tracked path(s) outside the backup scope "
+            "are not backed up online.",
+            status.coverage_gap,
+        )
 
     def _clear_failure(self, run: job_runs.RunHandle, status: BackupStatus) -> None:
         """Close the failure episode: a success opens a fresh one next time."""
@@ -957,6 +1081,7 @@ class BackupService:
         remote: str = "",
         pending_changes: int = 0,
         pending_commits: int = 0,
+        coverage_gap: int = 0,
     ) -> BackupStatus:
         """Build a status from the live state and the persisted record.
 
@@ -978,6 +1103,7 @@ class BackupService:
             last_success_commit=settings.backup_last_success_commit,
             pending_changes=pending_changes,
             pending_commits=pending_commits,
+            coverage_gap=coverage_gap,
             reason=reason,
         )
 
@@ -1123,9 +1249,24 @@ Then:
    and connect it as `origin`, over the authentication they already have.
 3. Configure the scope and the ignore rules. Everything under "backed up" is
    durable and belongs in the repository; everything under "never backed up"
-   does not, and must not reach the remote. Check the already-tracked paths
-   that fall outside the scope (`git ls-files` will list them) and tell the
-   user which ones you would untrack rather than untracking them silently.
+   does not, and must not reach the remote. A glob such as `.runtime/*` under
+   "never backed up" covers every file in that directory except
+   `.runtime/schedules.json`, which is listed under "backed up": the two lines
+   are one rule read from either side, and that file belongs to exactly one of
+   them. To write it, do not ignore the directory itself — git cannot re-include
+   a file inside an ignored directory, so a `.runtime/` line would win over any
+   negation and the automations would be dropped. Ignore every runtime
+   directory's contents, at any depth, and negate the one root file back, in
+   that order:
+     **/.runtime/*
+     !/.runtime/schedules.json
+   The leading `**` matters: a pattern containing a slash is anchored to the
+   repository root, so `client/.runtime/` and `a/b/.runtime/` would stop being
+   ignored — and those hold credentials. The negation is pinned to the root
+   for the mirror-image reason, so a nested `sub/.runtime/schedules.json`
+   stays ignored. Check the already-tracked paths that fall outside the scope
+   (`git ls-files` will list them) and tell the user which ones you would
+   untrack rather than untracking them silently.
 4. Before you commit or push anything, check the two things that fail quietly
    on a machine nobody has set git up on: that this repository has a committer
    identity (`git config user.name` and `git config user.email` — set them if
@@ -1216,18 +1357,13 @@ def _clean_reason(committed: bool) -> str:
     return "nothing to back up; the repository is already up to date"
 
 
-def _landed_state(gap: str) -> str:
-    """The state a run that did its work ends in.
-
-    A coverage gap downgrades it: the run succeeded, and the repository is
-    still only partly covered by an unattended commit, which is a thing the
-    owner has to resolve rather than a thing that repeats itself.
-    """
-    return STATE_NEEDS_ATTENTION if gap else STATE_READY
-
-
 def _landed_reason(committed: bool, gap: str) -> str:
-    """A landed run's reason, with the coverage gap appended when there is one."""
+    """A landed run's reason, with the coverage gap appended when there is one.
+
+    The sentence is the human detail behind ``coverage_gap`` — the paths, not
+    just the count — so it stays here and out of the state machine. No surface
+    reads it for a number (#733).
+    """
     if not gap:
         return _clean_reason(committed)
     return f"{_clean_reason(committed)}; {gap}"
@@ -1236,11 +1372,13 @@ def _landed_reason(committed: bool, gap: str) -> str:
 def _read_state(report: dict, unpushed: int) -> str:
     """The state a read-only answer supports.
 
-    The coverage gap outranks pending work on purpose: it is the standing
-    condition, and the pending counts are reported alongside whatever state this
-    returns, so nothing is lost by naming the gap first.
+    Only the failures stop here: a hard blocker (a credential inside the scope)
+    is the one thing an unattended run must not do, and pending work is work
+    still to do. A coverage gap is neither — it is reported as
+    ``coverage_gap`` beside whatever this returns, so a gap can neither claim a
+    failure nor hide the pending work underneath it (#733).
     """
-    if _hard_blockers(report) or report.get("tracked_excluded"):
+    if _hard_blockers(report):
         return STATE_NEEDS_ATTENTION
     if report.get("eligible") or unpushed:
         return STATE_PENDING
@@ -1248,17 +1386,24 @@ def _read_state(report: dict, unpushed: int) -> str:
 
 
 def _read_reason(report: dict, unpushed: int) -> str:
-    """Why a read-only status is not simply ``ready``."""
+    """Why a read-only status is not simply ``ready``.
+
+    The pending work comes first and the gap rides after it: a repository that
+    is both behind and only partly covered has to say so, and a gap that led
+    would bury the work still to do.
+    """
     blocked = _hard_blockers(report)
     if blocked:
         return "; ".join(blocked)
-    if report.get("tracked_excluded"):
-        return _coverage_gap(list(report["tracked_excluded"]))
+    parts: list[str] = []
     if report.get("eligible") or unpushed:
         pending = []
         if report.get("eligible"):
             pending.append(f"{len(report['eligible'])} file(s) to commit")
         if unpushed:
             pending.append(f"{unpushed} commit(s) not yet on origin")
-        return "waiting: " + ", ".join(pending)
-    return "up to date"
+        parts.append("waiting: " + ", ".join(pending))
+    gap = _coverage_gap(list(report.get("tracked_excluded") or []))
+    if gap:
+        parts.append(gap)
+    return "; ".join(parts) if parts else "up to date"

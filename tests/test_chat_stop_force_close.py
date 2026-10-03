@@ -19,7 +19,7 @@ from ciao.config import CiaoConfig
 from ciao.models import AssistantTextDelta, ResultEvent
 from ciao.sessions import ChatContext, StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import ChatInfo, ProjectChatManager
 
 from .conftest import attach_stub_mcp
 
@@ -465,4 +465,695 @@ async def test_stop_that_raises_still_publishes_a_terminal_result(
     assert pcm._chats[chat.chat_id].last_response_status == "empty"
     assert pcm._chats[chat.chat_id].last_snippet == ""
 
+    consumer.cancel()
+
+
+class _CleanStopHandle:
+    """Provider handle whose stop() releases the clean empty-error terminal."""
+
+    def __init__(self, release: asyncio.Event) -> None:
+        self._release = release
+
+    async def stop(self) -> None:
+        self._release.set()
+
+
+class _ScriptedProvider:
+    """Provider fake with a real ``execute_streaming`` below drive_stream."""
+
+    def __init__(self, chat: ChatInfo, script) -> None:
+        self._chat = chat
+        self._script = script
+        self.current_session_id = "sess-native"
+
+    async def execute_streaming(self, request):
+        async for event in self._script(request):
+            yield event
+
+
+class _RealPathProviderService:
+    """ProviderService fake exposing the shape ``drive_stream`` reads.
+
+    ``execute_streaming`` is a real async generator, so ``drive_stream``'s
+    normalization, the journal and ``record_turn`` all execute for real.
+    """
+
+    can_drain = False
+
+    def __init__(self, chat: ChatInfo, script, release: asyncio.Event) -> None:
+        self._provider = _ScriptedProvider(chat, script)
+        self._release = release
+
+    @property
+    def provider(self) -> _ScriptedProvider:
+        return self._provider
+
+    @property
+    def current_session_id(self) -> str:
+        return self._provider.current_session_id
+
+    def active_handle(self):
+        return _CleanStopHandle(self._release)
+
+    async def execute_streaming(self, request):
+        async for event in self._provider.execute_streaming(request):
+            yield event
+
+    async def stop_active(self) -> bool:
+        self._release.set()
+        return True
+
+    async def disconnect(self) -> None:
+        self._release.set()
+
+
+async def _start_real_path_stream(
+    tmp_path: Path,
+    *,
+    provider: str,
+    user_text: str,
+    release: asyncio.Event,
+    script,
+    project_name: str,
+    title: str = "stop-test",
+):
+    pcm = attach_stub_mcp(_make_manager(tmp_path))
+    pcm._STOP_GRACE_S = 2.0
+    project = pcm.create_project(project_name, workspace="work")
+    chat = pcm.create_chat(project.project_id, title=title, provider=provider)
+    pcm._providers[chat.chat_id] = _RealPathProviderService(chat, script, release)
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, user_text)
+    consumer = asyncio.create_task(consume(stream))
+    # The drive loop assigns `stream.turn_task` only once the provider pass is
+    # actually running. `stop_chat` uses that task to bound its clean stop, so
+    # a test that stops without a turn in flight only exercises cleanup.
+    await _wait_for(lambda: stream.turn_task is not None or stream.done)
+    return pcm, chat, stream, consumer, captured
+
+
+@pytest.mark.parametrize("stop_before_text", [False, True])
+async def test_clean_claude_stop_persists_partial_to_archive(
+    tmp_path: Path, stop_before_text: bool
+) -> None:
+    """A clean provider-level Claude stop survives reload and archive."""
+    release = asyncio.Event()
+
+    def script(request):
+        del request
+
+        async def gen():
+            if not stop_before_text:
+                yield AssistantTextDelta(type="text", text="partial answer")
+                # Subagent text must never be persisted as the main answer.
+                yield AssistantTextDelta(
+                    type="text",
+                    text="subagent aside",
+                    parent_tool_use_id="task-1",
+                )
+            await release.wait()
+            yield ResultEvent(
+                type="result",
+                result="",
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+                usage={"input_tokens": "3", "output_tokens": "5"},
+                quota={"five_hour": "7"},
+                cost_usd=0.25,
+            )
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-clean-partial",
+        title="stop-test",
+    )
+
+    if not stop_before_text:
+        await _wait_for(
+            lambda: any(e.get("type") == "text_delta" for e in captured)
+        )
+
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(lambda: stream.done)
+    await _wait_for(lambda: any(e.get("type") == "result" for e in captured))
+
+    results = [e for e in captured if e.get("type") == "result"]
+    # Exactly one terminal frame, normalized to a non-error stop.
+    assert len(results) == 1
+    assert results[0].get("stopped") is True
+    assert results[0].get("is_error") is False
+    assert results[0].get("text") == ("" if stop_before_text else "partial answer")
+    # No completed-answer announcement for a stopped partial.
+    assert pcm._chats[chat.chat_id].last_snippet == ""
+    assert pcm._chats[chat.chat_id].last_response_status == "empty"
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    await _wait_for(lambda: bool(pcm._transcripts.current_messages(ctx, "claude")))
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    assert len(stored["turns"]) == 1
+    turn = stored["turns"][-1]
+    assert turn["is_partial"] is True
+    assert turn["is_error"] is False
+    assert turn["usage"] == {"input_tokens": "3", "output_tokens": "5"}
+    assert turn["quota"] == {"five_hour": "7"}
+    assert turn["effective_model"] == chat.model
+    assert stored["session_id"] == "sess-native"
+    if stop_before_text:
+        # No invented assistant text: only the user row is durable.
+        assert [row["role"] for row in rows] == ["user"]
+        assert turn["response"] == ""
+    else:
+        assert [row["role"] for row in rows] == ["user", "assistant"]
+        assert rows[1]["content"] == "partial answer"
+        assert rows[1].get("partial") is True
+        assert "is_error" not in rows[1]
+        assert turn["response"] == "partial answer"
+    # The archive contains the partial exactly once and no subagent text.
+    archived = await pcm.archive_chat(chat.chat_id)
+    assert archived is not None
+    archive_text = archived.path.read_text(encoding="utf-8")
+    assert archive_text.count("partial answer") == (0 if stop_before_text else 1)
+    assert "subagent aside" not in archive_text
+
+    consumer.cancel()
+    release.set()
+
+
+async def test_stop_does_not_hide_substantive_provider_error(
+    tmp_path: Path,
+) -> None:
+    """A stop must not launder a real provider error into a clean partial."""
+    release = asyncio.Event()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield AssistantTextDelta(type="text", text="partial answer")
+            await release.wait()
+            yield ResultEvent(
+                type="result",
+                result="Model refused the request.",
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+            )
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-substantive",
+        title="stop-substantive",
+    )
+    await _wait_for(lambda: any(e.get("type") == "text_delta" for e in captured))
+    # The user stops, but the provider's terminal is a substantive error. The
+    # stop must not rewrite it into a clean partial.
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(lambda: stream.done)
+
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    assert results[0].get("is_error") is True
+    assert "stopped" not in results[0]
+    assert results[0].get("text") == "Model refused the request."
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    await _wait_for(lambda: bool(pcm._transcripts.current_messages(ctx, "claude")))
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    assert rows[-1]["content"] == "Model refused the request."
+    assert rows[-1].get("is_error") is True
+    assert pcm._chats[chat.chat_id].last_response_status == "error"
+    consumer.cancel()
+
+
+async def test_empty_provider_error_without_stop_stays_error(
+    tmp_path: Path,
+) -> None:
+    """An empty provider error with no user stop is a failure, not a stop."""
+    pcm = attach_stub_mcp(_make_manager(tmp_path))
+    project = pcm.create_project("stop-no-stop", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="empty-error", provider="claude")
+    release = asyncio.Event()
+    release.set()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield ResultEvent(
+                type="result",
+                result="",
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+            )
+
+        return gen()
+
+    pcm._providers[chat.chat_id] = _RealPathProviderService(chat, script, release)
+
+    received = [event async for event in pcm.stream_chat(chat.chat_id, "hello")]
+    assert len(received) == 1
+    assert received[0].is_error is True
+    assert received[0].stopped is False
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    assert stored["turns"][-1]["is_error"] is True
+    assert "is_partial" not in stored["turns"][-1]
+
+
+async def test_stop_exception_persists_partial_before_archive(
+    tmp_path: Path,
+) -> None:
+    """An abort-ack exception under a stop persists the partial; the drive
+    loop's existing Stop handler publishes the one terminal frame."""
+    release = asyncio.Event()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield AssistantTextDelta(type="text", text="partial answer")
+            await release.wait()
+            raise RuntimeError("request was aborted")
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-exc",
+        title="stop-exc",
+    )
+    await _wait_for(lambda: any(e.get("type") == "text_delta" for e in captured))
+
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(lambda: stream.done)
+
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    assert results[0].get("stopped") is True
+    assert results[0].get("is_error") is False
+    assert results[0].get("text") == "partial answer"
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    await _wait_for(lambda: bool(pcm._transcripts.current_messages(ctx, "claude")))
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    # One durable turn: the partial persisted once, not duplicated.
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    assert rows[1]["content"] == "partial answer"
+    assert rows[1].get("partial") is True
+    consumer.cancel()
+
+
+async def test_stop_with_sdk_error_diagnostic_persists_streamed_partial(
+    tmp_path: Path,
+) -> None:
+    """A stop whose provider terminal is an SDK diagnostic keeps the partial.
+
+    The real SDK does not end an interrupted Claude turn on an *empty* error
+    frame: the CLI exits non-zero after reporting a diagnostic, and the SDK
+    surfaces it as a ``ResultError`` carrying ``[ede_diagnostic] ...``. #952
+    only normalized the empty-error shape, so the internal string replaced the
+    streamed partial in the durable turn. The streamed partial must win and no
+    SDK internal may reach the transcript or the archive.
+    """
+    from claude_agent_sdk._errors import ResultError
+
+    diagnostic = (
+        "Claude Code returned an error result: [ede_diagnostic] "
+        "result_type=user last_content_type=n/a stop_reason=null "
+        "(exit code: 1)"
+    )
+    release = asyncio.Event()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield AssistantTextDelta(type="text", text="partial answer")
+            await release.wait()
+            # The CLI reports the terminal diagnostic as a non-empty error
+            # result frame (``_convert_message`` joins ``ResultMessage.errors``
+            # into ``result``) and then exits non-zero, which the SDK surfaces
+            # as a ``ResultError``.
+            yield ResultEvent(
+                type="result",
+                result=(
+                    "[ede_diagnostic] result_type=user "
+                    "last_content_type=n/a stop_reason=null"
+                ),
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+            )
+            raise ResultError(diagnostic, exit_code=1)
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-sdk-diagnostic",
+        title="stop-sdk-diagnostic",
+    )
+    await _wait_for(lambda: any(e.get("type") == "text_delta" for e in captured))
+
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(lambda: stream.done)
+
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    assert results[0].get("stopped") is True
+    assert results[0].get("is_error") is False
+    assert results[0].get("text") == "partial answer"
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    await _wait_for(lambda: bool(pcm._transcripts.current_messages(ctx, "claude")))
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    assert len(stored["turns"]) == 1
+    turn = stored["turns"][-1]
+    assert turn["is_partial"] is True
+    assert turn["is_error"] is False
+    assert turn["response"] == "partial answer"
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    assert rows[1]["content"] == "partial answer"
+    assert rows[1].get("partial") is True
+    assert "is_error" not in rows[1]
+    assert "ede_diagnostic" not in rows[1]["content"]
+
+    archived = await pcm.archive_chat(chat.chat_id)
+    assert archived is not None
+    archive_text = archived.path.read_text(encoding="utf-8")
+    assert "partial answer" in archive_text
+    assert "ede_diagnostic" not in archive_text
+    assert "ResultError" not in archive_text
+
+    consumer.cancel()
+
+
+async def test_stop_followup_does_not_inherit_stopped_state(
+    tmp_path: Path,
+) -> None:
+    """After a stopped turn, the queued follow-up is a normal success."""
+    release = asyncio.Event()
+
+    def script(request):
+        prompt = request.prompt
+
+        async def gen():
+            if "follow-up" in prompt:
+                yield ResultEvent(
+                    type="result",
+                    result="follow-up answer",
+                    session_id="sess-native",
+                    is_error=False,
+                    effective_model="opus",
+                )
+                return
+            yield AssistantTextDelta(type="text", text="partial answer")
+            await release.wait()
+            yield ResultEvent(
+                type="result",
+                result="",
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+            )
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-followup",
+        title="stop-followup",
+    )
+    await _wait_for(lambda: any(e.get("type") == "text_delta" for e in captured))
+    assert pcm.queue_message(chat.chat_id, "follow-up") is True
+
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(
+        lambda: len([e for e in captured if e.get("type") == "result"]) == 2
+    )
+    await _wait_for(lambda: stream.done)
+
+    results = [e for e in captured if e.get("type") == "result"]
+    assert results[0].get("stopped") is True
+    assert "stopped" not in results[1]
+    assert results[1].get("is_error") is False
+    assert results[1].get("text") == "follow-up answer"
+    assert pcm._chats[chat.chat_id].last_response_status == "success"
+    consumer.cancel()
+
+
+async def test_stopped_followup_does_not_reannounce_previous_answer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stopped follow-up must not re-announce the previous turn's answer.
+
+    ``last_assistant_text`` lives for the whole ``drive()`` session, so a
+    stopped follow-up that produced no answer of its own used to leave it
+    pointing at the prior turn's reply. The turn-done announce then fired
+    ``chat_result_ready`` plus a push for the already-seen answer the user had
+    just cancelled, and rewrote the chat's snippet and ``last_response_status``
+    as a fresh success.
+    """
+    release = asyncio.Event()
+    first_turn_release = asyncio.Event()
+
+    def script(request):
+        prompt = request.prompt
+
+        async def gen():
+            if "follow-up" in prompt:
+                yield AssistantTextDelta(type="text", text="partial answer")
+                await release.wait()
+                yield ResultEvent(
+                    type="result",
+                    result="",
+                    session_id="sess-native",
+                    is_error=True,
+                    effective_model="opus",
+                )
+                return
+            # Held open so the follow-up queues against a live stream.
+            await first_turn_release.wait()
+            yield ResultEvent(
+                type="result",
+                result="ok",
+                session_id="sess-native",
+                is_error=False,
+                effective_model="opus",
+            )
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-reannounce",
+        title="stop-reannounce",
+    )
+    assert pcm.queue_message(chat.chat_id, "follow-up") is True
+
+    published: list[dict] = []
+    pushes: list = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: pushes.append(a))
+
+    def spawn(coro, name: str):
+        if name.startswith("archive-proposal-helper") or name.startswith(
+            "memory-pass-"
+        ):
+            coro.close()
+            return None
+        return asyncio.create_task(coro, name=name)
+
+    monkeypatch.setattr(pcm, "_spawn_detached", spawn)
+
+    first_turn_release.set()
+    await _wait_for(
+        lambda: any(
+            e.get("type") == "text_delta" and e.get("text") == "partial answer"
+            for e in captured
+        )
+    )
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(lambda: stream.done)
+
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 2
+    assert results[0].get("text") == "ok"
+    assert "stopped" not in results[0]
+    assert results[1].get("stopped") is True
+    assert results[1].get("is_error") is False
+    assert results[1].get("text") == "partial answer"
+
+    # No announcement or push for the cancelled follow-up.
+    assert pushes == []
+    assert not any(ev.get("type") == "chat_result_ready" for ev in published)
+
+    # The cancelled turn is not recorded as this chat's fresh answer.
+    state = pcm._chats[chat.chat_id]
+    assert state.last_response_status == "empty"
+    assert state.last_snippet == ""
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    turns = stored["turns"]
+    assert len(turns) == 2
+    assert turns[0]["response"] == "ok"
+    assert "is_partial" not in turns[0]
+    assert turns[1]["response"] == "partial answer"
+    assert turns[1]["is_partial"] is True
+    assert turns[1]["is_error"] is False
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    assert [row["role"] for row in rows] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert rows[-1]["content"] == "partial answer"
+    assert rows[-1].get("partial") is True
+    assert "is_error" not in rows[-1]
+
+    consumer.cancel()
+
+
+async def test_cancel_after_terminal_does_not_duplicate_result_or_transcript(
+    tmp_path: Path,
+) -> None:
+    """A force-cancel landing after the terminal published must not add a
+    second stopped frame or a duplicate transcript turn."""
+    release = asyncio.Event()
+    publish_terminal = asyncio.Event()
+    hold_open = asyncio.Event()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield AssistantTextDelta(type="text", text="partial answer")
+            await publish_terminal.wait()
+            yield ResultEvent(
+                type="result",
+                result="",
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+            )
+            await hold_open.wait()
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-after-terminal",
+        title="stop-after-terminal",
+    )
+    await _wait_for(lambda: any(e.get("type") == "text_delta" for e in captured))
+
+    # Let the provider publish its terminal, then force-close the still-open
+    # generator. The drive loop's synthetic result must not fire again.
+    stream.user_stopped = True
+    publish_terminal.set()
+    await _wait_for(lambda: any(e.get("type") == "result" for e in captured))
+    stream.force_closing = True
+    if stream.turn_task is not None:
+        stream.turn_task.cancel()
+    hold_open.set()
+    await _wait_for(lambda: stream.done)
+
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    assert results[0].get("stopped") is True
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    await _wait_for(lambda: bool(pcm._transcripts.current_messages(ctx, "claude")))
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    assert len(stored["turns"]) == 1
+    assert stored["turns"][0]["is_partial"] is True
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    assert [row["role"] for row in rows] == ["user", "assistant"]
     consumer.cancel()

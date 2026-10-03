@@ -117,16 +117,9 @@ def test_get_returns_stock_plus_counts(client: TestClient) -> None:
         "place",
         "idea",
         "resource",
-        "product",
-        "feature",
-        "automation",
-        "document",
         "workspace",
-        "reference",
-        "content",
         "journal",
         "note",
-        "log",
         "skill-proposal",
     }
     assert all(row["builtin"] is True for row in rows)
@@ -381,7 +374,8 @@ def test_write_is_atomic_and_leaves_no_temp_file(client: TestClient, vault: Path
     assert _patch(client, again).status_code == 200
     assert (vault / "entity-types.yaml").read_text(encoding="utf-8") != first
     assert not list(vault.glob(".entity-types.*"))
-    assert [path.name for path in sorted(vault.iterdir())] == [
+    # Sort the names: WindowsPath objects compare case-insensitively.
+    assert sorted(path.name for path in vault.iterdir()) == [
         "VOCABULARY.md",
         "entity-types.yaml",
         "personal",

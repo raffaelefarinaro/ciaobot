@@ -15,11 +15,20 @@ from unittest.mock import patch
 
 import pytest
 
+from ciao.migration_notices import reset_links_cache, resolve_links
 from ciao.operator_actions import (
     DetectionContext,
     detect_actions,
     run_action,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_link_verdicts():
+    """The wikilink cache is process-wide, so a verdict must not leak between tests."""
+    reset_links_cache()
+    yield
+    reset_links_cache()
 
 
 class _FakeConfig:
@@ -30,11 +39,9 @@ class _FakeConfig:
         tmp_path: Path,
         *,
         workspaces: tuple[str, ...] = ("personal",),
-        vault_mode: str = "scratch",
     ) -> None:
         self.workspace_root = tmp_path
         self.vault_root = tmp_path / "memory-vault"
-        self.vault_mode = vault_mode
         self._names = list(workspaces)
         self._roots = {
             name: self.vault_root / name for name in self._names
@@ -157,7 +164,7 @@ def test_package_update_fires_only_on_available(tmp_path: Path) -> None:
     assert "package-update" in ids
 
 
-def test_package_update_leads_with_the_chat_button(tmp_path: Path) -> None:
+def test_package_update_leads_with_the_settings_button(tmp_path: Path) -> None:
     """Updating is the forward action; release notes are supporting reading."""
     _starred(tmp_path)
     context = _context(
@@ -169,8 +176,10 @@ def test_package_update_leads_with_the_chat_button(tmp_path: Path) -> None:
         },
     )
     tile = next(a for a in detect_actions(context) if a.id == "package-update")
-    assert tile.primary == "chat"
-    assert tile.as_dict()["primary"] == "chat"
+    assert tile.primary == "view"
+    assert tile.as_dict()["primary"] == "view"
+    assert tile.view_route == "/settings"
+    assert not tile.chat_prompt
     assert tile.link_label == "Release notes"
 
 
@@ -300,8 +309,19 @@ def test_locked_skills_orphaned_silent_without_lock(tmp_path: Path) -> None:
     assert "locked-skills-orphaned" not in [a.id for a in detect_actions(context)]
 
 
-def test_vault_location_fires_on_misplaced_vault(tmp_path: Path) -> None:
-    # personal workspace vault placed outside the standard folder.
+def test_vault_location_is_a_catalog_task_not_a_tile(tmp_path: Path) -> None:
+    """The misplaced-vault tile is gone; the condition is the `vault-relocate` task.
+
+    A tile could reach zero, but it could not be **dismissed** or **finished**: a
+    machine condition is only ever fixed, never declined, so an operator who did
+    not want this work had no way to say so and the same tile reappeared on every
+    60s poll. The catalog task carries both, and the audit keeps reporting it
+    independently — so the condition lost a surface, not a finding.
+
+    `tests/test_vault_relocate_update_task.py` owns the task's own contract; this
+    is the strip-side half, and it fails the moment a `_detect_vault_location`
+    comes back beside it.
+    """
     standard = tmp_path / "memory-vault" / "personal"
     standard.mkdir(parents=True, exist_ok=True)
     actual = tmp_path / "elsewhere" / "personal"
@@ -312,13 +332,11 @@ def test_vault_location_fires_on_misplaced_vault(tmp_path: Path) -> None:
             super().__init__(tmp_path, workspaces=("personal", "work"))
             self._roots["personal"] = actual
 
-    context = _context(tmp_path, config=_Weird())
-    ids = [a.id for a in detect_actions(context)]
-    assert "vault-location:personal" in ids
-    # A correctly placed vault does not fire.
-    context = _context(tmp_path)
-    ids = [a.id for a in detect_actions(context)]
-    assert "vault-location:personal" not in ids
+    ids = [a.id for a in detect_actions(_context(tmp_path, config=_Weird()))]
+    assert [i for i in ids if "vault-location" in i] == []
+    # And nothing else stood in for it either.
+    actions = detect_actions(_context(tmp_path, config=_Weird()))
+    assert [a for a in actions if a.kind == "vault-location"] == []
 
 
 def test_vault_vocabulary_fires_on_unresolved_only(tmp_path: Path) -> None:
@@ -337,16 +355,24 @@ def test_vault_vocabulary_fires_on_unresolved_only(tmp_path: Path) -> None:
     assert "vault-vocabulary" in ids
 
 
-def test_unmigrated_links_fires_only_for_existing_mode(tmp_path: Path) -> None:
+def test_unmigrated_links_card_needs_an_established_wikilink(tmp_path: Path) -> None:
+    """The card is a finding, not an inference from a receipt's absence.
+
+    A scan established the verdict; before one exists there is nothing to report,
+    and a completed receipt retires the notice even though the wikilink is still
+    in the vault, because the receipt is the migration's own record of the work.
+    """
     runtime = _runtime(tmp_path)
-    context = DetectionContext(
-        config=_FakeConfig(tmp_path, workspaces=("personal",), vault_mode="scratch"),
-        runtime_dir=runtime,
-    )
+    config = _FakeConfig(tmp_path, workspaces=("personal",))
+    root = config.workspace_vault_root("personal")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "a.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
+    context = DetectionContext(config=config, runtime_dir=runtime)
+
+    # No scan yet: the poll may not walk, so it has no verdict to report.
     assert "vault-unmigrated-links" not in [a.id for a in detect_actions(context)]
 
-    config = _FakeConfig(tmp_path, workspaces=("personal",), vault_mode="existing")
-    context = DetectionContext(config=config, runtime_dir=runtime)
+    resolve_links(config, runtime)
     ids = [a.id for a in detect_actions(context)]
     assert "vault-unmigrated-links" in ids
 
@@ -463,7 +489,7 @@ def test_missed_schedules_honors_fire_time_of_day(tmp_path: Path) -> None:
 def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
     """Contract 4: no action is a bare notice with neither a run nor a chat."""
     # Force every detector to fire so the whole registry is exercised.
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"), vault_mode="existing")
+    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
     runtime = _runtime(tmp_path)
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-vocabulary.json").write_text(
@@ -492,7 +518,7 @@ def test_every_action_offers_run_or_chat(tmp_path: Path) -> None:
 
 def test_ids_are_stable_across_calls(tmp_path: Path) -> None:
     """Contract 3: byte-identical actions across two passes."""
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"), vault_mode="existing")
+    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
     runtime = _runtime(tmp_path)
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-vocabulary.json").write_text(
@@ -535,7 +561,7 @@ def test_scan_vault_is_never_touched(tmp_path: Path) -> None:
     from ciao.operator_actions import detect_actions
     from ciao.vault_index import scan_vault
 
-    config = _FakeConfig(tmp_path, workspaces=("personal", "work"), vault_mode="existing")
+    config = _FakeConfig(tmp_path, workspaces=("personal", "work"))
     runtime = _runtime(tmp_path)
     (runtime / "migration").mkdir(parents=True, exist_ok=True)
     (runtime / "migration" / "vault-vocabulary.json").write_text(
@@ -561,37 +587,43 @@ async def test_run_action_unknown_id_raises_value_error(tmp_path: Path) -> None:
         await run_action("no-such-action", DetectionContext(config=_FakeConfig(tmp_path)))
 
 
-def test_unmigrated_links_tile_does_not_assert_wikilinks_it_cannot_verify(
+def test_unmigrated_links_tile_names_a_note_only_because_one_was_found(
     tmp_path: Path,
 ) -> None:
-    """The cheap predicate cannot know a wikilink exists, so it must not claim one.
+    """The tile used to hedge because it could not know; now it can, and says so.
 
-    This detector fires on "vault adopted, no migration receipt", which is true
-    of an adopted vault that was written in markdown links from the start and
-    has nothing to convert. It runs on every app open and window focus, so it
-    cannot call has_unmigrated_links, which walks the vault. The audit's notice
-    does run that accurate check and may legitimately stay silent here, so the
-    two surfaces disagree by design and the tile's wording has to be honest
-    about what it actually knows.
+    It fires on a completed scan that actually found a wikilink, so the card
+    names the note rather than inferring one from a missing receipt — and a vault
+    written in markdown links from the start, which the old predicate could not
+    tell from an unconverted one, gets no card at all.
     """
     config = _FakeConfig(tmp_path, workspaces=("personal",))
-    config.vault_mode = "existing"
     root = config.workspace_vault_root("personal")
     root.mkdir(parents=True, exist_ok=True)
-    # A markdown link only: nothing to migrate.
-    (root / "Note.md").write_text("[Peter](./People/Peter.md)\n", encoding="utf-8")
-
+    (root / "linked.md").write_text("See [[People/Peter]].\n", encoding="utf-8")
+    runtime = _runtime(tmp_path)
     context = DetectionContext(
-        config=config, runtime_dir=_runtime(tmp_path), schedule_store=_Store([])
+        config=config, runtime_dir=runtime, schedule_store=_Store([])
     )
-    tiles = [a for a in detect_actions(context) if a.kind == "unmigrated-links"]
 
-    assert tiles, "the tile should still offer the preview"
+    assert [
+        a for a in detect_actions(context) if a.kind == "unmigrated-links"
+    ] == [], "an unscanned vault is not a finding yet"
+
+    resolve_links(config, runtime)
+    tiles = [a for a in detect_actions(context) if a.kind == "unmigrated-links"]
+    assert tiles, "a scan that found a wikilink must offer the conversion"
     action = tiles[0]
-    assert "may still" in action.title
-    # It must not state as fact that wikilinks are present.
-    assert "still uses the retired" not in action.title
-    assert "still contains" not in action.detail
+    assert "still uses the retired" in action.title
+    assert "linked.md" in action.detail
+
+    # A clean vault reaches zero for a reason other than "a migration ran".
+    (root / "linked.md").unlink()
+    (root / "Note.md").write_text("[Peter](./People/Peter.md)\n", encoding="utf-8")
+    resolve_links(config, runtime)
+    assert [
+        a for a in detect_actions(context) if a.kind == "unmigrated-links"
+    ] == []
 
 
 
@@ -808,35 +840,288 @@ def test_the_drift_detectors_are_silent_before_the_re_rooting(tmp_path: Path) ->
     assert "workspace-assets-stale" not in kinds
 
 
-def test_pending_skill_triage_is_chat_only(tmp_path: Path) -> None:
-    config = _RerootedConfig(tmp_path)
-    for name in ("personal", "work"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    triage = tmp_path / ".runtime" / "migration" / "skills-triage.md"
-    triage.parent.mkdir(parents=True, exist_ok=True)
-    triage.write_text("# Triage\n\n- skills/alpha\n- skills/beta\n", encoding="utf-8")
+def _migrated_catalog_install(tmp_path: Path, runtime: Path) -> tuple[_RerootedConfig, Path]:
+    """A re-rooted install whose skill catalog the migration could not place.
 
-    actions = [a for a in detect_actions(_context(tmp_path, config=config))
-               if a.kind == "skill-triage-pending"]
+    Built by **running** the migration over a synthetic pre-migration install,
+    not by writing a file where the detector happens to read it (#810). A fixture
+    written at the detector's path passes whether or not the two agree, and that
+    is exactly how a card that could never fire stayed green.
+
+    Returns the config to detect against and the sheet the migration wrote.
+    """
+    from ciao.workspace_reroot import apply
+
+    install = tmp_path / "install"
+    install.mkdir()
+    for name in ("personal", "work"):
+        (install / "memory-vault" / name / "People").mkdir(parents=True)
+        (install / "memory-vault" / name / "People" / "Peter.md").write_text(
+            "---\ntype: person\n---\n# Peter\n", encoding="utf-8"
+        )
+    for generated in ("INDEX.md", "MEMORY.md", "VOCABULARY.md"):
+        (install / "memory-vault" / generated).write_text("generated\n", encoding="utf-8")
+    (install / "skills" / "jira-tickets").mkdir(parents=True)
+    (install / "skills" / "jira-tickets" / "SKILL.md").write_text(
+        "---\nname: jira-tickets\ndescription: File a Jira ticket.\n---\n# Jira\n",
+        encoding="utf-8",
+    )
+    (install / "skills" / "linkedin-writing").mkdir(parents=True)
+    (install / "skills" / "linkedin-writing" / "SKILL.md").write_text(
+        "---\nname: linkedin-writing\ndescription: Draft a post | with a pipe\n---\n",
+        encoding="utf-8",
+    )
+
+    result = apply(
+        install,
+        install / "memory-vault",
+        ["personal", "work"],
+        runtime,
+        primary="personal",
+    )
+    assert result["status"] == "migrated", result.get("refusals")
+    config = _RerootedConfig(install, workspaces=("personal", "work"))
+    sheet = install / "personal" / "memory-vault" / "Workspace" / "Skill-Triage.md"
+    assert sheet.is_file(), "the migration wrote no sheet for this test to find"
+    return config, sheet
+
+
+def test_the_card_follows_the_sheet_the_migration_actually_wrote(tmp_path: Path) -> None:
+    """#810: the detector and the re-rooting used different paths for the sheet.
+
+    The migration writes `Workspace/Skill-Triage.md` inside the primary
+    workspace's vault and records it in the receipt's `created_files`; the
+    detector used to look for `<runtime>/migration/skills-triage.md`, which
+    nothing in `ciao/` has ever written. So the sheet the re-rooting
+    deliberately left unanswered — the one decision it refuses to guess — was
+    surfaced by nothing.
+
+    This runs the migration and then the detector over what it produced, so the
+    two halves are pinned to each other rather than to a hand-written path.
+    """
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+
+    # The path the detector used to guess, still empty on an install the
+    # migration has just re-rooted, and the receipt recording where the sheet
+    # really went.
+    assert not (runtime / "migration" / "skills-triage.md").exists()
+    receipt = json.loads(
+        (runtime / "migration" / "workspace-rooting.json").read_text(encoding="utf-8")
+    )
+    assert sheet.relative_to(config.workspace_root).as_posix() in receipt["created_files"]
+
+    actions = [
+        a
+        for a in detect_actions(_context(tmp_path, config=config, runtime=runtime))
+        if a.kind == "skill-triage-pending"
+    ]
 
     assert len(actions) == 1
     assert "2 skill" in actions[0].title
+    assert str(sheet) in actions[0].chat_prompt
+    assert "jira-tickets" in actions[0].detail
     # Moving someone's tooling between workspaces is a judgement, never a button.
     assert not actions[0].run_label
     assert actions[0].chat_prompt
 
 
-def test_an_empty_triage_file_is_silent(tmp_path: Path) -> None:
-    config = _RerootedConfig(tmp_path)
-    for name in ("personal", "work"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    triage = tmp_path / ".runtime" / "migration" / "skills-triage.md"
-    triage.parent.mkdir(parents=True, exist_ok=True)
-    triage.write_text("# Triage\n\nNothing needed a decision.\n", encoding="utf-8")
+def test_a_filled_in_destination_clears_the_card(tmp_path: Path) -> None:
+    """The sheet is the completion evidence, so an answered sheet means zero.
 
-    assert "skill-triage-pending" not in _kinds(_context(tmp_path, config=config))
+    Nothing in the codebase writes this file, so a card counted on "the file is
+    there" would be permanent by construction — the "offered forever" shape a
+    dismissible card must not have. The Destination cell is the operator's own
+    record of a decision, and reading it is what lets the card go away.
+    """
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+
+    def pending() -> set[str]:
+        return {
+            a.id
+            for a in detect_actions(_context(tmp_path, config=config, runtime=runtime))
+            if a.kind == "skill-triage-pending"
+        }
+
+    assert pending() == {"skill-triage-pending"}
+
+    text = sheet.read_text(encoding="utf-8")
+    answered = text.replace(
+        "| `jira-tickets` | skills/ |  |", "| `jira-tickets` | skills/ | work |"
+    )
+    sheet.write_text(answered, encoding="utf-8")
+
+    actions = [
+        a
+        for a in detect_actions(_context(tmp_path, config=config, runtime=runtime))
+        if a.kind == "skill-triage-pending"
+    ]
+    assert len(actions) == 1
+    assert "1 skill" in actions[0].title, "a filled row must stop being counted"
+    assert "jira-tickets" not in actions[0].detail
+
+    sheet.write_text(
+        answered.replace(
+            "| `linkedin-writing` | skills/ |  |",
+            "| `linkedin-writing` | skills/ | personal |",
+        ),
+        encoding="utf-8",
+    )
+
+    assert "skill-triage-pending" not in _kinds(
+        _context(tmp_path, config=config, runtime=runtime)
+    ), "a fully answered sheet must reach zero"
+
+
+def test_a_deleted_sheet_is_silence_not_a_card_naming_a_missing_file(tmp_path: Path) -> None:
+    """The receipt's claim is checked against the filesystem, not trusted.
+
+    An operator who deletes the sheet has answered it, and a card that says "read
+    this file" about a file that is not there is the unactionable tile operators
+    learn to ignore.
+    """
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+    sheet.unlink()
+
+    assert "skill-triage-pending" not in _kinds(
+        _context(tmp_path, config=config, runtime=runtime)
+    )
+
+
+def test_an_unreadable_receipt_is_unknown_rather_than_a_clean_install(
+    tmp_path: Path,
+) -> None:
+    """A receipt this install cannot read must not report "nothing to decide".
+
+    Absence of proof is not proof: the sheet may well be sitting in the vault
+    with every destination blank, and a card-free strip on the strength of a file
+    that failed to parse is the notice quietly lying about the one thing it
+    exists to report.
+    """
+    runtime = _runtime(tmp_path)
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    (runtime / "migration" / "workspace-rooting.json").write_text("{not json", encoding="utf-8")
+
+    assert "skill-triage-pending" not in _kinds(_context(tmp_path, runtime=runtime))
+
+
+def test_an_unreadable_sheet_is_unknown_rather_than_a_answered_one(
+    tmp_path: Path,
+) -> None:
+    """A sheet that cannot be read must not report itself fully decided.
+
+    The card's completion evidence is the sheet's own blank cells, so a sheet
+    this install cannot read is not an answered sheet: it is an unknown. The
+    strip survives it and the failure is logged, which is the honest outcome —
+    the alternative is reporting "nothing needs deciding" about work nobody could
+    look at.
+    """
+    runtime = _runtime(tmp_path)
+    config, _sheet = _migrated_catalog_install(tmp_path, runtime)
+
+    with patch(
+        "ciao.workspace_reroot.undecided_skill_triage",
+        side_effect=OSError("unreadable"),
+    ):
+        actions = detect_actions(_context(tmp_path, config=config, runtime=runtime))
+
+    assert "skill-triage-pending" not in {a.kind for a in actions}
+
+
+def test_no_receipt_at_all_means_no_sheet_and_no_card(tmp_path: Path) -> None:
+    """A fresh install has no catalog to sort, so it is never nagged.
+
+    Absence of the migration receipt is the absence of the sheet, which is not
+    the same as an empty sheet, and both are silence.
+    """
+    runtime = _runtime(tmp_path)
+    config = _RerootedConfig(tmp_path)
+
+    assert "skill-triage-pending" not in _kinds(
+        _context(tmp_path, config=config, runtime=runtime)
+    )
+
+
+def test_a_refused_migration_wrote_no_sheet_and_offers_no_card(tmp_path: Path) -> None:
+    """A refusal returns before the write, so its receipt names no sheet.
+
+    `read_receipt` gates on `status == "migrated"`, so the resolver sees no
+    completed migration and says none — which is true: the sheet is written
+    inside the transaction a refusal never commits.
+    """
+    runtime = _runtime(tmp_path)
+    (runtime / "migration").mkdir(parents=True, exist_ok=True)
+    (runtime / "migration" / "workspace-rooting.json").write_text(
+        json.dumps(
+            {
+                "status": "refused",
+                "refusals": ["memory-vault has uncommitted changes"],
+                "created_files": ["personal/memory-vault/Workspace/Skill-Triage.md"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert "skill-triage-pending" not in _kinds(_context(tmp_path, runtime=runtime))
+
+
+def test_a_truncated_sheet_row_keeps_the_card_up_rather_than_answering_it(
+    tmp_path: Path,
+) -> None:
+    """A row with no Destination cell is a decision outstanding, not a silent zero.
+
+    The count is the card's completion evidence, so a row the reader cannot find a
+    Destination in cannot be said to be answered. Dropping it let a half-typed row
+    make the card disappear while a skill the operator never decided about was
+    still sitting in the sheet.
+    """
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+    text = sheet.read_text(encoding="utf-8")
+    # Two rows answered, one truncated mid-edit — inside the catalog table, which
+    # is where a row belongs and the only place the reader looks.
+    sheet.write_text(
+        text.replace("| `jira-tickets` | skills/ |  |", "| `jira-tickets` | skills/ | work |")
+        .replace("| `linkedin-writing` | skills/ |  |", "| `linkedin-writing` | skills/ | delete |")
+        .replace(
+            "| `jira-tickets` | skills/ | work |",
+            "| `half-typed` | skills/ |\n| `jira-tickets` | skills/ | work |",
+        ),
+        encoding="utf-8",
+    )
+
+    actions = [
+        a
+        for a in detect_actions(_context(tmp_path, config=config, runtime=runtime))
+        if a.kind == "skill-triage-pending"
+    ]
+
+    assert len(actions) == 1, "a row that cannot be answered must not clear the card"
+    assert "1 skill" in actions[0].title
+    assert "half-typed" in actions[0].detail
+
+
+def test_a_sheet_with_every_destination_filled_is_silent(tmp_path: Path) -> None:
+    """An install whose sheet lists nothing unanswered has nothing to decide."""
+    runtime = _runtime(tmp_path)
+    config, sheet = _migrated_catalog_install(tmp_path, runtime)
+    text = sheet.read_text(encoding="utf-8")
+    sheet.write_text(
+        "\n".join(
+            "| `jira-tickets` | skills/ | work |" if "jira-tickets" in line else
+            "| `linkedin-writing` | skills/ | delete |" if "linkedin-writing" in line else
+            line
+            for line in text.splitlines()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert "skill-triage-pending" not in _kinds(
+        _context(tmp_path, config=config, runtime=runtime)
+    )
 
 
 def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> None:

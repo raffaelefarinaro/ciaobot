@@ -198,15 +198,15 @@ def test_aliased_type_not_promoted(tmp_path: Path):
     vault = tmp_path / "vault"
     vault.mkdir()
     for i in range(6):
-        _write(vault / f"Note{i}.md", _note_body(type_="doc", title=f"Note{i}"))
+        _write(vault / f"Note{i}.md", _note_body(type_="discussion-prep", title=f"Note{i}"))
     entries = vi.scan_vault(vault)
     proposals = generate_vocabulary_proposals(entries, threshold=5)
     # No promotion: drift with suggested target is the low-risk fix.
     assert proposals["type_promotions"] == []
     # But vault_index still reports it as drift with alias target.
     report = vi.vocabulary_report(entries)
-    assert "doc" in report["type_drift"]
-    assert report["type_drift"]["doc"]["suggested"] == "document"
+    assert "discussion-prep" in report["type_drift"]
+    assert report["type_drift"]["discussion-prep"]["suggested"] == "note"
 
 
 def test_tag_promotion_at_threshold(tmp_path: Path):
@@ -387,7 +387,7 @@ def test_os_audit_alias_rename_still_reported_as_drift_not_promotion(tmp_path: P
     vault.mkdir()
     (workspace / ".runtime").mkdir()
     for i in range(6):
-        _write(vault / f"Note{i}.md", _note_body(type_="doc", title=f"Note{i}"))
+        _write(vault / f"Note{i}.md", _note_body(type_="discussion-prep", title=f"Note{i}"))
 
     report = run_os_audit(workspace_dir=workspace, vault_root=vault, runtime_dir=workspace / ".runtime")
     # Aliased types surface as frontmatter_errors (existing step-4 behavior).
@@ -398,7 +398,7 @@ def test_os_audit_alias_rename_still_reported_as_drift_not_promotion(tmp_path: P
     from ciao.vault_migration import migrate_vault_vocabulary
 
     summary = migrate_vault_vocabulary(vault, apply=False)
-    assert any(c["from"] == "doc" and c["to"] == "document" for c in summary["planned"])
+    assert any(c["from"] == "discussion-prep" and c["to"] == "note" for c in summary["planned"])
 
 
 def test_os_audit_vocabulary_scope_workspace_vs_global(tmp_path: Path):
@@ -519,9 +519,9 @@ def test_case_variant_of_alias_type_is_safe_rename_not_promotion(tmp_path: Path)
     vault = tmp_path / "vault"
     vault.mkdir()
     for i in range(6):
-        _write(vault / f"Note{i}.md", _note_body(type_="Doc", title=f"Note{i}"))
+        _write(vault / f"Note{i}.md", _note_body(type_="Discussion-Prep", title=f"Note{i}"))
     entries = vi_mod.scan_vault(vault)
-    assert vi_mod.canonical_type("Doc") == "document"
+    assert vi_mod.canonical_type("Discussion-Prep") == "note"
     proposals = generate_vocabulary_proposals(entries, threshold=5)
     assert proposals["type_promotions"] == []
 
@@ -580,10 +580,10 @@ def test_migration_renames_case_variant_of_alias(tmp_path: Path):
     vault = tmp_path / "vault"
     vault.mkdir()
     for i in range(3):
-        _write(vault / f"Note{i}.md", _note_body(type_="Doc", title=f"Note{i}"))
+        _write(vault / f"Note{i}.md", _note_body(type_="Discussion-Prep", title=f"Note{i}"))
     summary = migrate_vault_vocabulary(vault, apply=False)
     assert summary["unresolved"] == {}
-    assert any(c["from"] == "Doc" and c["to"] == "document" for c in summary["planned"])
+    assert any(c["from"] == "Discussion-Prep" and c["to"] == "note" for c in summary["planned"])
 
 
 def test_migration_renames_case_variant_of_canonical(tmp_path: Path):
@@ -883,8 +883,8 @@ def test_an_aliased_type_is_a_rename_not_a_category(tmp_path: Path):
     spelling of an existing category into the registry."""
     from ciao.vocabulary_proposals import category_candidates
 
-    entries = _cluster(tmp_path, "doc", 5)
-    assert vi.vocabulary_report(entries)["type_drift"]["doc"]["suggested"] == "document"
+    entries = _cluster(tmp_path, "discussion-prep", 5)
+    assert vi.vocabulary_report(entries)["type_drift"]["discussion-prep"]["suggested"] == "note"
     assert category_candidates(entries) == []
 
 

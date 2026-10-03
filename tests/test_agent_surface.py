@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import json
 from pathlib import Path
@@ -117,6 +118,37 @@ def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     assert chat_group <= set(service.operation_table)
 
 
+def test_note_verification_dispatches_on_cli_only_and_is_write_gated(
+    tmp_path: Path,
+) -> None:
+    """The managed operation that replaced hand-editing stale notes.
+
+    Two properties beyond registration. It is `mutating` — the annotations are
+    what `service._invoke`'s plan-mode gate reads, so a `_READ` entry here would
+    let a plan-mode chat write a note. And its whole schema is one path: there is
+    no argument through which a note's text could arrive, which is the property
+    the CLI cannot express and the server has to hold.
+    """
+    from ciao import mcp_server
+
+    service, _ = _service(tmp_path)
+    assert "verify_note" in service.operation_table
+    operation = mcp_server.OPERATIONS_BY_NAME["verify_note"]
+    assert operation.annotations.readOnlyHint is False
+    assert operation.annotations.destructiveHint is False
+    assert set(inspect.signature(operation.fn).parameters) == {"service", "payload_file"}
+
+
+def test_a_plan_mode_chat_cannot_verify_a_note(tmp_path: Path) -> None:
+    """The gate, end to end, through the CLI surface."""
+    service, _ = _service(tmp_path, mode="plan")
+    token = _token(service)
+    with _client(service) as client:
+        response = _post(client, token, "verify_note", {"payload_file": "verify.json"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "plan_mode_read_only"
+
+
 def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     """S4 removed the background-run and schedule groups from the MCP catalog
     but the dispatcher must still run them as `ciao run …` / `ciao schedule …`
@@ -141,7 +173,12 @@ def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> Non
         (["vault", "search", "who is Sofia", "--limit", "3"], ("vault_search", {"query": "who is Sofia", "limit": 3})),
         (["vault", "review", "list"], ("vault_review", {"action": "list"})),
         (["vault", "review", "keep", "--candidate", "c1"], ("vault_review", {"action": "decide", "candidate_id": "c1", "disposition": "keep"})),
+        (["vault", "review", "complete", "--candidate", "c1"], ("vault_review", {"action": "complete", "candidate_id": "c1"})),
+        # The verb is hyphenated on the command line and snake_cased on the wire.
+        (["vault", "review", "restore-completed", "--candidate", "c1"], ("vault_review", {"action": "restore_completed", "candidate_id": "c1"})),
         (["file", "surface", "out/report.md"], ("file_surface", {"path": "out/report.md"})),
+        # The payload crosses as a path; the verdict's prose never does.
+        (["note", "verify", "--payload-file", "out/verify.json"], ("verify_note", {"payload_file": "out/verify.json"})),
         (["chat", "list", "--project", "p1"], ("chats_list", {"project_id": "p1"})),
         (["chat", "get", "--chat", "c2"], ("chat_get", {"chat_id": "c2"})),
         (["chat", "create", "--title", "New", "--prompt", "hi"], ("chat_create", {"title": "New", "prompt": "hi"})),
@@ -194,6 +231,8 @@ def test_every_documented_command_parses() -> None:
         "vault search": ["q"], "vault review show": ["p"],
         "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
         "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
+        "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
+        "note verify": ["--payload-file", "p.json"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
         "project complete": ["p"], "project delete": ["p"], "schedule update": ["s"], "schedule pause": ["s"],
@@ -319,8 +358,14 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     missing = [command for command in _commands() if command not in cli]
     assert missing == []
     # It has to stay cheap: this text is prepended to every turn of every
-    # CLI-surface chat.
-    assert len(cli) < 9000
+    # CLI-surface chat. Raised from 9000 to 9500 for `note verify` (#726-D) —
+    # the previous 9000 left 24 characters of headroom, so the operation the
+    # agent is supposed to use INSTEAD of hand-editing stale notes could not
+    # be described at all. A command with no line here is a command the model
+    # does not know exists, which for this one means it hand-edits a note's
+    # `updated:` and leaves no receipt behind: exactly the defect the child
+    # exists to close. Pay for the line, and keep the ceiling honest.
+    assert len(cli) < 9500
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(

@@ -18,12 +18,13 @@ is an injectable callable so the decision logic stays unit-testable.
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+from ciao.tool_path import resolve_command
 
 # Prefix that marks the skills we regenerate from the CLI. Any directory under
 # the stock skills folder starting with this is treated as a generated gws
@@ -63,8 +64,8 @@ OAuth setup: Settings → Workspaces (Google Workspace card). Credentials live i
 ## Connection status
 
 Before promising a Google call will work, check whether the active workspace's
-Google account is connected and its token is valid with the `gws_status` MCP
-tool. It reports the linked profile, whether credentials are present, the last
+Google account is connected and its token is valid with `ciao gws status`.
+It reports the linked profile, whether credentials are present, the last
 health-monitor token reading, and whether a re-login is needed. It is read-only
 and never runs `gws auth status` itself. If `needs_relogin` is true, tell the
 user to re-authenticate in Settings → Workspaces (Google Workspace card) — the
@@ -208,13 +209,13 @@ def _normalize(text: str) -> str:
 
 def _gws_generate(dest: Path, *, gws_bin: str = "gws") -> None:
     """Default generator: run ``gws generate-skills`` in ``dest``."""
-    binary = shutil.which(gws_bin) or gws_bin
     try:
+        command = resolve_command(gws_bin) or [gws_bin]
         result = subprocess.run(
-            [binary, "generate-skills"],
+            [*command, "generate-skills"],
             cwd=str(dest),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             check=False,
         )
     except OSError as exc:
@@ -229,10 +230,10 @@ def _gws_generate(dest: Path, *, gws_bin: str = "gws") -> None:
 
 def installed_gws_version(*, gws_bin: str = "gws", runner=subprocess.run) -> str | None:
     """Return the installed ``gws`` CLI version (e.g. ``0.22.5``) or None."""
-    binary = shutil.which(gws_bin) or gws_bin
     try:
+        command = resolve_command(gws_bin) or [gws_bin]
         result = runner(
-            [binary, "--version"],
+            [*command, "--version"],
             capture_output=True,
             text=True,
             check=False,
@@ -306,6 +307,6 @@ def regenerate_stock_gws_skills(
             updated.append(name)
             if write:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(new_text, encoding="utf-8")
+                target.write_text(new_text, encoding="utf-8", newline="")
 
     return RegenResult(updated=updated, unchanged=unchanged, missing=missing)

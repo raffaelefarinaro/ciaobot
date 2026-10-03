@@ -10,14 +10,11 @@ import base64
 import json
 import logging
 import time
-from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
-
-NOTIFICATION_LOG_MAX = 100
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -26,14 +23,12 @@ def _b64url(data: bytes) -> str:
 class PushManager:
     """Persist VAPID keys + subscriptions, send Web Push notifications."""
 
-    def __init__(self, runtime_root: Path, subject: str = "", *, push_all: Callable[[], bool] | None = None) -> None:
+    def __init__(self, runtime_root: Path, subject: str = "") -> None:
         self._runtime = runtime_root
         self._runtime.mkdir(parents=True, exist_ok=True)
         self._vapid_path = runtime_root / "vapid.json"
         self._subs_path = runtime_root / "push_subscriptions.json"
-        self._log_path = runtime_root / "notifications.jsonl"
         self._subject = subject
-        self._push_all = push_all
         self._lock = Lock()
         self._subs: list[dict[str, Any]] = []
         self._private_pem: str = ""
@@ -42,22 +37,12 @@ class PushManager:
         self._load_or_create_keys()
         self._load_subs()
 
-    def push_all_devices(self) -> bool:
-        """Whether Web Push should cover every subscription, this machine included."""
-        if self._push_all is None:
-            return False
-        try:
-            return bool(self._push_all())
-        except Exception:
-            logger.exception("push_all_devices lookup failed; keeping the tray split")
-            return False
-
     # ── VAPID keys ──────────────────────────────────────────────────────
 
     def _load_or_create_keys(self) -> None:
         if self._vapid_path.exists():
             try:
-                data = json.loads(self._vapid_path.read_text())
+                data = json.loads(self._vapid_path.read_text(encoding="utf-8"))
                 self._private_pem = data["private_pem"]
                 self._public_b64 = data["public_b64"]
                 # Older files may not have the raw key; derive + persist it.
@@ -92,7 +77,7 @@ class PushManager:
             "private_pem": self._private_pem,
             "private_raw_b64": self._private_raw_b64,
             "public_b64": self._public_b64,
-        }))
+        }), encoding="utf-8", newline="")
 
     @staticmethod
     def _derive_raw_from_pem(pem: str) -> str:
@@ -119,24 +104,21 @@ class PushManager:
         if not self._subs_path.exists():
             return
         try:
-            self._subs = json.loads(self._subs_path.read_text()).get("subscriptions", [])
+            self._subs = json.loads(self._subs_path.read_text(encoding="utf-8")).get("subscriptions", [])
         except Exception:
             logger.exception("Failed to load subscriptions")
             self._subs = []
 
     def _save_subs(self) -> None:
-        self._subs_path.write_text(json.dumps({"subscriptions": self._subs}, indent=2))
+        self._subs_path.write_text(json.dumps({"subscriptions": self._subs}, indent=2), encoding="utf-8", newline="")
 
-    def add(self, subscription: dict[str, Any], *, local: bool = False) -> None:
+    def add(self, subscription: dict[str, Any]) -> None:
         endpoint = subscription.get("endpoint")
         if not endpoint:
             raise ValueError("subscription missing endpoint")
         with self._lock:
             self._subs = [s for s in self._subs if s.get("endpoint") != endpoint]
-            # `local` marks a subscription created from this machine (loopback
-            # client). Only a local subscription's successful delivery lets the
-            # menu bar stand down from its native-banner fallback.
-            self._subs.append({**subscription, "local": bool(local)})
+            self._subs.append(dict(subscription))
             self._save_subs()
 
     def remove(self, endpoint: str) -> None:
@@ -152,100 +134,27 @@ class PushManager:
     def has(self, endpoint: str) -> bool:
         return any(s.get("endpoint") == endpoint for s in self._subs)
 
-    # ── Notification log ────────────────────────────────────────────────
-
-    def _log_notification(self, payload: dict[str, Any]) -> None:
-        """Append to .runtime/notifications.jsonl so local companions (the
-        macOS menu bar app) can show notifications even when no Web Push
-        subscription exists."""
-        try:
-            with self._lock:
-                entry = {"ts": time.time(), **payload}
-                with self._log_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(entry) + "\n")
-                lines = self._log_path.read_text(encoding="utf-8").splitlines()
-                if len(lines) > NOTIFICATION_LOG_MAX * 2:
-                    self._log_path.write_text(
-                        "\n".join(lines[-NOTIFICATION_LOG_MAX:]) + "\n",
-                        encoding="utf-8",
-                    )
-        except Exception:
-            logger.exception("Failed to log notification")
-
-    def read_log(self, *, after: float = 0.0, limit: int = NOTIFICATION_LOG_MAX) -> list[dict[str, Any]]:
-        """Logged notifications with ``ts >= after``, oldest first.
-
-        Backs ``/api/menubar-notifications`` so a client node's tray reads the
-        log of the host that actually ran the chats instead of its own, which
-        stays empty forever.
-
-        ``after`` is inclusive so two entries sharing a timestamp are never
-        split across polls; the caller dedupes. A partial trailing line (the
-        log is appended from a worker thread) is skipped rather than raising —
-        the next poll sees it whole.
-        """
-        try:
-            lines = self._log_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-        entries: list[dict[str, Any]] = []
-        for line in lines:
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(entry, dict):
-                continue
-            try:
-                ts = float(entry.get("ts") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if ts >= after:
-                entries.append(entry)
-        return entries[-limit:] if limit > 0 else entries
-
     # ── Send ────────────────────────────────────────────────────────────
 
     def send(self, payload: dict[str, Any]) -> None:
-        """Notify this machine via the always-on menu bar, and other devices
-        via Web Push.
+        """Web Push ``payload`` to every subscription, this machine included.
 
-        The local machine ALWAYS gets a native menu-bar banner (queued in
-        notifications.jsonl; the menu bar posts it when its Notifications
-        toggle is on). Web Push is used only to reach *remote* subscriptions
-        (other devices) — never the local browser.
-
-        Why not trust Web Push for the local browser: the push service returns
-        2xx as soon as it *accepts* the message, which is not the same as the
-        browser *displaying* it. A browser with notifications disabled at the
-        OS level (e.g. System Settings → Notifications → Chrome = off) silently
-        drops the push while the push service still reports success. Suppressing
-        the native banner on that unverifiable signal made notifications vanish
-        entirely. The menu bar is always running and reliable, so it owns the
-        local notification; Web Push is a best-effort channel for other devices.
-
-        With push_all_devices on, every subscription is pushed and the tray log is skipped.
+        Each device opts in on its own (Settings → Notifications), so a
+        subscription existing is the whole delivery decision.
         """
-        if self.push_all_devices():
-            self._deliver(list(self._subs), payload)
-            return
-        self._log_notification(payload)
-        remote = [s for s in self._subs if not s.get("local")]
-        self._deliver(remote, payload)
+        self._deliver(list(self._subs), payload)
 
     def clear_chat(self, chat_id: str) -> None:
         """Clear delivered notifications for ``chat_id`` on every channel.
 
-        The log entry is consumed by the macOS menu-bar companion. The same
-        control payload is sent to every Web Push subscription, including the
-        local browser subscription: service workers can close notifications
-        they previously displayed, but the server cannot do that directly.
+        The control payload is sent to every Web Push subscription: service
+        workers can close notifications they previously displayed, but the
+        server cannot do that directly.
         """
         chat_id = chat_id.strip()
         if not chat_id:
             return
         payload = {"kind": "clear", "chat_id": chat_id}
-        self._log_notification(payload)
         self._deliver(list(self._subs), payload)
 
     def _deliver(self, subs: list[dict[str, Any]], payload: dict[str, Any]) -> int:

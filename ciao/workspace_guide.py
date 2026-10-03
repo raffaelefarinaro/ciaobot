@@ -35,6 +35,9 @@ import os
 import subprocess
 from pathlib import Path
 
+from ciao.git_proc import EXACT_BYTES
+from ciao.os_support.files import open_fd
+
 logger = logging.getLogger(__name__)
 
 #: The workspace guide. Both providers discover this name natively.
@@ -81,10 +84,10 @@ def _aliases(link: Path, target: Path) -> bool:
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        ["git", *EXACT_BYTES, *args],
         cwd=root,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8",
         timeout=30,
         check=False,
     )
@@ -209,21 +212,24 @@ def _write_backup(path: Path, text: str) -> bool:
     it. The migration runs unattended at startup, before the server binds, so
     nobody is watching when it happens.
 
-    ``O_NOFOLLOW`` refuses the open outright when the final component is a
-    link, and ``O_TRUNC`` is deliberate for the regular-file case: the backup
+    ``follow_symlinks=False`` (``O_NOFOLLOW``) refuses the open outright when
+    the final component is a link, and ``O_TRUNC`` is deliberate for the
+    regular-file case: the backup
     is rewritten, not appended. Returns whether the backup was written; a
     refusal is reported by the caller rather than silently skipped, because
     the backup is the only copy of what the merge does not fold in.
     """
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        fd = open_fd(
+            path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, follow_symlinks=False
+        )
     except OSError:
         logger.warning(
             "refusing to write %s: it exists and is not a regular file", path
         )
         return False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
     except OSError:
         logger.exception("could not write %s", path)
@@ -437,7 +443,7 @@ def migrate_root(root: Path | str) -> str:
         # filesystem, and the temp file lives beside the target so it is.
         tmp = base / f"{LEGACY_GUIDE_NAME}.merge.tmp"
         try:
-            tmp.write_text(merged, encoding="utf-8")
+            tmp.write_text(merged, encoding="utf-8", newline="")
             os.replace(tmp, legacy)
         except OSError:
             try:

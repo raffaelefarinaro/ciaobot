@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ciao.entity_types import stock_entity_type_registry
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
 from ciao.models import BridgeMode
+from ciao.os_support.paths import resolve_path
 from ciao.providers.opencode import OpencodeSettings
 
 if TYPE_CHECKING:
@@ -95,6 +96,74 @@ def _workspace_env(source: Any) -> str:
     the operator happened to be standing in.
     """
     return str(source.get("CIAO_WORKSPACE", "") or "").strip()
+
+
+def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
+    """``base`` with the installed server's workspace and its ``.env`` applied.
+
+    The one answer to "which install is this shell talking to": a bare-shell
+    invocation (`ciao health get` from any directory) has no CIAO_WORKSPACE, and
+    the workspace the installed server's service definition points at is the
+    install the operator actually has — not a fresh bootstrap workspace
+    manufactured beside it. ``base`` naming a workspace already is that answer,
+    and it is returned untouched.
+
+    Read-only, like the ``export=False`` branch of :meth:`CiaoConfig.from_env`:
+    the discovered ``.env`` is overlaid into a private mapping rather than loaded
+    into ``os.environ``, because ``load_dotenv`` sets keys it has never seen and
+    nothing restores them, so a read-only diagnostic would change its caller's
+    environment. No file is created and no secret is minted. Precedence matches
+    ``load_dotenv``: the caller's environment wins over the file.
+    """
+    if _workspace_env(base):
+        return dict(base)
+    # The platform branch, the definition it reads and the staleness guard all
+    # live in `ciao.install_discovery`; imported here so the seam stays the one
+    # place that knows the platform and the patch target the existing tests
+    # install (`ciao.macos_service.discover_runtime`) is still reached.
+    from ciao.install_discovery import discover_workspace
+
+    discovered = discover_workspace(base)
+    if discovered is None:
+        return dict(base)
+    # The discovered workspace's .env is what the running server reads; a
+    # bare-shell invocation must see the same values — auth settings first:
+    # `ciao run` against a stopped install must require the workspace's
+    # password, not fall back to an unauthenticated shell env. The discovered
+    # workspace is pinned absolutely so the file's relative CIAO_WORKSPACE=.
+    # cannot rebase onto the shell cwd. This must run before any field is
+    # parsed from the mapping, or it would see only the bare shell.
+    from dotenv import dotenv_values
+
+    discovered_workspace = str(discovered)
+    dotenv_path = Path(discovered_workspace) / ".env"
+    # Pinned even when that workspace has no `.env`: a service definition pointing
+    # at a directory means a server is installed there, and falling through to a
+    # freshly manufactured bootstrap root beside it is the failure discovery
+    # exists to prevent. (`from_env` used to pin only when the `.env` existed,
+    # while the CLI's own copy always pinned; this is the one rule for both.)
+    # A definition naming a directory that is no longer there is stale, and pinning
+    # it would recreate what the operator deleted (`_read_or_create_secret` mkdirs
+    # the runtime root), so `discover_workspace`'s `is_dir()` guard is part of
+    # this rule.
+    try:
+        overlay: dict[str, str] = {
+            key: value
+            for key, value in dotenv_values(dotenv_path).items()
+            if key and value is not None
+        }
+    except OSError:
+        overlay = {}
+    # The pin is the merge's final word, not the overlay's: discovery is entered
+    # for an *empty* CIAO_WORKSPACE as well as an unset one
+    # (`export CIAO_WORKSPACE=` in a shell profile), and the caller's
+    # environment wins the merge, so an empty string would otherwise beat the
+    # pin. The result was the hybrid this pinning exists to prevent — the
+    # installed workspace's auth and provider settings applied to a freshly
+    # manufactured bootstrap root, because `bootstrap_mode` still saw no
+    # workspace.
+    merged: dict[str, str] = {**overlay, **base, "CIAO_WORKSPACE": discovered_workspace}
+    return merged
 
 
 def reset_exported_dotenv() -> None:
@@ -195,7 +264,7 @@ def _clean_relative_path(raw: str) -> str:
     parts = [part for part in path.parts if part not in {".", ""}]
     if ".." in parts:
         raise ValueError("relative vault_root must not contain '..'")
-    return str(Path(*parts)) if parts else ""
+    return Path(*parts).as_posix() if parts else ""
 
 
 def _looks_like_vault(path: Path) -> bool:
@@ -478,7 +547,7 @@ def _read_or_create_secret(path: Path) -> str:
         pass
     token = secrets.token_urlsafe(32)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token + "\n", encoding="utf-8")
+    path.write_text(token + "\n", encoding="utf-8", newline="")
     return token
 
 
@@ -530,7 +599,6 @@ class CiaoConfig:
     legacy_workspaces_env: str = field(default="", repr=False)
     legacy_gws_profile: str = field(default="", repr=False)
     legacy_insights_disabled: bool | None = field(default=None, repr=False)
-    legacy_trajectories_disabled: bool | None = field(default=None, repr=False)
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
     # the PWA Settings → Models & providers tab (runtime settings store). A missing
@@ -563,12 +631,6 @@ class CiaoConfig:
     # Models tab (runtime settings store).
     # Empty = automatic routing: the workspace's sonnet-tier model.
     insights_model_override: str = ""
-    # Trajectory capture: when a chat is archived, also write a structured
-    # JSON record of skills loaded, tools used, errors, and the outcome to
-    # ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The operator
-    # setting is persisted by AppSettingsStore and migrated from the retired
-    # CIAO_TRAJECTORIES_DISABLED value.
-    trajectories_enabled: bool = True
 
     # Comma-separated list of models for the adversarial_review MCP tool.
     # Empty string defaults to the script's built-in panel.
@@ -614,31 +676,6 @@ class CiaoConfig:
         names = self.workspace_names()
         return names[0] if names else ""
 
-    def legacy_entity_workspace(self) -> str:
-        """Workspace that owns unprefixed entries in the global vault index.
-
-        First-run setup historically pointed the user's chosen logical
-        workspace at ``CIAO_VAULT_ROOT`` itself. If a workspace literally named
-        ``personal`` is added later, it must not steal those legacy entities
-        merely because :meth:`primary_workspace` prefers that name.
-        """
-        owners: list[str] = []
-        for name in self.workspace_names():
-            try:
-                if self.workspace_vault_root(name) == self.vault_root:
-                    owners.append(name)
-            except ValueError:
-                continue
-        if len(owners) == 1:
-            return owners[0]
-        if len(owners) > 1:
-            logger.warning(
-                "Legacy entity ownership is ambiguous across workspaces: %s",
-                ", ".join(owners),
-            )
-            return ""
-        return self.primary_workspace()
-
     def workspace_vault_root(self, workspace: str | None) -> Path:
         """Absolute vault directory for one logical workspace.
 
@@ -675,7 +712,7 @@ class CiaoConfig:
         :meth:`agent_vault_root` already derives from the same receipt.
 
         Answering "shared" unconditionally made this a claim about the past.
-        ``_detect_vault_location`` compares the resolved vault against this and
+        The vault-location check compares the resolved vault against this and
         raised "The personal vault is not in its standard folder" on a correctly
         migrated install, for every workspace, permanently — with a chat prompt
         telling the operator to move the vault back to where the migration had
@@ -701,7 +738,7 @@ class CiaoConfig:
         """Portable registry value for a workspace's standard vault folder."""
         root = self.canonical_workspace_vault_root(workspace)
         try:
-            return str(root.relative_to(self.workspace_root))
+            return root.relative_to(self.workspace_root).as_posix()
         except ValueError:
             return str(root)
 
@@ -844,7 +881,7 @@ class CiaoConfig:
             raise ValueError("vault_root must not be empty")
         root = Path(cleaned).expanduser()
         if root.is_absolute():
-            resolved = root.resolve()
+            resolved = resolve_path(root)
             if resolved == Path(resolved.anchor):
                 raise ValueError("vault_root must not be the filesystem root")
             # Absolute compatibility roots are canonicalized when the registry
@@ -858,14 +895,14 @@ class CiaoConfig:
             candidate = self.vault_root / root
             if candidate.is_symlink():
                 raise ValueError("workspace vault folder must not be a symlink")
-            resolved = candidate.resolve()
+            resolved = resolve_path(candidate)
             if resolved.parent != self.vault_root:
                 raise ValueError(
                     "workspace vault folder must stay inside the vault root"
                 )
             return resolved
         candidate = self.workspace_root / root
-        resolved = candidate.resolve()
+        resolved = resolve_path(candidate)
         if resolved == Path(resolved.anchor):
             raise ValueError("vault_root must not be the filesystem root")
         if resolved != candidate:
@@ -1023,7 +1060,7 @@ class CiaoConfig:
             for workspace in self.workspaces.values()
         ]
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
         self._workspace_registry_changed = False
 
@@ -1132,7 +1169,7 @@ class CiaoConfig:
                 indent=2,
             )
             + "\n",
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
         logger.warning(
             "CIAO_WORKSPACES is no longer read; imported %s into %s once. "
@@ -1182,7 +1219,7 @@ class CiaoConfig:
         if imported:
             tmp = registry_path.with_suffix(".json.tmp")
             try:
-                tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+                tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
                 tmp.replace(registry_path)
             except OSError:
                 logger.warning("Could not migrate the legacy GWS profile", exc_info=True)
@@ -1200,7 +1237,7 @@ class CiaoConfig:
                     indent=2,
                 )
                 + "\n",
-                encoding="utf-8",
+                encoding="utf-8", newline="",
             )
         except OSError:
             logger.warning("Could not record the legacy GWS profile migration", exc_info=True)
@@ -1332,11 +1369,10 @@ class CiaoConfig:
         the per-workspace allowlist was silently inert: a workspace restricted
         to two servers could reach every server its root declares.
 
-        Omitted (the seeding path), it keeps the pre-re-rooting view — the
-        shared files only. That is deliberate there: seeding writes an allowlist
-        from what a workspace can reach TODAY, and reading a per-root file into
-        it would seed a brand-new workspace with everything its root declares,
-        turning the fail-closed ``None`` default into allow-all.
+        Omitted, it returns the shared files only; no production caller omits
+        it now (seeding passes each workspace's name). Every caller therefore
+        resolves the declaration from the same file the chat reads, which is
+        also the rule seeding writes an allowlist from.
         """
         workspace_root = self.workspace_root
         candidates = [
@@ -1488,10 +1524,12 @@ class CiaoConfig:
         is confined to metadata Ciaobot generates (the workspace registry), and
         there is exactly one correct outcome per workspace — what it can reach
         right now. A registered workspace whose allowlist is ``None`` and that
-        exists in the registry file is seeded with every server declared in
-        ``.mcp.json`` that its ``disallowed_tools`` does not already deny. A
-        brand-new workspace created in code (legacy fallback, no file) is not
-        touched and keeps its ``None`` fail-closed default.
+        exists in the registry file is seeded with every server declared for that
+        workspace (its own agent-root ``.mcp.json`` first, then the shared
+        files, as :meth:`_declared_mcp_server_names` resolves them) that its
+        ``disallowed_tools`` does not already deny. A brand-new workspace
+        created in code (legacy fallback, no file) is not touched and keeps its
+        ``None`` fail-closed default.
 
         This reads and rewrites the raw file so unrelated or unknown keys (e.g.
         a future field this release does not know) survive; the normal
@@ -1508,18 +1546,6 @@ class CiaoConfig:
             return
         if not isinstance(entries, list):
             return
-        declared = self._declared_mcp_server_names()
-        if declared is None:
-            # A corrupt .mcp.json cannot be mapped to names; leave the
-            # allowlist untouched and let deny resolution fail closed by name
-            # against the known universe instead.
-            return
-        if not declared:
-            # Nothing is declared, so the effective set is empty and ``None``
-            # already denies nothing to reach (both fail closed). Persisting
-            # ``[]`` here would rewrite the registry on every fresh install and
-            # break a setup-rerun's idempotency for no behavioural change.
-            return
         changed = False
         for entry in entries:
             if not isinstance(entry, dict):
@@ -1527,6 +1553,22 @@ class CiaoConfig:
             name = str(entry.get("name", "")).strip()
             workspace_config = self.workspace(name)
             if workspace_config is None or workspace_config.allowed_mcp_servers is not None:
+                continue
+            # Resolved per entry, from this workspace's own agent root first:
+            # on a composed install that file is the only declaration there is,
+            # so one global (install-level only) read found nothing and left
+            # every ``None`` allowlist unmigrated and fail-closed.
+            declared = self._declared_mcp_server_names(name)
+            if declared is None:
+                # A corrupt .mcp.json cannot be mapped to names; leave this
+                # allowlist untouched and let deny resolution fail closed by
+                # name against the known universe instead.
+                continue
+            if not declared:
+                # Nothing is declared for this workspace, so the effective set is
+                # empty and ``None`` already fails closed. Persisting ``[]`` would
+                # rewrite the registry on every fresh install and break a
+                # setup-rerun's idempotency for no behavioural change.
                 continue
             denied = set(workspace_config.disallowed_tools or ())
             seed = [s for s in declared if f"mcp__{s}" not in denied]
@@ -1536,7 +1578,7 @@ class CiaoConfig:
         if not changed:
             return
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
 
     @classmethod
@@ -1606,61 +1648,11 @@ class CiaoConfig:
         else:
             source = os.environ
 
-        discovered_workspace = ""
         if env is None and not _workspace_env(source):
-            # A bare-shell CLI invocation (`ciao health get` from any directory)
-            # has no CIAO_WORKSPACE. Fall back to the workspace the installed
-            # server's LaunchAgent points at before dropping to bootstrap, so
-            # CLI diagnostics report on the install the operator actually has
-            # instead of manufacturing a fresh bootstrap workspace beside it.
-            # Gated on ``env is None``: explicit env dicts (every test, and any
-            # caller constructing a config) must keep their exact semantics.
-            from ciao.macos_service import discover_runtime
-
-            try:
-                discovered = discover_runtime(environ=dict(os.environ))
-            except Exception:  # noqa: BLE001 - plist missing/unreadable
-                discovered = None
-            if discovered and discovered.workspace:
-                discovered_workspace = discovered.workspace
-        if env is None and discovered_workspace:
-            # The discovered workspace's .env is what the running server reads;
-            # a bare-shell invocation must see the same values — auth settings
-            # first: `ciao run` against a stopped install must require the
-            # workspace's password, not fall back to an unauthenticated shell
-            # env. Values are overlaid into the source mapping rather than
-            # loaded into os.environ: a direct env write would leak into the
-            # process after this call (load_dotenv sets keys it has never seen,
-            # and nothing restores them), so a read-only diagnostic changed its
-            # caller's environment. Precedence matches load_dotenv: the process
-            # environment wins over the file, and the discovered workspace is
-            # pinned absolutely so the file's relative CIAO_WORKSPACE=. cannot
-            # rebase onto the shell cwd. This must run before any field below
-            # is parsed from ``source``, or it would see only the bare shell.
-            from dotenv import dotenv_values
-
-            dotenv_path = Path(discovered_workspace) / ".env"
-            if dotenv_path.exists():
-                try:
-                    dotenv_overlay = {
-                        key: value
-                        for key, value in dotenv_values(dotenv_path).items()
-                        if key and value is not None
-                    }
-                except OSError:
-                    dotenv_overlay = {}
-                dotenv_overlay["CIAO_WORKSPACE"] = discovered_workspace
-                source = {**dotenv_overlay, **source}
-                # Pinned again after the merge, not only in the overlay: discovery is
-                # entered for an *empty* CIAO_WORKSPACE as well as an unset one
-                # (`export CIAO_WORKSPACE=` in a shell profile), and the
-                # process environment wins the merge, so the empty string beat
-                # the pin. The result was the hybrid this pinning exists to
-                # prevent — the installed workspace's auth and provider
-                # settings applied to a freshly manufactured bootstrap root,
-                # because `bootstrap_mode` below still saw no workspace.
-                if not _workspace_env(source):
-                    source["CIAO_WORKSPACE"] = discovered_workspace
+            # A bare-shell CLI invocation has no CIAO_WORKSPACE: read the install the
+            # LaunchAgent points at (see `installed_workspace_env`). Gated on
+            # ``env is None``: explicit env dicts keep their exact semantics.
+            source = installed_workspace_env(source)
 
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
         pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
@@ -1711,7 +1703,7 @@ class CiaoConfig:
         else:
             vault_root = (workspace_root / "memory-vault").resolve()
         runtime_root = Path(
-            source.get("CIAO_RUNTIME_ROOT", str(runtime_default))
+            source.get("CIAO_RUNTIME_ROOT", "").strip() or str(runtime_default)
         ).expanduser()
         if not runtime_root.is_absolute():
             runtime_root = workspace_root / runtime_root
@@ -1750,14 +1742,6 @@ class CiaoConfig:
             if not legacy_insights_raw
             else legacy_insights_raw not in {"0", "false", "no", "off"}
         )
-        legacy_trajectories_raw = str(
-            source.get("CIAO_TRAJECTORIES_DISABLED", "") or ""
-        ).strip().lower()
-        legacy_trajectories_disabled = (
-            None
-            if not legacy_trajectories_raw
-            else legacy_trajectories_raw not in {"0", "false", "no", "off"}
-        )
 
         return cls(
             pwa_auth_token=pwa_auth_token,
@@ -1777,7 +1761,6 @@ class CiaoConfig:
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
             legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),
             legacy_insights_disabled=legacy_insights_disabled,
-            legacy_trajectories_disabled=legacy_trajectories_disabled,
         )
 
 

@@ -41,7 +41,7 @@
     <section>
       <p class="eyebrow">Any AI model</p>
       <h1>Bring the AI you already use</h1>
-      <p class="lead">Ciaobot doesn't sell you a model or ask for an API key. It runs chats through one of two open agent tools you install and sign in to yourself, and adds the workspaces, memory, files and schedules around them.</p>
+      <p class="lead">Your agents do the work. Ciaobot keeps the context. Connect Claude Code or OpenCode using your existing provider access, and add a persistent personal workspace around them.</p>
     </section>
 
     <section>
@@ -71,7 +71,14 @@
 
     <section>
       <h2>Why Ciaobot doesn't build its own agent</h2>
-      <p>The agent (the part that talks to the model, calls tools and edits files) is the hardest part of any AI tool, and Anthropic and the opencode team work on it full time. So Ciaobot builds on theirs and focuses on what they don't do: workspaces and projects, memory, assistant-tuned instructions and skills, and an app around it all. When Claude Code or opencode gets better, so does Ciaobot.</p>
+      <p>Claude Code and OpenCode already handle the model and tool execution loop. Ciaobot starts and supervises their sessions, adds workspace and project context, and keeps files, recurring tasks and reviewable memory around the work. It builds on those agents rather than replacing them.</p>
+      <p>Why not just use either agent directly? You can. Ciaobot is for when you want short tasks to share durable context, documents to review beside the chat, and useful knowledge to survive the end of a session.</p>
+    </section>
+
+    <section id="continuity">
+      <h2>Change your AI, not your second brain.</h2>
+      <p>Your notes, project context and remembered preferences stay in a folder you own. They remain ordinary Markdown, useful with another agent or text editor even when Ciaobot is not running.</p>
+      <p>This is continuity of your workspace, not a promise that provider sessions are interchangeable. A handover gives the other provider visible conversation history; its tools, permissions and supported capabilities may differ.</p>
     </section>
 
     <section>
@@ -108,12 +115,18 @@
       <ul>
         <li><strong>Per workspace:</strong> Settings → Workspaces sets which tool each workspace uses by default, for example Claude for Work and a local model for Personal.</li>
         <li><strong>Per chat:</strong> click the model chip in the chat header (<kbd>⌥</kbd>+<kbd>M</kbd>) to change model or thinking level. Switching to the other tool hands the chat over with its visible history.</li>
-        <li><strong>Per job:</strong> automations, memory extraction and the <code>/critique</code> review panel each have their own model setting, so you can put cheaper models on background work.</li>
+        <li><strong>Per job:</strong> automations, memory extraction and the <code>/critique</code> review panel each have their own model setting.</li>
       </ul>
       <figure>
         <a href="assets/img/voice.webp"><img src="assets/img/voice.webp" alt="Settings, Models &amp; providers: the background models used for memory extraction and the critique panel" loading="lazy" width="1600" height="1000"></a>
         <figcaption>Settings → Models &amp; providers: separate models for memory extraction and for second opinions.</figcaption>
       </figure>
+    </section>
+
+    <section id="critique">
+      <h2>Get independent second opinions with the critique panel</h2>
+      <p>Ask for a critique in a chat with <code>/critique</code> or the critique skill. Ciaobot sends the same plan, answer or file to each model in the panel for an independent adversarial review, then compares their findings and recommends whether to ship, revise or block. You can also run <code>ciao critique --input plan.md --type plan</code> in a terminal.</p>
+      <p>Settings → Models &amp; providers → Critique panel controls which models take part. On <strong>Automatic</strong>, the panel combines the distinct effective default models of your configured workspaces: each workspace’s default provider uses its configured model default. A provider you have not signed in to is skipped. Choose models in the picker to override the automatic panel; clear the selection to use workspace defaults again.</p>
     </section>
 
 

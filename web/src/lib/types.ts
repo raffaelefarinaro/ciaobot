@@ -124,6 +124,8 @@ export interface McpStatus {
   tool_count: number
   tools?: string[]
   env_path?: string
+  /** The workspace these servers belong to; '' is the install root. */
+  workspace?: string
   project_servers?: McpProjectServer[]
   active_sessions?: number
   providers?: string[]
@@ -242,58 +244,22 @@ export interface ChatInfo {
     state: 'queued' | 'running' | 'done' | 'attention'
     archive_policy: 'when_clean'
   }
-  // What the post-archive pipeline is doing, or did. Present only on archived
-  // chats that ran it. Drives the greyed activity signal and the settled
-  // "here is what was learned from this chat" line.
+  // The memory pass spawned for this archived chat, as recorded on the source
+  // chat (ciao/web/memory_pass.py). Present only on archived chats that queued
+  // one.
   postprocess?: ChatPostprocess | null
 }
 
-/** One stage of the persisted archive-job manifest (ciao/archive_jobs.py). */
-export interface ArchiveJobStep {
-  status: 'ok' | 'error' | 'skipped' | 'blocked' | 'pending' | 'running'
-  reason?: string
-  attempts?: number
-}
-
-/** The postprocess-friendly view of an archive job manifest. */
-export interface ArchiveJobView {
-  job_id: string
-  state: 'running' | 'incomplete' | 'blocked' | 'done' | 'tombstoned'
-  tombstoned?: boolean
-  blocked_reason?: string
-  /** Stages still pending/failed/blocked, in execution order. */
-  unfinished?: string[]
-  steps?: Record<string, ArchiveJobStep>
-  updated_at?: string
-}
-
-/** One step of the post-archive pipeline, as reported by ciao/job_runs.py. */
+/** The memory pass's step on an archived chat's postprocess record. */
 export interface ChatPostprocessStep {
-  // 'queued' | 'running' | 'attention' come from the memory-pass stages; the
-  // one-shot pipeline only ever settles a step to ok/error/skipped.
-  status: 'ok' | 'error' | 'skipped' | 'queued' | 'running' | 'attention'
+  status: 'ok' | 'queued' | 'running' | 'attention'
   extra?: Record<string, unknown>
-  /** Manifest projection: pending/running/blocked/ok/skipped/error. */
-  manifest_status?: ArchiveJobStep['status']
 }
 
 export interface ChatPostprocess {
-  /** 'running' while the pipeline task is alive; 'done' once it settles. */
-  state: 'running' | 'done' | 'incomplete' | 'blocked'
-  /** Job id of the step that is running, or the last one that ran. */
-  step?: string
-  /** Steps that can run for this chat, in execution order. */
-  expected?: string[]
-  /** Outcome per step, keyed by job id. Only finished steps appear. */
+  /** Keyed by step id; only `memory_pass` is written. */
   steps?: Record<string, ChatPostprocessStep>
-  started_at?: string
   updated_at?: string
-  /** Set when a server restart killed the pipeline mid-flight. */
-  interrupted?: boolean
-  /** Persisted manifest view, once the job settles or loads. */
-  job?: ArchiveJobView | null
-  /** Human-readable reason a job is blocked. */
-  blocked_reason?: string
 }
 
 export interface ChatRetryInfo {
@@ -302,14 +268,6 @@ export interface ChatRetryInfo {
   last_error: string
   attempts: number
   interval_seconds: number
-}
-
-/** One entity hint the context capsule carried: a vault note, by name. */
-export interface ContextEntity {
-  name: string
-  /** Vault-root-relative note path, e.g. `work/People/Mo.md`. */
-  path: string
-  category: string
 }
 
 export interface ChatMessage {
@@ -330,10 +288,6 @@ export interface ChatMessage {
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
   turn_index?: number
-  // Vault notes the entity matcher linked this user message to (links only;
-  // the note bodies are not sent). Read back from the stored context capsule
-  // on history loads, and set live by the `context_entities` event.
-  context_entities?: ContextEntity[]
   // Server-reported agent latency for the final assistant bubble of a turn,
   // in milliseconds. Drives the footer "· 7.3s" label.
   duration_ms?: number
@@ -424,9 +378,6 @@ export type WsEvent =
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
   | { type: 'model_changed'; model: string }
-  // The vault notes this turn's message was matched to; sent once per turn,
-  // right after its context capsule is built (an empty list included).
-  | { type: 'context_entities'; entities: ContextEntity[]; turn_index?: number }
   // Running token totals for the in-flight turn (cumulative, monotonic).
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.
@@ -492,7 +443,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, number>; postprocessing?: string[]; restarting?: boolean }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, number>; restarting?: boolean }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
@@ -599,8 +550,10 @@ export interface Schedule {
   // far too late to be actionable — see project_chats.dispatch_schedule.
   // 'skipped' is what the dispatcher records when a run reached the provider
   // but stopped short of a result (approval card, AskUserQuestion, deferred
-  // retry) — see project_chats._schedule_dispatch_status.
-  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped'
+  // retry) — see project_chats._schedule_dispatch_status. 'unfinished' is the
+  // case split out of it where background subagents never settled: nothing in
+  // the chat is waiting on the user (schedules.RUN_STATUS_UNFINISHED).
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'unfinished'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null
@@ -655,10 +608,6 @@ export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
   insights_model: string
   insights_enabled?: boolean
-  trajectories_enabled?: boolean
-  // The HTTPS origin other devices should use; empty/undefined = none.
-  trusted_url?: string
-  push_all_devices?: boolean
 
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
@@ -897,89 +846,6 @@ export interface WorkspaceHealthResponse {
   checks: WorkspaceHealthCheck[]
 }
 
-// ── Automation status (Settings → Automation) ──────────────────────────────
-
-export interface JobRun {
-  job: string
-  label: string
-  category: 'content' | 'system'
-  started_at: string
-  ended_at: string
-  duration_ms: number
-  status: 'ok' | 'error' | 'skipped'
-  model: string
-  provider: string
-  error: string | null
-  extra: Record<string, unknown>
-}
-
-export interface AutomationStats {
-  total_runs: number
-  success_rate: number | null
-  avg_duration_ms: number
-  last_error: { error: string; ts: string } | null
-}
-
-export interface ProposalOutcomeCounts {
-  promoted: number
-  dismissed: number
-}
-
-// Memory-proposal resolutions (promoted vs dismissed), the honest health
-// measure for the extraction pipeline. Served by GET /api/automation with
-// `?include=outcomes`, next to the job stats it sits beside in Settings →
-// Automation.
-export interface ProposalOutcomes {
-  promoted: number
-  dismissed: number
-  by_workspace: Record<string, ProposalOutcomeCounts>
-  recent_30d: ProposalOutcomeCounts
-}
-
-// GET /api/automation answers `?include=outcomes` with this envelope instead
-// of the bare job list; older servers ignore the hint and still answer with
-// the array.
-export interface AutomationPayload {
-  jobs: AutomationProcess[]
-  proposal_outcomes?: ProposalOutcomes
-}
-
-export interface AutomationProcess {
-  job: string
-  label: string
-  category: 'content' | 'system'
-  description: string
-  // Optional for compatibility with servers upgraded before capability
-  // metadata was added to GET /api/automation.
-  uses_model?: boolean
-  produces_outcome?: boolean
-  // Plain-language "when does this run?", the system schedule that fires it,
-  // and whether it is a one-shot migration. Optional: older servers omit them.
-  trigger?: string
-  schedule_id?: string
-  one_time?: boolean
-  // Bulk/manual variants of this job, reported nested so the page keeps one row
-  // per automation.
-  sub_jobs?: AutomationProcess[]
-  // Steps that run inside this job's task, on this job's trigger, in execution
-  // order. A step is not an automation — it has no trigger of its own — so it is
-  // reported here rather than as a peer row. No job owns one since the archive
-  // pipeline lost its stages in #627, but the shape is kept: a job that grows a
-  // multi-step task again should report it here, not as peer rows.
-  steps?: AutomationProcess[]
-  // Name of the whole pipeline, set only on the job that owns one
-  // ("When you archive a chat"). The job keeps `label` for its own step.
-  pipeline_label?: string
-  // Set on a step: when it is skipped, in the user's terms. A step answers this
-  // instead of "when does this run?", which its pipeline already answers.
-  step_condition?: string
-  // True while this job is inside a tracked run right now.
-  running?: boolean
-  last_run: JobRun | null
-  recent: JobRun[]
-  stats: AutomationStats
-}
-
 /**
  * What the small action endpoints answer with: `/api/package/update`.
  * Callers only branch on `ok` and show `error`; the rest of the body is
@@ -1139,7 +1005,7 @@ export interface OperatorAction {
   link_url?: string
   /** A "not now" button for ask-style actions; records a suppression receipt. */
   dismiss_label?: string
-  /** Which button leads the tile: "chat" makes the chat button the filled
+  /** Which button leads the tile: "view" makes the view button the filled
    *  primary and demotes the link to a chip. Empty keeps the default order. */
   primary?: string
   /** A precondition the install cannot get past on its own: unmissable and not
@@ -1167,6 +1033,90 @@ export interface HousekeepingDismissResponse {
   summary: string
   result?: Record<string, unknown>
   actions: OperatorAction[]
+}
+
+// ── Update tasks: the "After this update" group ────────────────────────────
+
+/** The lifecycles `ciao/update_tasks.py::LIFECYCLES` defines. The `| string`
+ *  escape hatch is deliberate: a state file written by a newer engine can hold a
+ *  lifecycle this build does not know, and rendering it as "unknown state" beats
+ *  rendering it as a task nobody has started. */
+export type UpdateTaskLifecycle =
+  | 'offered'
+  | 'in_progress'
+  | 'waiting_review'
+  | 'failed'
+  | 'completed'
+  | 'dismissed'
+  | string
+
+/** The three answers `update_tasks.APPLICABILITY_STATUSES` defines. `unknown`
+ *  is the one that must never be drawn as "done": it means nobody could say. */
+export type UpdateTaskApplicability =
+  | 'applicable'
+  | 'not_applicable'
+  | 'unknown'
+  | string
+
+/** One row of `GET /api/update-tasks` — the Home group and the Settings
+ *  history both render these, from `ciao/web/routes_api.py::_update_task_row`. */
+export interface UpdateTaskRow {
+  id: string
+  revision: number
+  /** `install` (one record for the whole engine) or `workspace` (the record
+   *  lives in that workspace's own vault). The history groups by this. */
+  scope: string
+  title: string
+  /** The one-line reason the task exists, shipped with the catalog. */
+  why: string
+  /** The engine version that introduced this task revision. */
+  since_version: string
+  status: UpdateTaskLifecycle
+  applicability: UpdateTaskApplicability
+  /** When this row's applicability was last *computed*. Distinct from
+   *  `updated_at`, which is when the record was written: a dismissal is a
+   *  decision, not a re-check, and a history that merged the two would claim
+   *  somebody had looked again. Inside the server's freshness window this keeps
+   *  the stamp of the call that computed the answer. */
+  applicability_checked_at: string
+  offered: boolean
+  suppressed: boolean
+  /** The chat an earlier start created, so "Resume" never needs the browser to
+   *  have remembered it. Empty when no live attempt exists. */
+  chat_id: string
+  prompt_digest: string
+  attempted_fingerprint: string
+  /** When the *record* was last written — a decision or an attempt. */
+  updated_at: string
+}
+
+/** Why `GET /api/update-tasks` is offering nothing. Present only then, because
+ *  an absent key and an empty list are different statements and `[]` is the
+ *  one a card would read as "you are done". */
+export interface UpdateTaskCoverageGap {
+  reason: string
+  detail: string
+}
+
+export interface UpdateTasksResponse {
+  tasks: UpdateTaskRow[]
+  coverage_gap?: UpdateTaskCoverageGap
+}
+
+/** `POST /api/update-tasks/{id}/start|dismiss|reopen`. `tasks` is absent when
+ *  the route's own decision landed but the follow-up detector pass could not be
+ *  listed — a client must treat its absence as "unknown", never as "empty". */
+export interface UpdateTaskActionResponse {
+  ok: boolean
+  task_id: string
+  /** Start only: the chat the task is in. A 500 refusal still carries it, so a
+   *  retry sends into that same chat instead of minting a second one. */
+  chat_id?: string
+  /** Start only: false means this call created the chat, true means nothing was
+   *  created — the same press twice lands in the same chat. */
+  resumed?: boolean
+  error?: string
+  tasks?: UpdateTaskRow[]
 }
 
 // ── Proposal review (agent roots) ────────────────────────────────────────
@@ -1209,6 +1159,24 @@ export interface ProposalRow {
   leak_warning?: boolean
   rehome?: RehomeSignal
   target?: string
+  /** A `note_edit` row: a note verification the autonomy rule would not apply,
+   * queued for a person to decide. `target` is the note it is about (the queue
+   * bullet's own payload is a sidecar id), and this is what the accept needs
+   * beyond it — the operation, and whether the accept can do what a button
+   * saying so would claim. */
+  note_edit?: {
+    id: string
+    /** `replace` | `restamp` | `retire`. */
+    operation: string
+    /** The verification outcome this was filed from. */
+    outcome: string
+    /** When it was decided, or empty while it is still queued. */
+    settled: string
+    /** The note receipt the accept's write handed back. */
+    receipt_id: string
+    can_accept: boolean
+    reason: string
+  }
   /** A `skill` row: the versioned record the queue owns, not a bullet.
    *
    * `chat_id` is the server's own record of which chat is implementing it and
@@ -1226,6 +1194,11 @@ export interface ProposalRow {
   chat_id?: string
   lifecycle?: SkillProposalLifecycle
   sources?: SkillEvidenceRow[]
+  /** The learnings this finding was derived from, one entry per finding, and
+   * the state of each. EMPTY on a proposal filed before origins existed, which
+   * is not the same as settled: an empty list means the record links nothing,
+   * so no learning behind it can be retired by settling the row. */
+  origins?: SkillOriginRow[]
 }
 
 /** Where a skill proposal is in the server-owned accept lifecycle.
@@ -1247,6 +1220,40 @@ export interface SkillEvidenceRow {
   archive: string
   turn: string
   excerpt: string
+}
+
+/** What became of one finding on one learning.
+ *
+ * `applied` is the only state that says the lesson is in the target AND
+ * `verification` names the receipt or readback that proves it. `dismissed` is a
+ * person rejecting that finding. `already_covered`, `not_applicable` and
+ * `unclear` are answers that still need somebody to look at the skill, and
+ * `failed` is the absence of one — none of them retire a learning.
+ */
+export type SkillOriginState =
+  | 'pending'
+  | 'implementing'
+  | 'interrupted'
+  | 'applied'
+  | 'dismissed'
+  | 'not_applicable'
+  | 'already_covered'
+  | 'unclear'
+  | 'failed'
+
+/** One finding's link back to the learning it came from. */
+export interface SkillOriginRow {
+  workspace: string
+  /** EMPTY for an origin the record could not read: unattributable, and a
+   * reason to leave every learning on that record alone. */
+  learning_id: string
+  /** The `content_revision` of `Workspace/Learnings.md` at filing, so a later
+   * read can tell whether the learning moved under the finding. */
+  source_revision: string
+  finding: string
+  summary: string
+  state: SkillOriginState
+  verification: string
 }
 
 /** `POST /api/proposals/{id}/implement` — accept a skill proposal into a chat.
@@ -1350,8 +1357,35 @@ export interface ProposalPreview {
   action?: string
   /** What the accept does to one destination. `add_category` is its own value
    * because it writes no file body: it appends a category to the registry and
-   * retypes the notes the proposal was filed with, moving nothing. */
-  operation: 'add' | 'update' | 'move' | 'add_category' | 'none' | ''
+   * retypes the notes the proposal was filed with, moving nothing.
+   * `note_edit` rewrites a whole vault note from the verification's exact
+   * replacement, and `retire_note` is the one operation that removes it — it
+   * moves the note to the reversible review trash and writes no body at all. */
+  operation: 'add' | 'update' | 'move' | 'add_category' | 'note_edit' | 'retire_note' | 'none' | ''
+  /**
+   * `note` or `entry` — the unit the accept writes.
+   *
+   * Separate from `operation` because all three entry operations report
+   * `note_edit`: `replace_entry`, `restamp_entry` and `retire_entry` share the
+   * note's operation word and differ in scope, and a card that read the
+   * operation alone would promise a whole-file rewrite for an accept that
+   * changes one line.
+   *
+   * Optional because a server older than this client does not send it, and
+   * absent means `note` — which is exactly what such a server means, since it
+   * has no entry operations to describe.
+   */
+  scope?: 'note' | 'entry'
+  /** The entry operation, when `scope` is `entry`. */
+  entry_operation?: string
+  /** The entry's own text before the accept; the whole-note `before` is the
+   * other half and is unchanged apart from this one span. */
+  entry_before?: string
+  /** The entry's own new text. Empty for an entry retirement, and for a record
+   * whose splice could not be inverted. */
+  entry_after?: string
+  /** An entry retirement: this one line is removed and the note is kept. */
+  entry_removed?: boolean
   destination: string
   destination_path: string
   revision: string
@@ -1413,6 +1447,12 @@ export interface ProposalHistoryRow {
   destination: string
   outcome: string
   proposal_id: string
+  /** The learning a derived finding was filed against, when this decision was
+   * about one finding rather than a whole row. EMPTY for every decision about a
+   * row, and for every row written before the field existed. */
+  learning_id?: string
+  /** Which finding within that learning, when the decision named one. */
+  finding?: string
   /** The archive transcript this fact came from, when one is still on disk. */
   source_path?: string
   /** The receipt that performed this decision. ABSENT — not falsy — for every
@@ -1420,6 +1460,81 @@ export interface ProposalHistoryRow {
    * "No change snapshot available" rather than offering an undo it cannot
    * honour. */
   change?: ProposalHistoryChange
+  /**
+   * The `note_edit` record behind this decision, when the server could still
+   * read it. ABSENT for a `note_edit` whose sidecar is gone or unreadable —
+   * same contract as `change`, and for the same reason: a record nobody can
+   * read must not be rendered as one nobody can check.
+   *
+   * This is what makes a verified note edit in History judgeable rather than a
+   * bare sentence: the exact before/after, the evidence the verdict rested on,
+   * how much of the note the check covered, and whether the decision is still
+   * open.
+   */
+  note_edit?: ProposalHistoryNoteEdit
+  /**
+   * `'restore'` for a decision that moved a note to the review trash. That
+   * change has no memory receipt, so there is no Undo — but it is not
+   * unrecoverable either, and saying "no change snapshot available" beside a
+   * retirement that really happened reads as a false claim. Vault Review's
+   * restore is the way back.
+   */
+  reversible_by?: 'restore'
+}
+
+/** One filed `note_edit` as the history ledger reports it. */
+export interface ProposalHistoryNoteEdit {
+  id: string
+  /** The vault-relative note this edit is about. */
+  relative_path: string
+  /** `replace` | `restamp` | `retire`, or `replace_entry` | `restamp_entry` |
+   * `retire_entry` for the three that change one list item and nothing else. */
+  operation: string
+  outcome: string
+  /** `complete` | `partial`. */
+  coverage: string
+  /** The note's full text before the edit. */
+  before: string
+  /** The note's full text after it; empty for a retirement. */
+  after: string
+  reason: string
+  evidence: { source_type: string; source_ref: string; quoted: string; supports: string }[]
+  /** When the owner decided; empty while the proposal is still open. */
+  settled: string
+  accepted: boolean
+  /** The note receipt the accept's write handed back. */
+  receipt_id: string
+  /** The decision has not been made yet. */
+  pending: boolean
+  /**
+   * `note` or `entry` — the unit the accept actually writes.
+   *
+   * The whole point of the three `*_entry` operations: a `retire_entry` removes
+   * one bullet and leaves every other fact in the file, so a history row that
+   * said "this note was rewritten" would overstate what happened, and one that
+   * showed only the whole-note before/after would differ by a single line with
+   * no way to see which.
+   *
+   * Optional, absent meaning `note`: a server older than this client has no
+   * entry operations to have recorded.
+   */
+  scope?: 'note' | 'entry'
+  /** The entry's identity, for an `entry`-scope decision. */
+  entry_identity?: string
+  /** The entry's fingerprint as the verdict was reached about it. */
+  entry_fingerprint?: string
+  /** The `[start, end]` character span the entry occupied in `before`. */
+  entry_span?: [number, number]
+  /** The entry's own text, exactly as the note held it. */
+  entry_before?: string
+  /** The entry's own new text; empty for a retirement, and for a record whose
+   * splice could not be inverted — `entry_removed` tells the two apart. */
+  entry_after?: string
+  /** An `entry`-scope retirement: this one line was removed and nothing else. */
+  entry_removed?: boolean
+  /** Set when the recorded splice could not be inverted, so the entry diff is
+   * withheld rather than guessed at. */
+  entry_recovery_error?: string
 }
 
 /** The receipt behind one history row, from `GET /api/proposals/history`. */
@@ -1502,9 +1617,147 @@ export interface VaultReviewEvidence {
    * limit for its type, and where that date came from. Optional (and null
    * when the signal is absent) so an older server simply leaves it out. */
   unverified?: VaultReviewUnverified | null
+  /** What the managed verification pass already concluded about this note's
+   * CURRENT revision, from `Workspace/Note-Checks.json`. `null` when nobody has
+   * checked the note, which is the ordinary case.
+   *
+   * `checked_at` is when the check RAN, which is not the note's own `updated:`:
+   * a verdict that came back `unverified` writes nothing, so the two dates
+   * diverge and the panel shows both rather than collapsing them. */
+  verification?: VaultReviewCheck | null
   /** Where a `superseded_language` candidate says so: the 1-based line, the
    * line itself, the phrase that matched, and the nearest line either side. */
   superseded?: VaultReviewSuperseded | null
+  /** What the entry-level detector found inside this note's own list items, and
+   * the pending entry proposals that will change them.
+   *
+   * Absent (or null) when the note has no usable date to age entries from, or
+   * when the server is older than this client. `unverified` is the file-level
+   * question; this is the same question one bullet in, and it is the one a
+   * re-stamped note cannot answer. A note can sit here with `stale: 0` because
+   * its own `updated:` is current and still show three facts nobody has checked
+   * — which is the whole reason it exists. */
+  entry_verification?: VaultReviewEntryCoverage | null
+}
+
+/** One note's per-entry freshness, as the review queue reports it. */
+export interface VaultReviewEntryCoverage {
+  /** List items the parse found in the note. */
+  entries: number
+  /** How many were judged; the rest are exempt event records. */
+  checked: number
+  /** Deliberately not judged: event-shaped entries and event sections. */
+  exempt: number
+  /** Judged entries nobody ever stamped — no `[verified:]`, or an unusable one. */
+  unverified: number
+  /** Runs of note text that are not entries at all: a paragraph, a table, a
+   * quote. Never verified, and never counted as clean. */
+  uncovered: number
+  /** Judged entries whose own date is past the horizon. */
+  stale: number
+  /** Share of the note read as entries, 0–1. */
+  coverage_ratio: number
+  /** Every in-scope assertion is covered AND current. */
+  fully_verified: boolean
+  /** The first few overdue entries, named in full so a row can show them. */
+  stale_entries: VaultReviewEntryFinding[]
+  /** How many further overdue entries the list left out. */
+  more_stale_entries: number
+  /** Pending `note_edit` proposals, one per entry that came back `needs_review`.
+   *
+   * These are the row's actionable links, and they are deliberately *links*:
+   * each accept rewrites or removes exactly one bullet, so the row points at
+   * the decision rather than offering a second whole-note button for a finding
+   * that is about a single line. */
+  proposals: VaultReviewEntryProposal[]
+  /** How many further pending entry proposals the list left out. */
+  more_proposals: number
+}
+
+/** One overdue entry, named in a review row. */
+export interface VaultReviewEntryFinding {
+  identity: string
+  /** 0-based line index the entry opens on, for "line 42" in the disclosure. */
+  line_number: number
+  /** The nearest preceding heading's text — which list this bullet is in. */
+  section: string
+  /** The entry's own text, exactly as the note holds it. */
+  excerpt: string
+  /** The physical lines either side of it, so a row can show the context. */
+  context: string[]
+  /** `aged` | `no-stamp` | `unusable-stamp`. */
+  reason: string
+  /** The same thing in a sentence, with the numbers beside it. */
+  detail: string
+  age_days: number | null
+  /** `YYYY-MM-DD`, or '' when there is no date at all. */
+  last_verified: string
+  /** True when this is the entry's own `[verified:]` day; false when the entry
+   * has no usable stamp and inherited the note's date instead. */
+  own_date: boolean
+  supported: boolean
+}
+
+/** A pending decision about one entry, linked rather than duplicated. */
+export interface VaultReviewEntryProposal {
+  identity: string
+  /** The queue row the decision is filed under — the thing to link to. */
+  proposal_id: string
+  /** `replace_entry` | `restamp_entry` | `retire_entry`, or '' when the
+   * filed record could not be read. */
+  operation: string
+  outcome: string
+  checked_at: string
+  retry_after: string
+  coverage: string
+  reason: string
+  citations: number
+  receipt_id: string
+  /** The accept will be refused: the note no longer holds the entry this was
+   * filed against, so the entry is due again and the row must say so rather
+   * than offering a button that can only fail. */
+  conflicted: boolean
+}
+
+/** One note's last verification, as the review queue reports it. */
+export interface VaultReviewCheck {
+  /** `still_valid` | `update` | `retire` | `unverified`. */
+  outcome: string
+  /** `YYYY-MM-DD`: when the check ran. */
+  checked_at: string
+  /** `YYYY-MM-DD`: the end of the cooldown, before the note is asked again. */
+  retry_after: string
+  /** `complete` | `partial`: how much of the note the check actually covered. */
+  coverage: string
+  /** Why the verdict came out the way it did, in the pass's own words. */
+  reason: string
+  /** How many citations the verdict rested on. */
+  citations: number
+  /** The note receipt an applied verdict wrote, or '' for one that wrote none. */
+  receipt_id: string
+  /** The revision the check describes. */
+  revision: string
+  /** A `note_edit` proposal is waiting on a person for this exact revision. */
+  pending: boolean
+  /** A proposal is pinned to a revision the note is no longer in, so it can no
+   * longer be applied. The note is due to be checked again. */
+  conflicted: boolean
+  /** The queue row id of the pending proposal, when `pending`. */
+  proposal_id: string
+}
+
+/** The verification proposal a row links to instead of duplicating its decision. */
+export interface VaultReviewPendingProposal {
+  /** The queue row the review card is keyed by — the thing a client links to. */
+  proposal_id: string
+  /** The sidecar the accept resolves, for a direct read of the filed record. */
+  note_edit_id: string
+  outcome: string
+  checked_at: string
+  retry_after: string
+  coverage: string
+  reason: string
+  citations: number
 }
 
 export interface VaultReviewUnverified {
@@ -1541,6 +1794,44 @@ export interface VaultReviewCandidate {
   status: string
   disposition: string
   deferred_until: string
+  /**
+   * Whether the engine will accept `complete` for this row — it is a project
+   * that still has somewhere to complete into. The backend decides it from the
+   * same helpers the action gates on, so the panel offers Complete in place of
+   * Retire exactly when the click will be honoured. Re-deriving it here from
+   * `evidence.type` would put a second definition of project-ness in the
+   * client, and a button the engine refuses is worse than no button.
+   */
+  completable: boolean
+  /**
+   * Whether that completion moves a whole project FOLDER rather than the one
+   * note. An untyped note nested under `projects/active/<x>/` is completable on
+   * its own — completing it closes the project, so the plan, the meeting notes
+   * and the attachments beside it all move. A button that said only "Complete"
+   * made that read as one file being moved, which is why the panel's confirm
+   * asks about the folder when this is set. Read off the payload for the same
+   * reason as `completable`: the layout decision is the engine's.
+   */
+  completion_moves_folder: boolean
+  /**
+   * The verification proposal this row links to, when one is waiting on a
+   * person for the note's CURRENT revision, and `null` otherwise.
+   *
+   * The queue used to offer a second, independent *Still true* / *Retire* on
+   * the same revision the pass had already filed a proposal about — the same
+   * question asked twice, in two places, with the two answers able to disagree.
+   * A row carrying this points at the proposal instead, and takes its own
+   * retirement action away when nothing else justifies it.
+   */
+  pending_verification?: VaultReviewPendingProposal | null
+  /**
+   * Whether the row still offers its terminal action (Retire, or Complete on a
+   * project). False only when a verification proposal is the note's *sole*
+   * reason for being here: some other signal — unlinked, duplicate, superseded
+   * wording — is an independent finding about the note, and the queue must not
+   * lose it because the pass happened to reach the same note first.
+   */
+  retirement_offered?: boolean
 }
 
 /** One restorable note in `.vault-trash`, from `GET /api/vault/review?include=trashed`. */

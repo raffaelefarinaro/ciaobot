@@ -268,13 +268,22 @@ export function isProgressCommentary(content: string): boolean {
  *  steal the final bubble); falls back to the last assistant text so a
  *  short clarifying question still surfaces. Returns -1 when none. */
 export function findFinalAnswerIndex(
-  buffer: Array<Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content'>>,
+  buffer: Array<Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content' | 'timestamp'>>,
 ): number {
   let fallback = -1
   for (let k = buffer.length - 1; k >= 0; k--) {
     const m = buffer[k]
     if (!isAssistantTextStep(m)) continue
     if (m.phase === 'commentary') continue
+    // History rows carry no `phase`, but the server stamps a timestamp on the
+    // closing row of a completed turn. A stamped row with no tool call after
+    // it is the delivered reply even when it opens like narration ("Good —
+    // updated both files."); an unstamped trailing "Now the docs:" is not.
+    if (
+      fallback < 0
+      && m.timestamp
+      && !buffer.slice(k + 1).some(r => r.tool_name === '_activity')
+    ) return k
     if (fallback < 0) fallback = k
     if (m.phase === 'final_answer') return k
     if (!isProgressCommentary(m.content || '')) return k
@@ -629,4 +638,20 @@ export function describeToolStep(line: string): string {
   const mcp = /^mcp__(.+?)__(.+)$/.exec(name)
   if (mcp) return `${mcp[1]} · ${mcp[2].replace(/_/g, ' ')}`
   return summary ? `${name} ${summary}` : name
+}
+
+/** True when the turn's chosen reply is narration cut off by reasoning, i.e.
+ *  the turn was interrupted mid-thought and the text is not a real answer. A
+ *  substantive or delivered reply followed by a reasoning-only step (OpenCode
+ *  reasoning models emit one after the answer) is still the answer. */
+export function isInterruptedTail(
+  finalMsg: Pick<ChatMessage, 'phase' | 'content' | 'timestamp'>,
+  trailing: Array<Pick<ChatMessage, 'tool_name'>>,
+): boolean {
+  if (!trailing.some(m => m.tool_name === '_thinking')) return false
+  if (finalMsg.phase === 'final_answer') return false
+  // The server stamps a timestamp on the closing row of a completed turn, so a
+  // stamped row is a delivered reply however it opens.
+  if (finalMsg.timestamp) return false
+  return isProgressCommentary(finalMsg.content || '')
 }

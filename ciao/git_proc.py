@@ -12,23 +12,33 @@ read ends never close and the transport is never torn down. Against an
 unreachable remote the then-30s backup loop exhausted a 256-fd launchd limit
 in about an hour, after which every subprocess spawn failed with EMFILE.
 
-The fix is to put git in its own process group (``start_new_session``) so the
-group kill takes the grandchild with it, then await the child and close the
-transport explicitly. The new session also means git has no controlling
-terminal; both callers are server-side background paths with no TTY to prompt
-on anyway, and a credential prompt there already failed rather than blocked.
+The fix is to put git in its own process tree (``tree_spawn_options``: a
+process group on POSIX, a Job Object on Windows) so the tree kill takes the
+grandchild with it, then await the child and close the transport explicitly.
+The new session also means git has no controlling terminal; both callers are
+server-side background paths with no TTY to prompt on anyway, and a
+credential prompt there already failed rather than blocked.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import signal
 import subprocess
 from pathlib import Path
 
+from ciao.os_support.processes import ProcessTree, tree_spawn_options
+
 logger = logging.getLogger(__name__)
+
+#: Prepended to every git the engine runs on a workspace or vault repo, so the
+#: bytes it commits are the bytes on disk, on every OS (#696). The vault's
+#: revisions and hashes assume exactly that, and the engine writes exact bytes
+#: (``newline=""``); Git for Windows ships ``core.autocrlf=true`` in its system
+#: config, which would store a CRLF note as an LF blob. On macOS and Linux the
+#: default is already ``false``. ``ensure_workspace_git`` also writes it into the
+#: repo's own config, so the user's git in that repo agrees.
+EXACT_BYTES: tuple[str, ...] = ("-c", "core.autocrlf=false")
 
 #: Stderr detail returned when a git command exceeds its timeout. Callers match
 #: on this to decide whether a remote is unreachable, so keep it stable.
@@ -40,15 +50,16 @@ GIT_TIMEOUT_DETAIL = "git command timed out"
 _REAP_TIMEOUT = 5.0
 
 
-async def _reap(proc: asyncio.subprocess.Process) -> None:
-    """Kill ``proc``'s process group, wait for it, and close its pipes.
+async def _reap(proc: asyncio.subprocess.Process, tree: ProcessTree) -> None:
+    """Kill ``proc``'s process tree, wait for it, and close its pipes.
 
     Exception-safe by design: this runs on timeout/cancel cleanup paths whose
     callers promise a stable ``(-1, "", GIT_TIMEOUT_DETAIL)`` result, so a
-    failing kill or close must never escape and replace it.
+    failing kill or close must never escape and replace it. It closes the
+    tree itself, last, because a shielded reap can outlive its caller.
     """
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        tree.kill()
     except (ProcessLookupError, PermissionError, OSError):
         # Already gone, or we could not address the group — fall back to the
         # child alone. Any grandchild then outlives it, but closing the
@@ -62,6 +73,7 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
     except (asyncio.TimeoutError, ProcessLookupError):
         logger.warning("git subprocess %s did not exit after SIGKILL", proc.pid)
     finally:
+        tree.close()
         transport = getattr(proc, "_transport", None)
         if transport is not None:
             try:
@@ -98,10 +110,10 @@ def run_git_sync(
     """
     try:
         proc = subprocess.run(
-            ["git", *args],
+            ["git", *EXACT_BYTES, *args],
             cwd=str(workspace),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             input=stdin,
         )
     except OSError as exc:
@@ -119,27 +131,39 @@ async def run_git(
     """
     proc = await asyncio.create_subprocess_exec(
         "git",
+        *EXACT_BYTES,
         *args,
         cwd=str(workspace),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
+        **tree_spawn_options(),
     )
+    try:
+        tree = ProcessTree(proc.pid)
+    except OSError:
+        # A git that cannot be killed as a tree would bring back #470.
+        proc.kill()
+        await proc.wait()
+        raise
     if timeout is not None:
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            await _reap(proc)
+            await _reap(proc, tree)
             return (-1, "", GIT_TIMEOUT_DETAIL)
         except (asyncio.CancelledError, Exception):
             # Cancellation (e.g. server shutdown) or a communicate() failure
             # must reap the child too, or the same descriptor leak as the
             # timeout path recurs (issue #470). Shield the reap so a second
             # cancel arriving mid-cleanup does not interrupt it.
-            await asyncio.shield(_reap(proc))
+            await asyncio.shield(_reap(proc, tree))
             raise
+        tree.close()
     else:
-        out, err = await proc.communicate()
+        try:
+            out, err = await proc.communicate()
+        finally:
+            tree.close()
     return (
         proc.returncode or 0,
         out.decode(errors="replace"),

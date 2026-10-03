@@ -40,6 +40,42 @@ _MIN_SIZE_RATIO = 0.5
 """Reject rewrites smaller than this fraction of the current doc."""
 
 
+def _invalidate_stamps(current: str, updated: str) -> str:
+    """``updated`` with the verification stamps this save did not earn.
+
+    Both folds rewrite a whole file, and a whole-file rewrite is exactly the
+    situation where a `[verified: …]` stamp can survive onto text it no longer
+    describes: the model was handed the old note, rewrote the bullet it was
+    told about, and carried the stamp across — a date on which nobody checked
+    the sentence now in the file. The prompt asks for this not to happen. This
+    is what makes it true.
+
+    The rule is a fingerprint comparison, not a heuristic about dates:
+    :func:`ciao.note_entries.invalidate_stale_stamps` keeps a stamp only when
+    the bullet carrying it is byte-identical to one the old file held, so a
+    pure re-stamp, a reordering and an untouched neighbour all survive and only
+    the changed or new bullets lose theirs. Those then read as *unverified* on
+    the next scan, which is the honest state for a fact nobody checked.
+
+    Never applied to a managed verification write. A `still_valid` re-stamp and
+    an accepted `replace_entry` write a new fingerprint carrying a stamp on
+    purpose, and running them through here would delete the exact claim the
+    operation exists to record; those go through
+    :func:`ciao.note_receipts.apply_entry_edit` and are not this function's
+    business.
+    """
+    from ciao import note_entries as ne
+
+    cleaned, dropped = ne.invalidate_stale_stamps(current, updated)
+    if dropped:
+        logger.info(
+            "dropped %d verification stamp(s) this save did not earn: the fact "
+            "underneath changed, so the date no longer describes it",
+            dropped,
+        )
+    return cleaned
+
+
 _DOC_UPDATE_SYSTEM_PROMPT = """\
 You maintain the canonical documentation file for a project.
 You receive the current doc and a short set of material bullets from a
@@ -54,6 +90,11 @@ Rules:
 - Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
   `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from anything
   you carry over.
+- Leave every `[verified: YYYY-MM-DD]` stamp exactly where it is, on the exact
+  bullet it is on. A stamp says somebody checked that fact. Adding one, moving
+  one, or leaving one on a bullet you reworded claims a check nobody made —
+  stamps on bullets you change are removed by the writer afterwards, so a
+  reworded fact comes back as needing a check.
 - If nothing in those bullets materially changes the doc, reply with exactly
   NO_CHANGES and nothing else.
 - Otherwise reply with the complete updated doc content and nothing else —
@@ -164,7 +205,7 @@ async def update_project_doc(
             updated = _strip_code_fence(output)
             if not _is_safe_rewrite(current, updated):
                 return False
-            doc_path.write_text(updated + "\n", encoding="utf-8")
+            doc_path.write_text(_invalidate_stamps(current, updated) + "\n", encoding="utf-8", newline="")
             logger.info("project doc updated from insights: %s", doc_path)
             return True
     except Exception as exc:  # noqa: BLE001 — fire-and-forget, never crash the pipeline
@@ -186,6 +227,11 @@ Rules:
   except to correct what the new fact directly supersedes.
 - Strip `[idx=N]` citations and bracketed destination tags (`[memory]`,
   `[project]`, `[people: <Name>]`, `[learnings]`, `[review]`) from the fact.
+- Leave every `[verified: YYYY-MM-DD]` stamp exactly where it is, on the exact
+  bullet it is on. A stamp says somebody checked that fact; adding one, moving
+  one, or leaving one on a bullet you reworded claims a check nobody made.
+  Stamps on bullets you changed are removed by the writer afterwards, so a
+  reworded fact comes back as needing a check rather than as already verified.
 - If the note already says what the fact says, reply with exactly
   NO_CHANGES and nothing else.
 - Otherwise reply with the complete updated note and nothing else —
@@ -209,6 +255,15 @@ async def fold_fact_into_person_note(
     means ``NO_CHANGES`` (``error_out`` left empty) or, with ``error_out``
     filled, a guard rejection, a note edited during the model call, or a
     failure; the note is untouched in every case.
+
+    **Stamps are the writer's job, not the model's.** :func:`_invalidate_stamps`
+    runs on the result, because a fold rewrites the whole file and a rewrite
+    that carries a `[verified: today]` onto the bullet it just touched would
+    claim a check that never happened — on the exact sentence most likely to
+    have changed. The system prompt asks the model to leave the stamps alone,
+    and the code does not depend on it: a stamp survives only when the bullet's
+    own fingerprint is byte-identical to what was there before. See
+    :func:`ciao.note_entries.invalidate_stale_stamps`.
     """
     try:
         if not note_path.is_file() or not fact.strip():
@@ -250,7 +305,8 @@ async def fold_fact_into_person_note(
                 if error_out is not None:
                     error_out.append(f"{note_path.name} changed during the fold; nothing was written")
                 return False
-            note_path.write_text(updated + "\n", encoding="utf-8")
+            updated = _invalidate_stamps(current, updated)
+            note_path.write_text(updated + "\n", encoding="utf-8", newline="")
             logger.info("person note updated from an accepted proposal: %s", note_path)
             return True
     except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row queued

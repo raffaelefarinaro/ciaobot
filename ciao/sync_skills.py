@@ -14,9 +14,23 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+from ciao.os_support.links import (
+    is_link,
+    link_dir,
+    link_file,
+    link_source,
+    link_target,
+    points_to,
+    preserve_divergent_mirror,
+    prune_orphan_sidecars,
+    remove_link,
+)
 from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
+
+# The memory regions were not set up; the installer tolerates exactly this code.
+SETUP_MEMORY_FAILED_RC = 3
 
 
 @dataclass(frozen=True)
@@ -46,6 +60,10 @@ class SyncSkillsResult:
     stock_commands_refreshed: int = 0
     stock_commands_customised: int = 0
     stock_commands_pruned: int = 0
+    # Set when the memory-region ensure/migrate step raised. Skill sync
+    # still ran to completion; `ciao setup` and `ciao sync-skills` report
+    # it and exit non-zero.
+    memory_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,12 +98,16 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
     "interrogation.md": frozenset({
         "11d35c9c49bffe7b37a01b7097a2b59f13ffa9c55cbd3911303a19ba063ecbfb",
         "17600a45d0fd58b5f79a6f865c57243f4bda134aeb31f2f89078223c2449ef71",
+        "39fe04830f698d88980d2e90b564c2ebbb0f0cd0809ea68ceb299f1ed883c3f3",
         "d21a3788354ffa84ef7178e5e3ff9dd5b159bda518eb210cb4ba2fe6e2e4faa9",
         "efcc5d781e3d4fb04657ba6505b833c56bb07851bac28d7d34f634a745fe7408",
     }),
     "remember.md": frozenset({
+        "015aee7694fcd85eb27475e84b030c6f871c9da217f7bbaf04cd4caabf8770e0",
         "3d56ae540d634af504816743fd8725db5aa7cea152d29bcf0918c80fcb4ef94b",
+        "524564ef06129f6f59af473851fc738dbc9aa72013dd0cef2f637a2170930ebb",
         "5bbbc47cc694ee6499e9189a8f571b4135890df451b48d279b1d8e65d43d790d",
+        "d2d0301801b2281d22019c464dd6f967f6c4a738af6021f872c5ce7ea0bb0d51",
         "7aaca3b9e0c94e8d5cf7c2b0afd802fdc91c3569fba9d2f63bf344e1e17c5096",
         "7d4b0175e15e55dad8201b98a58ef743419afbbbe472f5c89a0f3931465b658a",
         "86f6854b33701e02518cec19160fb0e2b466c31d48819678088af4c27a9560d5",
@@ -130,17 +152,17 @@ LEGACY_REMOVED_STOCK_AGENTS = frozenset({
 
 
 def _remove_path(path: Path) -> None:
-    if path.is_dir() and not path.is_symlink():
+    if path.is_dir() and not is_link(path):
         shutil.rmtree(path)
     else:
-        path.unlink(missing_ok=True)
+        remove_link(path)
 
 
 def _is_custom_skill_link(path: Path, workspace: Path) -> bool:
-    if not path.is_symlink():
+    if not is_link(path):
         return False
     try:
-        raw = os.readlink(path)
+        raw = link_target(path)
     except OSError:
         return False
     try:
@@ -155,22 +177,26 @@ def _is_custom_skill_link(path: Path, workspace: Path) -> bool:
 
 def _ensure_symlink(source: Path, link: Path, *, relative_to: Path | None = None) -> bool:
     source = source.resolve()
-    if link.exists():
-        try:
-            if link.resolve() == source:
-                return True
-        except OSError:
-            pass
-    if link.is_symlink():
-        link.unlink()
+    if link.exists() and points_to(link, source):
+        return True
+    kept = preserve_divergent_mirror(link)
+    if kept is not None:
+        # An editor saved the mirror by replacing it: the edit is in the
+        # mirror, not the source. Never discard it.
+        print(
+            f"WARN: {link} had edits that are not in {source}; kept them as {kept}",
+            file=sys.stderr,
+        )
+    if is_link(link):
+        remove_link(link)
     elif link.exists():
         _remove_path(link)
 
     link.parent.mkdir(parents=True, exist_ok=True)
-    target: Path | str = source
-    if relative_to is not None:
-        target = os.path.relpath(source, relative_to)
-    link.symlink_to(target)
+    if source.is_dir():
+        link_dir(source, link, relative_to=relative_to)
+    else:
+        link_file(source, link, relative_to=relative_to)
     return True
 
 
@@ -241,7 +267,7 @@ def _install_stock_skills(
             # (plan S5), when this set empties.
             continue
         target = claude_skills / entry.name
-        if target.is_symlink():
+        if is_link(target):
             continue  # user-managed link, leave it alone
         with resources.as_file(entry) as source:
             shutil.copytree(source, target, dirs_exist_ok=True)
@@ -251,7 +277,7 @@ def _install_stock_skills(
 
     pruned = 0
     for existing in _iter_entries(claude_skills):
-        if existing.name in live or existing.is_symlink() or not existing.is_dir():
+        if existing.name in live or is_link(existing) or not existing.is_dir():
             continue
         if not (existing / STOCK_SKILL_MARKER).exists():
             continue
@@ -278,15 +304,15 @@ def _rebuild_custom_skill_links(workspace: Path) -> tuple[int, int]:
 
     pruned = 0
     for target in _iter_entries(claude_skills):
-        if not target.is_symlink() or target.exists():
+        if not is_link(target) or target.exists():
             continue
         try:
-            current = os.readlink(target)
+            current = link_target(target)
         except OSError:
             continue
         if "/skills/" not in current:
             continue
-        target.unlink(missing_ok=True)
+        remove_link(target)
         pruned += 1
     return installed, pruned
 
@@ -332,15 +358,15 @@ def mirror_shared_skill_sources(workspace: Path, shared_root: Path) -> tuple[int
 
     pruned = 0
     for target in _iter_entries(claude_skills):
-        if target.name in live or not target.is_symlink() or target.exists():
+        if target.name in live or not is_link(target) or target.exists():
             continue
         try:
-            current = os.readlink(target)
+            current = link_target(target)
         except OSError:
             continue
         if marker not in current:
             continue
-        target.unlink(missing_ok=True)
+        remove_link(target)
         pruned += 1
     return linked, pruned
 
@@ -356,7 +382,7 @@ def _stock_command_marker(command_path: Path) -> Path:
 def _stock_command_marker_is_safe(command_path: Path) -> bool:
     # A symlinked marker would make the writer truncate whatever it points at
     # (e.g. ../../.env pulled in from a hostile git checkout).
-    return not _stock_command_marker(command_path).is_symlink()
+    return not is_link(_stock_command_marker(command_path))
 
 
 def _read_stock_command_marker(command_path: Path) -> str | None:
@@ -368,18 +394,18 @@ def _read_stock_command_marker(command_path: Path) -> str | None:
 
 def _write_stock_command_marker(command_path: Path, digest: str) -> None:
     marker = _stock_command_marker(command_path)
-    if marker.is_symlink():
+    if is_link(marker):
         # Belt and braces: the seed loop never reaches a symlinked marker.
         print(
             f"WARN: refusing to write symlinked stock-command marker {marker} "
-            f"-> {os.readlink(marker)}",
+            f"-> {link_target(marker)}",
             file=sys.stderr,
         )
         return
     # Atomic replace so a crash mid-write can never leave a truncated digest
     # behind (the digest is the managed copy's integrity check).
     tmp = marker.with_name(marker.name + ".tmp")
-    tmp.write_text(digest, encoding="utf-8")
+    tmp.write_text(digest, encoding="utf-8", newline="")
     os.replace(tmp, marker)
 
 
@@ -433,7 +459,7 @@ def _install_stock_agents(workspace: Path) -> tuple[int, int]:
         if (custom_dir / name).is_file():
             continue  # workspace subagent shadows the packaged agent
         target = agents_dir / name
-        if target.is_symlink():
+        if is_link(target):
             continue  # user-managed link, leave it alone
         with resources.as_file(stock_entry) as stock_path:
             shutil.copy2(stock_path, target)
@@ -445,7 +471,7 @@ def _install_stock_agents(workspace: Path) -> tuple[int, int]:
     for existing in _iter_entries(agents_dir):
         if not existing.is_file() or existing.name.endswith(STOCK_AGENT_MARKER_SUFFIX):
             continue
-        if not existing.name.endswith(".md") or existing.is_symlink():
+        if not existing.name.endswith(".md") or is_link(existing):
             continue
         if existing.name in live:
             continue
@@ -514,13 +540,13 @@ def _seed_stock_commands(workspace: Path) -> StockCommandSync:
     for stock_entry in stock_files:
         name = stock_entry.name
         canonical = commands_dir / name
-        if canonical.is_symlink():
+        if is_link(canonical):
             continue  # user-managed link, leave it alone
         if not _stock_command_marker_is_safe(canonical):
             marker = _stock_command_marker(canonical)
             print(
                 f"WARN: skipping {name}; stock-command marker {marker} is a "
-                f"symlink to {os.readlink(marker)}",
+                f"symlink to {link_target(marker)}",
                 file=sys.stderr,
             )
             continue  # never follow or replace a symlinked marker
@@ -567,13 +593,13 @@ def _seed_stock_commands(workspace: Path) -> StockCommandSync:
     pruned = 0
     for marker in commands_dir.glob(f"*{STOCK_COMMAND_MARKER_SUFFIX}"):
         command_path = marker.with_name(marker.name[: -len(STOCK_COMMAND_MARKER_SUFFIX)])
-        if marker.is_symlink():
+        if is_link(marker):
             # Never unlink or read a symlinked marker: the link itself is not
             # ours and its target must stay untouched.
             continue
         if command_path.name in live:
             continue
-        if command_path.is_file() and not command_path.is_symlink():
+        if command_path.is_file() and not is_link(command_path):
             marker_digest = _read_stock_command_marker(command_path)
             if marker_digest is not None and _digest(command_path.read_bytes()) == marker_digest:
                 _remove_path(command_path)
@@ -603,9 +629,9 @@ def _mirror_dir_symlinks(
     if source_dir.is_dir():
         for entry in sorted(source_dir.glob(glob_pattern), key=lambda item: item.name):
             if not entry.exists():
-                if entry.is_symlink():
+                if is_link(entry):
                     print(
-                        f"WARN: skipping dangling symlink {entry} -> {os.readlink(entry)}",
+                        f"WARN: skipping dangling symlink {entry} -> {link_target(entry)}",
                         file=sys.stderr,
                     )
                 continue
@@ -617,10 +643,11 @@ def _mirror_dir_symlinks(
     for entry in _iter_entries(dest_dir):
         if entry.name in live:
             continue
-        if not prune_regular and not entry.is_symlink():
+        if not prune_regular and not is_link(entry):
             continue
         _remove_path(entry)
         pruned += 1
+    prune_orphan_sidecars(dest_dir)
     return linked, pruned
 
 
@@ -683,7 +710,7 @@ def _cleanup_legacy_codex_projections(workspace: Path) -> int:
     pruned = 0
     wrapper_root = workspace / ".agents" / "skills"
     for entry in _iter_entries(wrapper_root):
-        if entry.is_dir() and not entry.is_symlink() and (entry / CODEX_WRAPPER_MARKER).is_file():
+        if entry.is_dir() and not is_link(entry) and (entry / CODEX_WRAPPER_MARKER).is_file():
             _remove_path(entry)
             pruned += 1
         elif _is_custom_skill_link(entry, workspace):
@@ -711,7 +738,7 @@ def _cleanup_legacy_codex_projections(workspace: Path) -> int:
         without_agents, partial_agents = _without_managed_codex_config(original)
         without_mcps, partial_mcps = _without_managed_codex_mcp_config(without_agents)
         if not partial_agents and not partial_mcps and without_mcps != original:
-            config_path.write_text(without_mcps, encoding="utf-8")
+            config_path.write_text(without_mcps, encoding="utf-8", newline="")
             pruned += 1
     return pruned
 
@@ -769,7 +796,7 @@ def _write_opencode_projection(target: Path, frontmatter: list[str], body: str) 
     try:
         if target.exists() and target.read_text(encoding="utf-8") == content:
             return True
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="")
     except OSError:
         return False
     return True
@@ -937,10 +964,10 @@ def _install_opencode_mcps(workspace: Path) -> tuple[int, int]:
     rendered = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
     try:
         if not config_path.exists() or config_path.read_text(encoding="utf-8") != rendered:
-            config_path.write_text(rendered, encoding="utf-8")
+            config_path.write_text(rendered, encoding="utf-8", newline="")
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(
-            json.dumps(sorted(managed), indent=2) + "\n", encoding="utf-8"
+            json.dumps(sorted(managed), indent=2) + "\n", encoding="utf-8", newline=""
         )
     except OSError:
         return 0, 0
@@ -986,9 +1013,9 @@ def _canonical_agent_sources(workspace: Path) -> list[Path]:
         if not source.is_file() or source.suffix != ".md":
             continue
         canonical = False
-        if source.is_symlink():
+        if is_link(source):
             try:
-                source.resolve().relative_to((workspace / "subagents").resolve())
+                link_source(source).relative_to((workspace / "subagents").resolve())
                 canonical = True
             except (OSError, ValueError):
                 pass
@@ -1016,11 +1043,11 @@ def _ensure_workspace_guide(workspace: Path) -> None:
         if guide_path(workspace).is_file():
             return
         agents_guide = workspace / GUIDE_NAME
-        if agents_guide.is_symlink():
+        if is_link(agents_guide):
             # A dangling link (its CLAUDE.md target was migrated or removed).
             if agents_guide.exists():
                 return
-            agents_guide.unlink()
+            remove_link(agents_guide)
 
         stock_workspace = resources.files("ciao.stock").joinpath("workspace")
         with resources.as_file(stock_workspace.joinpath(GUIDE_NAME)) as source:
@@ -1206,6 +1233,7 @@ def sync_workspace_skills(
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
     _ensure_workspace_guide(root)
+    memory_error: str | None = None
     try:
         from ciao import job_runs
         from ciao.memory_tool import (
@@ -1239,7 +1267,8 @@ def sync_workspace_skills(
                 guide,
                 ", ".join(restamped),
             )
-    except Exception:  # noqa: BLE001 — never block skill sync on memory regions
+    except Exception as exc:  # noqa: BLE001 — never block skill sync on memory regions
+        memory_error = f"{type(exc).__name__}: {exc}"
         logger.exception(
             "memory region ensure/migrate failed for %s; continuing skill sync",
             root,
@@ -1271,6 +1300,38 @@ def sync_workspace_skills(
     except Exception:  # noqa: BLE001 — never block skill sync on the vault
         logger.exception(
             "vault vocabulary migration failed for %s; continuing skill sync",
+            root,
+        )
+
+    try:
+        from ciao import job_runs
+        from ciao.vault_migration import (
+            retain_retired_stock_types_if_needed,
+            retired_receipt_path,
+        )
+
+        vault_root = _resolve_vault_root(root)
+        runtime_root = _resolve_runtime_root(root)
+        # Receipt-gated, like the vocabulary migration above: the check scans
+        # the whole vault, so it runs once per vault, not on every boot.
+        if not retired_receipt_path(runtime_root, vault_root).is_file():
+            with job_runs.track_sync(
+                "retired_stock_categories", "Keep retired stock categories"
+            ) as run:
+                summary = retain_retired_stock_types_if_needed(vault_root, runtime_root)
+                run.extra["retained"] = summary.get("retained") or []
+                if summary.get("failed"):
+                    logger.warning(
+                        "retired stock categories not kept for %s: %s; "
+                        "fix entity-types.yaml and run `ciao vault-migrate --apply`",
+                        vault_root,
+                        summary["failed"],
+                    )
+                elif not summary.get("retained"):
+                    run.skip("no note uses a retired stock category")
+    except Exception:  # noqa: BLE001 — never block skill sync on the vault
+        logger.exception(
+            "keeping retired stock categories failed for %s; continuing skill sync",
             root,
         )
 
@@ -1363,6 +1424,7 @@ def sync_workspace_skills(
         opencode_commands_pruned=opencode_commands_pruned,
         opencode_mcps_installed=opencode_mcps_installed,
         opencode_mcps_pruned=opencode_mcps_pruned,
+        memory_error=memory_error,
     )
 
 
@@ -1381,7 +1443,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--verbose", action="store_true", help="Accepted for script compatibility.")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    sync_workspace_skills(args.workspace)
+    result = sync_workspace_skills(args.workspace)
+    if result.memory_error:
+        print(
+            f"Warning: memory regions not set up for "
+            f"{Path(args.workspace).expanduser().resolve()}: {result.memory_error}. "
+            "Skills were synced; fix the error and re-run `ciao sync-skills`.",
+            file=sys.stderr,
+        )
+        return SETUP_MEMORY_FAILED_RC
     return 0
 
 

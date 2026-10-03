@@ -79,6 +79,88 @@ describe('changeFor', () => {
     })
   })
 
+  it('reads a whole-note rewrite as its own change, not as a line update', () => {
+    // `update` says "Update a line" and a note edit rewrites the whole note, so
+    // borrowing it would understate the change the operator is approving.
+    const c = changeFor(
+      row({ kind: 'note_edit', target: 'notes/office.md' }),
+      preview({
+        action: 'note_edit', operation: 'note_edit', destination: 'notes/office.md',
+        before: 'third floor', after: 'fourth floor', separator: '\n',
+      }),
+    )
+    expect(c).toMatchObject({
+      type: 'edit', label: 'Update a note', verb: 'Update note',
+      destination: 'notes/office.md', qualifier: 'the whole note; undoable from History',
+    })
+  })
+
+  it('gives each entry operation its own type, because they are not the same write', () => {
+    // All three report `operation: note_edit` — they are the same write path
+    // scoped to one list item — and they differ in what a person is agreeing to.
+    // "Update a note" is wrong for all three, and worst for the one that removes
+    // something, because that is the row where a reader has to be sure the rest
+    // of the file survives.
+    const entryRow = row({ kind: 'note_edit', target: 'People/Alice.md' })
+    const base = {
+      action: 'note_edit' as const, operation: 'note_edit' as const,
+      destination: 'People/Alice.md', separator: '\n',
+      scope: 'entry' as const,
+    }
+    expect(changeFor(entryRow, preview({
+      ...base, entry_operation: 'replace_entry', entry_before: '- Lives in Porto', entry_after: '- Lives in Lisbon',
+    }))).toMatchObject({
+      type: 'editFact', label: 'Change one fact', verb: 'Change fact',
+      qualifier: 'one line of the note; the rest is untouched, undoable from History',
+    })
+    expect(changeFor(entryRow, preview({
+      ...base, entry_operation: 'restamp_entry', entry_before: '- x [verified: 2020-01-01]', entry_after: '- x [verified: 2026-09-30]',
+    }))).toMatchObject({
+      type: 'restampFact', label: 'Check one fact again', verb: 'Mark fact checked',
+      qualifier: 'stamps this one line as checked today; the rest is untouched',
+    })
+    expect(changeFor(entryRow, preview({
+      ...base, entry_operation: 'retire_entry', entry_removed: true, entry_before: '- x', entry_after: '',
+    }))).toMatchObject({
+      type: 'retireFact', label: 'Retire one fact', verb: 'Retire fact',
+      qualifier: 'one line of the note; the rest is untouched, undoable from History',
+    })
+  })
+
+  it('reads a server without a scope field as a whole-note edit', () => {
+    // `scope` is absent on a server older than this client, and absent means
+    // `note` — which is what such a server means, since it has no entry
+    // operations to describe.
+    expect(changeFor(row({ kind: 'note_edit' }), preview({
+      action: 'note_edit', operation: 'note_edit', destination: 'notes/office.md', separator: '\n',
+    }))).toMatchObject({ type: 'edit', label: 'Update a note', verb: 'Update note' })
+  })
+
+  it('reads a retirement as a reversible move, not a workspace move', () => {    // The copy has to carry the two facts that make this safe: it goes to a
+    // trash, and it comes back. `move` says "to the X workspace", which is a
+    // different operation entirely.
+    const c = changeFor(
+      row({ kind: 'note_edit', target: 'notes/office.md' }),
+      preview({
+        action: 'note_edit', operation: 'retire_note', destination: 'notes/office.md',
+        before: 'third floor', after: '', exact: true, separator: '\n',
+      }),
+    )
+    expect(c).toMatchObject({
+      type: 'retire', label: 'Retire a note', verb: 'Retire note',
+      destination: 'notes/office.md',
+      qualifier: 'moved to the review trash, where it can be restored',
+    })
+  })
+
+  it('blocks a note edit the server says cannot be applied', () => {
+    // A note that moved since the proposal was filed, or a re-stamp with no
+    // frontmatter to stamp: the row stays queued and the button is not offered.
+    expect(changeFor(row({ kind: 'note_edit' }), preview({
+      action: 'note_edit', operation: 'note_edit', destination: 'notes/office.md', can_accept: false,
+    }))).toMatchObject({ type: 'blocked', label: 'Cannot save yet', verb: '' })
+  })
+
   it('gives rows with no preview their own types', () => {
     expect(changeFor(row({ kind: 'skill', path: 'Workspace/skill-proposals/x.md' }), undefined).type).toBe('skill')
     expect(changeFor(row({ kind: 'review' }), undefined, { canAccept: false, fallbackQualifier: 'Needs you' }))

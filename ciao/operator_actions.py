@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from ciao.migration_notices import cached_links
 from ciao.workspace_guide import GUIDE_NAME, guide_path
 
 logger = logging.getLogger(__name__)
@@ -51,9 +52,9 @@ logger = logging.getLogger(__name__)
 class OperatorAction:
     """One clearable condition the operator can act on.
 
-    ``id`` is stable and scope-suffixed (``vault-location:work``) so a client
-    can accept it by id across renders. ``severity`` is a sort key only, never
-    rendered. ``glyph`` is one character shown next to the amber rule.
+    ``id`` is stable and scope-suffixed (``workspace-root-missing:work``) so a
+    client can accept it by id across renders. ``severity`` is a sort key only,
+    never rendered. ``glyph`` is one character shown next to the amber rule.
     """
 
     id: str
@@ -83,7 +84,7 @@ class OperatorAction:
     # via dismiss_action() instead of running a fix.
     dismiss_label: str = ""
     # Which button leads the tile. Empty keeps the default order (run, link and
-    # view buttons filled, chat as a chip below). "chat" puts the chat button
+    # view buttons filled, chat as a chip below). "view" puts the view button
     # first as the filled primary and demotes the link to a chip: on the update
     # tile the forward action is updating, and release notes are supporting
     # reading.
@@ -204,14 +205,9 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
             workspace="",
             link_label="Release notes",
             link_url=latest_release_redirect_url(),
-            chat_label="How to install",
-            primary="chat",
-            chat_prompt=(
-                f"A new Ciaobot version ({latest}) is available. The current "
-                "install is updated through Ciaobot.app or the one-line "
-                "installer; check Settings for the update, and explain how to "
-                "install it on this machine without losing data."
-            ),
+            view_label="Update in Settings",
+            view_route="/settings",
+            primary="view",
         )
     ]
 
@@ -253,7 +249,7 @@ def _write_star_receipt(context: DetectionContext, status: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps({"status": status, "at": now.isoformat()}),
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
     except OSError:
         logger.exception("operator actions: could not write star receipt")
@@ -307,64 +303,27 @@ def _detect_github_star(context: DetectionContext) -> list[OperatorAction]:
 
 
 # -- vault location ----------------------------------------------------------
-
-
-def _detect_vault_location(context: DetectionContext) -> list[OperatorAction]:
-    """A workspace vault kept outside its standard folder is a chat-only fix.
-
-    Mirrors the ``vault_outside_vault_root`` notice: the standard location is a
-    fact of the registry, not a scan, so comparing two resolved paths is cheap.
-    Moving an existing vault is a user-owned decision with possible conflicts,
-    so this is a chat action, never a mechanical run.
-    """
-    config = context.config
-    resolver = getattr(config, "workspace_vault_root", None)
-    standardizer = getattr(config, "canonical_workspace_vault_root", None)
-    lister = getattr(config, "workspace_names", None)
-    if not callable(resolver) or not callable(standardizer) or not callable(lister):
-        return []
-    actions: list[OperatorAction] = []
-    for name in lister():
-        try:
-            actual = Path(resolver(name)).resolve()
-            standard = Path(standardizer(name)).resolve()
-        except Exception:  # noqa: BLE001 — advisory; a bad registry must not fail
-            continue
-        if actual == standard or not actual.is_dir():
-            continue
-        actions.append(
-            OperatorAction(
-                id=f"vault-location:{name}",
-                kind="vault-location",
-                severity=20,
-                title=f"The {name} vault is not in its standard folder",
-                detail=(
-                    f"Workspace '{name}' keeps its vault at {actual}; its standard "
-                    f"location is {standard}."
-                ),
-                glyph="⌂",
-                workspace=name,
-                chat_label="Fix in chat",
-                chat_prompt=(
-                    f"Preview the move with `ciao vault-relocate {name}`, then "
-                    f"apply it with `ciao vault-relocate {name} --apply`. It moves "
-                    "this workspace's own content into the standard folder "
-                    "automatically and updates the registry; reverse it exactly "
-                    f"with `ciao vault-relocate {name} --undo`. If the preview "
-                    "lists anything it could not classify (a symlink, most often), "
-                    "resolve only those with the operator — don't ask about the "
-                    "move itself, and don't re-derive it by hand. If it refuses "
-                    "because the vault lives outside the install's git worktree "
-                    "(an external or hand-pinned vault root), that is a real "
-                    "limitation, not something to work around — tell the operator "
-                    "rather than moving it by hand yourself. After a successful "
-                    "apply, tell the operator Ciaobot needs a restart (Settings -> "
-                    "Restart) before the new location takes effect everywhere, "
-                    "including in this chat."
-                ),
-            )
-        )
-    return actions
+#
+# There is deliberately no `_detect_vault_location` here any more, and the shape
+# of its absence is the point of #800's last slice.
+#
+# This module's contract above says every detector must be able to reach zero, and
+# the vault-location condition could: the OS audit reports it, `ciao vault-relocate`
+# is a managed remedy with an apply/undo cycle and a per-workspace receipt, and
+# "After this update" now carries a workspace-scoped `vault-relocate` task for it.
+# What it could not do is be *dismissed*, or *finished*: a tile has no "not now"
+# for a machine condition (`dismiss_action` refuses it by design) and no
+# completion, so an operator who declined this work had no way to record that and
+# the same tile reappeared on every poll for ever.
+#
+# The task is the one surface that can carry both. It is also the only one that
+# should: a duplicate card is not "two views of one finding", it is the same
+# finding asked about twice, and `tests/test_vault_relocate_update_task.py` fails if
+# a tile is ever added back beside it.
+#
+# The condition, its wording and the managed remedy sentence all still live in
+# `ciao.migration_notices`, which the audit reads and the task's detector reads —
+# so nothing about *what is true* moved, only where an operator is asked about it.
 
 
 # -- workspace re-rooting ----------------------------------------------------
@@ -464,13 +423,21 @@ def _detect_workspace_unmigrated(context: DetectionContext) -> list[OperatorActi
 def _detect_vault_vocabulary(context: DetectionContext) -> list[OperatorAction]:
     """Frontmatter types that the canonical-vocabulary migration could not resolve.
 
-    Read from the ``vault-vocabulary.json`` receipt only. The migration is run
-    at install (see ``sync_skills``), which writes the receipt with the
-    ``unresolved`` types it declined to guess. Those are real categorisation
-    decisions the operator must make; the tile surfaces them. The run button
-    re-applies the aliased renames (a note written since the migration may have
-    reintroduced an alias) and rewrites the receipt, so a clean re-run clears
-    the tile.
+    Read from the INSTALL-WIDE view only — ``vault_migration.read_receipt`` with
+    no vault named, which is assembled from the per-vault **keyed** receipts and
+    consults the pre-keying unkeyed file only on a single-vault install. The
+    migration is run at install (see ``sync_skills``), which writes one receipt
+    per vault with the ``unresolved`` types it declined to guess; the view
+    answers None while any vault of the install is still uncovered, because a
+    half-migrated install is not one whose vocabulary is settled. Those
+    ``unresolved`` types are real categorisation decisions the operator must
+    make, and the tile surfaces them.
+
+    The run button re-applies the aliased renames (a note written since the
+    migration may have reintroduced an alias) and rewrites each vault's own keyed
+    receipt, which is the same file this read is built from — so a clean re-run
+    clears the tile, and one that is not clean leaves it with the types still
+    outstanding. See :func:`_run_vault_vocabulary` for the write side.
     """
     runtime = context.runtime
     if runtime is None:
@@ -519,59 +486,37 @@ def _detect_vault_vocabulary(context: DetectionContext) -> list[OperatorAction]:
 def _detect_unmigrated_links(context: DetectionContext) -> list[OperatorAction]:
     """A vault still written in the retired wikilink dialect.
 
-    Cheap path: an ``existing``-mode vault is the only one that can carry
-    wikilinks (a ``scratch`` install is created conformant, so it is skipped
-    entirely and reaches zero), and an absent link-migration receipt is the
-    signal it was never converted. The exact wikilink walk belongs to the
-    button press, never to deciding to draw the tile.
-    """
-    config = context.config
-    runtime = context.runtime
-    if runtime is None:
-        return []
-    mode = getattr(config, "vault_mode", "scratch") or "scratch"
-    if mode != "existing":
-        return []
-    try:
-        from ciao.vault_migrate_links import read_receipt
+    Applicability and wording come from ``ciao.migration_notices``, which the OS
+    audit reads for the same notice, so the two surfaces ask one question and
+    cannot answer it differently. This side of the probe reads a verdict a scan
+    already established — it runs on every app open, every window focus and every
+    60s poll, and establishing the verdict means walking the vault, which is the
+    one cost the Home contract is written against. The route starts that scan
+    detached (``routes_api._refresh_links_scan``), so a card appears a poll or two
+    after the first scan rather than on the first render.
 
-        receipt = read_receipt(runtime)
-    except Exception:  # noqa: BLE001
-        logger.exception("operator actions: link migration receipt read failed")
-        return []
-    if receipt is not None:
+    What that buys is a card that is true when it is drawn: a finding exists only
+    when a walk actually found a wikilink, so the tile names a note instead of
+    inferring one from a receipt's absence, and an install whose last scan found
+    nothing gets no card at all. That is how this detector reaches zero for a
+    reason other than "a migration ran" — and it is why the vault's mode is not
+    part of the question, since a vault Ciaobot created is also the one an operator
+    can hand a wikilink.
+    """
+    finding = cached_links(context.config, context.runtime)
+    if finding is None:
         return []
     return [
         OperatorAction(
             id="vault-unmigrated-links",
             kind="unmigrated-links",
             severity=20,
-            # Worded conditionally on purpose. This detector runs on every app
-            # open and window focus, so it cannot call has_unmigrated_links,
-            # which walks the vault. It knows only that the vault was adopted
-            # and no migration receipt exists, which does NOT establish that a
-            # wikilink is present: an adopted vault written in markdown links
-            # from the start satisfies both and contains nothing to convert.
-            # The audit's own notice does run the accurate check and may
-            # legitimately stay silent where this tile speaks.
-            title="The vault may still use the retired wikilink dialect",
-            detail=(
-                "This vault was adopted and no link migration has been recorded, "
-                "so it may still contain `[[wikilinks]]`, which nothing reads as "
-                "graph edges, backlinks, or clickable links. The preview below "
-                "reports exactly what would change, and finds nothing if the "
-                "vault is already clean."
-            ),
+            title=finding.title,
+            detail=finding.detail,
             glyph="🔗",
             workspace="",
             chat_label="Convert in chat",
-            chat_prompt=(
-                "The vault may still contain retired `[[wikilinks]]`. Preview the "
-                "conversion with `ciao vault-migrate-links` (dry-run by default), "
-                "then apply it with `ciao vault-migrate-links --apply`. Every "
-                "rewrite is recorded, so `ciao vault-unmigrate-links --apply` "
-                "restores the notes byte for byte."
-            ),
+            chat_prompt=finding.remedy,
         )
     ]
 
@@ -867,46 +812,84 @@ def _detect_locked_skills_orphaned(context: DetectionContext) -> list[OperatorAc
 def _detect_skill_triage_pending(context: DetectionContext) -> list[OperatorAction]:
     """Skills the migration could not attribute to one workspace.
 
-    The migration writes a triage file rather than guessing which root owns a
+    The migration writes a triage sheet rather than guessing which root owns a
     customised skill, because guessing hands one workspace's tooling to another.
     Chat-only: every entry is a judgement about what the skill is for.
+
+    The sheet is found through the re-rooting receipt, not by a path spelled out
+    here (#810). ``apply`` already records the file it created, so the receipt is
+    the durable answer and this card follows the sheet wherever the migration put
+    it — inside the primary workspace's vault, whose leaf is the install's fact
+    and not this module's. The detector used to read
+    ``<runtime>/migration/skills-triage.md``, a path nothing in ``ciao/`` has
+    ever written, so the one decision the re-rooting deliberately refuses to
+    guess was surfaced by nothing at all.
+
+    What is counted is the rows whose **Destination** cell is still blank, which
+    is the sheet's own record of what has not been decided. Filling a cell in is
+    the operator's decision, so the count falls as the sheet is answered and
+    reaches zero when it is fully answered — a card that was permanent by
+    construction is the "offered forever" shape #788's upkeep row is about.
+
+    A receipt or a sheet this install cannot read is an unknown, not a clean
+    install: it is logged and no card is drawn, rather than reporting that
+    nothing needs deciding about a sheet nobody managed to look at.
     """
     runtime = context.runtime
-    if runtime is None:
+    install = getattr(context.config, "workspace_root", None)
+    if install is None or runtime is None:
         return []
-    triage = Path(runtime) / "migration" / "skills-triage.md"
+    try:
+        from ciao.workspace_reroot import skill_triage_sheet, undecided_skill_triage
+
+        triage = skill_triage_sheet(runtime, Path(install))
+    except Exception:  # noqa: BLE001 — an unreadable receipt is unknown, not clean
+        logger.exception("operator actions: skill-triage receipt read failed")
+        return []
+    if triage is None:
+        # The migration wrote no sheet: a fresh install has no catalog to sort,
+        # and a refusal or a rehearsal never reached the write.
+        return []
+    # The receipt's claim, checked against the filesystem rather than trusted. An
+    # operator who deleted the sheet has answered it, and a card naming a file
+    # that is not there is a card nobody can act on.
     if not triage.is_file():
         return []
     try:
-        lines = [
-            line for line in triage.read_text(encoding="utf-8").splitlines()
-            if line.strip().startswith(("- ", "* "))
-        ]
+        pending = undecided_skill_triage(triage)
     except OSError:
+        logger.exception("operator actions: skill-triage sheet read failed")
         return []
-    if not lines:
+    if not pending:
         return []
+    shown = ", ".join(pending[:5])
+    more = f" and {len(pending) - 5} more" if len(pending) > 5 else ""
     return [
         OperatorAction(
             id="skill-triage-pending",
             kind="skill-triage-pending",
             severity=_DRIFT_SEVERITY,
-            title=f"{len(lines)} skill(s) need a workspace",
+            title=f"{len(pending)} skill(s) need a workspace",
             detail=(
                 "The separation could not tell which workspace these skills "
                 "belong to, so it left them for a decision rather than handing "
-                "one workspace's tooling to another."
+                f"one workspace's tooling to another: {shown}{more}. The sheet is "
+                f"{triage}."
             ),
             glyph="✦",
             workspace="",
             chat_label="Decide with me",
             chat_prompt=(
-                f"Read `{triage}` and walk me through each skill it lists. For "
-                "each one, say what it does and which workspace it looks like it "
-                "belongs to, then ask me to confirm before moving anything. Move "
-                "an approved skill into that workspace's `skills/` directory and "
-                "run `ciao sync-skills` for that root. Leave anything I do not "
-                "confirm exactly where it is."
+                f"Read `{triage}` and walk me through each skill whose "
+                "**Destination** cell is still blank — the blank is deliberate, "
+                "because deciding which workspace a skill belongs to is a "
+                "judgement about my own work. For each one, say what it does and "
+                "which workspace it looks like it belongs to, then ask me to "
+                "confirm before moving anything. Write the destination I confirm "
+                "into that row's **Destination** cell, `git mv` the directory from "
+                "`<primary>/skills/<name>` to `<destination>/skills/<name>`, and "
+                "run `ciao sync-skills` for both roots. Leave anything I do not "
+                "confirm exactly where it is, and fill no cell I have not decided."
             ),
         )
     ]
@@ -1039,7 +1022,6 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
 _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_unmigrated,
     _detect_package_update,
-    _detect_vault_location,
     _detect_vault_vocabulary,
     _detect_unmigrated_links,
     _detect_missed_schedules,
@@ -1209,23 +1191,103 @@ def _run_package_update(context: DetectionContext) -> tuple[dict[str, Any], str]
     raise RuntimeError(reason)
 
 
-def _run_vault_vocabulary(context: DetectionContext) -> tuple[dict[str, Any], str]:
-    config = context.config
-    vault_root = getattr(config, "vault_root", None)
-    runtime = context.runtime
-    if vault_root is None or runtime is None:
-        raise RuntimeError("vault or runtime is not configured")
-    from ciao.vault_migration import migrate_vault_vocabulary, write_receipt
+def _vocabulary_vaults(config: Any) -> list[Path]:
+    """Every vault this install holds notes in, deduplicated, in registry order.
 
-    summary = migrate_vault_vocabulary(Path(vault_root), apply=True)
-    if "skipped" in summary:
-        raise RuntimeError(str(summary["skipped"]))
-    # Rewrite the receipt so the next detection reflects the re-scan: resolved
-    # types clear the tile, anything still unresolved keeps it.
-    write_receipt(runtime, {"renamed": summary["renamed"], "unresolved": summary["unresolved"]})
-    renamed = len(summary.get("renamed", []))
-    failed = len(summary.get("failed", []))
-    return summary, f"{renamed} type(s) renamed, {failed} failed."
+    ``vault_scan_targets`` is the seam for "all the notes in this install" (one
+    shared vault before the re-rooting, one per agent root after), and it hands
+    back the very paths ``sync_skills`` migrates per root — so a receipt written
+    here lands on the key the install's own migration writes. Two roots holding
+    the same vault would otherwise be walked and stamped twice on one press.
+    """
+    vaults: list[Path] = []
+    for root, _workspace, _prefix in config.vault_scan_targets():
+        vault = Path(root)
+        if vault not in vaults:
+            vaults.append(vault)
+    return vaults
+
+
+def _run_vault_vocabulary(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Re-migrate the vaults the card reported, writing one KEYED receipt each.
+
+    The card is install-scoped and reads the install-wide view, which is
+    assembled from the per-vault keyed receipts (see
+    :func:`_detect_vault_vocabulary`). This used to write the pre-keying unkeyed
+    ``vault-vocabulary.json``, which that view consults only on a single-vault
+    install — so on a re-rooted install the press wrote a file nobody read, the
+    card survived it, and the button looked like it worked on exactly the layout
+    that could not use it (#814). The write is therefore keyed on the vault the
+    press just migrated: the same file the reader builds its answer from, and
+    nobody else's, since the key names one vault and no receipt of another root
+    is touched.
+
+    Two rules keep a press honest. A vault whose own receipt is already complete
+    is left alone — re-walking it would mutate a root with nothing to migrate and
+    re-stamp a receipt that is not the card's evidence. And the summary reports
+    the re-read install-wide view rather than the press's own arithmetic, so a
+    root still waiting on its first migration is named instead of being rounded
+    into "all done": the view stays None until every vault has a receipt, and a
+    press that completed one of two roots has fixed one root, not the install.
+    """
+    runtime = context.runtime
+    if runtime is None:
+        raise RuntimeError("vault or runtime is not configured")
+    from ciao.vault_migration import migrate_vault_vocabulary, read_receipt, write_receipt
+
+    vaults = _vocabulary_vaults(context.config)
+    scanned: list[Path] = []
+    blocked: list[str] = []
+    renamed = 0
+    failed = 0
+    for vault in vaults:
+        receipt = read_receipt(runtime, vault)
+        if receipt is not None and not (receipt.get("unresolved") or {}):
+            continue
+        summary = migrate_vault_vocabulary(vault, apply=True)
+        if "skipped" in summary:
+            # No vault on disk yet. Leave no receipt for it, exactly as the
+            # managed migration does, so the real vault is migrated when it exists.
+            blocked.append(f"{vault}: {summary['skipped']}")
+            continue
+        # Keyed on the vault this run just migrated: the file the install-wide
+        # view is built from, rewritten so the next detection sees this scan.
+        write_receipt(runtime, summary, vault_root=vault)
+        scanned.append(vault)
+        renamed += len(summary.get("renamed") or [])
+        failed += len(summary.get("failed") or [])
+
+    if not scanned and blocked:
+        raise RuntimeError(blocked[0])
+
+    # What the card will read on its next pass, re-read rather than assumed.
+    view = read_receipt(runtime)
+    unresolved = (view or {}).get("unresolved") or {}
+    uncovered = [str(vault) for vault in vaults if read_receipt(runtime, vault) is None]
+    result = {
+        "vaults": [str(vault) for vault in scanned],
+        "renamed": renamed,
+        "failed": failed,
+        "unresolved": sorted(unresolved),
+        "uncovered": uncovered,
+        "blocked": blocked,
+    }
+    if not scanned:
+        return result, "Every vault is already migrated."
+    text = f"{renamed} type(s) renamed, {failed} failed."
+    if uncovered:
+        text += (
+            f" {len(uncovered)} vault(s) still have no migration receipt: "
+            f"{', '.join(uncovered)}."
+        )
+    elif unresolved:
+        text += (
+            f" {len(unresolved)} type(s) still need a decision: "
+            f"{', '.join(sorted(unresolved))}."
+        )
+    else:
+        text += " Nothing left to decide on."
+    return result, text
 
 
 async def _run_missed_schedules(context: DetectionContext) -> tuple[dict[str, Any], str]:

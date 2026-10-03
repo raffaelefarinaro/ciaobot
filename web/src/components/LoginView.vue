@@ -62,7 +62,7 @@
             </li>
             <li>
               <strong>Archive into a second brain.</strong>
-              <span>Archived chats produce a session trajectory, and the memory pass turns them into proposals for review.</span>
+              <span>Archive a chat and it remembers what should be: your preferences, the people and projects you mention. Notes are sorted by category, and you can change those categories any time after setup.</span>
             </li>
             <li>
               <strong>Files, with history.</strong>

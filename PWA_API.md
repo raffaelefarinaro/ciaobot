@@ -39,7 +39,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
-| GET | `/api/menubar-notifications` | Notification feed for the loopback-only local feed (`?after=<epoch>`, inclusive; includes read-clear controls) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -51,8 +50,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/unread` | Mark chat unread on purpose ("come back to this"); clears the read stamp and emits a cross-device `chat_unread` event |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
-| POST | `/api/chats/{chat_id}/retry-insights` | Retry the unfinished post-archive step for an archived chat: resumes whatever is still pending/failed on its archive-job manifest (the session trajectory). Returns `{status, chat_id, job}`; `status` is `started` / `running` / `complete` / `blocked` / `not_archived` / `no_archive` |
-| GET | `/api/chats/{chat_id}/archive-job` | The persisted post-archive manifest for an archived chat: per-stage statuses, `unfinished` list and any `blocked_reason` (or `{job:null}` when none exists) |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
@@ -74,38 +71,41 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/file-content` | Read one snapshot's content |
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
 | GET | `/api/vault/backlinks` | List notes whose wikilinks resolve to a given markdown path |
-| GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace |
-| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed,cleared` also lists the reversible trash inventory and the kept notes still in the vault) or record an explicit keep/restore decision; trash, permanent deletion and `reopen` are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation. `reopen` undoes a keep by appending to the ledger, putting the note back in the queue. A successful POST answers `{ok, result, candidates, trashed, cleared}` — the queue it had to rebuild anyway, so a client never needs a follow-up GET (candidate generation reads every note in the vault three times) |
+| GET | `/api/vault/graph` | Vault-wide note graph (frontmatter `related:` + `[[wikilinks]]`) for the Memory Map page; optional `?workspace=` scopes to one logical workspace | Each node also carries `check`: the managed verification's state for its current revision, and a check that already answers it **clears** the node's `stale` flag (a note checked inside its 30-day cooldown, or one a proposal is waiting on, is not unchecked however old its own `updated:` reads), so the map does not send the operator to a queue that has deliberately stopped asking. `check.settled` says the revision is answered, `check.pending` that a proposal is waiting for a person, and `check.conflicted` that the pinned proposal can no longer be applied and the note is due again; `check: null` means nobody has checked it.
+| GET, POST | `/api/vault/review` | List explainable note-review candidates (`?include=trashed,cleared` also lists the reversible trash inventory and the kept notes still in the vault) or record an explicit keep/restore decision; trash, permanent deletion, `complete` and `reopen` are separate actions, with permanent deletion requiring a trashed candidate and exact confirmation. `reopen` undoes a keep by appending to the ledger, putting the note back in the queue. `complete` closes a **project** candidate out: it moves the note to `projects/completed/` — the whole folder for a `projects/active/<slug>/` project, whatever note in that folder was the candidate — rewrites `status: active` to `status: completed`, and repoints every `related:`/wikilink/markdown reference to any note in the moved project, in one transaction that rolls the move and every link back if the ledger append fails; `restore_completed` reverses one such row, and a project already restored cannot be restored again. Every candidate in the payload carries `completable`, the backend's own answer to "will `complete` be honoured for this row" (true only for a project that still has somewhere to complete into): a client should offer Complete in place of Retire when it is true rather than re-deriving project-ness from `evidence.type`, or it will offer a button the engine refuses. Retire (`trash`) stays available for every type, including a project that is wrong or abandoned. A successful POST answers `{ok, result, candidates, trashed, cleared}` — the queue it had to rebuild anyway, so a client never needs a follow-up GET (candidate generation reads every note in the vault three times) | A candidate the managed verification pass has already looked at carries the check state for its **current** revision (`evidence.verification`: the outcome, when the check ran, its coverage, the citations it rested on, and the cooldown), and a check that already answers the revision clears the `unverified` signal — so the queue, the Memory Map and the nightly curation pass cannot disagree about which notes are still due. When a `note_edit` proposal is waiting on a person for that exact revision, the row also carries `pending_verification` (the queue row and the sidecar id, with the outcome, coverage, citations and reason) and `retirement_offered`: a client should link the proposal rather than offer a second `Still true` / `Retire` on the same revision, and must keep `Retire` when another signal (unlinked, duplicate, superseded wording) is an independent finding. A proposal pinned to a revision the note has left comes back as `pending_verification: null` with`evidence.verification.conflicted: true` — its accept would refuse as a conflict, so the row's own actions are the only route left. `checked_at` is when the check RAN and is not the note's own `updated:`; a verdict that came back `unverified` writes nothing, so a client must not collapse the two into one date.
 | DELETE | `/api/vault/note` | Permanently delete one vault note (`?path=`, the `Entry.path` string form); strips dangling `related:`/`relatedTo:` and `[[wikilink]]` references from every note that linked to it first |
 | POST | `/api/file-restore` | Restore a snapshot to disk |
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
-| GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed. With `?include=outcomes` answers `{"jobs": [...], "proposal_outcomes": {"promoted": n, "dismissed": m, "by_workspace": {…}, "recent_30d": {…}}}` — the memory-proposal promoted-vs-dismissed tally shown beside the job stats; without it the response stays the bare list |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
-| GET | `/api/commands` | List slash commands |
-| GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings |
+| GET | `/api/commands` | List slash commands; `?workspace=<name>` scopes them to that workspace's agent root |
+| GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings; `?workspace=<name>` scopes the subagent and command lists to that workspace's agent root |
 | GET | `/api/agent-assets/audit` | Full AI OS audit report; `status` is `healthy`, `needs_attention`, or `error` |
 | GET | `/api/workspace-health` | Scan workspace/vault/discovery-file health |
 | POST | `/api/workspace-health/fix` | Apply the automatic remedies (create missing scaffold files, re-link skills); returns the fresh report |
-| POST | `/api/agent-assets/subagents` | Create a workspace-owned subagent and vault mirror |
-| PATCH, DELETE | `/api/agent-assets/subagents/{name}` | Update or delete a custom workspace-owned subagent |
-| POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |
-| PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command |
+| POST | `/api/agent-assets/subagents` | Create a workspace-owned subagent and vault mirror; the body must carry `workspace` |
+| PATCH, DELETE | `/api/agent-assets/subagents/{name}` | Update or delete a custom workspace-owned subagent; `workspace` in the PATCH body, `?workspace=` on the DELETE |
+| POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror; the body must carry `workspace` |
+| PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command; `workspace` in the PATCH body, `?workspace=` on the DELETE |
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
 | GET | `/api/housekeeping` | List the home-screen operator actions (detector pass; each carries `run_label`, `chat_label`, `chat_prompt`) |
 | POST | `/api/housekeeping/{action_id}/run` | Perform one action's mechanical work, re-run detection, and return the fresh action list; unknown id is 404 |
 | POST | `/api/housekeeping/{action_id}/dismiss` | Record a "not now" for an ask-style action (e.g. the GitHub star nudge), re-run detection, and return the fresh action list; unknown id is 404 |
+| GET | `/api/update-tasks` | The "After this update" tasks this engine version supports for `?workspace=`, one row per task: `id`, `revision`, `scope`, `title`, `why`, `since_version`, `status` (the recorded lifecycle — `offered` when there is no record yet — through `dismissed`), `applicability` (`applicable`/`not_applicable`/`unknown`), `offered`, `suppressed`, and the `chat_id`/`prompt_digest`/`attempted_fingerprint`/`updated_at` of its last attempt. `applicability_checked_at` is when that row's *answer* was computed (ISO-8601 UTC), and is a different clock from `updated_at`, which is when the *record* was written — a dismissal is a decision, not a re-check. Inside the freshness window a row keeps the stamp of the call that computed the answer, so a repeated read does not re-date it. `coverage_gap` is present only when nothing is being offered, and says which of `no_eligible_task`/`not_substantiated`/`nothing_offered` applies. `?workspace=` is required (400 otherwise): applicability and state are per workspace. No `change_token`, so applicability falls back to the freshness window; the state file is still read on every call, so a dismissal or a launch shows up at once. The one write it performs is a **settlement**: a task whose record is `in_progress`/`waiting_review`/`failed` is checked against its registered completion check when this call computes its detector answer, and becomes `completed` if the check's postcondition holds — so a task the operator finished leaves Home without a separate endpoint, and its `status`/`suppressed`/`offered` in the very response that settled it. Nothing else is written and nothing is launched: no chat, no prompt, no model turn. `applicability` stays the detector's own answer even when `status` is `completed`, because the rows it counts may still be there (a review that retained them is a finished task). The settlement rides the same freshness window as the detector, so it lands within `APPLICABILITY_TTL_S` (300s) of the evidence appearing; nothing is written when the check is unregistered, raises, or says the postcondition does not hold yet. The lifecycle is revalidated under the write lock, so a `dismissed` (or reopened) decision that lands while the check is running wins over the settlement and is what this response reports; and a settlement whose write cannot land is skipped rather than raised, leaving the task in its previous lifecycle for a later listing |
+| POST | `/api/update-tasks/{task_id}/start` | Start this task's chat with the **packaged** prompt for its revision, or hand back the chat the last start created. `{ok, task_id, chat_id, resumed, result, tasks}`; `resumed: false` means this call created the chat and dispatched the prompt, `true` means nothing was created (double click, second tab, retry, restart — all the same call twice). A live chat is not the same as a dispatched prompt, so the record decides what a resume does: a `failed` attempt re-sends the prompt into that same chat and still reports `resumed: true` (one chat throughout, the prompt dispatched exactly once across the failure and the retry), and a `dismissed` or reopened-`offered` record is a reopen — same chat, record written `in_progress`, nothing re-sent. 409 for a refused task (unknown id, one this engine version cannot support, no `?workspace=`, no chat manager, a state record that cannot be written before the turn starts, or a record that already says `completed` at this revision — a finished task is never re-run, and that holds whether or not its chat is still there), 500 with the `chat_id` when the chat exists but the turn could not be dispatched — which is recoverable: the next start sends the prompt into that same chat. Nothing after the turn started is a refusal: a record that will not take the `in_progress` write is logged and still answered with the chat (the record keeps saying `failed`, which the next start retries from), and a detector pass that cannot list the tasks leaves the reply without its `tasks` key |
+| POST | `/api/update-tasks/{task_id}/dismiss` | Record "not this one" for this task at this revision (optional `{"reason": "..."}` body, kept as the record's evidence), suppressing the offer at this revision only and keeping the chat it was in — except a `failed` record's chat, which is live and empty because the prompt never reached it, so that one is dropped and the next start creates a fresh chat and dispatches into it. `{ok, task_id, result, tasks}`; 409 for a refused task — an unknown or unsupported id, and a record that already says `completed` at this revision, which is the same refusal a start answers and for the same reason: overwriting a verdict would put a later start back in reach of a finished task. |
+| POST | `/api/update-tasks/{task_id}/reopen` | Undo that dismissal at this revision and re-offer the task. `{ok, task_id, result, tasks}`; only `dismissed` is reopened, so an offered or in-flight task succeeds and writes nothing. 409 for a refused task |
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, stale_after_days, enabled, builtin, note_count}`. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, a negative `stale_after_days`, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
-| GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); Ciaobot's own surface is reported by `/api/agent/status` |
+| GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); `?workspace=<name>` scopes it to that workspace's own `.mcp.json`. Ciaobot's own surface is reported by `/api/agent/status` |
 | GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
 | POST | `/api/mcp/env-keys` | Save project-MCP env secrets into the workspace `.env` (optionally bind new keys into a server via `server`); values never returned |
-| POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json` |
-| PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys) |
-| DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json` |
-| GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio) |
+| POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json`; `?workspace=<name>` writes that workspace's own file |
+| PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys); `?workspace=<name>` scopes the file |
+| DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json`; `?workspace=<name>` scopes the file |
+| GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio); `?workspace=<name>` scopes the lookup |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); guards a drain before an engine restart |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
@@ -155,14 +155,16 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/local/backup/setup-prompt` | The canonical setup prompt plus the trusted `context` it was rendered from (read-only, entirely local) |
 | POST | `/api/local/backup/setup-chat` | Open (or re-enter) a setup chat and **send** the prompt into it; idempotent |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
-| GET | `/api/addresses` | Where other devices can open this engine: the configured trusted HTTPS URL first (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
+| GET | `/api/addresses` | Where other devices can open this engine: the Tailscale Serve HTTPS URL first when one exists (`kind: trusted`, `secure: true`), then LAN/Bonjour HTTP URLs (`kind: lan`), then localhost (`kind: loopback`). Session-protected; URLs never carry a password or token |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code (source checkout in dev mode only) |
 | POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |
 | POST | `/api/admin/drain` | Close admission for new turns ahead of an engine update; returns `{draining, active_chat_ids}` (loopback-only, no session; used by `ciao update apply`) |
 | POST | `/api/admin/drain/cancel` | Reopen admission after an update's drain timed out; returns `{draining: false}` (loopback-only, no session; used by `ciao update apply`) |
 | GET | `/api/admin/status` | Read admin/deploy status |
-| GET | `/api/admin/skills` | List skills labelled as custom or stock (merged across agent roots) |
+| GET | `/api/service/login` | Whether the engine service starts at the next sign-in, as the machine reports it |
+| PATCH | `/api/service/login` | Turn that start-at-sign-in state on or off for this engine's own service (`{"enabled": bool}`) |
+| GET | `/api/admin/skills` | List skills labelled as custom or stock; merged across every agent root, or one workspace's root with `?workspace=<name>` |
 | POST | `/api/admin/skills/add` | Deprecated: returns 410, replaced by `/api/skills/import` |
 | POST | `/api/skills/import` | Import a skill from a validated zip (multipart `file`; validates zip-slip, one SKILL.md, frontmatter). A SKILL.md over the 15KB context budget imports with a note on `warnings`/`message` |
 | WS | `/ws/chat/{chat_id}` | Per-chat streaming socket |
@@ -250,13 +252,31 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
   -H 'content-type: application/json' \
   -d '{"action":"reopen","candidate_id":"<candidate-id>"}'
+
+# Close a finished PROJECT out, then put it back. Only a `type: project` (or a
+# note under `projects/`) is accepted — anything else is a 409, and `trash` is
+# the action for it. The response `result` carries `previous_path`, `new_path`,
+# `status_rewritten` and `edited_backlinks`, so a client can say what moved and
+# which notes were repointed without re-reading the vault.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
+  -H 'content-type: application/json' \
+  -d '{"action":"complete","candidate_id":"<candidate-id>"}'
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/vault/review?workspace=default" \
+  -H 'content-type: application/json' \
+  -d '{"action":"restore_completed","candidate_id":"<candidate-id>"}'
 ```
 
 **Agent assets**
 
+Subagents, commands and skills belong to ONE workspace, named by the `workspace`
+field (or `?workspace=` on a bodyless request). A write that omits it, or names a
+workspace that is not registered, is a 400 — it is never redirected to the
+install root, so an asset cannot land somewhere you did not ask for. A read with
+no workspace (or an unknown one) falls back to the whole install.
+
 ```bash
-# Inspect subagents, commands, and workspace health.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/agent-assets"
+# Inspect one workspace's subagents, commands, and the install-wide health block.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/agent-assets?workspace=personal"
 
 # Inspect workspace/vault health only.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspace-health"
@@ -266,26 +286,26 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspace-heal
 # then syncs the subagent into .claude/agents/.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents" \
   -H 'content-type: application/json' \
-  -d '{"name":"pr-reviewer","description":"Review pull-request diffs for regressions.","prompt":"Inspect the changed files, identify concrete risks, and report findings first."}'
+  -d '{"workspace":"personal","name":"pr-reviewer","description":"Review pull-request diffs for regressions.","prompt":"Inspect the changed files, identify concrete risks, and report findings first."}'
 
 # Update or delete a custom subagent. Installed/system subagents are read-only.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents/pr-reviewer" \
   -H 'content-type: application/json' \
-  -d '{"description":"Review pull-request diffs for regressions.","content":"# Pr Reviewer\n\nInspect changed files, identify concrete risks, and report findings first."}'
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents/pr-reviewer"
+  -d '{"workspace":"personal","description":"Review pull-request diffs for regressions.","content":"# Pr Reviewer\n\nInspect changed files, identify concrete risks, and report findings first."}'
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents/pr-reviewer?workspace=personal"
 
 # Create a workspace-owned slash command.
 # Writes commands/<name>.md, mirrors a vault note under memory-vault/Workspace/Commands/,
 # then syncs it into the provider-native command locations.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands" \
   -H 'content-type: application/json' \
-  -d '{"name":"decision-record","description":"Turn notes into a decision record.","argument_hint":"<notes>","prompt":"Convert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
+  -d '{"workspace":"personal","name":"decision-record","description":"Turn notes into a decision record.","argument_hint":"<notes>","prompt":"Convert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
 
 # Update or delete a custom slash command. Installed/system commands are read-only.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record" \
   -H 'content-type: application/json' \
-  -d '{"description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
+  -d '{"workspace":"personal","description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record?workspace=personal"
 ```
 
 **Housekeeping (operator-action strip)**
@@ -302,6 +322,63 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/housek
 # Record a "not now" for an ask-style action (e.g. the GitHub star nudge). The
 # response re-runs detection and returns the fresh action list.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/housekeeping/github-star/dismiss"
+```
+
+**Update tasks (the "After this update" catalog)**
+
+```bash
+# List the tasks this engine supports for a workspace, with their state. Each row
+# carries its lifecycle (`status`), the applicability answer behind it, and the
+# chat a previous start created — so a caller never has to remember a chat id.
+# `?workspace=` is required.
+#
+# Read `applicability_checked_at` as "when did anyone last look" and `updated_at`
+# as "when did the operator decide". They are separate clocks on purpose: a
+# dismissed task has a decision time and a stale check time, and a surface that
+# shows only the second cannot tell an unexamined condition from a settled one.
+# Answers are cached for `update_tasks.APPLICABILITY_TTL_S`, so a repeat read
+# inside that window reports the same check time rather than re-dating it; the
+# state file, by contrast, is read on every call.
+#
+# This is also how a task finishes. When it computes a task's answer, it asks
+# that task's registered completion check — so a task the operator has finished
+# turns to `status: "completed"` here, and drops off Home, with no separate call.
+# `applicability` is unaffected: a review that deliberately kept some rows leaves
+# those rows countable, and the task is done anyway.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/update-tasks?workspace=personal"
+
+# Start a task. Idempotent per (task, revision): press it twice and you get the
+# SAME chat back with `"resumed": true`, and the packaged prompt runs once. There
+# is no prompt field — the instructions are read from the packaged catalog on the
+# server, and the response's `prompt_digest` is what they hash to. If the last
+# dispatch failed (the 500 below, or a crash mid-launch), the next start sends
+# the prompt into that same chat rather than reporting a resume that never ran.
+# Starting a task you had dismissed reopens it in place. 409 means the task was
+# refused (unknown id, or one this engine version cannot support).
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/start?workspace=personal"
+
+# Decline this task at this revision. Suppresses the offer at this revision only;
+# a later revision is new work and is offered again. `reason` is optional.
+#
+# This hides the task in this workspace. It does NOT cancel a chat that is
+# already open and it does NOT mark the work done: the record goes to
+# `dismissed`, the chat carries forward, and a client that tells the operator
+# otherwise is lying about the state of the machine. Reopen below puts it back.
+# The chat is carried forward unless the last attempt never dispatched
+# (`status: "failed"`): that chat is live and empty, so the next start creates a
+# fresh one and dispatches into it rather than reporting the empty one as
+# running.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/dismiss?workspace=personal" \
+  -H 'content-type: application/json' \
+  -d '{"reason":"reviewed them by hand"}'
+
+# Undo that dismissal and put the task back on offer. Re-evaluates current
+# applicability rather than replaying old instructions: the answer comes from the
+# same detector pass as the list.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/update-tasks/review-legacy-rows/reopen?workspace=personal"
 ```
 
 **Projects**
@@ -592,14 +669,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
   -H 'content-type: application/json' -d '{"profile":"personal"}'
 ```
 
-**Routine settings (Settings → Models / Automations)**
+**Routine settings (Settings → General / Models)**
 
 ```bash
-# Read internal-routine settings: the automatic-session-insights and trajectory
-# capture switches, insights and critique model overrides, the per-provider
-# default model / thinking / routine-model maps, and the effective models after
-# defaults. insights_enabled=false stops the memory pass; trajectories_enabled=false
-# stops trajectory records.
+# Read internal-routine settings: the automatic-session-insights switch,
+# insights and critique model overrides, the per-provider default model /
+# thinking / routine-model maps, and the effective models after defaults.
+# insights_enabled=false stops the memory pass.
 #
 # insights_model_effective is the PRIMARY workspace's answer only. With no
 # override the insights routine resolves from the chat's own workspace, so
@@ -614,11 +690,9 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # on-device option) reads as Automatic rather than reaching a provider as a
 # literal model id. Per-provider defaults use the nested maps:
 # provider_default_models, provider_default_thinking, provider_insights_models.
-# trusted_url is the HTTPS origin other devices should use (e.g. a Tailscale
-# Serve address); only a bare https origin is accepted and "" clears it.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_enabled":false,"trajectories_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**
@@ -638,7 +712,7 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/mcp/s
   -d '{"env_keys":{"LINEAR_API_KEY":"LINEAR_TOKEN"}}'
 
 # Delete one server. 404 when the name is not in .mcp.json.
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear"
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear?workspace=personal"
 
 # Discover a server's tools on demand (HTTP probe, or previously observed names).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear/tools"
@@ -716,7 +790,12 @@ that landed, never by a local commit. A failed push keeps the local commit untou
 reset, no force-push — and the remote URL is always reported with any credential removed.
 `remote` is read fresh on every call and is empty whenever this boot is paused or the
 repository is unconfigured; `last_remote` is the record of where the last run pushed, so it
-is still the answer when `remote` is not. `POST /api/local/backup/run` is the manual trigger;
+is still the answer when `remote` is not. `coverage_gap` is the number of tracked paths git
+already has that the backup scope refuses to commit — the whole count, not a sample — so a
+repository that is also a checkout is reported as a coverage fact beside whatever `state` is.
+It is not a state: a run that committed and pushed through a gap is `ready` and is recorded
+as a success. `reason` is prose for a human and may be reworded; read `coverage_gap` for the
+number. `POST /api/local/backup/run` is the manual trigger;
 it takes the same lock as the scheduled tick, so the two can never interleave. 200 when the
 run left the repository in a state that needs nothing from you, 400 when it could not do its
 job (no repository, no remote, refused credentials, unreachable remote) — the body is the
@@ -725,7 +804,7 @@ same status object either way.
 ```bash
 # What the backup service knows: {state, scope, branch, remote, last_remote, enabled,
 # interval_s, last_attempt_at, last_success_at, last_success_commit, pending_changes,
-# pending_commits, reason}.
+# pending_commits, coverage_gap, reason}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup"
 
 # Pause backups, or turn them off entirely. Both survive a restart.
@@ -745,6 +824,65 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/backup/s
 # click re-enters the same chat instead of starting a second agent.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/backup/setup-chat"
 ```
+
+**Engine start at sign-in**
+
+`GET /api/service/login` and `PATCH /api/service/login` report and change one
+thing: whether the *engine service that serves this request* starts when this
+user signs in. They are the next-sign-in state, not the running state — an
+engine stopped right now can still be set to start at the next sign-in, and a
+running engine can be set not to.
+
+Both are ordinary `/api/*` routes: signed session cookie required, and the PATCH
+also needs a same-origin `Origin`/`Referer`. Neither is in the public or
+loopback-only allowlist, so a local process without a session is refused.
+
+The body is exactly one key: `{"enabled": true}` or `{"enabled": false}`. A
+string, a number, `null`, an extra key, an empty object, or unparseable JSON is
+a 400, and the request never reaches the service layer.
+
+```bash
+# Read the verified state: {platform, supported, installed, enabled, can_change,
+# reason, setup_command}.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/service/login"
+
+# Turn it on / off. The response is the re-read state, not the request echoed.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/service/login" \
+  -H 'content-type: application/json' -d '{"enabled":true}'
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/service/login" \
+  -H 'content-type: application/json' -d '{"enabled":false}'
+```
+
+`installed` and `enabled` are tri-state, and `null` means *the machine did not
+say*. A definition that does not parse, a `launchctl print-disabled` listing
+that cannot be read, a Task Scheduler identity mangled by a lossy code page, a
+definition that names no workspace, a definition that serves a different
+workspace, a hand-written LaunchAgent with neither `RunAtLoad` nor `KeepAlive`,
+a task with no enabled logon trigger: each reports `null` with the reason in
+`reason` and `can_change: false`. Do not render a switch position out of a
+`null`; render the reason. `can_change` is the only field that licenses a
+write, and it is true only where the enabled bit is proven to be what decides.
+
+`platform` is `macos`, `windows`, `linux`, or `other`. On Linux, and on a
+platform with no service backend, `supported` is false and `reason` points at
+`docs/LINUX.md` (a systemd unit an administrator enables by hand).
+
+The engine identity is fixed and never taken from a request: the
+`com.ciao.server` LaunchAgent in the real per-user LaunchAgents directory on
+macOS, the registered `\Ciaobot\Engine` Task Scheduler task on Windows.
+`installed: false` (macOS, no plist) carries a `setup_command` to run instead;
+`setup_command` is always a fixed, non-executing hint. **These routes never
+create, register, start, stop, restart, bootstrap, or repoint a service, and
+never write a plist or task XML.** A service belonging to another workspace is
+reported and left alone.
+
+Status codes on PATCH: 200 with the re-read status; 409 with `error` plus the
+same status fields when the change is not this engine's to make (no service,
+another workspace's service, a definition that does not start at sign-in, an
+unanswerable query); 503 when the OS refused the change or the re-read did not
+confirm it. A change only counts as done when the machine's re-read says what
+was asked for — the 503 is the honest answer when it does not, and it is never
+papered over with the requested value.
 
 **Connecting a data folder to a private remote**
 
@@ -795,9 +933,38 @@ never the reverse — a failed write returns **409** with the bullet still queue
 so an over-cap region cannot silently swallow the fact. A `rehome` row is not
 moved here: relocating a note and rewriting every reference to it is
 `vault_rehome`'s job, reversible through its own receipt, and doing half of it
-from a queue row would leave links pointing at a path that moved. `dismiss` writes
-nothing. Batch accept applies the same rule per row and reports `promoted` and
-`dismissed` for each, keeping the bullets it could not write.
+from a queue row would leave links pointing at a path that moved. A `note_edit`
+row IS performed here, and it is the one accept that rewrites a whole vault note:
+through `ciao.note_receipts.commit_note_change`, so it is revision-checked,
+journaled and undoable from History like any other note write, and a note that
+moved since the proposal was filed is a **409** with `conflict: true` and the
+bullet still queued — never an overwrite. A `retire` in the same row is
+attended-only and reversible: it calls `vault_review.trash_note` and moves the
+note into `Workspace/.vault-trash/`, from where the review panel's restore puts
+it back. `dismiss` writes nothing, but on a `note_edit` row it SETTLES the
+proposal, clearing the note-check's `proposal_id` — deliberately not a permanent
+"refused" marker, so the note is not asked about again until its cooldown
+expires and an edited note is proposed again straight away. A write that lands
+but cannot be recorded as decided — the sidecar unreadable, the lock held — is a
+**409**, not a success: the error names the note and its receipt, the bullet
+stays queued, and that dismissal is what settles the record. Reporting it as an
+accept would take away the only control the owner has over a note whose proposal
+is no longer in the queue. Batch accept applies
+the same rules per row and reports `promoted` and `dismissed` for each, keeping
+the bullets it could not write.
+
+`GET /api/proposals/history` resolves every `note_edit` decision back to the
+record it was filed from and returns it as a `note_edit` block: the vault-relative
+note, the operation (`replace` | `restamp` | `retire`), the exact `before`/`after`
+text, the reason, the evidence the verdict rested on, its coverage, and whether
+the decision is still `pending`. Without it a settled verification reads as the
+bullet's one line with a destination — nothing a reader could judge it against
+months later. An accepted `replace`/`restamp` carries a `note_apply` receipt and
+so the ordinary undo; an accepted `retire` moved a file and journalled no memory
+receipt, so the row is returned with `reversible_by: "restore"` (the review
+trash) rather than as a change with no snapshot, which is a different claim. A
+row whose record cannot be read simply has no `note_edit` key, the same contract
+as a missing `change`.
 
 ```bash
 # List every queued proposal across all workspaces, plus open skill-proposal
@@ -826,13 +993,32 @@ nothing. Batch accept applies the same rule per row and reports `promoted` and
 # "Open chat". Dismissing one records the decision and flips its `lifecycle` to
 # `dismissed`: the file stays on disk, readable and still accumulating evidence,
 # and the row leaves the listing.
+#
+# A `kind: "note_edit"` row is one note whose verification the autonomy rule
+# would not apply unattended (a retirement, an update the evidence cannot carry,
+# a `still_valid` with no `updated:` to stamp) — see
+# `ciao/note_edit_proposals.py`. It carries `target` (the vault-relative note the
+# accept would rewrite) and `note_edit: {id, operation, outcome, settled,
+# receipt_id, can_accept, reason}`. `operation` is `replace` | `restamp` |
+# `retire`; `can_accept` is the server's own answer to whether the accept could
+# do what a button saying so claims (false for a note that moved since the
+# proposal was filed - a retirement included, which is refused as a conflict
+# rather than trashing a note nobody judged - a re-stamp with no frontmatter to
+# stamp, a record that has already been decided, and a record that is missing or
+# unreadable), with the reason beside it. The queue bullet's own
+# payload is the sidecar id — a digest that says nothing to a reviewer, so the
+# row is resolved server-side — and the operation, the before/after images and
+# the citations live at
+# `<vault>/Workspace/Memory-Note-Edit-Proposals/<id>.json`. Exactly one row per
+# (note, revision).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 
 # What accepting one row would write, WITHOUT writing it. Returns
 # {ok, preview} where preview is {id, kind, text, action, operation
-# (add|update|move|none), destination, destination_path, before, after,
-# revision, exact, can_accept, reason, truncated}. `before`/`after` are the
-# exact destination body the accept would replace, computed from the same
+# (add|update|move|add_category|note_edit|retire_note|none), destination,
+# destination_path, before, after, revision, exact, can_accept, reason,
+# truncated}. `before`/`after` are the exact destination body the accept would
+# replace, computed from the same
 # functions the accept calls - so a stamped learned-at date, a duplicate that
 # writes nothing, and a learning whose recurrence count is bumped instead of
 # appended all show as what they are. `exact: false` marks a kind whose result
@@ -840,6 +1026,13 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals"
 # accept time). `?text=` previews an edited wording against the same current
 # destination. `revision` is the destination digest this preview was computed
 # against; hand it back on the accept below.
+#
+# `note_edit` and `retire_note` are the note-verification operations and are
+# their own values rather than `update`/`move`: a `note_edit` preview is the
+# WHOLE note's before/after, byte-exact and computed against the note as it
+# stands, so its `after` is the bytes the accept writes; a `retire_note` preview
+# has no after body, because the accept moves the note to the review trash
+# rather than rewriting it.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/preview"
 
 # Accept a SKILL proposal into an implementation chat. A skill row is the one
@@ -1015,7 +1208,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_title`: auto-title finished.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
-- `chat_postprocess`: the post-archive pipeline reporting itself. Archiving a chat dispatches one task that writes the session trajectory (`ciao/insights.py:run_archive_pipeline`); the vault work moved to the memory pass, a chat of the app's own, in #627. This event fires when the pipeline starts, as the step finishes, and when it settles. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{state: "running"|"done", step, expected: [job_id], steps: {job_id: {status, extra}}, started_at, updated_at, interrupted?}`. The same object is persisted on the chat and returned as `ChatInfo.postprocess`, so an archived chat can still report what was taken from it after a reload — the PWA renders it as a muted activity signal while `state` is `running` and as a settled one-line summary afterwards. `interrupted` marks a pipeline a restart killed mid-flight. The connect `snapshot` carries `postprocessing: [chat_id]` for pipelines already in flight, so a client that joins between the start and finish events still shows them.
+- `chat_postprocess`: the memory pass queued by archiving a chat reporting on that chat. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{steps: {memory_pass: {status: "queued"|"running"|"ok"|"attention", extra: {chat_id}}}, updated_at}` and `extra.chat_id` is the pass's own chat. The same object is persisted on the archived chat and returned as `ChatInfo.postprocess`, so it can still link to its memory pass after a reload.
 - `workspaces_changed`: a workspace was archived or restored (any tab or device). No payload; clients refetch `GET /api/workspaces` and `GET /api/projects`, so the sidebar and pickers stop offering an archived workspace without a reload.
 - `schedules_changed`: an automation was created, edited, paused, resumed, or deleted (REST route, Automations page, or the `schedule_*` MCP tools mid-turn). No payload; the client refetches `GET /api/schedules`, which is where the computed `next_run` / `missed` / `context_available` fields are assembled. Without it an automation created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload. The deprecated `loops_changed` alias was removed with the loop MCP tools (#441); existing clients listen for `schedules_changed`.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.

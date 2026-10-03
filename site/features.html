@@ -63,7 +63,9 @@
         <h2>Documents side by side</h2>
         <p>When Ciaobot writes a note, a plan or a table, it opens next to the chat. Ask for a change and watch the file update. Tables (CSV) are editable, and you can comment on a single cell.</p>
         <p>To point at something precisely, <strong>highlight any passage</strong>, in the document or in the chat, and add a comment. The comment goes out with your next message, so "make this friendlier" knows exactly what "this" is.</p>
-        <p class="how"><strong>How:</strong> ask for a document ("write the wedding-day timeline as a note"). Open any file card and use <em>Pin to sidebar</em> to keep it beside the chat. Word, PowerPoint, Excel and PDF files you drop in are converted so Ciaobot can read them.</p>
+        <p>Word, PowerPoint, Excel and PDF files you attach are converted to Markdown with <a href="https://github.com/firecrawl/anydoc">AnyDoc</a>, so the assistant can work from their contents rather than a filename. AnyDoc is included with Ciaobot; conversion happens when a supported document is attached.</p>
+        <p>Links work too: Ciaobot reads web pages directly, stripping menus and ads. It can read available YouTube captions; GitHub links use <code>gh</code> instead. Nothing to install — no separate CLI and no Node.js on the host.</p>
+        <p class="how"><strong>How:</strong> ask for a document ("write the wedding-day timeline as a note"). Open any file card and use <em>Pin to sidebar</em> to keep it beside the chat. Drop in a supported office file or PDF to have Ciaobot read it.</p>
       </div>
       <figure>
         <a href="assets/img/chat-doc.webp"><img src="assets/img/chat-doc.webp" alt="A chat on the left and the wedding-day timeline document open on the right, just updated by Ciaobot" loading="lazy" width="1600" height="1000"></a>

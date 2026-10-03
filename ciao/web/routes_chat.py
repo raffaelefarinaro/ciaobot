@@ -17,13 +17,14 @@ clients are connected.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ciao.web.auth import authorize_websocket
-from ciao.web.chat_broker import ChatStream
+from ciao.web.chat_broker import STREAM_KEEPALIVE_SECONDS, ChatStream
 from ciao.web.connection_tracker import ConnectionTracker
 from ciao.models import ImageAttachment
 from ciao.web.project_chats import RestartDrainingError
@@ -57,17 +58,32 @@ _ATTACH_POLL_SECONDS = 0.5
 
 
 async def _attach_streams(websocket: WebSocket, pcm, chat_id: str) -> None:
-    """Forward every broker stream for this chat until the socket dies."""
+    """Forward every broker stream for this chat until the socket dies.
+
+    While idle it sends a keepalive every STREAM_KEEPALIVE_SECONDS so the PWA
+    watchdog does not read silence as a dead socket.
+    """
     last: ChatStream | None = None
+    loop = asyncio.get_running_loop()
+    last_sent = loop.time()
     while True:
         stream = pcm.get_active_stream(chat_id)
         if stream is not None and stream is not last:
             last = stream
             if not await _forward_stream(websocket, stream):
                 return
+            # The stream's own subscribe() was writing keepalives until it
+            # ended.
+            last_sent = loop.time()
             # Immediately re-check: a queued follow-up or background stream
             # may already have replaced the one that just finished.
             continue
+        if loop.time() - last_sent >= STREAM_KEEPALIVE_SECONDS:
+            try:
+                await websocket.send_json({"type": "keepalive"})
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            last_sent = loop.time()
         await asyncio.sleep(_ATTACH_POLL_SECONDS)
 
 
@@ -403,6 +419,11 @@ async def ws_events(websocket: WebSocket) -> None:
     await websocket.accept()
     pcm = websocket.app.state.project_chat_manager
 
+    # Attach before the snapshot is built: an event published between the
+    # snapshot and the subscription would otherwise be lost, and a lost
+    # `chat_streaming_done` leaves the client believing the turn still runs.
+    subscription = pcm.events.attach()
+
     # Snapshot: tell the client which chats are currently streaming so the
     # sidebar dots render immediately on reload.
     try:
@@ -427,16 +448,17 @@ async def ws_events(websocket: WebSocket) -> None:
             # resolves non-terminal runs as orphans on start — so this only
             # ever reports runs the live process is actually supervising.
             "background_runs": pcm.background_run_counts,
-            # Chats whose post-archive pipeline is mid-flight. A client that
-            # connects between the start and finish events would otherwise show
-            # nothing at all until the next archive.
-            "postprocessing": pcm.postprocessing_chat_ids(),
             # Late connectors that missed `server_restarting` still get the
             # overlay instead of a chat-level turn rejection.
             "restarting": bool(getattr(pcm, "_restart_draining", False)),
         })
     except (WebSocketDisconnect, RuntimeError):
+        subscription.close()
         return
+    except BaseException:
+        # Anything else must not leave the subscriber queue registered.
+        subscription.close()
+        raise
 
     tracker: ConnectionTracker | None = getattr(
         websocket.app.state, "connection_tracker", None
@@ -446,11 +468,15 @@ async def ws_events(websocket: WebSocket) -> None:
     sub_task: asyncio.Task | None = None
 
     async def _pump_events() -> None:
-        async for payload in pcm.events.subscribe():
-            try:
+        try:
+            async for payload in subscription:
                 await websocket.send_json(payload)
-            except (WebSocketDisconnect, RuntimeError):
-                return
+        except (WebSocketDisconnect, RuntimeError):
+            return
+        # The hub ended the stream (queue overflow). Close the socket so the
+        # client reconnects and takes a fresh snapshot.
+        with contextlib.suppress(RuntimeError):
+            await websocket.close()
 
     sub_task = asyncio.create_task(_pump_events())
     try:
@@ -461,6 +487,7 @@ async def ws_events(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        subscription.close()
         if sub_task is not None and not sub_task.done():
             sub_task.cancel()
         if tracker and conn_id:

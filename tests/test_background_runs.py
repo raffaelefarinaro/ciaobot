@@ -11,13 +11,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import signal
 import stat
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ciao import background, job_runs
+from ciao.os_support.processes import ProcessTree
+from tests.test_os_support_processes import _beats_stopped, _leader, _wait_for_beat
 from ciao.background import (
     BackgroundRun,
     BackgroundRunError,
@@ -35,6 +40,7 @@ from ciao.background import (
 from ciao.config import CiaoConfig
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 from ciao.sessions import StateStore
+from ciao.tool_path import engine_bin_dir
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 
@@ -144,6 +150,17 @@ def test_cwd_symlink_out_of_the_workspace_is_rejected(tmp_path: Path) -> None:
     assert excinfo.value.code == "cwd_forbidden"
 
 
+# The interpreter running the suite, not a venv's launcher: a launcher adds a
+# process of its own. Runs that need "a command" use it with `-c`, so the same
+# test runs on every OS instead of assuming /bin/sh.
+PYTHON = getattr(sys, "_base_executable", sys.executable)
+
+
+def _py(code: str) -> list[str]:
+    """argv that runs ``code`` with this interpreter."""
+    return [PYTHON, "-c", code]
+
+
 def test_relative_executable_stays_inside_the_workspace(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     root.mkdir()
@@ -161,10 +178,80 @@ def test_relative_executable_stays_inside_the_workspace(tmp_path: Path) -> None:
     assert excinfo.value.code == "cmd_forbidden"
 
 
+def test_a_relative_path_with_the_native_separator_is_a_path(tmp_path: Path) -> None:
+    """`scripts\\x.py` on Windows is a path under the run dir, not a program name."""
+    root = tmp_path / "workspace"
+    (root / "scripts").mkdir(parents=True)
+    script = root / "scripts" / "x.py"
+    script.write_text("print('hi')\n", encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    native = os.path.join("scripts", "x.py")
+    assert resolve_executable(native, root, root) == str(script.resolve())
+    with pytest.raises(BackgroundRunError) as excinfo:
+        resolve_executable(os.path.join("..", "evil.py"), root, root)
+    assert excinfo.value.code == "cmd_forbidden"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a drive-less rooted path is a Windows shape")
+def test_a_rooted_path_without_a_drive_is_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`\\tools\\x.exe` names the current drive's root, not the run directory."""
+    # The current drive decides what a rooted path means; on a CI runner the
+    # checkout (and so the cwd) is on D: while the temp dir is on C:.
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    tool = tmp_path / "tool.exe"
+    tool.write_bytes(b"")
+    rooted = str(tool)[len(tool.drive):]  # C:\\...\\tool.exe -> \\...\\tool.exe
+    assert not Path(rooted).is_absolute() and Path(rooted).root
+    assert Path(resolve_executable(rooted, root, root)).resolve() == tool.resolve()
+
+
 def test_missing_executable_fails_at_validation_not_in_the_log(tmp_path: Path) -> None:
     with pytest.raises(BackgroundRunError) as excinfo:
         resolve_executable("definitely-not-a-real-binary-xyz", tmp_path, tmp_path)
     assert excinfo.value.code == "cmd_not_found"
+
+
+def test_bare_ciao_resolves_to_the_engine_over_a_stale_decoy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A background ``ciao`` runs the engine, not a stale install earlier on PATH (#995)."""
+    engine = shutil.which("ciao", path=engine_bin_dir())
+    assert engine is not None, "the test interpreter's bin dir must hold the engine ciao"
+
+    decoy_dir = tmp_path / "stale-local-bin"
+    decoy_dir.mkdir()
+    # The decoy needs a PATHEXT suffix on Windows, or a bare-name lookup cannot
+    # see it at all and the assertion below would hold vacuously there.
+    decoy_name = "ciao.bat" if sys.platform == "win32" else "ciao"
+    decoy = decoy_dir / decoy_name
+    decoy.write_text("#!/bin/sh\necho stale\n", encoding="utf-8")
+    decoy.chmod(decoy.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(decoy_dir), "/user/bin"]))
+
+    assert resolve_executable("ciao", tmp_path, tmp_path) == engine
+
+
+def test_other_bare_names_still_resolve_from_the_user_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the engine-first promotion is new; a user's own command resolves as before."""
+    user_dir = tmp_path / "user-bin"
+    user_dir.mkdir()
+    # A bare-name PATH lookup searches PATHEXT on Windows, so the tool needs a
+    # launchable suffix there or the name resolves to nothing and the test only
+    # exercises the POSIX path.
+    name = "background-test-tool.bat" if sys.platform == "win32" else "background-test-tool"
+    tool = user_dir / name
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(user_dir))
+
+    assert resolve_executable(name, tmp_path, tmp_path) == str(tool)
 
 
 def test_env_rejects_loader_hooks_and_the_session_token() -> None:
@@ -253,14 +340,22 @@ async def test_run_resolves_paths_against_the_owning_workspace_root(
     runner = _rerooted_runner(tmp_path)
     scripts = tmp_path / "work" / "automations"
     scripts.mkdir(parents=True)
-    probe = scripts / "probe.sh"
-    probe.write_text("#!/bin/sh\npwd\n", encoding="utf-8")
-    probe.chmod(probe.stat().st_mode | stat.S_IXUSR)
+    if sys.platform == "win32":
+        # A shebang script is not a Windows program, so the relative path is
+        # the script's, run by the interpreter; it still resolves against the
+        # run's cwd inside the re-rooted workspace.
+        (scripts / "probe.py").write_text("import os\nprint(os.getcwd())\n", encoding="utf-8")
+        cmd = [PYTHON, "./probe.py"]
+    else:
+        probe = scripts / "probe.sh"
+        probe.write_text("#!/bin/sh\npwd\n", encoding="utf-8")
+        probe.chmod(probe.stat().st_mode | stat.S_IXUSR)
+        cmd = ["./probe.sh"]
 
     run = await runner.start_run(
         parent_chat_id="chat-1",
         workspace="work",
-        cmd=["./probe.sh"],
+        cmd=cmd,
         cwd="automations",
     )
     assert Path(run.cwd) == scripts.resolve()
@@ -282,7 +377,7 @@ async def test_run_cannot_reach_another_workspace(tmp_path: Path) -> None:
         await runner.start_run(
             parent_chat_id="chat-1",
             workspace="work",
-            cmd=["/bin/sh", "-c", "true"],
+            cmd=_py('pass'),
             cwd="../personal",
         )
     assert excinfo.value.code == "cwd_forbidden"
@@ -332,7 +427,7 @@ async def test_run_is_refused_when_its_workspace_directory_is_gone(
         await runner.start_run(
             parent_chat_id="chat-1",
             workspace="work",
-            cmd=["/bin/sh", "-c", "true"],
+            cmd=_py('pass'),
         )
     assert excinfo.value.code == "workspace_unavailable"
 
@@ -347,7 +442,7 @@ async def test_happy_path_records_output_and_wakes_once(tmp_path: Path) -> None:
     run = await runner.start_run(
         parent_chat_id="chat-1",
         workspace="work",
-        cmd=["/bin/sh", "-c", "echo hello-from-run"],
+        cmd=_py("print('hello-from-run')"),
         label="greeter",
     )
     assert run.status == "running"
@@ -375,7 +470,7 @@ async def test_failing_command_reports_its_exit_code(tmp_path: Path) -> None:
 
     run = await runner.start_run(
         parent_chat_id="chat-1",
-        cmd=["/bin/sh", "-c", "echo boom >&2; exit 3"],
+        cmd=_py("import sys; print('boom', file=sys.stderr); sys.exit(3)"),
     )
     final = await _await_terminal(runner, run.run_id)
 
@@ -393,9 +488,9 @@ async def test_cancel_terminates_the_whole_process_tree(tmp_path: Path) -> None:
 
     run = await runner.start_run(
         parent_chat_id="chat-1",
-        # A child sleep in the same session: killing only argv[0] would leave
-        # it behind, which is why the run gets its own process group.
-        cmd=["/bin/sh", "-c", "sleep 300 & sleep 300"],
+        # A child sleep in the same tree: killing only argv[0] would leave it
+        # behind, which is why the run gets its own process tree.
+        cmd=_py("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)']); time.sleep(300)"),
         timeout_s=300,
     )
     final = await runner.cancel(run.run_id)
@@ -405,6 +500,79 @@ async def test_cancel_terminates_the_whole_process_tree(tmp_path: Path) -> None:
     assert len(collector.finished) == 1
 
 
+
+async def test_cancel_ends_a_grandchild_on_every_os(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real spawn, tree and cancel, with a Python command that forks."""
+    monkeypatch.setattr(background, "CANCEL_GRACE_SECONDS", 0.5)
+    runner = _runner(tmp_path)
+    beat = tmp_path / "beat"
+    run = await runner.start_run(
+        parent_chat_id="chat-1", cmd=_leader(beat, then="time.sleep(300)"), timeout_s=300
+    )
+    await asyncio.to_thread(_wait_for_beat, beat)
+    final = await runner.cancel(run.run_id)
+    assert final.status == "cancelled"
+    assert await asyncio.to_thread(_beats_stopped, beat), "the grandchild survived the cancel"
+
+
+# Ignore the polite stop (SIGTERM on POSIX, CTRL_BREAK on Windows), so only the
+# kill after the grace period can end the process that runs this.
+_IGNORE_STOP = (
+    "import signal; "
+    "[signal.signal(getattr(signal, name), signal.SIG_IGN) "
+    "for name in ('SIGTERM', 'SIGBREAK') if hasattr(signal, name)]"
+)
+
+
+async def test_shutdown_kills_a_grandchild_after_the_leader_exits_in_the_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stop()` must still reach the tree when the leader is gone before the kill.
+
+    The leader outlives the polite stop, then exits on its own inside the grace
+    period, so the supervisor finishes before `_terminate` sends its kill. If the
+    supervisor closed the tree at that point, the kill would have nothing to
+    reach on Windows and the grandchild, which also ignores the polite stop,
+    would keep beating.
+    """
+    monkeypatch.setattr(background, "CANCEL_GRACE_SECONDS", 3.0)
+    runner = _runner(tmp_path)
+    beat = tmp_path / "beat"
+    # The real interpreter, not a venv's launcher: a launcher does not ignore
+    # the polite stop, and its death takes its interpreter with it, which would
+    # end the grandchild whatever the kill did.
+    python = PYTHON
+    grandchild ="\n".join(
+        [
+            _IGNORE_STOP,
+            "import sys, time",
+            "while True:",
+            "    open(sys.argv[1], 'w').write(str(time.monotonic()))",
+            "    time.sleep(0.05)",
+        ]
+    )
+    leader = "\n".join(
+        [
+            _IGNORE_STOP,
+            "import subprocess, sys, time",
+            # Not on the run's pipe: holding it open would keep the supervisor
+            # waiting past the kill, and the leader's exit has to finish it.
+            f"subprocess.Popen([{python!r}, '-c', {grandchild!r}, {str(beat)!r}],"
+            " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+            "time.sleep(1.5)",
+        ]
+    )
+    await runner.start_run(
+        parent_chat_id="chat-1", cmd=[python, "-c", leader], timeout_s=300
+    )
+    await asyncio.to_thread(_wait_for_beat, beat)
+    await runner.stop()
+    assert await asyncio.to_thread(_beats_stopped, beat), "the grandchild survived the shutdown"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pins the POSIX killpg calls")
 async def test_terminate_kills_group_after_leader_has_exited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -421,22 +589,22 @@ async def test_terminate_kills_group_after_leader_has_exited(
 
     monkeypatch.setattr(background, "CANCEL_GRACE_SECONDS", 0.01)
     monkeypatch.setattr(
-        background.os,
+        os,
         "killpg",
         lambda pid, sig: signals.append((pid, sig)),
     )
 
-    await runner._terminate(_ExitedProcess())  # type: ignore[arg-type]
+    await runner._terminate(_ExitedProcess(), ProcessTree(12345))  # type: ignore[arg-type]
 
     assert signals == [
-        (12345, background.signal.SIGTERM),
-        (12345, background.signal.SIGKILL),
+        (12345, signal.SIGTERM),
+        (12345, signal.SIGKILL),
     ]
 
 
 async def test_cancelling_a_finished_run_is_a_no_op(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
-    run = await runner.start_run(parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "true"])
+    run = await runner.start_run(parent_chat_id="chat-1", cmd=_py('pass'))
     finished = await _await_terminal(runner, run.run_id)
 
     again = await runner.cancel(run.run_id)
@@ -450,7 +618,7 @@ async def test_timeout_kills_the_run_and_reports_it_as_failed(tmp_path: Path) ->
 
     run = await runner.start_run(
         parent_chat_id="chat-1",
-        cmd=["/bin/sh", "-c", "sleep 60"],
+        cmd=_py('import time; time.sleep(60)'),
         timeout_s=1,
     )
     final = await _await_terminal(runner, run.run_id, timeout=30.0)
@@ -466,17 +634,17 @@ async def test_the_per_chat_run_limit_is_enforced(tmp_path: Path) -> None:
     for _ in range(MAX_ACTIVE_RUNS_PER_CHAT):
         started.append(
             await runner.start_run(
-                parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 30"], timeout_s=60
+                parent_chat_id="chat-1", cmd=_py('import time; time.sleep(30)'), timeout_s=60
             )
         )
 
     with pytest.raises(BackgroundRunError) as excinfo:
-        await runner.start_run(parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "true"])
+        await runner.start_run(parent_chat_id="chat-1", cmd=_py('pass'))
     assert excinfo.value.code == "run_limit_reached"
 
     # Another chat is unaffected: the cap is per owner, not global.
     other = await runner.start_run(
-        parent_chat_id="chat-2", cmd=["/bin/sh", "-c", "true"]
+        parent_chat_id="chat-2", cmd=_py('pass')
     )
     await _await_terminal(runner, other.run_id)
 
@@ -489,7 +657,7 @@ async def test_stop_terminates_live_runs_so_a_restart_has_no_orphans(
 ) -> None:
     runner = _runner(tmp_path)
     run = await runner.start_run(
-        parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 300"], timeout_s=600
+        parent_chat_id="chat-1", cmd=_py('import time; time.sleep(300)'), timeout_s=600
     )
 
     await runner.stop()
@@ -512,7 +680,7 @@ async def test_stop_marks_terminated_runs_for_wake_replay(tmp_path: Path) -> Non
     """
     runner = _runner(tmp_path)
     run = await runner.start_run(
-        parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 300"], timeout_s=600
+        parent_chat_id="chat-1", cmd=_py('import time; time.sleep(300)'), timeout_s=600
     )
 
     await runner.stop()
@@ -548,7 +716,7 @@ def test_replay_pending_wakes_delivers_and_clears_the_marker(tmp_path: Path) -> 
     store.replace(BackgroundRun(
         run_id="bg-deferred",
         parent_chat_id="chat-1",
-        cmd=["/bin/sh", "-c", "true"],
+        cmd=_py('pass'),
         started_at="2026-08-12T10:00:00+00:00",
         ended_at="2026-08-12T10:00:05+00:00",
         status="cancelled",
@@ -578,7 +746,7 @@ async def test_stop_terminates_multiple_live_runs_concurrently(tmp_path: Path) -
     started: list[object] = []
     release = asyncio.Event()
 
-    async def fake_terminate(proc: object) -> None:
+    async def fake_terminate(proc: object, tree: object) -> None:
         started.append(proc)
         if len(started) == 1:
             first_started.set()
@@ -587,6 +755,10 @@ async def test_stop_terminates_multiple_live_runs_concurrently(tmp_path: Path) -
         await release.wait()
 
     runner._procs = {"run-a": object(), "run-b": object()}  # type: ignore[assignment]
+    runner._trees = {  # type: ignore[assignment]
+        "run-a": SimpleNamespace(close=lambda: None),
+        "run-b": SimpleNamespace(close=lambda: None),
+    }
     runner._terminate = fake_terminate  # type: ignore[method-assign]
 
     stop_task = asyncio.create_task(runner.stop())
@@ -608,7 +780,7 @@ def test_restart_orphans_resolve_to_a_terminal_state_and_wake(tmp_path: Path) ->
     store.replace(BackgroundRun(
         run_id="bg-orphan",
         parent_chat_id="chat-1",
-        cmd=["/bin/sh", "-c", "sleep 900"],
+        cmd=_py('import time; time.sleep(900)'),
         pid=424242,
         started_at="2026-08-12T10:00:00+00:00",
         status="running",
@@ -653,7 +825,7 @@ def test_orphan_resolution_is_idempotent(tmp_path: Path) -> None:
 async def test_a_live_run_is_not_mistaken_for_an_orphan(tmp_path: Path) -> None:
     runner = _runner(tmp_path)
     run = await runner.start_run(
-        parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "sleep 30"], timeout_s=60
+        parent_chat_id="chat-1", cmd=_py('import time; time.sleep(30)'), timeout_s=60
     )
 
     assert runner.resolve_orphans() == []
@@ -752,7 +924,7 @@ async def test_finished_runs_are_recorded_as_job_runs(tmp_path: Path) -> None:
     )
     try:
         run = await runner.start_run(
-            parent_chat_id="chat-1", cmd=["/bin/sh", "-c", "exit 2"], label="probe"
+            parent_chat_id="chat-1", cmd=_py('import sys; sys.exit(2)'), label="probe"
         )
         await _await_terminal(runner, run.run_id)
 
@@ -771,8 +943,6 @@ async def test_finished_runs_are_recorded_as_job_runs(tmp_path: Path) -> None:
     assert rows[0]["status"] == "error"
     assert rows[0]["extra"]["run_id"] == run.run_id
     assert rows[0]["extra"]["exit_code"] == 2
-    # The registry entry makes it visible on the Automation page.
-    assert any(spec.job == "background_run" for spec in job_runs.REGISTRY)
 
 
 # ── wake path ─────────────────────────────────────────────────────────────
@@ -953,7 +1123,7 @@ async def test_runner_announces_both_edges(tmp_path: Path) -> None:
     run = await runner.start_run(
         parent_chat_id="chat-1",
         workspace="work",
-        cmd=["/bin/sh", "-c", "true"],
+        cmd=_py('pass'),
     )
     assert started == [(run.run_id, {"chat-1": 1})]
 
@@ -1074,7 +1244,7 @@ async def test_a_finished_run_wakes_its_chat_end_to_end(
 
     run = await runner.start_run(
         parent_chat_id=chat.chat_id,
-        cmd=["/bin/sh", "-c", "echo report-ready"],
+        cmd=_py("print('report-ready')"),
         label="nightly",
     )
     await _await_terminal(runner, run.run_id)
@@ -1139,7 +1309,7 @@ async def test_cancelled_drain_replays_marked_wake(
 
     run = await runner.start_run(
         parent_chat_id=chat.chat_id,
-        cmd=["/bin/sh", "-c", "echo report-ready"],
+        cmd=_py("print('report-ready')"),
         label="nightly",
     )
     await _await_terminal(runner, run.run_id)
@@ -1199,7 +1369,7 @@ async def test_control_plane_start_attributes_the_run_to_the_calling_chat(
 
     result = await plane.background_run_start(
         _principal(chat.chat_id, project.project_id),
-        cmd=["/bin/sh", "-c", "echo ok"],
+        cmd=_py("print('ok')"),
         label="probe",
     )
 
@@ -1226,7 +1396,7 @@ async def test_a_run_is_invisible_to_another_chat(tmp_path: Path) -> None:
 
     started = await plane.background_run_start(
         _principal(owner.chat_id, project.project_id),
-        cmd=["/bin/sh", "-c", "sleep 30"],
+        cmd=_py('import time; time.sleep(30)'),
         timeout_s=60,
     )
     run_id = started["data"]["run_id"]
@@ -1265,7 +1435,7 @@ async def test_control_plane_rejects_a_cwd_outside_the_workspace(
     with pytest.raises(ControlPlaneError) as excinfo:
         await plane.background_run_start(
             _principal(chat.chat_id, project.project_id),
-            cmd=["/bin/sh", "-c", "true"],
+            cmd=_py('pass'),
             cwd="../../etc",
         )
     assert excinfo.value.code in {"invalid_cwd", "cwd_forbidden", "cwd_not_found"}
@@ -1295,7 +1465,7 @@ async def test_background_tools_report_unavailable_without_a_runner(
 
     with pytest.raises(ControlPlaneError) as excinfo:
         await plane.background_run_start(
-            _principal(chat.chat_id, project.project_id), cmd=["/bin/sh", "-c", "true"]
+            _principal(chat.chat_id, project.project_id), cmd=_py('pass')
         )
     assert excinfo.value.code == "unavailable"
 
@@ -1309,7 +1479,7 @@ async def test_status_returns_the_log_tail(tmp_path: Path) -> None:
 
     started = await plane.background_run_start(
         _principal(chat.chat_id, project.project_id),
-        cmd=["/bin/sh", "-c", "echo tail-marker"],
+        cmd=_py("print('tail-marker')"),
     )
     run_id = started["data"]["run_id"]
     await _await_terminal(runner, run_id)

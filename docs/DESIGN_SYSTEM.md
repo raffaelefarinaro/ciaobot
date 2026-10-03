@@ -197,8 +197,8 @@ A transient *working* mark where the work originates, and a persistent
 *needs you* count where its output waits. One without the other either hides
 that anything happened, or hides that something is now pending. Worked
 example — the memory pass and the proposals queue: post-archive work shows a
-transient `tidying` working signal (ChatSignals + `chatIsPostprocessing` in
-the store), and the persistent waiting count is the memory rail badge
+transient memory-insights row on Home while its pass runs
+(`lib/memoryInsights.ts`), and the persistent waiting count is the memory rail badge
 (proposals store counts rendered in `ProjectSidebar.vue`).
 
 **Rule S5 — Counts are real counts.**
@@ -261,7 +261,7 @@ sites), then settings incrementally per tab. Do not big-bang 28 cards.
 `SettingsView.vue` is the largest file in the app: a 2,210-line template and
 2,051 lines of scoped CSS covering seven routed tabs. The routes already exist
 (`/settings/workspaces`, `/settings/models`,
-`/settings/context`, `/settings/skills`, `/settings/automations`), so the tabs
+`/settings/context`, `/settings/skills`), so the tabs
 are separable with no router change — each becomes its own SFC. This is also
 where most of the L1.1 violations live, and splitting makes them visible.
 
@@ -330,15 +330,21 @@ state chain is fixed, the rest of those views is not.
 ### Test suite: Node floor (resolved)
 
 There was never a broken dependency here, and an earlier draft of this document
-said there was. The real cause: **jsdom 29 requires Node
-`^20.19.0 || ^22.13.0 || >=24.0.0`** — its CJS dependency chain does `require()`
-on an ESM module, and `require(esm)` only landed in Node 20.19.0. Nothing in the
-repo declared that floor, so on an older local Node every jsdom test file failed
+said there was. The real cause: **jsdom requires a Node floor, and nothing in
+the repo declared it** — so on an older local Node every jsdom test file failed
 to start its worker while vitest still printed
 `Test Files 25 passed` for the files that *did* run. 17 of 42 files silently
 never executed, and the summary looked green.
 
-CI was always fine — `.github/workflows/ci.yml` uses Node 22.
+Under jsdom 29 the floor was `^20.19.0 || ^22.13.0 || >=24.0.0`, driven by its
+CJS dependency chain doing `require()` on an ESM module, and `require(esm)` only
+landed in Node 20.19.0. **jsdom 30 raised all three lines and dropped the 20.x
+one: the floor is now `^22.22.2 || ^24.15.0 || >=26.0.0`.** Node 20 is EOL, and
+the requirement is the same one either way — declared in one place and
+mirrored everywhere, so it moves with jsdom rather than drifting from it.
+
+CI was always fine — `.github/workflows/ci.yml` uses Node 22, which satisfies
+both ranges.
 
 Fixed by declaring the constraint and making violations loud:
 
@@ -346,6 +352,13 @@ Fixed by declaring the constraint and making violations loud:
 - `.nvmrc` pinning 22 to match CI
 - `web/scripts/check-node.mjs`, run as the first step of `npm test`, which exits 1
   with an explanation rather than letting a partial run report success
+
+**The floor is a paired edit, and it is two files that must not drift.** jsdom's
+`engines` is the source; `web/package.json`'s `engines` and
+`SUPPORTED_RANGE` in `check-node.mjs` mirror it, and the accept/reject tables in
+`web/src/lib/__tests__/checkNode.test.ts` pin the behaviour. Raising jsdom
+without moving all three leaves the gate enforcing a floor jsdom no longer has —
+which fails loudly, so it is a five-minute fix, not a silent one.
 
 On a supported Node the full suite is 61 test files green.
 

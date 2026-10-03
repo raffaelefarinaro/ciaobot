@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from ciao.jsonio import write_private_text
+from ciao.os_support.private import make_private, make_private_dir
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ def save_profile_registry(config, entries: Sequence[dict[str, str]]) -> None:
         if slugify_profile(entry.get("name", ""))
     ]
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
 
 
@@ -577,7 +578,7 @@ def store_credentials(
     try:
         # everything under here is OAuth material; tighten the profile dir for
         # installs whose older setup left it group/world-readable
-        config_dir.chmod(0o700)
+        make_private_dir(config_dir)
     except OSError as exc:
         logger.warning("Failed to tighten %s permissions: %s", config_dir, exc)
     creds_path = config_dir / "credentials.json"
@@ -587,7 +588,7 @@ def store_credentials(
     key_file = config_dir / ".encryption_key"
     if key_file.exists():
         try:
-            key_file.chmod(0o600)
+            make_private(key_file)
         except Exception as exc:
             logger.warning("Failed to fix .encryption_key permissions: %s", exc)
 
@@ -849,9 +850,13 @@ def auth_status(
     when available, ``token_valid`` / ``token_error`` / ``has_refresh_token``.
     Never logs the raw subprocess output.
     """
-    from ciao.tool_path import login_shell_path, resolve_tool
+    from ciao.tool_path import login_shell_path, resolve_command
 
-    if not resolve_tool("gws"):
+    try:
+        gws = resolve_command("gws")
+    except OSError as exc:
+        return {"available": False, "reason": str(exc)}
+    if not gws:
         return {"available": False, "reason": "gws CLI not installed"}
 
     env = _profile_env_for_status(config, profile)
@@ -860,7 +865,7 @@ def auth_status(
     env["PATH"] = login_shell_path()
     try:
         result = runner(
-            ["gws", "auth", "status"],
+            [*gws, "auth", "status"],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -967,7 +972,7 @@ class GwsHealthMonitor:
         self._runtime.mkdir(parents=True, exist_ok=True)
         self._cache_path().write_text(
             json.dumps({"profiles": profiles}, indent=2, sort_keys=True),
-            encoding="utf-8",
+            encoding="utf-8", newline="",
         )
 
     def _configured_profiles(self) -> list[str]:

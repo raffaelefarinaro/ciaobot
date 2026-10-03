@@ -2,8 +2,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import CommentComposePopover from '../CommentComposePopover.vue'
+import { useProjectStore } from '../../stores/projects'
+import type { WorkspaceInfo } from '../../lib/types'
 
 const FULL_HEIGHT = 932
 const KEYBOARD_HEIGHT = 596
@@ -31,21 +34,34 @@ function composeTop(): number {
   return parseFloat(el.style.top)
 }
 
-function mountCompose(props: { anchor?: { top: number; left: number } | null; modelValue?: string; images?: string[] } = {}) {
+function mountCompose(props: { anchor?: { top: number; left: number } | null; modelValue?: string; images?: string[]; inline?: boolean } = {}) {
   return mount(CommentComposePopover, {
     props: {
       anchor: props.anchor === undefined ? { top: 40, left: 80 } : props.anchor,
       modelValue: props.modelValue ?? '',
       images: props.images ?? [],
+      inline: props.inline ?? false,
     },
     attachTo: document.body,
   })
+}
+
+function workspace(name: string, color?: string): WorkspaceInfo {
+  return { name, vault_root: '', default_provider: 'claude', gws_profile: '', ...(color ? { color } : {}) }
+}
+
+function composeEl(): HTMLElement | null {
+  return document.body.querySelector<HTMLElement>('.compose')
 }
 
 describe('CommentComposePopover', () => {
   beforeEach(() => {
     setViewportHeight(FULL_HEIGHT)
     vi.unstubAllGlobals()
+    // The popover reads the active workspace to colour itself, so every mount
+    // needs a store. A fresh one per test keeps the workspace assertions below
+    // independent of whatever the previous test left behind.
+    setActivePinia(createPinia())
   })
 
   afterEach(() => {
@@ -150,6 +166,77 @@ describe('CommentComposePopover', () => {
     expect(document.body.querySelector('.compose')).toBeNull()
     wrapper.unmount()
   })
+})
 
+describe('CommentComposePopover workspace accent', () => {
+  beforeEach(() => {
+    setViewportHeight(FULL_HEIGHT)
+    setActivePinia(createPinia())
+  })
 
+  // The accent lives on #ciao-app as an inherited custom property, so the body
+  // teleport drops it and the composer's primary button comes back pink. The
+  // workspace identity travels with the popover instead.
+  it('carries the active workspace colour across the body teleport', async () => {
+    const store = useProjectStore()
+    store.workspaces = [workspace('personal', 'emerald'), workspace('work', 'amber')]
+    store.activeWorkspace = 'personal'
+    const wrapper = mountCompose({ modelValue: 'A comment' })
+    await nextTick()
+
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('emerald')
+    // Still the body-teleported box, not something that moved back into place.
+    expect(composeEl()!.parentElement).toBe(document.body)
+    wrapper.unmount()
+  })
+
+  it('follows a workspace switch without remounting', async () => {
+    const store = useProjectStore()
+    store.workspaces = [workspace('personal', 'emerald'), workspace('work', 'cyan')]
+    store.activeWorkspace = 'personal'
+    const wrapper = mountCompose({ modelValue: 'A comment' })
+    await nextTick()
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('emerald')
+
+    store.activeWorkspace = 'work'
+    await nextTick()
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('cyan')
+
+    // A colour change on the workspace record itself is the same case: the
+    // preset can be edited in Settings while the popover is open.
+    store.workspaces[1].color = 'violet'
+    await nextTick()
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('violet')
+    wrapper.unmount()
+  })
+
+  // Inside a modal dialog the Teleport is disabled and the popover stays in the
+  // dialog's DOM, which does inherit from #ciao-app. Setting the attribute there
+  // too keeps one code path and one look rather than two.
+  it('keeps the workspace colour in inline (inside a dialog) mode', async () => {
+    const store = useProjectStore()
+    store.workspaces = [workspace('personal', 'amber')]
+    const wrapper = mountCompose({ modelValue: 'A comment', inline: true })
+    await nextTick()
+
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('amber')
+    wrapper.unmount()
+  })
+
+  it('falls back to the default accent for a workspace with no preset', async () => {
+    const store = useProjectStore()
+    // No colour set at all, and then one that is not a known preset: neither
+    // resolves to an accent, so both land on the documented default.
+    store.workspaces = [workspace('personal')]
+    const wrapper = mountCompose({ modelValue: 'A comment' })
+    await nextTick()
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('pink')
+    wrapper.unmount()
+
+    store.workspaces = [workspace('personal', 'chartreuse')]
+    const second = mountCompose({ modelValue: 'Another comment' })
+    await nextTick()
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('pink')
+    second.unmount()
+  })
 })

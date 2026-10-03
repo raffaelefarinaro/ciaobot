@@ -25,6 +25,11 @@ from typing import Any
 from ciao import provider_registry
 from ciao.model_tiers import canonical_tier, is_tier
 from ciao.schedules import supports_auto_archive
+# The two vocabularies an `update_task` helper is checked against, taken from
+# the module that defines the tasks rather than re-spelled here: a scope or an
+# id shape the catalog stopped accepting must stop being accepted here too, in
+# the same commit.
+from ciao.update_task_catalog import SCOPES
 
 # Project-files surface (list + upload). Mirrors the union of the read-only
 # workspace-file/image allowlists plus the new binary one (PDF, ZIP, office
@@ -86,25 +91,35 @@ def _classify_file(path: Path) -> str:
 # convention".
 _VAULT_FOLDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
+# A task id in an `update_task` helper, spelled the way the packaged catalog
+# spells one (`update_task_catalog._ID_RE`, deliberately re-declared rather than
+# imported: the chat store must keep validating this shape if the catalog's
+# loader ever changes, and a chat store that cannot read a helper is a chat the
+# operator cannot find again).
+_TASK_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+# A `prompt_digest`, at the width `update_tasks.FINGERPRINT_CHARS` keeps.
+_HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _restored_postprocess(raw: object) -> dict:
-    """Sanitize a persisted post-archive record on load.
+    """Keep only the memory-pass step of a persisted post-archive record.
 
-    The pipeline is an in-process ``asyncio`` task, so a record still marked
-    "running" is a record whose task died with the previous process. Downgrading
-    it to "done" keeps the chat reporting the steps that did land instead of
-    showing an activity indicator nothing is left alive to clear."""
-    if not isinstance(raw, dict) or not raw:
+    Records written while archiving still ran a trajectory stage also carry
+    that pipeline's run state, manifest view and step; nothing reads them."""
+    if not isinstance(raw, dict):
         return {}
-    state = dict(raw)
-    if state.get("state") == "running":
-        state["state"] = "done"
-        state["step"] = ""
-        state["interrupted"] = True
+    steps = raw.get("steps")
+    step = steps.get("memory_pass") if isinstance(steps, dict) else None
+    if not isinstance(step, dict):
+        return {}
+    state: dict = {"steps": {"memory_pass": dict(step)}}
+    if raw.get("updated_at"):
+        state["updated_at"] = raw["updated_at"]
     return state
 
 
@@ -528,13 +543,48 @@ def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_update_task_helper(value: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed on an update-task helper, same contract as the other two.
+
+    This kind is what makes a launched "After this update" task findable again
+    after a restart: it is the only record of which task a chat is for, so a
+    half-valid one is a chat the store can no longer recognise. Every field is
+    therefore required and typed — the id must be the kebab name the catalog
+    gives a task, the revision a positive integer, the scope one the catalog
+    scopes tasks by, and the digest hex, because a digest that is not one is a
+    value this code did not write.
+    """
+    task_id = str(value.get("task_id") or "")
+    if len(task_id) > 128 or not _TASK_ID_RE.fullmatch(task_id):
+        return {}
+    revision = value.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        return {}
+    scope = str(value.get("scope") or "")
+    if scope not in SCOPES:
+        return {}
+    prompt_digest = str(value.get("prompt_digest") or "")
+    if not _HEX_DIGEST_RE.fullmatch(prompt_digest):
+        return {}
+    return {
+        "kind": "update_task",
+        "task_id": task_id,
+        "revision": revision,
+        "scope": scope,
+        "prompt_digest": prompt_digest,
+    }
+
+
 def _normalize_chat_helper(value: Any) -> dict[str, Any]:
     """Fail closed on lifecycle metadata supplied by older or invalid clients."""
     if not isinstance(value, dict):
         return {}
-    if value.get("kind") == "memory_pass":
+    kind = value.get("kind")
+    if kind == "memory_pass":
         return _normalize_memory_pass_helper(value)
-    if value.get("kind") != "proposal":
+    if kind == "update_task":
+        return _normalize_update_task_helper(value)
+    if kind != "proposal":
         return {}
     intent = str(value.get("intent") or "")
     policy = str(value.get("archive_policy") or "")

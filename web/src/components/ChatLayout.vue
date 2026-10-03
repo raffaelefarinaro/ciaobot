@@ -110,6 +110,7 @@
               <div class="home-workbench">
                 <div class="home-main">
                   <HomeIntake />
+                  <HomeNoticeReopen />
                   <HousekeepingStrip />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
@@ -234,6 +235,7 @@
             <div class="home-workbench">
               <div class="home-main">
                 <HomeIntake />
+                <HomeNoticeReopen />
                 <HousekeepingStrip />
                 <HomeSetupCard />
                 <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
@@ -264,9 +266,10 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import HomeNoticeReopen from './HomeNoticeReopen.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
-import { openNewChatPicker, pendingNewChat } from '../lib/newChat'
+import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
@@ -572,10 +575,9 @@ const currentProjectId = computed(() => {
 // "needs the user".
 //
 // A memory-insight row counts as activity: a workspace whose only thing
-// happening is a memory pass is not empty, and neither is one whose only
-// activity is a chat still saving its trajectory — post-archive work is not
-// part of `activeChatsAll`, but it is still something this surface reports
-// before the user starts a new chat.
+// happening is a memory pass is not empty — post-archive work is not part of
+// `activeChatsAll`, but it is still something this surface reports before the
+// user starts a new chat.
 const hasHomeActivity = computed(
   () => store.activeChatsAll.length > 0 || store.memoryInsightRows.length > 0,
 )
@@ -641,7 +643,9 @@ if (typeof document !== 'undefined') {
 }
 
 async function chooseNewChat(workspace = store.activeWorkspace, projectId?: string) {
-  const selectedProject = await openNewChatPicker({ workspace, projectId })
+  const selectedProject = projectId
+    || (workspace === store.activeWorkspace ? homeNewChatProjectId.value : '')
+    || await openNewChatPicker({ workspace })
   if (!selectedProject) return
   await store.newChatInProject(selectedProject)
 }
@@ -970,7 +974,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     // lane's project menu moved the menu's focus *and* roamed the chat grid,
     // leaving the menu open with focus somewhere else entirely.
     if (e.defaultPrevented) return
-    if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
+    if (homeRecentRef.value?.onArrow?.(e.key)) e.preventDefault()
     return
   }
 
@@ -1497,10 +1501,32 @@ onBeforeUnmount(() => {
   gap: 48px;
 }
 
+/* One column, one gap. Every section root here used to carry its own top
+   margin, and the result was three different distances between the composer
+   and the next thing depending on which notices were open — 12px next to a
+   notice, 42px down to the recent list, and the two summed wherever both
+   applied. The gap lives here; the roots below hand theirs back. */
 .home-main {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* Section roots give up their *block* margins so the gap is the only thing
+   separating them — `margin-block`, not `margin`: these are flex items, and
+   inline `auto` margins on a flex item absorb all the free space on the cross
+   axis, which re-centres the chip and shrinks the setup card to fit-content.
+   Their own inline margins (the three capped shells) stay as they were.
+   `:deep()` because these are other components' root elements (and
+   HousekeepingStrip's are a fragment, which inherits no scope id). Card,
+   heading and row spacing inside each section is untouched. */
+.home-main > :deep(.housekeeping),
+.home-main > :deep(.update-tasks),
+.home-main > :deep(.home-setup),
+.home-main > :deep(.home-notice-reopen),
+.home-main > :deep(.home-recent) {
+  margin-block: 0;
 }
 
 .home-workbench .home-main > .home-intake,

@@ -7,7 +7,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from ciao import macos_service
+from ciao.os_support.limits import SERVER_NOFILE_TARGET
+
+# These reach the real launchd domain (`gui/<uid>`, built from os.getuid) or
+# classify the Ciaobot.app launchd layout; neither exists on Windows, whose
+# service is a Task Scheduler task (tests/test_windows_service.py). The parser
+# contracts and the platform-stubbed tests stay on every OS.
+launchd_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="the launchd domain and Ciaobot.app layout are macOS-only"
+)
 
 
 def _runtime(tmp_path: Path) -> macos_service.DesktopRuntime:
@@ -100,7 +111,7 @@ def test_restart_and_stop_require_confirmation_for_active_chats(
     monkeypatch,
 ) -> None:
     runtime = _runtime(tmp_path)
-    monkeypatch.setattr(macos_service, "_active_chat_ids", lambda _port: ["chat-1"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: ["chat-1"])
     calls: list[list[str]] = []
 
     restart = macos_service.restart_service(
@@ -121,7 +132,7 @@ def test_restart_and_stop_require_confirmation_for_active_chats(
 
 def test_force_stop_boots_out_server(tmp_path: Path, monkeypatch) -> None:
     runtime = _runtime(tmp_path)
-    monkeypatch.setattr(macos_service, "_active_chat_ids", lambda _port: ["chat-1"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: ["chat-1"])
     calls: list[list[str]] = []
 
     result = macos_service.stop_service(
@@ -151,7 +162,7 @@ def test_migrate_and_rollback_preserve_recoverable_assets(
     (legacy_app / "marker").write_text("legacy app", encoding="utf-8")
     trash = tmp_path / "Trash"
     calls: list[list[str]] = []
-    monkeypatch.setattr(macos_service, "_server_reachable", lambda _port: True)
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: True)
 
     migrated = macos_service.migrate_legacy_companion(
         runtime=runtime,
@@ -184,6 +195,7 @@ def test_migrate_and_rollback_preserve_recoverable_assets(
     assert (legacy_app / "marker").read_text() == "legacy app"
 
 
+@launchd_only
 def test_migrate_is_idempotent_and_ignores_unrecognized_apps(
     tmp_path: Path,
     monkeypatch,
@@ -197,7 +209,7 @@ def test_migrate_is_idempotent_and_ignores_unrecognized_apps(
     unrecognized = applications / "Ciaobot Server.app"
     _write_bundle(unrecognized, "UnexpectedExecutable")
     trash = tmp_path / "Trash"
-    monkeypatch.setattr(macos_service, "_server_reachable", lambda _port: True)
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: True)
 
     first = macos_service.migrate_legacy_companion(
         runtime=runtime,
@@ -287,6 +299,7 @@ def test_service_parser_contract() -> None:
     assert stop.force is True
 
 
+@launchd_only
 def test_service_start_registers_missing_launch_agent(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -317,6 +330,8 @@ def test_service_start_registers_missing_launch_agent(
     environment = plist_data["EnvironmentVariables"]
     assert environment["CIAO_WORKSPACE"] == str(workspace.resolve())
     assert environment["CIAO_PORT"] == "9555"
+    assert plist_data["SoftResourceLimits"]["NumberOfFiles"] == SERVER_NOFILE_TARGET
+    assert plist_data["HardResourceLimits"]["NumberOfFiles"] == SERVER_NOFILE_TARGET
     assert ["bootstrap", f"gui/{os.getuid()}", str(plist_path)] in calls
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
@@ -440,6 +455,7 @@ def test_service_start_rejects_tcc_protected_workspace(
     assert calls == []
 
 
+@launchd_only
 def test_service_start_register_honors_runtime_root_and_engine_path(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -479,6 +495,7 @@ def test_service_start_register_honors_runtime_root_and_engine_path(
     assert "-m" not in plist_data["ProgramArguments"]
 
 
+@launchd_only
 def test_service_start_refuses_workspace_mismatch(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -557,7 +574,7 @@ def test_update_engine_requires_confirmation_before_upgrading_active_chats(
     tmp_path: Path, monkeypatch
 ) -> None:
     runtime = _runtime(tmp_path)
-    monkeypatch.setattr(macos_service, "_active_chat_ids", lambda _port: ["chat-1"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: ["chat-1"])
     monkeypatch.setattr(
         "ciao.package_version.update_package",
         lambda: (_ for _ in ()).throw(AssertionError("upgrade must not start")),
@@ -649,6 +666,7 @@ def test_migration_classify_parser_contract() -> None:
     assert args.as_json is True
 
 
+@launchd_only
 def test_migration_classify_reports_a_live_desktop_host(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -671,6 +689,7 @@ def test_migration_classify_reports_a_live_desktop_host(
     assert payload["details"]["port"] == 9555
 
 
+@launchd_only
 def test_migration_classify_refuses_to_guess_an_unreadable_state(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

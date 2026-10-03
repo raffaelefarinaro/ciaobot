@@ -19,7 +19,6 @@ from typing import AsyncIterator
 from ciao.models import (
     AssistantTextDelta,
     ModelCapabilityQuestionEvent,
-    ContextEntitiesEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
@@ -92,6 +91,7 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
 #
 # Keep this short: the PWA's half-open watchdog treats ~2 missed keepalives as
 # stale, so 5s here → recovery in ~12s instead of ~45s with a 15s cadence.
+# `_attach_streams` sends it too while a chat is idle.
 STREAM_KEEPALIVE_SECONDS = 5.0
 
 
@@ -497,8 +497,6 @@ def event_to_json(event: StreamEvent) -> dict | None:
         return {"type": "status", "message": event.status or ""}
     if isinstance(event, ModelChangedEvent):
         return {"type": "model_changed", "model": event.model}
-    if isinstance(event, ContextEntitiesEvent):
-        return {"type": "context_entities", "entities": event.entities}
     if isinstance(event, TokenUsageEvent):
         return {
             "type": "token_usage",
@@ -514,6 +512,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
             "usage": event.usage,
             "session_id": event.session_id or "",
         }
+        if event.stopped:
+            payload["stopped"] = True
         if event.fallback_final:
             payload["fallback_final"] = True
         if event.quota:
@@ -898,6 +898,55 @@ class ChatStreamBroker:
         self._streams.pop(chat_id, None)
 
 
+class EventsSubscription:
+    """One consumer of `EventsHub`.
+
+    Registered with the hub on construction, so events published after
+    `EventsHub.attach()` returns are queued even before iteration starts. The
+    caller must `close()` it.
+    """
+
+    _RESYNC: dict = {"type": "resync"}
+
+    def __init__(self, hub: "EventsHub") -> None:
+        self._hub = hub
+        self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
+
+    def offer(self, payload: dict) -> None:
+        try:
+            self._queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            # A dropped event can be `chat_streaming_done`, which a client
+            # cannot infer. Discard the backlog and end the stream so the
+            # socket reconnects and takes a fresh snapshot instead.
+            logger.warning("EventsHub subscriber queue full, forcing resync")
+            while not self._queue.empty():
+                self._queue.get_nowait()
+            self._queue.put_nowait(self._RESYNC)
+            self.close()
+
+    def close(self) -> None:
+        self._hub._subs.discard(self)
+
+    async def __aiter__(self) -> AsyncIterator[dict]:
+        """Yield live events until closed; ends after a forced resync."""
+        while True:
+            try:
+                payload = await asyncio.wait_for(
+                    self._queue.get(), timeout=STREAM_KEEPALIVE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # Keep the idle /ws/events socket warm (see
+                # STREAM_KEEPALIVE_SECONDS). Without traffic it can die
+                # half-open and miss the `chat_streaming_done` recovery
+                # signal a client uses to refetch after a quiet turn.
+                yield {"type": "keepalive"}
+                continue
+            if payload is self._RESYNC:
+                return
+            yield payload
+
+
 class EventsHub:
     """App-wide pub/sub for cross-chat awareness events.
 
@@ -906,11 +955,11 @@ class EventsHub:
     in-app toasts). Distinct from `ChatStream`, which carries per-turn deltas.
 
     Events are fire-and-forget; no replay buffer. Subscribers only see events
-    that fire after they connect; past activity comes from REST.
+    that fire after they attach; past activity comes from REST.
     """
 
     def __init__(self) -> None:
-        self._subs: set[asyncio.Queue[dict]] = set()
+        self._subs: set[EventsSubscription] = set()
 
     @property
     def subscriber_count(self) -> int:
@@ -918,29 +967,12 @@ class EventsHub:
         return len(self._subs)
 
     def publish(self, payload: dict) -> None:
-        """Fan-out to live subscribers. Drop events for full subscriber queues."""
-        for queue in list(self._subs):
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                logger.warning("EventsHub subscriber queue full, dropping event")
+        """Fan-out to live subscribers."""
+        for sub in list(self._subs):
+            sub.offer(payload)
 
-    async def subscribe(self) -> AsyncIterator[dict]:
-        """Iterate live events. Caller is responsible for cancelling the
-        iterator (e.g. on WebSocket disconnect)."""
-        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
-        self._subs.add(queue)
-        try:
-            while True:
-                try:
-                    yield await asyncio.wait_for(
-                        queue.get(), timeout=STREAM_KEEPALIVE_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    # Keep the idle /ws/events socket warm (see
-                    # STREAM_KEEPALIVE_SECONDS). Without traffic it can die
-                    # half-open and miss the `chat_streaming_done` recovery
-                    # signal a client uses to refetch after a quiet turn.
-                    yield {"type": "keepalive"}
-        finally:
-            self._subs.discard(queue)
+    def attach(self) -> EventsSubscription:
+        """Register a consumer now; iterate it and `close()` it when done."""
+        sub = EventsSubscription(self)
+        self._subs.add(sub)
+        return sub

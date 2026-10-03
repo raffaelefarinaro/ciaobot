@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -66,8 +67,6 @@ from ciao.web.routes_api import (
     chat_messages,
     chat_message_part,
     chat_retry,
-    chat_retry_insights,
-    chat_archive_job,
     chat_prompt,
     chat_stop,
     chat_new_session,
@@ -117,13 +116,16 @@ from ciao.web.routes_api import (
     setup_list_dirs_endpoint,
     setup_mkdir_endpoint,
     setup_status_endpoint,
-    list_automation,
     list_completed_projects,
     list_projects,
     list_proposals,
     list_housekeeping,
     run_housekeeping_action,
     dismiss_housekeeping_action,
+    list_update_tasks,
+    start_update_task,
+    dismiss_update_task,
+    reopen_update_task,
     list_schedules,
     list_workspaces,
     project_chats,
@@ -174,13 +176,13 @@ from ciao.web.routes_node import (
     update_status_endpoint,
 )
 from ciao.web.routes_push import (
-    push_notification_feed,
     push_public_key,
     push_status,
     push_subscribe,
     push_subscription_check,
     push_unsubscribe,
 )
+from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -270,8 +272,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/handover", chat_handover, methods=["POST"]),
         Route("/api/chats/{chat_id}/fork", chat_fork, methods=["POST"]),
         Route("/api/chats/{chat_id}/archive", chat_archive, methods=["POST"]),
-        Route("/api/chats/{chat_id}/retry-insights", chat_retry_insights, methods=["POST"]),
-        Route("/api/chats/{chat_id}/archive-job", chat_archive_job, methods=["GET"]),
         Route("/api/chats/{chat_id}/continue", chat_continue, methods=["POST"]),
         Route("/api/chats/{chat_id}/read", chat_mark_read, methods=["POST"]),
         Route("/api/chats/{chat_id}/unread", chat_mark_unread, methods=["POST"]),
@@ -310,8 +310,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
-        # Automation status (read-only) — Settings → Automation page
-        Route("/api/automation", list_automation, methods=["GET"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
@@ -339,6 +337,14 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/housekeeping", list_housekeeping, methods=["GET"]),
         Route("/api/housekeeping/{action_id}/run", run_housekeeping_action, methods=["POST"]),
         Route("/api/housekeeping/{action_id}/dismiss", dismiss_housekeeping_action, methods=["POST"]),
+        # "After this update" tasks: the offered list, and the one idempotent
+        # launch that turns a task into a chat with the packaged prompt in it.
+        # Session-protected like every other /api route; not loopback-only,
+        # because a second device is exactly the race the idempotency is for.
+        Route("/api/update-tasks", list_update_tasks, methods=["GET"]),
+        Route("/api/update-tasks/{task_id}/start", start_update_task, methods=["POST"]),
+        Route("/api/update-tasks/{task_id}/dismiss", dismiss_update_task, methods=["POST"]),
+        Route("/api/update-tasks/{task_id}/reopen", reopen_update_task, methods=["POST"]),
         Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
         Route("/api/agent-assets/subagents/{name}", update_subagent_endpoint, methods=["PATCH"]),
         Route("/api/agent-assets/subagents/{name}", delete_subagent_endpoint, methods=["DELETE"]),
@@ -402,7 +408,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
-        Route("/api/menubar-notifications", push_notification_feed, methods=["GET"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),
@@ -429,6 +434,15 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/admin/drain", admin_drain, methods=["POST"]),
         Route("/api/admin/drain/cancel", admin_drain_cancel, methods=["POST"]),
         Route("/api/admin/status", admin_status, methods=["GET"]),
+        # The engine's verified start-at-sign-in state, and the switch for it.
+        # Session-protected like every other /api route, and deliberately not
+        # in the public or loopback-only allowlists: it is a change to a
+        # per-user OS service, so it takes the ordinary authenticated,
+        # same-origin path. It can only read or flip the enabled bit of the
+        # service already installed for the engine's own workspace — it never
+        # registers, starts, stops or repoints a service.
+        Route("/api/service/login", service_login_status, methods=["GET"]),
+        Route("/api/service/login", service_login_update, methods=["PATCH"]),
         Route("/api/admin/skills", admin_skills, methods=["GET"]),
         Route("/api/admin/skills/add", admin_add_skill, methods=["POST"]),
         Route("/api/skills/import", skill_import, methods=["POST"]),
@@ -464,6 +478,11 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # warm the discovery cache at startup so the first Settings -> Models & providers
         # visit serves a populated list instead of blocking on the probe.
         warm_claude_discovery_cache(getattr(config, "workspace_root", None))
+        # The first login-shell probe can take seconds; every chat start reads
+        # this cached value, so pay for it here, off the event loop.
+        from ciao.tool_path import login_shell_path
+
+        await asyncio.to_thread(login_shell_path)
 
         try:
             yield

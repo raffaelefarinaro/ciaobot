@@ -38,12 +38,18 @@ Verification:
      attribute (adding a field to the `/ws/events` snapshot broke
      `tests/test_ws_auth.py`, whose `SimpleNamespace` stub had no such
      attribute), so a green focused run proves nothing about the suite.
-  3. `cd web && npm test` — the full frontend suite. Needs Node >= 20.19;
+  3. `cd web && npm test` — the full frontend suite. Needs Node >= 22.22.2;
      `npx vitest` on an older Node silently skips component files while
-     printing green.
+     printing green. The floor is set by jsdom and lives in three places that
+     must agree: `web/package.json` `engines`, `SUPPORTED_RANGE` in
+     `web/scripts/check-node.mjs`, and `docs/DEVELOPMENT.md`.
   4. `cd web && npm run build` after frontend changes.
-  PRs into `develop` only run these on Linux; the macOS job (browser tests and
-  an engine cold-start) runs after merge, so a PR going green is not proof the
+  PRs into `develop` run these on Linux, and the first three on Windows too:
+  the `windows` job (`windows-latest`) blocks on every module importing,
+  `python -m mypy ciao` (natively win32, so a POSIX-only call such as
+  `os.getuid` or `signal.SIGHUP` outside a platform branch fails it), the
+  full `pytest` suite and `npm test`. The macOS job (browser tests and an
+  engine cold-start) runs after merge, so a PR going green is not proof the
   macOS job will.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running — it just will not fail the build for you.
@@ -58,6 +64,20 @@ Verification:
 Branching and releases:
 - All pull requests target `develop`.
 - Only the admin creates releases from `develop`.
+
+Upkeep between releases:
+- [`docs/UPKEEP.md`](docs/UPKEEP.md) is the watchlist: topics we keep an eye on,
+  with the last-checked date and the decision. **Edit it during ordinary work** —
+  add a row when you notice something worth watching, in whatever PR you are
+  already in. It is a working document, not a periodic report, and a stale date
+  on an unchecked row is worse than no date.
+- The checks themselves live in the `/ciao-upkeep` skill: every dependency and
+  pin we install (the `gws` CLI, the GitHub Actions pins and the paired Node
+  floor), the stock skill catalog against `ciao-capabilities` and
+  the marketing site, doc rot, and the advisory CI steps nobody reads.
+- `/ciao-release` deliberately does none of this. It cuts, verifies, installs,
+  walks the UI and ships; it does not fix. A defect found during a release
+  becomes an issue, and the fix happens on `develop` before the next cut.
 
 Use plain, factual engineering notes in commits and pull requests.
 

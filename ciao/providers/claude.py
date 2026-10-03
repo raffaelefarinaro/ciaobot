@@ -1210,6 +1210,19 @@ class ClaudeProvider(BaseSDKProvider):
             quota = self._pending_quota or self._extract_quota(msg)
             self._pending_quota = {}
             result_text = msg.result or ""
+            if msg.is_error and not result_text:
+                # A reported SDK failure can carry its diagnostics only in
+                # ``errors`` (e.g. subtype "error_during_execution" with an
+                # empty ``result``). Join the nonempty string entries so a real
+                # error keeps a message instead of reading as an empty result.
+                # An empty ``errors`` list stays empty: cancellation is
+                # inferred by the caller, not invented here.
+                errors = msg.errors or []
+                result_text = "\n".join(
+                    error
+                    for error in errors
+                    if isinstance(error, str) and error
+                )
             if msg.is_error:
                 result_text = _annotate_connection_host(result_text, self._api_host)
             return [

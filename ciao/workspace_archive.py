@@ -101,7 +101,7 @@ def _rerooted(config: Any) -> bool:
 
 def _display(config: Any, path: Path) -> str:
     try:
-        return str(path.relative_to(Path(config.workspace_root)))
+        return path.relative_to(Path(config.workspace_root)).as_posix()
     except ValueError:
         return str(path)
 
@@ -218,7 +218,7 @@ def _new_archive_dir(config: Any, name: str, now: datetime) -> Path:
 def _write_metadata(folder: Path, metadata: dict[str, Any]) -> None:
     path = folder / METADATA_FILE
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
 
 
@@ -391,8 +391,8 @@ def mark_rolled_back(config: Any, archived: dict[str, Any]) -> None:
 def refresh_shared_index(config: Any) -> bool:
     """Rebuild the shared ``INDEX.md`` on an install that has not re-rooted.
 
-    There one index lists every workspace's notes under a workspace prefix and
-    entity hints read it back, so an archived folder's entries must leave it
+    There one index lists every workspace's notes under a workspace prefix, so
+    an archived folder's entries must leave it
     now rather than at the next restart. A per-root install needs nothing: the
     archived root's own index moved with it.
     """
@@ -609,7 +609,7 @@ def _restored_vault_root(
                 )
     stored = str(candidate)
     if candidate.is_relative_to(install) and len(candidate.relative_to(install).parts) > 1:
-        stored = str(candidate.relative_to(install))
+        stored = candidate.relative_to(install).as_posix()
     from ciao.workspaces import vault_root_owner  # noqa: PLC0415
 
     owner = vault_root_owner(config, candidate)

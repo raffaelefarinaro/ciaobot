@@ -146,7 +146,7 @@ def _walk_notes(
         with scan:
             for entry in scan:
                 name = entry.name
-                child_rel = name if not rel else rel + os.sep + name
+                child_rel = name if not rel else rel + KEY_SEPARATOR + name
                 try:
                     is_dir = entry.is_dir(follow_symlinks=False)
                 except OSError:
@@ -157,8 +157,14 @@ def _walk_notes(
                 elif name.endswith(suffix):
                     yield child_rel, entry
 
-FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+# `\r?\n`, as in vault_links: a CRLF note's frontmatter is still frontmatter.
+FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
+
+# Stored keys are relative paths spelled with `/` on every OS, the way the
+# search rows, `expand_note` and the MCP telemetry hand them to clients; a key
+# built from the native separator came out as `a\b.md` on Windows.
+KEY_SEPARATOR = "/"
 
 # Every stored key is a path relative to the key base, so no key can begin with
 # a separator: this prefix matches no row. It is the fail-closed answer for a
@@ -166,7 +172,7 @@ H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 # everything) leaked one workspace's notes into another's search. Public so
 # callers of vault_key_prefix can recognise the fail-closed answer by name
 # instead of re-deriving the sentinel's value.
-NO_MATCH_KEY_PREFIX = os.sep
+NO_MATCH_KEY_PREFIX = KEY_SEPARATOR
 
 
 SEARCH_DB_NAME = "vault-fts.db"
@@ -398,10 +404,10 @@ def _scope_prefix(root_dir: Path, base: Path) -> str | None:
     never claim a prefix the stored keys do not have.
     """
     try:
-        relative = str(Path(root_dir).relative_to(Path(base)))
+        relative = Path(root_dir).relative_to(Path(base)).as_posix()
     except ValueError:
         return None
-    return "" if relative in {"", "."} else relative + os.sep
+    return "" if relative in {"", "."} else relative + KEY_SEPARATOR
 
 
 def _is_reserved_key(root_rel: str) -> bool:
@@ -412,7 +418,7 @@ def _is_reserved_key(root_rel: str) -> bool:
     overhead: the predicate can only be true for the handful of reserved names,
     so the set lookup decides it for everything else.
     """
-    name = root_rel.rpartition(os.sep)[2]
+    name = root_rel.rpartition(KEY_SEPARATOR)[2]
     if name.casefold() not in RESERVED_UNINDEXED_FILES:
         return False
     return _is_reserved_bookkeeping(Path(root_rel))
@@ -690,7 +696,7 @@ def index_file(
         rel = file_path.relative_to(base)
     except ValueError:
         return False
-    rel_str = str(rel)
+    rel_str = rel.as_posix()
 
     # Determine which table it belongs to
     is_log = "Logs" in rel.parts
@@ -1041,7 +1047,7 @@ def expand_note(
     which is what makes this a refinement of the snippet rule rather than a way
     around it.
     """
-    key = str(stored_key).strip().replace("/", os.sep)
+    key = str(stored_key).strip()
     if not key or "\x00" in key or Path(key).is_absolute():
         return None
     # Scope first, so an out-of-scope key is never even looked up. A caller
@@ -1190,7 +1196,7 @@ def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
             "paths": paths[:50],
         }
         with keyed_lock(f"search-hits:{path}"):
-            with path.open("a", encoding="utf-8") as f:
+            with path.open("a", encoding="utf-8", newline="") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             if path.stat().st_size > _HITS_MAX_BYTES:
                 lines = path.read_text(encoding="utf-8").splitlines()[-_HITS_KEEP_LINES:]
@@ -1198,7 +1204,7 @@ def record_search_hits(runtime_dir: Path, query: str, paths: list[str]) -> None:
                 # never observes a half-rewritten file, and a failed write
                 # leaves the previous log intact.
                 tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="")
                 os.replace(tmp, path)
     except Exception:  # noqa: BLE001 — telemetry must never break search
         logger.debug("Could not record search hits", exc_info=True)

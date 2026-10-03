@@ -26,6 +26,7 @@ as child sessions — is native.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -68,6 +69,7 @@ from ciao.providers.base import (
 from ciao.execution_modes import (
     opencode_credential_deny_rules,
 )
+from ciao.os_support.processes import ProcessTree, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
 
@@ -99,8 +101,10 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
 })
 
 OPENCODE_V2_REQUIRED = (
-    "Ciaobot requires OpenCode 2.0.16 or newer 2.x. "
-    "Update OpenCode, then retry this chat."
+    "Ciaobot requires OpenCode 2.0.16 or newer 2.x. OpenCode 1 cannot be "
+    "upgraded in place: install OpenCode 2 (npm install -g @opencode/cli, "
+    "brew install anomalyco/tap/opencode-v2, or "
+    "curl -fsSL https://opencode.ai/v2/install | bash), then retry this chat."
 )
 
 # The catalog needs a throwaway `opencode serve` (~1-2s), and /api/models is
@@ -195,6 +199,60 @@ def _opencode_messages_signature(messages: list[Any]) -> str:
             )
     return "|".join(pieces)
 _SHUTDOWN_TIMEOUT = 5.0
+
+
+async def _stop_server(process: asyncio.subprocess.Process, tree: ProcessTree) -> None:
+    """Stop an ``opencode serve`` and everything it started, politely first.
+
+    The tree, not the one process: on Windows the process we spawned is the npm
+    shim's ``cmd.exe``, whose ``opencode.exe`` child is the actual server and
+    outlived a kill aimed at the shim alone. Same order as before: ask, wait
+    ``_SHUTDOWN_TIMEOUT``, then kill. A leader that already exited may have
+    left its tree behind, so that is still ended (``kill_descendants``).
+    """
+    try:
+        if process.returncode is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                tree.kill_descendants()
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            tree.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
+        except (TimeoutError, asyncio.TimeoutError):
+            try:
+                tree.kill()
+                await process.wait()
+            except (ProcessLookupError, FileNotFoundError, PermissionError, OSError):
+                # The tree already exited between the timeout and the kill;
+                # treat it as cleanly gone rather than surfacing a spurious
+                # task exception.
+                pass
+    finally:
+        tree.close()
+
+
+async def _spawn_server(
+    *argv: str, **kwargs: Any
+) -> tuple[asyncio.subprocess.Process, ProcessTree]:
+    """``create_subprocess_exec`` as a tree that dies with the engine.
+
+    ``dies_with_engine``: on POSIX the server stays in the engine's process
+    group, as it always has, so launchd's group kill on an engine crash still
+    reaches it; on Windows its Job Object ends the tree when the engine exits.
+    """
+    options: dict[str, Any] = {**tree_spawn_options(dies_with_engine=True), **kwargs}
+    process = await asyncio.create_subprocess_exec(*argv, **options)
+    try:
+        tree = ProcessTree(process.pid, dies_with_engine=True)
+    except OSError:
+        # A server that cannot be stopped as a tree would leak; do not run it.
+        process.kill()
+        await process.wait()
+        raise
+    return process, tree
+
+
 _SERVER_START_LOCKS: dict[str, asyncio.Lock] = {}
 _CATALOG_LOCKS: dict[str, asyncio.Lock] = {}
 # Lines of the server's stderr kept for error messages. The pipe must be read
@@ -219,9 +277,11 @@ _MODE_AGENTS: dict[str, str] = {
 _READ_ONLY_TOOLS = ("read", "glob", "grep")
 # V2 sends the glob pattern/regex itself as the permission resource; it does
 # not send the search root or result paths. Require an explicit operator card
-# for both search actions in every mode, including bypass, so a broad search
-# cannot silently enumerate credential-bearing files. Path-shaped deny rules
-# below still hard-deny direct protected glob patterns after this ask rule.
+# for both search actions in every mode except bypass, so a broad search
+# cannot silently enumerate credential-bearing files. Bypass already allows
+# shell, which reaches the same files, so a card there only stalls the run.
+# Path-shaped deny rules below still hard-deny direct protected glob patterns
+# after this ask rule.
 _SEARCH_PERMISSION_RULES: tuple[dict[str, str], ...] = (
     {"action": "glob", "resource": "*", "effect": "ask"},
     {"action": "grep", "resource": "*", "effect": "ask"},
@@ -608,17 +668,18 @@ def mode_settings(
     any ``ciao …`` argv prefix: an allow rule is a prefix a shell suffix
     (``ciao help >/dev/null; <cmd>``) could ride past, so bash stays ``ask``
     and every shell command, including ``ciao …``, keeps a card. Users who want
-    no routine cards switch to ``bypass``; V2 glob/grep search actions still
-    require an explicit card because their resources are not paths.
+    no routine cards switch to ``bypass``; outside bypass, V2 glob/grep search
+    actions still require an explicit card because their resources are not paths.
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
     rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
     # Search resources in V2 are patterns/regexes rather than paths. Keep
-    # search operations behind an explicit card even in bypass mode; otherwise
-    # a broad glob/grep can enumerate secrets without any operator decision.
-    rules.extend(dict(rule) for rule in _SEARCH_PERMISSION_RULES)
+    # search operations behind an explicit card, except in bypass where the
+    # blanket allow (shell included) already covers them.
+    if key != "bypass":
+        rules.extend(dict(rule) for rule in _SEARCH_PERMISSION_RULES)
     # Last, and for every mode including `bypass`: resolution is
     # last-match-wins, and this is the one carve-out no mode may buy its way
     # out of. See `opencode_credential_deny_rules`.
@@ -1259,6 +1320,7 @@ class OpencodeProvider(BaseSDKProvider):
         # `mode_settings`.
         self._permission_rules = permission_rules
         self._process: asyncio.subprocess.Process | None = None
+        self._tree: ProcessTree | None = None
         # Reads the server's stderr for its whole life; see
         # `_start_stderr_reader` for why leaving the pipe unread is not an option.
         self._stderr_task: asyncio.Task[None] | None = None
@@ -1466,8 +1528,8 @@ class OpencodeProvider(BaseSDKProvider):
         binary = resolve_opencode_binary(request.extra_env)
         if not binary:
             raise FileNotFoundError(
-                "opencode CLI not found. Install it, make sure it is on your login shell PATH, "
-                "or set CIAO_OPENCODE_BIN."
+                "opencode CLI not found. Install OpenCode 2 (npm install -g @opencode/cli), "
+                "make sure it is on your login shell PATH, or set CIAO_OPENCODE_BIN."
             )
 
         lock = _server_start_lock(self.workspace_root)
@@ -1513,7 +1575,7 @@ class OpencodeProvider(BaseSDKProvider):
         for problem in workspace_config_placeholder_problems(self.workspace_root, env):
             logger.warning("opencode: %s", problem)
 
-        self._process = await asyncio.create_subprocess_exec(
+        self._process, self._tree = await _spawn_server(
             binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
             cwd=str(self.workspace_root),
             env=env,
@@ -1662,21 +1724,10 @@ class OpencodeProvider(BaseSDKProvider):
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-        process = self._process
-        self._process = None
-        if process is not None and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
-            except (TimeoutError, asyncio.TimeoutError):
-                try:
-                    process.kill()
-                    await process.wait()
-                except (ProcessLookupError, FileNotFoundError):
-                    # The process already exited between the timeout and the
-                    # kill; treat it as cleanly gone rather than surfacing a
-                    # spurious task exception.
-                    pass
+        process, tree = self._process, self._tree
+        self._process, self._tree = None, None
+        if process is not None and tree is not None:
+            await _stop_server(process, tree)
         # After the process is gone, so the tail still explains a crash above.
         reader = self._stderr_task
         self._stderr_task = None
@@ -3341,6 +3392,7 @@ class _EphemeralServer:
     def __init__(self, workspace_root: Path) -> None:
         self._workspace_root = workspace_root
         self._process: asyncio.subprocess.Process | None = None
+        self._tree: ProcessTree | None = None
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> httpx.AsyncClient | None:
@@ -3348,13 +3400,19 @@ class _EphemeralServer:
             return await self._enter_unlocked()
 
     async def _enter_unlocked(self) -> httpx.AsyncClient | None:
-        binary = resolve_opencode_binary()
+        try:
+            binary = resolve_opencode_binary()
+        except OSError as exc:
+            # A wrapper that leads nowhere is not a missing CLI, but for a caller
+            # asking only "can this start a server" the two answers are the same.
+            logger.warning("opencode: %s", exc)
+            return None
         if not binary:
             return None
         port = _free_port()
         password = secrets.token_urlsafe(24)
         try:
-            self._process = await asyncio.create_subprocess_exec(
+            self._process, self._tree = await _spawn_server(
                 binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
                 cwd=str(self._workspace_root),
                 env={**os.environ, "OPENCODE_SERVER_PASSWORD": password},
@@ -3391,21 +3449,10 @@ class _EphemeralServer:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-        process = self._process
-        self._process = None
-        if process is not None and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_SHUTDOWN_TIMEOUT)
-            except (TimeoutError, asyncio.TimeoutError):
-                try:
-                    process.kill()
-                    await process.wait()
-                except (ProcessLookupError, FileNotFoundError):
-                    # The process already exited between the timeout and the
-                    # kill; treat it as cleanly gone rather than surfacing a
-                    # spurious task exception.
-                    pass
+        process, tree = self._process, self._tree
+        self._process, self._tree = None, None
+        if process is not None and tree is not None:
+            await _stop_server(process, tree)
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -3430,7 +3477,7 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     try:
         listed = subprocess.run(
             [binary, "auth", "list", "--format", "json"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3445,7 +3492,7 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
         )
     try:
         listed = subprocess.run(
-            [binary, "auth", "list"], capture_output=True, text=True, timeout=timeout
+            [binary, "auth", "list"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3464,7 +3511,7 @@ def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, An
     try:
         result = subprocess.run(
             [binary, "api", "GET", path],
-            capture_output=True, text=True, timeout=timeout, cwd=str(Path.home()),
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout, cwd=str(Path.home()),
         )
         payload = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
@@ -3504,7 +3551,22 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
 
     from ciao.setup_status import _provider
 
-    binary = resolve_opencode_binary()
+    binary: str | None
+    try:
+        binary = resolve_opencode_binary()
+    except OSError as exc:
+        # Found on PATH, but as a wrapper that does not lead to one executable —
+        # a `npm install -g` that was interrupted, or a package whose entry point
+        # is a script. Saying "not installed" would send the operator to install
+        # something they already have.
+        return _provider(
+            name="opencode",
+            ok=False,
+            auth="broken",
+            command="opencode",
+            detail=f"installed but broken: {exc}",
+            version="unknown",
+        )
     if not binary:
         return _provider(
             name="opencode",
@@ -3517,7 +3579,7 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
     version = ""
     try:
         result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=timeout
+            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )
         version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     except (OSError, subprocess.SubprocessError):

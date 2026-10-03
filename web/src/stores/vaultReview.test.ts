@@ -31,6 +31,8 @@ function candidate(overrides: Partial<VaultReviewCandidate> = {}): VaultReviewCa
     status: 'candidate',
     disposition: '',
     deferred_until: '',
+    completable: false,
+    completion_moves_folder: false,
     ...overrides,
   }
 }
@@ -78,9 +80,14 @@ describe('vaultReview store', () => {
     expect(store.candidates).toHaveLength(1)
 
     post.mockRejectedValueOnce(new Error('action failed'))
+    // The failed action refetches, and that refetch is what clears a stale-load
+    // warning the user was still looking at: the list is rebuilt, so the panel
+    // can stop saying it is showing a stale one.
+    get.mockResolvedValueOnce({ candidates: [candidate()], trashed: [] })
     await store.trash('personal', 'cid1')
     expect(store.error).toBe('action failed')
-    expect(store.loadError).toBe('offline')
+    expect(store.loadError).toBe('')
+    expect(store.candidates).toHaveLength(1)
   })
 
   it('clears a stale-load warning when a mutation returns a fresh queue', async () => {
@@ -185,6 +192,52 @@ describe('vaultReview store', () => {
     })
   })
 
+  it('completes and restores a completed project through their own actions', async () => {
+    // Completion MOVES a project rather than removing it, so the way back is
+    // `restore_completed` and not the trash's `restore`: the notes rewritten
+    // to follow it out of `active/` are only put back by that one.
+    get.mockResolvedValue({ candidates: [], trashed: [] })
+    post.mockResolvedValue({ ok: true })
+    const store = useVaultReviewStore()
+
+    await store.complete('personal', 'cid1')
+    await store.restoreCompleted('personal', 'cid2')
+
+    expect(post).toHaveBeenNthCalledWith(1, '/api/vault/review?workspace=personal', {
+      action: 'complete',
+      candidate_id: 'cid1',
+    })
+    expect(post).toHaveBeenNthCalledWith(2, '/api/vault/review?workspace=personal', {
+      action: 'restore_completed',
+      candidate_id: 'cid2',
+    })
+    // Neither carries the trash's `restore`, and neither carries `confirm`:
+    // that field gates permanent deletion, and sending it here would ask for
+    // a confirmation nobody was ever shown.
+    for (const call of [1, 2]) {
+      expect(post).toHaveBeenNthCalledWith(
+        call, '/api/vault/review?workspace=personal',
+        expect.not.objectContaining({ confirm: expect.anything() }),
+      )
+    }
+  })
+
+  it('reports a refused completion without throwing', async () => {
+    // The engine refuses a candidate that changed under the click, and the
+    // panel's toast is the only place that refusal can surface. The toast gets
+    // plain copy; the engine's sentence is kept beside it rather than shown.
+    post.mockRejectedValue(new Error('only a project can be completed'))
+    get.mockResolvedValue({ candidates: [], trashed: [] })
+    const store = useVaultReviewStore()
+
+    expect(await store.complete('personal', 'cid1')).toBe(false)
+    expect(store.error).toBe(
+      'This is not a project, so there is nothing to complete. Retire moves it to Retired instead.',
+    )
+    expect(store.errorDetail).toBe('only a project can be completed')
+    expect(store.isBusy('cid1')).toBe(false)
+  })
+
   it('adopts the queue the POST returns instead of re-scanning the vault', async () => {
     // The endpoint regenerates the queue anyway (the readable projection is
     // pending-only), and each generation reads every note in the vault three
@@ -286,13 +339,88 @@ describe('vaultReview store', () => {
 
   it('reports a failed mutation without throwing', async () => {
     post.mockRejectedValue(new Error('candidate changed or no longer exists'))
+    get.mockResolvedValue({ candidates: [], trashed: [] })
     const store = useVaultReviewStore()
 
     const ok = await store.trash('personal', 'cid1')
 
     expect(ok).toBe(false)
-    expect(store.error).toBe('candidate changed or no longer exists')
+    // Plain copy, with the engine's own words kept one field away.
+    expect(store.error).toContain('This note changed since this list was built')
+    expect(store.errorDetail).toBe('candidate changed or no longer exists')
     expect(store.isBusy('cid1')).toBe(false)
+  })
+
+  it('refetches after a failed mutation so a stale row heals', async () => {
+    // A refusal is usually the row being STALE — its destination filled up, or
+    // the note was edited, since this list was built — and only a rescan can
+    // rebuild it. The catch used to keep the list as it was, so the row held a
+    // Complete button that 409'd identically on every retry until the panel was
+    // reopened.
+    get.mockResolvedValue({ candidates: [candidate({ candidate_id: 'stale' })], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('personal')
+
+    post.mockRejectedValue(new Error('only a project can be completed; retire this note instead'))
+    get.mockResolvedValue({ candidates: [], trashed: [] })
+    await store.complete('personal', 'stale')
+
+    // A forced GET: joining the in-flight one, or the request issued before the
+    // POST, would repaint the very list that has to change.
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(store.candidates).toEqual([])
+    expect(store.loadedWorkspace).toBe('personal')
+  })
+
+  it('leaves the workspace on screen alone when a mutation fails after a switch', async () => {
+    // The refetch is scoped to the workspace asked about: running it for an
+    // abandoned scope would repaint the new one with the old one's rows, the
+    // race the guarded snapshot adoption exists to prevent.
+    get.mockResolvedValue({ candidates: [candidate({ candidate_id: 'work-row' })], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('work')
+
+    post.mockRejectedValue(new Error('note is outside the vault'))
+    await store.trash('personal', 'abc123abc123abc123abc123')
+
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(store.loadedWorkspace).toBe('work')
+    expect(store.candidates.map(c => c.candidate_id)).toEqual(['work-row'])
+  })
+
+  // ── the refusal copy ───────────────────────────────────────────────────
+
+  it('shows plain copy for a completion refusal and keeps the raw message', () => {
+    // The engine's own sentence reached the toast verbatim: "only a project can
+    // be completed; retire this note instead" is written for a log reader, not
+    // for someone who just clicked Complete on a project.
+    post.mockRejectedValue(
+      new Error('only a project can be completed; retire this note instead'),
+    )
+    const store = useVaultReviewStore()
+
+    return store.complete('personal', 'cid1').then((ok) => {
+      expect(ok).toBe(false)
+      expect(store.error).toContain('not a project')
+      expect(store.error).not.toContain('only a project can be completed')
+      // And nothing is swallowed: the engine's words are one field away, which
+      // is what a fix chat is seeded with.
+      expect(store.errorDetail).toBe('only a project can be completed; retire this note instead')
+    })
+  })
+
+  it('leaves a message it does not recognise alone', () => {
+    // A genuine 500, or a refusal from a newer engine, keeps its own wording
+    // rather than being replaced by a confident guess about a failure nobody
+    // has described.
+    post.mockRejectedValue(new Error('HTTP 500 Internal Server Error'))
+    const store = useVaultReviewStore()
+
+    return store.trash('personal', 'cid1').then((ok) => {
+      expect(ok).toBe(false)
+      expect(store.error).toBe('HTTP 500 Internal Server Error')
+      expect(store.errorDetail).toBe('HTTP 500 Internal Server Error')
+    })
   })
 
   // ── the "nothing to stamp" notice ──────────────────────────────────────

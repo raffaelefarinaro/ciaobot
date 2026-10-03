@@ -8,6 +8,12 @@ ever grows into an allowlist-with-exceptions is the failure this file exists to
 catch, so the exclusion cases are written as an explicit table rather than
 sprinkled through the tests.
 
+Three of those rows are the ones #734 asked about, because each was a refusal
+that read as an accident: a folder the operator named `Logs`, the automation
+store, and the durable roots that sit bare at the top of the data root. They
+are answered deliberately rather than accidentally, so the `#734` section below
+states each answer next to the reason it is the answer.
+
 Everything runs on temporary directories: no real user vault, no network, and
 no real repository is ever written to.
 """
@@ -45,9 +51,8 @@ INELIGIBLE = {
     ".agents/recipe.md": "a provider mirror sync-skills regenerates",
     ".opencode/recipe.md": "a provider mirror sync-skills regenerates",
     "opencode.json": "a provider mirror sync-skills regenerates",
-    "memory-vault/Logs/Chats/2026-09-28/session.md": "the derived transcript archive",
-    "Logs/Chats/2026-09-28/session.md": "the derived transcript archive",
-    ".archived-workspaces/old/memory-vault/Logs/Chats/s.md": "the transcript archive",
+    "memory-vault/Logs/Chats/2026-09-28/session.md": "the transcript archive",
+    "Logs/Chats/2026-09-28/session.md": "a bare top-level directory, not a durable tree",
     "node_modules/left-pad/index.js": "a dependency tree",
     "web/node_modules/vite/dist/node.js": "a dependency tree",
     ".venv/lib/python3.13/site-packages/x.py": "a virtualenv",
@@ -99,6 +104,26 @@ def _install(tmp_path: Path, *, vault: Path | None = None) -> tuple[Path, CiaoCo
     return workspace, _config(workspace, vault)
 
 
+def _rerooted_install(tmp_path: Path) -> tuple[Path, CiaoConfig]:
+    """An install that has been re-rooted per workspace, as a git repository.
+
+    The shape matters to what follows, so it is spelled out rather than faked:
+    the agent assets live one directory per workspace, the transcript archive
+    has been promoted to ``<install>/Logs`` and is no longer inside the vault,
+    and the vault is still a scope base in its own right at the data root. That
+    is the install in which a folder the operator named ``Logs`` inside their
+    own vault is a notes folder rather than the archive.
+    """
+    workspace = tmp_path / "install"
+    (workspace / "memory-vault" / "Notes").mkdir(parents=True)
+    (workspace / "personal" / "memory-vault").mkdir(parents=True)
+    (workspace / ".runtime").mkdir()
+    _git(workspace, "init", "-q", "-b", "main")
+    mark_born_per_root(workspace, workspace / ".runtime", ["personal"])
+    reset_reroot_cache()
+    return workspace, _config(workspace)
+
+
 # ── the allowlist ────────────────────────────────────────────────────────────
 
 
@@ -127,6 +152,10 @@ def test_eligible_relpaths_names_the_allowlist(tmp_path: Path) -> None:
         "subagents/",
         "commands/",
         "AGENTS.md",
+        # The one file carved out of a refused directory (#734). It is in the
+        # allowlist rather than an exception to it, so the status and the setup
+        # prompt can render the scope without a second list of names.
+        ".runtime/schedules.json",
     )
 
 
@@ -137,11 +166,22 @@ def test_ineligible_names_every_refusal(tmp_path: Path) -> None:
 
     refused = backup_scope.ineligible(config)
     for name in (
-        ".env", ".envrc", "secrets/", ".runtime/", ".claude/", ".agents/",
-        ".opencode/", "opencode.json", "node_modules/", "Logs/",
+        ".env", ".envrc", "secrets/", ".claude/", ".agents/",
+        ".opencode/", "opencode.json", "node_modules/",
         "memory-vault/Logs/", ".venv/", "__pycache__/", ".git/",
     ):
         assert name in refused, name
+    # `.runtime` is refused for everything but the one file the scope carves
+    # out of it, so it is named as a glob: `.runtime/` beside a scope that
+    # commits `.runtime/schedules.json` would be a claim the scope does not
+    # make, and this tuple is what the setup prompt prints.
+    assert ".runtime/" not in refused
+    assert ".runtime/*" in refused
+    # The transcript archive is refused where this install keeps it, which here
+    # is inside the vault. The bare name is not refused at any depth any more
+    # (#734): a name match cannot tell the archive from a notes folder the
+    # operator called `Logs`.
+    assert "Logs/" not in refused
 
 
 def test_an_unknown_top_level_directory_is_not_eligible(tmp_path: Path) -> None:
@@ -193,6 +233,143 @@ def test_a_symlink_out_of_the_data_root_is_excluded(tmp_path: Path) -> None:
 
     assert backup_scope.is_eligible("memory-vault/linked/notes.md", config) is False
     assert backup_scope.is_eligible("memory-vault/Notes/day-1.md", config) is True
+
+
+# ── #734: the three refusals that read as over-refusals ──────────────────────
+#
+# One row per decision, with the reason beside it, because each of the three is
+# a rule a reader has to be able to check against the code rather than trust:
+# the file carved out of `.runtime`, the archive pinned to its location, and the
+# bare top-level roots that stay out on purpose.
+
+
+def test_the_734_scope_table(tmp_path: Path) -> None:
+    """Every path #734 is about, on the layout each answer is about.
+
+    The re-rooted install is the one that separates the two things the archive
+    rule used to conflate: the archive has been promoted to `<install>/Logs`, so
+    a folder the operator named `Logs` inside their own vault is theirs.
+    """
+    _workspace, config = _rerooted_install(tmp_path)
+    table = (
+        # A notes folder the operator happens to have called `Logs`. The vault's
+        # own layout is the app's canonical structure and its folder names are
+        # theirs; a single markdown file is not a derived archive.
+        ("memory-vault/Logs/x.md", True, "the operator's own notes folder"),
+        ("memory-vault/Logs/Chats/note.md", True, "the operator's own notes folder"),
+        # The archive, where this install resolves it: the promoted
+        # `<install>/Logs`, refused by location rather than by the name alone.
+        ("Logs/Chats/x.md", False, "the derived transcript archive"),
+        ("Logs/Chats/2026-09-28/session.md", False, "the derived transcript archive"),
+        ("Logs/anything-at-all.md", False, "the derived transcript archive"),
+        # The one file `.runtime` does not refuse: the automation catalog the
+        # product is built to restore from git.
+        (".runtime/schedules.json", True, "the durable automation store"),
+        # ...and the rest of the directory still is.
+        (".runtime/custom_providers.json", False, "operator credentials"),
+        (".runtime/node_state.json", False, "runtime state"),
+        (".runtime/schedules.json.tmp", False, "not the file, a half-written one"),
+        ("personal/.runtime/schedules.json", False, "the one path the carve-out names"),
+        # Bare top-level durable roots: emitted only under a scope base, and no
+        # base covers the top of the data root on this layout. Answered
+        # deliberately in #734 — the answer for an install keeping its catalog
+        # at the data root is a workspace subfolder, not a wider base, because
+        # a top-level `skills/` is application source in a checkout.
+        ("commands/x.md", False, "a bare top-level root, not a durable tree"),
+        ("skills/recipe/SKILL.md", False, "a bare top-level root, not a durable tree"),
+        ("memory-vault/Notes/x.md", True, "the vault is a scope base of its own"),
+        ("personal/commands/x.md", True, "an agent root, so the tree under it is durable"),
+    )
+
+    for rel, expected, reason in table:
+        assert backup_scope.is_eligible(rel, config) is expected, f"{rel}: {reason}"
+
+
+def test_the_archive_denial_wins_where_the_vault_is_the_archive(tmp_path: Path) -> None:
+    """The guard on the archive rule, and the reason it is anchored rather than
+    matched by name.
+
+    A vault configured at the archive's own path is still a scope base, and
+    provenance would admit every file in it — including a multi-gigabyte derived
+    archive the rule exists to protect. The archive refusal is evaluated first,
+    so it wins there too, rather than being one install short of covering what
+    it is for.
+    """
+    workspace = tmp_path / "install"
+    (workspace / "Logs" / "Chats").mkdir(parents=True)
+    (workspace / ".runtime").mkdir()
+    (workspace / "personal" / "memory-vault").mkdir(parents=True)
+    _git(workspace, "init", "-q", "-b", "main")
+    mark_born_per_root(workspace, workspace / ".runtime", ["personal"])
+    reset_reroot_cache()
+    # The promoted archive is the configured vault: every note-shaped path
+    # inside it is derived output, whatever the vault rule would admit.
+    config = _config(workspace, vault=workspace / "Logs")
+
+    assert backup_scope.data_root(config) == workspace.resolve()
+    assert backup_scope.is_eligible("Logs/Chats/x.md", config) is False
+    assert backup_scope.is_eligible("Logs/Notes/2026-09-28.md", config) is False
+    # The rest of the scope is untouched: the refusal is one directory, not a
+    # verdict on the install.
+    assert backup_scope.is_eligible("personal/memory-vault/Notes/a.md", config) is True
+    assert "Logs/" in backup_scope.ineligible(config)
+
+
+def test_an_archived_workspaces_transcripts_stay_refused(tmp_path: Path) -> None:
+    """The one place the archive anchor does not reach, pinned on both sides.
+
+    `config.logs_root` is the *one* archive this install writes, and the
+    re-rooting promotes it to the install root, so an archived agent root
+    holding a `Logs` tree is a copy of a workspace as it was — derived output
+    the resolved location cannot point at. `<logs_root>/Chats` is where
+    transcripts actually live, so that subtree stays refused under an archived
+    root even though the archive itself is refused by location rather than by
+    name (#734).
+
+    The refusal stops at the transcript subtree on purpose. A markdown note
+    sitting beside it in the same `Logs` folder is the same shape as
+    `memory-vault/Logs/x.md` on a live root, and the old name rule — which
+    refused every `Logs` at every depth — is what a user's own notes folder of
+    that name kept running into.
+    """
+    _workspace, config = _install(tmp_path)
+
+    # Derived transcripts under an archived root: refused.
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Logs/Chats/2026-09-28/s.md", config
+    ) is False
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Logs/Chats/s.md", config
+    ) is False
+    # A note beside them, and the rest of the archived root, are not.
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Logs/notes.md", config
+    ) is True
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Notes/day-9.md", config
+    ) is True
+    # The archive this install does write is still refused, whole.
+    assert backup_scope.is_eligible("memory-vault/Logs/Chats/s.md", config) is False
+
+
+def test_a_live_root_is_not_an_archived_one(tmp_path: Path) -> None:
+    """Where the archived-root refusal stops, on the layout the shape exists on.
+
+    The re-rooted install is the one with both spellings side by side: an
+    archived agent root copied from before the migration, and a live root whose
+    vault is the operator's own. The transcript subtree of the live root is
+    treated like the rest of its vault — by provenance, not by name — which is
+    the answer #734 settled for a live root and the only reason the refusal
+    above is scoped to `.archived-workspaces/`.
+    """
+    _workspace, config = _rerooted_install(tmp_path)
+
+    assert backup_scope.is_eligible(
+        "personal/memory-vault/Logs/Chats/2026-09-28/s.md", config
+    ) is True
+    assert backup_scope.is_eligible(
+        ".archived-workspaces/old/memory-vault/Logs/Chats/2026-09-28/s.md", config
+    ) is False
 
 
 # ── layouts ──────────────────────────────────────────────────────────────────

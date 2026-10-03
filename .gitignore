@@ -68,6 +68,13 @@ secrets/
 /.opencode/
 /opencode.json
 /commands/
+# The guide lock, written next to AGENTS.md by ciao/memory_tool.py:431 to
+# serialize writes to the bounded memory regions. Empty, advisory, and
+# recreated on demand — but it lands in the app repo whenever something
+# treats this checkout as a workspace (`ciao sync-skills` defaults
+# --workspace to "."), and an unignored 0-byte file is one `git add` away
+# from a commit.
+AGENTS.md.lock
 
 # npm/vite/vitest caches created when a command is run from the repo root
 # instead of web/ or desktop/. There is no root package.json, so this is only

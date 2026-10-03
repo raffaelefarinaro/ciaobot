@@ -4,9 +4,11 @@
   <img src="site/assets/img/hero.png" alt="Ciaobot mascot saying Ciao!" width="100%">
 </p>
 
-Ciaobot is your **second brain and personal assistant**. It is built on top of the CLIs you already use, such as [Claude Code](https://github.com/anthropics/claude-code) and [opencode](https://opencode.ai), and gives you one interface for working with them.
+Ciaobot is your **second brain and personal assistant**: a persistent personal workspace for the agents you already use, [Claude Code](https://github.com/anthropics/claude-code) and [OpenCode](https://opencode.ai).
 
-You are not tied to one CLI, model, or provider. Use Claude, opencode with a cloud or local model, or switch between them as needed. Ciaobot keeps the interface and the context consistent while your work, chats, and memory remain in a folder you own and can reuse with any CLI in the future.
+**Your agents do the work. Ciaobot keeps the context.** Claude Code and OpenCode handle models and tools; Ciaobot adds projects, durable memory, files, and recurring tasks so each conversation can build on what came before.
+
+**Change your AI, not your second brain.** Use Claude or OpenCode with a cloud or local model. Your notes, project context, and remembered preferences stay in a folder you own. Durable Markdown knowledge remains useful outside Ciaobot; provider sessions, tools, and permissions are not interchangeable.
 
 ## Install
 
@@ -20,12 +22,30 @@ Installs the engine with uv, starts it as a LaunchAgent, and prints a one-time l
 
 During setup you choose the folder where Ciaobot keeps your notes and memory: a new folder, or an existing one such as an Obsidian vault. It stays yours, in plain Markdown, usable with any other tool.
 
+**Windows 11 (x64 or ARM64), preview:**
+
+```powershell
+irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
+```
+
+No administrator rights needed. This installs the engine, puts `ciao` on your `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`), registers the logon task that starts the engine when you sign in, starts it, and prints the same one-time link.
+
+`iex` cannot take arguments, so any option goes through a script block: `-Workspace 'D:\Ciaobot'` to put the workspace elsewhere, `-NoStart` to install without registering the logon task or starting anything, and `-Uninstall` to remove what the installer added.
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1))) -Uninstall
+```
+
+Uninstalling stops and unregisters the logon task, removes the engine and its receipt, and takes the `PATH` entry back out. Your workspace folder is kept, and the script prints where it is.
+
+Windows support is a **preview**: the first Windows releases are labelled that way and the label comes off after one release cycle with no Windows-specific regressions. Requirements, the logon task, logs, provider setup and troubleshooting are in [docs/WINDOWS.md](docs/WINDOWS.md). Engine updates on Windows are not available yet, so for now re-run the installer only to repair an install.
+
 ### Connect your agent
 
 Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
 
-- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`, then add `~/.local/bin` to your `PATH` if needed) and run `claude auth login`.
-- **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.0.16+](https://opencode.ai/v2/docs/) and authenticate the provider there. Its models appear in Ciaobot's model picker.
+- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`, then add `~/.local/bin` to your `PATH` if needed) and run `claude auth login`. On Windows, install it with `irm https://claude.ai/install.ps1 | iex` instead.
+- **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.0.16+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors running from a git checkout: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
@@ -63,20 +83,30 @@ Everything you can click, you can also ask for in a chat.
 
 ## Documentation
 
-| Doc | What's in it |
+Start with the [documentation hub](docs/README.md), organised by what you want to do:
+
+- **Using Ciaobot:** first task, projects, memory, files, and automations.
+- **Connecting and extending:** providers, Google Workspace, skills, and MCP.
+- **Operating Ciaobot:** updates, backups, remote access, and troubleshooting.
+- **Building Ciaobot:** architecture, development, API, and agent CLI.
+
+## Why not just use Claude Code or OpenCode?
+
+They are excellent agents. Ciaobot gives them a persistent personal workspace: separate areas of your life, project context carried into each conversation, reviewable memory, scheduled work, and documents you can discuss beside the chat.
+
+| Without a persistent workspace | With Ciaobot |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, workspace layout, chat pipeline, memory, schedules, and providers. |
-| [docs/AGENT_CLI.md](docs/AGENT_CLI.md) | CLI-first agent surface: transport, security, operation catalog, and provider configuration. |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Git checkout, development workflow, testing, and change guidelines. |
-| [INTEGRATIONS.md](INTEGRATIONS.md) | Environment variables, OAuth, and integration configuration. |
-| [PWA_API.md](PWA_API.md) | API endpoints, authentication, state paths, and agent recipes. |
-| [web/README.md](web/README.md) | PWA development workflow and frontend details. |
-| [SECURITY.md](SECURITY.md) | Security policy. |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution guidelines. |
-| [docs/CREDITS.md](docs/CREDITS.md) | Open tools Ciaobot is built on. |
+| Explain the same background in every session | Project context travels with the conversation |
+| Useful decisions disappear into chat history | Archived chats can become durable Markdown knowledge |
+| Copy outputs between a terminal and documents | Review and annotate files beside the chat |
+| Remember to repeat the same prompt every week | Automations run it and leave a result to inspect |
+
+### See what it remembered. Decide what stays.
+
+With Session insights enabled, archiving a chat can file confident facts automatically; uncertain ones become proposals. Review proposals and recorded decisions in Memory, with Undo where a reversible receipt is available. Nightly curation consolidates existing core memory rather than adding new core facts unattended. Old or unused notes are flagged for your decision, not automatically deleted; retired notes remain restorable until you permanently delete them.
 
 The user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` and `ciao`; the Python package and many environment variables still use `ciao`/`CIAO_*` for compatibility.
 
 ## Built on
 
-Ciaobot is glue around excellent open tools: Claude Code, the Claude Agent SDK, opencode, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.
+Ciaobot builds a persistent personal workspace on excellent open tools: Claude Code, the Claude Agent SDK, OpenCode, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.

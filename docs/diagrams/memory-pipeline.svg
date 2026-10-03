@@ -74,7 +74,7 @@
 <text x="624" y="98" class="mono">Needs review</text>
 
 <!-- Footer -->
-<text x="12" y="114" class="mono">Settings → Automation shows every run. The pass files what it is sure of; unsure ones wait for you. [review] items never auto-drop.</text>
+<text x="12" y="114" class="mono">The pass files what it is sure of; unsure ones wait for you. [review] items never auto-drop.</text>
 <text x="12" y="128" class="mono">Self-heal: [expires:] pruned before startup · audit/repair moves stale or event-shaped entries to Learnings.</text>
 <text x="12" y="178" class="mono-muted">Source: ciao/web/memory_pass.py · ciao/memory_proposals.py · ciao/project_doc_update.py · ciao/memory_audit.py · ciao/execution_modes.py</text>
 </svg>

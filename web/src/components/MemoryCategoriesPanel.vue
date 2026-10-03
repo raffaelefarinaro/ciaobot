@@ -54,7 +54,9 @@ const changedIds = computed(() => {
 })
 
 const dirty = computed(() => changedIds.value.size > 0)
-const onCount = computed(() => draft.value.filter((row) => row.enabled).length)
+/** The rows the page lists: the types the agent writes itself are not a choice. */
+const visibleRows = computed(() => draft.value.filter((row) => !row.hidden))
+const onCount = computed(() => visibleRows.value.filter((row) => row.enabled).length)
 
 /** A draft id the list already holds under another spelling, or ''. */
 function idTaken(id: string): string {
@@ -109,6 +111,12 @@ const CATEGORY_PRESETS = [
     description: 'A company, institution or group the user belongs to or works with.' },
   { id: 'event', label: 'Event', kind: 'note' as EntityTypeKind, folder: 'Events',
     description: 'Something that happened at a time. Use for trips, launches, appointments and deadlines.' },
+  { id: 'product', label: 'Product', kind: 'note' as EntityTypeKind, folder: 'products',
+    description: 'A product, service or line the user ships or sells. Use for versions, pricing, positioning.' },
+  { id: 'document', label: 'Document', kind: 'note' as EntityTypeKind, folder: 'Documents',
+    description: "A durable document of the user's own. Use for plans, templates and written material." },
+  { id: 'reference', label: 'Reference', kind: 'note' as EntityTypeKind, folder: 'references',
+    description: 'Material quoted from elsewhere. Use for external analysis and citations.' },
 ]
 
 /** Presets whose id the list already holds, so they are not offered as new. */
@@ -261,6 +269,8 @@ function rowFromForm(): EntityTypeRow {
       ? true
       : (draft.value.find((row) => row.id === form.editing)?.enabled ?? previous?.enabled ?? true),
     builtin: form.builtin,
+    core: previous?.core ?? false,
+    hidden: previous?.hidden ?? false,
     note_count: previous?.note_count ?? 0,
   }
 }
@@ -310,12 +320,36 @@ async function saveDraft() {
 <template>
   <section class="cat-panel" aria-labelledby="cat-heading">
     <header class="cat-head">
-      <h2 id="cat-heading" class="cat-h">{{ onCount }} of {{ store.types.length }} categories on</h2>
+      <h2 id="cat-heading" class="cat-h">{{ onCount }} of {{ visibleRows.length }} categories on</h2>
       <p class="cat-lede">
         The kinds of notes this vault keeps, and the <code>type:</code> each one is
         written with. Turn one off to keep its notes but stop claiming that type.
       </p>
     </header>
+
+    <!-- What the two memory layers are, and what a category is for — above the
+         controls, and outside the load branches on purpose: it is true while the
+         list is loading and after a failure too, so it must never be read as a
+         claim about an empty registry (#979). Static text, no request, no state. -->
+    <section class="cat-why" aria-labelledby="cat-why-heading">
+      <h3 id="cat-why-heading" class="cat-why-h">How memory is organized</h3>
+      <p class="cat-why-line">
+        <strong>Profile &amp; preferences</strong> — a small, bounded block kept in
+        your workspace guide and loaded into every conversation, so you stop
+        repeating yourself. <em>Keeps answers short and jargon-free.</em>
+      </p>
+      <p class="cat-why-line">
+        <strong>Notes, by category</strong> — everything else is a note you own,
+        filed under one of the categories in this list.
+        <em>The decision behind a launch, who someone is, the reference you keep
+        coming back to.</em>
+      </p>
+      <p class="cat-why-line cat-why-foot">
+        A category is a filing rule, not a request: changing one shapes how
+        <strong>future</strong> notes are organized, and no empty folder is created
+        for a category you never write in.
+      </p>
+    </section>
 
     <div v-if="catLoading" class="cat-loading" role="status" aria-live="polite">
       <span class="cat-spinner" aria-hidden="true"></span> Loading categories…
@@ -365,7 +399,7 @@ async function saveDraft() {
           </thead>
           <tbody>
             <tr
-              v-for="row in draft"
+              v-for="row in visibleRows"
               :key="row.id"
               class="cat-row"
               :class="{ 'cat-row--off': !row.enabled }"
@@ -396,7 +430,10 @@ async function saveDraft() {
                   class="cat-switch"
                   :class="{ on: row.enabled }"
                   :aria-checked="row.enabled ? 'true' : 'false'"
-                  :aria-label="`${row.enabled ? 'Disable' : 'Enable'} ${row.label}`"
+                  :aria-disabled="row.core ? 'true' : undefined"
+                  :disabled="row.core"
+                  :title="row.core ? `${row.label} is required by Ciaobot and stays on` : undefined"
+                  :aria-label="row.core ? `${row.label} is required and always on` : `${row.enabled ? 'Disable' : 'Enable'} ${row.label}`"
                   @click.stop="setEnabled(row.id, !row.enabled)"
                 >
                   <!-- The button is the tap target and the track inside it is
@@ -574,6 +611,34 @@ async function saveDraft() {
   line-height: 1.55;
 }
 .cat-lede code { font-family: var(--font-mono); }
+
+/* The explanation: one neutral surface, quiet type, no accent — it is reading,
+   not a control, and nothing in it is clickable. */
+.cat-why {
+  margin-bottom: var(--space-3);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+.cat-why-h {
+  margin: 0 0 4px;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+.cat-why-line {
+  margin: 0;
+  /* The surface spans the pane like the table below it, but the reading keeps
+     a measure: prose across a 1400px pane is 130 characters a line. */
+  max-width: 78ch;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+}
+.cat-why-line strong { color: var(--fg); font-weight: 600; }
+.cat-why-line em { font-style: normal; color: var(--fg3); }
+.cat-why-foot { margin-top: 4px; }
 
 .cat-loading {
   display: flex;
@@ -779,6 +844,8 @@ async function saveDraft() {
   transition: transform 120ms var(--ease);
 }
 .cat-switch.on .cat-switch-dot { background: var(--on-accent); transform: translateX(16px); }
+/* A core category stays on: the switch reads as a fact, not a control. */
+.cat-switch:disabled { opacity: 0.5; cursor: not-allowed; }
 /* The hit area is the switch, and a touch layout needs the full 44px of it in
    both directions — DESIGN.md's 44×44, which a 40px track cannot be on its own. */
 @media (pointer: coarse) {

@@ -24,6 +24,7 @@ from typing import Sequence
 
 from ciao import gws_auth, gws_wrapper
 from ciao.gws_auth import fingerprint
+from ciao.os_support.private import is_private, make_private, open_private
 
 _PERSONAL_SCOPES = gws_auth._PERSONAL_SCOPES  # noqa: SLF001
 
@@ -70,10 +71,10 @@ def _store_pending_verifier(config_dir, code_verifier: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Create with 0600 rather than writing then chmod-ing: the verifier must
     # never exist group/world-readable, even briefly.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fd = open_private(path, os.O_WRONLY | os.O_TRUNC)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
         fh.write(code_verifier)
-    os.chmod(path, 0o600)
+    make_private(path)
 
 
 def _load_pending_verifier(config_dir) -> str:
@@ -101,9 +102,8 @@ def _clear_pending_verifier(config_dir) -> None:
 def _fix_encryption_key_permissions(config_dir) -> None:
     key_file = config_dir / ".encryption_key"
     if key_file.exists():
-        mode = key_file.stat().st_mode & 0o777
-        if mode != 0o600:
-            os.chmod(key_file, 0o600)
+        if not is_private(key_file):
+            make_private(key_file)
             print(f"  Fixed {key_file} permissions to 600")
 
 

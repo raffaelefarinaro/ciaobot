@@ -58,4 +58,4 @@ def test_runtime_lines_always_includes_today_and_cwd(monkeypatch) -> None:
     monkeypatch.delenv("GWS_PROFILE", raising=False)
     lines = _runtime_lines(Path("/repo/x"))
     assert any(ln.startswith("today=") for ln in lines)
-    assert "cwd=/repo/x" in lines
+    assert f"cwd={Path('/repo/x')}" in lines  # the native spelling the agent works in

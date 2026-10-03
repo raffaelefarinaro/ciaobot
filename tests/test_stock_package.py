@@ -1,17 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
 
-
-EXPECTED_AGENTS = {
-    "memory.md",
-    "researcher.md",
-    "secretary.md",
-}
 
 EXPECTED_COMMANDS = {
     "critique.md",
@@ -32,10 +27,11 @@ PRIVATE_MARKERS = {
 }
 
 
-def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
+def test_stock_package_contains_memory_skill_commands_and_schedules() -> None:
     stock = resources.files("ciao.stock")
 
-    assert {path.name for path in stock.joinpath("agents").iterdir() if path.name.endswith(".md")} == EXPECTED_AGENTS
+    assert not stock.joinpath("agents").is_dir() or not list(stock.joinpath("agents").glob("*.md"))
+    assert stock.joinpath("skills", "ciao-memory", "SKILL.md").is_file()
     assert {path.name for path in stock.joinpath("commands").iterdir() if path.name.endswith(".md")} == EXPECTED_COMMANDS
     assert stock.joinpath("skills").is_dir()
     assert not list(stock.joinpath("skills").glob("*.md"))
@@ -54,32 +50,35 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert {entry["schedule_id"] for entry in schedules["schedules"]} == EXPECTED_SYSTEM_SCHEDULES
 
 
-def _curation_skill_text() -> str:
-    return (
-        resources.files("ciao.stock")
-        .joinpath("skills", "memory-curation", "SKILL.md")
-        .read_text(encoding="utf-8")
-    )
+def _curation_prompt() -> str:
+    schedules = json.loads(resources.files("ciao.stock").joinpath("schedules.json").read_text(encoding="utf-8"))
+    return next(entry["prompt"] for entry in schedules["schedules"] if entry["schedule_id"] == "system-memory-curation")
 
 
-def test_stock_curation_prompt_invokes_the_skill() -> None:
-    """The schedule prompt is a dispatcher; the procedure lives in the skill.
-
-    The old 5K-character single-paragraph prompt was brittle and duplicated
-    the memory agent's contract; the skill file is the one canonical copy.
-    """
-    stock = resources.files("ciao.stock")
-    schedules = json.loads(stock.joinpath("schedules.json").read_text(encoding="utf-8"))
-    prompt = next(
-        entry["prompt"]
-        for entry in schedules["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
-
-    assert "memory-curation" in prompt
+def test_stock_curation_prompt_contains_the_procedure() -> None:
+    """The packaged schedule is the only copy of the nightly procedure."""
+    prompt = _curation_prompt()
     assert "one-line no-op" in prompt
-    # The procedure itself must not be inlined any more.
-    assert len(prompt) < 1200
+    assert "## 0. Start the run" in prompt
+    assert "## 10. Report" in prompt
+    assert not resources.files("ciao.stock").joinpath("skills/memory-curation/SKILL.md").is_file()
+
+
+def test_baseline_authoring_does_not_ship_as_optional_skills() -> None:
+    skills = resources.files("ciao.stock").joinpath("skills")
+    assert not skills.joinpath("workspace-authoring/SKILL.md").is_file()
+    assert not skills.joinpath("sop-authoring/SKILL.md").is_file()
+    visual_plan = skills.joinpath("visual-plan/SKILL.md").read_text(encoding="utf-8")
+    assert "the core prompt handles those" in visual_plan
+
+
+def test_support_checks_for_a_released_fix_before_new_issue() -> None:
+    support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
+    assert "https://github.com/raffaelefarinaro/ciaobot/releases" in support
+    assert "https://github.com/raffaelefarinaro/ciaobot/blob/main/CHANGELOG.md" in support
+    assert "https://github.com/raffaelefarinaro/ciaobot/issues" in support
+    assert "not merely\nmerged or closed" in support
+    assert "suggest updating and\nretesting first" in support
 
 
 def test_stock_curation_skill_consolidation_contract() -> None:
@@ -91,7 +90,7 @@ def test_stock_curation_skill_consolidation_contract() -> None:
     undo file, queue uncertain removals as [review] yes/no questions, never
     promote NEW facts unattended.
     """
-    skill = _curation_skill_text()
+    skill = _curation_prompt()
 
     # Consolidation is allowed, bounded by the undo log.
     assert "consolidate that region now" in skill
@@ -115,7 +114,7 @@ def test_stock_curation_skill_files_discovered_bounded_facts() -> None:
     travels by file, and the source label is a plain chat id — $(), backticks,
     and quotes interpolate even inside double quotes.
     """
-    skill = _curation_skill_text()
+    skill = _curation_prompt()
 
     assert "ciao memory-proposal-add --kind memory --source <chat id> --text-file" in skill
     assert "<chat title>" not in skill
@@ -126,8 +125,8 @@ def test_stock_curation_skill_files_discovered_bounded_facts() -> None:
 
 def test_stock_curation_skill_carries_the_new_passes() -> None:
     """Temporal re-verification, structured learnings, queue/log separation,
-    log rotation, and alias upkeep all live in the skill."""
-    skill = _curation_skill_text()
+    log rotation, and alias upkeep all live in the schedule."""
+    skill = _curation_prompt()
 
     assert "aging_state_entries" in skill
     assert "retrieved_recently" in skill
@@ -142,13 +141,9 @@ def test_stock_curation_skill_carries_the_new_passes() -> None:
     assert "Never delete it unattended" in skill
 
 
-def test_stock_memory_agent_role_matches_curator_contract() -> None:
-    """The spawned memory agent must allow the same guarded consolidation.
-
-    The curation schedule says \"Use the memory agent\", so if the role still
-    forbade region writes the two instructions would cancel out.
-    """
-    role = resources.files("ciao.stock").joinpath("agents/memory.md").read_text(
+def test_stock_memory_skill_matches_curator_contract() -> None:
+    """The skill and scheduled curation must agree on guarded consolidation."""
+    role = resources.files("ciao.stock").joinpath("skills/ciao-memory/SKILL.md").read_text(
         encoding="utf-8"
     )
 
@@ -158,7 +153,9 @@ def test_stock_memory_agent_role_matches_curator_contract() -> None:
     # New-fact promotion follows the pass/curation split even though
     # consolidation is allowed: the memory pass can promote a confident
     # state-shaped fact, but the unattended curator never promotes a new one.
-    assert "an unattended curation run never promotes a new region fact" in role
+    assert "An unattended curation run never promotes a new fact" in role
+    assert "Load the `ciao-memory` skill" in _curation_prompt()
+    assert "Use one memory agent" not in _curation_prompt()
 
 
 def test_stock_workspace_guide_carries_default_caps() -> None:
@@ -238,3 +235,57 @@ def test_pyproject_packages_stock_data() -> None:
     assert "schedules.json" in package_data["ciao.stock"]
     assert "schedules/*.md" in package_data["ciao.stock"]
     assert "evals/*.json" in package_data["ciao.stock"]
+
+
+# Files that legitimately name control-plane operations (telemetry names).
+_OPERATION_NAME_EXEMPT = {
+    "skills/ciao-cli/SKILL.md",
+    "skills/ciao-cli/commands.json",
+    "evals/scenarios.json",
+}
+_AGENT_CLI_NOUNS = "memory|vault|note|file|chat|project|schedule|workspace|context|run|gws"
+_CLI_MENTION = re.compile(rf"\bciao ({_AGENT_CLI_NOUNS}) ([a-z][a-z-]*)")
+
+
+def _cli_commands() -> dict[str, str]:
+    path = Path(resources.files("ciao.stock")) / "skills" / "ciao-cli" / "commands.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _stock_instruction_files() -> list[tuple[str, str]]:
+    stock = Path(resources.files("ciao.stock"))
+    found = []
+    for path in sorted(stock.rglob("*")):
+        if not path.is_file() or path.suffix not in {".md", ".json"}:
+            continue
+        relative = path.relative_to(stock).as_posix()
+        if relative in _OPERATION_NAME_EXEMPT:
+            continue
+        found.append((relative, path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_stock_instructions_name_cli_commands_not_operation_names() -> None:
+    operations = {op for op in _cli_commands().values() if "_" in op}
+    assert "vault_search" in operations
+    for relative, text in _stock_instruction_files():
+        for op in sorted(operations):
+            assert not re.search(rf"(?<![\w-]){re.escape(op)}(?![\w-])", text), (
+                f"{relative} names the operation `{op}`; name its `ciao <noun> <verb>` command instead"
+            )
+
+
+def test_stock_instructions_only_mention_real_cli_commands() -> None:
+    commands = set(_cli_commands())
+    for relative, text in _stock_instruction_files():
+        for noun, verb in _CLI_MENTION.findall(text):
+            head = f"{noun} {verb}"
+            assert any(c == head or c.startswith(f"{head} ") for c in commands), (
+                f"{relative} mentions `ciao {head}`, which is not in ciao-cli/commands.json"
+            )
+
+
+def test_stock_workspace_guide_does_not_restate_injected_policy() -> None:
+    guide = resources.files("ciao.stock").joinpath("workspace", "AGENTS.md").read_text(encoding="utf-8")
+    assert "never restart the Ciaobot service" not in guide
+    assert "vault_search" not in guide and "file_surface" not in guide

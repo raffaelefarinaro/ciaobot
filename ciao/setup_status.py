@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Mapping, Any
 
 from ciao import provider_registry
+from ciao.os_support.shell_hints import path_hint
 from ciao.workspace_guide import guide_path
 
 # Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
@@ -226,7 +227,7 @@ def _provider(
 def _cli_version(binary: str) -> str:
     try:
         run = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True,
+            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=3, check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -266,7 +267,7 @@ def _discover_claude_system_skills_uncached() -> list[str]:
         try:
             res = subprocess.run(
                 [binary, "plugin", "list"],
-                capture_output=True, text=True, timeout=8.0, check=False,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8.0, check=False,
             )
             cli_ok = res.returncode == 0
             output = (res.stdout or "") + "\n" + (res.stderr or "")
@@ -583,7 +584,7 @@ def _discover_claude_mcps_uncached(
         res = subprocess.run(
             [binary, "mcp", "list"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=_CLAUDE_MCP_LIST_TIMEOUT_SECONDS,
             check=False,
         )
@@ -651,23 +652,8 @@ def claude_path_command(directory: str = "") -> str:
     itself; repeating it here means the wizard can hand it over as a second
     copyable step instead of leaving the user stuck one command short.
     """
-    if sys.platform == "win32":
-        return ""
-    home = str(Path.home())
     target = directory or str(Path.home() / ".local" / "bin")
-    if target == home or target.startswith(home + os.sep):
-        # Written into an rc file, so keep it portable across machines and
-        # readable to whoever opens that file later.
-        target = "$HOME" + target[len(home) :]
-    # The engine usually runs under launchd, where SHELL is unset; zsh is the
-    # macOS default and the shell the documented installer assumes.
-    shell = os.path.basename(os.environ.get("SHELL", "") or "zsh")
-    if shell == "fish":
-        return f"fish_add_path {target}"
-    # macOS terminals start login shells, which read ~/.bash_profile — not
-    # ~/.bashrc, which would fix only the shell the user is sitting in.
-    rc = "~/.bash_profile" if shell == "bash" else "~/.zshrc"
-    return f"""echo 'export PATH="{target}:$PATH"' >> {rc} && source {rc}"""
+    return path_hint(target, persist=True)
 
 
 def claude_path_hint(cli_path: str) -> str:
@@ -940,7 +926,7 @@ def claude_auth_status(
         completed = subprocess.run(
             [binary, "auth", "status", "--json"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=_CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS,
             check=False,
             env=process_env,

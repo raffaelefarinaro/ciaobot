@@ -39,7 +39,11 @@ import yaml
 # (it is the module a consumer will import), and the Categories renderer takes
 # the registry as an argument rather than loading one, so this import is a type
 # and a name — no category is read until a caller asks for it.
-from ciao.entity_types import EntityTypeRegistry, load_entity_types
+from ciao.entity_types import (
+    EntityTypeRegistry,
+    load_entity_types,
+    stock_entity_type_registry,
+)
 from ciao.vault_links import (
     FENCED_CODE_RE,
     FM_LIST_ITEM_RE,
@@ -67,6 +71,19 @@ def default_vault_root() -> Path:
         base = Path(workspace).expanduser() if workspace else Path.cwd()
         root = base / root
     return root.resolve()
+
+
+VAULT_RENDER_PREFIX = Path("memory-vault")
+"""The folder name a note path is *rendered* under, and the default prefix.
+
+An :class:`Entry`'s ``path`` is a rendering: the same note is
+``memory-vault/People/Sofia.md`` in the scan, the Memory Map and the audit
+report, and ``People/Sofia.md`` everywhere the vault's own state keys on it.
+A caller that strips the prefix (to stat a file, to reach the check state) and a
+caller that renders one have to agree on this string or every join misses
+silently — which reads as "no note is stale" rather than as a bug. So it is
+named here, next to the renderer, instead of spelled out at each of them.
+"""
 
 EXCLUDED_TOP_DIRS = {"Logs", "Templates", ".obsidian"}
 
@@ -99,13 +116,18 @@ def is_generated_vault_file(name: str) -> bool:
 ARCHIVED_WORKSPACES_DIR = ".archived-workspaces"
 EXCLUDED_PATH_PARTS: set[str] = {".vault-trash", ARCHIVED_WORKSPACES_DIR}
 
-# Vault bookkeeping the memory pipeline itself writes (casefolded names).
+# Vault bookkeeping the app itself writes (casefolded names). Mostly the memory
+# pipeline's own files; `Update-Tasks.json` is the update-task state store.
 # Indexing them made the proposals queue and the curation logs rank above real
-# notes for ordinary recall queries — the memory system's paperwork must never
-# compete with the memories it manages. Matched only directly under a
-# `Workspace/` directory — where the pipeline writes them — so a user's own
+# notes for ordinary recall queries — the system's paperwork must never compete
+# with the memories it manages. Matched only directly under a
+# `Workspace/` directory — where the app writes them — so a user's own
 # note that happens to share a name (`projects/team/Weekly-Review-Log.md`)
 # stays searchable. Shared with `fts_search` so the two cannot drift.
+#
+# `note-checks.json` is `ciao.note_verification`'s durable per-note verification
+# state: a verdict with its citations, not a memory, and indexed JSON would put
+# "checked on <date>" in the middle of an ordinary recall result.
 RESERVED_UNINDEXED_FILES = frozenset(
     {
         "memory-proposals.md",
@@ -114,17 +136,35 @@ RESERVED_UNINDEXED_FILES = frozenset(
         "curation-log.md",
         "weekly-review-log.md",
         "vault-review.md",
+        # The update-task state store (`ciao/update_tasks.py`): a per-workspace
+        # record of which "After this update" tasks were offered, dismissed or
+        # completed. A guard, not a fix for a live leak: every consumer of this
+        # set reads markdown only today (`fts_search._index_directory`'s `.md`
+        # default, `fts_search.index_file`, `vault_index`'s `rglob("*.md")`,
+        # `vault_lint._markdown_source_paths`), so nothing here can reach a
+        # `.json` file. It is listed because that is where the vault's own
+        # bookkeeping belongs, and because the day a consumer widens to
+        # non-markdown files this name has to be in the set already rather than
+        # becoming an index row and a recall hit.
+        "update-tasks.json",
+        "note-checks.json",
+        # The Learnings cleanup suppression store (`ciao/learnings_cleanup.py`):
+        # which `(learning_id, entry_revision)` pairs have already been retired,
+        # so an undo is not reversed by the next nightly pass. A guard with a
+        # machine identity in it, and indexed JSON would put a raw uuid in the
+        # middle of an ordinary recall result.
+        "learnings-cleanup.json",
     }
 )
 
 
 def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
-    """True for the memory pipeline's own files, exactly where it writes them.
+    """True for the app's own vault bookkeeping, exactly where it writes it.
 
-    ``rel_to_root`` is the path relative to the vault root. The pipeline only
-    ever writes these files at ``<vault>/Workspace/<name>``, so the match is
-    exact: a user's note under any other directory that happens to be named
-    ``workspace`` (``projects/acme/workspace/Curation-Log.md``) stays indexed.
+    ``rel_to_root`` is the path relative to the vault root. These files are only
+    ever written at ``<vault>/Workspace/<name>``, so the match is exact: a user's
+    note under any other directory that happens to be named ``workspace``
+    (``projects/acme/workspace/Curation-Log.md``) stays indexed.
     """
     return (
         len(rel_to_root.parts) in {2, 3}
@@ -132,54 +172,22 @@ def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
         and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
     )
 
-# Directory-based type inference when frontmatter is missing.
-DIR_TYPE_MAP = {
-    "People": "person",
-    "Projects": "project",
-    "Ideas": "idea",
-    "Resources": "resource",
-    "Places": "place",
-    "Documents": "document",
-    "Workspace": "workspace",
-    "references": "reference",
-    "products": "product",
-    "features": "feature",
-    "active": "project",
-    "completed": "project",
-    "content": "content",
-    "journal": "journal",
-    "automations": "automation",
-}
-
-# The closed vocabulary for frontmatter ``type:``.
+# The stock vocabulary, read off the shipped category list
+# (`ciao/stock/entity-types.yaml`) so the file is the one place a category is
+# declared. These three are what a caller with no vault registry falls back to;
+# a caller that holds one asks it for the same views.
 #
-# Seeded from every DIR_TYPE_MAP *value* so path inference can never produce a
-# type the linter rejects, plus the types the vault earned by use that no
-# directory name implies. Deliberately a separate constant rather than more
-# DIR_TYPE_MAP entries: that map's *keys* are directory names, and
-# ``_workspace_of`` tests membership in them to tell a folder type from a
-# workspace name, so adding a key silently changes workspace inference.
-CANONICAL_TYPES = frozenset(DIR_TYPE_MAP.values()) | {
-    "log",
-    "note",
-    "skill-proposal",
-}
-
-# Near-duplicate values seen in real vaults, mapped to the canonical type they
-# meant. Reported as drift with the target named, so the fix is a rename with a
-# known destination rather than a judgement call. Without this the index grows
-# one section per synonym: `doc (1)` next to `document (1)`.
-TYPE_ALIASES = {
-    "analysis": "reference",
-    "discussion-prep": "note",
-    "doc": "document",
-    "feature-brief": "feature",
-    "hackathon-log": "journal",
-    "plan": "document",
-    "planning-doc": "document",
-    "project-log": "log",
-    "template": "document",
-}
+# `DIR_TYPE_MAP` is directory-based type inference when frontmatter is missing.
+# Its *keys* are directory names and `_workspace_of` tests membership in them to
+# tell a folder type from a workspace name, so a category's folder is a key here
+# for that reason too. `CANONICAL_TYPES` is the closed vocabulary for
+# frontmatter ``type:``. `TYPE_ALIASES` maps near-duplicate values seen in real
+# vaults to the type they meant, reported as drift with the target named so the
+# fix is a rename with a known destination rather than a judgement call.
+_STOCK_REGISTRY = stock_entity_type_registry()
+DIR_TYPE_MAP = _STOCK_REGISTRY.dir_type_map()
+CANONICAL_TYPES = _STOCK_REGISTRY.canonical_types()
+TYPE_ALIASES = _STOCK_REGISTRY.aliases()
 
 
 # How much of a note's filename a sibling temp file may carry. The prefix is
@@ -295,6 +303,16 @@ class Entry:
     # note carries no such key — consumers then fall back to mtime, which
     # says "touched", not "checked". See ciao.memory_audit for the consumer.
     updated: str = ""
+
+    @property
+    def path_key(self) -> str:
+        """``path`` as the note's id: spelled with ``/`` on every OS.
+
+        Every map, set, comparison and output that names a note uses this, never
+        ``str(path)``, which spells the separators with backslashes on Windows
+        and then matches no ``/``-spelled ref, link or client id.
+        """
+        return self.path.as_posix()
 
 
 def is_excluded(rel_path: Path) -> bool:
@@ -502,12 +520,12 @@ def build_filename_index(
     ``memory-vault``, which raises the moment a scan renders paths under a
     per-root prefix, so a caller that knows the prefix has to say so.
     """
-    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
+    prefix = VAULT_RENDER_PREFIX if path_prefix is None else Path(path_prefix)
     idx: dict[str, list[Path]] = defaultdict(list)
     for e in entries:
         # key by vault-relative path without extension
         rel_from_vault = _strip_prefix(e.path, prefix)
-        stem_key = str(rel_from_vault.with_suffix(""))
+        stem_key = rel_from_vault.with_suffix("").as_posix()
         idx[stem_key].append(e.path)
         # also key by filename stem alone for bare references like "Mo"
         idx[e.path.stem].append(e.path)
@@ -581,7 +599,7 @@ def scan_vault(
     if registry is None:
         registry = load_entity_types(vault_root)
     dir_type_map = registry.dir_type_map()
-    prefix = Path("memory-vault") if path_prefix is None else Path(path_prefix)
+    prefix = VAULT_RENDER_PREFIX if path_prefix is None else Path(path_prefix)
     entries: list[Entry] = []
     for md_path in sorted(vault_root.rglob("*.md")):
         rel_from_vault = md_path.relative_to(vault_root)
@@ -652,7 +670,7 @@ def scan_vault(
                 if ref not in unresolved:
                     unresolved.append(ref)
                 continue
-            key = str(target)
+            key = target.as_posix()
             if key in seen or target == e.path:
                 continue
             seen.add(key)
@@ -667,7 +685,7 @@ def _build_graph(entries: list[Entry]) -> dict[str, set[str]]:
     """Undirected graph keyed by repo-relative path string."""
     graph: dict[str, set[str]] = defaultdict(set)
     for e in entries:
-        src = str(e.path)
+        src = e.path_key
         for tgt in e.related:
             graph[src].add(tgt)
             graph[tgt].add(src)
@@ -677,19 +695,21 @@ def _build_graph(entries: list[Entry]) -> dict[str, set[str]]:
 def _ref_matches(raw: str, filename_idx: dict[str, list[Path]], deleted_path: str) -> bool:
     """True if a raw related/link reference string resolves to deleted_path."""
     target = resolve_related(_normalize_related_value(raw), filename_idx)
-    return target is not None and str(target) == deleted_path
+    return target is not None and target.as_posix() == deleted_path
 
 
 def _strip_frontmatter_related(
-    fm_text: str, filename_idx: dict[str, list[Path]], deleted_path: str
+    fm_text: str, filename_idx: dict[str, list[Path]], deleted_path: str, *, eol: str = "\n"
 ) -> tuple[str, bool]:
     """Remove `related:`/`relatedTo:` entries pointing at deleted_path.
 
     Edits surgically line-by-line instead of round-tripping through
     yaml.safe_dump, so untouched keys keep their original formatting,
-    quoting, and order.
+    quoting, and order. ``eol`` is the note's own line ending: the lines are
+    read without their ``\r`` and joined back with it, so a CRLF note stays
+    CRLF instead of coming back with its rewritten lines LF.
     """
-    lines = fm_text.split("\n")
+    lines = [line.removesuffix("\r") for line in fm_text.split("\n")]
     out: list[str] = []
     changed = False
     i, n = 0, len(lines)
@@ -738,7 +758,7 @@ def _strip_frontmatter_related(
             out.extend(kept_item_lines)
         # else: every item under this key was stripped, so drop the key too.
         i = j
-    return "\n".join(out), changed
+    return eol.join(out), changed
 
 
 def _strip_body_links(
@@ -798,10 +818,13 @@ def _strip_all_references(
     m = FRONTMATTER_RE.match(text)
     changed = False
     if m:
-        new_fm_text, fm_changed = _strip_frontmatter_related(m.group(1), filename_idx, deleted_path)
+        eol = "\r\n" if "\r\n" in m.group(0) else "\n"
+        new_fm_text, fm_changed = _strip_frontmatter_related(
+            m.group(1), filename_idx, deleted_path, eol=eol
+        )
         if fm_changed:
             changed = True
-            text = text[:m.start()] + f"---\n{new_fm_text}\n---\n" + text[m.end():]
+            text = text[:m.start()] + f"---{eol}{new_fm_text}{eol}---{eol}" + text[m.end():]
     m2 = FRONTMATTER_RE.match(text)
     body_start = m2.end() if m2 else 0
     new_body, body_changed = _strip_body_links(
@@ -836,7 +859,7 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
                 # name near NAME_MAX plus ".", 8 random chars and ".tmp"
                 # raises ENAMETOOLONG, which no caller here catches.
                 prefix=temp_prefix(abs_path.name),
-                suffix=".tmp",
+                suffix=".tmp", newline="",
             ) as handle:
                 handle.write(new_text)
                 temp = Path(handle.name)
@@ -852,7 +875,7 @@ def _commit_staged_edits(edits: list[tuple[Path, str, str]]) -> list[str]:
             replaced.append((target, original))
     except OSError:
         for target, original in reversed(replaced):
-            target.write_text(original, encoding="utf-8")
+            target.write_text(original, encoding="utf-8", newline="")
         for _, temp in staged:
             try:
                 temp.unlink(missing_ok=True)
@@ -897,7 +920,7 @@ def strip_references(
     fails.
     """
     vault_root = vault_root.resolve()
-    prefix = path_prefix or Path("memory-vault")
+    prefix = path_prefix or VAULT_RENDER_PREFIX
     entries = scan_vault(vault_root, path_prefix=path_prefix)
     filename_idx = build_filename_index(entries)
     # Phase 1 (pure): compute every rewrite up front, so a bad or unreadable
@@ -905,12 +928,15 @@ def strip_references(
     edits: list[tuple[Path, str, str]] = []
     edited: list[str] = []
     for e in entries:
-        if str(e.path) == deleted_path or deleted_path not in e.related:
+        if e.path_key == deleted_path or deleted_path not in e.related:
             continue
         rel_from_vault = _strip_prefix(e.path, prefix)
         abs_path = vault_root / rel_from_vault
         try:
-            text = abs_path.read_text(encoding="utf-8")
+            # Exact text: a text-mode read turns CRLF into LF, and the write
+            # below is exact, so the whole note came back converted.
+            with open(abs_path, encoding="utf-8", newline="") as handle:
+                text = handle.read()
         except OSError:
             continue
         new_text, file_changed = _strip_all_references(
@@ -918,7 +944,7 @@ def strip_references(
         )
         if file_changed:
             edits.append((abs_path, text, new_text))
-            edited.append(str(e.path))
+            edited.append(e.path_key)
     # Phase 2: stage + swap everything in, or roll back to the original bytes.
     _commit_staged_edits(edits)
     if undo is not None:
@@ -927,13 +953,13 @@ def strip_references(
 
 
 def _normalize_path_arg(value: str) -> str:
-    """Normalize a user-supplied path to match entry.path string form."""
+    """Normalize a user-supplied path to match ``Entry.path_key``."""
     p = Path(value)
     try:
         p = p.resolve().relative_to(Path.cwd().resolve())
     except (ValueError, OSError):
         p = Path(value)
-    return str(p)
+    return p.as_posix()
 
 
 def filter_entries(
@@ -970,7 +996,7 @@ def neighbors(
     depth: int = 1,
 ) -> list[tuple[int, Entry]]:
     """BFS neighbors of start_path up to `depth` hops (excludes start)."""
-    by_path = {str(e.path): e for e in entries}
+    by_path = {e.path_key: e for e in entries}
     graph = _build_graph(entries)
     if start_path not in by_path:
         return []
@@ -991,7 +1017,7 @@ def neighbors(
         if d == 0 or p not in by_path:
             continue
         out.append((d, by_path[p]))
-    out.sort(key=lambda x: (x[0], str(x[1].path)))
+    out.sort(key=lambda x: (x[0], x[1].path_key))
     return out
 
 
@@ -1008,7 +1034,7 @@ def format_tsv(entries: list[Entry], include_hops: list[int] | None = None) -> s
             lines.append(
                 "\t".join(
                     [
-                        str(e.path),
+                        e.path_key,
                         e.workspace,
                         e.type,
                         e.title,
@@ -1025,7 +1051,7 @@ def format_tsv(entries: list[Entry], include_hops: list[int] | None = None) -> s
                 "\t".join(
                     [
                         str(hop),
-                        str(e.path),
+                        e.path_key,
                         e.workspace,
                         e.type,
                         e.title,
@@ -1041,7 +1067,7 @@ def format_tsv(entries: list[Entry], include_hops: list[int] | None = None) -> s
 def format_json(entries: list[Entry], hops: list[int] | None = None) -> str:
     def item(e: Entry, hop: int | None) -> dict:
         d: dict[str, Any] = {
-            "path": str(e.path),
+            "path": e.path_key,
             "workspace": e.workspace,
             "type": e.type,
             "title": e.title,
@@ -1082,9 +1108,8 @@ def _index_link(repo_rel: str) -> str:
     Still not a Ciaobot node: `scan_vault` skips generated files, so the
     god-node the backticks guarded against cannot come back.
 
-    The label keeps the full vault-relative path: `context/entity_tagger.py`
-    parses it back out of INDEX.md, and the path is what tells two notes with
-    the same stem apart. INDEX.md sits at the vault root, so the destination is
+    The label keeps the full vault-relative path: the path is what tells two
+    notes with the same stem apart. INDEX.md sits at the vault root, so the destination is
     simply "./" + that path.
     """
     inner = _vault_relative_ref(repo_rel)
@@ -1110,7 +1135,7 @@ def format_md(entries: list[Entry]) -> str:
                 if e.aliases:
                     extras.append("aliases: " + ", ".join(e.aliases))
                 suffix = f" ({'; '.join(extras)})" if extras else ""
-                sections.append(f"- {_index_link(str(e.path))}{suffix}")
+                sections.append(f"- {_index_link(e.path_key)}{suffix}")
             sections.append("")
     return "\n".join(sections).rstrip() + "\n"
 
@@ -1134,7 +1159,7 @@ def write_index_file(entries: list[Entry], dest: Path) -> None:
         f"{memory}"
         "For filtered queries run `ciao vault-index --help`.\n\n"
     )
-    dest.write_text(header + format_md(entries), encoding="utf-8")
+    dest.write_text(header + format_md(entries), encoding="utf-8", newline="")
 
 
 def scan_targets(
@@ -1163,7 +1188,7 @@ def scan_targets(
         scanned = scan_vault(root, workspace=workspace, path_prefix=prefix)
         prefixes[workspace] = Path(prefix)
         for entry in scanned:
-            rendered = str(entry.path)
+            rendered = entry.path_key
             try:
                 tail = entry.path.relative_to(prefix)
             except ValueError:
@@ -1190,8 +1215,8 @@ def _build_workspace_index(
     for e in entries:
         if not e.workspace:
             continue
-        inside = _strip_prefix(e.path, prefixes.get(e.workspace, Path("memory-vault")))
-        idx[f"{e.workspace}/{inside.with_suffix('')}"].append(e.path)
+        inside = _strip_prefix(e.path, prefixes.get(e.workspace, VAULT_RENDER_PREFIX))
+        idx[f"{e.workspace}/{inside.with_suffix('').as_posix()}"].append(e.path)
         idx[f"{e.workspace}/{e.path.stem}"].append(e.path)
     return idx
 
@@ -1207,7 +1232,7 @@ def _resolve_cross_workspace(entries: list[Entry], prefixes: dict[str, Path]) ->
         return
     idx = _build_workspace_index(entries, prefixes)
     workspaces = set(prefixes)
-    owner = {str(e.path): e.workspace for e in entries}
+    owner = {e.path_key: e.workspace for e in entries}
     for e in entries:
         if not e.related_unresolved:
             continue
@@ -1216,10 +1241,10 @@ def _resolve_cross_workspace(entries: list[Entry], prefixes: dict[str, Path]) ->
         seen = {*e.related}
         for ref in e.related_unresolved:
             target = _resolve_workspace_ref(ref, e.workspace, idx, workspaces)
-            if target is None or str(target) == str(e.path):
+            if target is None or target.as_posix() == e.path_key:
                 still_missing.append(ref)
                 continue
-            key = str(target)
+            key = target.as_posix()
             if key in seen:
                 continue
             seen.add(key)
@@ -1300,7 +1325,7 @@ def vocabulary_report(
                 record = drift.setdefault(
                     raw, {"suggested": canonical, "paths": []}
                 )
-                record["paths"].append(str(entry.path))
+                record["paths"].append(entry.path_key)
         # A tag repeated within one note's frontmatter list is the same note
         # using it, not independent usage: one note with
         # `tags: [research, research, research]` must not inflate the count to
@@ -1392,7 +1417,7 @@ def format_vocabulary(
 def entity_types_section(registry: EntityTypeRegistry) -> str:
     """The vault's categories, as a `## Categories` block for VOCABULARY.md.
 
-    The file the memory agent reads before it writes frontmatter, so it names
+    The file the memory-writing agent reads before it writes frontmatter, so it names
     the categories the vault is *configured* with — which is not the same list
     as the types its notes happen to use, and is the one a reader needs in order
     to know what a new category would be called. One line per enabled entry:
@@ -1427,7 +1452,7 @@ def write_vocabulary_file(
     """Write `VOCABULARY.md`.
 
     Deliberately carries no generated-at timestamp, unlike ``INDEX.md``: this
-    file is read by the memory agent before it writes frontmatter, and a
+    file is read before the agent writes frontmatter, and a
     timestamp would dirty it in git on every rebuild even when the vocabulary
     itself never moved.
 
@@ -1452,7 +1477,7 @@ def write_vocabulary_file(
     sections = [format_vocabulary(entries, registry=registry)]
     if registry is not None:
         sections.insert(0, entity_types_section(registry))
-    dest.write_text(header + "\n".join(sections), encoding="utf-8")
+    dest.write_text(header + "\n".join(sections), encoding="utf-8", newline="")
 
 
 # ---- CLI -------------------------------------------------------------------
@@ -1525,8 +1550,8 @@ def main(argv: list[str] | None = None) -> int:
             name=args.name,
         )
         # Preserve hop metadata only for entries that survived filtering
-        kept_paths = {str(e.path) for e in filtered}
-        hop_pairs = [(h, e) for h, e in hopped if str(e.path) in kept_paths]
+        kept_paths = {e.path_key for e in filtered}
+        hop_pairs = [(h, e) for h, e in hopped if e.path_key in kept_paths]
         ents = [e for _, e in hop_pairs]
         hops = [h for h, _ in hop_pairs]
     else:

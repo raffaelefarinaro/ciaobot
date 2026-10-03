@@ -1,29 +1,59 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import os
 import plistlib
 import sqlite3
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from ciao import cli
 
 
+def _fake_python(tmp_path: Path) -> str:
+    """The interpreter setup points its service at.
+
+    POSIX setup only writes the path into the plist, so a made-up one will do.
+    Windows' Task Scheduler renderer accepts only python.exe/pythonw.exe and
+    checks pythonw.exe is really there (the task runs hidden), so on Windows it
+    is a pair of empty files under ``tmp_path``.
+    """
+    if sys.platform != "win32":
+        return "/opt/ciao/bin/python"
+    bin_dir = tmp_path / "fake-python"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("python.exe", "pythonw.exe"):
+        (bin_dir / name).write_bytes(b"")
+    return str(bin_dir / "python.exe")
+
+# setup's launchd backend: the plist and the ~/Applications bundle clean-up run
+# only there. On Windows setup writes a Task Scheduler definition instead, which
+# tests/test_windows_service.py covers.
+launchd_setup_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the launchd plist and ~/Applications clean-up are setup's macOS backend",
+)
+
+
 def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
-    monkeypatch.setattr(cli, "_run_server", lambda: called.append("run") or 0)
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: called.append(kwargs) or 0)
 
     assert cli.main(["run"]) == 0
-    assert called == ["run"]
+    assert called == [{"supervised": False}]
 
 
 def _raise_system_exit(code: int):
-    def _main() -> None:
+    def _main(*, supervised: bool = False) -> None:
         raise SystemExit(code)
 
     return _main
@@ -80,6 +110,60 @@ def test_run_propagates_other_exit_codes_without_relaunch(
     assert cli._run_server() == 3
 
 
+def test_run_supervised_returns_restart_code_without_execv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supervisor owns the relaunch, so the child only reports the code."""
+    import ciao.main
+
+    def fail_execv(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("execv must not be called under --supervised")
+
+    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(75))
+    monkeypatch.setattr(cli.os, "execv", fail_execv)
+
+    assert cli._run_server(supervised=True) == 75
+
+
+def test_run_parser_accepts_supervised_flag() -> None:
+    assert cli.build_parser().parse_args(["run", "--supervised"]).supervised is True
+
+
+def test_run_server_passes_supervised_to_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine's restart watchdog has to know it is supervised too, or a
+    wedged cleanup re-execs and bypasses the supervisor's relaunch."""
+    import ciao.main
+
+    seen: list[dict[str, object]] = []
+
+    def _fake_main(**kwargs: object) -> None:
+        seen.append(kwargs)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(ciao.main, "main", _fake_main)
+
+    assert cli._run_server(supervised=True) == 0
+    assert seen == [{"supervised": True}]
+
+
+def test_supervise_is_registered_and_help_exits_zero() -> None:
+    """Registered as a subparser too, so `ciao --help` discloses it."""
+    parser = cli.build_parser()
+    action = next(a for a in parser._subparsers._actions if hasattr(a, "choices") and a.choices)
+    assert "supervise" in action.choices
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["supervise", "--help"])
+    assert exc.value.code == 0
+
+
+def test_supervise_is_not_an_agent_command() -> None:
+    """`ciao supervise` is an operator launcher: the agent surface must not claim it."""
+    from ciao.agent_cli import is_agent_invocation
+
+    assert is_agent_invocation(["supervise"]) is False
+
+
 def test_cli_public_preflight_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
@@ -125,11 +209,11 @@ def test_cli_dev_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cli.dev, "main", lambda argv: called.append(argv) or 0)
 
-    assert cli.main(["dev", "--workspace", "/tmp/app", "--no-install"]) == 0
+    assert cli.main(["dev", "--workspace", str(Path("/tmp/app")), "--no-install"]) == 0
     assert called == [
         [
             "--workspace",
-            "/tmp/app",
+            str(Path("/tmp/app")),
             "--backend-port",
             "8543",
             "--frontend-port",
@@ -171,8 +255,8 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(cli, "_vault_lint_command", lambda args: called.append(args) or 0)
 
-    assert cli.main(["vault-lint", "--vault-root", "/tmp/vault"]) == 0
-    assert str(called[0].vault_root) == "/tmp/vault"
+    assert cli.main(["vault-lint", "--vault-root", str(Path("/tmp/vault"))]) == 0
+    assert str(called[0].vault_root) == str(Path("/tmp/vault"))
 
 
 def test_cli_gws_auth_helper_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,8 +280,8 @@ def test_cli_workspace_census_dispatches_command(
         cli, "_workspace_census_command", lambda args: called.append(args) or 0
     )
 
-    assert cli.main(["workspace-census", "--vault-root", "/tmp/vault", "--json"]) == 0
-    assert str(called[0].vault_root) == "/tmp/vault"
+    assert cli.main(["workspace-census", "--vault-root", str(Path("/tmp/vault")), "--json"]) == 0
+    assert str(called[0].vault_root) == str(Path("/tmp/vault"))
     assert called[0].json is True
 
 
@@ -364,7 +448,9 @@ def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
     assert report["pending_action_count"] == 1
     notices = report["upgrade_notices"]["notices"]
     assert notices[0]["workspace"] == "research"
-    assert "Open a Ciaobot chat" in notices[0]["remedy"]
+    # The managed command, not a hand migration: the audit's remedy and the Home
+    # card's are one sentence from `ciao.migration_notices` since #816.
+    assert "ciao vault-relocate research --apply" in notices[0]["remedy"]
 
 
 def test_cli_create_chat_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -382,8 +468,8 @@ def test_cli_cleanup_sdk_blobs_dispatches_command(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(cli, "_cleanup_sdk_blobs_command", lambda args: called.append(args) or 0)
 
-    assert cli.main(["cleanup-sdk-blobs", "--workspace", "/tmp/workspace", "--apply"]) == 0
-    assert str(called[0].workspace) == "/tmp/workspace"
+    assert cli.main(["cleanup-sdk-blobs", "--workspace", str(Path("/tmp/workspace")), "--apply"]) == 0
+    assert str(called[0].workspace) == str(Path("/tmp/workspace"))
     assert called[0].apply is True
 
 
@@ -407,13 +493,13 @@ def test_cli_sync_skills_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> 
             [
                 "sync-skills",
                 "--workspace",
-                "/tmp/workspace",
+                str(Path("/tmp/workspace")),
                 "--skip-upstream",
             ]
         )
         == 0
     )
-    assert str(called[0].workspace) == "/tmp/workspace"
+    assert str(called[0].workspace) == str(Path("/tmp/workspace"))
     assert called[0].skip_upstream is True
 
 
@@ -436,7 +522,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
             "--app-dir",
             str(apps),
             "--python",
-            "/opt/ciao/bin/python",
+            _fake_python(tmp_path),
             "--port",
             "9443",
         ]
@@ -453,7 +539,8 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     # setup now builds the per-workspace layout directly instead of the shared one
     # that then had to be migrated.
     root = workspace / "research"
-    assert (root / ".claude" / "agents" / "memory.md").is_file()
+    assert (root / ".claude" / "skills" / "ciao-memory" / "SKILL.md").is_file()
+    assert not (root / ".claude" / "agents" / "memory.md").exists()
     assert (root / "commands" / "remember.md").is_file()
     assert "ciao:memory" in (
         root / "commands" / "remember.md"
@@ -485,21 +572,24 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     )
     assert registry[0]["name"] == "research"
     assert registry[0]["vault_root"] == "research/memory-vault"
-    plist = launch_agents / "com.ciao.server.plist"
-    assert plist.is_file()
-    plist_text = plist.read_text(encoding="utf-8")
-    assert "<string>/opt/ciao/bin/python</string>" in plist_text
-    assert "<string>run</string>" in plist_text
-    assert f"<string>{workspace.resolve()}</string>" in plist_text
-    assert "<string>9443</string>" in plist_text
-    assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
+    # The platform's own service definition: the plist here, the Task Scheduler
+    # XML on Windows, whose fields tests/test_windows_service.py pins.
+    service = cli._service_definition(launch_agents)
+    assert service is not None and service.is_file()
+    if sys.platform != "win32":
+        plist_text = service.read_text(encoding="utf-8")
+        assert "<string>/opt/ciao/bin/python</string>" in plist_text
+        assert "<string>run</string>" in plist_text
+        assert f"<string>{workspace.resolve()}</string>" in plist_text
+        assert "<string>9443</string>" in plist_text
+        assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
+        # Login Items still groups the server agent under the desktop app.
+        assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
+        assert "<string>local.ciaobot.app</string>" in plist_text
     # No menu-bar agent and no launcher bundle: Ciaobot.app is the menu bar
     # now, and nothing writes the retired rumps helper.
     assert not (launch_agents / "com.ciao.menubar.plist").exists()
     assert not (apps / "Ciaobot Server.app").exists()
-    # Login Items still groups the server agent under the desktop app.
-    assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
-    assert "<string>local.ciaobot.app</string>" in plist_text
     # Setup always mints the one-time login token, even with no desktop app:
     # the summary prints it as the login URL.
     setup_token = (workspace / ".runtime" / "setup-token").read_text(
@@ -534,6 +624,58 @@ def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
     assert "PWA_AUTH_REQUIRED=true" not in env_lines
 
 
+def _setup_cli_args(tmp_path: Path) -> list[str]:
+    return [
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--auth-token",
+        "test-token",
+        "--no-auth",
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+    ]
+
+
+def test_setup_exits_nonzero_and_warns_when_memory_regions_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The memory step never blocks skill sync, but setup must say it failed
+    and exit non-zero instead of reporting success (#790). The code is the
+    one install-engine.sh tolerates, so a good install is not rolled back."""
+    workspace = tmp_path / "workspace"
+
+    def _boom(*a, **k):
+        raise RuntimeError("guide unwritable")
+
+    monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom)
+    rc = cli.main(_setup_cli_args(tmp_path))
+
+    assert rc == cli.SETUP_MEMORY_FAILED_RC
+    err = capsys.readouterr().err
+    assert "memory regions not set up for" in err
+    assert "guide unwritable" in err
+    # Skills were still synced before the failure was reported. A fresh setup
+    # scaffolds assets per agent root, so that is `workspace/personal`.
+    skills = workspace / "personal" / ".claude" / "skills"
+    assert skills.is_dir()
+    assert any(skills.iterdir())
+
+
+def test_setup_exits_zero_without_warning_on_the_normal_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    rc = cli.main(_setup_cli_args(tmp_path))
+
+    assert rc == 0
+    assert "memory regions not set up" not in capsys.readouterr().err
+
+
+@launchd_setup_only
 def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -554,6 +696,7 @@ def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     assert "CIAO_NATIVE_SIDECAR" not in plist["EnvironmentVariables"]
 
 
+@launchd_setup_only
 def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
     launch_agents = tmp_path / "LaunchAgents"
 
@@ -599,7 +742,7 @@ def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool =
         "--workspace", str(workspace),
         "--launch-agents-dir", str(launch_agents),
         "--app-dir", str(apps),
-        "--python", "/opt/ciao/bin/python",
+        "--python", _fake_python(launch_agents.parent),
         "--port", "9443",
     ]
     if yes:
@@ -622,7 +765,15 @@ def test_setup_refuses_source_checkout(tmp_path: Path, capsys) -> None:
     assert not (checkout / ".env").exists()  # nothing scaffolded
 
 
-def test_setup_refuses_to_repoint_existing_workspace(tmp_path: Path, capsys) -> None:
+def test_setup_refuses_to_repoint_existing_workspace(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform == "win32":
+        # The Windows guard asks Task Scheduler whether the task exists before
+        # trusting the XML (a stale file is not a task); stand in for it here.
+        from ciao import windows_service
+
+        monkeypatch.setattr(windows_service, "task_exists", lambda: True)
     launch_agents = tmp_path / "LaunchAgents"
     apps = tmp_path / "Applications"
     first = tmp_path / "ws-one"
@@ -733,6 +884,301 @@ def test_setup_preserves_load_failure_status_and_stderr(
     assert capsys.readouterr().err == "launchctl: load failed\n"
 
 
+def test_setup_launchctl_failure_never_reads_as_the_memory_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """install-engine.sh reads setup's exit 3 as the tolerated memory warning
+    and carries on, so a launchctl load that happens to fail with 3 must not
+    be reported as one: the install would continue with the agent unloaded
+    (#790)."""
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "launchctl":
+            return real_run(command, *args, **kwargs)
+        return subprocess.CompletedProcess(command, 3 if command[1] == "load" else 0)
+
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = cli.main(
+        _launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents")
+    )
+
+    assert result == 1
+    assert result != cli.SETUP_MEMORY_FAILED_RC
+
+
+class _RecordingBackend:
+    """Stands in for `service_backend.current_backend()` in the load path."""
+
+    name = "recording"
+
+    def __init__(self, status: int = 0) -> None:
+        self.status = status
+        self.loaded: list[Path] = []
+
+    def agents_dir(self) -> Path:
+        return Path.home() / "Library" / "LaunchAgents"
+
+    def live_agents_dir(self) -> Path:
+        return Path.home() / "Library" / "LaunchAgents"
+
+    def is_live_agents_dir(self, path: Path) -> bool:
+        return False
+
+    def bootout_agent(self, label: str) -> None:
+        return None
+
+    def load_agent(self, definition: Path) -> int:
+        self.loaded.append(definition)
+        return self.status
+
+    def schedule_server_handoff(self) -> bool:
+        return False
+
+
+def _no_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command and command[0] == "launchctl":
+            raise AssertionError(f"cli must not shell out to launchctl: {command!r}")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+
+def test_setup_load_launchd_goes_through_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    backend = _RecordingBackend(status=0)
+    monkeypatch.setattr(
+        cli.service_backend, "current_backend", lambda: backend
+    )
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    _no_launchctl(monkeypatch)
+
+    assert (
+        cli.main(_launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents"))
+        == 0
+    )
+
+    assert backend.loaded == [tmp_path / "LaunchAgents" / "com.ciao.server.plist"]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"), [(3, 1), (5, 5)]
+)
+def test_setup_load_failure_through_the_backend(
+    status: int,
+    expected: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    backend = _RecordingBackend(status=status)
+    monkeypatch.setattr(
+        cli.service_backend, "current_backend", lambda: backend
+    )
+    monkeypatch.setattr(cli, "setup_workspace", _stub_setup_for_launchd)
+    _no_launchctl(monkeypatch)
+
+    result = cli.main(
+        _launchd_setup_argv(tmp_path / "workspace", tmp_path / "LaunchAgents")
+    )
+
+    assert result == expected
+    assert backend.loaded == [tmp_path / "LaunchAgents" / "com.ciao.server.plist"]
+
+
+def test_disable_legacy_menubar_agent_boots_out_only_the_live_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Backend(_RecordingBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.booted: list[str] = []
+            self.default_dir = tmp_path / "default"
+            self.live_dir = tmp_path / "live"
+
+        def agents_dir(self) -> Path:
+            return self.default_dir
+
+        def live_agents_dir(self) -> Path:
+            return self.live_dir
+
+        def bootout_agent(self, label: str) -> None:
+            self.booted.append(label)
+
+    backend = Backend()
+    monkeypatch.setattr(
+        cli.service_backend, "current_backend", lambda: backend
+    )
+    live_plist = backend.live_dir / "com.ciao.menubar.plist"
+    default_plist = backend.default_dir / "com.ciao.menubar.plist"
+    for plist in (live_plist, default_plist):
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text("plist", encoding="utf-8")
+    other_plist = tmp_path / "other" / "com.ciao.menubar.plist"
+    other_plist.parent.mkdir(parents=True)
+    other_plist.write_text("plist", encoding="utf-8")
+
+    assert cli._disable_legacy_menubar_agent(backend.live_dir) is True
+    assert cli._disable_legacy_menubar_agent(tmp_path / "other") is True
+    # No argument falls back to the backend's default agents dir.
+    assert cli._disable_legacy_menubar_agent() is True
+
+    assert not live_plist.exists()
+    assert not default_plist.exists()
+    assert not other_plist.exists()
+    assert backend.booted == ["com.ciao.menubar"]
+
+
+def test_write_launchd_plist_repoint_guard_uses_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
+    agents = tmp_path / "a"
+    agents.mkdir()
+    workspace_a = tmp_path / "ws-a"
+    workspace_a.mkdir()
+    (agents / "com.ciao.server.plist").write_text(
+        _plist_with_workspace(workspace_a), encoding="utf-8"
+    )
+    backend = _RecordingBackend()
+    monkeypatch.setattr(
+        cli.service_backend, "current_backend", lambda: backend
+    )
+    monkeypatch.setattr(cli, "_plist_workspace", lambda _path: workspace_a.resolve())
+
+    def write(workspace: Path, is_live: bool) -> Path:
+        backend.is_live_agents_dir = lambda _path: is_live  # type: ignore[method-assign]
+        return cli._write_launchd_plist(
+            workspace=workspace,
+            launch_agents_dir=agents,
+            port=8443,
+            confirm_repoint=False,
+        )
+
+    with pytest.raises(RuntimeError, match="Refusing to repoint"):
+        write(tmp_path / "ws-b", True)
+
+    written = write(tmp_path / "ws-b", False)
+    assert written.is_file()
+
+
+class _PlatformShim:
+    """`cli.sys` with a different `platform`, leaving the real module alone.
+
+    `monkeypatch.setattr(cli.sys, "platform", ...)` would patch the global
+    `sys` module, so unrelated code (shutil, ctypes) would take the win32
+    branches too. Only cli needs to believe it is on another platform.
+    """
+
+    def __init__(self, real: object, platform: str) -> None:
+        self._real = real
+        self.platform = platform
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def _plist_with_workspace(workspace: Path) -> str:
+    return (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<plist version=\"1.0\"><dict><key>ProgramArguments</key><array>"
+        f"<string>{workspace}</string></array></dict></plist>\n"
+    )
+
+
+def test_setup_workspace_early_guard_uses_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
+    agents = tmp_path / "a"
+    agents.mkdir()
+    workspace_a = tmp_path / "ws-a"
+    workspace_a.mkdir()
+    (agents / "com.ciao.server.plist").write_text(
+        _plist_with_workspace(workspace_a), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        _RecordingBackend,
+        "is_live_agents_dir",
+        lambda self, _path: True,
+    )
+    monkeypatch.setattr(
+        cli.service_backend,
+        "current_backend",
+        _RecordingBackend,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_plist_workspace",
+        lambda _path: workspace_a.resolve(),
+    )
+    target = tmp_path / "ws-b"
+
+    with pytest.raises(RuntimeError, match="Refusing to repoint"):
+        cli.setup_workspace(target, launch_agents_dir=agents)
+
+    assert not target.exists(), "the early guard must refuse before creating anything"
+
+
+def test_setup_workspace_does_not_ask_for_a_backend_on_linux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "sys", _PlatformShim(sys, "linux"))
+    monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
+
+    def no_backend():
+        raise AssertionError("setup_workspace must not ask for a backend here")
+
+    monkeypatch.setattr(cli.service_backend, "current_backend", no_backend)
+
+    written = cli.setup_workspace(tmp_path / "ws")
+
+    assert (tmp_path / "ws").is_dir()
+    assert not any("LaunchAgents" in str(path) for path in written)
+
+
+def test_setup_workspace_asks_the_backend_where_a_service_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """macOS and Windows both have a background service, so setup writes its
+    definition by default (#845) and the definition dir comes from the backend.
+    """
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
+    agents = tmp_path / "LaunchAgents"
+    asked: list[str] = []
+
+    class _DarwinBackend(_RecordingBackend):
+        def agents_dir(self) -> Path:
+            asked.append("agents_dir")
+            return agents
+
+        def is_live_agents_dir(self, _path: Path) -> bool:
+            return False
+
+    monkeypatch.setattr(cli.service_backend, "current_backend", _DarwinBackend)
+
+    written = cli.setup_workspace(
+        tmp_path / "ws", app_dir=tmp_path / "Applications"
+    )
+
+    assert set(asked) == {"agents_dir"}
+    plist = agents / "com.ciao.server.plist"
+    # written lists the workspace files first; the definition is written last.
+    assert written[-1] == plist
+    assert plist.is_file()
+
+
+@launchd_setup_only
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"
@@ -759,6 +1205,7 @@ def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     assert not foreign.exists()  # untouched (never created); guard for typos
 
 
+@launchd_setup_only
 def test_setup_migrates_native_ciaobot_app_without_removing_pwa(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     legacy = apps / "Ciaobot.app" / "Contents"
@@ -813,6 +1260,7 @@ def test_setup_keeps_browser_pwa_named_ciaobot_app(tmp_path: Path) -> None:
     assert not (apps / "Ciaobot Server.app").exists()
 
 
+@launchd_setup_only
 def test_setup_skips_legacy_companion_when_the_app_is_installed(
     tmp_path: Path,
 ) -> None:
@@ -841,8 +1289,8 @@ def test_default_app_dir_matches_the_release_installer() -> None:
     assert cli._default_app_dir() == Path.home() / "Applications"
 
 
+@launchd_setup_only
 def test_setup_cleans_our_bundles_from_home_applications(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     home_apps = tmp_path / "home" / "Applications"
     for name, bundle_id in (("Ciao.app", "local.ciao.app"), ("Ciaobot.app", "local.ciaobot.app")):
         contents = home_apps / name / "Contents"
@@ -962,10 +1410,62 @@ def test_setup_prints_workspace_and_login_url(tmp_path: Path, capsys) -> None:
 
 def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = Path(cli.sys.executable).parent
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    assert cli._path_export_hint() == f'export PATH="{bin_dir}:$PATH"'
-    monkeypatch.setenv("PATH", f"/usr/bin:{bin_dir}")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+    hint = cli._path_export_hint()
+    if sys.platform == "win32":
+        # A persistent user-PATH update through the registry, not `export`
+        # (the full line is pinned in tests/test_os_support_shell_hints.py).
+        assert hint is not None
+        assert hint.startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
+        assert f"'{bin_dir}'" in hint
+    else:
+        assert hint == f'export PATH="{bin_dir}:$PATH"'
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(bin_dir)]))
     assert cli._path_export_hint() is None
+
+
+def test_path_export_hint_uses_the_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "path_hint", lambda directory, *, persist: "HINT")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    assert cli._path_export_hint() == "HINT"
+
+
+def test_setup_summary_prints_the_windows_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    workspace = tmp_path / "workspace"
+    token_path = workspace / ".runtime" / "setup-token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text("tok\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_path_export_hint", lambda: "LINE")
+    monkeypatch.setattr(cli, "path_hint_note", lambda: "NOTE")
+
+    cli._print_setup_summary(workspace, 9443)
+
+    out = capsys.readouterr().out
+    # Windows writes the user PATH, which the terminal that ran it cannot see,
+    # so the note has to sit directly under the line it is about.
+    assert "  LINE\n  NOTE" in out
+
+
+def test_setup_summary_prints_no_note_without_a_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    workspace = tmp_path / "workspace"
+    token_path = workspace / ".runtime" / "setup-token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text("tok\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_path_export_hint", lambda: None)
+    monkeypatch.setattr(cli, "path_hint_note", lambda: "NOTE")
+
+    cli._print_setup_summary(workspace, 9443)
+
+    out = capsys.readouterr().out
+    # Nothing was added to PATH, so there is no change to wait for: the note
+    # must not hang on its own.
+    assert "PATH" not in out
+    assert "NOTE" not in out
 
 
 def test_setup_url_rotates_token_by_default(tmp_path: Path, capsys) -> None:
@@ -1260,6 +1760,113 @@ def test_cli_skill_proposal_remove_refuses_ambiguous_match(
     assert len(list(queue.glob("*.md"))) == 2
 
 
+def test_cli_skill_proposal_remove_prefers_an_exact_skill_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The improvement prompt always passes the exact skill name, so `review`
+    must settle `review` even when `code-review` is queued beside it. Substring
+    alone made that settle ambiguous with no longer substring left to try."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    review = _skill_proposal_workspace(workspace, "review")
+    code_review = _skill_proposal_workspace(workspace, "code-review")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "review"]) == 0
+
+    record = skill_proposals.parse_proposal(review, "personal")
+    assert record is not None
+    assert record.lifecycle == skill_proposals.DISMISSED
+    # The sibling that only matched as a substring is untouched.
+    other = skill_proposals.parse_proposal(code_review, "personal")
+    assert other is not None
+    assert other.lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_still_refuses_an_ambiguous_substring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The unique-substring convenience is the second tier, not the only one: a
+    needle that names nothing exactly still refuses when it matches several."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    review = _skill_proposal_workspace(workspace, "review")
+    code_review = _skill_proposal_workspace(workspace, "code-review")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "revi"]) == 1
+
+    assert "more than one" in capsys.readouterr().err
+    # Nothing was settled.
+    for source in (review, code_review):
+        record = skill_proposals.parse_proposal(source, "personal")
+        assert record is not None
+        assert record.lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_does_not_settle_a_sibling_for_a_settled_exact_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The retry the improvement prompt produces must settle nothing, not the
+    next skill along. `read_queue` drops settled records, so an already-settled
+    `review` found nothing in the exact tier and the substring tier settled
+    `code-review` as applied — a decision nobody made."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    review = _skill_proposal_workspace(workspace, "review")
+    code_review = _skill_proposal_workspace(workspace, "code-review")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-remove", "review"]) == 0
+    # The same name again, as a retry or as `--applied` after `--not-applicable`.
+    assert cli.main(["skill-proposal-remove", "review", "--applied"]) == 1
+
+    assert "already settled" in capsys.readouterr().err
+    # The sibling is still queued, and the settled one is still the one decision.
+    sibling = skill_proposals.parse_proposal(code_review, "personal")
+    assert sibling is not None
+    assert sibling.lifecycle == skill_proposals.PENDING
+    settled = skill_proposals.parse_proposal(review, "personal")
+    assert settled is not None
+    assert settled.lifecycle == skill_proposals.DISMISSED
+
+
+def test_cli_skill_proposal_remove_matches_a_proposal_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An id is the only selector that cannot be ambiguous by name, so it has to
+    select: two queued skills whose names both contain the needle still leave one
+    answer when the caller holds `code-review`'s id rather than its name."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    review = _skill_proposal_workspace(workspace, "review")
+    code_review = _skill_proposal_workspace(workspace, "code-review")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    pid = skill_proposals.proposal_id("personal", "code-review")
+    assert cli.main(["skill-proposal-remove", pid]) == 0
+
+    target = skill_proposals.parse_proposal(code_review, "personal")
+    assert target is not None
+    assert target.lifecycle == skill_proposals.DISMISSED
+    # The skill whose name merely contains the needle is untouched.
+    other = skill_proposals.parse_proposal(review, "personal")
+    assert other is not None
+    assert other.lifecycle == skill_proposals.PENDING
+
+
 def _accepted_skill_proposal(
     root: Path, name: str = "2026-08-09-defuddle"
 ) -> Path:
@@ -1445,6 +2052,614 @@ def test_cli_skill_proposal_remove_refuses_not_applicable_with_another_outcome(
     assert record.lifecycle == skill_proposals.IMPLEMENTING
 
 
+def test_the_improvement_prompts_settle_command_works_from_the_agent_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prompt's own settle command, run verbatim from where a chat runs it.
+
+    `--workspace` on `skill-proposal-remove` is the install-root *path*, not a
+    workspace name, and a chat's working directory is the workspace's agent root.
+    So the prompt's `--workspace .` built a config rooted at the agent root, found
+    no registry there, fell back to the default `personal` workspace and looked
+    for a queue under `<agent root>/memory-vault/personal/...` — which does not
+    exist. The command exited 1 with "No skill proposals are queued.", the edit
+    still landed, and the proposal stayed queued, so the queue kept asking.
+    """
+    import shlex
+
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+
+        prompt = skill_proposals.render_improvement_prompt(stored)
+        settle = next(
+            line
+            for line in prompt.splitlines()
+            if "skill-proposal-remove" in line and "--applied" in line
+        )
+        argv = shlex.split(settle.strip())[1:]
+    finally:
+        reset_reroot_cache()
+
+    assert cli.main(argv) == 0
+
+    settled = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert settled is not None
+    assert settled.lifecycle == skill_proposals.APPLIED
+
+
+def test_the_improvement_prompts_applied_command_settles_a_learning_linked_proposal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prompt's own settle command, run with the placeholder filled in.
+
+    `settle_proposal` refuses `applied` on a record that links learnings without a
+    verification, so the prompt's `--applied` line has to carry one and say what
+    to put in it. It did not: the chat ran the line verbatim, got exit 1 with
+    "needs a verification", and the proposal stayed queued.
+
+    The readback goes in a file, so the text is Markdown with backticks, `$` and
+    an apostrophe — none of which any shell would carry intact as an argument.
+    """
+    import shlex
+
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # A filing cannot answer a finding, so this is what the prompt must ask
+        # for — and if the queue dropped the link, it would not.
+        assert len(stored.origins) == 1
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+
+        prompt = skill_proposals.render_improvement_prompt(stored)
+        # A skill file's readback is Markdown: backticks, `$` and an
+        # apostrophe. It travels in a file, so what the chat substitutes for the
+        # placeholder is a path and the bytes are exactly what it wrote.
+        readback = "- Use `gh api`, don't scrape; $HOME stays literal"
+        # A directory with a space, substituted in double quotes as the prompt
+        # says: that is what keeps a Windows path's backslashes and the space
+        # intact through every shell (and through POSIX shlex on windows CI).
+        readback_dir = tmp_path / "read back"
+        readback_dir.mkdir()
+        readback_file = readback_dir / "readback.txt"
+        readback_file.write_text(readback, encoding="utf-8")
+        settle = next(
+            line
+            for line in prompt.splitlines()
+            if "skill-proposal-remove" in line and "--applied" in line
+        ).replace(skill_proposals.VERIFICATION_PLACEHOLDER, f'"{readback_file}"')
+        argv = shlex.split(settle.strip())[1:]
+    finally:
+        reset_reroot_cache()
+
+    assert cli.main(argv) == 0
+
+    settled = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert settled is not None
+    assert len(settled.origins) == 1
+    assert settled.origins[0].state == skill_proposals.ORIGIN_APPLIED
+    # The exact text of the file, so this also pins that no shell quoting was
+    # needed to carry it and none of it was eaten on the way in.
+    assert settled.origins[0].verification == readback
+    assert settled.lifecycle == skill_proposals.APPLIED
+
+
+def test_the_improvement_prompts_placeholder_is_not_a_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The prompt's own settle command, run with the placeholder left in place.
+
+    `settle_proposal` checks that a verification is present, not that it is
+    anything: a chat that ran the line verbatim settled every linked origin as
+    applied with the prompt's own placeholder as its "proof". The record then
+    read as a lesson the skill carries, which nothing had checked.
+    """
+    import shlex
+
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+
+        prompt = skill_proposals.render_improvement_prompt(stored)
+        # Verbatim, placeholder and all: this is the line as a chat that forgot
+        # to edit it types it.
+        settle = next(
+            line
+            for line in prompt.splitlines()
+            if "skill-proposal-remove" in line and "--applied" in line
+        )
+        argv = shlex.split(settle.strip())[1:]
+    finally:
+        reset_reroot_cache()
+
+    assert cli.main(argv) == 1
+    assert "still the prompt's placeholder" in capsys.readouterr().err
+
+    reread = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert reread is not None
+    # Nothing settled: the origin is still open, and the record is still the one
+    # the review queue is asking about.
+    assert len(reread.origins) == 1
+    assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert reread.origins[0].verification == ""
+    assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_names_the_flag_carrying_the_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal has to point at the flag the caller actually used.
+
+    A chat that ran the old `--verification READBACK_FILE` line was told
+    "--verification-file is still the prompt's placeholder" — a flag it never
+    passed. It cannot fix that message: the file it never named is the thing the
+    message names, and the value it did pass is the one that needs replacing. The
+    refusal is the only thing standing between the placeholder and a settled
+    origin, so it has to be actionable.
+    """
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+    finally:
+        reset_reroot_cache()
+
+    code = cli.main(
+        [
+            "skill-proposal-remove",
+            "web-research",
+            "--applied",
+            "--verification",
+            skill_proposals.VERIFICATION_PLACEHOLDER,
+        ]
+    )
+    assert code == 1
+    assert capsys.readouterr().err.startswith("--verification is still")
+
+    reread = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert reread is not None
+    assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_rejects_both_verification_flags() -> None:
+    """One proof, one door.
+
+    `--verification` and `--verification-file` are the same evidence by two
+    routes, so passing both is a contradiction the parser has to refuse: a
+    silently-preferred winner would settle the finding with proof nobody chose.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "skill-proposal-remove",
+                "web-research",
+                "--applied",
+                "--verification",
+                "x",
+                "--verification-file",
+                "f",
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
+def test_cli_skill_proposal_remove_refuses_an_unreadable_verification_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A readback the command cannot read is not a readback.
+
+    Silently settling without one would record an applied learning with no proof
+    — the exact thing the verification is there to prevent — so a missing or
+    unreadable file is an error, and the origin stays open.
+    """
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+        missing = tmp_path / "no-such-readback.txt"
+    finally:
+        reset_reroot_cache()
+
+    code = cli.main(
+        [
+            "skill-proposal-remove",
+            "web-research",
+            "--applied",
+            "--verification-file",
+            str(missing),
+        ]
+    )
+    assert code == 2
+    assert "could not read --verification-file" in capsys.readouterr().err
+
+    reread = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert reread is not None
+    assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
+
+
+# The readback a Windows chat actually writes. Windows PowerShell 5.1's `>` and
+# `Out-File` write UTF-16LE with a BOM; `Out-File -Encoding utf8` and Notepad's
+# "UTF-8 with BOM" write UTF-8 with a BOM. Both are what `--verification-file`
+# has to read, on the platform the readback-in-a-file change was made for.
+_BOM_READBACK = "- Use `gh api`, don't scrape — $HOME"
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+def test_cli_skill_proposal_remove_reads_a_bom_verification_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    """A readback written by a Windows tool is still a readback.
+
+    Read as strict UTF-8 it is not: PowerShell's default `>` writes UTF-16LE with
+    a BOM, so the read raises `UnicodeDecodeError` and the command exits 2 — on
+    the exact platform the readback travels in a file for. And a UTF-8 BOM is
+    subtler: `str.strip()` does not remove U+FEFF, so a file read back with a
+    leading BOM records a character the skill does not carry, which is not the
+    exact readback the verification exists to prove.
+    """
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+        readback_file = tmp_path / f"readback-{encoding}.txt"
+        readback_file.write_bytes(_BOM_READBACK.encode(encoding))
+    finally:
+        reset_reroot_cache()
+
+    assert (
+        cli.main(
+            [
+                "skill-proposal-remove",
+                "web-research",
+                "--applied",
+                "--verification-file",
+                str(readback_file),
+            ]
+        )
+        == 0
+    )
+
+    settled = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert settled is not None
+    assert settled.origins[0].state == skill_proposals.ORIGIN_APPLIED
+    # Exactly what was written: no U+FEFF, no mojibake, no lost em dash.
+    assert settled.origins[0].verification == _BOM_READBACK
+    assert settled.lifecycle == skill_proposals.APPLIED
+
+
+def test_cli_skill_proposal_remove_refuses_an_empty_verification_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty readback file is not a readback.
+
+    A chat whose redirect failed, or which wrote the file before writing to it,
+    would otherwise settle a finding as applied with the empty string as its
+    proof — the record then reads as a lesson the skill carries, and nothing had
+    checked. `settle_proposal` only knows the string is non-empty; this is the
+    check that knows it is not the empty string.
+    """
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig, reset_reroot_cache
+
+    install = tmp_path / "install"
+    _per_root_workspace(install)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(install))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+
+    reset_reroot_cache()
+    try:
+        config = CiaoConfig.from_env(
+            {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
+        )
+        stored = skill_proposals.upsert_proposal(
+            config,
+            skill_proposals.SkillProposal(
+                id=skill_proposals.proposal_id("personal", "web-research"),
+                workspace="personal",
+                skill="web-research",
+                canonical_path="skills/web-research/SKILL.md",
+                reviewed_revision="a" * 64,
+                title="Skill reflection: web-research",
+                problem="Repeated fetch failures.",
+                change="Add a defuddle fallback.",
+                rationale="It handles blocked pages.",
+                sources=(),
+                lifecycle=skill_proposals.PENDING,
+                chat_id="",
+                updated_at="2026-10-02T10:00:00Z",
+                origins=(
+                    skill_proposals.SkillOrigin(
+                        workspace="personal",
+                        learning_id="learn-2026-10-01-fetchfailures",
+                        source_revision="b" * 64,
+                        finding="Repeated fetch failures need a defuddle fallback.",
+                        state=skill_proposals.ORIGIN_PENDING,
+                    ),
+                ),
+            ),
+        )
+        # The chat's working directory: this workspace's agent root, not the
+        # install root the env names.
+        monkeypatch.chdir(config.agent_root("personal"))
+        empty = tmp_path / "empty-readback.txt"
+        empty.write_text("\n", encoding="utf-8")
+    finally:
+        reset_reroot_cache()
+
+    code = cli.main(
+        [
+            "skill-proposal-remove",
+            "web-research",
+            "--applied",
+            "--verification-file",
+            str(empty),
+        ]
+    )
+    assert code == 2
+    assert "is empty" in capsys.readouterr().err
+
+    reread = skill_proposals.parse_proposal(
+        skill_proposals.proposal_path(config, "personal", "web-research"), "personal"
+    )
+    assert reread is not None
+    assert reread.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert reread.lifecycle == stored.lifecycle == skill_proposals.PENDING
+
+
 # -- skill-proposal-add ------------------------------------------------------
 
 
@@ -1467,30 +2682,29 @@ def _finding(
     *,
     name: str = "finding",
     sources: list[dict] | None = None,
+    origins: list[dict] | None = None,
 ) -> str:
     """Write one structured finding, as a pass or a person would, and return it."""
     path = tmp_path / f"{name}.json"
-    path.write_text(
-        json.dumps(
+    payload: dict = {
+        "title": "notes: read the categories block first",
+        "problem": "The user corrected the note type twice.",
+        "change": "Add a step: read the Categories block before a type.",
+        "rationale": "The correction repeated, so it is reusable.",
+        "sources": sources
+        if sources is not None
+        else [
             {
-                "title": "notes: read the categories block first",
-                "problem": "The user corrected the note type twice.",
-                "change": "Add a step: read the Categories block before a type.",
-                "rationale": "The correction repeated, so it is reusable.",
-                "sources": sources
-                if sources is not None
-                else [
-                    {
-                        "chat_id": "chat-7",
-                        "archive": "memory-vault/personal/logs/x.md",
-                        "turn": "3",
-                        "excerpt": "no, that's a person, not a project",
-                    }
-                ],
+                "chat_id": "chat-7",
+                "archive": "memory-vault/personal/logs/x.md",
+                "turn": "3",
+                "excerpt": "no, that's a person, not a project",
             }
-        ),
-        encoding="utf-8",
-    )
+        ],
+    }
+    if origins is not None:
+        payload["origins"] = origins
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return str(path)
 
 
@@ -1575,7 +2789,9 @@ def test_cli_skill_proposal_add_refuses_a_finding_with_no_evidence(
 
     Evidence is the record's whole claim: which session, which turn, which
     words. A finding without it would be indistinguishable from an invention,
-    and the review surface has no way to show it is unsupported.
+    and the review surface has no way to show it is unsupported. A routed lesson
+    is the one finding whose evidence is a learning link instead, and the next
+    test covers that; this one is the empty-sources case, which stays refused.
     """
     workspace = tmp_path / "workspace"
     _owned_skill_install(workspace, "notes")
@@ -1589,6 +2805,134 @@ def test_cli_skill_proposal_add_refuses_a_finding_with_no_evidence(
     assert "sources" in capsys.readouterr().err
     queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
     assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_accepts_a_lesson_routed_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A lesson with no `sources` is the lesson-routing path, not a loose check.
+
+    The finding is real — a lesson in `Workspace/Learnings.md` applies to a
+    skill the conversation never loaded — and the only honest record of it is the
+    `origins` link, because a `sources` entry would have to name a `turn` the
+    transcript never contained. So the requirement is *one or the other*, and
+    the record says which it was.
+    """
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "unused-skill")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(
+        tmp_path,
+        name="lesson",
+        sources=None,
+        origins=[
+            {
+                "learning_id": "lrn-1",
+                "finding": "the lesson is about a skill this chat never loaded",
+                "source_revision": "abc123",
+                "summary": "Route it to the skill that covers the workflow",
+            }
+        ],
+    )
+    # The lesson route carries no `sources` at all.
+    payload = json.loads(Path(finding).read_text(encoding="utf-8"))
+    del payload["sources"]
+    Path(finding).write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cli.main(["skill-proposal-add", "unused-skill", "--input-file", finding]) == 0
+
+    record = skill_proposals.parse_proposal(
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "unused-skill.md",
+        "personal",
+    )
+    assert record is not None
+    # No fabricated source, and the link that replaces it is filed pending.
+    assert record.sources == ()
+    assert len(record.origins) == 1
+    assert record.origins[0].learning_id == "lrn-1"
+    assert record.origins[0].state == skill_proposals.ORIGIN_PENDING
+    assert record.origins[0].verification == ""
+
+
+def test_cli_skill_proposal_add_still_refuses_a_finding_with_neither(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One or the other, not neither.
+
+    Dropping the `sources` requirement for routed lessons must not have become
+    dropping it: a payload carrying neither is a finding with nothing behind it,
+    and the complaint has to name both fields so a caller knows what to add.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, name="bare")
+    payload = json.loads(Path(finding).read_text(encoding="utf-8"))
+    del payload["sources"]
+    Path(finding).write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    err = capsys.readouterr().err
+    assert "sources" in err and "origins" in err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_refuses_a_settled_origin_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A filing is a question; only `skill-proposal-remove` answers one.
+
+    A payload carrying its own `state` could declare the lesson applied and skip
+    the verification an applied needs, so the key is refused by name rather than
+    read and dropped — the same rule the origin reader has always applied.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(
+        tmp_path,
+        name="preset",
+        origins=[{"learning_id": "lrn-1", "finding": "x", "state": "applied"}],
+    )
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+    assert "state" in capsys.readouterr().err
+
+
+def test_cli_skill_proposal_add_still_refuses_a_nonexistent_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The new-skill path does not come through here, and must not start to.
+
+    `resolve_owned_skill` requires an existing owned source, and a lesson about
+    a skill that does not exist yet is a `[review]` draft for a person to create
+    — not a filer pointed at a name with no file behind it.
+    """
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, name="nonesuch", sources=None, origins=[{"learning_id": "l", "finding": "f"}])
+
+    assert cli.main(["skill-proposal-add", "does-not-exist", "--input-file", finding]) == 1
+    err = capsys.readouterr().err
+    assert "does-not-exist" in err and "owns no canonical source" in err
 
 
 def test_cli_skill_proposal_add_reads_the_finding_from_a_file(
@@ -1726,6 +3070,369 @@ def test_cli_skill_proposal_add_requires_the_input_file(
     assert excinfo.value.code == 2
 
 
+# -- skill-proposal origins -------------------------------------------------
+
+
+def _origin_input(**overrides: object) -> dict:
+    """One learning link in a filed finding, as a routed pass would write it."""
+    entry: dict = {
+        "learning_id": "5d6b0a1e-6f4a-5b1c-9d2e-3a4b5c6d7e8f",
+        "finding": "read the Categories block before a type",
+        "source_revision": "c" * 64,
+        "summary": "Add the Categories step.",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_cli_skill_proposal_add_accepts_a_learning_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A finding that came from a learnings entry says so, and the link is what
+    a later settlement folds — so it has to reach the record, in the workspace
+    that minted the id, or the learning behind it can never be retired."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, origins=[_origin_input()])
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding, "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["origins"] == 1
+    record = skill_proposals.parse_proposal(
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "notes.md",
+        "personal",
+    )
+    assert record is not None
+    assert len(record.origins) == 1
+    # The workspace is this queue's, decided here rather than taken from the
+    # payload: an id only means something where it was minted.
+    assert record.origins[0].workspace == "personal"
+    assert record.origins[0].state == skill_proposals.ORIGIN_PENDING
+
+
+def test_cli_skill_proposal_add_files_a_finding_with_no_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Most findings are a correction the user made, with no learning behind them.
+    Omitting the links entirely is the normal case and must stay cheap."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", _finding(tmp_path)]) == 0
+
+    record = skill_proposals.parse_proposal(
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "notes.md",
+        "personal",
+    )
+    assert record is not None and record.origins == ()
+
+
+@pytest.mark.parametrize(
+    ("origins", "because"),
+    [
+        ("not a list", "must be a list"),
+        (["not an object"], "must be an object"),
+        ([{"finding": "x"}], 'needs a non-empty "learning_id"'),
+        ([{"learning_id": "x"}], 'needs a non-empty "finding"'),
+        ([_origin_input(learning_id=7)], '"learning_id" must be a string'),
+        ([_origin_input(source_revision=["x"])], '"source_revision" must be a string'),
+        ([_origin_input(nonsense="x")], "unknown field"),
+        ([_origin_input(state="applied")], "unknown field"),
+        ([_origin_input(verification="read it back and it is there")], "unknown field"),
+    ],
+)
+def test_cli_skill_proposal_add_fails_closed_on_a_malformed_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    origins: object,
+    because: str,
+) -> None:
+    """A half-read link is a learning that looks settled and is not. Refusing the
+    whole finding is the honest answer: the caller is told which entry is wrong
+    and nothing lands on disk for it to be half-attributed later."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, origins=origins)
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    assert because in capsys.readouterr().err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_refuses_a_link_from_another_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A learning id is minted inside a workspace, so an id from another one says
+    nothing here. Filing it anyway would make a foreign id look like a link this
+    queue had verified — and that link is what retires a learning."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, origins=[_origin_input(workspace="work")])
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    err = capsys.readouterr().err
+    assert "work" in err and "personal" in err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+
+
+def test_cli_skill_proposal_add_refuses_a_finding_that_claims_to_be_answered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A finding is filed as a question, so a payload that arrives declaring its
+    own finding ``applied`` is asserting a decision nobody made. Stored as filed,
+    that would clear the learning behind it — skipping the verification an
+    applied needs to mean anything, and standing in for a rejection a dismissed
+    needs — and let the cleanup path retire a lesson nobody applied or rejected.
+    Refused by name, and both fields named so the filer can fix the payload."""
+    from ciao import skill_proposals
+
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(
+        tmp_path,
+        origins=[
+            _origin_input(state="applied", verification="read it back and it is there")
+        ],
+    )
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 2
+
+    err = capsys.readouterr().err
+    assert "state" in err and "verification" in err
+    queue = workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    assert not queue.is_dir() or list(queue.glob("*.md")) == []
+    # The vocabulary still exists — this is a refusal, not a field the queue
+    # stopped speaking: `skill-proposal-remove` is what writes a state.
+    assert "applied" in skill_proposals.ORIGIN_STATES
+
+
+def test_cli_skill_proposal_add_tells_the_filer_the_links_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A link nobody knows landed is a learning that never goes quiet and nobody
+    can say why. The person filing gets to see it."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path, origins=[_origin_input()])
+
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+
+    assert "Linked 1 learning finding" in capsys.readouterr().out
+
+
+# -- skill-proposal-remove: settling a linked finding -----------------------
+
+
+LEARNING_ID = "5d6b0a1e-6f4a-5b1c-9d2e-3a4b5c6d7e8f"
+
+
+def _linked_workspace(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
+    """An install owning one skill, filed against two findings of one learning."""
+    workspace = root / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(
+        root,
+        origins=[
+            _origin_input(learning_id=LEARNING_ID, finding="read the Categories block"),
+            _origin_input(learning_id=LEARNING_ID, finding="read it back afterwards"),
+        ],
+    )
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+    return workspace
+
+
+def _stored_record(workspace: Path):
+    from ciao import skill_proposals
+
+    record = skill_proposals.parse_proposal(
+        workspace
+        / "memory-vault"
+        / "personal"
+        / "Workspace"
+        / "Skill-Proposals"
+        / "notes.md",
+        "personal",
+    )
+    assert record is not None
+    return record
+
+
+def test_cli_skill_proposal_remove_applied_needs_a_verification_on_a_linked_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command the implementation prompt already names must not quietly
+    retire a lesson. A finished chat and a row leaving the queue are the two
+    things the CLI can see for itself, and neither is the lesson being in the
+    skill — so the command says what is missing and settles nothing."""
+    from ciao import skill_proposals
+
+    workspace = _linked_workspace(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    assert cli.main(["skill-proposal-remove", "notes", "--applied"]) == 1
+
+    assert "needs a verification" in capsys.readouterr().err
+    record = _stored_record(workspace)
+    assert record.lifecycle == skill_proposals.PENDING
+    assert [origin.state for origin in record.origins] == [
+        skill_proposals.ORIGIN_PENDING
+    ] * 2
+
+
+def test_cli_skill_proposal_remove_records_a_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The way out, on the command the prompt already spells: name the receipt or
+    the readback, and the linked finding is applied with its proof on record."""
+    from ciao import skill_proposals
+
+    workspace = _linked_workspace(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    assert (
+        cli.main(
+            [
+                "skill-proposal-remove",
+                "notes",
+                "--applied",
+                "--verification",
+                "read SKILL.md back: the Categories step is there",
+            ]
+        )
+        == 0
+    )
+
+    record = _stored_record(workspace)
+    assert record.lifecycle == skill_proposals.APPLIED
+    assert [origin.state for origin in record.origins] == [
+        skill_proposals.ORIGIN_APPLIED
+    ] * 2
+    assert record.origins[0].verification == (
+        "read SKILL.md back: the Categories step is there"
+    )
+
+
+def test_cli_skill_proposal_remove_settles_one_linked_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A record is one row per skill, so a chat that dealt with one of its
+    findings has not dealt with the rest. The CLI can say which, and reports
+    what is still outstanding."""
+    from ciao import skill_proposals
+
+    workspace = _linked_workspace(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    assert (
+        cli.main(
+            [
+                "skill-proposal-remove",
+                "notes",
+                "--applied",
+                "--learning-id",
+                LEARNING_ID,
+                "--finding",
+                "read the Categories block",
+                "--verification",
+                "mrcpt_abc123",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["lifecycle"] == "pending"
+    assert [origin["state"] for origin in result["origins"]] == [
+        skill_proposals.ORIGIN_APPLIED,
+        skill_proposals.ORIGIN_PENDING,
+    ]
+    assert _stored_record(workspace).lifecycle == skill_proposals.PENDING
+
+
+def test_cli_skill_proposal_remove_refuses_a_finding_without_a_learning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A finding text on its own names nothing, and guessing which learning it
+    belonged to is exactly the kind of silent link this shape exists to stop."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path)
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+    capsys.readouterr()
+
+    assert (
+        cli.main(["skill-proposal-remove", "notes", "--applied", "--finding", "x"]) == 2
+    )
+
+    assert "--learning-id" in capsys.readouterr().err
+
+
+def test_cli_skill_proposal_remove_reports_a_learning_it_does_not_carry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Naming a learning this proposal does not link is a bug worth hearing
+    about, not a decision worth recording."""
+    workspace = tmp_path / "workspace"
+    _owned_skill_install(workspace, "notes")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    finding = _finding(tmp_path)
+    assert cli.main(["skill-proposal-add", "notes", "--input-file", finding]) == 0
+    capsys.readouterr()
+
+    assert (
+        cli.main(["skill-proposal-remove", "notes", "--learning-id", LEARNING_ID]) == 1
+    )
+
+    assert "links no learning" in capsys.readouterr().err
+
+
 def _search_note(vault: Path, name: str) -> None:
     (vault / "People").mkdir(parents=True, exist_ok=True)
     (vault / "People" / f"{name}.md").write_text(
@@ -1823,7 +3530,7 @@ def test_cli_vault_search_never_returns_a_sibling_agent_roots_notes(
     assert "Aymen" in out  # this workspace's own note still resolves
     assert "Alba" not in out
     # And the link points at the note that actually exists on disk.
-    assert str(work_vault / "People" / "Aymen.md") in out
+    assert (work_vault / "People" / "Aymen.md").as_uri() in out
 
 
 def test_critique_is_reachable_through_the_ciao_entry_point(monkeypatch):
@@ -1939,7 +3646,6 @@ def test_cli_health_reports_the_installed_workspace_from_a_bare_shell(
         monkeypatch.delenv(name, raising=False)
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
 
     reset_reroot_cache()
     try:
@@ -1998,7 +3704,6 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
         "PWA_AUTH_REQUIRED",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
 
     reset_reroot_cache()
@@ -2052,7 +3757,6 @@ def test_config_discovery_survives_an_exported_empty_workspace(
         monkeypatch.delenv(name, raising=False)
     # The whole point: present in the environment, but empty.
     monkeypatch.setenv("CIAO_WORKSPACE", "")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
 
     reset_reroot_cache()
@@ -2064,3 +3768,830 @@ def test_config_discovery_survives_an_exported_empty_workspace(
     # The discovered install wins, so the .env and the root agree.
     assert config.workspace_root == workspace.resolve()
     assert config.pwa_auth_token == "ws-secret-token"
+
+
+# -- skill-draft-* (#728-D) --------------------------------------------------
+
+
+def _draft_workspace(tmp_path: Path) -> Path:
+    """An install whose vault registers `personal`."""
+    root = tmp_path / "workspace"
+    (root / "memory-vault" / "personal" / "Workspace").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _draft_payload(tmp_path: Path, **overrides) -> str:
+    path = tmp_path / "draft.json"
+    payload = {
+        "target": "upstream_issue",
+        "skill": "web-research",
+        "title": "Document the offline fallback for a timed-out fetch",
+        "change": "State that a timed-out fetch is retried once before reporting.",
+        "body": "A fetch that times out is a transport failure, not an empty answer.",
+        "repository": "example/tools",
+        "version": "1.4.0",
+        "private_evidence": "chat-42 turn 7",
+    }
+    payload.update(overrides)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return str(path)
+
+
+def test_cli_skill_draft_add_files_a_review_row_and_writes_nothing_public(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Filing is local and complete: a queue row and a record, and no `gh`.
+
+    The whole unattended contract is that this step is safe to run with nobody
+    watching, so the command that does it must not reach the network — a test
+    that only checked the row would pass with a `gh` call in the middle.
+    """
+    from ciao import upstream_drafts
+
+    called: list[list[str]] = []
+    monkeypatch.setattr(
+        upstream_drafts, "_run_gh", lambda args, timeout=30.0: called.append(list(args))
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path)
+
+    assert cli.main(["skill-draft-add", "--input-file", draft, "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["filed"] is True
+    assert payload["target"] == "upstream_issue"
+    assert called == []
+    assert upstream_drafts.find_draft(_workspace_config(workspace), payload["id"]) is not None
+
+
+def test_cli_skill_draft_add_refuses_a_body_that_would_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The gate is at the door, so a leaking body is never written at all."""
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(
+        tmp_path, body="it happened in turn 4 of chat-1 and I logged it"
+    )
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 2
+    assert "cannot file the draft" in capsys.readouterr().err
+    sidecars = (
+        workspace / "memory-vault" / "personal" / "Workspace" / "Skill-Drafts"
+    )
+    assert not sidecars.is_dir() or list(sidecars.glob("*.json")) == []
+
+
+def test_cli_skill_draft_add_refuses_an_unknown_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No new top-level queue kind, so an unknown target is not a new kind.
+
+    A draft is a routing decision, which is what `[review]` already means, and a
+    command that accepted an arbitrary target string would be inventing kinds
+    the three shared bullet readers never learned to parse.
+    """
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, target="brand_new_kind")
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 2
+    err = capsys.readouterr().err
+    assert "upstream_issue" in err and "new_skill" in err
+
+
+def test_cli_skill_drafts_lists_what_is_open_and_what_is_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path)
+    assert cli.main(["skill-draft-add", "--input-file", draft, "--json"]) == 0
+    identity = json.loads(capsys.readouterr().out)["id"]
+    capsys.readouterr()
+
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    open_rows = json.loads(capsys.readouterr().out)["drafts"]
+    assert [row["id"] for row in open_rows] == [identity]
+
+    assert cli.main(["skill-draft-reject", identity, "--reason", "covered", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["drafts"] == []
+    assert cli.main(["skill-drafts", "--all", "--json"]) == 0
+    settled = json.loads(capsys.readouterr().out)["drafts"]
+    assert [row["lifecycle"] for row in settled] == ["rejected"]
+
+
+def test_cli_skill_draft_approve_searches_before_it_creates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The attended step, driven through the command, links an existing issue."""
+    from ciao import upstream_drafts
+
+    monkeypatch.setattr(
+        upstream_drafts, "search_existing_issues", lambda **_: ["https://example/3"]
+    )
+    created: list[dict] = []
+    monkeypatch.setattr(
+        upstream_drafts, "create_issue", lambda **kw: created.append(kw) or "https://example/9"
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    assert cli.main(["skill-draft-add", "--input-file", _draft_payload(tmp_path), "--json"]) == 0
+    identity = json.loads(capsys.readouterr().out)["id"]
+
+    assert cli.main(["skill-draft-approve", identity, "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["lifecycle"] == "filed"
+    assert payload["issue_url"] == "https://example/3"
+    assert created == []
+
+
+def test_cli_skill_draft_approve_creates_the_new_skill_from_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The new-skill route creates from the file it is given, then settles.
+
+    The content comes from a file for the same reason every other finding does
+    (a skill body is prose a shell would mangle), and the row settles only
+    after the write — so an interrupted run leaves a draft a person can retry
+    rather than a "created" record with no file.
+    """
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(
+        tmp_path,
+        target="new_skill",
+        skill="invoice-recon",
+        body="",
+        change="Create skills/invoice-recon with a trigger and one step.",
+    )
+    assert cli.main(["skill-draft-add", "--input-file", draft, "--json"]) == 0
+    identity = json.loads(capsys.readouterr().out)["id"]
+    content = tmp_path / "SKILL.md"
+    content.write_text(
+        "---\nname: invoice-recon\ndescription: Reconcile an invoice\n---\n\n"
+        "Match the invoice number first.\n",
+        encoding="utf-8",
+    )
+
+    assert cli.main(
+        ["skill-draft-approve", identity, "--content-file", str(content), "--json"]
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["lifecycle"] == "filed"
+    assert Path(payload["issue_url"]).as_posix().endswith("skills/invoice-recon/SKILL.md")
+    assert (workspace / "skills" / "invoice-recon" / "SKILL.md").is_file()
+
+
+def test_cli_skill_draft_approve_needs_content_for_a_new_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A creation with no content would write an empty skill, so it is refused."""
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, target="new_skill", skill="invoice-recon", body="")
+    assert cli.main(["skill-draft-add", "--input-file", draft, "--json"]) == 0
+    identity = json.loads(capsys.readouterr().out)["id"]
+
+    assert cli.main(["skill-draft-approve", identity]) == 2
+    assert "--content-file" in capsys.readouterr().err
+    assert not (workspace / "skills" / "invoice-recon").exists()
+
+
+def test_cli_skill_draft_approve_reports_an_unknown_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+
+    assert cli.main(["skill-draft-approve", "nope"]) == 1
+    assert "no open draft" in capsys.readouterr().err
+    assert cli.main(["skill-draft-reject", "nope"]) == 1
+
+
+def _run_draft_add(capsys: pytest.CaptureFixture[str], payload: str) -> str:
+    """File a draft through the CLI and return its ``--json`` stdout."""
+    assert cli.main(["skill-draft-add", "--input-file", payload, "--json"]) == 0
+    return capsys.readouterr().out
+
+
+def test_an_unattended_run_cannot_file_create_or_settle_through_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command an automation actually shells, refused with its own exit code.
+
+    `approve_draft(unattended=...)` only refused a caller that said so, and the
+    CLI passed `False` on every path — so the flag proved nothing and a nightly
+    Workspace care run could file a public issue, create a skill, or settle a
+    draft by running the very command a person runs. Attendedness is read from
+    the run's own curation lease here, so there is nothing to pass and nothing to
+    override. The exit code is distinct from 1 because nothing failed: the
+    request was well-formed and the answer is that no reviewer is present.
+    """
+    from ciao import upstream_drafts
+    from ciao.curation_run import begin_run
+
+    reached: list[str] = []
+    monkeypatch.setattr(
+        upstream_drafts, "create_issue", lambda **kw: reached.append("create") or "u"
+    )
+    monkeypatch.setattr(
+        upstream_drafts,
+        "search_existing_issues",
+        lambda **kw: reached.append("search") or [],
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    config = _workspace_config(workspace)
+    stock = json.loads(_run_draft_add(capsys, _draft_payload(tmp_path)))["id"]
+    new = json.loads(
+        _run_draft_add(
+            capsys,
+            _draft_payload(
+                tmp_path,
+                target="new_skill",
+                skill="invoice-recon",
+                body="",
+                change="Create skills/invoice-recon with a trigger and one step.",
+            ),
+        )
+    )["id"]
+    content = tmp_path / "SKILL.md"
+    content.write_text(
+        "---\nname: invoice-recon\ndescription: Reconcile an invoice\n---\n\n"
+        "Match the invoice number first.\n",
+        encoding="utf-8",
+    )
+    begin_run(
+        Path(config.workspace_vault_root("personal")), holder="nightly:1", ttl_s=600
+    )
+
+    refused = cli.UNATTENDED_REFUSED_EXIT
+    assert cli.main(["skill-draft-approve", stock, "--json"]) == refused
+    assert "unattended" in capsys.readouterr().err
+    assert cli.main(
+        ["skill-draft-approve", new, "--content-file", str(content), "--json"]
+    ) == refused
+    capsys.readouterr()
+    assert cli.main(["skill-draft-reject", new, "--reason", "no"]) == refused
+    capsys.readouterr()
+
+    # Nothing reached GitHub, no skill was written, and both rows are still
+    # queued — which is what the run reports under "What needs you".
+    assert reached == []
+    assert not (workspace / "skills" / "invoice-recon").exists()
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["drafts"]
+    assert sorted(row["id"] for row in rows) == sorted([stock, new])
+    assert all(row["lifecycle"] == "pending" for row in rows)
+
+
+
+def _workspace_config(root: Path):
+    """The config the CLI itself would build for ``root``, for a direct assertion."""
+    from ciao.config import CiaoConfig
+
+    return CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "test-token",
+        "CIAO_WORKSPACE": str(root),
+        "CIAO_VAULT_ROOT": str(root / "memory-vault"),
+    })
+
+
+def test_cli_skill_draft_add_says_when_the_target_disagrees_with_the_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The routing decision is a real answer, and the filer is told it.
+
+    A pass that files an upstream-issue draft for a skill this workspace owns
+    under `skills/` is filing blind, and the note names the command that would
+    actually apply the change locally. It is a note rather than a refusal because
+    a forked packaged skill is owned *and* still worth reporting upstream.
+    """
+    workspace = tmp_path / "workspace"
+    (workspace / "memory-vault" / "personal" / "Workspace").mkdir(parents=True)
+    skill_md = workspace / "skills" / "notes" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("---\nname: notes\n---\n\n# notes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, skill="notes")
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 0
+
+    out = capsys.readouterr().out
+    assert "is a source this workspace owns under skills/" in out
+    assert "ciao skill-proposal-add" in out
+
+
+def test_cli_skill_draft_add_says_a_new_skill_name_already_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The creation would be refused later; the filer is told now.
+
+    Naming an existing skill as a *new* one means the approval is going to fail
+    on a collision, and a person who has not been told that reads the refusal as
+    a bug rather than as a routing mistake.
+    """
+    workspace = tmp_path / "workspace"
+    (workspace / "memory-vault" / "personal" / "Workspace").mkdir(parents=True)
+    skill_md = workspace / "skills" / "notes" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("---\nname: notes\n---\n\n# notes\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, target="new_skill", skill="notes", body="")
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 0
+
+    out = capsys.readouterr().out
+    assert "already exists here, so this is not a new skill" in out
+
+
+def test_cli_skill_draft_add_says_when_there_is_nothing_to_report_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No local source and no installed copy means no upstream either.
+
+    An upstream-issue draft for a name that exists nowhere cannot be filed by
+    anybody: there is no repository it belongs to, and guessing at one is what
+    the contract forbids.
+    """
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    draft = _draft_payload(tmp_path, skill="never-heard-of-it")
+
+    assert cli.main(["skill-draft-add", "--input-file", draft]) == 0
+
+    out = capsys.readouterr().out
+    assert "no packaged copy to report upstream" in out
+    assert '"new_skill"' in out
+
+
+# ---- The workspace name the entry pass is planned under -------------------
+#
+# `entry_identity` digests the workspace name, and every operation that consumes
+# one resolves the vault through the workspace registry and mints it under the
+# name the registry knows. So a `curation-begin` that planned the entry pass
+# under the vault DIRECTORY's name would mint identities nothing resolves: every
+# managed call comes back `conflict`, no verdict is ever filed, and the worklist
+# key never settles. The name is therefore resolved once, by the same registry
+# read that resolved the vault, and the only case where the directory's own name
+# stands in for the registry's is an explicit `--vault-root`.
+
+
+def _registered_install(tmp_path: Path) -> tuple[Path, Path]:
+    """An install whose registry names workspace `work` inside `memory-vault/client-a`.
+
+    The layout that makes the difference visible: a shared vault whose directory
+    is `client-a` and whose registered name is `work`, so a name taken from the
+    directory is provably the wrong one.
+    """
+    root = tmp_path / "workspace"
+    vault = root / "memory-vault" / "client-a"
+    (vault / "Workspace").mkdir(parents=True)
+    (vault / "People").mkdir()
+    (root / ".runtime").mkdir(parents=True)
+    (root / ".runtime" / "workspaces.json").write_text(
+        json.dumps({"work": {"name": "work", "vault_root": str(vault)}}),
+        encoding="utf-8",
+    )
+    return root, vault
+
+
+def _curation_args(**overrides: object) -> argparse.Namespace:
+    """The `argparse.Namespace` a curation subcommand is dispatched with."""
+    args = argparse.Namespace(
+        workspace=None, vault_root=None, guide=None, max_items=None, max_seconds=None
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def _stale_fact_note(vault: Path) -> Path:
+    """One person note whose single bullet is stamped well past its horizon."""
+    from ciao import curation_run as cr
+
+    note = vault / "People" / "Ada.md"
+    note.write_text(
+        "---\ntype: person\nupdated: 2024-01-05\n---\n\n# Ada\n\n"
+        "- Ada runs the release train [verified: 2024-01-05]\n",
+        encoding="utf-8",
+    )
+    (vault / cr.CURATION_LOG_RELATIVE).write_text(
+        "---\nlast_full_pass: 2026-09-18\n---\n\n# Curation log\n", encoding="utf-8"
+    )
+    return note
+
+
+def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name the entry pass mints identities under is the registered one.
+
+    `client-a` is a directory, `work` is the workspace: nothing else in the
+    install knows `client-a`, and the operations the plan exists to hand work to
+    resolve the vault through the registry. The whole point is that the plan and
+    the operation name the same workspace, so the name travels out of the one
+    resolution that read the registry — it is not asked for again here, and it is
+    not inferred from the directory.
+    """
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(root / "memory-vault"))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    _workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args()
+    )
+
+    assert name == "work"
+    assert resolved == vault.resolve()
+    assert name != resolved.name, "the directory's name is the guess this replaces"
+    # And the plan it produces is keyed on identities minted under that name —
+    # the one a managed `entry verify` call can actually resolve.
+    payload, _worklist = cli._curation_plan(_curation_args())
+    entries = [
+        item for item in payload["items"] if item["pass"] == "stale_entry"
+    ]
+    assert len(entries) == 1, payload["items"]
+    from ciao import note_entries as ne
+
+    identity = ne.parse_note_entries(
+        (vault / "People" / "Ada.md").read_text(encoding="utf-8"),
+        note_path="People/Ada.md",
+        workspace="work",
+    ).entries[0].identity
+    assert identity in entries[0]["reason"], entries[0]["reason"]
+
+
+def test_an_explicit_vault_root_is_planned_under_its_registered_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit `--vault-root` the registry knows is named by its owner.
+
+    The operator named a directory, `client-a`, but the registry calls the
+    workspace that owns it `work` — and every operation the plan hands work to
+    resolves the vault through that registry, so `client-a` mints identities
+    nothing resolves. The active workspace is still not consulted, because an
+    explicit argument outranks the environment: naming it something else changes
+    nothing.
+    """
+    root, vault = _registered_install(tmp_path)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    _workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args(vault_root=str(vault))
+    )
+
+    assert (resolved, name) == (vault.resolve(), "work")
+
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "nope")
+
+    _workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args(vault_root=str(vault))
+    )
+
+    assert (resolved, name) == (vault.resolve(), "work")
+
+
+def test_an_unregistered_explicit_vault_root_keeps_its_directory_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `--vault-root` the registry does not know still keeps its directory name.
+
+    The owner lookup has to be able to answer "none": the operator pointed at a
+    directory in person, outside every registered workspace, and there is no
+    workspace name to resolve. The directory's own name is used explicitly rather
+    than left as nothing at all.
+    """
+    root, _vault = _registered_install(tmp_path)
+    other = tmp_path / "loose" / "memory-vault"
+    (other / "Workspace").mkdir(parents=True)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+
+    _workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args(vault_root=str(other))
+    )
+
+    assert name == "memory-vault"
+    assert resolved == other.resolve()
+
+
+def test_a_bare_shell_explicit_vault_root_is_named_by_the_installed_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `CIAO_WORKSPACE`, just a terminal and a `--vault-root`.
+
+    The owner lookup reads a registry, and from a bare shell the install root it
+    used was the cwd — so the registered owner was never found and the name fell
+    back to the vault directory's own name, `client-a`, which no operation that
+    consumes an entry identity resolves. The install the operator actually has
+    is the one the LaunchAgent points at, the same answer `_learnings_workspace`
+    and `from_env` now share.
+    """
+    root, vault = _registered_install(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(root), runtime_root=str(root / ".runtime")
+        ),
+    )
+
+    name = cli._resolve_workspace_and_vaults(_curation_args(vault_root=str(vault)))[3]
+
+    assert name == "work"
+
+
+def test_a_bare_shell_explicit_vault_root_with_an_empty_workspace_mints_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exported empty `CIAO_WORKSPACE` must not turn a name lookup into a mint.
+
+    `export CIAO_WORKSPACE=` in a shell profile leaves the key present but empty,
+    so it survives the discovery helper (the caller's environment wins the merge)
+    and `setdefault` would leave it in place. `from_env` then has a token and no
+    workspace, which is exactly the bootstrap combination: it MINTED
+    `~/.ciao/bootstrap/.runtime/bootstrap-auth-token` and read a registry nobody
+    asked for, on a lookup whose whole contract is to read and name. On develop
+    the line was an unconditional assignment, so this never happened.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(workspace="", runtime_root=""),
+    )
+    vault = tmp_path / "v"
+
+    name = cli._resolve_workspace_and_vaults(_curation_args(vault_root=str(vault)))[3]
+
+    assert name == "v", "no registry knows this vault, so the directory's name is the answer"
+    # What the empty string cost: `bootstrap_mode` went True and `from_env` wrote
+    # `<bootstrap>/.runtime/bootstrap-auth-token`. Conftest redirects that root to
+    # `tmp_path/bootstrap` (an operator sees `~/.ciao/bootstrap`), so assert on it.
+    assert not (tmp_path / "bootstrap").exists(), "naming a vault must mint nothing"
+    assert not (home / ".ciao").exists()
+
+
+def test_a_bare_shell_active_workspace_does_not_mint_a_bootstrap_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`CIAO_ACTIVE_WORKSPACE` alone must resolve through the install, not bootstrap.
+
+    A scheduled run exports the active workspace name without `CIAO_WORKSPACE`,
+    so the branch built `dict(os.environ)` and skipped discovery. With no
+    workspace, `from_env` took the bootstrap branch and wrote
+    `<bootstrap>/.runtime/bootstrap-auth-token`, then read a registry nobody
+    asked for. Routing through `installed_workspace_env` gives it the installed
+    root and its registry, and the token stand-in only when blank keeps it out of
+    bootstrap mode.
+    """
+    root, vault = _registered_install(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("CIAO_WORKSPACE", "CIAO_VAULT_ROOT", "CIAO_RUNTIME_ROOT", "PWA_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(root), runtime_root=str(root / ".runtime")
+        ),
+    )
+
+    workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args()
+    )
+
+    assert name == "work"
+    assert workspace == root.resolve()
+    assert resolved == vault.resolve()
+    # What bootstrap mode cost: `from_env` wrote the token under the redirect
+    # conftest installs (`tmp_path/bootstrap`), because discovery was skipped.
+    assert not (tmp_path / "bootstrap").exists(), "a read-only resolution must mint nothing"
+
+
+def test_a_bare_shell_vault_root_uses_the_installed_root_not_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install root, not the cwd, is the workspace a bare shell `--vault-root` is named after.
+
+    `_curation_context` passes this `workspace` to `guide_path(workspace)`, and
+    `_curation_config` puts `state_path` under `<workspace>/.runtime` — so
+    returning the cwd read the guide and wrote state beside the shell while the
+    run was named after the installed workspace.
+    """
+    root, vault = _registered_install(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT", "CIAO_ACTIVE_WORKSPACE", "PWA_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(root), runtime_root=str(root / ".runtime")
+        ),
+    )
+
+    workspace, resolved, _registry, name = cli._resolve_workspace_and_vaults(
+        _curation_args(vault_root=str(vault))
+    )
+
+    assert name == "work"
+    assert resolved == vault.resolve()
+    assert workspace == root.resolve(), "the installed root, not the cwd"
+
+
+def test_a_bare_shell_read_only_audit_targets_the_install_not_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`os-audit` and `memory-audit` read the install, not the directory you are in.
+
+    Both commands defaulted their workspace to the cwd, so from a bare shell they
+    audited whatever directory happened to be current. Discovery seeds the
+    installed root instead, and the token stand-in is applied only when blank so
+    the read-only resolution can never enter bootstrap mode.
+    """
+    root = tmp_path / "workspace"
+    _write_healthy_audit_workspace(root)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for name in ("CIAO_WORKSPACE", "CIAO_VAULT_ROOT", "CIAO_RUNTIME_ROOT", "PWA_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("CIAO_ACTIVE_WORKSPACE", raising=False)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(root), runtime_root=str(root / ".runtime")
+        ),
+    )
+
+    import ciao.os_audit as os_audit
+
+    seen: dict[str, Any] = {}
+    real_os_audit = os_audit.run_os_audit
+
+    def _spy(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return real_os_audit(**kwargs)
+
+    monkeypatch.setattr(os_audit, "run_os_audit", _spy)
+    cli.main(["os-audit", "--json"])
+
+    assert seen["workspace_dir"] == root.resolve()
+    assert seen["vault_root"] == (root / "memory-vault").resolve()
+    assert seen["runtime_dir"] == (root / ".runtime").resolve()
+
+    import ciao.os_audit as os_audit_mod
+
+    memory_seen: dict[str, Any] = {}
+    real_scan = os_audit_mod._scan_memory_guide
+
+    def _scan_spy(guide: Path, **kwargs: Any) -> dict[str, Any]:
+        memory_seen["workspace_dir"] = kwargs["workspace_dir"]
+        return real_scan(guide, **kwargs)
+
+    monkeypatch.setattr(os_audit_mod, "_scan_memory_guide", _scan_spy)
+    cli.main(["memory-audit", "--json"])
+
+    assert memory_seen["workspace_dir"] == root.resolve()
+    assert not (tmp_path / "bootstrap").exists(), "a read-only audit must mint nothing"
+    assert not (elsewhere / ".runtime").exists(), "nothing may be created under the cwd"
+
+
+def test_curation_plan_with_a_per_root_vault_root_folds_under_the_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `--vault-root` on a per-root install plans the entry pass, and folds by owner.
+
+    The layout this fixes: every workspace's vault directory is called
+    `memory-vault`, so planning under the directory's name put the stale-entry
+    pass's identities under a workspace the registry does not know — the pass was
+    reported as not planned at all. With the owner as the name it is planned, the
+    install root is still the workspace, and the fold registry is keyed by the
+    owner, so `workspace_vault_root` finds the vault it was built for.
+    """
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+
+    # The fold registry is keyed by whatever the plan hands `_curation_config`,
+    # so calling the helper directly would only prove the helper round-trips its
+    # own argument. Spying on it is what shows the owner, not the directory.
+    seen: list[str] = []
+    real_config = cli._curation_config
+
+    def _spy(workspace: Path, vault_: Path, name: str) -> Any:
+        seen.append(name)
+        return real_config(workspace, vault_, name)
+
+    monkeypatch.setattr(cli, "_curation_config", _spy)
+
+    payload, _worklist = cli._curation_plan(_curation_args(vault_root=str(vault)))
+
+    # Fails first on the unfixed code, so the identity check below is only
+    # reached once the plan is known to have been keyed by the owner.
+    assert seen == ["work"]
+    assert not any("stale-entry pass was not planned" in n for n in payload["notes"]), (
+        payload["notes"]
+    )
+    assert payload["workspace"] == str(root)
+    # And the pass that was planned minted its identity under that same name, so
+    # a managed `entry verify` resolves the one the plan hands it.
+    entries = [item for item in payload["items"] if item["pass"] == "stale_entry"]
+    assert len(entries) == 1, payload["items"]
+    from ciao import note_entries as ne
+
+    identity = ne.parse_note_entries(
+        (vault / "People" / "Ada.md").read_text(encoding="utf-8"),
+        note_path="People/Ada.md",
+        workspace="work",
+    ).entries[0].identity
+    assert identity in entries[0]["reason"], entries[0]["reason"]
+
+
+def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No name to resolve means the pass is skipped *and reported*, not guessed.
+
+    Planning the entry pass under the directory's name is the failure this
+    replaces: every identity it mints names no entry, every managed call answers
+    `conflict`, and the worklist reports a backlog it can never drain. Skipping
+    it *silently* is the other half of the same problem, because a skipped pass
+    must never read as a pass that found nothing to do — so the worklist says
+    which pass was not planned and why, and the note it would otherwise have
+    planned is right there in the vault.
+    """
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "")
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(vault))
+
+    _workspace, _vault, _guide, _budget, _registry, name = cli._curation_context(
+        _curation_args()
+    )
+
+    assert name is None, "there is no registry to ask and no --vault-root to read"
+    payload, _worklist = cli._curation_plan(_curation_args())
+    assert [i for i in payload["items"] if i["pass"] == "stale_entry"] == []
+    assert any("stale-entry pass was not planned" in n for n in payload["notes"]), (
+        payload["notes"]
+    )
+    # And the fact it did not plan is one the pass *would* have found: the note is
+    # past its horizon and its bullet carries its own 2024 stamp.
+    from ciao import note_entries as ne
+
+    entry = ne.parse_note_entries(
+        (vault / "People" / "Ada.md").read_text(encoding="utf-8"),
+        note_path="People/Ada.md",
+        workspace="client-a",
+    ).entries[0]
+    assert entry.verified == date(2024, 1, 5)

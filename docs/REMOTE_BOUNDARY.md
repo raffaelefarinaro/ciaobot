@@ -30,8 +30,8 @@ carried by the session.
   `Origin` or `Referer` that matches the request host, allowing for a
   proxy-declared `X-Forwarded-Host`.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
-  local feed (`/api/menubar-chats`, `/api/menubar-notifications`; legacy route
-  names, no native client) and the update
+  local feed (`/api/menubar-chats`; legacy route
+  name, no native client) and the update
   coordinator's drain handshake. It reads the TCP source address, never the
   `Host` header, which a caller controls. A loopback peer carrying
   reverse-proxy headers (`Forwarded`, `Via`, any `X-Forwarded-*`,

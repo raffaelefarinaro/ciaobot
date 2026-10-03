@@ -23,6 +23,20 @@ transcript names a skill ``ciao.skills_inventory.eligible_owned_skills``
 resolves for this workspace, so the memory work is identical either way and a
 workspace with no skills of its own is never asked to consider the stock
 catalog.
+
+A **second, separate** section (:data:`LESSON_ROUTING_PROMPT`) covers the
+lessons in ``Workspace/Learnings.md`` — which is also where a ``/remember`` of a
+lesson lands. A lesson applies to a skill whether or not the conversation that
+produced it happened to load that skill, and the old gate made that finding
+unrepresentable: there was no way to file it without claiming the transcript
+demonstrated something it did not. So the lesson path is a different candidate
+set (the workspace's own inventory, gated on there being a learnings document to
+route out of), it records the link through the structured ``origins`` field
+rather than a ``sources``/turn entry, and it names the two destinations that are
+not an edit to a file this workspace owns — an upstream issue for a packaged
+skill, a new skill for one that does not exist — as ``[review]`` drafts a
+person acts on. It renders on its own, with no owned skill in the catalog at all,
+because a workspace that owns nothing still has lessons with somewhere to go.
 """
 
 from __future__ import annotations
@@ -31,7 +45,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ciao import skills_inventory, transcripts
+from ciao import skills_inventory, transcripts, upstream_drafts
 from ciao.web import chat_service
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -70,13 +84,20 @@ MEMORY_PASS_PROMPT = (
     "list of what you changed."
 )
 
-#: The skill-review section, appended to the pass prompt and only when the
-#: workspace owns a skill the archived transcript shows in use. The one
-#: rendering rule is the ``{skills}`` field: the candidates are resolved here,
-#: from the archive's own evidence line and the workspace's own catalog, so the
-#: model is handed the intersection and never the catalog to walk. Everything a
-#: proposal may be filed against is therefore decided by the backend, not by a
-#: flag the model supplies.
+#: How a lesson that is not an owned-skill edit gets filed, spelled the way
+#: ``ciao.cli`` parses it. One constant rather than prose in the prompt below,
+#: for the reason the ``skill-proposal-add`` line has one: a prompt naming a flag
+#: the parser rejects exits 2 and files nothing at all, and the two routing
+#: commands are the ones a model is most likely to get wrong (they take no
+#: positional name, because the draft's own JSON already names the skill).
+DRAFT_COMMAND = "`ciao skill-draft-add --input-file FILE`"
+
+#: The skill-review section, appended to the pass prompt when the workspace owns
+#: a skill the archived transcript shows in use. The one rendering rule is the
+#: ``{skills}`` field: the candidates are resolved here, from the archive's own
+#: evidence line and the workspace's own catalog, so the model is handed the
+#: intersection and never the catalog to walk. Everything a proposal may be filed
+#: against is therefore decided by the backend, not by a flag the model supplies.
 #:
 #: The ``ciao skill-proposal-add`` line spells the command the way ``ciao.cli``
 #: parses it — ``NAME`` positional, ``--input-file`` the only option — because a
@@ -86,12 +107,13 @@ MEMORY_PASS_PROMPT = (
 #: ``str.format``-ed per chat: a JSON example spelled out here would be read as
 #: a field and raise on the first turn.
 SKILL_REVIEW_PROMPT = (
-    "The transcript shows this workspace's own skills in use: {skills}. That is "
-    "the whole candidate set — a packaged, mirrored or shared copy is not "
-    "anyone's to improve here, and a skill the conversation never used is not a "
-    "finding. Read a candidate's current source under this workspace's `skills/` "
-    "directory before you judge it, and file an improvement proposal only when "
-    "the conversation shows one of three things: a correction the user made "
+    "The transcript shows this workspace's own skills in use: {skills}. Those are "
+    "candidates, and they are not the only ones — the lesson-routing paragraph "
+    "below adds a second, separate set for a lesson rather than a correction. A "
+    "packaged, mirrored or shared copy is not anyone's to improve here. Read a "
+    "candidate's current source under this workspace's `skills/` directory "
+    "before you judge it, and file an improvement proposal only when the "
+    "conversation shows one of three things: a correction the user made "
     "that the skill's wording would have prevented; a mistake you corrected "
     "yourself that the wording led you into; or a step the work needed, which "
     "the skill does not describe and whose absence changed the result. The "
@@ -107,10 +129,113 @@ SKILL_REVIEW_PROMPT = (
     "carries the `chat_id`, the `archive` path, the `turn` the transcript "
     "numbered it under, and a short verbatim `excerpt` from that turn — then "
     "run `ciao skill-proposal-add NAME --input-file FILE`, one file per "
-    "skill. Every one of those fields is text you took out of a conversation, "
-    "so none of it may travel as a shell argument, and never write into the "
+    "skill. If the finding came from an entry in this workspace's "
+    "`Workspace/Learnings.md`, add an `origins` list as well, where every entry "
+    "carries the `learning_id` that entry's own `ciao:learning` comment already "
+    "holds, the `finding` naming the one specific thing in that entry this "
+    "change addresses, the `source_revision` being the sha256 of that entry's own "
+    "canonical line — the exact bytes of the bullet you read, `ciao:learning` "
+    "comment included — and a one-line `summary` of the change; omit "
+    "`origins` entirely when the finding did not come from a learnings entry, "
+    "which is the normal case. Every one of those fields is text you took out of "
+    "a conversation, so none of it may travel as a shell argument, and never "
+    "write into the "
     "`Workspace/Skill-Proposals/` folder by hand; mention a filed proposal in "
     "your closing list."
+)
+
+#: The lesson-routing half of the skill-review section, appended after
+#: :data:`SKILL_REVIEW_PROMPT` and only when this workspace has something to
+#: route: a ``Workspace/Learnings.md`` (a ``/remember`` of a lesson files into
+#: the same document) and at least one owned skill to route a lesson to, or a
+#: packaged catalog / no catalog at all to route one away from.
+#:
+#: This is the second candidate path the routing contract asks for, and the
+#: thing it must not do is invent the evidence the first path has. A lesson that
+#: applies to a skill the conversation never loaded is a real finding, and the
+#: only honest record of it is an ``origins`` link to the learning — never a
+#: ``sources`` entry or a ``turn`` number, which would claim the transcript
+#: demonstrated something it did not. So the prompt says that in the same breath
+#: as it says a catalog match is a candidate rather than proof: read the skill,
+#: cite both why it applies and the failure or correction you actually saw, and
+#: the link is what ties the finding to the lesson.
+#:
+#: The two destinations that are not an edit to a file this workspace owns are
+#: named here because a pass that only knows the owned path files a proposal
+#: against the wrong thing or files nothing: a packaged skill belongs to whoever
+#: maintains it, so the lesson becomes a ``[review]`` draft for an upstream issue
+#: and a lesson with no fitting skill at all becomes a ``[review]`` draft for a
+#: new one, because the edit-only filer cannot name a target that does not exist
+#: and the resolver must keep refusing to.
+#:
+#: ``{inventory}`` is the whole owned catalog or a sentence saying there is none,
+#: and it is deliberately the *inventory* rather than a shortlist: choosing which
+#: of a workspace's skills a lesson applies to is the judgement, and a backend
+#: guess would be a decision about a file this section then told the model it
+#: may not edit. ``{routing}`` is the command for the two non-owned paths.
+#:
+#: **Self-contained, deliberately.** This section renders on its own — with no
+#: used owned skill, :data:`SKILL_REVIEW_PROMPT` is not in the prompt at all — and
+#: that is the case the section exists for: a lesson applying to a skill the
+#: conversation never loaded. So the owned-skill command and the ``origins`` field
+#: shape are spelled out here rather than referred to "above", where they would
+#: point at nothing in precisely the pass that most needs them. The cost is one
+#: repeated sentence when both sections do render, and the benefit is a pass that
+#: is never told to run a command it has not been given.
+LESSON_ROUTING_PROMPT = (
+    "\n\nA lesson is a different kind of finding. This workspace's "
+    "`Workspace/Learnings.md` holds reusable lessons, and a `/remember` of one "
+    "lands in that same document, so read it before you decide a lesson has "
+    "nowhere to go. A lesson applies to a skill whether or not this conversation "
+    "happened to load it, and that is a path of its own: {inventory}\n\n"
+    "An inventory match is a CANDIDATE, never proof. Read the skill's current "
+    "source, and file only when you can say both why it applies to this lesson "
+    "and what the conversation actually showed — the failure, the correction, or "
+    "the step whose absence changed the result. If the skill already says it, "
+    "file nothing: an already-covered lesson needs no proposal, and one that "
+    "repeats guidance is noise a person has to read to dismiss.\n\n"
+    "When one of those owned skills is the answer, file a proposal for it rather "
+    "than an edit. Write a JSON object to a scratch file — a `title`, a `problem` "
+    "saying what went wrong, a `change` giving the exact instruction to add or "
+    "replace, and a `rationale` — then run `ciao skill-proposal-add NAME "
+    "--input-file FILE`, where NAME is that skill's own name and there is one "
+    "file per skill. Add an `origins` list to the same object, where every entry "
+    "carries the `learning_id` that the learning's own `ciao:learning` comment in "
+    "`Workspace/Learnings.md` already holds, a `finding` naming the one specific "
+    "thing in that entry this change addresses, the `source_revision` being the "
+    "sha256 of that entry's own canonical line — the exact bytes of the bullet "
+    "you read, `ciao:learning` comment included — and a one-line "
+    "`summary` of the change. It is that entry's line and not the whole document "
+    "because a revision is what proves the finding was written against text that "
+    "is still there: any other edit to `Learnings.md` leaves your entry untouched "
+    "and must not cancel it, and conversely a later rewording of *this* entry must. "
+    "Never record it as a `sources` entry or a `turn` "
+    "for a skill this conversation never used: that would claim the transcript "
+    "demonstrated something it did not, and a fabricated source is worse than an "
+    "unlinked finding. Every one of those fields is text you read, so none of it "
+    "may travel as a shell argument, and never write into the "
+    "`Workspace/Skill-Proposals/` folder by hand.\n\n"
+    "When the skill a lesson applies to is NOT this workspace's own — a packaged "
+    "or mirrored copy under `.claude/skills`, a shared source, or a skill of "
+    "another project — it is not yours to edit: a local edit there is discarded "
+    "by the next sync. File a `[review]` draft instead, through {routing}. It "
+    "names the skill, the owning repository and version when you can identify "
+    "them, and a `body` that is the lesson written so a stranger could reproduce "
+    "it: what was done, what went wrong, and the instruction that would have "
+    "prevented it. No transcript excerpt, no chat or vault path, no name, no "
+    "credential — a public issue is public, and the draft keeps your private "
+    "evidence locally either way. If you cannot identify the owning repository, "
+    "say so in the draft rather than guessing at one.\n\n"
+    "When no skill fits at all and the lesson is a reusable workflow, file a "
+    "`[review]` draft for a new skill with the same command: a proposed `skill` "
+    "name, the `change` holding the purpose, the trigger that should load it and "
+    "the instruction it should carry. A person creates the file, reads it back "
+    "and syncs it; you do not create a directory, and you do not aim the "
+    "edit-only `ciao skill-proposal-add` at a name that does not exist yet — it "
+    "refuses that on purpose. Either way the draft is where your turn ends: you "
+    "do not open the issue or create the skill, and neither may the nightly "
+    "Workspace care run, which files the same drafts and reports them for a "
+    "person to approve."
 )
 
 
@@ -378,19 +503,66 @@ class MemoryPassCoordinator:
     def _skill_review_section(self, chat: ChatInfo, helper: dict) -> str:
         """The skill-review section, or nothing when there is nothing to review.
 
-        Cheap by construction, and the cost that matters is the pass's turns
-        rather than a stat: the candidates are the intersection of what the
-        archive records as used and what
-        :func:`ciao.skills_inventory.eligible_owned_skills` resolves for this
-        workspace, computed here. A workspace with no owned skills, or a
-        conversation that used none of them, gets no section at all — so the
-        pass is never asked to walk the stock catalog, and a name a pass could
-        not have proposed against never reaches the prompt.
+        Two sections, and the gate on each is a backend answer rather than a
+        flag the model supplies. The correction path is rendered when the
+        candidates are the intersection of what the archive records as used and
+        what :func:`ciao.skills_inventory.eligible_owned_skills` resolves for
+        this workspace: a conversation that used none of them has nothing to
+        correct, so it gets no section, and a name the pass could not have
+        proposed against never reaches the prompt.
+
+        The lesson path is rendered when this workspace has something to route.
+        That is a real question with a real answer — does a
+        ``Workspace/Learnings.md`` exist, and does the workspace own any skill to
+        route a lesson to — and both halves matter in opposite directions. With
+        neither there is no lesson to route and the pass must not be handed a
+        catalog to walk. With a catalog but no used skill, a lesson can still
+        apply to a skill the conversation never loaded, which is exactly the
+        finding the old gate made unrepresentable: so the lesson section is
+        rendered on its own, listing the inventory and the two non-owned
+        destinations, and the pass is still never asked to consider the stock
+        catalog as editable.
         """
+        section = ""
         candidates = self._reviewable_skills(chat, helper)
-        if not candidates:
-            return ""
-        return "\n\n" + SKILL_REVIEW_PROMPT.format(skills=", ".join(candidates))
+        if candidates:
+            section = "\n\n" + SKILL_REVIEW_PROMPT.format(skills=", ".join(candidates))
+        workspace = self._workspace_of(chat)
+        if not workspace:
+            return section
+        if not upstream_drafts.learnings_present(self._host._config, workspace):
+            return section
+        try:
+            inventory = [
+                skill.name
+                for skill in skills_inventory.eligible_owned_skills(
+                    self._host._config, workspace
+                )
+            ]
+        except ValueError:
+            # An unregistered workspace, or one sharing an agent root with
+            # another: the catalog is not this workspace's to review.
+            logger.debug("No owned skills resolvable for %r", workspace)
+            inventory = []
+        if not inventory:
+            # A workspace with no owned skills still gets the two paths that do
+            # not need one: a lesson about a packaged skill is somebody else's
+            # issue, and a lesson no skill covers is a new one. Both are drafts
+            # for a person, so the pass is asked to prepare rather than edit.
+            listing = (
+                "This workspace owns no skills of its own, so every lesson is "
+                "either about a packaged skill or about a skill that does not "
+                "exist yet — both of which are drafts below, not edits."
+            )
+        else:
+            listing = (
+                "These are the skills this workspace owns, and any of them may be "
+                "the one a lesson applies to: "
+                + ", ".join(inventory)
+            )
+        return section + LESSON_ROUTING_PROMPT.format(
+            inventory=listing, routing=DRAFT_COMMAND
+        )
 
     def _reviewable_skills(self, chat: ChatInfo, helper: dict) -> list[str]:
         """The owned skills this conversation used, by name, sorted.
@@ -431,12 +603,7 @@ class MemoryPassCoordinator:
     def _set_source_step(
         self, source_chat_id: str, status: str, memory_chat_id: str
     ) -> None:
-        """Record the pass on the archived chat's own postprocess record.
-
-        Written directly rather than through ``_apply_job_event``: that folds
-        only into a chat currently inside ``_postprocessing``, and this step
-        outlives the archive job by as long as the pass takes.
-        """
+        """Record the pass on the archived chat's own postprocess record."""
         if not source_chat_id:
             return
         source = self._host._chats.get(source_chat_id)

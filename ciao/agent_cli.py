@@ -29,7 +29,10 @@ from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
 #: ``run`` and ``gws`` are operator commands too (the server launcher and the
 #: gws passthrough), so those route only for the verbs in ``_SHARED_NOUN_VERBS``.
 AGENT_NOUNS: frozenset[str] = frozenset(
-    {"memory", "vault", "file", "chat", "project", "schedule", "workspace", "context", "help"}
+    {
+        "memory", "vault", "note", "file", "chat", "project", "schedule",
+        "workspace", "context", "help",
+    }
 )
 _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
     "run": frozenset({"start", "status", "cancel"}),
@@ -133,11 +136,29 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_parser("list")
     show = review.add_parser("show")
     show.add_argument("path")
-    for verb in ("keep", "trash", "restore", "delete"):
+    # `restore-completed` is hyphenated like the rest of the verb surface; the
+    # action it maps to is the review module's own `restore_completed`.
+    for verb in ("keep", "trash", "restore", "complete", "restore-completed", "delete"):
         sub = review.add_parser(verb)
         sub.add_argument("--candidate", required=True)
         if verb == "delete":
             sub.add_argument("--confirm", required=True, help="Repeat the candidate id.")
+
+    note = _verbs(nouns.add_parser("note", help="Verification of stale vault notes."))
+    verify = note.add_parser("verify", help="Record one stale note's verification verdict.")
+    # A path, not the payload itself. The verdict's before/after text and its
+    # citations are user prose: as a shell argument it would be mangled by
+    # `$()`, backticks and quotes, and it would sit in the process table. The
+    # same rule as `skill-proposal-add --input-file` and `chat handover
+    # --messages`, and the server reads and bounds the document rather than the
+    # caller reading it and posting the parsed dict.
+    verify.add_argument(
+        "--payload-file",
+        required=True,
+        metavar="FILE",
+        help="JSON document holding the verdict: relative_path, expected_revision, "
+        "outcome, coverage, evidence, before/after, reason. Never pass the prose itself.",
+    )
 
     file_ = _verbs(nouns.add_parser("file", help="Surface a workspace file in the pinned panel."))
     surface = file_.add_parser("surface")
@@ -324,7 +345,20 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             return "vault_review", {"action": "decide", "candidate_id": args.candidate, "disposition": "keep"}
         if action == "delete":
             return "vault_review", {"action": "delete", "candidate_id": args.candidate, "confirm": args.confirm}
-        return "vault_review", {"action": action, "candidate_id": args.candidate}
+        # Every remaining verb is its own action, and one is not spelled the same
+        # way: the CLI surface is hyphenated (`restore-completed`) while the
+        # review module's action is `restore_completed`. The verb stays as typed
+        # in `args.action`, so the translation belongs here rather than in the
+        # parser.
+        wire = "restore_completed" if action == "restore-completed" else action
+        return "vault_review", {"action": wire, "candidate_id": args.candidate}
+    if noun == "note":
+        # The path crosses to the server as written. Reading the document here
+        # and posting the parsed object would move the size cap, the workspace
+        # confinement and the "is this actually a file" check into the one place
+        # that can be bypassed, for no gain: the payload is user prose the shell
+        # must not touch, and a path is not prose.
+        return "verify_note", {"payload_file": args.payload_file}
     if noun == "file":
         return "file_surface", {"path": args.path}
     if noun == "chat":

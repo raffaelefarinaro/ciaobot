@@ -192,7 +192,10 @@ describe('ChatPanel aligned layout', () => {
     // Click the reply (not a link or button inside it) to select it.
     await replies[0].get('.message-row').trigger('click')
     expect(replies[0].classes()).toContain('message-wrap--selected')
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(true)
+    // Selection marks one message and nothing else: no backdrop ever covers the
+    // transcript, so the turns around the selected one stay readable.
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
+    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
     const actions = replies[0].get('.message-actions')
     expect(actions.text()).toContain('Copy')
     expect(actions.text()).toContain('Fork from here')
@@ -202,10 +205,12 @@ describe('ChatPanel aligned layout', () => {
     // footer can bleed to the card's edges and share its left edge.
     expect(replies[0].findAll('.message-row > .message-actions')).toHaveLength(1)
 
-    // Esc deselects without closing the chat.
+    // Esc deselects without closing the chat, and still puts nothing over the
+    // transcript.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await nextTick()
     expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
     expect(wrapper.emitted('close')).toBeUndefined()
 
     // Enter on a focused message selects it too; the user's own offers Copy only.
@@ -218,13 +223,19 @@ describe('ChatPanel aligned layout', () => {
     // card, so a 44px touch target cannot reach into the turn below it.
     expect(request.findAll('.message-row > .message-actions')).toHaveLength(1)
 
-    // Clicking the veil deselects.
-    await wrapper.get('.message-select-backdrop').trigger('click')
+    // The reply is no longer selected and the request is, so at most one message
+    // carries the outline at a time.
+    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
+
+    // Clicking the selected message again deselects it: there is no veil to
+    // click off now, so the toggle has to live on the message.
+    await request.get('.message-row').trigger('click')
     expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('pulls a selected turn back into view when the footer it just gained falls below the transcript', async () => {
+  it('does not move the transcript when a message is selected', async () => {
     const wrapper = await mountPanel(TURNS)
     // The transcript's visible box: top 100, 600px tall, scrolled 40px down.
     const transcript = wrapper.get('.messages').element as HTMLElement
@@ -234,22 +245,27 @@ describe('ChatPanel aligned layout', () => {
 
     const reply = wrapper.findAll('.message-wrap.assistant').at(-1)!
     const card = reply.get('.message-row')
-    // Selecting a reply grows it, and on a phone the new footer lands under
-    // the composer: 60px past the visible bottom. The scroll covers that plus
-    // the 12px of breathing room left above the transcript's edge.
+    // Selecting a reply grows it, and on a phone the new footer can land under
+    // the composer. Selection must not yank the transcript: the reader keeps
+    // their place, so the old reveal scroll is gone and the scroll position is
+    // untouched even when the card's bottom sits past the visible edge.
     card.element.getBoundingClientRect = () => ({ top: 400, bottom: 760 }) as DOMRect
     await card.trigger('click')
     await nextTick()
-    expect(scrollCalls.at(-1)).toEqual({ top: 112, behavior: 'smooth' })
+    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
+    expect(transcript.scrollTop).toBe(40)
+    expect(scrollCalls).toEqual([])
 
-    // A footer that already fits must not yank the transcript away from
-    // wherever the reader had scrolled to, so no scroll is issued.
-    scrollCalls.length = 0
-    card.element.getBoundingClientRect = () => ({ top: 200, bottom: 640 }) as DOMRect
-    wrapper.get('.message-select-backdrop').trigger('click')
+    // Deselect and re-select the same card: still no scroll, and nothing laid
+    // over the transcript.
+    await card.trigger('click')
+    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
     await card.trigger('click')
     await nextTick()
     expect(scrollCalls).toEqual([])
+    expect(transcript.scrollTop).toBe(40)
+    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
+    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
     wrapper.unmount()
   })
 

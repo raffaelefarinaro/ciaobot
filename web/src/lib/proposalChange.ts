@@ -17,8 +17,26 @@
  *   update     not exact (a model folds it in on accept) merge    Merge into a note
  *   move       —                                         move     Move a note
  *   add_category a new category for a note cluster       category New category
+ *   note_edit  scope `entry`, restamp_entry              restamp  Check one fact again
+ *   note_edit  scope `entry`, otherwise                  editFact Change one fact
+ *   note_edit  a whole note rewritten by its verification edit     Update a note
+ *   retire_note the note moved to the review trash       retire   Retire a note
  *   none       can_accept                                none     Already saved
  *   none / ''  cannot be accepted as it stands           blocked  Cannot save yet
+ *
+ * `note_edit` and `retire_note` are separate types, and not `update`/`move`,
+ * because both of those borrowed words mean something narrower here: this is the
+ * WHOLE note, not a line, and a retirement is a move to a trash somebody can
+ * restore from, not a move between workspaces. A row whose accept would rewrite
+ * a note must not read as a region edit.
+ *
+ * The three entry operations get their own three types for the same reason one
+ * level down. `replace_entry`, `restamp_entry` and `retire_entry` all report the
+ * `note_edit` operation — they are the same write path, scoped to one list item
+ * — and they differ in what a person is agreeing to: restamp it, change it, or
+ * take it out. "Update a note" is wrong for all three, and worst for the one
+ * that removes something, because it is the row where a reader has to be sure
+ * the rest of the file survives.
  *
  * Rows that never get a preview have their own types: a skill proposal is
  * built in a chat (`skill`), a row with nowhere to go yet needs a decision
@@ -29,8 +47,9 @@
 import type { ProposalPreview, ProposalRow } from './types'
 
 export type ProposalChangeType =
-  | 'new' | 'add' | 'update' | 'merge' | 'move' | 'category' | 'none' | 'blocked'
-  | 'skill' | 'decide' | 'pending'
+  | 'new' | 'add' | 'update' | 'merge' | 'move' | 'category' | 'edit' | 'retire'
+  | 'editFact' | 'restampFact' | 'retireFact'
+  | 'none' | 'blocked' | 'skill' | 'decide' | 'pending'
 
 export interface ProposalChange {
   type: ProposalChangeType
@@ -53,6 +72,11 @@ export const CHANGE_FILTERS: { type: ProposalChangeType; label: string }[] = [
   { type: 'update', label: 'Update a line' },
   { type: 'move', label: 'Move' },
   { type: 'category', label: 'New category' },
+  { type: 'edit', label: 'Update a note' },
+  { type: 'retire', label: 'Retire a note' },
+  { type: 'editFact', label: 'Change one fact' },
+  { type: 'restampFact', label: 'Check one fact again' },
+  { type: 'retireFact', label: 'Retire one fact' },
   { type: 'none', label: 'Already saved' },
   { type: 'blocked', label: 'Cannot save yet' },
   { type: 'skill', label: 'Skill' },
@@ -169,6 +193,63 @@ export function changeFor(
       verb: 'Add category',
       destination,
       qualifier: 'retypes the notes it came from',
+    }
+  }
+  if (op === 'note_edit') {
+    // Three entry operations share this one `operation` value and differ only in
+    // scope, so the scope decides the row. The qualifier carries the two facts
+    // the verb does not: the change is one line of the file rather than the
+    // file, and it is reversible — which is the part that matters most on the
+    // retirement, where a reader has to be sure the other facts in the note are
+    // not going anywhere.
+    if (preview.scope === 'entry') {
+      if (preview.entry_removed) {
+        return {
+          type: 'retireFact',
+          label: 'Retire one fact',
+          verb: 'Retire fact',
+          destination,
+          qualifier: 'one line of the note; the rest is untouched, undoable from History',
+        }
+      }
+      if (preview.entry_operation === 'restamp_entry') {
+        return {
+          type: 'restampFact',
+          label: 'Check one fact again',
+          verb: 'Mark fact checked',
+          destination,
+          qualifier: 'stamps this one line as checked today; the rest is untouched',
+        }
+      }
+      return {
+        type: 'editFact',
+        label: 'Change one fact',
+        verb: 'Change fact',
+        destination,
+        qualifier: 'one line of the note; the rest is untouched, undoable from History',
+      }
+    }
+    // A whole note, rewritten from the verification's exact replacement — so the
+    // qualifier carries the two facts the verb does not: the change is the whole
+    // file rather than an entry in it, and it is reversible.
+    return {
+      type: 'edit',
+      label: 'Update a note',
+      verb: 'Update note',
+      destination,
+      qualifier: 'the whole note; undoable from History',
+    }
+  }
+  if (op === 'retire_note') {
+    // A retirement is the one accept that removes something, so the copy says
+    // the two things that make it safe: it is a move into a trash, and it can
+    // be put back.
+    return {
+      type: 'retire',
+      label: 'Retire a note',
+      verb: 'Retire note',
+      destination,
+      qualifier: 'moved to the review trash, where it can be restored',
     }
   }
   if (op === 'none') {

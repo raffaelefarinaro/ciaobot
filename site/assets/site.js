@@ -1,3 +1,29 @@
+// The install picker: one command per platform, chosen for the visitor's OS and
+// switchable. Each <option> carries its label and command, so the copy button
+// below copies whatever is showing. Without JavaScript the picker stays hidden
+// and the page shows the macOS command plus a <noscript> line for Windows.
+(function () {
+  document.querySelectorAll('[data-install]').forEach(function (box) {
+    var select = box.querySelector('[data-install-os]');
+    var code = box.querySelector('code');
+    var label = box.querySelector('[data-install-label]');
+    var note = box.querySelector('[data-install-note]');
+    if (!select || !code) return;
+    function show() {
+      var option = select.options[select.selectedIndex];
+      code.textContent = option.dataset.cmd;
+      if (label) label.textContent = option.dataset.label;
+      if (note) note.hidden = option.value !== 'windows';
+    }
+    var ua = navigator.userAgentData;
+    var platform = (ua && ua.platform) || navigator.platform || navigator.userAgent || '';
+    if (/win/i.test(platform)) select.value = 'windows';
+    select.addEventListener('change', show);
+    select.closest('.install-os').hidden = false;
+    show();
+  });
+})();
+
 // Copy-to-clipboard for the install command and the example prompts.
 (function () {
   function copy(text, done) {
@@ -32,6 +58,21 @@
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
     });
   });
+})();
+
+// Play the product demo automatically unless the visitor prefers reduced motion.
+// Native controls keep pause, replay and fullscreen available without JavaScript.
+(function () {
+  var video = document.querySelector('[data-product-demo]');
+  if (!video) return;
+  var motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  function syncMotion() {
+    video.autoplay = !motion.matches;
+    if (motion.matches) video.pause();
+    else video.play().catch(function () {}); // Autoplay may be blocked; controls remain available.
+  }
+  motion.addEventListener('change', syncMotion);
+  syncMotion();
 })();
 
 // A visitor-controlled example of conversation → note → recall on the home page.

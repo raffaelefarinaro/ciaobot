@@ -12,8 +12,7 @@ This module owns both:
   row, built once in :func:`build_accept_result` for the single-row and batch
   routes alike;
 * :func:`record_decision` is the one place a decision is written, to the
-  dedupe sidecar (``memory_proposals``) and to the outcomes tally
-  (``proposal_outcomes``), in that order.
+  dedupe sidecar (``memory_proposals``).
 
 Nothing here touches Starlette: no ``Request``, no response objects, no app
 state. A caller passes the queue path, the row's fields and what the accept
@@ -41,6 +40,10 @@ AcceptDescriptor = proposal_kinds.AcceptDescriptor
 
 # The accept actions that write to a named destination file rather than to a
 # bounded region of the workspace guide. They share one result shape.
+# ``note_edit`` is NOT among them: it rewrites a whole note through the
+# revision-checked note-receipt transaction (or moves the note to the review
+# trash) and reports a conflict as its own thing, so it has its own branch in
+# :func:`build_accept_result`.
 _DESTINATION_ACTIONS = (
     "fold_doc",
     "write_people_note",
@@ -172,6 +175,30 @@ def build_accept_result(
             ),
             conflict=conflict,
         )
+    if accept.action == "note_edit":
+        # Its own branch rather than the shared destination shape, because the
+        # thing a caller has to be able to tell apart here is a CONFLICT: a note
+        # that moved since the proposal was filed is still promotable, just not
+        # against the text the operator read, so the client reopens its preview
+        # instead of reporting a failed write. A destination branch would carry
+        # the conflict flag, but naming it separately is what keeps a whole-note
+        # rewrite from being read as "a file was written" by anything that
+        # groups accepts by where they land.
+        return ProposalActionResult(
+            id=proposal_id,
+            action=accept.action,
+            dismissed=dismissed,
+            promoted=bool(outcome.get("ok")),
+            # The note the edit was about, or — for a retirement — where it went
+            # into the reversible review trash.
+            destination=str(outcome.get("destination", "")),
+            error=(
+                str(outcome.get("error", "could not write the note"))
+                if failed
+                else None
+            ),
+            conflict=conflict,
+        )
     # Re-home and route_manually: nothing was written into a region or a doc.
     # A re-home's move is performed by its own handler and reported through the
     # row's candidate destination, which is what the panel already shows.
@@ -194,26 +221,18 @@ def record_decision(
     text: str,
     kind: str,
     via: str,
-    workspace: str = "",
     source: str = "",
     destination: str = "",
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
 ) -> None:
-    """Record one resolved proposal in both ledgers the queue depends on.
+    """Record one resolved proposal in the decision history.
 
-    Order matters and is fixed here: the decision history first, the outcomes
-    tally second. The history is what ``append_proposals`` dedupes against, so
-    a decision missing from it means the next curator pass re-files the fact
-    the operator just resolved; the tally only counts kinds and is trimmed.
-
-    ``action`` is ``"accept"`` or ``"dismiss"``; anything else is treated as a
-    dismissal by the history and refused by the tally, which is the behaviour
-    each caller already had. The tally is written only for the extraction
-    kinds — a ``skill`` row is filed by the memory pass but settled rather than
-    promoted and ``rehome`` rows are queued by vault hygiene, so neither
-    measures the memory pipeline.
+    The history is what ``append_proposals`` dedupes against, so a decision
+    missing from it means the next curator pass re-files the fact the operator
+    just resolved. ``action`` is ``"accept"`` or ``"dismiss"``; anything else is
+    treated as a dismissal.
 
     ``receipt_id`` is the memory-change receipt an accept's write handed back.
     The history keeps the ORIGINAL bullet as ``text`` because append-time
@@ -231,10 +250,9 @@ def record_decision(
     is not this function's to write: by the time a decision is recorded the row
     is already out of the queue, which is too late for it to matter.
 
-    Imports are deferred so a test that patches ``ciao.memory_proposals`` or
-    ``ciao.proposal_outcomes`` still sees its patch honoured here.
+    Imports are deferred so a test that patches ``ciao.memory_proposals`` still
+    sees its patch honoured here.
     """
-    from ciao import proposal_outcomes
     from ciao.memory_proposals import record_dismissal, record_promotion
 
     accepted = action == "accept"
@@ -249,12 +267,4 @@ def record_decision(
         outcome=outcome,
         proposal_id=proposal_id,
         receipt_id=receipt_id,
-    )
-    if not proposal_outcomes.is_extraction_kind(kind):
-        return
-    proposal_outcomes.record(
-        kind=kind,
-        action="promoted" if accepted else "dismissed",
-        workspace=workspace,
-        via=via,
     )

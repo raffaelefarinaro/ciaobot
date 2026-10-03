@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../lib/api'
+import { completionRefusalCopy } from '../lib/vaultReviewLabels'
 import type {
   VaultReviewCandidate,
   VaultReviewResponse,
@@ -44,6 +45,10 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   const loading = ref(false)
   const busyIds = ref<Set<string>>(new Set())
   const error = ref('')
+  // The server's own words for a failure, kept beside the friendly line in
+  // `error`. The panel shows the friendly one; the raw is what a fix chat is
+  // seeded with, so nothing is swallowed by translating it.
+  const errorDetail = ref('')
   const loadError = ref('')
   // Set when an action succeeded but did not do everything its label claims —
   // "Still true" on a note with no frontmatter clears the row without writing
@@ -203,7 +208,28 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
       }
       return { ok: true, result }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Action failed'
+      const detail = e instanceof Error ? e.message : 'Action failed'
+      // Refetch before reporting, or not at all. A refusal here is usually the
+      // row being STALE — a destination that filled up, or a note edited, after
+      // this list was built — and the list is the only thing that can rebuild
+      // the row. Without it the row kept its button and every retry 409'd
+      // identically until the panel was reopened; the `completable` flag the
+      // action refused on is recomputed by that same scan.
+      //
+      // Only the scope on screen: a refetch for a workspace the user has left
+      // would repaint the new one with the old one's rows, which is the exact
+      // race the guarded snapshot adoption above exists to prevent.
+      if (loadedWorkspace.value === workspace || loadedWorkspace.value === null) {
+        await fetch(workspace, { force: true })
+      }
+      // Set the raw first: `error` is what the panel's watcher reacts to, and
+      // the raw is what a fix chat is seeded with, so it must already be there.
+      // A server refusal in its own words ("only a project can be completed;
+      // retire this note instead") reads as a leaked engine message in a
+      // toast. Say what happened instead; an unrecognised message still passes
+      // through unchanged, so nothing is lost to the mapping.
+      errorDetail.value = detail
+      error.value = completionRefusalCopy(detail) || detail
       return { ok: false, result: null }
     } finally {
       setBusy(id, false)
@@ -272,6 +298,28 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     return (await mutate(workspace, id, { action: 'trash', candidate_id: id })).ok
   }
 
+  /**
+   * Close a project out: the note moves to `projects/completed/` and every
+   * reference to it is repointed. Only offered on a candidate the backend
+   * marked `completable` — see `VaultReviewCandidate.completable` — so this
+   * posts an action the engine will accept rather than re-deciding here.
+   */
+  async function complete(workspace: string, id: string): Promise<boolean> {
+    return (await mutate(workspace, id, { action: 'complete', candidate_id: id })).ok
+  }
+
+  /**
+   * Undo a completion, putting the project and every rewritten link back.
+   *
+   * Not surfaced in the panel yet: a completed note leaves the candidate list
+   * and the trash, so there is no row to hang this on. It is here because the
+   * action and its ledger row already exist, and the next surface that needs
+   * the way back should not have to re-derive the payload.
+   */
+  async function restoreCompleted(workspace: string, id: string): Promise<boolean> {
+    return (await mutate(workspace, id, { action: 'restore_completed', candidate_id: id })).ok
+  }
+
   /** Bring a trashed note back to its original path. */
   async function restore(workspace: string, id: string): Promise<boolean> {
     return (await mutate(workspace, id, { action: 'restore', candidate_id: id })).ok
@@ -297,6 +345,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     loading,
     isBusy,
     error,
+    errorDetail,
     loadError,
     notice,
     loadedWorkspace,
@@ -304,6 +353,8 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
     ensureLoaded,
     decide,
     trash,
+    complete,
+    restoreCompleted,
     restore,
     remove,
   }

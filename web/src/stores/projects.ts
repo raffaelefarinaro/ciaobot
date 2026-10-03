@@ -12,14 +12,12 @@ import {
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
-import { isPostprocessing, postprocessNeedsRetry } from '../lib/postprocessView'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
 import type {
   ArchiveChatResponse,
   ArchivedWorkspace,
   ArchivedWorkspacesResponse,
-  ArchiveJobView,
   ProjectInfo,
   ChatInfo,
   ChatPostprocess,
@@ -53,7 +51,6 @@ import {
 import {
   dropSupersededLiveTail,
   historySignature,
-  isLiveTraceRow,
   isSettledHistoryRow,
   mergeMessageFields,
   mergeMetadata,
@@ -104,6 +101,11 @@ export const useProjectStore = defineStore('projects', () => {
   // authoritative session history is still on the way.
   const loadingMessages = ref<Record<string, boolean>>({})
   const messageLoadGenerations = new Map<string, number>()
+  // Per-chat request order for /messages. Responses can return out of order
+  // (a poll issued before the answer persisted, resolving after the reconcile
+  // fetch); an older one must not overwrite rows a newer one already applied.
+  const messageRequestsIssued = new Map<string, number>()
+  const messageRequestsApplied = new Map<string, number>()
   // Pagination state for envelope-mode history loads (see loadMessagesFromServer).
   const historyMeta = ref<Record<string, { total: number; hasMore: boolean; nextOffset: number | null; limit: number } | undefined>>({})
   const loadingOlder = ref<Record<string, boolean>>({})
@@ -1103,18 +1105,12 @@ export const useProjectStore = defineStore('projects', () => {
       || chatHasRunningSubagents(chatId)
   }
 
-  // ── Post-archive pipeline ────────────────────────────────────────────────
-  // Archiving a chat writes the session trajectory; the vault work went to the
-  // memory pass, a chat of the app's own, in #627. The state lives on the chat
-  // itself (so an archived chat can still report what was taken from it after a
-  // reload); these are the read paths every surface shares.
+  // ── Memory pass record ───────────────────────────────────────────────
+  // An archived chat records the memory pass spawned for it on its own
+  // postprocess record, so a reload can still link the two.
 
   function chatPostprocess(chatId: string): ChatPostprocess | null {
     return chats.value.find(c => c.chat_id === chatId)?.postprocess || null
-  }
-
-  function chatIsPostprocessing(chatId: string): boolean {
-    return isPostprocessing(chatPostprocess(chatId))
   }
 
   // ── Memory pass ───────────────────────────────────────────────────────
@@ -1140,28 +1136,6 @@ export const useProjectStore = defineStore('projects', () => {
   // confirms. A failed POST rolls `archived` back and clears the entry.
   function isArchiving(chatId: string): boolean {
     return Boolean(archivingChats.value[chatId])
-  }
-
-  /**
-   * Reconcile against the server's list of live pipelines. A chat the server
-   * omits has settled: downgrade it to 'done' rather than dropping the record,
-   * because the outcomes it already collected are still worth showing.
-   */
-  function applyPostprocessingSnapshot(runningIds: string[]): void {
-    const running = new Set(runningIds)
-    for (const chat of chats.value) {
-      const pp = chat.postprocess
-      if (!pp) continue
-      if (pp.state === 'running' && !running.has(chat.chat_id)) {
-        // The server is not running this pipeline. Use the manifest to tell a
-        // clean settle from an interrupted one: an unfinished job stays
-        // retryable rather than being reported as done.
-        const state = pp.job?.unfinished?.length
-          ? (pp.job.state === 'blocked' ? 'blocked' : 'incomplete')
-          : 'done'
-        chat.postprocess = { ...pp, state, step: '' }
-      }
-    }
   }
 
   function projectIsStreaming(projectId: string): boolean {
@@ -1726,12 +1700,13 @@ export const useProjectStore = defineStore('projects', () => {
         // fetch resolves would let an incoming message be clobbered by the
         // fetch result overwriting messages[chatId].
         //
-        // A deep link to an archived chat stops before this: the panel renders
-        // read-only from whatever transcript is held locally, exactly as
-        // `switchChat` leaves it, so booting must not dial a socket or fetch a
-        // history the archive is not served from.
+        // A deep link to an archived chat fetches its history once and stops,
+        // exactly as `switchChat` leaves it: /messages serves the archived
+        // vault transcript, but there is no session left to dial a socket to.
         const bootChatId = activeChatId.value
-        if (!isArchivedChat(bootChatId)) {
+        if (isArchivedChat(bootChatId)) {
+          void loadMessages(bootChatId)
+        } else {
           void (async () => {
             await loadMessages(bootChatId, { waitForSettledReply: true })
             connectWs(bootChatId)
@@ -2550,47 +2525,6 @@ export const useProjectStore = defineStore('projects', () => {
     return c
   }
 
-  /** Resume the unfinished post-archive steps for one archived chat. */
-  async function retryInsights(chatId: string): Promise<void> {
-    const res = await api.post<{ status: string; job?: ArchiveJobView | null }>(
-      `/api/chats/${chatId}/retry-insights`,
-    )
-    const status = res?.status
-    if (res?.job) applyArchiveJob(chatId, res.job)
-    if (status === 'running') {
-      pushToast({ chat_id: '', title: 'Already tidying', body: 'This chat is already being processed.' })
-    } else if (status === 'complete') {
-      pushToast({ chat_id: '', title: 'Nothing to finish', body: 'Every post-archive step is already complete.' })
-    } else if (status === 'blocked') {
-      pushToast({
-        chat_id: '',
-        title: 'Cannot resume yet',
-        body: res?.job?.blocked_reason || 'This chat needs attention before its unfinished steps can run.',
-      })
-    }
-  }
-
-  /** Fold a manifest view onto the chat's postprocess record. */
-  function applyArchiveJob(chatId: string, job: ArchiveJobView | null | undefined) {
-    if (!job) return
-    const chat = chats.value.find(c => c.chat_id === chatId)
-    if (!chat) return
-    const pp: ChatPostprocess = { ...(chat.postprocess || { state: 'done' }) }
-    pp.job = job
-    if (job.unfinished?.length) {
-      if (pp.state !== 'running') {
-        pp.state = job.state === 'blocked' ? 'blocked' : 'incomplete'
-      }
-    } else if (pp.state === 'incomplete' || pp.state === 'blocked') {
-      // The server confirmed nothing is unfinished (e.g. a completion event was
-      // missed). Clear a stale incomplete/blocked state, or the UI keeps
-      // showing "not finished" and a retry control forever.
-      pp.state = 'done'
-      pp.step = ''
-    }
-    chat.postprocess = pp
-  }
-
   function replaceChat(chat: ChatInfo) {
     const idx = chats.value.findIndex(x => x.chat_id === chat.chat_id)
     if (idx >= 0) chats.value[idx] = chat
@@ -2685,9 +2619,13 @@ export const useProjectStore = defineStore('projects', () => {
     // handles both transparently.
     type ServerEnvelope = { items: ServerRow[]; total: number; offset: number; limit: number; hasMore: boolean; nextOffset: number | null }
     try {
+      const requestSeq = (messageRequestsIssued.get(chatId) || 0) + 1
+      messageRequestsIssued.set(chatId, requestSeq)
       const serverMsgs = await api.get<ServerRow[] | ServerEnvelope>(
         `/api/chats/${chatId}/messages?limit=50`
       )
+      if (requestSeq < (messageRequestsApplied.get(chatId) || 0)) return
+      messageRequestsApplied.set(chatId, requestSeq)
       if (Array.isArray(serverMsgs) && !serverMsgs.length) {
         reconcileQueuedWithMessages(chatId)
         return
@@ -2787,9 +2725,6 @@ export const useProjectStore = defineStore('projects', () => {
           local.forEach((row, pos) => {
             if (typeof row.i === 'number') posByIndex.set(row.i, pos)
           })
-          // Where the window's genuinely-new rows start once appended; -1 when
-          // the window brought nothing past the cached extent.
-          let firstAppendPos = -1
           const merged = local.slice()
           // Where the un-indexed live tail begins: everything the client
           // rendered from streaming events (optimistic user bubble, activity
@@ -2822,17 +2757,27 @@ export const useProjectStore = defineStore('projects', () => {
             }
             return false
           }
-          const followUpBoundary = (() => {
-            const users = merged
-              .map((row, pos) => row.role === 'user' && pos >= tailStart ? pos : -1)
-              .filter(pos => pos >= 0)
-            if (users.length > 1) return users[1]
-            if (users.length !== 1) return null
-            const pos = users[0]
-            if (typeof merged[pos].i === 'number') return pos
-            return merged.slice(tailStart, pos).some(isLiveTraceRow) ? pos : null
-          })()
-          let insertedBeforeFollowUp = 0
+          // Position of the last row the window has placed so far. Server rows
+          // are placed in window order, each after the one before it, and a
+          // new row goes at the END of the cursor's turn (just above the next
+          // user bubble), so each turn keeps its own rows. Inserting at one
+          // fixed boundary instead put a queued turn's activity and answer
+          // above its own user bubble whenever the turn before it was still
+          // un-indexed at reconcile time.
+          //
+          // Every splice below lands at or after tailStart, so the held rows'
+          // positions in posByIndex never shift.
+          let cursor = tailStart - 1
+          const nextUserAfter = (pos: number) => {
+            let p = pos + 1
+            while (p < merged.length && merged[p].role !== 'user') p++
+            return p
+          }
+          const turnStartOf = (pos: number) => {
+            let p = pos
+            while (p > tailStart && merged[p].role !== 'user') p--
+            return Math.max(p, tailStart)
+          }
           for (const item of windowRows) {
             const abs = item.i
             if (typeof abs !== 'number') continue
@@ -2843,6 +2788,7 @@ export const useProjectStore = defineStore('projects', () => {
               // durable transcript. Keep whatever the live stream already gave
               // us for the fields the row is still missing.
               merged[pos] = mergeMessageFields(item, merged[pos])
+              cursor = pos
               continue
             }
             if (abs < cachedEnd) {
@@ -2857,42 +2803,66 @@ export const useProjectStore = defineStore('projects', () => {
             // while the turn was live (WS reconnect, chat switch back, the
             // post-result reconcile) otherwise appended the server copy of
             // the whole turn — the reported "double message", on the user
-            // bubble first and then on the Activity group + answer. Scan the
-            // live tail in order so server rows pair with their own turn's
-            // copies; identical texts pair one-to-one, so a genuine repeat
-            // send keeps both copies countable.
-            let reconciled = false
-            for (let p = tailStart; p < merged.length; p++) {
-              const row = merged[p]
-              if (typeof row.i === 'number') continue
-              if (!sameRow(row, item)) continue
-              // The live copy is the richer one for streamed turns (usage,
-              // phase, duration); the server row contributes only its index.
-              // A user bubble is the exception: the server owns the canonical
-              // turn_index/sent_at, so merge onto the server row.
-              merged[p] = item.role === 'user'
-                ? mergeMessageFields(item, row)
-                : { ...row, i: item.i }
-              posByIndex.set(abs, p)
-              reconciled = true
-              break
+            // bubble first and then on the Activity group + answer. A server
+            // user row pairs with a later live bubble, by the server-assigned
+            // turn_index first and then by text; any other row only with a
+            // copy inside the cursor's own turn. Identical texts pair
+            // one-to-one, so a genuine repeat send keeps both copies countable.
+            // A new row always lands after every held row.
+            cursor = Math.max(cursor, tailStart - 1)
+            const end = nextUserAfter(cursor)
+            let match = -1
+            if (item.role === 'user') {
+              // The next bubble is normally this row's live copy, but an
+              // undelivered one (a failed send kept in the transcript) can sit
+              // ahead of it. Skipped bubbles stay above, in their own turn.
+              let byText = -1
+              for (let p = end; p < merged.length; p++) {
+                const row = merged[p]
+                if (row.role !== 'user' || typeof row.i === 'number') continue
+                if (item.turn_index != null && row.turn_index === item.turn_index) {
+                  match = p
+                  break
+                }
+                // A bubble the server already numbered as another turn is not
+                // this row's copy, however alike the text.
+                const otherTurn = item.turn_index != null && row.turn_index != null
+                if (byText < 0 && !otherTurn && sameRow(row, item)) byText = p
+              }
+              if (match < 0) match = byText
+            } else {
+              for (let p = turnStartOf(cursor); p < end; p++) {
+                const row = merged[p]
+                if (typeof row.i !== 'number' && sameRow(row, item)) {
+                  match = p
+                  break
+                }
+              }
             }
-            if (reconciled) continue
-            // Insert settled rows before a fast follow-up's live tail. Without
-            // this, the follow-up renders before the authoritative answer it
-            // followed, even though both turns are otherwise reconciled.
-            const insertionPos = followUpBoundary === null
-              ? merged.length
-              : followUpBoundary + insertedBeforeFollowUp
-            if (firstAppendPos < 0) firstAppendPos = insertionPos
-            for (const [index, position] of posByIndex) {
-              if (position >= insertionPos) posByIndex.set(index, position + 1)
+            if (match < 0) {
+              merged.splice(end, 0, item)
+              cursor = end
+              continue
             }
-            merged.splice(insertionPos, 0, item)
-            posByIndex.set(abs, insertionPos)
-            if (followUpBoundary !== null) insertedBeforeFollowUp++
+            // The live copy is the richer one for streamed turns (usage,
+            // phase, duration); the server row contributes only its index.
+            // A user bubble is the exception: the server owns the canonical
+            // turn_index/sent_at, so merge onto the server row.
+            const row = merged[match]
+            const placed = item.role === 'user'
+              ? mergeMessageFields(item, row)
+              : { ...row, i: item.i }
+            if (match < cursor) {
+              // Rows placed since sit above the live copy; move it after them
+              // so the turn reads in the server's order.
+              merged.splice(match, 1)
+              merged.splice(cursor, 0, placed)
+            } else {
+              merged[match] = placed
+              cursor = match
+            }
           }
-          messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, firstAppendPos)
+          messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, windowRows)
         }
         persistMessages()
         // Same rule the flat branch below applies, through the same predicate:
@@ -3383,12 +3353,15 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
     // Fire-and-forget: clears overlay + SW cache + hits /read for cross-device sync.
     void markRead(chatId)
-    // An archived chat stops here. ChatPanel renders it from the stored
-    // transcript with no composer, and the provider has already reclaimed the
-    // session, so the three calls below would buy nothing: a socket that can
-    // only stay silent, a `/messages` fetch the archive is not served from,
-    // and subagent rows for agents that are gone.
-    if (isArchivedChat(chatId)) return
+    // An archived chat stops after one history fetch. /messages serves the
+    // archived vault transcript (the provider already reclaimed the session),
+    // and ChatPanel renders it with no composer. Without the fetch a browser
+    // that had not cached the transcript showed an empty chat. The socket and
+    // subagent rows would buy nothing: nothing can stream, the agents are gone.
+    if (isArchivedChat(chatId)) {
+      if (!opts?.skipHistory) await loadMessages(chatId)
+      return
+    }
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
     void loadSubagents(chatId)
     connectWs(chatId)
@@ -3927,10 +3900,6 @@ export const useProjectStore = defineStore('projects', () => {
         // over — the runner resolves them as orphans — so an empty map after
         // one is the truth, not a gap.)
         backgroundRuns.value = { ...(msg.background_runs || {}) }
-        // Post-archive pipelines still in flight. Authoritative like the counts
-        // above: a chat the server no longer lists as running has settled, so
-        // clear a stale 'running' rather than leaving it pulsing forever.
-        applyPostprocessingSnapshot(msg.postprocessing || [])
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -4031,7 +4000,16 @@ export const useProjectStore = defineStore('projects', () => {
             }
           }
           // In-app toast for the document-visible-but-different-chat case.
-          if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+          // A memory pass is the app updating its own memory, not a
+          // conversation the owner started, and the server already refuses its
+          // OS push (`_schedule_push`). Toasting here is what made archiving a
+          // chat pop a "Memory pass · <title>" notification. A pass reports
+          // itself on Home's memory-insight row and on the archived source's
+          // `postprocess` record; only `attention` — blocked on the owner —
+          // earns an interruption anywhere. Keyed on the helper, not the
+          // title: a user project may legitimately be called "Memory".
+          if (!isMemoryPassChat(resultChat)
+            && typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
               chat_id: msg.chat_id,
               title: msg.title || 'ciaobot',
@@ -5456,15 +5434,6 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
 
-      case 'context_entities': {
-        // The user bubble is already there (user_echo precedes the turn).
-        const target = event.turn_index != null
-          ? msgs.find(m => m.role === 'user' && m.turn_index === event.turn_index)
-          : [...msgs].reverse().find(m => m.role === 'user')
-        if (target) target.context_entities = Array.isArray(event.entities) ? event.entities : []
-        break
-      }
-
       case 'model_changed': {
         const chat = chats.value.find(c => c.chat_id === chatId)
         if (chat && event.model) {
@@ -5780,7 +5749,7 @@ export const useProjectStore = defineStore('projects', () => {
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
-    chatPostprocess, chatIsPostprocessing,
+    chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
     // Actions
@@ -5791,7 +5760,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchCompletedProjects, restoreProject,
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, archiveChat, continueArchivedChat, newSession,
-    setChatRetry, stopChatRetry, tryChatRetryNow, retryInsights,
+    setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,

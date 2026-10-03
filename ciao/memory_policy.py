@@ -3,7 +3,7 @@
 The memory system has more than one way to write durable memory, and they do
 not all have the same approval rule. Before this module the copies drifted:
 the architecture said new memory needs review while archive-time extraction
-called ``auto_promote_memory=True``; the memory agent said the typed path
+called ``auto_promote_memory=True``; the retired memory agent said the typed path
 enforces the cap while ``update_region`` documents and implements an advisory
 one; and the unattended capsule said "do not ask" without saying what to do with
 work that *requires* approval.
@@ -15,12 +15,12 @@ promotes a new region fact with no reviewer present; the rows that write one
 live are attended turns a person can steer.
 
 This module is the single machine-readable statement of that policy. The prose
-lives in the stock assets (``ciao/stock/agents/memory.md``,
-``ciao/stock/commands/remember.md``, ``ciao/stock/skills/memory-curation``) and
+lives in the stock assets (``ciao/stock/skills/ciao-memory/SKILL.md``,
+``ciao/stock/commands/remember.md``, ``ciao/stock/schedules.json``) and
 in ``docs/ARCHITECTURE.md``; tests pin every copy here so they cannot drift
 apart again. It is deliberately behavior-free: the accept path in
 ``ciao/memory_proposals.py``, the memory-pass chat in
-``ciao/web/memory_pass.py`` and the curation skill remain the implementation.
+``ciao/web/memory_pass.py`` and the Workspace care schedule prompt remain the implementation.
 
 Two rules the matrix encodes and the whole surface must respect:
 
@@ -133,9 +133,12 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
         summary=(
             "The nightly Workspace care run may consolidate a region at/above "
             "~85% of its cap (merge duplicates, drop expired, move project-scoped "
-            "facts out) under the undo log. It never promotes a NEW region fact, "
-            "never trashes or permanently deletes a note, and defers anything "
-            "that needs a reviewer."
+            "facts out) under the undo log, and may VERIFY a stale note: "
+            "re-stamp one it found still true, or apply a cited whole-note "
+            "replacement, both through the undo log. It never promotes a NEW "
+            "region fact, never retires/trashes or permanently deletes a note, "
+            "and defers anything that needs a reviewer — including a retirement "
+            "verdict, which it files as a note_edit proposal instead of applying."
         ),
         writes_regions=True,
         writes_vault=True,
@@ -186,7 +189,16 @@ CONTEXT_KEYS: tuple[str, ...] = tuple(policy.key for policy in CONTEXT_POLICIES)
 
 @dataclass(frozen=True, slots=True)
 class DeferredAction:
-    """One approval-requiring action an unattended run must defer and report."""
+    """One approval-requiring action an unattended run must defer and report.
+
+    ``action`` names the *judgement*, never the mechanism. An entry may also say
+    what the run is allowed to do on the same subject — retiring a learning whose
+    findings are already settled is not a judgement, and saying so is what keeps
+    the row from reading as a blanket prohibition the engine then breaks every
+    night. What must not appear is an action whose own name is something the run
+    may do: a list that defers what the code then performs teaches a model to
+    route around the deferral.
+    """
 
     action: str
     reason: str
@@ -198,8 +210,57 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
         "New region facts need a reviewer; queue them in Workspace/Memory-Proposals.md.",
     ),
     DeferredAction(
+        "Edit a skill, or promote a lesson into a skill or the AGENTS.md guide body",
+        "A recurring lesson is a routing priority, not permission: file a proposal "
+        "or a [review] draft for a person instead (ciao skill-proposal-add, "
+        "ciao skill-draft-add). Recurrence is how often, never who decided.",
+    ),
+    DeferredAction(
+        "Settle a skill proposal or a skill draft",
+        "Settlement follows verified application or an explicit rejection, and an "
+        "unattended run can verify neither; a run that decided something would "
+        "archive an unanswered question as an answer. ciao.upstream_drafts reads "
+        "the run's own curation lease and refuses approve, create and reject "
+        "alike.",
+    ),
+    DeferredAction(
         "Trash, restore, or permanently delete a vault note",
         "ciao vault review mutations require an attended turn (unattended_forbidden).",
+    ),
+    DeferredAction(
+        "Retire a note a verification found wrong",
+        "A verification may re-stamp a note it read in full, or apply a cited "
+        "whole-note replacement, but retirement is a human decision: note_verification "
+        "imports no delete primitive at all and returns the verdict as a note_edit "
+        "proposal, which only an attended accept or dismiss settles. While that "
+        "proposal waits, the review queue links to it instead of asking the same "
+        "question again.",
+    ),
+    DeferredAction(
+        "Retire one fact inside a note, or retire the note a fact lives in",
+        "The same rule one level in. An entry verification may re-stamp that "
+        "entry's own `[verified:]` date or apply a cited replacement for its exact "
+        "span, and entry_verification imports no delete primitive either; a "
+        "retired entry comes back as a retire_entry proposal whose accept removes "
+        "that one span through the same whole-note receipt, so it is reversible and "
+        "the note's other facts survive. A whole-note retirement stays Vault "
+        "Review's trash and is never reachable from either verification path.",
+    ),
+    DeferredAction(
+        "Judge a learning obsolete, or retire an Active entry the reconciliation "
+        "did not propose",
+        "The judgement is a person's, never a flag's. The nightly run *may* remove "
+        "an Active entry whose every finding is already applied-with-a-verification "
+        "or dismissed — that is settlement, already recorded by a person, and the "
+        "removal is reversible from a receipt — through `ciao learnings-cleanup "
+        "--apply-settled`, which retires only the rows the reconciliation itself "
+        "proposed, never reapproves one, and is capped at "
+        "LEARNINGS_CLEANUP_MAX_ITEMS. What it may not do is remove an entry "
+        "nothing has ever proposed, one whose finding is still open, or one whose "
+        "only destination was an upstream issue: those are judgements, not "
+        "settlements, and they are `ciao learnings-cleanup --apply --approval-file`, "
+        "which refuses without a stated reason and its evidence per row. An "
+        "unattended run never sets `reapprove`.",
     ),
     DeferredAction(
         "Write memory or a project doc in another workspace",
@@ -212,13 +273,18 @@ UNATTENDED_DEFERRED_ACTIONS: tuple[DeferredAction, ...] = (
     ),
     DeferredAction(
         "Open or comment on a public GitHub issue, or run a destructive git operation",
-        "Public and destructive actions need the operator's approval.",
+        "Public and destructive actions need the operator's approval. An upstream "
+        "skill lesson is prepared as a [review] draft and waits for that approval; "
+        "ciao.upstream_drafts refuses approve_draft (and create_new_skill and "
+        "reject_draft) whenever the run holds the vault's curation lease, and "
+        "`ciao skill-draft-approve` / `skill-draft-reject` exit 4 for the same "
+        "reason.",
     ),
 )
 """Dangerous unattended examples, pinned across providers.
 
 The unattended capsule (``ciao/context/capsule.py``) tells the model not to ask
-and to defer; the curation skill encodes the memory-specific half. Tests assert
+and to defer; the Workspace care schedule prompt encodes the memory-specific half. Tests assert
 every one of these resolves to "defer" for both supported providers, so a new
 provider cannot introduce a different unattended rule.
 """
@@ -237,7 +303,8 @@ UNATTENDED_CAPSULE_GUIDANCE = (
     "questions or wait for approval, and do not route around the absent "
     "reviewer. Defer and report in your final output any action that needs "
     "approval: promoting a NEW fact into the always-loaded memory regions, "
-    "trashing or permanently deleting a vault note, writing another "
+    "editing a skill or the AGENTS.md guide body, settling a skill proposal or "
+    "draft, trashing or permanently deleting a vault note, writing another "
     "workspace, creating or moving an automation into another workspace, and "
     "public or destructive git actions."
 )

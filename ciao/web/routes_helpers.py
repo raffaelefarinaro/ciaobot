@@ -7,6 +7,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from ciao.git_proc import EXACT_BYTES
+
 from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger(__name__)
@@ -237,6 +239,15 @@ def _resolve_workspace_path(roots: list[Path], raw: str, allow_fuzzy: bool = Fal
     return resolved
 
 
+# Automated snapshot commits carry a fixed identity so they never depend on the
+# operator's git config (a fresh machine has none). Same values as cli.py,
+# workspace_guide.py and workspace_reroot.py.
+_SNAPSHOT_GIT_IDENTITY: tuple[str, ...] = (
+    "-c", "user.name=Ciaobot",
+    "-c", "user.email=ciaobot@localhost",
+)
+
+
 async def _commit_and_push(workspace: Path, message: str) -> tuple[bool, str]:
     """Stage everything, commit, push. Returns (ok, details).
 
@@ -245,7 +256,7 @@ async def _commit_and_push(workspace: Path, message: str) -> tuple[bool, str]:
     async def _git(*args: str) -> tuple[int, str]:
         result = await asyncio.to_thread(
             subprocess.run,
-            ["git", *args],
+            ["git", *EXACT_BYTES, *args],
             cwd=str(workspace),
             capture_output=True,
             text=True,
@@ -262,7 +273,7 @@ async def _commit_and_push(workspace: Path, message: str) -> tuple[bool, str]:
 
     rc_diff, _ = await _git("diff", "--quiet", "--cached")
     if rc_diff != 0:
-        rc, out = await _git("commit", "-m", message)
+        rc, out = await _git(*_SNAPSHOT_GIT_IDENTITY, "commit", "-m", message)
         if rc != 0:
             return False, f"git commit failed: {out}"
 

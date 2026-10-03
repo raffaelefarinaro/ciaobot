@@ -1,9 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import {
-  ageInWords, candidateLeaf, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel,
+  ageInWords, candidateLeaf, coverageSummary, entryReasonExplanation, entryReasonLabel, orderedSignals, signalChipLabel, signalLabel, signalReasons, signalRowLabel, verificationLabel,
 } from './vaultReviewLabels'
-import type { VaultReviewEvidence } from './types'
+import type { VaultReviewEntryCoverage, VaultReviewEvidence } from './types'
 import { formatAgeDays } from './relativeTime'
+
+/** One note's entry block, with the counts a mixed note would report. */
+function coverage(over: Partial<VaultReviewEntryCoverage> = {}): VaultReviewEntryCoverage {
+  return {
+    entries: 4, checked: 3, exempt: 1, unverified: 1, uncovered: 0, stale: 1,
+    coverage_ratio: 0.7, fully_verified: false,
+    stale_entries: [], more_stale_entries: 0, proposals: [], more_proposals: 0,
+    ...over,
+  }
+}
 
 describe('vault review labels', () => {
   it('names every known detection signal in plain language', () => {
@@ -23,9 +33,89 @@ describe('vault review labels', () => {
     expect(signalChipLabel('stale_horizon')).toBe('Stale horizon')
   })
 
+  it('names the entry-level signal as being about facts inside the note', () => {
+    // "Inside" is the load-bearing word: a note can be current and still hold a
+    // fact nobody checked, and a label that said only "unchecked" would read as
+    // the file-level verdict this signal is not.
+    expect(signalLabel('unverified_entries')).toBe('facts inside it have gone unchecked')
+    expect(signalChipLabel('unverified_entries')).toBe('Facts unchecked inside')
+  })
+
   it('orders signals by how often they mean retire', () => {
     expect(orderedSignals(['weak_provenance', 'unlinked', 'unverified', 'superseded_language', 'zeta']))
       .toEqual(['superseded_language', 'unverified', 'unlinked', 'weak_provenance', 'zeta'])
+    // A "check this" signal sits with `unverified`, not at the end: it is a
+    // re-read, not a disposal, and a reader scanning for retirement candidates
+    // should meet it before the weaker provenance signal.
+    expect(orderedSignals(['unverified_entries', 'weak_provenance']))
+      .toEqual(['unverified_entries', 'weak_provenance'])
+  })
+
+  it('puts the count of due facts on the entry row, and degrades without them', () => {
+    const base: VaultReviewEvidence = {
+      backlinks: [], outbound_links: [], bridge: false, duplicate_group: [], last_update: '', type: 'person', age_days: null,
+    }
+    expect(signalRowLabel('unverified_entries', { ...base, entry_verification: coverage({ stale: 2, unverified: 1 }) }))
+      .toBe('3 facts inside unchecked')
+    expect(signalRowLabel('unverified_entries', { ...base, entry_verification: coverage({ stale: 1, unverified: 0 }) }))
+      .toBe('1 fact inside unchecked')
+    expect(signalRowLabel('unverified_entries', base)).toBe('facts inside unchecked')
+  })
+
+  it('distinguishes the three kinds of entry staleness in words', () => {
+    // A row that showed only the code would leave a reader unable to tell
+    // "nobody ever checked this bullet" from "the last check is two years old" —
+    // two different amounts of work. The coarse summary line below the list is
+    // deliberately blunter, because its `unverified` bucket holds both of the
+    // first two; only the per-card copy can tell them apart.
+    expect(entryReasonLabel('no-stamp')).toBe('never checked')
+    expect(entryReasonLabel('unusable-stamp')).toBe('the check on it is not a usable date')
+    expect(entryReasonLabel('aged')).toBe('last checked too long ago')
+    expect(entryReasonLabel('something_newer')).toBe('something_newer')
+    expect(entryReasonLabel('')).toBe('needs a check')
+  })
+
+  it('explains each entry reason once, in a sentence that carries no numbers', () => {
+    // Every fact sharing a reason shares this sentence, and the panel states it
+    // once per reason rather than once per fact. An `age_days` here would read
+    // as a claim about every fact under the head, so the age stays on its row.
+    expect(entryReasonExplanation('no-stamp'))
+      .toBe('Nobody has recorded a [verified:] check on it, so it carries the note’s date instead of its own.')
+    expect(entryReasonExplanation('unusable-stamp'))
+      .toBe('The [verified:] stamp on it cannot be read as a date.')
+    expect(entryReasonExplanation('aged'))
+      .toBe('Its own check is older than the review horizon.')
+    // A reason this client has no words for is shown by its label alone. A guess
+    // at a newer server's vocabulary would be a claim nobody wrote.
+    expect(entryReasonExplanation('something_newer')).toBe('')
+    expect(entryReasonExplanation('')).toBe('')
+  })
+
+  it('summarises coverage in counts, and never as a percentage', () => {
+    const base: VaultReviewEvidence = {
+      backlinks: [], outbound_links: [], bridge: false, duplicate_group: [], last_update: '', type: 'person', age_days: null,
+    }
+    expect(coverageSummary({ ...base, entry_verification: coverage() }))
+      .toBe('4 facts in the note · 1 past due · 1 not verified · 1 recorded as events')
+    // A low share is normal — a note is mostly frontmatter, headings and blank
+    // lines — so the ratio is deliberately absent from the sentence.
+    expect(coverageSummary({ ...base, entry_verification: coverage({ coverage_ratio: 0.12 }) }))
+      .not.toContain('%')
+    // Prose is named, because it is the case a reader has to act on and the only
+    // one the counts alone would not show.
+    expect(coverageSummary({ ...base, entry_verification: coverage({ uncovered: 1 }) }))
+      .toContain('1 block of prose not read as facts')
+  })
+
+  it('says a note with no list items is unmeasured rather than clean', () => {
+    const base: VaultReviewEvidence = {
+      backlinks: [], outbound_links: [], bridge: false, duplicate_group: [], last_update: '', type: 'person', age_days: null,
+    }
+    expect(coverageSummary({ ...base, entry_verification: coverage({ entries: 0, checked: 0, exempt: 0, stale: 0, unverified: 0, uncovered: 1 }) }))
+      .toBe('No facts written as list items — 1 block of prose this check could not read')
+    expect(coverageSummary({ ...base, entry_verification: coverage({ entries: 0, checked: 0, exempt: 0, stale: 0, unverified: 0, uncovered: 0 }) }))
+      .toBe('No facts in this note to check')
+    expect(coverageSummary(base)).toBe('')
   })
 
   it('puts the age and the limit on an unverified row, and degrades without them', () => {

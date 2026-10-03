@@ -4,14 +4,18 @@ plus event-broadcast coverage for project CRUD."""
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ArchiveOutcome, ProjectChatManager
@@ -37,15 +41,27 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+async def _release_after(
+    blockers: list[threading.Event], delay: float
+) -> None:
+    """Release saturated pool workers after *delay* seconds.
+
+    Used by the #942 regression test so the old fixed-budget poll would expire
+    while the pool is still saturated, independently of the waiter under test.
+    """
+    await asyncio.sleep(delay)
+    for event in blockers:
+        event.set()
+
+
 class _EventCapture:
-    """Test helper: registers itself as an EventsHub subscriber by inserting
-    a plain asyncio.Queue into the hub's `_subs` set, so synchronous publishes
-    land directly in `events` for assertion."""
+    """Test helper: attaches an EventsHub subscription so synchronous
+    publishes land directly in its queue for assertion."""
 
     def __init__(self, pcm: ProjectChatManager) -> None:
         self._pcm = pcm
-        self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
-        pcm._events._subs.add(self.queue)
+        self._subscription = pcm._events.attach()
+        self.queue = self._subscription._queue
 
     def drain(self) -> list[dict]:
         out: list[dict] = []
@@ -218,37 +234,6 @@ def test_delete_project_allows_manual_project_without_vault_folder(tmp_path: Pat
     assert p.project_id not in pcm._projects
 
 
-@pytest.mark.asyncio
-async def test_archive_postprocess_runs_insights_for_all_chats(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("insights-project", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="insights chat")
-    calls: list[dict] = []
-
-    async def fake_pipeline(job: object, inputs: dict, **kwargs: object) -> None:
-        calls.append(inputs)
-
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", fake_pipeline)
-
-    pcm.run_archive_postprocess(
-        chat.chat_id,
-        ArchiveOutcome(
-            path=tmp_path / "archive.md",
-            session_id="session-1",
-            turn_count=1,
-            filtered_jsonl="filtered transcript",
-        ),
-        chat,
-        project,
-    )
-    await asyncio.sleep(0)
-
-    assert bool(calls) is True
-
-
 # ── Empty-chat cleanup ──────────────────────────────────────────────────
 
 
@@ -337,6 +322,41 @@ async def test_archive_chat_publishes_event(tmp_path: Path) -> None:
     assert len(archived) == 1
     assert archived[0]["chat_id"] == chat.chat_id
     assert archived[0]["project_id"] == project.project_id
+
+
+async def test_archiving_a_run_chat_clears_its_needs_you_flag(tmp_path: Path) -> None:
+    """A "skipped" run points the operator at its chat; archiving it answers that.
+
+    Left up, the Automations page kept saying "last run needs you — check the
+    chat" about a chat that was archived, until the next run (a week later for
+    a weekly entry). Only the entry whose last run was this chat is touched.
+    """
+    pcm = _make_manager(tmp_path)
+    store = ScheduleStore(tmp_path / ".runtime")
+    pcm.schedule_store = store
+    project = pcm.create_project("2026-q3-sched", workspace="work")
+    chat = pcm.create_chat(project.project_id)
+    other = pcm.create_chat(project.project_id)
+
+    def _entry(run_chat: str) -> str:
+        entry = store.create(
+            daily_time_utc="06:00", prompt="Brief.", model="", mode="auto", chat_id=0,
+            web_project_id=project.project_id, workspace="work",
+        )
+        entry.last_run_chat_id = run_chat
+        entry.last_status = "skipped"
+        store.replace(entry)
+        return entry.schedule_id
+
+    archived_run = _entry(chat.chat_id)
+    other_run = _entry(other.chat_id)
+
+    cap = _EventCapture(pcm)
+    await pcm.archive_chat(chat.chat_id)
+
+    assert store.get(archived_run).last_status == "ok"
+    assert store.get(other_run).last_status == "skipped"
+    assert any(e.get("type") == "schedules_changed" for e in cap.drain())
 
 
 async def test_archive_route_returns_the_postprocess_lifecycle(
@@ -456,7 +476,6 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
 
     monkeypatch.setattr(async_reads, "keyed_lock", _recording_keyed_lock)
     monkeypatch.setattr(fts_search, "index_file", _recording_index_file)
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", _noop_pipeline)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
@@ -464,22 +483,126 @@ async def test_archive_postprocess_indexes_under_the_shared_write_lock(
         chat.chat_id,
         ArchiveOutcome(
             path=archive_path,
-            session_id="session-index",
             turn_count=1,
-            filtered_jsonl=None,
         ),
         chat,
         project,
     )
-    # The index write is dispatched as a tracked background task; let it run.
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if indexed:
-            break
+    # The index write is dispatched as a tracked background task. Wait on that
+    # task itself (not a fixed sleep budget): under a loaded runner the read can
+    # be admitted late, and the old 500 ms poll expired before it ran (#942).
+    pending = [
+        t
+        for t in pcm._detached_tasks
+        if t.get_name() == f"archive-index-{chat.chat_id}"
+    ]
+    assert pending, "postprocess did not schedule the index task"
+    await asyncio.gather(*pending)
 
     assert indexed == [archive_path], "archive indexing did not run"
     assert locks, "archive indexing did not take the shared FTS write lock"
     assert locks[0] == f"fts-index:{fts_search.get_db_path()}"
+
+
+@pytest.mark.asyncio
+async def test_archive_index_waits_for_the_detached_task_under_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#942: the wait is on the detached task, not a fixed time budget.
+
+    Reproduces the Windows CI flake on a fast machine: saturate the shared,
+    bounded vault-read executor so the archive index read cannot be admitted
+    within the old 500 ms poll, then run the real postprocess body. The fixed
+    budget would assert while indexing is merely late; awaiting the tracked
+    ``archive-index-<chat>`` task completes once the pool drains.
+    """
+    from ciao import async_reads, fts_search
+
+    async_reads.reset_vault_read_executor()
+    blockers: list[threading.Event] = []
+    submitted: list[concurrent.futures.Future[None]] = []
+    release_task: asyncio.Task[None] | None = None
+    try:
+        pcm = _make_manager(tmp_path)
+        project = pcm.create_project("archive-index-load", workspace="work")
+        chat = pcm.create_chat(project.project_id, title="archive index load chat")
+
+        locks: list[str] = []
+        indexed: list[Path] = []
+        real_keyed_lock = async_reads.keyed_lock
+
+        def _recording_keyed_lock(key: str):
+            locks.append(key)
+            return real_keyed_lock(key)
+
+        def _recording_index_file(conn, vault_root, file_path, *, path_base=None):
+            indexed.append(Path(file_path))
+            return True
+
+        monkeypatch.setattr(async_reads, "keyed_lock", _recording_keyed_lock)
+        monkeypatch.setattr(fts_search, "index_file", _recording_index_file)
+
+        executor = async_reads.vault_read_executor()
+        for i in range(executor.max_backlog):
+            event = threading.Event()
+            submitted.append(
+                executor.submit(
+                    f"block-{i}",
+                    lambda e=event: e.wait(),
+                    coalesce=False,
+                )
+            )
+            blockers.append(event)
+
+        archive_path = tmp_path / "archive.md"
+        archive_path.write_text("# chat\n\nfindme archive body\n", encoding="utf-8")
+        pcm.run_archive_postprocess(
+            chat.chat_id,
+            ArchiveOutcome(
+                path=archive_path,
+                turn_count=1,
+            ),
+            chat,
+            project,
+        )
+        pending = [
+            t
+            for t in pcm._detached_tasks
+            if t.get_name() == f"archive-index-{chat.chat_id}"
+        ]
+        assert pending, "postprocess did not schedule the index task"
+
+        # Keep the pool saturated for longer than the old 500 ms budget.
+        # Releasing from a background coroutine (not before the wait) means a
+        # regression to the old 50 x 10 ms poll asserts on an empty ``indexed``
+        # here instead of passing by accident.
+        release_task = asyncio.ensure_future(_release_after(blockers, 0.75))
+
+        # The pool is saturated, so the index read cannot have run yet.
+        await asyncio.sleep(0.05)
+        assert indexed == [], "indexed before the saturated pool was released"
+
+        # The wait is on the tracked index task, never the clock.
+        await asyncio.gather(*pending)
+
+        assert indexed == [archive_path], "archive indexing did not run"
+        assert locks, "archive indexing did not take the shared FTS write lock"
+        assert locks[0] == f"fts-index:{fts_search.get_db_path()}"
+    finally:
+        if release_task is not None:
+            if not release_task.done():
+                release_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await release_task
+        # Always release every worker before tearing down, then join them:
+        # ``reset_vault_read_executor`` only cancels queued jobs and waits up
+        # to two seconds, so a still-running blocker would survive it.
+        for event in blockers:
+            event.set()
+        for future in submitted:
+            with contextlib.suppress(Exception):
+                future.result()
+        async_reads.reset_vault_read_executor()
 
 
 def test_synchronous_archive_indexing_is_best_effort(
@@ -501,7 +624,6 @@ def test_synchronous_archive_indexing_is_best_effort(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(fts_search, "index_file", _explode)
-    monkeypatch.setattr("ciao.insights.run_archive_pipeline", _noop_pipeline)
 
     archive_path = tmp_path / "archive.md"
     archive_path.write_text("# chat\n\nbody\n", encoding="utf-8")
@@ -512,14 +634,8 @@ def test_synchronous_archive_indexing_is_best_effort(
         chat.chat_id,
         ArchiveOutcome(
             path=archive_path,
-            session_id="session-best-effort",
             turn_count=1,
-            filtered_jsonl=None,
         ),
         chat,
         project,
     )
-
-
-async def _noop_pipeline(**_kwargs: object) -> None:
-    return None

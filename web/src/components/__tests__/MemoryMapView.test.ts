@@ -63,6 +63,35 @@ function graphPayload() {
   }
 }
 
+function checkedPayload() {
+  const base = (over: Record<string, unknown> = {}) => ({
+    tags: [], aliases: [], description: '', workspace: 'personal', degree: 1,
+    mtime: 1, updated: '2025-01-01', age_days: 640, threshold_days: 180, ...over,
+  })
+  return {
+    nodes: [
+      base({
+        id: 'checked', title: 'Checked', type: 'note', stale: false,
+        check: { outcome: 'still_valid', checked_at: '2026-09-28', retry_after: '2026-10-28', coverage: 'complete', reason: '', citations: 3, receipt_id: 'mrcpt_1', settled: true, pending: false, proposal_id: '', conflicted: false },
+      }),
+      base({
+        id: 'partial', title: 'Partial', type: 'note', stale: false,
+        check: { outcome: 'unverified', checked_at: '2026-09-28', retry_after: '2026-10-28', coverage: 'partial', reason: 'a connector was down', citations: 0, receipt_id: '', settled: true, pending: false, proposal_id: '', conflicted: false },
+      }),
+      base({
+        id: 'pending', title: 'Pending', type: 'note', stale: false,
+        check: { outcome: 'retire', checked_at: '2026-09-28', retry_after: '2026-10-28', coverage: 'complete', reason: 'the office moved', citations: 2, receipt_id: '', settled: true, pending: true, proposal_id: 'p-1', conflicted: false },
+      }),
+      base({
+        id: 'conflicted', title: 'Conflicted', type: 'note', stale: true,
+        check: { outcome: 'retire', checked_at: '2026-08-01', retry_after: '2026-08-31', coverage: 'complete', reason: 'the office moved', citations: 2, receipt_id: '', settled: false, pending: false, proposal_id: 'p-2', conflicted: true },
+      }),
+      base({ id: 'untouched', title: 'Untouched', type: 'note', stale: true, check: null }),
+    ],
+    edges: [],
+  }
+}
+
 describe('MemoryMapView keyboard and touch access', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -692,6 +721,14 @@ describe('MemoryMapView sections', () => {
         ? { ok: true, status: 200, text: async () => guide } as unknown as Response
         : { ok: false, status: 404, text: async () => '' } as unknown as Response
     }))
+    // The count uses the viewer's locale (`toLocaleString()`), so pin one here:
+    // otherwise the machine's decides, and en-CH renders 3000 as `3'000`.
+    const toLocaleString = Number.prototype.toLocaleString
+    vi.spyOn(Number.prototype, 'toLocaleString').mockImplementation(
+      function (this: number, locales?: Intl.LocalesArgument, options?: Intl.NumberFormatOptions) {
+        return toLocaleString.call(this, locales ?? 'en-US', options)
+      },
+    )
     const { wrapper } = await mountSection('review')
     await flushPromises()
 
@@ -704,6 +741,112 @@ describe('MemoryMapView sections', () => {
     // 20 chars of entry plus the trailing newline, against the 3000 default cap.
     expect(regions[0]!.get('.guide-region-count').text()).toBe('21 / 3,000')
     expect(regions[0]!.get('[role="meter"]').attributes('aria-valuenow')).toBe('21')
+    wrapper.unmount()
+  })
+})
+
+// ── A note somebody has already checked ─────────────────────────────────────
+//
+// The map's `stale` flag is the age rule, and the managed pass only ever
+// CLEARS it. A note in its cooldown, or one a proposal is waiting on, is not
+// "unchecked" — the tile has to say which, or the flag's absence looks like the
+// note being quietly forgotten.
+
+describe('MemoryMapView verification state', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    apiGet.mockReset()
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/api/vault/graph')) return Promise.resolve(checkedPayload())
+      return Promise.resolve({})
+    })
+    const store = useProjectStore()
+    store.workspaces = [{ name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' }]
+    store.activeWorkspace = 'personal'
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+  })
+
+  afterEach(async () => {
+    document.body.innerHTML = ''
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  async function selectNote(id: string) {
+    const wrapper = await mountView('/memory/map')
+    await flushPromises()
+    await nextTick()
+    useMemoryMapStore().selectNode(id)
+    await nextTick()
+    await flushPromises()
+    return wrapper
+  }
+
+  it('leads the tile with a pending proposal and a link to it, not "needs review"', async () => {
+    const wrapper = await selectNote('pending')
+
+    const lead = wrapper.get('.mm-tile .mm-tile-pending').text()
+    expect(lead).toContain('Being checked')
+    expect(lead).toContain('2026-09-28')
+    expect(wrapper.get('.mm-tile-pending a').text()).toBe('Open the proposal')
+    // Being asked about is not being ignored, and saying "unchecked" here would
+    // link the operator to a queue that has stopped asking on purpose.
+    expect(wrapper.find('.mm-tile-stale').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows a recorded verdict, its coverage and when the note is due again', async () => {
+    const wrapper = await selectNote('checked')
+
+    const lead = wrapper.get('.mm-tile .mm-tile-checked').text()
+    expect(lead).toContain('Checked 2026-09-28')
+    expect(lead).toContain('the note is still true')
+    expect(lead).toContain('covering the whole note')
+    expect(lead).toContain('2026-10-28')
+    wrapper.unmount()
+  })
+
+  it('says a partial check covered part of the note', async () => {
+    const wrapper = await selectNote('partial')
+
+    expect(wrapper.get('.mm-tile-checked').text()).toContain('covering part of the note')
+    wrapper.unmount()
+  })
+
+  it('says a dead proposal means the note is unchecked again', async () => {
+    const wrapper = await selectNote('conflicted')
+
+    expect(wrapper.get('.mm-tile-stale').text())
+      .toContain('A verification is out of date for this note')
+    // Its accept would refuse as a conflict, so the tile must not offer a link
+    // to a card nobody can use.
+    expect(wrapper.find('.mm-tile-pending').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('still calls a never-checked note out', async () => {
+    const wrapper = await selectNote('untouched')
+
+    expect(wrapper.get('.mm-tile-stale').text()).toContain('Unchecked for')
+    expect(wrapper.find('.mm-tile-checked').exists()).toBe(false)
+    expect(wrapper.find('.mm-tile-pending').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('counts only the note that is genuinely unchecked', async () => {
+    const wrapper = await mountView('/memory/map')
+    await flushPromises()
+    await nextTick()
+
+    const mm = useMemoryMapStore()
+    // Three carry a check that settles their revision and the server cleared
+    // their flags, so the toolbar must not re-add them. The fourth is a dead
+    // proposal — the note really IS unchecked again — so it belongs here.
+    expect(mm.staleNotes.map(n => n.title)).toEqual(['Conflicted', 'Untouched'])
+    expect(wrapper.get('.mm-toolbar-stale').text()).toContain('2')
     wrapper.unmount()
   })
 })

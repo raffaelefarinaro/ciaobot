@@ -84,6 +84,7 @@ describe('HomeReviewSummary', () => {
 
   it('counts only the active workspace and refreshes on scope changes', async () => {
     const wrapper = mount(HomeReviewSummary)
+    expect(wrapper.get('#home-review-title').text()).toBe('At a glance')
     // Up-to-date queues drop out; only what needs a look is listed.
     let titles = wrapper.findAll('.home-review-title').map(node => node.text())
     expect(titles).toEqual(['1 memory proposal', '1 active automation'])
@@ -185,9 +186,6 @@ describe('HomeReviewSummary', () => {
     expect(rows[1].find('.home-review-detail').text()).toContain('personal briefing · next')
     expect(wrapper.find('.home-review-icon').exists()).toBe(false)
 
-    await wrapper.get('.home-review-link').trigger('click')
-    expect(router.push).toHaveBeenCalledWith('/memory')
-
     await rows[1].trigger('click')
     expect(router.push).toHaveBeenCalledWith('/schedules')
     wrapper.unmount()
@@ -211,7 +209,7 @@ describe('HomeReviewSummary', () => {
 
     const switchChat = vi.spyOn(projects, 'switchChat').mockResolvedValue(undefined)
     const wrapper = mount(HomeReviewSummary)
-    expect(wrapper.findAll('.home-review-link').map(l => l.text())).toEqual(['Open Memory'])
+    expect(wrapper.text()).not.toContain('Open Memory')
     expect(wrapper.text()).not.toContain('memory pass')
     expect(switchChat).not.toHaveBeenCalled()
     wrapper.unmount()

@@ -7,11 +7,12 @@ import pytest
 
 from ciao import cli
 from ciao.linux_service import render_service
+from ciao.os_support.limits import SERVER_NOFILE_TARGET
+from ciao.os_support.private import is_private
 
 
 def test_linux_setup_preserves_configuration_without_desktop_side_effects(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.sys, "platform", "linux")
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("CIAO_ENGINE_PATH", raising=False)
     workspace = tmp_path / "workspace"
     args = ["setup", "--workspace", str(workspace), "--port", "8544"]
@@ -19,7 +20,7 @@ def test_linux_setup_preserves_configuration_without_desktop_side_effects(tmp_pa
     config = (workspace / ".env").read_text()
     assert "PWA_PORT=8544" in config
     assert "PWA_AUTH_REQUIRED=true" in config
-    assert (workspace / ".env").stat().st_mode & 0o777 == 0o600
+    assert is_private(workspace / ".env")
     assert not (tmp_path / "LaunchAgents").exists()
     assert not (tmp_path / "Library").exists()
     assert not (tmp_path / "Applications").exists()
@@ -37,6 +38,7 @@ def test_linux_rejects_launchd_before_creating_workspace(tmp_path, monkeypatch):
     assert not workspace.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a systemd unit names POSIX paths (/srv/ciao), which are not absolute on Windows")
 def test_service_keeps_virtualenv_and_escapes_systemd_expansions(tmp_path):
     python = tmp_path / "venv %n $HOME" / "bin" / "python"
     python.parent.mkdir(parents=True)
@@ -52,6 +54,7 @@ def test_service_keeps_virtualenv_and_escapes_systemd_expansions(tmp_path):
     assert 'WorkingDirectory=/srv/ciao "personal" %%n' in unit
     assert 'Environment="HOME=/var/lib/ciaobot"' in unit
     assert "KillMode=control-group" in unit
+    assert f"LimitNOFILE={SERVER_NOFILE_TARGET}" in unit
     assert "EnvironmentFile=" not in unit  # dotenv owns parsing of the workspace file
 
 
@@ -67,6 +70,7 @@ def test_service_refuses_invalid_values(overrides):
         render_service(**kwargs)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a systemd unit names POSIX paths (/srv/ciao), which are not absolute on Windows")
 def test_cli_renders_only_a_unit(capsys):
     assert cli.main([
         "linux-service", "--workspace", "/srv/ciao", "--user", "ciaobot",

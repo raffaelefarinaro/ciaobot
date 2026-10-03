@@ -1,0 +1,38 @@
+[
+  {
+    "id": "learnings-cleanup",
+    "revision": 1,
+    "since_version": "0.0.0",
+    "scope": "workspace",
+    "title": "Review this workspace's Learnings.md entries",
+    "why": "An entry only retires when a finding filed against it has been verified into a skill or rejected by a person. The entries no proposal has ever linked are exactly the ones nothing is watching, and they can only be judged by reading them.",
+    "detector": "learnings-cleanup-review-needed",
+    "completion_check": "learnings-cleanup-review-recorded",
+    "prompt_resource": "prompts/learnings-cleanup-1.md",
+    "depends_on": []
+  },
+  {
+    "id": "unrehomed-people",
+    "revision": 1,
+    "since_version": "0.0.0",
+    "scope": "install",
+    "title": "Re-home person notes a workspace-wide curation run misfiled",
+    "why": "An older engine's memory curation ran once for the whole install with one workspace as its write target, so work contacts landed in that workspace's People/ folder. The routing bug is fixed, but the backlog is still on disk, and moving a note means moving every reference to it. This task is offered only when the migration's own plan finds a tag-obvious cross-workspace move — never merely because no re-homing has been recorded, which is true of every install that never needed one. `ciao os-audit` reports that broader condition as an advisory notice whatever this card says.",
+    "detector": "unrehomed-people-review-needed",
+    "completion_check": "unrehomed-people-rehome-recorded",
+    "prompt_resource": "prompts/unrehomed-people-1.md",
+    "depends_on": []
+  },
+  {
+    "id": "vault-relocate",
+    "revision": 1,
+    "since_version": "0.0.0",
+    "scope": "workspace",
+    "title": "Move this workspace's vault into its standard folder",
+    "why": "The workspace registry says this workspace's vault lives outside the folder this install's layout puts it in — usually a vault adopted before the per-workspace subfolder convention, or hand-pointed at an external directory. `ciao vault-relocate` moves it and updates the registry itself, reversibly. This card is offered only when the vault is actually there and actually misplaced, and it is done only when a completed relocation is recorded and the layout still agrees: `--undo` removes that receipt, so undoing the move brings the work back rather than leaving it hidden. `ciao os-audit` reports the same condition independently, and dismissing this card does not silence it.",
+    "detector": "vault-relocate-review-needed",
+    "completion_check": "vault-relocate-recorded",
+    "prompt_resource": "prompts/vault-relocate-1.md",
+    "depends_on": []
+  }
+]

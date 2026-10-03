@@ -1,16 +1,36 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from ciao import sync_skills
+import pytest
+
+from ciao import cli, sync_skills
+from ciao.os_support.links import is_link, link_dir, link_source
 
 
 def _write(path: Path, text: str = "content\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="")
+
+
+def _dangling_dir_link(target: Path, link: Path, *, relative_to: Path | None = None) -> None:
+    """A directory link whose target is gone (a Windows junction needs it to exist first)."""
+    target.mkdir(parents=True, exist_ok=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link_dir(target, link, relative_to=relative_to)
+    target.rmdir()
+
+
+def _user_file_symlink(link: Path, target: Path) -> None:
+    """A file symlink the user made; a Windows account without the privilege cannot."""
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"cannot create a file symlink here: {exc}")
 
 
 def test_upstream_skills_removed(tmp_path: Path) -> None:
@@ -82,7 +102,7 @@ def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     claude_skill = workspace / ".claude" / "skills" / "demo"
-    assert claude_skill.is_symlink()
+    assert is_link(claude_skill)
     assert claude_skill.resolve() == (workspace / "skills" / "demo").resolve()
     assert result.custom_installed == 1
 
@@ -96,14 +116,14 @@ def test_sync_restamps_stale_cap_markers(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     guide = workspace / "AGENTS.md"
-    guide.write_text("# Guide\n\n", encoding="utf-8")
+    guide.write_text("# Guide\n\n", encoding="utf-8", newline="")
     ensure_regions(guide)
     stamped = re.sub(
         r"(<!-- ciao:memory:start cap=)\d+( -->)",
         r"\g<1>2200\g<2>",
         guide.read_text(encoding="utf-8"),
     )
-    guide.write_text(stamped, encoding="utf-8")
+    guide.write_text(stamped, encoding="utf-8", newline="")
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -118,14 +138,14 @@ def test_sync_preserves_agents_canonical_upstream_skill(tmp_path: Path) -> None:
     _write(canonical / "SKILL.md", "# Upstream package\n")
     claude_link = workspace / ".claude" / "skills" / "upstream"
     claude_link.parent.mkdir(parents=True)
-    claude_link.symlink_to(canonical)
+    link_dir(canonical, claude_link)
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     assert canonical.is_dir()
     assert not canonical.is_symlink()
     assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "# Upstream package\n"
-    assert claude_link.is_symlink()
+    assert is_link(claude_link)
     assert claude_link.resolve() == canonical.resolve()
 
 
@@ -143,16 +163,22 @@ def test_sync_prunes_legacy_codex_agents_skills_symlinks(tmp_path: Path) -> None
     agents_skills = workspace / ".agents" / "skills"
     agents_skills.mkdir(parents=True)
     # Live Codex-era leftovers in both historical shapes.
-    (agents_skills / "kept").symlink_to("../../skills/kept")
-    (agents_skills / "also-kept").symlink_to("../../.claude/skills/also-kept")
+    link_dir(workspace / "skills" / "kept", agents_skills / "kept", relative_to=agents_skills)
+    _dangling_dir_link(
+        workspace / ".claude" / "skills" / "also-kept",
+        agents_skills / "also-kept",
+        relative_to=agents_skills,
+    )
     # Broken leftover: its skill is gone, so sync cannot relink it.
-    (agents_skills / "stale").symlink_to("../../skills/stale")
+    _dangling_dir_link(
+        workspace / "skills" / "stale", agents_skills / "stale", relative_to=agents_skills
+    )
     # User-owned content sync must never touch.
     _write(agents_skills / "upstream" / "SKILL.md", "# Upstream package\n")
-    (agents_skills / "elsewhere").symlink_to("/tmp/somewhere-else")
+    _dangling_dir_link(tmp_path / "outside" / "somewhere-else", agents_skills / "elsewhere")
     # Foreign same-name links must survive: same basename and a /skills/
     # segment, but outside this workspace's catalogs.
-    (agents_skills / "foreign").symlink_to("/tmp/skills/foreign")
+    _dangling_dir_link(tmp_path / "outside" / "skills" / "foreign", agents_skills / "foreign")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -161,16 +187,14 @@ def test_sync_prunes_legacy_codex_agents_skills_symlinks(tmp_path: Path) -> None
     assert remaining == {"upstream", "elsewhere", "foreign"}
     assert (agents_skills / "upstream" / "SKILL.md").is_file()
     # The live skill itself still syncs into the maintained catalog.
-    assert (workspace / ".claude" / "skills" / "kept").is_symlink()
+    assert is_link(workspace / ".claude" / "skills" / "kept")
 
 
 def test_sync_workspace_skills_prunes_orphaned_custom_links(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "kept" / "SKILL.md")
     (workspace / ".claude" / "skills").mkdir(parents=True)
-    (workspace / ".claude" / "skills" / "stale").symlink_to(
-        workspace / "skills" / "stale"
-    )
+    _dangling_dir_link(workspace / "skills" / "stale", workspace / ".claude" / "skills" / "stale")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -188,10 +212,10 @@ def test_sync_workspace_skills_mirrors_subagents_and_commands(tmp_path: Path) ->
 
     agent_link = workspace / ".claude" / "agents" / "research.md"
     command_link = workspace / ".claude" / "commands" / "remember.md"
-    assert agent_link.is_symlink()
-    assert agent_link.resolve() == (workspace / "subagents" / "research.md").resolve()
-    assert command_link.is_symlink()
-    assert command_link.resolve() == (workspace / "commands" / "remember.md").resolve()
+    assert is_link(agent_link)
+    assert link_source(agent_link) == (workspace / "subagents" / "research.md").resolve()
+    assert is_link(command_link)
+    assert link_source(command_link) == (workspace / "commands" / "remember.md").resolve()
     assert (workspace / ".claude" / "agents" / "stock.md").is_file()
     assert result.agents_installed == 1
     assert result.commands_installed >= 1
@@ -221,8 +245,8 @@ def test_sync_workspace_skills_migrates_legacy_stock_commands(tmp_path: Path) ->
     assert "ciao:memory" in text
     assert "# Old stock remember" not in text
     link = workspace / ".claude" / "commands" / "remember.md"
-    assert link.is_symlink()
-    assert link.resolve() == canonical.resolve()
+    assert is_link(link)
+    assert link_source(link) == canonical.resolve()
 
 
 def _stock_command_bytes(name: str) -> bytes:
@@ -257,7 +281,7 @@ def test_unmodified_stock_command_is_refreshed(tmp_path: Path) -> None:
     old = b"# Old stock remember\n"
     _write(canonical, old.decode("utf-8"))
     marker = workspace / "commands" / "remember.md.ciao-stock-command"
-    marker.write_text(hashlib.sha256(old).hexdigest(), encoding="utf-8")
+    marker.write_text(hashlib.sha256(old).hexdigest(), encoding="utf-8", newline="")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -277,7 +301,7 @@ def test_edited_stock_command_is_left_alone_and_unmarked(tmp_path: Path) -> None
     _write(canonical, "# My edit\n")
     marker = workspace / "commands" / "remember.md.ciao-stock-command"
     # Hash of bytes other than what is on disk: simulates a user edit.
-    marker.write_text(hashlib.sha256(b"something else\n").hexdigest(), encoding="utf-8")
+    marker.write_text(hashlib.sha256(b"something else\n").hexdigest(), encoding="utf-8", newline="")
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -391,12 +415,12 @@ def test_stale_stock_command_is_pruned_only_when_unmodified(tmp_path: Path) -> N
     gone_bytes = b"# Once packaged\n"
     gone.write_bytes(gone_bytes)
     (commands_dir / "gone.md.ciao-stock-command").write_text(
-        hashlib.sha256(gone_bytes).hexdigest(), encoding="utf-8"
+        hashlib.sha256(gone_bytes).hexdigest(), encoding="utf-8", newline=""
     )
     gone_edited = commands_dir / "gone-edited.md"
     gone_edited.write_bytes(b"# My edit of a stale command\n")
     (commands_dir / "gone-edited.md.ciao-stock-command").write_text(
-        hashlib.sha256(b"different bytes\n").hexdigest(), encoding="utf-8"
+        hashlib.sha256(b"different bytes\n").hexdigest(), encoding="utf-8", newline=""
     )
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
@@ -413,7 +437,7 @@ def test_symlinked_stock_command_is_ignored(tmp_path: Path) -> None:
     other = workspace / "commands" / "my-own-remember.md"
     _write(other, "# My own command\n")
     commands_dir = workspace / "commands"
-    (commands_dir / "remember.md").symlink_to(other)
+    _user_file_symlink(commands_dir / "remember.md", other)
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
@@ -429,7 +453,7 @@ def test_symlinked_stock_command_marker_is_never_followed(
     commands_dir = tmp_path / "workspace" / "commands"
     commands_dir.mkdir(parents=True)
     target = tmp_path / "secret.env"
-    target.write_text("SECRET=1", encoding="utf-8")
+    target.write_text("SECRET=1", encoding="utf-8", newline="")
     for present in (True, False):
         canonical = commands_dir / "remember.md"
         if present:
@@ -439,7 +463,7 @@ def test_symlinked_stock_command_marker_is_never_followed(
         marker = commands_dir / "remember.md.ciao-stock-command"
         if marker.exists() or marker.is_symlink():
             marker.unlink()
-        marker.symlink_to(target)
+        _user_file_symlink(marker, target)
 
         sync_skills.sync_workspace_skills(tmp_path / "workspace", refresh_upstream=False)
 
@@ -482,7 +506,7 @@ def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     link = workspace / ".claude" / "skills" / "web-research"
-    assert link.is_symlink()
+    assert is_link(link)
     assert link.resolve() == (workspace / "skills" / "web-research").resolve()
 
 
@@ -518,7 +542,7 @@ def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
                 },
             }
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     canonical = workspace / ".agents" / "skills" / "upstream"
     _write(canonical / "SKILL.md", "# Upstream\n")
@@ -529,32 +553,34 @@ def test_sync_ignores_skills_lock(tmp_path: Path) -> None:
     assert result.upstream_pruned == 0
 
 
-def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:
+def test_sync_installs_memory_skill_without_stock_agents(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    memory = workspace / ".claude" / "agents" / "memory.md"
-    assert memory.is_file()
-    assert sync_skills._is_managed_stock_agent(memory)
-    content = memory.read_text(encoding="utf-8")
-    assert "ciao vault search" in content
-    assert "vault_search" not in content
-    assert result.stock_agents_installed == 3
+    assert (workspace / ".claude" / "skills" / "ciao-memory" / "SKILL.md").is_file()
+    assert result.stock_agents_installed == 0
+    assert not list((workspace / ".claude" / "agents").glob("*.md"))
 
 
-def test_sync_refreshes_managed_stock_agent(tmp_path: Path) -> None:
+def test_sync_prunes_retired_memory_agent_on_upgrade(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     memory = workspace / ".claude" / "agents" / "memory.md"
     _write(memory, "# Old memory agent\n")
     sync_skills._mark_stock_agent(memory)
 
+    _write(
+        workspace / ".opencode" / "agents" / "memory.md",
+        f"{sync_skills.OPENCODE_GENERATED_MARKER}\n# Old memory projection\n",
+    )
+
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    content = memory.read_text(encoding="utf-8")
-    assert "ciao vault search" in content
-    assert "vault_search" not in content
+    assert not memory.exists()
+    assert not sync_skills._stock_agent_marker(memory).exists()
+    assert not (workspace / ".opencode" / "agents" / "memory.md").exists()
+    assert (workspace / ".claude" / "skills" / "ciao-memory" / "SKILL.md").exists()
 
 
 def test_stale_stock_agent_copy_is_pruned(tmp_path: Path) -> None:
@@ -570,6 +596,32 @@ def test_stale_stock_agent_copy_is_pruned(tmp_path: Path) -> None:
     assert not stale.exists()
     assert hand_made.is_file()
     assert result.stock_agents_pruned == 1
+
+
+def test_sync_prunes_retired_stock_agents_but_preserves_custom_ones(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    for name in ("researcher", "secretary"):
+        stock = workspace / ".claude" / "agents" / f"{name}.md"
+        _write(stock, f"# Old {name} stock agent\n")
+        sync_skills._mark_stock_agent(stock)
+        _write(
+            workspace / ".opencode" / "agents" / f"{name}.md",
+            f"{sync_skills.OPENCODE_GENERATED_MARKER}\n# Old {name} projection\n",
+        )
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    for name in ("researcher", "secretary"):
+        assert not (workspace / ".claude" / "agents" / f"{name}.md").exists()
+        assert not (workspace / ".opencode" / "agents" / f"{name}.md").exists()
+
+    custom = workspace / "subagents" / "researcher.md"
+    _write(custom, "# My researcher\n")
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert result.stock_agents_installed == 0
+    assert link_source(workspace / ".claude" / "agents" / "researcher.md") == custom.resolve()
+    assert custom.read_text(encoding="utf-8") == "# My researcher\n"
 
 
 def test_legacy_removed_stock_agent_is_pruned_without_marker(tmp_path: Path) -> None:
@@ -594,6 +646,70 @@ def test_subagent_shadows_stock_agent(tmp_path: Path) -> None:
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
     link = workspace / ".claude" / "agents" / "memory.md"
-    assert link.is_symlink()
-    assert link.resolve() == custom.resolve()
+    assert is_link(link)
+    assert link_source(link) == custom.resolve()
     assert custom.read_text(encoding="utf-8") == "# Custom memory\n"
+
+
+def _boom_guide_unwritable(*a, **k):
+    raise RuntimeError("guide unwritable")
+
+
+def test_sync_reports_memory_region_failure_and_keeps_syncing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """A broken memory step must not raise, and must be reported on the
+    result instead of only in the log (#790)."""
+    monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom_guide_unwritable)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with caplog.at_level(logging.ERROR):
+        result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert result.memory_error == "RuntimeError: guide unwritable"
+    # Skill sync still ran to completion.
+    assert result.stock_installed > 0
+    assert (workspace / ".claude" / "skills").is_dir()
+    # Startup triage counts error-log content, so the record must stay.
+    assert "memory region ensure/migrate failed" in caplog.text
+
+
+def test_sync_memory_error_is_none_on_the_normal_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert result.memory_error is None
+
+
+def test_main_returns_nonzero_and_warns_when_memory_step_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("ciao.memory_tool.ensure_regions", _boom_guide_unwritable)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    rc = sync_skills.main(["--workspace", str(workspace)])
+
+    assert rc == cli.SETUP_MEMORY_FAILED_RC
+    err = capsys.readouterr().err
+    assert "memory regions not set up" in err
+    assert "guide unwritable" in err
+
+
+def test_main_returns_zero_on_the_normal_path(
+    capsys: pytest.CaptureFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    rc = sync_skills.main(["--workspace", str(workspace)])
+
+    assert rc == 0
+    assert "Warning" not in capsys.readouterr().err

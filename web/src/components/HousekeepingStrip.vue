@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
-import type { OperatorAction } from '../lib/types'
+import { askConfirm } from '../lib/confirm'
+import type { OperatorAction, UpdateTaskRow } from '../lib/types'
 import { renderMarkdown } from '../lib/safeMarkdown'
+import HomeNoticeWindow from './HomeNoticeWindow.vue'
+import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
+const noticeWindows = useHomeNoticeWindows()
 
 const chatBusy = ref(false)
 
@@ -32,10 +36,15 @@ const scopedActions = computed(() => {
     (action) => !action.workspace || action.workspace === active,
   )
 })
+const visibleActions = computed(() => scopedActions.value.filter(action => !noticeWindows.isClosed(actionKey(action))))
+
+function actionKey(action: OperatorAction): string {
+  return `action:${action.workspace || 'shared'}:${action.id}`
+}
 
 const groups = computed(() => {
   const byWorkspace = new Map<string, OperatorAction[]>()
-  for (const action of scopedActions.value) {
+  for (const action of visibleActions.value) {
     const key = action.workspace || ''
     const bucket = byWorkspace.get(key)
     if (bucket) bucket.push(action)
@@ -64,7 +73,7 @@ onMounted(() => {
 // The strip has no permanent furniture: with zero actions it renders nothing at
 // all (the template guards on a non-empty list before creating any element).
 function hasActions(): boolean {
-  return housekeeping.actions.length > 0
+  return visibleActions.value.length > 0
 }
 
 async function runAction(action: OperatorAction): Promise<void> {
@@ -129,11 +138,11 @@ async function onDetailClick(event: MouseEvent): Promise<void> {
   }
 }
 
-// The backend names the tile's lead button. "chat" (the update tile) makes the
-// chat button the filled primary and demotes the link to a chip; anything else
+// The backend names the tile's lead button. "view" (the update tile) makes the
+// view button the filled primary and demotes the link to a chip; anything else
 // keeps the default order, where run/link/view buttons lead.
-function chatLeads(action: OperatorAction): boolean {
-  return action.primary === 'chat' && !!action.chat_prompt
+function viewLeads(action: OperatorAction): boolean {
+  return action.primary === 'view' && !!action.view_route
 }
 
 function chatButtonLabel(action: OperatorAction): string {
@@ -168,36 +177,355 @@ async function openChat(action: OperatorAction): Promise<void> {
     chatBusy.value = false
   }
 }
+
+// ── "After this update" ────────────────────────────────────────────────────
+//
+// The work Ciaobot's own update leaves behind, as cards rather than as prose.
+// They live in their own section instead of joining `groups` because their
+// policy is different in a way the operator can feel: an operator action is a
+// view of the machine and disappears when re-detection says the condition is
+// gone, while an update task is a *decision* that persists until somebody
+// reverses it, can be reopened from Settings, and must never be drawn as done
+// before a completion check has actually said so.
+
+/** The lifecycles where an attempt exists: a chat was opened, is waiting on the
+ *  operator, or did not get going. Every state question below turns on this one
+ *  list, because it is the difference between "nobody has started this" and
+ *  "somebody already did". */
+const LIVE_ATTEMPT_STATES: string[] = ['in_progress', 'waiting_review', 'failed']
+
+/** The rows Home puts in front of the operator.
+ *
+ * Three kinds of thing survive, and everything else is somebody else's history:
+ *
+ *  - a task the operator already decided about is not news. `dismissed` is
+ *    hidden in this scope (and reopenable from Settings → Update task history),
+ *    and `completed` is a verdict a completion check reached rather than
+ *    something to re-offer.
+ *  - an offer that *applies* here is new work, and so is one nobody could rule
+ *    on yet (`unknown`): a detector that has not run has not established that
+ *    there is nothing to do.
+ *  - a live attempt (`in_progress`, `waiting_review`, `failed`) always stays.
+ *    Its chat is open or needs a decision, which is not a thing to hide.
+ *
+ * What is deliberately gone is an offer the detector says does *not* apply.
+ * Every install ships the whole catalog, so drawing those would put a permanent
+ * "nothing to do" card on the Home of everyone who does not need the task — and
+ * an install with no work would no longer have an empty Home. */
+const visibleUpdateTasks = computed(() =>
+  housekeeping.updateTasks.filter((task) => {
+    if (task.status === 'completed' || task.status === 'dismissed') return false
+    if (LIVE_ATTEMPT_STATES.includes(task.status)) return true
+    return task.applicability !== 'not_applicable'
+  }),
+)
+const openUpdateTasks = computed(() => visibleUpdateTasks.value.filter(task => !noticeWindows.isClosed(updateKey(task))))
+
+function updateKey(task: UpdateTaskRow): string {
+  return `update:${projectStore.activeWorkspace || 'shared'}:${taskKey(task)}`
+}
+
+watch(
+  () => [
+    ...scopedActions.value.map(actionKey),
+    ...visibleUpdateTasks.value.map(updateKey),
+  ],
+  keys => noticeWindows.setAvailable('housekeeping', keys),
+  { immediate: true },
+)
+onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
+
+/** Whether the group draws anything at all.
+ *
+ * Real rows, plus one exception: a group that still has an announcement to
+ * deliver. Hiding the last card removes the button that was pressed, so without
+ * this the group would vanish in the same tick — taking with it the only place
+ * the outcome could be said and the only place focus could land. An operator who
+ * pressed "Hide it" and saw the page rearrange itself in silence has been told
+ * nothing about whether it worked.
+ *
+ * The exception is a *loan*, not a state: `clearGroupStatus` ends it on a timer
+ * and on a workspace switch (see `GROUP_STATUS_TTL_MS`), because a heading, a
+ * lede and a stale "Hidden …" left standing on Home would outlive the thing they
+ * describe — and, across a workspace switch, be attributed to a workspace the
+ * operator never pressed anything in.
+ *
+ * Zero tasks and a *failed* list are otherwise drawn identically — as nothing —
+ * because that is the strip's own best-effort contract (`refresh` swallows a
+ * failure and leaves the strip empty rather than showing an error, and a Home
+ * that raised a red line for a background poll would nag about a condition the
+ * operator cannot act on from this page). Silence is not a false "done": the
+ * group has no all-clear state at all, so its absence never reads as a verdict.
+ *
+ * The one place a failed check *is* reported is Settings → Update task history,
+ * which fetches for itself and owns the error, its retry, and the empty state. */
+const showUpdateGroup = computed(
+  () => openUpdateTasks.value.length > 0 || groupStatus.value !== '',
+)
+
+/** One task's key. A revision is a different record and a different card, so
+ *  the two are never collapsed into one row. */
+function taskKey(task: UpdateTaskRow): string {
+  return `${task.id}@${task.revision}`
+}
+
+function taskBusy(task: UpdateTaskRow): boolean {
+  return housekeeping.pendingUpdateTaskIds.has(taskKey(task))
+}
+
+function taskError(task: UpdateTaskRow): string {
+  return housekeeping.taskErrors[taskKey(task)] || ''
+}
+
+/** The one line that says where this task stands, in words rather than a colour.
+ *
+ * `unknown` is worded as a question nobody could answer, never as an absence of
+ * work: a detector that has not run, or could not, has not established that
+ * there is nothing to do. It is checked first, so a row whose detector is still
+ * silent says so even while an attempt is under way — the silence is the more
+ * recent fact, and the one an operator is waiting on.
+ *
+ * There is no "does not apply" line, because a row that does not apply and has
+ * no attempt is not drawn at all (see `visibleUpdateTasks`): a permanent card
+ * reading "nothing to do" on the Home of an install that never needed the task
+ * is the opposite of what a zero-task Home should look like. */
+function taskStateLine(task: UpdateTaskRow): string {
+  if (task.applicability === 'unknown') {
+    return 'Checking whether this applies here…'
+  }
+  if (task.status === 'waiting_review') {
+    return 'Its chat is open and waiting for you to decide what to do with it.'
+  }
+  if (task.status === 'failed') {
+    return 'The last attempt did not get going. Starting again reuses the same chat.'
+  }
+  if (task.status === 'in_progress') {
+    // Not "on the left": the chat is a route, and on a phone the list is above
+    // the conversation. Where it opens is the layout's business.
+    return 'Started. Its chat is open.'
+  }
+  return 'New since this update.'
+}
+
+/** Whether this row's lead button starts — or resumes — its chat.
+ *
+ * The gate is the row's *state*, not the detector's answer, and the difference
+ * is not cosmetic. An offer is the only row that needs `applicable` first:
+ * nobody may be handed instructions for a condition this install has not
+ * established exists. A live attempt is a different question — the chat is
+ * already open and the work is already under way, and `not_applicable` is the
+ * *normal* state once the chat has done the job but the completion check has not
+ * said so yet. Gating Resume on it would strand a live chat behind a small "Open
+ * its chat" link, which is precisely the wrong thing to do to somebody whose
+ * work is running. */
+function canStart(task: UpdateTaskRow): boolean {
+  if (LIVE_ATTEMPT_STATES.includes(task.status)) return true
+  return task.applicability === 'applicable'
+}
+
+const groupEl = ref<HTMLElement | null>(null)
+/** The outcome of the last press. Declared here rather than beside the click
+ *  handlers because `showUpdateGroup` reads it: a group that still owes the
+ *  operator an announcement has to stay on screen to deliver it. */
+const groupStatus = ref('')
+
+/** How long the outcome of the last press keeps the group on screen.
+ *
+ * Long enough to be read aloud by a screen reader, and long enough for the eye
+ * to find the group focus just landed on; short enough that a Home left open
+ * does not sit there with yesterday's "Hidden …" under a heading that is no
+ * longer about anything. */
+const GROUP_STATUS_TTL_MS = 10_000
+let groupStatusTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Drop the announcement, and with it the group when it has no cards left.
+ *
+ *  Called on a timer and on a workspace switch. A workspace change is not
+ *  optional: the status describes a press in the workspace the operator just
+ *  left, and carrying it over would attribute it to the one they are now in. */
+function clearGroupStatus(): void {
+  if (groupStatusTimer !== null) {
+    clearTimeout(groupStatusTimer)
+    groupStatusTimer = null
+  }
+  groupStatus.value = ''
+}
+
+onBeforeUnmount(clearGroupStatus)
+
+/** Keep the keyboard where the operator left it when a card goes away.
+ *
+ * A dismissal removes the very button that was pressed, so the browser drops
+ * focus to the body and the next Tab starts again from the top of the page —
+ * which reads, to somebody who just acted, as the app having decided they were
+ * finished. Landing on the group itself (rather than on the next card's first
+ * button) keeps the reading order intact and gives the announcement a home. */
+async function keepFocus(): Promise<void> {
+  await nextTick()
+  const active = document.activeElement
+  if (groupEl.value && (!active || active === document.body)) {
+    groupEl.value.focus()
+  }
+}
+
+async function report(text: string, at: string, after?: () => Promise<void>): Promise<void> {
+  // A press belongs to the workspace it was made in, and this sentence is about
+  // that press. If the operator has moved on since, the group on screen is
+  // someone else's workspace: saying it there would attribute the decision to
+  // the wrong workspace, and clearing the status first would throw away whatever
+  // the new workspace has to say for itself. So the outcome goes unsaid and the
+  // effect — the chat it opened — still happens.
+  if (projectStore.activeWorkspace !== at) {
+    if (after) await after()
+    return
+  }
+  clearGroupStatus()
+  groupStatus.value = text
+  groupStatusTimer = setTimeout(clearGroupStatus, GROUP_STATUS_TTL_MS)
+  if (after) await after()
+  await keepFocus()
+}
+
+async function openTaskChat(chatId: string): Promise<void> {
+  if (!chatId) return
+  const { router } = await import('../router')
+  await router.push(`/chat/${chatId}`)
+}
+
+/** Start (or resume) a task's chat.
+ *
+ * The button is the same on an offered task and on one already under way, and
+ * that is the server's doing rather than a shortcut here: `start` is idempotent
+ * per `(task, revision)`, so a double press, a second tab or a retry after a
+ * dropped response all land in one chat with the prompt dispatched once. The
+ * label says which of the two is meant so nobody is surprised. */
+async function startTask(task: UpdateTaskRow): Promise<void> {
+  // Captured before the first await: the outcome is about the workspace the
+  // button was pressed in, wherever the reader has wandered to since.
+  const at = projectStore.activeWorkspace || ''
+  const outcome = await housekeeping.startUpdateTask(task)
+  if (!outcome.ok) {
+    if (outcome.chatId) {
+      // The chat exists and the prompt never reached it. Opening it rather than
+      // throwing it away is the whole point of the server sending the id back.
+      await report('The chat was opened but the task could not be sent into it.', at, () =>
+        openTaskChat(outcome.chatId),
+      )
+      return
+    }
+    await report(outcome.error, at)
+    return
+  }
+  const title = task.title
+  await report(
+    outcome.resumed
+      ? `Reopened the existing chat for “${title}”.`
+      : `Started “${title}” in a new chat.`,
+    at,
+    () => openTaskChat(outcome.chatId),
+  )
+}
+
+/** Decline this task at this revision, after saying exactly what that means.
+ *
+ * The confirmation is not ceremony. Two things are true at once and an operator
+ * pressing a small button is unlikely to have thought about either: the card
+ * disappears for this workspace only, and — when a chat is open — nothing about
+ * that chat changes. It is not cancelled and it is not marked done; dismissing
+ * records "not this one" and leaves the work exactly where it was. */
+async function dismissTask(task: UpdateTaskRow): Promise<void> {
+  // Same reasoning as `startTask`: the confirmation can be open for as long as it
+  // takes to read, and the press after it belongs to the workspace it was
+  // confirmed in.
+  const at = projectStore.activeWorkspace || ''
+  const hasChat = task.status === 'in_progress' || task.status === 'waiting_review' || !!task.chat_id
+  const message = hasChat
+    ? 'Hide this task in this workspace? Its chat stays open and is not marked ' +
+      'done — you can carry on in it, and reopen the task from Settings → ' +
+      'Update task history.'
+    : 'Hide this task in this workspace? It stays hidden for this revision only, ' +
+      'and you can reopen it from Settings → Update task history.'
+  if (!await askConfirm(message, {
+    title: 'Hide this update task?',
+    confirmLabel: 'Hide it',
+    cancelLabel: 'Keep it',
+  })) return
+
+  const outcome = await housekeeping.dismissUpdateTask(task)
+  if (!outcome.ok) {
+    await report(outcome.error, at)
+    return
+  }
+  await report(
+    hasChat
+      ? `Hidden “${task.title}”. Its chat is untouched and still open.`
+      : `Hidden “${task.title}” in this workspace. Reopen it from Settings.`,
+    at,
+  )
+}
+
+async function reviewTask(): Promise<void> {
+  const { router } = await import('../router')
+  await router.push('/memory/review?show=suggested')
+}
+
+async function recheckTasks(): Promise<void> {
+  await housekeeping.recheckUpdateTask()
+  await keepFocus()
+}
+
+// Applicability and state are per workspace, so a workspace switch re-asks the
+// question rather than leaving the previous workspace's answers on screen — and
+// takes the last press's announcement with them, since that press was made in
+// the workspace being left, not in the one now on screen.
+watch(
+  () => projectStore.activeWorkspace,
+  (next, previous) => {
+    if (next && next !== previous) {
+      clearGroupStatus()
+      void housekeeping.refreshUpdateTasks(next)
+    }
+  },
+)
 </script>
 
 <template>
+  <!--
+    Two sections, not one list. The operator actions above are preconditions and
+    fixes, and a blocking one has to be seen first; the update tasks below are
+    optional work the update left behind, with a different policy (a decision
+    that persists, reopenable from Settings). Merging them would let an optional
+    card sort above an unmissable one and would make "hide this" mean two
+    different things in one list.
+  -->
   <section v-if="hasActions()" class="housekeeping" aria-label="Housekeeping actions">
     <template v-for="group in groups" :key="group.workspace || '_shared'">
       <p v-if="showHeadings" class="housekeeping-group">
         {{ group.workspace || 'shared' }}
       </p>
-      <article
-        v-for="action in group.actions"
-        :key="action.id"
-        class="housekeeping-tile"
-        :class="{ 'housekeeping-tile--blocking': action.blocking }"
-      >
-      <div class="housekeeping-body">
-        <p class="housekeeping-title">{{ action.title }}</p>
-        <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
-        <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
+       <HomeNoticeWindow
+         v-for="action in group.actions"
+         :key="action.id"
+         class="housekeeping-tile"
+         :class="{ 'housekeeping-tile--blocking': action.blocking }"
+         :title="action.title"
+         :notice-key="actionKey(action)"
+         :blocking="action.blocking"
+       >
+       <div class="housekeeping-body">
+         <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+         <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
       </div>
       <div class="housekeeping-actions">
-        <!-- A chat-led tile (the update tile) puts its chat button first and
+        <!-- A view-led tile (the update tile) puts its view button first and
              filled, in DOM order so focus and screen readers meet it first. -->
         <button
-          v-if="action.chat_prompt && chatLeads(action)"
+          v-if="viewLeads(action)"
           type="button"
           class="btn-small btn-primary"
-          :disabled="chatBusy"
-          @click="onChatButtonClick(action)"
+          @click="openView(action)"
         >
-          {{ chatButtonLabel(action) }}
+          {{ action.view_label || 'Open' }}
         </button>
         <button
           v-if="action.run_label"
@@ -211,14 +539,14 @@ async function openChat(action: OperatorAction): Promise<void> {
         <a
           v-if="action.link_url"
           class="btn-small housekeeping-link"
-          :class="chatLeads(action) ? 'btn-chip' : 'btn-primary'"
+          :class="viewLeads(action) ? 'btn-chip' : 'btn-primary'"
           :href="action.link_url"
           target="_blank"
           rel="noopener noreferrer"
           @click="onLinkClick(action)"
         >{{ action.link_label || 'Open' }}</a>
         <button
-          v-if="action.view_route"
+          v-if="action.view_route && !viewLeads(action)"
           type="button"
           class="btn-small btn-primary"
           @click="openView(action)"
@@ -226,7 +554,7 @@ async function openChat(action: OperatorAction): Promise<void> {
           {{ action.view_label || 'Open' }}
         </button>
         <button
-          v-if="action.chat_prompt && !chatLeads(action)"
+          v-if="action.chat_prompt"
           type="button"
           class="btn-small btn-chip"
           :disabled="chatBusy"
@@ -241,8 +569,105 @@ async function openChat(action: OperatorAction): Promise<void> {
           @click="dismissAction(action)"
         >{{ action.dismiss_label }}</button>
         </div>
-      </article>
+       </HomeNoticeWindow>
     </template>
+  </section>
+
+  <section
+    v-if="showUpdateGroup"
+    ref="groupEl"
+    class="update-tasks"
+    tabindex="-1"
+    aria-labelledby="update-tasks-heading"
+  >
+     <h2 id="update-tasks-heading" class="update-tasks-heading">After this update</h2>
+
+    <!-- The outcome of the last press, in a live region. The button that was
+         pressed is often the thing that disappeared, so this is where the
+         result is announced once focus has landed back on the group. -->
+    <p class="update-tasks-status" role="status">{{ groupStatus }}</p>
+
+     <HomeNoticeWindow
+       v-for="task in openUpdateTasks"
+       :key="taskKey(task)"
+       class="housekeeping-tile update-task"
+       :title="task.title"
+       :notice-key="updateKey(task)"
+     >
+       <div class="housekeeping-body">
+         <div class="housekeeping-detail">{{ task.why }}</div>
+        <p class="update-task-meta">
+          <span>{{ taskStateLine(task) }}</span>
+          <span v-if="task.since_version">Since Ciaobot {{ task.since_version }}</span>
+        </p>
+        <!-- A refusal leaves the card exactly as it was and says why here. A
+             cleared card would read as "handled", which is the one thing a
+             failed start, a refused dismiss and a declined reopen have in
+             common and none of them are. -->
+        <p v-if="taskError(task)" class="update-task-error" role="alert">
+          {{ taskError(task) }}
+        </p>
+      </div>
+      <div class="housekeeping-actions">
+        <!-- waiting_review: the decisions are on the review queue, which has
+             per-row accept/dismiss and a destination picker. Sending the
+             operator to the chat to re-decide them in prose would be worse than
+             naming the surface that already exists. -->
+        <button
+          v-if="task.status === 'waiting_review'"
+          type="button"
+          class="btn-small btn-primary"
+          @click="reviewTask()"
+        >Review proposals</button>
+
+        <!-- One start button for every state that can start. Idempotent on the
+             server per (task, revision), so the label is the only thing that
+             differs between "begin" and "carry on". Gate is the lifecycle, not
+             the detector (see canStart): a live attempt gets Resume even when
+             the detector has already decided the work is not needed, because
+             the chat is open and stranding it is the worse outcome. -->
+        <button
+          v-if="canStart(task)"
+          type="button"
+          class="btn-small"
+          :class="task.status === 'offered' ? 'btn-primary' : 'btn-chip'"
+          :disabled="taskBusy(task)"
+          @click="startTask(task)"
+        >
+          <template v-if="taskBusy(task)">Working…</template>
+          <template v-else-if="task.status === 'in_progress'">Resume chat</template>
+          <template v-else-if="task.status === 'waiting_review'">Resume chat</template>
+          <template v-else-if="task.status === 'failed'">Try again</template>
+          <template v-else>Start in chat</template>
+        </button>
+
+        <!-- The one row that reaches here is an offer nobody can say applies:
+             `visibleUpdateTasks` drops an offer the detector has ruled out, and
+             `canStart` gives every live attempt its Resume. So a quiet re-check
+             is the only honest action left — and it is never drawn as "done". -->
+        <button
+          v-else
+          type="button"
+          class="btn-small btn-chip"
+          :disabled="taskBusy(task)"
+          @click="recheckTasks()"
+        >Check again</button>
+
+        <button
+          v-if="task.chat_id"
+          type="button"
+          class="btn-small btn-chip"
+          @click="openTaskChat(task.chat_id)"
+        >Open its chat</button>
+
+        <button
+          type="button"
+          class="btn-small btn-chip"
+          :disabled="taskBusy(task)"
+          @click="dismissTask(task)"
+        >Hide it</button>
+      </div>
+     </HomeNoticeWindow>
   </section>
 </template>
 
@@ -252,8 +677,10 @@ async function openChat(action: OperatorAction): Promise<void> {
    and not an app-wide lock: the one realistic cause is an uncommitted vault, and
    locking the app would take away the assistant needed to fix it. */
 .housekeeping-tile--blocking {
-  border-color: var(--warning);
+  border-top-color: var(--warning);
   background: rgba(210, 153, 34, 0.08);
+  padding-inline: var(--space-3);
+  border-radius: var(--radius);
 }
 
 .housekeeping-group {
@@ -274,27 +701,24 @@ async function openChat(action: OperatorAction): Promise<void> {
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  margin-block: var(--space-3);
+  gap: var(--space-3);
 }
 
 .housekeeping-tile {
+  min-width: 0;
+}
+.housekeeping-tile :deep(.home-notice-content) {
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-areas:
-    'body'
-    'actions';
+  grid-template-areas: 'body' 'actions';
   column-gap: var(--space-2);
   row-gap: var(--space-2);
   align-items: start;
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  min-width: 0;
 }
 
 @media (min-width: 640px) {
-  .housekeeping-tile {
+  .housekeeping-tile :deep(.home-notice-content) {
     grid-template-columns: 1fr auto;
     grid-template-areas: 'body actions';
     align-items: center;
@@ -323,7 +747,7 @@ async function openChat(action: OperatorAction): Promise<void> {
 }
 
 .housekeeping-detail {
-  margin: var(--space-1) 0 0;
+  margin: 0;
   font-size: var(--text-sm);
   color: var(--fg2);
 }
@@ -374,5 +798,89 @@ async function openChat(action: OperatorAction): Promise<void> {
   text-align: center;
   text-decoration: none;
   box-sizing: border-box;
+}
+
+/* ── "After this update" ────────────────────────────────────────────────────
+   The same hairline row and the same buttons the strip above uses — an update
+   task is a different *kind* of thing, not a different design language, and a
+   reader who knows the strip already knows these. What changes is the heading:
+   this is a group with a name, where the strip's tiles are a list without one. */
+
+.update-tasks {
+  width: 100%;
+  max-width: var(--home-max);
+  margin: 0 auto;
+  margin-block: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* The group takes focus when a card it owns disappears (see keepFocus), and a
+   visible ring is the only way that landing spot is findable by keyboard. The
+   heading carries the focus outline instead, which is where the eye goes next
+   anyway and keeps the ring off a full-width empty row. */
+.update-tasks:focus {
+  outline: none;
+}
+
+.update-tasks:focus-visible .update-tasks-heading {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* The one Home heading shared with `HomeRecentChats`'s "Continue where you left
+   off", token for token — same size, weight and tracking — so a Home with both
+   on screen has one heading scale rather than two. */
+.update-tasks-heading {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  width: fit-content;
+}
+
+.update-tasks-status {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+
+/* An empty live region must not reserve a row: `role="status"` regions are
+   always in the accessibility tree, so the height has to come from the text
+   rather than from a min-height. */
+.update-tasks-status:empty {
+  display: none;
+}
+
+.update-tasks-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+
+.update-task .housekeeping-detail {
+  margin-top: 2px;
+}
+
+.update-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--fg3);
+}
+
+.update-task-error {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  color: var(--error);
 }
 </style>

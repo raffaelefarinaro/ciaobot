@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.os_support.links import is_link
 from ciao.skills_inventory import (
     STOCK_SKILL_MARKER,
     eligible_owned_skills,
@@ -50,7 +51,7 @@ def _write_skill_file(skill_dir: Path, name: str, description: str = "Owned skil
     skill_md.parent.mkdir(parents=True, exist_ok=True)
     skill_md.write_text(
         f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
-        encoding="utf-8",
+        encoding="utf-8", newline=""
     )
     return skill_md
 
@@ -87,14 +88,14 @@ def test_workspace_local_source_and_revision(tmp_path: Path) -> None:
     assert owned.revision == hashlib.sha256(skill_md.read_bytes()).hexdigest()
     assert eligible_owned_skills(config, "personal") == [owned]
 
-    skill_md.write_text("# demo, rewritten\n", encoding="utf-8")
+    skill_md.write_text("# demo, rewritten\n", encoding="utf-8", newline="")
 
     assert resolve_owned_skill(config, "personal", "demo").revision != owned.revision
 
 
 def test_custom_shadow_is_eligible(tmp_path: Path) -> None:
     packaged = resources.files("ciao.stock").joinpath("skills")
-    shadow = "web-research"
+    shadow = "convert-documents-to-markdown"
     assert shadow in {e.name for e in packaged.iterdir() if e.is_dir()}, (
         "the shadow has to shadow a name that actually ships"
     )
@@ -232,7 +233,8 @@ def test_shared_sources_are_ineligible(tmp_path: Path) -> None:
     linked, pruned = mirror_shared_skill_sources(root, shared)
 
     assert (linked, pruned) == (1, 0)
-    assert (root / ".claude" / "skills" / "shared-demo").is_symlink()
+    # A symlink on POSIX, a junction on Windows: the link module answers for both.
+    assert is_link(root / ".claude" / "skills" / "shared-demo")
     assert eligible_owned_skills(config, "personal") == []
     with pytest.raises(ValueError, match="owns no canonical source"):
         resolve_owned_skill(config, "personal", "shared-demo")
@@ -303,3 +305,168 @@ def test_catalog_skips_invalid_sources_and_is_sorted(tmp_path: Path) -> None:
     assert all(skill.path.parent.parent == root / "skills" for skill in owned)
     assert all(skill.workspace == "personal" for skill in owned)
     assert _tree(root) == before
+
+
+# ── `create_owned_skill` (the new-skill route, #728-D) ─────────────────────
+
+
+def _skill_body(name: str, description: str = "Owned skill", body: str = "# x\n") -> str:
+    return f"---\nname: {name}\ndescription: {description}\n---\n\n{body}"
+
+
+def test_a_creation_returns_the_source_read_back(tmp_path: Path) -> None:
+    """The caller is handed the bytes on disk, not the text it submitted.
+
+    Same contract an edit gets: the readback goes through `resolve_owned_skill`,
+    so the revision here is a revision somebody could hold and re-check.
+    """
+    from ciao.skills_inventory import create_owned_skill
+
+    config = _config(tmp_path, "personal", rerooted=True)
+    content = _skill_body("invoice-recon", "Reconcile an invoice")
+
+    created = create_owned_skill(config, "personal", "invoice-recon", content)
+
+    root = config.agent_root("personal")
+    written = root / "skills" / "invoice-recon" / "SKILL.md"
+    assert written.read_text(encoding="utf-8") == content
+    assert created.skill.path == written
+    assert created.skill.revision == hashlib.sha256(written.read_bytes()).hexdigest()
+    assert created.trigger == "invoice-recon"
+    assert created.description == "Reconcile an invoice"
+    assert created.over_budget is False
+    # And the catalog now resolves it like any other owned source, which is what
+    # makes the next improvement against it a normal edit.
+    assert [owned.name for owned in eligible_owned_skills(config, "personal")] == [
+        "invoice-recon"
+    ]
+
+
+def test_a_creation_refuses_a_name_that_already_exists(tmp_path: Path) -> None:
+    """A creation that overwrote an existing skill would be an edit.
+
+    The owned file is somebody's work; pointing the new-skill route at it would
+    take the check every other write depends on away from the queue, so the
+    collision is refused and the existing bytes are left alone.
+    """
+    from ciao.skills_inventory import create_owned_skill
+
+    config = _config(tmp_path, "personal", rerooted=True)
+    existing = _write_skill(config.agent_root("personal"), "notes", "Mine")
+
+    with pytest.raises(ValueError, match="already has a skills/notes entry"):
+        create_owned_skill(
+            config, "personal", "notes", _skill_body("notes", "Something else")
+        )
+
+    assert "description: Mine" in existing.read_text(encoding="utf-8")
+
+
+def test_a_creation_refuses_a_name_an_installed_copy_takes(tmp_path: Path) -> None:
+    """A local skill shadowing an installed one is owned — but not *creatable*.
+
+    `resolve_owned_skill` deliberately treats a real local skill that shadows a
+    packaged one as owned, because it is somebody's file. A creation is the case
+    that has to refuse: the person writing it did not know the copy underneath,
+    and the next sync would keep the two in tension.
+    """
+    from ciao.skills_inventory import create_owned_skill
+
+    config = _config(tmp_path, "personal", rerooted=True)
+    root = config.agent_root("personal")
+    installed = _write_skill_file(
+        root / ".claude" / "skills" / "web-research", "web-research", "Packaged"
+    )
+    (installed.parent / STOCK_SKILL_MARKER).touch()
+
+    with pytest.raises(ValueError, match="already exists"):
+        create_owned_skill(
+            config, "personal", "web-research", _skill_body("web-research", "Mine")
+        )
+    assert not (root / "skills" / "web-research").exists()
+
+
+def test_a_creation_refuses_a_symlinked_catalog(tmp_path: Path) -> None:
+    """The shared-mirror shape is refused at the link, not after following it."""
+    from ciao.skills_inventory import create_owned_skill
+
+    config = _config(tmp_path, "personal", rerooted=True)
+    root = config.agent_root("personal")
+    root.mkdir(parents=True, exist_ok=True)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (root / "skills").symlink_to(shared, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        create_owned_skill(config, "personal", "invoice-recon", _skill_body("invoice-recon"))
+
+    assert list(shared.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("no frontmatter at all", "frontmatter"),
+        ("---\nname: other\ndescription: d\n---\n\nbody\n", "frontmatter name"),
+        ("---\nname: invoice-recon\n---\n\nbody\n", "description"),
+        ("---\nname: invoice-recon\ndescription: d\n---\n\n   \n", "no body"),
+        ("   ", "empty content"),
+    ],
+)
+def test_a_creation_refuses_content_that_would_not_load(
+    tmp_path: Path, content: str, expected: str
+) -> None:
+    """A skill with no trigger never fires and one with no description is never
+    chosen, so a creation that allowed either would write a file nothing reads.
+
+    The name check is the load-bearing one: a skill is loaded under its
+    frontmatter name, so a mismatch creates one nobody can address. Refused
+    rather than normalized, for the reason a bad directory name is.
+    """
+    from ciao.skills_inventory import create_owned_skill
+
+    config = _config(tmp_path, "personal", rerooted=True)
+    with pytest.raises(ValueError, match=expected):
+        create_owned_skill(config, "personal", "invoice-recon", content)
+    assert not (config.agent_root("personal") / "skills" / "invoice-recon").exists()
+
+
+def test_an_over_budget_creation_is_written_and_flagged(tmp_path: Path) -> None:
+    """The budget warns everywhere else, so it warns here too.
+
+    `MAX_SKILL_BYTES` is a context cost the engine pays on every load, not a
+    validity rule: refusing here would make the first skill of a large workspace
+    impossible to create, and the audit already reports an over-budget skill.
+    """
+    from ciao.skills_inventory import MAX_SKILL_BYTES, create_owned_skill
+
+    config = _config(tmp_path, "personal", rerooted=True)
+    body = "\n".join(f"line {n}" for n in range(MAX_SKILL_BYTES // 4))
+    content = _skill_body("invoice-recon", "Reconcile an invoice", body=body)
+
+    created = create_owned_skill(config, "personal", "invoice-recon", content)
+
+    assert created.over_budget is True
+    assert (config.agent_root("personal") / "skills" / "invoice-recon" / "SKILL.md").is_file()
+
+
+def test_a_creation_still_refuses_a_shared_agent_root(tmp_path: Path) -> None:
+    """One catalog serving two workspaces means a "new" skill is visible to both."""
+    from ciao.skills_inventory import create_owned_skill
+
+    # Not rerooted: every workspace answers with the install root.
+    config = _config(tmp_path, "personal", "work")
+    with pytest.raises(ValueError, match="shares its agent root"):
+        create_owned_skill(config, "personal", "invoice-recon", _skill_body("invoice-recon"))
+    with pytest.raises(ValueError, match="unknown workspace"):
+        create_owned_skill(config, "elsewhere", "invoice-recon", _skill_body("invoice-recon"))
+
+
+def test_a_creation_refuses_a_name_that_is_not_one_directory(tmp_path: Path) -> None:
+    """The same rule `resolve_owned_skill` enforces, for the same reason."""
+    from ciao.skills_inventory import create_owned_skill
+
+    config = _config(tmp_path, "personal", rerooted=True)
+    for name in ("../escape", "a/b", "", ".", "..", ".hidden"):
+        with pytest.raises(ValueError, match="not a skill directory name|not one directory"):
+            create_owned_skill(config, "personal", name, _skill_body("x"))

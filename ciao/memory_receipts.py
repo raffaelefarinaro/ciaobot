@@ -52,6 +52,7 @@ import hashlib
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -59,6 +60,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from ciao.os_support.locks import lock_exclusive, unlock
+from ciao.os_support.private import open_private
+from ciao.os_support.users import user_key
 from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
@@ -83,6 +88,10 @@ _TERMINAL = frozenset({APPLIED, FAILED, ROLLED_BACK, CONFLICT, UNDONE})
 # category apply is the first kind here that touches more than one destination
 # file: the registry and every note it retyped, which is why it carries its own
 # list rather than borrowing the region protocol's one before/after pair.
+#
+# A note apply (`ciao/note_receipts.py`) is one file, so it uses the ordinary
+# before/after pair like a region does. Its reverse write is *not* here: undo is
+# not offered for undo, so a `note_undo` row stays view-only.
 UNDOABLE_KINDS = frozenset(
     {
         "region_apply",
@@ -91,6 +100,7 @@ UNDOABLE_KINDS = frozenset(
         "queue_resolve",
         "prune_expired",
         "category_apply",
+        "note_apply",
     }
 )
 
@@ -218,8 +228,8 @@ def lock_path_for(resolved_key: str) -> Path:
     Uses ``CIAO_QUEUE_LOCK_DIR`` when set (tests pin it), else a per-user
     directory under the system temp root. Deterministic in the resolved
     guarded path so every process and thread guarding the same file picks the
-    same lock. The uid component keeps two local accounts from colliding on a
-    shared ``/tmp``.
+    same lock. The user component (the uid; the SID on Windows) keeps two local
+    accounts from colliding on a shared ``/tmp``.
 
     Public because the curation lease (``ciao/curation_run.py``) guards a
     different vault file and must not reinvent — or diverge from — where this
@@ -229,11 +239,7 @@ def lock_path_for(resolved_key: str) -> Path:
     if base:
         root = Path(base)
     else:
-        try:
-            uid = os.getuid()
-        except AttributeError:  # pragma: no cover - non-POSIX
-            uid = 0
-        root = Path(tempfile.gettempdir()) / f"ciao-queue-locks-{uid}"
+        root = Path(tempfile.gettempdir()) / f"ciao-queue-locks-{user_key()}"
     digest = hashlib.sha256(resolved_key.encode("utf-8")).hexdigest()[:32]
     return root / f"{digest}.lock"
 
@@ -255,7 +261,7 @@ def write_queue_atomically(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.write.tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8", newline="")
         os.replace(tmp, path)
     except OSError:
         try:
@@ -305,7 +311,6 @@ def queue_lock(
     A lock that cannot be taken raises :class:`QueueLockError`; callers must let
     it propagate rather than fall through to an unlocked write.
     """
-    import fcntl
     import time
 
     try:
@@ -328,13 +333,13 @@ def queue_lock(
     lock_path = _queue_lock_path(key)
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = lock_path.open("a+", encoding="utf-8")
+        handle = lock_path.open("a+", encoding="utf-8", newline="")
     except OSError as exc:
         raise QueueLockError(f"could not open queue lock {lock_path}: {exc}") from exc
     deadline = time.monotonic() + max(0.0, timeout_s)
     while True:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(handle.fileno(), blocking=False)
             break
         except BlockingIOError:
             if time.monotonic() >= deadline:
@@ -352,7 +357,7 @@ def queue_lock(
     finally:
         depths.pop(key, None)
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            unlock(handle.fileno())
         except OSError:
             pass
         handle.close()
@@ -393,21 +398,37 @@ def journal_writable(journal: Path) -> bool:
         return False
 
 
+def _open_private(
+    path: Path, *, flags: int, mode: int = 0o600, follow_symlinks: bool = True
+) -> int:
+    """Open *path* for append/create, 0600 when this call has to create it.
+
+    `os.open`'s mode applies only to a file it actually creates, and it is
+    masked by the umask, which is exactly the behaviour wanted here: a journal,
+    its lock and the trim temp all hold the note bodies receipts image, so a new
+    one must not appear group- or world-readable under a permissive umask — and
+    an *existing* file keeps whatever mode its owner chose rather than being
+    silently re-chmod'ed by a background append.
+
+    Previously these were opened with `Path.open("a")`, which creates 0666
+    minus the umask: a 0600 note's own before/after images ended up readable by
+    every local account on the machine.
+    """
+    return open_private(path, flags, mode, follow_symlinks=follow_symlinks)
+
+
 def _append(journal: Path, payload: dict[str, Any]) -> None:
     """Append one receipt row, serialized across processes and fsynced."""
     journal.parent.mkdir(parents=True, exist_ok=True)
     row = {**payload, "v": RECEIPT_VERSION}
     line = json.dumps(row, ensure_ascii=False) + "\n"
     lock = journal.with_name(journal.name + ".lock")
+    lock_fd = _open_private(lock, flags=os.O_RDWR | os.O_APPEND)
+    handle = os.fdopen(lock_fd, "a+", encoding="utf-8", newline="")
     try:
-        import fcntl
-    except ImportError:  # pragma: no cover - non-POSIX
-        fcntl = None  # type: ignore[assignment]
-    handle = lock.open("a+", encoding="utf-8")
-    try:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        with journal.open("a", encoding="utf-8") as f:
+        lock_exclusive(handle.fileno())
+        journal_fd = _open_private(journal, flags=os.O_WRONLY | os.O_APPEND)
+        with os.fdopen(journal_fd, "a", encoding="utf-8", newline="") as f:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
@@ -416,11 +437,10 @@ def _append(journal: Path, payload: dict[str, Any]) -> None:
         # and the stale snapshot then silently deleted that newer receipt.
         _trim_if_large(journal)
     finally:
-        if fcntl is not None:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
+        try:
+            unlock(handle.fileno())
+        except OSError:
+            pass
         handle.close()
 
 
@@ -428,7 +448,23 @@ def _trim_if_large(journal: Path) -> None:
     try:
         if not journal.exists() or journal.stat().st_size < MAX_BYTES:
             return
-        lines = journal.read_text(encoding="utf-8", errors="replace").splitlines()
+        # Split on "\n" only, never `splitlines()`: the rows are JSON Lines, and
+        # a receipt legitimately carries the note body it images, which may
+        # contain U+2028, U+2029 or U+0085 — all of which `str.splitlines`
+        # treats as line breaks even though `_append` writes them literally
+        # (`ensure_ascii=False`). Splitting there cut a row in half, so the
+        # journal stopped being readable: undo reported "unknown receipt" and
+        # a prepared note write could never be recovered.
+        #
+        # Blank entries are dropped because `KEEP_LINES` is a budget of real
+        # rows: `split("\n")` yields a trailing empty string for the newline
+        # `_append` writes, and keeping it would spend one slot of the budget
+        # on nothing and retain one row too few.
+        lines = [
+            line
+            for line in journal.read_text(encoding="utf-8", errors="replace").split("\n")
+            if line.strip()
+        ]
         # Keep the newest rows, but never drop a non-terminal receipt: an
         # interrupted operation must stay recoverable until it settles.
         #
@@ -458,11 +494,77 @@ def _trim_if_large(journal: Path) -> None:
         }
         if dropped_ids & pending_ids:
             return
+        # Byte-aware, after the row-count cut: `KEEP_LINES` is a budget of rows,
+        # not of bytes, and a row can carry a whole note's before *and* after
+        # image. A handful of big receipts therefore kept the journal far above
+        # `MAX_BYTES` — the size this function is called to bound — and every
+        # later append re-ran the whole read-and-rewrite over the same
+        # over-long file. Whole rows are dropped from the front until what is
+        # left serializes within the cap.
+        #
+        # Whole rows, and never a pending one. The head of the list is the only
+        # candidate, and dropping from the front can only pass over it, so an
+        # unresolved receipt either keeps everything after it or stops the trim
+        # entirely. The newest row is never dropped either: a journal is kept
+        # because it records something.
+        #
+        # Sizes are computed once and subtracted as the head advances, and the
+        # rows are serialized once at the end. Re-joining and re-encoding the
+        # whole remainder per popped row was quadratic — thousands of rows each
+        # rebuilding megabytes under the journal lock, on the append path of
+        # every write. `len(line) + 1` is the row plus the newline that follows
+        # it, which is one byte more than the joined file can ever be, so the
+        # budget below is an upper bound and the cap still holds.
+        sizes = [len(line.encode("utf-8")) + 1 for line in kept]
+        total = sum(sizes)
+        head = 0
+        while head < len(kept) - 1 and total > MAX_BYTES:
+            first = _safe_row(kept[head]) or {}
+            if str(first.get("id", "")) in pending_ids:
+                break
+            total -= sizes[head]
+            head += 1
+        payload = _serialize_rows(kept[head:])
         tmp = journal.with_name(f".{journal.name}.trim.tmp")
-        tmp.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
+        # The temp holds the whole retained journal, note bodies included, so it
+        # is created 0600 — carrying the journal's own mode when there is one, so
+        # the `os.replace` never silently re-modes a file its owner set a mode
+        # on. `os.open`'s mode applies only to the file it creates, so a temp
+        # left behind by a trim that died mid-write is removed first rather
+        # than reused under whatever mode it happened to get, and `O_EXCL` with
+        # it means the open can only ever create: a temp that appeared in the
+        # window between the unlink and the open — or a link planted in its
+        # place — fails the open instead of being written through, and the
+        # best-effort trim is skipped rather than following a link out of the
+        # vault with the whole journal in its hands.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        try:
+            mode = stat.S_IMODE(journal.stat().st_mode)
+        except OSError:
+            mode = 0o600
+        tmp_fd = _open_private(
+            tmp, flags=os.O_WRONLY | os.O_EXCL, mode=mode, follow_symlinks=False
+        )
+        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, journal)
     except Exception:  # noqa: BLE001 — trimming is best-effort
         logger.debug("memory receipts: trim failed", exc_info=True)
+
+
+def _serialize_rows(lines: list[str]) -> str:
+    """The exact bytes one journal is written as, from its lines.
+
+    Split and joined in the same place, on ``"\\n"`` only (see `_trim_if_large`
+    for why never `splitlines()`), so the size the trim measures is the size the
+    file will have.
+    """
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _safe_row(line: str) -> dict[str, Any] | None:
@@ -491,7 +593,10 @@ def read_receipts(journal: Path) -> list[dict[str, Any]]:
         raw = journal.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    for line in raw.splitlines():
+    # `split("\n")`, not `splitlines()`: see `_trim_if_large`. A note body
+    # holding U+2028/U+2029/U+0085 must not split its own receipt row, or the
+    # folded journal loses the write entirely.
+    for line in raw.split("\n"):
         line = line.strip()
         if not line:
             continue
@@ -1179,6 +1284,15 @@ def recover_pending(
     * queue resolution whose bullet is gone → ``applied``; still present →
       ``rolled_back``.
 
+    A note write (``ciao/note_receipts.py``) is classified the same way, by the
+    note's exact current revision: matching the after image → ``applied``,
+    matching the before image → ``rolled_back``, anything else or a missing
+    note → ``conflict``. A note write is only ever classified here, never
+    replayed — including an interrupted *undo*, whose reverse write is settled
+    by that same comparison; what recovery additionally does is settle the
+    original receipt whose ``undone`` row the crash lost, never re-attempt the
+    reverse write itself.
+
     An ``applied`` receipt with a fact but no recorded outcome has its decision
     sidecar completed here, so a crash between the guide write and the decision
     update still yields exactly one consistent operation.
@@ -1204,6 +1318,19 @@ def recover_pending(
             result.conflicts.append(settled)
         else:
             result.reconciled.append(settled)
+    # A note undo journals its reverse write before it marks the original
+    # `undone`, so a crash in between leaves an applied reverse write attached
+    # to an original that still reads as `applied` — and therefore still
+    # offering an undo that can only fail, against a note already restored.
+    # That is not an interrupted *row*, so the loop above cannot see it; one
+    # idempotent pass over the settled journal closes it. A journal with no note
+    # receipts is a no-op.
+    try:
+        from ciao import note_receipts as note_rx
+
+        result.reconciled.extend(note_rx.settle_open_undo_links(journal))
+    except Exception:  # noqa: BLE001 — recovery is best-effort per journal
+        logger.exception("memory receipts: could not settle note undo links")
     return result
 
 
@@ -1216,6 +1343,12 @@ def _reconcile(
     kind = str(receipt.get("kind", ""))
     if kind == "queue_resolve":
         return _reconcile_queue(receipt, journal, proposals_path=proposals_path)
+    # Local import: the note protocol builds on this module's journal, lock and
+    # receipt shape, so importing it at module scope would be a cycle.
+    from ciao import note_receipts as note_rx
+
+    if kind in note_rx.NOTE_KINDS:
+        return note_rx.reconcile_note_receipt(receipt, journal)
     return _reconcile_region(receipt, journal)
 
 
@@ -1616,6 +1749,11 @@ def undo_receipt(
     with the receipt's after revision. A mismatch means an unrelated fact was
     written after this operation, so replacing the region with the before image
     would delete it: that is a :class:`RevisionConflict`, not an undo.
+
+    A note receipt is routed to :func:`ciao.note_receipts.undo_note_receipt`,
+    which applies the same "the destination must still be what this operation
+    left behind" rule to a vault note — against the vault the journal belongs
+    to, or the caller's own when it passed one.
     """
     if journal is None:
         journal = journal_path(vault_root, None)
@@ -1632,6 +1770,13 @@ def undo_receipt(
         return _undo_queue(receipt, journal, vault_root, actor, source)
     if kind == "category_apply":
         return _undo_category(receipt, journal)
+    # Local import, for the same reason as in `_reconcile`.
+    from ciao import note_receipts as note_rx
+
+    if kind in note_rx.NOTE_KINDS:
+        return note_rx.undo_note_receipt(
+            receipt, journal, vault_root=vault_root, actor=actor, source=source
+        )
     return _undo_region(receipt, journal, vault_root, actor, source)
 
 
@@ -1728,7 +1873,7 @@ def _undo_queue(
                 "the queue changed after this operation; undo was refused"
             )
         tmp = path.with_name(f".{path.name}.undo.tmp")
-        tmp.write_text(str(before), encoding="utf-8")
+        tmp.write_text(str(before), encoding="utf-8", newline="")
         os.replace(tmp, path)
     undone = {
         **{k: v for k, v in receipt.items() if k != "v"},

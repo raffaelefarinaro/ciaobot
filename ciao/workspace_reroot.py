@@ -32,11 +32,13 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from ciao.git_proc import EXACT_BYTES
 from ciao.workspace_guide import (
     GUIDE_NAME,
     LEGACY_GUIDE_NAME,
@@ -320,7 +322,7 @@ def write_receipt(runtime_root: Path, payload: dict[str, Any]) -> Path:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         path.replace(path.with_name(f"{path.stem}.{stamp}{path.suffix}"))
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
     return path
 
@@ -356,9 +358,9 @@ def run_git(root: Path, *args: str) -> tuple[int, str]:
     import subprocess
 
     proc = subprocess.run(
-        ["git", "-C", str(root), *args],
+        ["git", *EXACT_BYTES, "-C", str(root), *args],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8",
         check=False,
     )
     # rstrip only. `git status --porcelain` encodes the index and worktree state
@@ -447,7 +449,7 @@ def apply(
     payload["git_history"] = history
 
     history_refusal: list[str] = []
-    if history["status"] in {"no_git_binary", "init_failed", "add_failed", "commit_failed"}:
+    if history["status"] in _HISTORY_REFUSALS:
         detail = history.get("error") or history["status"]
         history_refusal = [
             "the install has no git history to roll back to and one could not be "
@@ -610,7 +612,7 @@ def apply(
             stashed.append(
                 {
                     "source": relative,
-                    "backup": str(target.relative_to(runtime_root)),
+                    "backup": target.relative_to(runtime_root).as_posix(),
                     "tracked": tracked,
                 }
             )
@@ -951,7 +953,7 @@ def _walk_entries(base: Path) -> set[str]:
     for current, dirs, files in os.walk(base, followlinks=False):
         prefix = Path(current).relative_to(base)
         for name in [*dirs, *files]:
-            entries.add(str(prefix / name))
+            entries.add((prefix / name).as_posix())
     return entries
 
 
@@ -988,7 +990,7 @@ def _fingerprint_tree(base: Path) -> dict[str, dict[str, Any]]:
     for current, dirs, files in os.walk(base, followlinks=False):
         prefix = Path(current).relative_to(base)
         for name in [*dirs, *files]:
-            records[str(prefix / name)] = _entry_fingerprint(Path(current) / name)
+            records[(prefix / name).as_posix()] = _entry_fingerprint(Path(current) / name)
     return records
 
 
@@ -1096,7 +1098,7 @@ def _write_registry(runtime_root: Path, entries: list[dict[str, Any]]) -> None:
     path = registry_file(runtime_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)
 
 
@@ -1327,7 +1329,7 @@ def flag_stranded_sessions(runtime_root: Path) -> dict[str, Any]:
 
     if flagged:
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
     return {"flagged": flagged}
 
@@ -1352,7 +1354,7 @@ def clear_stranded_sessions(runtime_root: Path, chat_ids: list[str]) -> int:
             cleared += 1
     if cleared:
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
     return cleared
 
@@ -1422,7 +1424,7 @@ def write_guide_split(
         root.mkdir(parents=True, exist_ok=True)
         guide = root / GUIDE_NAME
         if not guide.exists():
-            guide.write_text(text, encoding="utf-8")
+            guide.write_text(text, encoding="utf-8", newline="")
             # Record what was actually written: undo removes created files by
             # this path, so a stale name here leaves the guide behind and the
             # install no longer round-trips.
@@ -1443,7 +1445,7 @@ def write_guide_split(
             stashed.append(
                 {
                     "source": f"{destination}/{_QUEUE_RELATIVE}",
-                    "backup": str(target.relative_to(runtime_root)),
+                    "backup": target.relative_to(runtime_root).as_posix(),
                 }
             )
         written = append_proposals(
@@ -1553,6 +1555,16 @@ def bootstrap_root(root: Path, shared: Path) -> tuple[list[str], list[str]]:
 # migration writes into as it runs. None of them are moved by the migration, so
 # excluding them costs the rollback nothing. `.env.example` is deliberately not
 # matched — it is documentation.
+#
+# Every entry is read at ANY depth, so each one is either unanchored (no interior
+# slash, which gitignore already matches at every level) or carries its own
+# `**/` prefix. That is not redundancy. An entry like `.obsidian/workspace*` has
+# an interior slash, which anchors a gitignore pattern to the directory holding
+# the `.gitignore`, so written bare it would exclude only the root copy while the
+# pathspec below matched the nested one — a path excluded from the snapshot when
+# it happened to be pre-staged and captured when it did not. Obsidian's workspace
+# file is per-vault UI state, never worth a rollback point, so it is excluded
+# wherever it appears.
 _SNAPSHOT_IGNORES: tuple[str, ...] = (
     ".runtime/",
     ".env",
@@ -1561,7 +1573,16 @@ _SNAPSHOT_IGNORES: tuple[str, ...] = (
     "node_modules/",
     ".venv/",
     ".DS_Store",
-    ".obsidian/workspace*",
+    "**/.obsidian/workspace*",
+)
+
+# The statuses that mean there is no usable rollback point, shared by both
+# callers (this module's `apply` and `vault_relocate`'s) so the two cannot drift.
+# `unstage_failed` joins them because a snapshot we could not prove is free of
+# credentials is not a safety net: proceeding would commit the very secrets the
+# excludes exist to keep out, so the migration refuses and says so.
+_HISTORY_REFUSALS: frozenset[str] = frozenset(
+    {"no_git_binary", "init_failed", "unstage_failed", "add_failed", "commit_failed"}
 )
 
 
@@ -1579,11 +1600,30 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
     - a repository with at least one commit: left completely alone.
     - a repository with no commits: given the snapshot commit, because ``git mv``
       works without a HEAD but ``git checkout`` has nothing to return to.
-    - not a repository: ``git init``, a ``.gitignore``, then the snapshot.
+    - not a repository: ``git init``, then the snapshot.
 
-    The snapshot deliberately excludes credentials and volatile state (see
-    ``_SNAPSHOT_IGNORES``). A safety net that captured `.env` would turn "we made
-    you a backup" into "we committed your provider keys".
+    Both snapshotting branches first get the credential-excluding ``.gitignore``
+    (see ``_SNAPSHOT_IGNORES``), and it is additive: an owner's entries are kept
+    and only missing ones are appended. The snapshot deliberately excludes
+    credentials and volatile state. A safety net that captured `.env` would turn
+    "we made you a backup" into "we committed your provider keys", so the
+    exclusion is written on every path that reaches the snapshot rather than only
+    on the one where the repository is created.
+
+    The ignore file alone is not enough, because ``.gitignore`` never unstages:
+    a path the owner ``git add``ed before the migration is still in the index
+    and ``git add -A`` keeps it there. So the index is corrected too, removing
+    the excluded paths from the INDEX ONLY — ``git rm --cached``, which leaves
+    every working file on disk untouched. The exclusion is about what the
+    snapshot records, not about deleting anything from the install.
+
+    And the correction is not trusted: an owner's ``.gitignore`` can re-admit a
+    credential the append could not override (a ``!`` negation placed after our
+    entry, or a nested ``.gitignore`` we never read), so the index is read back
+    with the same pathspecs before the commit. Anything still staged, and any
+    failure to run the check at all, is an ``unstage_failed`` refusal — the one
+    outcome this function must never produce is a snapshot commit holding a
+    secret while reporting success.
     """
     root = Path(install_root).resolve()
     out: dict[str, Any] = {"status": "", "created_repo": False, "commit": ""}
@@ -1604,7 +1644,6 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
             return out
         out["status"] = "seeded_empty_repo"
     else:
-        _write_snapshot_gitignore(root)
         init_code, init_out = run_git(root, "init", "-b", "main")
         if init_code != 0:
             out["status"] = "init_failed"
@@ -1613,10 +1652,60 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
         out["created_repo"] = True
         out["status"] = "created"
 
+    # Written here, not in the `else`, so it covers BOTH branches that reach
+    # `git add -A`. The pre-seeded empty repository used to skip it and got its
+    # snapshot with no exclusions at all, so the very first `git add -A` over
+    # that install root committed `.env` and `secrets/`. The exclusion file is
+    # itself a repo file, so git honours it for a repo that already exists.
+    # It appends only the missing entries and never rewrites what an owner
+    # already wrote, and a repository with a HEAD has returned above, so no
+    # established history is touched.
+    _write_snapshot_gitignore(root)
+    # A `.gitignore` does not unstage anything: a path an owner `git add`ed
+    # before the migration is still in the index, and `git add -A` keeps it
+    # there, so the snapshot would carry their credentials despite the
+    # exclusions. The index is corrected first — the working files stay exactly
+    # where they are, which is the whole point: the exclusion is about what the
+    # snapshot records, not about deleting anything from disk.
+    unstage_code, unstage_out = run_git(root, *_unstage_snapshot_ignores_args())
+    if unstage_code != 0:
+        out["status"] = "unstage_failed"
+        out["error"] = unstage_out.strip()
+        return out
     add_code, add_out = run_git(root, "add", "-A")
     if add_code != 0:
         out["status"] = "add_failed"
         out["error"] = add_out.strip()
+        return out
+    # VERIFY, do not assume. The unstage above is a best effort, and an owner's
+    # own `.gitignore` can undo it in two ways it cannot be defended against by
+    # appending: a negation AFTER our entry (`.env` then `!.env`, which
+    # `_write_snapshot_gitignore` skips because `.env` is already mentioned) and
+    # a nested `sub/.gitignore` saying `!.env`, which applies to the whole subtree
+    # and is never read by the exclusion write. Either one puts the secret back
+    # into the index on `git add -A`, which is exactly what #811 is about.
+    #
+    # So the index is read back with the same pathspecs and the commit is made
+    # only if nothing came back. A verification that cannot run counts as not
+    # clean: an unverifiable snapshot is not a safety net.
+    check_code, check_out = run_git(
+        root, "ls-files", "-z", "--", *_snapshot_ignore_pathspecs()
+    )
+    if check_code != 0:
+        out["status"] = "unstage_failed"
+        out["error"] = (
+            "could not verify the snapshot excludes credentials: "
+            f"{check_out.strip()}"
+        )
+        return out
+    leaked = [name for name in check_out.split("\0") if name]
+    if leaked:
+        out["status"] = "unstage_failed"
+        out["error"] = (
+            "still staged for the snapshot after the credential exclusions: "
+            + ", ".join(sorted(leaked)[:8])
+            + (" and more" if len(leaked) > 8 else "")
+        )
         return out
     commit_code, commit_out = run_git(
         root,
@@ -1637,6 +1726,70 @@ def ensure_rollback_history(install_root: Path) -> dict[str, Any]:
     return out
 
 
+def _snapshot_ignore_pathspecs() -> list[str]:
+    """``_SNAPSHOT_IGNORES`` in the one pathspec spelling both callers share.
+
+    The unstage and the verification that guards the commit must agree exactly —
+    a verification looking for something the unstage did not remove would either
+    pass a dirty index or refuse a clean one — so there is one translation here
+    and both read it.
+
+    Per entry:
+
+    - a trailing slash means a directory, so it becomes ``<name>/**``. The
+      pathspec ``secrets/`` alone matches NOTHING, because git reads it as a
+      literal path with an unusable trailing slash, which is the shape a
+      verification would silently pass on.
+    - an unanchored entry is prefixed ``**/``, because a gitignore pattern with
+      no interior slash matches at ANY depth. ``client/.runtime/`` holds a
+      credentialed config in exactly the way ``.runtime/`` does, and a
+      root-anchored ``.runtime/`` would silently stop matching and re-open the
+      hole #811 closed.
+    - an entry that already carries its own ``**/`` is left alone, so prefixing
+      is not applied twice.
+
+    ``:(glob)`` is required, not decoration, and both of its effects matter here.
+    Verified against git rather than assumed: in the DEFAULT pathspec matcher a
+    ``*`` crosses a ``/`` (``a*env`` matches ``a/b/.env``) and ``**`` collapses to
+    a single component, so ``**/.env`` needs an intermediate directory and misses
+    the root-level ``.env`` — the very file this exists to protect. With
+    ``:(glob)``, ``*`` stops at ``/`` and ``**`` means "any number of
+    directories, including none".
+    """
+    pathspecs: list[str] = []
+    for entry in _SNAPSHOT_IGNORES:
+        directory = entry.endswith("/")
+        name = entry[:-1] if directory else entry
+        prefix = "" if name.startswith("**/") else "**/"
+        pathspecs.append(f":(glob){prefix}{name}/**" if directory else f":(glob){prefix}{name}")
+    return pathspecs
+
+
+def _unstage_snapshot_ignores_args() -> list[str]:
+    """The ``git rm --cached`` invocation that drops excluded paths from the index.
+
+    ``--force`` is what makes this work on a repository with no HEAD: git
+    otherwise refuses to drop a path whose staged content differs from both the
+    worktree and HEAD, which is every path in a seeded repository. It forces the
+    INDEX entry only. ``--cached`` never touches the working tree, so the
+    owner's files stay on disk, and ``--ignore-unmatch`` makes an index that
+    holds nothing to drop a no-op instead of an error.
+
+    The pathspecs come from the fixed ignore list and are passed after ``--``,
+    so nothing an owner wrote is ever interpreted as a git argument.
+    """
+    return [
+        "rm",
+        "--cached",
+        "-r",
+        "-q",
+        "-f",
+        "--ignore-unmatch",
+        "--",
+        *_snapshot_ignore_pathspecs(),
+    ]
+
+
 def _write_snapshot_gitignore(root: Path) -> None:
     """Add the exclusions a fresh snapshot needs, keeping any existing file."""
     path = root / ".gitignore"
@@ -1649,7 +1802,7 @@ def _write_snapshot_gitignore(root: Path) -> None:
         "# Ciaobot: credentials and volatile state stay out of snapshots\n"
     )
     body = existing if not existing or existing.endswith("\n") else existing + "\n"
-    path.write_text(header + body + "\n".join(missing) + "\n", encoding="utf-8")
+    path.write_text(header + body + "\n".join(missing) + "\n", encoding="utf-8", newline="")
 
 
 # -- P10.6: rebuild the derived artefacts per root ---------------------------
@@ -1691,7 +1844,7 @@ def rebuild_indexes(
             entries = scan_vault(vault)
             write_index_file(entries, vault / "INDEX.md")
             (vault / "VOCABULARY.md").write_text(
-                format_vocabulary(entries), encoding="utf-8"
+                format_vocabulary(entries), encoding="utf-8", newline=""
             )
         except Exception as exc:  # noqa: BLE001 — reported per root, never fatal
             out["errors"].append({"workspace": name, "error": str(exc)})
@@ -2079,7 +2232,7 @@ def write_skills_triage(
     source_dir.mkdir(parents=True, exist_ok=True)
     readme = source_dir / "README.md"
     if not readme.exists():
-        readme.write_text(_SKILLS_SRC_README, encoding="utf-8")
+        readme.write_text(_SKILLS_SRC_README, encoding="utf-8", newline="")
         created.append(f"{_SKILLS_SRC}/README.md")
 
     # No catalog means no sheet. A triage document listing nothing is noise in a
@@ -2088,9 +2241,203 @@ def write_skills_triage(
         doc = install_root / primary_vault / _SKILL_TRIAGE_RELATIVE
         if not doc.exists():
             doc.parent.mkdir(parents=True, exist_ok=True)
-            doc.write_text(format_skill_triage(triage, workspaces), encoding="utf-8")
+            doc.write_text(format_skill_triage(triage, workspaces), encoding="utf-8", newline="")
             created.append(f"{primary_vault}/{_SKILL_TRIAGE_RELATIVE}")
     return created
+
+
+# -- Reading the sheet back --------------------------------------------------
+
+# The two halves of the sheet's lifecycle live here together on purpose: the
+# writer decides WHERE the sheet goes, so the reader that has to find it again
+# must ask the writer's own record rather than work the location out for itself.
+# Every surface that shows this sheet (the Home card) goes through
+# :func:`skill_triage_sheet`, so there is one answer to "where is it" and it is
+# the receipt's.
+
+
+def skill_triage_sheet(runtime_root: Path, install_root: Path) -> Path | None:
+    """The triage sheet the re-rooting wrote, or ``None`` if it wrote none.
+
+    Located from the migration receipt's ``created_files``, which is where
+    ``apply`` records exactly what :func:`write_skills_triage` created. That is
+    the only durable answer available: the sheet goes inside the primary
+    workspace's vault, and both the primary and that vault's leaf come from the
+    registry and the migration, not from anything a reader may assume. A reader
+    that spelled the path out would be a second source of truth for a location
+    this module decides, and the two drift silently (#810: the Home detector
+    looked for ``<runtime>/migration/skills-triage.md``, which nothing in
+    ``ciao/`` has ever written, so the one decision the re-rooting deliberately
+    refuses to guess was surfaced by nothing at all).
+
+    The return value is the receipt's claim, checked but not statted — it does
+    not ask whether the sheet is still there. Whether it exists is a separate
+    question for the caller, and keeping the two apart is what lets a caller
+    report "the migration recorded a sheet and it is gone" instead of quietly
+    agreeing with the receipt.
+
+    ``None`` means one thing only: the migration wrote no sheet. That covers no
+    receipt at all, and a receipt recording a refusal or a rehearsal — neither of
+    which reached the write, because the sheet is written inside the same
+    transaction the receipt commits. A receipt that is present and unreadable is
+    an **unknown** and raises :class:`ValueError`, so no caller can mistake it for
+    the clean case and report "nothing to decide" about a sheet it never read.
+
+    A claim that would leave the install is the same kind of unknown, and raises
+    for the same reason: the receipt is runtime state this process reads but does
+    not own, so its entries are checked rather than followed (see
+    :func:`_contained_sheet_path`). Following one unchecked is how a card ends up
+    naming a file outside the install, or a file that happens to end with the
+    right characters in a folder called ``evilWorkspace``.
+    """
+    receipt = read_receipt(Path(runtime_root))
+    if receipt is None:
+        if receipt_path(runtime_root).is_file() and peek_receipt(runtime_root) is None:
+            raise ValueError(
+                f"the re-rooting receipt at {receipt_path(runtime_root)} is not "
+                "readable JSON, so whether a triage sheet was written is unknown"
+            )
+        return None
+    created = receipt.get("created_files")
+    if not isinstance(created, list):
+        return None
+    recorded = [entry for entry in created if _claims_skill_triage_sheet(entry)]
+    if not recorded:
+        return None
+    # A completed receipt records one sheet, written once into the primary
+    # vault's Workspace folder. Two entries would mean the receipt is not the
+    # record this reader thinks it is, and picking one silently would be a guess.
+    if len(recorded) > 1:
+        raise ValueError(
+            f"the re-rooting receipt records {len(recorded)} triage sheets "
+            f"({', '.join(recorded)}), so which one to read is unknown"
+        )
+    return _contained_sheet_path(install_root, str(recorded[0]))
+
+
+def _claims_skill_triage_sheet(entry: object) -> bool:
+    """Whether one ``created_files`` entry is naming the triage sheet.
+
+    Matched on a **component boundary**, not on a string suffix. The writer's own
+    format always puts a folder in front of ``Workspace/Skill-Triage.md``, so
+    the separator is part of the claim: ``evilWorkspace/Skill-Triage.md`` ends
+    with the same characters and is a different file in a different folder, and a
+    reader that cannot tell those two apart is guessing. Non-strings are not
+    claims at all.
+    """
+    return isinstance(entry, str) and entry.endswith(f"/{_SKILL_TRIAGE_RELATIVE}")
+
+
+def _contained_sheet_path(install_root: Path, entry: str) -> Path:
+    """The claimed sheet path, or :class:`ValueError` if it is not one.
+
+    Three checks, because each closes a different way out of the install:
+
+    * **Relative POSIX, no traversal.** An absolute entry, a Windows separator,
+      or a ``.``/``..`` component is not a path this migration writes — it is a
+      path *through* the install, aimed at something else.
+    * **Contained after resolution.** The joined path is resolved (which follows
+      symlinks) and must still sit under the resolved install root, so a
+      component that is a symlink pointing out of the install cannot smuggle the
+      sheet somewhere else. Resolution is also what makes the check survive the
+      install root itself being reached through a symlink, which is normal on
+      macOS and common in test trees. Resolving to the root itself is refused
+      too: a claim that lands on the install directory is not a sheet.
+
+    Every failure raises rather than returning a path, because the caller's
+    honest options are "here is the sheet" and "I cannot tell" — and a reader
+    that normalises a hostile entry into a plausible-looking path has quietly
+    become the second source of truth this function exists to remove.
+    """
+    claimed = PurePosixPath(entry)
+    if claimed.is_absolute() or "\\" in entry:
+        raise ValueError(
+            f"the re-rooting receipt names the triage sheet as {entry!r}, which is "
+            "not a relative path inside the install"
+        )
+    if any(part in {".", ".."} for part in claimed.parts):
+        raise ValueError(
+            f"the re-rooting receipt names the triage sheet as {entry!r}, which "
+            "leaves the install it was written for"
+        )
+    root = Path(install_root).resolve()
+    sheet = (root / claimed).resolve()
+    if sheet == root or not sheet.is_relative_to(root):
+        raise ValueError(
+            f"the re-rooting receipt names the triage sheet as {entry!r}, which "
+            f"resolves to {sheet} — outside the install at {root}"
+        )
+    return sheet
+
+
+def undecided_skill_triage(sheet: Path) -> tuple[str, ...]:
+    """The skills in a triage sheet whose **Destination** cell is still blank.
+
+    The blank is the migration's decision, not an oversight: attributing a
+    customised skill to a root is a judgement about somebody's own work, and a
+    default here is exactly the guess the sheet exists to avoid. So this reads
+    the blank and nothing else — it never proposes a destination, never writes
+    one, and never reorders or drops a row.
+
+    Which makes the blank the card's completion evidence too: filling a cell in
+    is the operator's own record that the row is dealt with, so the count falls
+    as the sheet is answered and reaches zero when it is fully answered. A sheet
+    whose rows are all filled is not a permanent card.
+
+    A sheet with no table, no header, or no rows yields an empty tuple: nothing
+    unanswered is the honest answer for a document in any other shape, and a
+    malformed sheet must not raise a condition on the Home strip. A sheet that
+    cannot be **read** is a different answer and raises :class:`OSError`, because
+    an unreadable file says nothing about what is outstanding in it.
+
+    A row **shorter than the Destination column** is counted as undecided rather
+    than dropped. A truncated row is what a half-typed edit or a narrower column
+    looks like, and there is no reading of a row without a Destination cell that
+    says the decision was made — whereas skipping it says the card can reach zero
+    while a row the operator never answered is still sitting there. A row whose
+    name cell is empty is not a row at all and is skipped.
+    """
+    pending: list[str] = []
+    destination = -1
+    for line in Path(sheet).read_text(encoding="utf-8").splitlines():
+        cells = _triage_cells(line)
+        if not cells:
+            if destination >= 0:
+                # The table ended; the trailing "N skill(s) to triage." line and
+                # anything an operator appended below are not rows.
+                break
+            continue
+        lowered = [cell.strip("`* ").lower() for cell in cells]
+        if "destination" in lowered:
+            destination = lowered.index("destination")
+            continue
+        if destination < 0:
+            continue
+        if all(set(cell) <= set("-: ") for cell in cells):
+            continue  # the `| --- | --- |` separator under the header
+        name = cells[0].strip("`* ")
+        if not name:
+            continue
+        if len(cells) <= destination or not cells[destination]:
+            pending.append(name)
+    return tuple(pending)
+
+
+def _triage_cells(line: str) -> list[str]:
+    """One markdown table row's cells, or ``[]`` for a line that is not a row.
+
+    Split on **unescaped** pipes only. :func:`_one_cell` escapes a pipe inside a
+    description as ``\\|`` so a row survives the table, and the reference
+    catalog's descriptions are multi-sentence YAML block scalars that contain
+    them — ordinary content here, not an edge case. Splitting naively would move
+    the Destination column one to the right on exactly those rows and report a
+    filled cell as blank.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return []
+    body = stripped.strip("|")
+    return [cell.strip() for cell in re.split(r"(?<!\\)\|", body)]
 
 
 # -- The upgrade trigger ----------------------------------------------------

@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { installInstructions, isIos, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
 import { canPromptInstall, installed, promptInstall } from '../lib/installPrompt'
 import { errorMessage } from '../lib/errorMessage'
+import HomeNoticeWindow from './HomeNoticeWindow.vue'
+import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
+
+const noticeWindows = useHomeNoticeWindows()
+const SETUP_NOTICE_KEY = 'setup:device'
 
 /** The device-local setup nudge: install, then notifications.
  *
@@ -38,8 +43,19 @@ const probed = ref(false)
 const installDone = computed(() => standalone.value || installed.value)
 const needsInstallFirst = computed(() => isIos() && !standalone.value)
 
+/** Both real steps are finished (or cannot be finished here). */
+const complete = computed(() => installDone.value && (pushOn.value || !pushAvailable.value || denied.value))
+/** The card lingers a moment after the user completes it so the confirmation
+ *  is readable, then goes away by itself. */
+const finished = ref(false)
+let finishTimer: ReturnType<typeof setTimeout> | undefined
+watch(() => touched.value && complete.value, done => {
+  if (done) finishTimer = setTimeout(() => { finished.value = true }, 2500)
+})
+onBeforeUnmount(() => clearTimeout(finishTimer))
+
 const visible = computed(() => {
-  if (dismissed.value) return false
+  if (dismissed.value || finished.value) return false
   // Neither install prompts nor push subscriptions exist without a secure
   // origin, so the steps would be instructions for something impossible.
   if (window.isSecureContext !== true) return false
@@ -48,8 +64,10 @@ const visible = computed(() => {
   // there is done, not stuck. Nor is an installed app whose notifications are
   // blocked: nothing in this card can unblock them, and the Settings
   // notifications card still explains how.
-  return touched.value || !(installDone.value && (pushOn.value || !pushAvailable.value || denied.value))
+  return touched.value || !complete.value
 })
+watch(visible, shown => noticeWindows.setAvailable('device-setup', shown ? [SETUP_NOTICE_KEY] : []), { immediate: true })
+onBeforeUnmount(() => noticeWindows.clearAvailable('device-setup'))
 
 onMounted(async () => {
   pushAvailable.value = pushSupported()
@@ -99,11 +117,8 @@ function hide() {
 </script>
 
 <template>
-  <section v-if="visible" class="home-setup" aria-labelledby="home-setup-title">
-    <div class="home-setup-head">
-      <h2 id="home-setup-title" class="home-setup-title">Set up this device</h2>
-      <button class="btn-small btn-chip" type="button" @click="hide">Hide</button>
-    </div>
+  <section v-if="visible && !noticeWindows.isClosed(SETUP_NOTICE_KEY)" class="home-setup" aria-label="Set up this device">
+    <HomeNoticeWindow title="Set up this device" :notice-key="SETUP_NOTICE_KEY" close-label="Dismiss setup reminder on this device" @close="hide">
     <ol class="home-setup-steps">
       <li class="home-setup-step" :data-done="installDone">
         <div class="home-setup-text">
@@ -136,27 +151,15 @@ function hide() {
       </li>
     </ol>
     <p v-if="error" class="action-result" role="alert">{{ error }}</p>
+    </HomeNoticeWindow>
   </section>
 </template>
 
 <style scoped>
-/* A plain section, not a card: Home already has one raised surface in view
-   (the housekeeping strip) and a second box here would compete with it. */
 .home-setup { margin-block: var(--space-3); }
-.home-setup-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-.home-setup-title {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 600;
-}
 .home-setup-steps {
   list-style: none;
-  margin: var(--space-2) 0 0;
+  margin: 0;
   padding: 0;
 }
 .home-setup-step {
@@ -168,6 +171,7 @@ function hide() {
   padding: var(--space-2) 0;
   border-top: 1px solid var(--border);
 }
+.home-setup-step:first-child { border-top: 0; padding-top: 0; }
 .home-setup-text {
   display: flex;
   flex-direction: column;
@@ -176,4 +180,7 @@ function hide() {
   flex: 1 1 14rem;
 }
 .home-setup-step[data-done="true"] strong { color: var(--fg3); }
+@container (max-width: 560px) {
+  .home-setup-step > button { width: 100%; min-height: 44px; }
+}
 </style>

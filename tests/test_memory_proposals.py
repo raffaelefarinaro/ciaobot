@@ -21,6 +21,7 @@ import pytest
 from ciao import memory_proposals as mp
 from ciao import memory_tool as mt
 from ciao import proposal_tracking
+from ciao.learning_records import SECTION_ACTIVE, LearningRecord, parse_learnings
 
 
 def write_guide(
@@ -888,55 +889,278 @@ def test_render_entity_note_is_exactly_what_the_write_lands(tmp_path: Path) -> N
 # ---- Structured learnings -------------------------------------------------
 
 
+def _learnings(vault: Path) -> str:
+    return (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
+
+
+def _one_active_record(vault: Path) -> LearningRecord:
+    """The single record under ``## Active``, failing loudly on any other shape.
+
+    Read back through the canonical model rather than through a private regex
+    of this module's: the line the writer emits is a machine record, and a test
+    that asserted on it with a hand-rolled pattern would keep passing after the
+    writer had stopped writing anything.
+    """
+    document = parse_learnings(_learnings(vault), workspace=vault.name)
+    active = [
+        entry.record
+        for entry in document.entries
+        if entry.section == SECTION_ACTIVE
+    ]
+    assert len(active) == 1 and active[0] is not None, document.diagnostics
+    return active[0]
+
+
 def test_append_learning_writes_structured_entry(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     assert mp.append_learning(
-        vault, "Airtable sort param returns 400; filter by field ID.", source="chat-a1"
+        vault, "Airtable sort param returns 400; filter by field ID.", workspace="vault", source="chat-a1"
     )
-    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
-    line = next(l for l in text.splitlines() if l.startswith("- ["))
-    match = mp._LEARNING_LINE_RE.match(line)
-    assert match is not None
-    assert match.group("count") == "1"
-    assert match.group("first") == match.group("last")
-    assert match.group("sources") == "chat-a1"
+    record = _one_active_record(vault)
+    assert record.text == "Airtable sort param returns 400; filter by field ID."
+    assert record.count == 1
+    assert record.first_seen == record.last_seen
+    # The observation is the evidence, and it is persisted rather than parsed
+    # back out of the human-readable citation list.
+    assert [o.source for o in record.observations] == ["chat-a1"]
 
 
-def test_append_learning_recurrence_increments_instead_of_duplicating(
+def test_append_learning_recurrence_counts_evidence_not_replays(
     tmp_path: Path,
 ) -> None:
+    """A second sighting counts; re-filing the first one does not.
+
+    The old writer incremented whenever the normalized statement matched, so a
+    retry that re-quoted the same episode from the same source — the common case
+    behind a duplicate accept — inflated recurrence and drifted a learning
+    towards the x3 promotion threshold on no new evidence at all.
+    """
     vault = tmp_path / "vault"
     fact = "Airtable sort param returns 400; filter by field ID."
-    assert mp.append_learning(vault, fact, source="chat-a1")
-    assert mp.append_learning(vault, fact, source="chat-b2")
-    # Whitespace/case variations still count as the same learning.
-    assert mp.append_learning(vault, fact.upper(), source="chat-b2")
+    assert mp.append_learning(vault, fact, workspace="vault", source="chat-a1")
+    assert mp.append_learning(vault, fact, workspace="vault", source="chat-b2")
+    # Whitespace and case variations are still the same statement, and chat-b2
+    # is still the source already counted, so this changes nothing.
+    assert mp.append_learning(vault, fact.upper(), workspace="vault", source="chat-b2")
 
-    text = (vault / "Workspace" / "Learnings.md").read_text(encoding="utf-8")
-    lines = [l for l in text.splitlines() if l.startswith("- [")]
-    assert len(lines) == 1
-    match = mp._LEARNING_LINE_RE.match(lines[0])
-    assert match is not None
-    assert match.group("count") == "3"
-    assert match.group("sources") == "chat-a1, chat-b2"  # dedup'd source
+    text = _learnings(vault)
+    assert text.count(fact) == 1
+    record = _one_active_record(vault)
+    assert record.count == 2
+    assert [o.source for o in record.observations] == ["chat-a1", "chat-b2"]
 
 
 def test_append_learning_leaves_legacy_bullets_alone(tmp_path: Path) -> None:
+    """An owner-written bullet survives a write that records no evidence.
+
+    A source-less sighting is refused by the model — nothing can tell it apart
+    from a new one — so there is nothing to converge the line towards, and
+    re-rendering it as a canonical entry would rewrite the owner's prose on the
+    strength of a no-op.
+    """
     vault = tmp_path / "vault"
     path = vault / "Workspace" / "Learnings.md"
+    original = "# Learnings\n\n## Active\n- legacy plain learning bullet\n"
     path.parent.mkdir(parents=True)
-    path.write_text(
-        "# Learnings\n\n## Active\n- legacy plain learning bullet\n",
-        encoding="utf-8",
-    )
-    assert mp.append_learning(vault, "legacy plain learning bullet")
-    text = path.read_text(encoding="utf-8")
-    assert text.count("legacy plain learning bullet") == 1  # exact dup short-circuit
+    path.write_text(original, encoding="utf-8")
+    assert mp.append_learning(vault, "legacy plain learning bullet", workspace="vault")
+    assert path.read_text(encoding="utf-8") == original
 
-    assert mp.append_learning(vault, "A brand new structured learning.", source="chat-x")
+    assert mp.append_learning(
+        vault, "A brand new structured learning.", workspace="vault", source="chat-x"
+    )
     text = path.read_text(encoding="utf-8")
     assert "- legacy plain learning bullet" in text
     assert "(x1) A brand new structured learning." in text
+
+
+# ── `/remember` provenance (request) ───────────────────────────────────────
+
+
+def test_a_remember_sighting_with_no_turn_records_the_request(
+    tmp_path: Path,
+) -> None:
+    """The `/remember` case, and the reason `request` exists at all.
+
+    A lesson is usually remembered in a chat that is never archived, so there
+    is no transcript turn to cite. The two ways out are not equivalent: citing a
+    manufactured turn is a reference to a conversation that never happened,
+    while the request id is the sighting's real, re-readable origin.
+    """
+    vault = tmp_path / "vault"
+    fact = "Pin the Node version before running the suite."
+    assert mp.append_learning(vault, fact, workspace="vault", request="req-7")
+
+    record = _one_active_record(vault)
+    assert record.count == 1
+    assert [(o.request, o.source, o.turn) for o in record.observations] == [
+        ("req-7", "", None)
+    ]
+    # And it reads back off the file, cited as a request rather than a chat.
+    line = next(
+        line
+        for line in _learnings(vault).splitlines()
+        if "Pin the Node version" in line
+    )
+    assert "— sources: req:req-7" in line
+    # The identity is the request alone, which is what makes a retry a no-op.
+    document = parse_learnings(_learnings(vault), workspace=vault.name)
+    reparsed = [e.record for e in document.entries if e.record is not None][0]
+    assert reparsed.observations[0].identity == ("request", "req-7")
+    assert reparsed.observations[0].citation == "req:req-7"
+
+
+def test_a_remember_retry_does_not_inflate_recurrence(tmp_path: Path) -> None:
+    """The dedupe the request id buys, and the reason it is carried at all.
+
+    A `/remember` filed twice is one sighting. Without a stable identity the
+    second accept would count as new evidence and push a lesson towards a
+    promotion threshold nobody earned.
+    """
+    vault = tmp_path / "vault"
+    fact = "Pin the Node version before running the suite."
+    assert mp.append_learning(vault, fact, workspace="vault", request="req-7")
+    assert mp.append_learning(vault, fact, workspace="vault", request="req-7")
+
+    record = _one_active_record(vault)
+    assert record.count == 1
+    assert len(record.observations) == 1
+    # A *different* request is a different sighting, and does count.
+    assert mp.append_learning(vault, fact, workspace="vault", request="req-8")
+    assert _one_active_record(vault).count == 2
+
+
+def test_a_remember_may_carry_both_a_source_and_a_request(tmp_path: Path) -> None:
+    """An archived `/remember` has a real chat id, and it may keep it.
+
+    The two are different facts, so both are kept: the citation shows the
+    archive because that is the re-readable provenance, and the identity keys on
+    the request because it is the narrower one.
+    """
+    vault = tmp_path / "vault"
+    fact = "Pin the Node version before running the suite."
+    assert mp.append_learning(vault, fact, workspace="vault", source="chat-9", request="req-7")
+
+    record = _one_active_record(vault)
+    assert [(o.source, o.request) for o in record.observations] == [("chat-9", "req-7")]
+    assert record.observations[0].identity == ("request", "req-7")
+    assert record.observations[0].citation == "chat-9"
+
+
+def test_a_request_is_not_a_source_and_does_not_manufacture_a_turn(
+    tmp_path: Path,
+) -> None:
+    """No chat id, no turn number, no archive path — the line says `req:`.
+
+    Every one of those would be an invented citation, and the request field is
+    the honest alternative; a test that only checked the count would pass even
+    if the writer had quietly rendered a `chat-*` source.
+    """
+    vault = tmp_path / "vault"
+    assert mp.append_learning(
+        vault, "A lesson with no transcript behind it.", workspace="vault", request="r1"
+    )
+    text = _learnings(vault)
+    assert "chat-" not in text
+    assert "#1" not in text
+    assert "req:r1" in text
+
+
+def test_the_preview_renders_the_same_provenance_the_accept_writes(
+    tmp_path: Path,
+) -> None:
+    """The card and the write cannot disagree about where the sighting came from.
+
+    This is the same argument the `source` field was fixed for: a preview that
+    drops the citation shows a shorter sources list than the line the accept is
+    about to produce, and the person reviewing it never saw the real one.
+    """
+    vault = tmp_path / "vault"
+    before = mp.LEARNINGS_STUB
+    rendered, operation = mp.render_learning_append(
+        before, "A lesson.", workspace=vault.name, request="req-3"
+    )
+    assert operation == "add"
+    assert "req:req-3" in rendered
+
+
+# ── The bullet grammar's `request` tail ────────────────────────────────────
+
+
+def test_a_bullet_round_trips_its_request_through_the_queue(tmp_path: Path) -> None:
+    """The `_(request: …)_` tail is a field, not more text in the source.
+
+    Folding it into the source would make a request id read back as a chat id,
+    which is the invented-citation failure this field exists to remove — so the
+    two are parsed apart and both survive the round trip.
+    """
+    from ciao.proposal_kinds import parse_bullet
+
+    bullet = mp.MemoryProposal(
+        target="learnings",
+        text="Pin the Node version before running the suite.",
+        source_section="/remember",
+        request="req-7",
+    ).as_bullet()
+    parsed = parse_bullet(bullet)
+    assert parsed is not None
+    assert parsed.kind == "learnings"
+    assert parsed.text == "Pin the Node version before running the suite."
+    assert parsed.source == "/remember"
+    assert parsed.request == "req-7"
+
+    vault = tmp_path / "vault"
+    mp.append_proposals([mp.MemoryProposal(
+        target="learnings",
+        text="Pin the Node version before running the suite.",
+        source_section="/remember",
+        request="req-7",
+    )], vault)
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    row = next(
+        row
+        for row in mp.list_proposals(queue)
+        if row["kind"] == "learnings"
+    )
+    assert row["source"] == "/remember"
+    assert row["request"] == "req-7"
+
+
+def test_a_bullet_written_before_the_request_field_parses_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Every bullet already in an installed vault has no request tail."""
+    from ciao.proposal_kinds import parse_bullet
+
+    for line in (
+        "- [memory] Prefers short answers.  _(from: curation)_",
+        "- [project ./projects/x/doc.md] Ships on Friday.  _(from: chat-1)_",
+        "- [learnings] No tail at all",
+        "- [note_edit abc123] Retire this.  _(from: /remember)_",
+    ):
+        parsed = parse_bullet(line)
+        assert parsed is not None, line
+        assert parsed.request == "", line
+
+
+def test_a_closing_paren_in_a_request_cannot_end_the_tail_early() -> None:
+    """The bullet is one line with its own delimiters, so a `)` is stripped.
+
+    Left in, it would close the tail early and the rest of the line would read
+    as body text — a row that stops parsing without anything looking wrong.
+    """
+    from ciao.proposal_kinds import parse_bullet
+
+    bullet = mp.MemoryProposal(
+        target="learnings",
+        text="A lesson.",
+        source_section="/remember",
+        request="req) and then some prose",
+    ).as_bullet()
+    parsed = parse_bullet(bullet)
+    assert parsed is not None
+    assert parsed.text == "A lesson."
+    assert parsed.request == "req and then some prose"
 
 
 # ── accept_region_fact: the UI accept path's guards ───────────────────────

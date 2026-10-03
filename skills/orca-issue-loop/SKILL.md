@@ -76,13 +76,24 @@ Rules:
 - The parent/child split, the round history, and any deferred finding go in the record, not only in scattered PR comments.
 - `plans/loop-state.md` carries the one-line cross-issue view (what is in flight, what merged); each `record.md` carries the depth for one issue.
 
+## 0.2 Finish the whole graph, not one wave
+
+**The default is to work every queued issue to completion in dependency order, not to merge a first wave and stop.** This is the failure mode to avoid: you split a parent into children, merge the independent foundations (the A children), and then report progress while the actual user-facing feature — the B/C/D children that depend on them — is still unbuilt. A foundation nothing consumes yet has delivered nothing to the user.
+
+- **Track the graph, not the batch.** Keep the child DAG in `plans/<batch>.md` with every child's status (`todo` / `in-flight` / `merged`). Work the *ready* set (children whose dependencies are merged) continuously: as one merges, start the next ready child without waiting to be asked. Never leave a parent open "for later" while its ready children sit unstarted.
+- **A parent closes only when all its children are merged** (or the user rules the rest out). Do not close a parent on its foundation alone, and do not silently stop with ready children outstanding. If you must stop (budget, a genuine blocker, a decision only the user can make), say exactly which children are unbuilt and why.
+- **Re-plan each child just-in-time.** A child that depended on an API another child added must be planned against *current* `develop` after that child merges; the parent body may predate the merged shape. File the child as its own issue (`Part of #N`) with an implementation-grade plan, then run it through the same loop.
+- **A blocker that is a decision, not code, asks the user once** (batch the questions), then continues with the rest of the graph while the answer is pending — do not stall the whole DAG on one question, and do not guess an irreversible answer.
+
+**Clear the loop's own follow-ups.** Any issue the loop opens along the way — a deferred review nit filed as `#NNN`, a split-out hardening item, a follow-up from a merged PR — is part of this workload. Track those ids in the same graph and close them the same way (plan → implement → review → merge → close) before declaring the batch done, unless the user explicitly wants to defer one.
+
 ## 1. Plan → GitHub issue (you, big model)
 
 **Starting from an existing issue `#N`:** `gh issue view N --comments`. If it already has a plan matching the template's level of detail, reuse it. Otherwise investigate and add the plan (edit the body, keeping the reporter's text under `## Report`).
 
 **Starting from a description:** investigate the codebase properly — read the files you will name, find the tests that cover them, and read `AGENTS.md` / `docs/DEVELOPMENT.md` / `web/README.md` / `DESIGN.md` where relevant. Then fill `references/plan-template.md`.
 
-The plan is written for a model that will **not** explore on its own. It must name exact files, functions and line anchors, the change in each, the new tests (file + test name + what they assert), the commands to verify, and explicit out-of-scope items. If you cannot write a step concretely, you have not investigated enough — keep reading. Split work that needs more than ~8 files or two subsystems into separate child issues (`Part of #N`), track them as a checklist comment on the parent, and run the loop on one child at a time, planning each against the current `develop` just before it runs.
+The plan is written for a model that will **not** explore on its own. It must name exact files, functions and line anchors, the change in each, the new tests (file + test name + what they assert), the commands to verify, and explicit out-of-scope items. If you cannot write a step concretely, you have not investigated enough — keep reading. Split work that needs more than ~8 files or two subsystems into separate child issues (`Part of #N`), track them as a checklist comment on the parent, and run the loop on every ready child (dependencies merged, up to the concurrency cap in the pitfalls), planning each against the current `develop` just before it runs.
 
 Classification (from `ciao-support`): title prefix `[Bug]` → label `bug`; `[Feature]` → label `enhancement`; small improvements to existing behavior are `[Feature]`/`enhancement` too.
 
@@ -189,7 +200,7 @@ Workers never push, never touch GitHub (except the reviewer's PR comments), neve
    ```bash
    cd <wt> && ~/repos/ciaobot/.venv/bin/mypy ciao
    cd <wt> && PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto tests/ -q
-   cd <wt>/web && npm test && npm run build     # only if web/ changed; Node ≥ 20.19
+   cd <wt>/web && npm test && npm run build     # only if web/ changed; Node >= 22.22.2
    ```
    `npm run build` rewrites tracked `static/index.html` — commit that output with the change. Red gates → do **not** push; write the failures into the next fix prompt (see §7).
 5. Push: `git -C <wt> push -u origin HEAD`, then confirm with `git ls-remote origin <branch>` (a quiet push can fail silently).
@@ -243,7 +254,7 @@ Merge procedure:
 4. `gh issue close <N> --repo raffaelefarinaro/ciaobot --comment "Merged into develop via #<PR> (<merge sha link>). Ships in the next release."` — needed because develop isn't the default branch. Tick the child on the parent's checklist comment if there is one.
 5. `orca worktree set --worktree id:<wt> --workspace-status completed --comment "merged #<PR>" --json`, then `orca worktree rm --worktree id:<wt> --force --json` (the branch is merged; nothing is lost).
 6. Update the records: set `plans/issue-<N>/record.md` to `merged #<PR>` with the merge sha and the final shipped shape (§0.1), and mark the issue merged in `plans/loop-state.md`.
-7. Report to the user: issue, PR, merge commit, rounds used, model, anything deferred into follow-up issues.
+7. Report to the user: issue, PR, merge commit, rounds used, model, anything deferred into follow-up issues (tracked in the graph and cleared per §0.2 unless the user deferred them).
 
 ## Traps
 

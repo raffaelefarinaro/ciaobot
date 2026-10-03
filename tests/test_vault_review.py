@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from datetime import UTC, datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +28,13 @@ from ciao.vault_review import (
 # its fixture's `updated:` date instead of letting the date age into a failure.
 _PINNED = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 
+
+# POSIX permission semantics: mode bits (0o644) and a read-only directory that
+# refuses unlinks. Windows has neither (chmod only toggles the read-only
+# attribute of a file, never a folder's delete permission).
+posix_permissions = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX mode bits and read-only directories"
+)
 
 def _note(root: Path, name: str, body: str) -> None:
     path = root / name
@@ -108,7 +116,7 @@ def test_the_queue_projection_is_not_itself_a_note(tmp_path: Path) -> None:
     queue = tmp_path / "Workspace" / "Vault-Review.md"
     assert queue.is_file()
 
-    scanned = {str(entry.path) for entry in scan_vault(tmp_path, workspace="personal")}
+    scanned = {entry.path_key for entry in scan_vault(tmp_path, workspace="personal")}
     assert "memory-vault/Workspace/Vault-Review.md" not in scanned
     assert "Workspace/Vault-Review.md" not in run_validation(tmp_path).get("orphans", [])
 
@@ -176,6 +184,7 @@ def test_a_hub_note_does_not_outrank_an_orphan(tmp_path: Path) -> None:
     assert hub.priority < orphan.priority
 
 
+@posix_permissions
 def test_permanent_delete_keeps_backlinks_when_the_folder_is_read_only(tmp_path: Path) -> None:
     _note(tmp_path, "People/A.md", "The canonical note.")
     _note(tmp_path, "People/B.md", "See [A](A.md).")
@@ -279,6 +288,117 @@ def test_an_earlier_unattended_turn_does_not_block_a_later_attended_trash(tmp_pa
     chat.user_turn_unattended.pop("7")
     assert plane.vault_review(principal, "trash", candidate_id=candidate.candidate_id)["ok"]
     assert not (tmp_path / "People" / "A.md").exists()
+
+
+def test_an_unattended_turn_cannot_complete_or_restore_a_project(tmp_path: Path) -> None:
+    """The attended-turn guard is an invariant, not a remembered list of actions.
+
+    It held for every mutating action the control plane offers, and completion
+    joined that surface: the destructive class (a folder move, a backlink
+    rewrite across the vault, a terminal ledger row), which the panel already
+    makes an attended and confirmed click. The same engine reached from a
+    schedule must answer the same way. `restore_completed` is guarded for the
+    reason `restore` is: undoing a disposition is as much a decision as making
+    it.
+    """
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+
+    _project(tmp_path, "demo")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    chat = SimpleNamespace(user_turn_count=2, user_turn_unattended={"1": True})
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object(), workspace_vault_root=lambda name: tmp_path),
+        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: chat),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="token-1", chat_id="chat-1", project_id="project-1",
+        workspace="personal", provider="opencode",
+    )
+
+    with pytest.raises(ControlPlaneError) as completing:
+        plane.vault_review(principal, "complete", candidate_id=candidate.candidate_id)
+    assert completing.value.code == "unattended_forbidden"
+    with pytest.raises(ControlPlaneError) as undoing:
+        plane.vault_review(principal, "restore_completed", candidate_id=candidate.candidate_id)
+    assert undoing.value.code == "unattended_forbidden"
+    # The refusal is the whole outcome: nothing moved, nothing recorded.
+    assert (tmp_path / "projects" / "active" / "demo" / "demo.md").is_file()
+    assert read_ledger(tmp_path) == []
+
+    # And an attended turn still completes it — the guard reads the CURRENT turn,
+    # so one scheduled turn in the chat does not close the project for good.
+    chat.user_turn_unattended.pop("1")
+    assert plane.vault_review(principal, "complete", candidate_id=candidate.candidate_id)["ok"]
+    assert (tmp_path / "projects" / "completed" / "demo" / "demo.md").is_file()
+
+
+@pytest.mark.parametrize("action", sorted(review.ATTENDED_ONLY_ACTIONS))
+def test_every_attended_only_action_is_refused_on_an_unattended_turn(action: str, tmp_path: Path) -> None:
+    """ATTENDED_ONLY_ACTIONS is the control plane's gate set, not a copy of it (#882).
+
+    The Workspace care prompt is written against this set, so a gate that grew
+    without the prompt being re-read would let the prompt name an action the
+    engine refuses. Reading the constant here keeps the two from drifting: an
+    action added to one and not the other fails here rather than in a nightly run.
+    """
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    candidate = generate_candidates(tmp_path, workspace="personal")[0]
+    chat = SimpleNamespace(user_turn_count=1, user_turn_unattended={"0": True})
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object(), workspace_vault_root=lambda name: tmp_path),
+        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: chat),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="token-1", chat_id="chat-1", project_id="project-1",
+        workspace="personal", provider="opencode",
+    )
+
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.vault_review(
+            principal,
+            action,
+            candidate_id=candidate.candidate_id,
+            disposition="keep",
+            confirm=candidate.candidate_id,
+        )
+    assert refused.value.code == "unattended_forbidden"
+    # The refusal is the whole outcome: the note is untouched and nothing is
+    # recorded, whatever the action would have moved.
+    assert (tmp_path / "People" / "A.md").is_file()
+    assert read_ledger(tmp_path) == []
+
+
+def test_reading_the_queue_is_allowed_on_an_unattended_turn(tmp_path: Path) -> None:
+    """The other half of #882's set: `list` and `inspect` are the whole surface
+    an unattended run has on the review queue, so the guard must not touch them."""
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, McpPrincipal
+
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    chat = SimpleNamespace(user_turn_count=1, user_turn_unattended={"0": True})
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object(), workspace_vault_root=lambda name: tmp_path),
+        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: chat),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="token-1", chat_id="chat-1", project_id="project-1",
+        workspace="personal", provider="opencode",
+    )
+
+    listed = plane.vault_review(principal, "list")
+    assert listed["ok"] and listed["data"]["candidates"]
+    candidate = listed["data"]["candidates"][0]
+    assert plane.vault_review(principal, "inspect", path=candidate["path"])["ok"]
 
 
 def test_lookup_notes_need_more_than_unlinked_to_be_offered_for_retirement(tmp_path: Path) -> None:
@@ -659,6 +779,7 @@ def test_no_retention_window_is_claimed_in_code(tmp_path: Path) -> None:
 # ── release review fixes ─────────────────────────────────────────────────────
 
 
+@posix_permissions
 def test_keep_preserves_the_note_file_mode(tmp_path: Path) -> None:
     """A temp file lands at 0600; os.replace would tighten the note silently.
 
@@ -1050,7 +1171,7 @@ def test_an_invalid_disposition_does_not_rewrite_the_queue(
     `record_decision` raises on a bad disposition, but the control plane
     regenerated the queue projection first — so a call that errored out had
     still rewritten `Workspace/Vault-Review.md`. An agent following a stale
-    instruction (the curation skill named `improve_link` for a release after
+    instruction (the Workspace care schedule prompt named `improve_link` for a release after
     it was retired) hit exactly that.
     """
     from types import SimpleNamespace
@@ -1424,3 +1545,1113 @@ def test_candidate_carries_superseded_evidence(tmp_path: Path) -> None:
     assert candidate.evidence["superseded"]["line"] == 8
     assert candidate.evidence["superseded"]["match"] == "Replaced by"
     assert candidate.evidence["unverified"] is None
+
+
+# --- completing a project --------------------------------------------------
+#
+# `trash_note` was the only disposition a project candidate had, and it is the
+# wrong instrument for one that finished: the note left the active tree with
+# `status: active` still in it and every note that linked to it kept a reference
+# to a file the queue had stopped listing. Completion is the disposition that
+# closes one out, and these pin the three things it promises: the move, the
+# links, and the fact that both can be put back.
+
+
+def _project(root: Path, slug: str, *, updated: str = "2026-05-19") -> Path:
+    """A folder project under ``projects/active/``, as the PWA discovers them."""
+    folder = root / "projects" / "active" / slug
+    folder.mkdir(parents=True)
+    (folder / f"{slug}.md").write_text(
+        f"---\ntype: project\nstatus: active\ntags: [project]\nupdated: {updated}\n---\n"
+        f"# {slug}\n\nStill in flight.\n",
+        encoding="utf-8",
+    )
+    return folder
+
+
+def _project_candidate(root: Path, needle: str) -> review.ReviewCandidate:
+    return next(
+        item
+        for item in generate_candidates(root, workspace="personal", max_candidates=50, now=_SEPT)
+        if needle in item.path
+    )
+
+
+def test_completing_a_folder_project_moves_it_and_rewrites_its_status(tmp_path: Path) -> None:
+    """The reported complaint: a finished project leaves the active tree closed, not hidden."""
+    _project(tmp_path, "evaluate-sdk-docs-page")
+    candidate = _project_candidate(tmp_path, "active/evaluate-sdk-docs-page")
+
+    metadata = review.complete_project_note(tmp_path, candidate)
+
+    completed = tmp_path / "projects" / "completed" / "evaluate-sdk-docs-page" / "evaluate-sdk-docs-page.md"
+    assert completed.is_file()
+    assert not (tmp_path / "projects" / "active" / "evaluate-sdk-docs-page").exists()
+    # The one line that contradicts the move, rewritten with the same
+    # substitution the PWA's own completion uses.
+    assert "status: completed" in completed.read_text(encoding="utf-8")
+    assert "status: active" not in completed.read_text(encoding="utf-8")
+    assert metadata["status_rewritten"] is True
+    row = read_ledger(tmp_path)[-1]
+    assert row["disposition"] == "complete"
+    assert row["path"] == "memory-vault/projects/active/evaluate-sdk-docs-page/evaluate-sdk-docs-page.md"
+    assert row["previous_path"] == row["path"]
+    assert row["new_path"] == "memory-vault/projects/completed/evaluate-sdk-docs-page/evaluate-sdk-docs-page.md"
+
+
+def test_completing_moves_the_whole_project_folder(tmp_path: Path) -> None:
+    """The main markdown is an entry point; the plan beside it is the project."""
+    folder = _project(tmp_path, "evaluate-sdk-docs-page")
+    (folder / "plan.md").write_text("---\ntype: note\n---\n# Plan\n", encoding="utf-8")
+    candidate = _project_candidate(tmp_path, "active/evaluate-sdk-docs-page/evaluate-sdk-docs-page.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    completed = tmp_path / "projects" / "completed" / "evaluate-sdk-docs-page"
+    assert (completed / "plan.md").is_file()
+    assert not folder.exists()
+
+
+def test_a_flat_project_note_completes_into_the_completed_tree(tmp_path: Path) -> None:
+    """`projects/Faraman-Calendar.md` is the reported layout: no folder of its own.
+
+    `_completed_counterpart` answers "" for it, so before this the only way out
+    of the queue was the trash — which retired a project that had simply
+    finished.
+    """
+    (tmp_path / "projects").mkdir(parents=True)
+    (tmp_path / "projects" / "Faraman-Calendar.md").write_text(
+        "---\ntype: project\nstatus: active\ntags: [project]\nupdated: 2026-05-19\n---\n"
+        "# Faraman-Calendar\n\nStill in flight.\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "Faraman-Calendar")
+
+    metadata = review.complete_project_note(tmp_path, candidate)
+
+    completed = tmp_path / "projects" / "completed" / "Faraman-Calendar.md"
+    assert completed.is_file()
+    assert "status: completed" in completed.read_text(encoding="utf-8")
+    assert metadata["new_path"] == "memory-vault/projects/completed/Faraman-Calendar.md"
+
+
+def _unqueued_candidate(
+    root: Path, path: str, declared_type: str = "project"
+) -> review.ReviewCandidate:
+    """A candidate the queue would never return, to read the flag on its own.
+
+    `never_queued` keeps anything under `projects/completed/` out of the
+    generated list, so the "already completed" case cannot be produced by
+    `generate_candidates` — and the flag still has to be right for it, because
+    it is the flag that decides which button the panel draws.
+
+    It carries `vault_root` the way a real one does, since the destination
+    check is a question about the disk and a candidate with no vault behind it
+    is never completable.
+    """
+    return review.ReviewCandidate(
+        candidate_id=review.candidate_id("personal", path, "deadbeef"),
+        workspace="personal",
+        path=path,
+        content_hash="deadbeef",
+        signals=("unlinked",),
+        priority=1,
+        evidence={"type": declared_type},
+        vault_root=root,
+    )
+
+
+def test_the_payload_says_whether_a_candidate_can_be_completed(tmp_path: Path) -> None:
+    """The panel must not re-derive project-ness from `evidence.type`.
+
+    It has no alias table and no view of the `projects/` layouts, so a second
+    definition would be free to disagree with the one that gates the action —
+    and the disagreement is a Complete button the engine then refuses. The flag
+    is therefore computed from the same helpers `complete_project_note` checks,
+    here, in the payload.
+    """
+    _project(tmp_path, "evaluate-sdk-docs-page")
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    (tmp_path / "projects" / "Person-note.md").write_text(
+        "---\ntype: person\nstatus: active\nupdated: 2026-05-19\n---\n# Person\n\nFiled oddly.\n",
+        encoding="utf-8",
+    )
+    queued = generate_candidates(tmp_path, workspace="personal", max_candidates=50, now=_SEPT)
+    by_path = {item.path: item.as_dict() for item in queued}
+
+    # A project the engine will complete: the flag is on.
+    project = by_path["memory-vault/projects/active/evaluate-sdk-docs-page/evaluate-sdk-docs-page.md"]
+    assert project["completable"] is True
+
+    # Not a project at all.
+    assert by_path["memory-vault/People/A.md"]["completable"] is False
+    # A declared type always wins over the folder it sits in, here and in the
+    # action, so the flag must not offer Complete for it.
+    assert by_path["memory-vault/projects/Person-note.md"]["completable"] is False
+
+    # A project that is already completed has nowhere to complete INTO, which
+    # `_completed_path_for` answers "" for. The queue never returns one — the
+    # completed tree is exempt — so the row is built by hand.
+    completed = _unqueued_candidate(tmp_path, "memory-vault/projects/completed/demo/demo.md")
+    assert completed.as_dict()["completable"] is False
+    # And a project outside `projects/` is not a project at all.
+    outside = _unqueued_candidate(tmp_path, "memory-vault/notes/demo.md")
+    assert outside.as_dict()["completable"] is False
+    # While the same note under `projects/` is.
+    flat = _unqueued_candidate(tmp_path, "memory-vault/projects/demo.md")
+    assert flat.as_dict()["completable"] is True
+
+    # A candidate with no vault behind it cannot be checked, so it is not
+    # offered: Retire always works, and answering yes without looking would be
+    # the one answer that cannot be kept.
+    homeless = review.ReviewCandidate(
+        candidate_id="h" * 24, workspace="personal",
+        path="memory-vault/projects/demo.md", content_hash="deadbeef",
+        signals=("unlinked",), priority=1, evidence={"type": "project"},
+    )
+    assert homeless.as_dict()["completable"] is False
+    # And the operator's absolute path never reaches the payload.
+    assert "vault_root" not in flat.as_dict()
+    assert str(tmp_path) not in json.dumps(flat.as_dict())
+
+
+def test_the_payload_says_whether_completion_moves_a_folder(tmp_path: Path) -> None:
+    """A row that closes a whole directory must not read as a one-file move.
+
+    Any note under `projects/active/<x>/` is completable in its own right — the
+    candidate need not be the entry markdown — but completing one of them moves
+    the project FOLDER: the plan, the notes and the attachments beside it travel
+    too. A row whose button said only "Complete" made that read as one file
+    being filed away, which is the kind of small dishonesty the `completable`
+    flag was added to stop. The panel has to be able to ask about the right unit,
+    and it has no way to know that from `completable` alone.
+    """
+    _project(tmp_path, "demo")
+    nested = tmp_path / "projects" / "active" / "demo" / "meetings"
+    nested.mkdir()
+    # Untyped on purpose: a declared `type:` always wins, so a note inside a
+    # project folder is a project candidate because of where it sits — the shape
+    # a real project folder has. `updated:` is what queues it.
+    (nested / "2026-01.md").write_text(
+        "---\nupdated: 2026-05-19\n---\n# 2026-01\n\nKickoff.\n", encoding="utf-8"
+    )
+    # The flat form: no folder of its own, so completing it moves exactly the
+    # file the row names.
+    (tmp_path / "projects" / "Solo.md").write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n# Solo\n\nIn flight.\n",
+        encoding="utf-8",
+    )
+    by_path = {
+        item.path: item.as_dict()
+        for item in generate_candidates(tmp_path, workspace="personal", max_candidates=50, now=_SEPT)
+    }
+
+    assert by_path["memory-vault/projects/active/demo/meetings/2026-01.md"]["completable"] is True
+    assert by_path["memory-vault/projects/active/demo/meetings/2026-01.md"]["completion_moves_folder"] is True
+    # And the same project read from its own entry markdown, which is the note
+    # that drags the folder.
+    assert by_path["memory-vault/projects/active/demo/demo.md"]["completion_moves_folder"] is True
+    # The flat project: still completable, moves nothing but itself.
+    assert by_path["memory-vault/projects/Solo.md"]["completable"] is True
+    assert by_path["memory-vault/projects/Solo.md"]["completion_moves_folder"] is False
+
+    # Gated on the same refusal the flag beside it is: a row whose Complete would
+    # be refused must not also describe what the refused move would have done.
+    (tmp_path / "projects" / "completed").mkdir()
+    (tmp_path / "projects" / "completed" / "Solo.md").write_text(
+        "---\ntype: project\n---\n# Solo\n", encoding="utf-8"
+    )
+    assert _project_candidate(tmp_path, "projects/Solo.md").as_dict()["completion_moves_folder"] is False
+    # And a bool, never the path it was read from: an absolute path on the
+    # operator's disk means nothing to a client.
+    flat = _unqueued_candidate(tmp_path, "memory-vault/projects/Solo.md")
+    assert isinstance(flat.as_dict()["completion_moves_folder"], bool)
+    assert str(tmp_path) not in json.dumps(flat.as_dict())
+
+
+def test_an_occupied_completion_destination_takes_complete_off_the_row(tmp_path: Path) -> None:
+    """Two projects landing on one name is a content decision, never a move.
+
+    The completion refuses it before writing anything, so a row that still
+    showed Complete was offering a button whose only possible answer was 409 —
+    and because the row has no Retire, Still true was left as the sole working
+    action on it. The flag has to read the destination off the disk, not just
+    the layout off the path.
+    """
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "A.md").write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n# A\n\nIn flight.\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "projects/A.md")
+    assert candidate.as_dict()["completable"] is True
+
+    (tmp_path / "projects" / "completed").mkdir()
+    (tmp_path / "projects" / "completed" / "A.md").write_text(
+        "---\ntype: project\n---\n# A\n", encoding="utf-8"
+    )
+
+    # The flag and the action agree, which is the whole point: the row falls
+    # back to Retire and the action refuses for the same reason.
+    assert _project_candidate(tmp_path, "projects/A.md").as_dict()["completable"] is False
+    with pytest.raises(ValueError, match="already exists"):
+        review.complete_project_note(tmp_path, _project_candidate(tmp_path, "projects/A.md"))
+
+
+def test_an_occupied_project_folder_takes_complete_off_the_row(tmp_path: Path) -> None:
+    """A folder project moves as a folder, so the folder is what must be free.
+
+    A candidate nested below the entry markdown has its OWN completed path
+    clear while `projects/completed/<slug>/` is occupied. Asking only about the
+    note's own path is what left a nested row offering a button the engine
+    refuses.
+    """
+    folder = _project(tmp_path, "demo")
+    nested = folder / "meetings" / "2026-01.md"
+    nested.parent.mkdir(parents=True)
+    # Untyped on purpose: a declared `type:` always wins, so a nested note is
+    # a project candidate because of where it sits, which is the shape a real
+    # project folder has. `updated:` is what queues it.
+    nested.write_text(
+        "---\nupdated: 2026-05-19\n---\n# 2026-01\n\nKickoff.\n", encoding="utf-8"
+    )
+    needle = "active/demo/meetings/2026-01.md"
+    assert _project_candidate(tmp_path, needle).as_dict()["completable"] is True
+
+    (tmp_path / "projects" / "completed" / "demo").mkdir(parents=True)
+    (tmp_path / "projects" / "completed" / "demo" / "other.md").write_text(
+        "---\ntype: note\n---\n# Other\n", encoding="utf-8"
+    )
+
+    # The note's own destination (`completed/demo/meetings/2026-01.md`) is
+    # free; the move target is not, and the move is what would clobber.
+    assert not (tmp_path / "projects" / "completed" / "demo" / "meetings" / "2026-01.md").exists()
+    assert _project_candidate(tmp_path, needle).as_dict()["completable"] is False
+    with pytest.raises(ValueError, match="already exists"):
+        review.complete_project_note(tmp_path, _project_candidate(tmp_path, needle))
+
+
+def test_completion_repoints_every_inbound_reference_in_both_dialects(tmp_path: Path) -> None:
+    """A move that leaves the links behind trades one broken vault for another.
+
+    Both dialects are the same edge written twice, so both have to be repointed:
+    the frontmatter ref and the wikilink are vault-relative, the markdown
+    destination is relative to the note holding it and moves with the note.
+    """
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = (
+        "---\ntype: note\nupdated: 2026-05-19\nrelated: [projects/active/demo/demo]\n---\n"
+        "# Hub\n\nSee [[projects/active/demo/demo]] and [the demo](../projects/active/demo/demo.md).\n"
+    )
+    (tmp_path / "notes" / "Hub.md").write_text(hub, encoding="utf-8")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    metadata = review.complete_project_note(tmp_path, candidate)
+
+    rewritten = (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8")
+    assert "projects/active/demo" not in rewritten
+    assert "related: [projects/completed/demo/demo]" in rewritten
+    assert "[[projects/completed/demo/demo]]" in rewritten
+    assert "[the demo](../projects/completed/demo/demo.md)" in rewritten
+    assert metadata["edited_backlinks"] == ["memory-vault/notes/Hub.md"]
+    # Nothing dangles: every reference the linter can resolve now lands on a
+    # file that exists. The linter is the same reader the Memory Map and the
+    # index use, so this is the "no broken links" claim stated in the vault's
+    # own terms rather than in the spelling of one fixture.
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+
+def test_completion_refuses_a_non_project_and_an_occupied_destination(tmp_path: Path) -> None:
+    """Retire stays for notes that are wrong; completion is only for projects.
+
+    And two projects landing on one name is a content decision, never a move:
+    `shutil.move` would answer it by overwriting whichever note was already
+    there, and the refusal has to cost the vault nothing at all.
+    """
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    _note(tmp_path, "People/B.md", "An unlinked note.")
+    people = next(
+        item
+        for item in generate_candidates(tmp_path, workspace="personal", max_candidates=50, now=_SEPT)
+        if item.path.endswith("/A.md")
+    )
+    with pytest.raises(ValueError, match="only a project"):
+        review.complete_project_note(tmp_path, people)
+    assert (tmp_path / "People" / "A.md").is_file()
+    assert read_ledger(tmp_path) == []
+
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "A.md").write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n# A\n\nIn flight.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "projects" / "completed").mkdir()
+    (tmp_path / "projects" / "completed" / "A.md").write_text("---\ntype: project\n---\n# A\n", encoding="utf-8")
+    project = _project_candidate(tmp_path, "projects/A.md")
+
+    with pytest.raises(ValueError, match="already exists"):
+        review.complete_project_note(tmp_path, project)
+
+    # The source is untouched: the destination is checked before anything is
+    # written, and the refusal is the whole outcome.
+    assert (tmp_path / "projects" / "A.md").read_text(encoding="utf-8").count("status: active") == 1
+    assert (tmp_path / "projects" / "completed" / "A.md").read_text(encoding="utf-8") == "---\ntype: project\n---\n# A\n"
+    assert read_ledger(tmp_path) == []
+
+
+def test_the_control_plane_can_complete_and_restore_a_project(tmp_path: Path) -> None:
+    """An agent could see `completable` and had no verb to act on it.
+
+    The CLI and the MCP tool both land here, so the gap was the whole agent
+    surface: a project an agent was told to close out could only be retired,
+    which hides it and leaves every link behind. The pair has to be reachable
+    through the same resolver `inspect` and `decide` use — a completed project
+    is out of the queue by then, so its id cannot come from a fresh scan.
+    """
+    from types import SimpleNamespace
+
+    from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = (
+        "---\ntype: note\nupdated: 2026-05-19\n---\n"
+        "# Hub\n\n[[projects/active/demo/demo]].\n"
+    )
+    (tmp_path / "notes" / "Hub.md").write_text(hub, encoding="utf-8")
+    _note(tmp_path, "People/A.md", "An unlinked note.")
+    plane = CiaoControlPlane(
+        SimpleNamespace(workspace=lambda name: object(), workspace_vault_root=lambda name: tmp_path),
+        project_chat_manager=SimpleNamespace(get_chat=lambda chat_id: None),
+        schedule_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="token-1", chat_id="chat-1", project_id="project-1",
+        workspace="personal", provider="opencode",
+    )
+
+    listed = plane.vault_review(principal, "list")["data"]["candidates"]
+    project = next(item for item in listed if item["path"].endswith("projects/active/demo/demo.md"))
+    assert project["completable"] is True
+
+    closed = plane.vault_review(principal, "complete", candidate_id=project["candidate_id"])
+    assert closed["ok"]
+    assert closed["data"]["new_path"].endswith("projects/completed/demo/demo.md")
+    assert (tmp_path / "projects" / "completed" / "demo" / "demo.md").is_file()
+    assert not (tmp_path / "projects" / "active" / "demo").exists()
+    assert "projects/completed/demo" in (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8")
+
+    # The way back, addressed by the same id — it is in neither the queue nor
+    # the trash, so the id can only have come from the completion's own row.
+    restored = plane.vault_review(
+        principal, "restore_completed", candidate_id=project["candidate_id"]
+    )
+    assert restored["ok"]
+    source = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    assert source.is_file()
+    assert "status: active" in source.read_text(encoding="utf-8")
+    assert (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8") == hub
+
+    # And the refusal the PWA already shows: a non-project is a retire, said in
+    # the engine's own words so both surfaces report the same thing.
+    people = next(item for item in plane.vault_review(principal, "list")["data"]["candidates"]
+                  if item["path"].endswith("People/A.md"))
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.vault_review(principal, "complete", candidate_id=people["candidate_id"])
+    assert refused.value.code == "vault_review_invalid"
+    assert "only a project can be completed" in str(refused.value)
+    assert (tmp_path / "People" / "A.md").is_file()
+
+
+def test_a_failed_completion_audit_puts_the_move_and_every_link_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row that says "completed" while notes still point at the old path is the one
+    outcome this must never produce, so the ledger append is inside the transaction."""
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = (
+        "---\ntype: note\nupdated: 2026-05-19\n---\n"
+        "# Hub\n\n[[projects/active/demo/demo]] and [demo](../projects/active/demo/demo.md).\n"
+    )
+    (tmp_path / "notes" / "Hub.md").write_text(hub, encoding="utf-8")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    def fail_audit(*args: object, **kwargs: object) -> None:
+        raise OSError("ledger is read-only")
+
+    monkeypatch.setattr("ciao.vault_review._append", fail_audit)
+    with pytest.raises(ValueError, match="audit failed"):
+        review.complete_project_note(tmp_path, candidate)
+
+    source = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    assert source.is_file()
+    assert "status: active" in source.read_text(encoding="utf-8")
+    assert (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8") == hub
+    assert not (tmp_path / "projects" / "completed").exists()
+    assert read_ledger(tmp_path) == []
+
+
+def test_restore_completed_puts_the_project_the_note_and_the_links_back(tmp_path: Path) -> None:
+    """Reversibility is the workflow's claim; completion has to be part of it."""
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = (
+        "---\ntype: note\nupdated: 2026-05-19\n---\n"
+        "# Hub\n\n[[projects/active/demo/demo]] and [demo](../projects/active/demo/demo.md).\n"
+    )
+    (tmp_path / "notes" / "Hub.md").write_text(hub, encoding="utf-8")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    review.complete_project_note(tmp_path, candidate)
+
+    review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    source = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    assert source.is_file()
+    # The project folder is gone from `completed/`; the empty `completed/` tree
+    # stays, because that is where the PWA looks for finished projects and a
+    # vault that has completed one is expected to have it.
+    assert not (tmp_path / "projects" / "completed" / "demo").exists()
+    assert "status: active" in source.read_text(encoding="utf-8")
+    assert (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8") == hub
+    assert read_ledger(tmp_path)[-1]["disposition"] == "restore"
+    # And the project is a candidate again, byte for byte what it was, so the
+    # same completion is possible a second time.
+    again = _project_candidate(tmp_path, "active/demo/demo.md")
+    assert again.candidate_id == candidate.candidate_id
+    assert review.complete_project_note(tmp_path, again)["new_path"].endswith(
+        "projects/completed/demo/demo.md"
+    )
+
+
+def test_restore_completed_refuses_when_a_rewritten_note_changed_since(tmp_path: Path) -> None:
+    """Restoring an image over an edit would throw that edit away."""
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "Hub.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Hub\n\n[[projects/active/demo/demo]]\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    review.complete_project_note(tmp_path, candidate)
+    (tmp_path / "notes" / "Hub.md").write_text(
+        "---\ntype: note\nupdated: 2026-09-29\n---\n# Hub\n\nRewritten by hand.\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="has changed since"):
+        review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    # Nothing moved and nothing was written: the refusal is the whole outcome.
+    assert (tmp_path / "projects" / "completed" / "demo" / "demo.md").is_file()
+    assert "Rewritten by hand." in (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8")
+
+
+def test_a_completed_project_is_not_re_queued(tmp_path: Path) -> None:
+    """`test_completed_projects_are_never_retirement_candidates` exempts the tree;
+    this pins the other half — that completing one does not put it back in the
+    queue, and does not record the move as a note that vanished from the vault."""
+    _project(tmp_path, "demo")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+    generate_candidates(tmp_path, workspace="personal", write_queue=True)
+
+    assert not [c for c in generate_candidates(tmp_path, workspace="personal", write_queue=False) if "demo" in c.path]
+    assert not [r for r in read_ledger(tmp_path) if r["disposition"] == "vanished"]
+    assert "complete" in review.DISPOSITIONS
+
+
+def test_a_completed_flat_project_is_not_recorded_as_vanished(tmp_path: Path) -> None:
+    """The flat layout has no folder, so `_completed_counterpart` cannot answer for it."""
+    (tmp_path / "projects").mkdir()
+    (tmp_path / "projects" / "Faraman-Calendar.md").write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n# Faraman-Calendar\n\nLive.\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "Faraman-Calendar")
+    review.complete_project_note(tmp_path, candidate)
+
+    generate_candidates(tmp_path, workspace="personal", write_queue=True)
+
+    assert not [r for r in read_ledger(tmp_path) if r["disposition"] == "vanished"]
+
+
+# --- round 1: a folder project is a whole folder, not one file -------------
+#
+# Every note under `projects/active/<x>/` is a candidate in its own right, and
+# `complete_project_note` moves the whole `<x>` folder whatever the candidate
+# was. The tests below pin the consequences of that one decision: where the
+# folder lands, what happens to links to the notes beside the entry markdown,
+# that such a project can still be put back, that nothing is restored on top of
+# a folder that is already there, and that a second restore refuses.
+
+
+def test_completing_a_nested_candidate_moves_the_project_folder(tmp_path: Path) -> None:
+    """`destination.parent` is the move's destination only for the entry markdown.
+
+    A candidate at `projects/active/x/meetings/2026-01.md` has a parent of
+    `completed/x/meetings`, and moving the `x` folder there split the project
+    across two trees and left `new_path` naming a file that does not exist.
+    """
+    _project(tmp_path, "x")
+    nested = tmp_path / "projects" / "active" / "x" / "meetings"
+    nested.mkdir(parents=True)
+    # No `type:`: a note inside `projects/active/` is a project by where it
+    # sits, which is the shape a project folder really has.
+    (nested / "2026-01.md").write_text(
+        "---\nupdated: 2026-05-19\n---\n# 2026-01\n\nKickoff.\n", encoding="utf-8"
+    )
+    candidate = _project_candidate(tmp_path, "meetings/2026-01.md")
+    assert candidate.evidence["type"] == "project"
+
+    metadata = review.complete_project_note(tmp_path, candidate)
+
+    # The folder, not the note's parent, is what moved.
+    assert metadata["new_path"] == "memory-vault/projects/completed/x/meetings/2026-01.md"
+    assert (tmp_path / "projects" / "completed" / "x" / "meetings" / "2026-01.md").is_file()
+    assert (tmp_path / "projects" / "completed" / "x" / "x.md").is_file()
+    assert not (tmp_path / "projects" / "completed" / "x" / "meetings" / "meetings").exists()
+    assert not (tmp_path / "projects" / "active" / "x").exists()
+
+
+def test_completing_a_folder_project_repoints_links_to_its_siblings(tmp_path: Path) -> None:
+    """The whole folder moves, so a link to a note in it dangles like one to the entry note.
+
+    A map holding only the entry markdown left `[[projects/active/demo/plan]]` and
+    a relative destination pointing at `plan.md` resolving to files that were no
+    longer there, and the linter — the reader the Memory Map and the index share —
+    reported the result as a broken link.
+    """
+    _project(tmp_path, "demo")
+    (tmp_path / "projects" / "active" / "demo" / "plan.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Plan\n\nSteps.\n", encoding="utf-8"
+    )
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "Hub.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\nrelated: [projects/active/demo/plan]\n---\n"
+        "# Hub\n\n[[projects/active/demo/plan]] and [the plan](../projects/active/demo/plan.md).\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    hub = (tmp_path / "notes" / "Hub.md").read_text(encoding="utf-8")
+    assert "projects/active/demo/plan" not in hub
+    assert "related: [projects/completed/demo/plan]" in hub
+    assert "[[projects/completed/demo/plan]]" in hub
+    assert "[the plan](../projects/completed/demo/plan.md)" in hub
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+
+def test_a_folder_project_with_a_rewritten_sibling_can_be_restored(tmp_path: Path) -> None:
+    """A sibling's undo image has to name where the note is AFTER the move.
+
+    Keyed at the pre-move path, every restore of a folder project with a rewritten
+    note inside it failed with "a note rewritten by the completion is gone" — the
+    completion was one-way, which is the opposite of what the ledger claims.
+    """
+    _project(tmp_path, "demo")
+    plan = tmp_path / "projects" / "active" / "demo" / "plan.md"
+    plan.write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Plan\n\nSee [[projects/active/demo]].\n",
+        encoding="utf-8",
+    )
+    plan_before = plan.read_bytes()
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    review.complete_project_note(tmp_path, candidate)
+
+    # The sibling moved and was rewritten; its image is keyed at the new path.
+    moved = tmp_path / "projects" / "completed" / "demo" / "plan.md"
+    assert "projects/completed/demo" in moved.read_text(encoding="utf-8")
+    review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    assert plan.read_bytes() == plan_before
+    assert (tmp_path / "projects" / "active" / "demo" / "demo.md").is_file()
+    assert not moved.exists()
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+
+def test_restore_refuses_when_the_original_project_folder_is_occupied(tmp_path: Path) -> None:
+    """`shutil.move(dir, existing_dir)` nests rather than refusing.
+
+    With `projects/active/demo/` holding something else the note's own path was
+    free, so the note-level check passed and the restore produced
+    `active/demo/demo/…` — the project's notes twice, one of them unreachable by
+    any ref.
+    """
+    _project(tmp_path, "demo")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    review.complete_project_note(tmp_path, candidate)
+    squatter = tmp_path / "projects" / "active" / "demo"
+    squatter.mkdir(parents=True)
+    (squatter / "other.md").write_text("---\ntype: note\n---\n# Other\n", encoding="utf-8")
+    completed = tmp_path / "projects" / "completed" / "demo" / "demo.md"
+    before = completed.read_bytes()
+
+    with pytest.raises(ValueError, match="the original folder is occupied"):
+        review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    # The refusal is the whole outcome: nothing moved, nothing overwritten.
+    assert completed.read_bytes() == before
+    assert (squatter / "other.md").is_file()
+    assert not (squatter / "demo").exists()
+    assert not [r for r in read_ledger(tmp_path) if r["disposition"] == "restore"]
+
+
+def test_a_second_restore_of_the_same_project_refuses(tmp_path: Path) -> None:
+    """The last row for an id is the answer, and a `restore` is not a `complete`."""
+    _project(tmp_path, "demo")
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+    review.complete_project_note(tmp_path, candidate)
+    review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+    restored = (tmp_path / "projects" / "active" / "demo" / "demo.md").read_bytes()
+
+    with pytest.raises(ValueError, match="completed candidate not found"):
+        review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    assert (tmp_path / "projects" / "active" / "demo" / "demo.md").read_bytes() == restored
+    assert len([r for r in read_ledger(tmp_path) if r["disposition"] == "restore"]) == 1
+
+
+def test_a_crlf_note_keeps_its_line_endings_through_a_completion(tmp_path: Path) -> None:
+    """One link changed, not every line ending in the vault.
+
+    `read_text`/`write_text` translate line endings, so completing a project
+    reflowed every CRLF note that linked to it into a whole-file diff — and the
+    recorded "original" was not the original, so nothing could be compared
+    against it afterwards.
+    """
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = tmp_path / "notes" / "Hub.md"
+    hub.write_bytes(
+        b"---\r\ntype: note\r\nupdated: 2026-05-19\r\n---\r\n"
+        b"# Hub\r\n\r\nSee [[projects/active/demo/demo]].\r\n"
+    )
+    before = hub.read_bytes()
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    after = hub.read_bytes()
+    assert b"\n" not in after.replace(b"\r\n", b"")
+    # Byte-identical apart from the one ref.
+    assert after == before.replace(
+        b"projects/active/demo/demo", b"projects/completed/demo/demo"
+    )
+
+
+def test_a_failed_completion_audit_restores_crlf_bytes_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rollback's promise is byte-exact, and a translated original breaks it."""
+    _project(tmp_path, "demo")
+    (tmp_path / "notes").mkdir()
+    hub = tmp_path / "notes" / "Hub.md"
+    hub.write_bytes(
+        b"---\r\ntype: note\r\nupdated: 2026-05-19\r\n---\r\n"
+        b"# Hub\r\n\r\nSee [[projects/active/demo/demo]].\r\n"
+    )
+    before = hub.read_bytes()
+    project = tmp_path / "projects" / "active" / "demo" / "demo.md"
+    project_before = project.read_bytes()
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    def fail_audit(*args: object, **kwargs: object) -> None:
+        raise OSError("ledger is read-only")
+
+    monkeypatch.setattr("ciao.vault_review._append", fail_audit)
+    with pytest.raises(ValueError, match="audit failed"):
+        review.complete_project_note(tmp_path, candidate)
+
+    assert hub.read_bytes() == before
+    assert project.read_bytes() == project_before
+    assert read_ledger(tmp_path) == []
+
+
+def test_a_declared_type_beats_the_projects_folder(tmp_path: Path) -> None:
+    """A person note filed under `projects/` is a person note, not a project.
+
+    The path is a fallback for a note that declared no type at all; letting it
+    override a declaration offered to close someone's `type: person` record
+    because of the directory they put it in.
+    """
+    (tmp_path / "projects" / "active" / "x").mkdir(parents=True)
+    (tmp_path / "projects" / "active" / "x" / "Ada.md").write_text(
+        "---\ntype: person\nupdated: 2026-05-19\n---\n# Ada\n\nA collaborator.\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "active/x/Ada.md")
+    assert candidate.evidence["type"] == "person"
+
+    with pytest.raises(ValueError, match="only a project"):
+        review.complete_project_note(tmp_path, candidate)
+
+    assert (tmp_path / "projects" / "active" / "x" / "Ada.md").is_file()
+    assert not (tmp_path / "projects" / "completed").exists()
+    assert read_ledger(tmp_path) == []
+
+
+def test_a_percent_encoded_ref_to_a_spaced_project_is_repointed(tmp_path: Path) -> None:
+    """The stem prefilter has to see the spelling it is skipping past.
+
+    A destination with a space in it is written `My%20Project.md`, and the bare
+    stem is not a substring of that — so a prefilter comparing the two skipped
+    the one file that needed rewriting, and the link dangled after the move.
+    """
+    (tmp_path / "projects").mkdir(parents=True)
+    (tmp_path / "projects" / "My Project.md").write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n# My Project\n\nLive.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "projects" / "Hub.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Hub\n\n[the project](My%20Project.md).\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "My Project.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    hub = (tmp_path / "projects" / "Hub.md").read_text(encoding="utf-8")
+    assert "My%20Project.md" not in hub
+    # Angle-bracketed, because the filename has a space in it.
+    assert "[the project](<completed/My Project.md>)" in hub
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+
+def test_a_note_edited_under_a_completion_is_not_overwritten(tmp_path: Path) -> None:
+    """The rewrite was computed against text that no longer exists; refuse it.
+
+    The reads that produce these rewrites happen a full vault sweep earlier in
+    the same request, and a note edited in between would otherwise have a
+    mechanical link rewrite laid over the edit — with the ledger recording the
+    result as a successful completion.
+    """
+    hub = tmp_path / "Hub.md"
+    hub.write_text("---\ntype: note\n---\n# Hub\n\nSee [[demo]].\n", encoding="utf-8")
+    stale = review._read_exact(hub)
+    hub.write_text("---\ntype: note\n---\n# Hub\n\nSee [[demo]], edited by hand.\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="changed while"):
+        review._write_texts([(hub, stale, "rewritten")])
+
+    # The refusal is the whole outcome: the edit is intact.
+    assert "edited by hand" in hub.read_text(encoding="utf-8")
+    assert list(tmp_path.glob(".Hub.md.*")) == []
+
+
+def test_an_entry_note_that_links_its_siblings_completes_and_restores(tmp_path: Path) -> None:
+    """The entry note is inside the moving folder, so its own links move with it.
+
+    The sweep used to skip the one note it could not afford to skip: `demo.md`
+    linking `[[projects/active/demo/plan]]` ended up in `completed/demo/demo.md`
+    still naming `projects/active/demo/plan`, which the move had just taken away.
+    The same dangling link as one written in any other note, on the single note
+    the rewriter was told to ignore.
+    """
+    folder = _project(tmp_path, "demo")
+    (folder / "plan.md").write_text(
+        "---\ntype: note\nupdated: 2026-05-19\n---\n# Plan\n\nSteps.\n", encoding="utf-8"
+    )
+    entry = folder / "demo.md"
+    entry.write_text(
+        "---\ntype: project\nstatus: active\ntags: [project]\nupdated: 2026-05-19\n"
+        "related: [projects/active/demo/plan]\n---\n"
+        "# demo\n\nSee [[projects/active/demo/plan]] and [the plan](plan.md).\n",
+        encoding="utf-8",
+    )
+    entry_before = entry.read_bytes()
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    moved = tmp_path / "projects" / "completed" / "demo" / "demo.md"
+    closed = moved.read_text(encoding="utf-8")
+    assert "projects/active/demo/plan" not in closed
+    assert "related: [projects/completed/demo/plan]" in closed
+    assert "[[projects/completed/demo/plan]]" in closed
+    assert "[the plan](plan.md)" in closed
+    assert "status: completed" in closed
+    assert run_validation(tmp_path)["broken_markdown_links"] == []
+
+    review.restore_completed(tmp_path, candidate.candidate_id, workspace="personal")
+
+    # Byte-exact both ways: the status line and the references are one image.
+    assert entry.read_bytes() == entry_before
+    assert (tmp_path / "projects" / "active" / "demo" / "plan.md").is_file()
+    assert not moved.exists()
+
+
+def test_completion_leaves_a_status_line_in_the_body_alone(tmp_path: Path) -> None:
+    """The substitution is scoped to the frontmatter, where the key actually lives.
+
+    A body line reading `status: active` — a pasted transcript, a fenced example,
+    a sentence about a decision log — is prose. Rewriting it made a note that was
+    never closed claim that it was, and the reverse substitution then flipped every
+    such line back on restore, so a restore edited a note it had never touched.
+    """
+    folder = _project(tmp_path, "demo")
+    entry = folder / "demo.md"
+    entry.write_text(
+        "---\ntype: project\nstatus: active\nupdated: 2026-05-19\n---\n"
+        "# demo\n\n```yaml\nstatus: active\n```\n\nThe log line above was `status: active`.\n",
+        encoding="utf-8",
+    )
+    candidate = _project_candidate(tmp_path, "active/demo/demo.md")
+
+    review.complete_project_note(tmp_path, candidate)
+
+    closed = (tmp_path / "projects" / "completed" / "demo" / "demo.md").read_text(encoding="utf-8")
+    assert closed.count("status: completed") == 1
+    assert closed.count("status: active") == 2
+    assert "```yaml\nstatus: active\n```" in closed
+    assert "was `status: active`." in closed
+
+
+def test_a_note_that_stopped_being_utf8_mid_completion_is_rolled_back(tmp_path: Path) -> None:
+    """A decode failure is the caller's signal to unwind, like any other write failure.
+
+    It is not an `OSError`, so it skipped the `except OSError` that restores the
+    already-swapped files and put the project back — leaving the vault with some
+    of its notes repointed and the rest not.
+    """
+    hub = tmp_path / "Hub.md"
+    hub.write_text("---\ntype: note\n---\n# Hub\n\nSee [[demo]].\n", encoding="utf-8")
+    stale = review._read_exact(hub)
+    hub.write_bytes(b"---\ntype: note\n---\n# Hub\n\nSee [[caf\xe9]].\n")
+    other = tmp_path / "Other.md"
+    other.write_text("---\ntype: note\n---\n# Other\n", encoding="utf-8")
+
+    with pytest.raises((OSError, UnicodeDecodeError)):
+        review._write_texts(
+            [(hub, stale, "rewritten"), (other, review._read_exact(other), "rewritten too")]
+        )
+
+    # The note that was already swapped in is back, and the unreadable one is
+    # exactly as it was found.
+    assert other.read_text(encoding="utf-8") == "---\ntype: note\n---\n# Other\n"
+    assert hub.read_bytes() == b"---\ntype: note\n---\n# Hub\n\nSee [[caf\xe9]].\n"
+    assert list(tmp_path.glob(".Hub.md.*")) == []
+
+
+# ── The managed verification, as the queue sees it ─────────────────────────
+#
+# A note the nightly pass has already checked is not the same kind of row as one
+# nobody has touched, and a note it has filed a proposal about is not a question
+# this queue may ask a second time.
+
+
+def _stale_note(root: Path, name: str = "People/Old.md", body: str = "An old claim.") -> Path:
+    """A note whose `updated:` is old enough to be flagged, and that is unlinked."""
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Exact bytes: a check records the revision of the text the caller read, and
+    # a text-mode write on Windows would put CRLF on disk under an LF reading.
+    path.write_text(
+        "---\ntype: note\nupdated: 2025-01-01\n---\n" + body, encoding="utf-8", newline=""
+    )
+    return path
+
+
+def _queue(root: Path) -> list:
+    """The candidate list as of the pinned clock, at full size.
+
+    The clock matters: a check recorded on `_PINNED` is inside its 30-day
+    cooldown *then*, and a queue generated against the real today would find the
+    cooldown long expired and ask the note again — which is the bug, not the
+    behaviour under test.
+    """
+    return generate_candidates(
+        root, workspace="personal", max_candidates=50, now=_PINNED
+    )
+
+
+def _check(root: Path, relative: str, text: str, **fields):
+    """Record one check against the note's CURRENT text, and return it."""
+    from datetime import timedelta
+
+    from ciao import memory_receipts as mr
+    from ciao import note_verification as nv
+
+    check = nv.NoteCheck(
+        relative_path=relative,
+        content_revision=mr.content_revision(text),
+        outcome=fields.pop("outcome", "unverified"),
+        checked_at=fields.pop("checked_at", _PINNED.date()),
+        retry_after=fields.pop(
+            "retry_after", _PINNED.date() + timedelta(days=30)
+        ),
+        **fields,
+    )
+    nv.record_note_check(root, check)
+    return check
+
+
+def test_a_check_in_cooldown_stops_the_queue_asking_again(tmp_path: Path) -> None:
+    """`unverified` is a question; a recorded verdict is the answer to it.
+
+    A verdict that came back `unverified` writes nothing, so the note's
+    `updated:` stays exactly where it was and the age rule fires every single
+    scan. Without the check state the queue asked the same note nightly, got
+    `already_checked` back, and asked again the night after.
+    """
+    note = _stale_note(tmp_path)
+    text = note.read_text(encoding="utf-8")
+    _check(tmp_path, "People/Old.md", text, outcome="unverified", coverage="partial")
+
+    rows = _queue(tmp_path)
+    row = next(
+        c for c in _queue(tmp_path)
+        if c.path.endswith("People/Old.md")
+    )
+    assert "unverified" not in row.signals
+    assert row.evidence["verification"]["outcome"] == "unverified"
+    assert row.evidence["verification"]["checked_at"] == _PINNED.date().isoformat()
+    # It is still in the queue for the other reason it was flagged, and the
+    # check state explains why it is not also being nagged about its age.
+    assert "unlinked" in row.signals
+    assert row.as_dict()["pending_verification"] is None
+
+
+def test_a_pending_proposal_is_linked_rather_than_duplicated(tmp_path: Path) -> None:
+    """One revision, one question — the queue points at the proposal."""
+    note = _stale_note(tmp_path)
+    text = note.read_text(encoding="utf-8")
+    _check(
+        tmp_path,
+        "People/Old.md",
+        text,
+        outcome="update",
+        coverage="complete",
+        proposal_id="b7",
+    )
+    row = next(
+        c for c in _queue(tmp_path)
+        if c.path.endswith("People/Old.md")
+    )
+    payload = row.as_dict()
+    pending = payload["pending_verification"]
+    assert pending is not None
+    assert pending["proposal_id"] == "b7"
+    assert pending["outcome"] == "update"
+    assert pending["coverage"] == "complete"
+    # The sidecar id is derived the one way the proposer derives it, so a client
+    # reading the row and an accept resolving it cannot name different records.
+    from ciao.note_edit_proposals import note_edit_id
+
+    assert pending["note_edit_id"] == note_edit_id(
+        "personal", "People/Old.md", row.evidence["verification"]["revision"]
+    )
+    # The note is still queued for the unlinked signal, and still offers Retire:
+    # an unlinked note is a real finding the queue must not lose.
+    assert "unlinked" in row.signals
+    assert payload["retirement_offered"] is True
+    # And the check itself is honest about waiting rather than claiming a
+    # question is open when it is not.
+    assert row.evidence["verification"]["pending"] is True
+    assert row.evidence["verification"]["conflicted"] is False
+
+
+def test_a_proposal_is_the_sole_reason_suppresses_the_duplicate_candidate(
+    tmp_path: Path,
+) -> None:
+    """A note held only for a proposal offers no second decision.
+
+    Nothing else about this note is a finding, so its only way into the queue
+    was the age rule — and the age rule is exactly what the proposal answers.
+    Offering Still true and Retire here would ask the same question twice, in
+    two places, with the two answers free to disagree.
+    """
+    path = tmp_path / "Notes/Lonely.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: note\nupdated: 2025-01-01\n---\nClaimed fact.\n", encoding="utf-8", newline=""
+    )
+    # Linked from elsewhere, so `unlinked` cannot fire, and it carries
+    # frontmatter, so `weak_provenance` cannot either.
+    (tmp_path / "Notes/Hub.md").write_text(
+        "---\ntype: note\nupdated: 2026-01-10\n---\nSee [[Lonely]].\n", encoding="utf-8"
+    )
+    before = [
+        c.path
+        for c in _queue(tmp_path)
+        if c.path.endswith("Lonely.md")
+    ]
+    assert before, "the age rule alone must queue an isolated note"
+
+    text = path.read_text(encoding="utf-8")
+    _check(
+        tmp_path, "Notes/Lonely.md", text, outcome="retire", coverage="complete",
+        proposal_id="c3",
+    )
+    rows = _queue(tmp_path)
+    row = next((c for c in rows if c.path.endswith("Lonely.md")), None)
+    # The `unverified` signal is gone, so with no other signal the note is no
+    # longer a candidate at all — and the check holds it off a second proposal.
+    assert row is None
+    # The note is still discoverable where it is being decided: the check names
+    # the queue row, and nothing was written to the note.
+    from ciao import memory_receipts as mr
+    from ciao.note_verification import should_check
+
+    assert not should_check(
+        tmp_path, "Notes/Lonely.md", mr.content_revision(text), today=_PINNED.date()
+    )
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_a_conflicted_proposal_gives_the_queue_its_actions_back(tmp_path: Path) -> None:
+    """A proposal pinned to text the note has left is dead, and says so.
+
+    Its accept would refuse as a conflict, so suppressing this row would leave
+    the note with nobody asking about it at all: the proposal cannot be applied
+    and the queue had withdrawn. The row comes back, labelled.
+    """
+    note = _stale_note(tmp_path)
+    stale_text = note.read_text(encoding="utf-8")
+    _check(
+        tmp_path, "People/Old.md", stale_text, outcome="retire", coverage="complete",
+        proposal_id="d4",
+    )
+    # The note is edited, so the check describes a revision that no longer exists.
+    note.write_text(
+        "---\ntype: note\nupdated: 2025-01-01\n---\nA different claim entirely.\n",
+        encoding="utf-8",
+    )
+    rows = _queue(tmp_path)
+    row = next(c for c in rows if c.path.endswith("People/Old.md"))
+    payload = row.as_dict()
+    state = row.evidence["verification"]
+    assert state["conflicted"] is True
+    assert state["pending"] is False
+    # A dead proposal is not a live question, so nothing is linked and the
+    # queue's own offer is untouched.
+    assert payload["pending_verification"] is None
+    assert payload["retirement_offered"] is True
+    assert "unverified" in row.signals
+    # And the note is due to be checked again.
+    from ciao import memory_receipts as mr
+    from ciao.note_verification import should_check
+
+    assert should_check(
+        tmp_path,
+        "People/Old.md",
+        mr.content_revision(note.read_text(encoding="utf-8")),
+        today=_PINNED.date(),
+    )
+
+
+def test_an_unchecked_note_carries_no_verification_state(tmp_path: Path) -> None:
+    """`None` means nobody checked it — not a default object claiming otherwise."""
+    _stale_note(tmp_path)
+    row = next(
+        c for c in _queue(tmp_path)
+        if c.path.endswith("People/Old.md")
+    )
+    payload = row.as_dict()
+    assert row.evidence["verification"] is None
+    assert payload["verification"] is None
+    assert payload["pending_verification"] is None
+    assert payload["retirement_offered"] is True

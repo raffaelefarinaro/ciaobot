@@ -313,16 +313,13 @@ def test_vault_key_prefix_names_the_root_in_both_layouts(tmp_path: Path) -> None
     shared.mkdir(parents=True)
     rooted.mkdir(parents=True)
 
-    assert fts_search.vault_key_prefix(shared, install) == os.path.join(
-        "memory-vault", "personal", ""
-    )
-    assert fts_search.vault_key_prefix(rooted, install) == os.path.join(
-        "personal", "memory-vault", ""
-    )
+    # Keys are `/`-separated on every OS (fts_search.KEY_SEPARATOR).
+    assert fts_search.vault_key_prefix(shared, install) == "memory-vault/personal/"
+    assert fts_search.vault_key_prefix(rooted, install) == "personal/memory-vault/"
     # No base means the legacy default: relative to the indexed directory's own
     # parent, which is exactly why two roots collided.
-    assert fts_search.vault_key_prefix(rooted, None) == os.path.join("memory-vault", "")
-    assert fts_search.vault_key_prefix(shared, None) == os.path.join("personal", "")
+    assert fts_search.vault_key_prefix(rooted, None) == "memory-vault/"
+    assert fts_search.vault_key_prefix(shared, None) == "personal/"
 
 
 def test_changing_the_key_base_wipes_the_index_rather_than_mixing_formats(
@@ -337,7 +334,7 @@ def test_changing_the_key_base_wipes_the_index_rather_than_mixing_formats(
     fts_search.index_vault(db_conn, personal, path_base=personal.parent)
 
     paths = {row[0] for row in db_conn.execute("SELECT path FROM vault_meta")}
-    assert paths == {os.path.join("memory-vault", "People", "User.md")}
+    assert paths == {"memory-vault/People/User.md"}
 
 
 def test_no_test_can_reach_the_real_search_database(tmp_path: Path) -> None:
@@ -485,7 +482,7 @@ def test_a_scoped_transcript_search_cannot_return_another_roots_chat(
     rows = fts_search.search_logs(db_conn, "findme", limit=10, path_prefix=prefix)
 
     assert [row["path"] for row in rows] == [
-        os.path.join("personal", "memory-vault", "Logs", "Chats", "2026-06-08-chat.md")
+        "personal/memory-vault/Logs/Chats/2026-06-08-chat.md"
     ]
     # Both roots' rows are in the one database, which is what makes the filter
     # load-bearing rather than decorative.
@@ -501,10 +498,8 @@ def test_logs_key_prefix_names_the_archive_in_both_layouts(
     per_root = install / "personal" / "memory-vault" / "Logs"
 
     # Promoted (D5): one archive shared by every workspace, so one prefix.
-    assert fts_search.logs_key_prefix(promoted, install) == os.path.join("Logs", "")
-    assert fts_search.logs_key_prefix(per_root, install) == os.path.join(
-        "personal", "memory-vault", "Logs", ""
-    )
+    assert fts_search.logs_key_prefix(promoted, install) == "Logs/"
+    assert fts_search.logs_key_prefix(per_root, install) == "personal/memory-vault/Logs/"
 
     # An archive outside the key base has no prefix at all, so it fails closed:
     # no results, rather than every root's transcripts.

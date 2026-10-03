@@ -16,12 +16,11 @@ vi.mock('../../lib/push', () => ({
 vi.mock('../../lib/api', () => ({
   api: {
     get: vi.fn(async (path: string) => {
-      if (path === '/api/settings/routines') return { push_all_devices: false }
       if (path.startsWith('/api/push/subscription')) return { registered: true, count: 1 }
       return {}
     }),
     post: vi.fn(async () => ({ ok: true })),
-    patch: vi.fn(async () => ({ push_all_devices: true })),
+    patch: vi.fn(),
   },
 }))
 
@@ -52,14 +51,10 @@ afterEach(() => {
 })
 
 describe('SettingsNotifications push controls', () => {
-  it('toggles delivery to every device', async () => {
+  it('has no delivery row', async () => {
     const view = await mountCard()
-    expect(view.text()).toContain('Other devices only')
-
-    await button(view, 'Push to every device').trigger('click')
-    await flushPromises()
-
-    expect(api.patch).toHaveBeenCalledWith('/api/settings/routines', { push_all_devices: true })
-    expect(view.text()).toContain('Every device, including this computer')
+    expect(view.text()).not.toContain('Delivery')
+    expect(view.text()).not.toContain('Push to every device')
+    expect(api.patch).not.toHaveBeenCalled()
   })
 })

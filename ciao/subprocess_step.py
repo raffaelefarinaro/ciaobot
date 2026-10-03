@@ -25,7 +25,7 @@ def run_step(args: list[str], *, cwd: str, timeout: int) -> subprocess.Completed
     """
     try:
         return subprocess.run(
-            args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+            args, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except FileNotFoundError as exc:
         return subprocess.CompletedProcess(

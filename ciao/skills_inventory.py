@@ -6,6 +6,14 @@ answers "what is installed", as labels for the Settings list.
 those may a pass edit", which no label can carry: see the workspace-owned
 sources section at the foot of the module.
 
+:func:`create_owned_skill` is the one write in this module, and it exists because
+the new-skill routing path (#728-D) needs a canonical source that does not exist
+yet. It is a separate function rather than a mode on :func:`resolve_owned_skill`
+on purpose: that resolver's contract is that an *existing* owned source is the
+only thing a proposal may be filed against, and a flag that made it return a path
+for a directory that is not there would take that contract away from every other
+caller to serve one.
+
 :data:`MAX_SKILL_BYTES` lives here for the same reason: a budget for one
 ``SKILL.md`` is a fact about skills, and this is the module that owns them.
 """
@@ -13,13 +21,19 @@ sources section at the foot of the module.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ciao.memory_receipts import write_queue_atomically
+
 if TYPE_CHECKING:
     from ciao.config import CiaoConfig
+
+logger = logging.getLogger(__name__)
 
 # Marker dropped into skills copied from ``ciao.stock`` (see
 # ``ciao.sync_skills._install_stock_skills``), so a stale copy is pruned when it
@@ -182,7 +196,7 @@ def _path_for(root: Path, name: str, *, prefer_custom: bool) -> str:
 
 def _relative_or_absolute(path: Path, root: Path) -> str:
     try:
-        return str(path.relative_to(root))
+        return path.relative_to(root).as_posix()
     except ValueError:
         return str(path)
 
@@ -336,6 +350,174 @@ def eligible_owned_skills(config: CiaoConfig, workspace: str) -> list[OwnedSkill
         except ValueError:
             continue
     return owned
+
+
+@dataclass(frozen=True, slots=True)
+class CreatedSkill:
+    """The owned source :func:`create_owned_skill` wrote, read back from disk.
+
+    ``skill`` is the :class:`OwnedSkill` the readback resolved to, so a caller
+    holds the same revision contract an edit does: the bytes here are the bytes
+    on disk after the write, not the bytes that were handed in. ``trigger`` and
+    ``description`` are what the frontmatter actually said once parsed, so a
+    helper can report on the skill it created without re-reading the file.
+    """
+
+    skill: OwnedSkill
+    trigger: str
+    description: str
+    over_budget: bool
+
+
+def create_owned_skill(
+    config: CiaoConfig, workspace: str, name: str, content: str
+) -> CreatedSkill:
+    """Create ``skills/<name>/SKILL.md`` in ``workspace`` and read it back.
+
+    The creation counterpart to :func:`resolve_owned_skill`, and deliberately a
+    separate function rather than a flag on it. That resolver's whole contract
+    is that an *existing* canonical source is the only thing an improvement may
+    be filed against; a new-skill draft has no such file, so it cannot be
+    pointed at one, and relaxing the resolver to invent a path for a target that
+    does not exist would remove the check that every other write depends on. So
+    the new-skill path creates the file here, under the same confinement, and
+    only after the checks an edit gets.
+
+    What is refused, and why each one matters:
+
+    * a name that is not one plain directory (:func:`_check_skill_name`) — a
+      name that could address a second directory is not a name the catalog lists;
+    * an agent root this workspace does not own alone
+      (:func:`_owned_agent_root`) — one catalog serving several workspaces means
+      a "new" skill is visible to all of them;
+    * a ``skills/`` root that is a symlink — the shared-mirror shape. A *missing*
+      ``skills/`` is not refused: a workspace with no skills yet has none, and
+      its first skill is exactly what brings the catalog into being;
+    * **a name that already exists**, as a directory, as a symlink, or as an
+      installed copy under ``.claude/skills``/``.agents/skills`` — a creation that
+      overwrote any of those would be an edit wearing a creation's permissions,
+      and a local skill shadowing a packaged one is a legitimate owned skill that
+      somebody wrote;
+    * empty or non-UTF-8 content, for the same reason :func:`resolve_owned_skill`
+      refuses them: a skill with no body is not a skill.
+
+    ``over_budget`` is a report, not a refusal: :data:`MAX_SKILL_BYTES` is a
+    context budget the engine pays on every load, and the project's rule is that
+    it warns rather than refuses (see the module's note on it). The content is
+    validated for a ``name``/``description`` frontmatter pair and a non-empty
+    body instead, because a skill with no trigger never fires and a skill with no
+    description is invisible in every catalog listing.
+
+    Writes through the owning queue's atomic write, so a crash cannot leave a
+    half-written ``SKILL.md`` for the next sync to mirror.
+    """
+    _check_skill_name(name)
+    root = _owned_agent_root(config, workspace)
+    catalog = root / "skills"
+    if catalog.is_symlink():
+        raise ValueError(
+            f"{catalog} is a symlink: {catalog} is the shared-mirror shape, so a "
+            "skill created through it would land in somebody else's catalog"
+        )
+    if not content.strip():
+        raise ValueError(
+            f"refusing to create {name!r} from empty content: a skill with no body "
+            "is not a skill"
+        )
+    try:
+        content.encode("utf-8")
+    except UnicodeEncodeError as exc:  # pragma: no cover - str is always encodable
+        raise ValueError(f"the content for {name!r} is not valid UTF-8") from exc
+
+    skill_dir = root / "skills" / name
+    if skill_dir.is_symlink() or skill_dir.exists():
+        raise ValueError(
+            f"workspace {workspace!r} already has a skills/{name} entry: a "
+            "creation that overwrote it would be an edit, and an edit is filed "
+            "as a proposal against the existing source"
+        )
+    for mirror in (".claude", ".agents"):
+        installed = root / mirror / "skills" / name
+        if installed.is_symlink() or installed.exists():
+            raise ValueError(
+                f"{installed} already exists: that name is taken by an installed "
+                f"or mirrored copy, and a new skills/{name} would silently shadow "
+                "it. Improve the existing source instead, or pick another name"
+            )
+
+    description, trigger = _frontmatter_pair(content, name)
+    # `parents=True` creates a `skills/` catalog a workspace with no skills yet
+    # does not have. That is the one directory this function brings into being:
+    # a workspace's first skill cannot be filed without one, and refusing here
+    # would make "no skills yet" unreachable rather than merely empty.
+    skill_dir.mkdir(parents=True)
+    try:
+        skill_md = skill_dir / "SKILL.md"
+        write_queue_atomically(skill_md, content)
+    except OSError as exc:
+        # A half-created directory is worse than none: it is a catalog entry a
+        # resolver will find and a sync will try to mirror.
+        shutil.rmtree(skill_dir, ignore_errors=True)
+        raise ValueError(f"could not create skills/{name}/SKILL.md: {exc}") from exc
+
+    # Read back through the resolver, so what the caller is handed is the same
+    # thing an edit is handed: the source as it exists, with its own revision.
+    owned = resolve_owned_skill(config, workspace, name)
+    created = CreatedSkill(
+        skill=owned,
+        trigger=trigger,
+        description=description,
+        over_budget=len(owned.content.encode("utf-8")) > MAX_SKILL_BYTES,
+    )
+    logger.info("Created owned skill %s in %s", name, workspace)
+    return created
+
+
+def _frontmatter_pair(content: str, name: str) -> tuple[str, str]:
+    """``(description, trigger)`` from a skill's frontmatter, checked for a body.
+
+    The trigger is the frontmatter ``name``: a skill whose ``name`` disagrees
+    with its directory is loaded under one name and listed under the other, so a
+    creation that allowed it would produce a skill nobody can address. Refused
+    here rather than normalized, for the reason :func:`_check_skill_name` gives.
+
+    The description is required too, and for the same class of reason: it is what
+    every catalog listing and every provider's skill index reads, so a skill
+    without one is installed and never selected.
+    """
+    parts = content.split("---", 2)
+    if len(parts) < 3 or not parts[0].strip() == "":
+        raise ValueError(
+            f"a new skill needs YAML frontmatter: the content for {name!r} does "
+            "not open with a `---` line"
+        )
+    fields: dict[str, str] = {}
+    for line in parts[1].splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key = key.strip().casefold()
+        if key in {"name", "description"} and key not in fields:
+            fields[key] = value.strip().strip("\"'")
+    declared = fields.get("name", "")
+    if declared != name:
+        raise ValueError(
+            f"the frontmatter name {declared!r} does not match the directory "
+            f"name {name!r}: a skill is loaded under its frontmatter name, so a "
+            "mismatch creates one nobody can address"
+        )
+    description = fields.get("description", "")
+    if not description:
+        raise ValueError(
+            f"a new skill needs a `description:` in its frontmatter: that is "
+            f"what {name!r} is selected on, and without one it is never chosen"
+        )
+    if not parts[2].strip():
+        raise ValueError(
+            f"the content for {name!r} has frontmatter and no body: a skill that "
+            "says nothing has nothing to load"
+        )
+    return description, declared
 
 
 def _owned_agent_root(config: CiaoConfig, workspace: str) -> Path:

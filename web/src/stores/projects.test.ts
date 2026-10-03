@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
-import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, test, vi, type Mock } from 'vitest'
 import { createPinia as newPinia, setActivePinia } from 'pinia'
-import type { ProjectInfo, ChatInfo } from '../lib/types'
+import type { ProjectInfo, ChatInfo, ChatMessage } from '../lib/types'
+import type { ServerRow } from '../lib/chatHistory'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
@@ -965,33 +966,6 @@ describe('deferred send visibility and re-send de-duplication', () => {
     }
   })
 
-  test('context_entities attaches the matched notes to its user bubble', async () => {
-    try {
-      const store = useProjectStore()
-      const chatId = 'chat-deferred-entities'
-      store.activeChatId = chatId
-
-      store.sendMessage(chatId, 'ask Mo')
-      const socket = lateSockets[0]
-      socket.open()
-      await vi.advanceTimersByTimeAsync(3000)
-      socket.onmessage?.({ data: JSON.stringify({ type: 'user_echo', text: 'ask Mo', turn_index: 0 }) })
-      socket.onmessage?.({
-        data: JSON.stringify({
-          type: 'context_entities',
-          turn_index: 0,
-          entities: [{ name: 'Mo', path: 'work/People/Mo.md', category: 'person' }],
-        }),
-      })
-
-      const [bubble] = userBubbles(store, chatId, 'ask Mo')
-      expect(bubble.context_entities).toEqual([{ name: 'Mo', path: 'work/People/Mo.md', category: 'person' }])
-    } finally {
-      vi.useRealTimers()
-      vi.stubGlobal('WebSocket', FakeWebSocket)
-    }
-  })
-
   test('a deferred send that lands mid-turn becomes one queue entry, not a bubble plus a chip', async () => {
     try {
       const store = useProjectStore()
@@ -1304,6 +1278,30 @@ describe('trace-only history tails', () => {
     }
   })
 
+  test('an older /messages response does not overwrite a newer one', async () => {
+    // A poll issued before the answer persisted can resolve after the fetch that
+    // already carries it. Adopting the smaller, older window dropped the answer.
+    const store = useProjectStore()
+    const chatId = 'c-out-of-order'
+    store.activeChatId = chatId
+    let releaseStale: (value: unknown) => void = () => {}
+    const stale = new Promise(resolve => { releaseStale = resolve })
+    let calls = 0
+    apiGet.mockImplementation((path: string) => {
+      if (!path.includes('/messages')) return Promise.resolve([])
+      calls += 1
+      return calls === 1 ? stale : Promise.resolve([USER, FINAL])
+    })
+
+    const older = store.loadMessages(chatId, { background: true })
+    await store.loadMessages(chatId, { background: true })
+    expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+
+    releaseStale([USER])
+    await older
+    expect(store.messages[chatId].at(-1)?.content).toBe(FINAL.content)
+  })
+
   test('older result reconciliation does not clear a newer turn', async () => {
     // A new turn can start while the previous turn's reconcile is awaiting
     // /messages. Clearing on its stale "settled" read wiped the live turn's
@@ -1440,6 +1438,37 @@ describe('result frames and unread state', () => {
     })
 
     expect(store.unread[chatId]).toBe(1)
+  })
+
+  it('retains normalized stopped partial reply without an error or unread badge', () => {
+    // A clean provider-level Stop arrives as a normalized frame: stopped=true,
+    // is_error=false, and the partial text the user watched stream. The client
+    // must keep that text, finish streaming, and not paint an error or an
+    // unread marker for the half sentence the user cancelled.
+    const store = useProjectStore()
+    const chatId = 'c-stopped-normalized'
+    store.activeChatId = 'some-other-chat'
+    store.streaming[chatId] = true
+    store.messages[chatId] = [{ role: 'user', content: 'do the thing', timestamp: '' }]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Let me check the',
+        is_error: false,
+        stopped: true,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+      }),
+    })
+
+    const last = store.messages[chatId].at(-1)
+    expect(last?.content).toBe('Let me check the')
+    expect(last?.is_error).toBeFalsy()
+    expect(store.streaming[chatId]).toBe(false)
+    expect(store.unread[chatId]).toBeUndefined()
   })
 })
 
@@ -3397,7 +3426,7 @@ describe('memoryInsightRows', () => {
       chat_id: 'src', project_id: 'p1', title: 'Deck figures',
       archived: true, local: true, archive_path: 'chats/src.md',
       created_at: '2026-08-27T00:00:00Z', last_activity_at: '2026-08-27T00:00:00Z',
-      postprocess: { state: 'running', step: 'memory_pass', steps: {} },
+      postprocess: { steps: { memory_pass: { status: 'running', extra: { chat_id: 'pass-1' } } } },
       ...over,
     }
   }
@@ -3465,65 +3494,68 @@ describe('memoryInsightRows', () => {
     expect(row).toMatchObject({ phase: 'needsYou', blocking: true, question: 'Which project?' })
   })
 
-  test('offers the retry for a pipeline that stopped with a stage left', () => {
+  // Archiving a chat spawns a pass, and the pass ends as an ordinary turn, so
+  // it announced itself as one: a "Memory pass · <title>" toast at whoever
+  // archived. The server already refuses the OS push for a pass
+  // (`_schedule_push`); the in-app toast had no such guard.
+  test('a finished memory pass does not toast the owner', () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    apiGet.mockResolvedValue([])
     const store = useProjectStore()
-    store.chats = [sourceChat({
-      postprocess: {
-        state: 'incomplete',
-        job: { job_id: 'j', state: 'incomplete', unfinished: ['trajectory'] },
-      },
-    })] as unknown as typeof store.chats
+    store.chats = [passChat()] as unknown as typeof store.chats
+    // The archived source closed the pane it was archived from, so nothing is
+    // focused: the exact state the toast used to fire in.
+    store.activeChatId = null
 
-    expect(store.memoryInsightRows[0]).toMatchObject({
-      phase: 'unfinished',
-      retryable: true,
-      label: 'trajectory not finished',
-    })
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const resultReady = (chatId: string, title: string) =>
+      sock.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_result_ready',
+          chat_id: chatId,
+          project_id: 'p-mem',
+          title,
+          snippet: 'Stamped the pricing note.',
+        }),
+      })
+
+    resultReady('pass-1', 'Memory pass · Deck figures')
+    expect(store.toasts).toHaveLength(0)
+
+    // An ordinary chat in the same state still notifies, or the guard is
+    // swallowing real results too.
+    store.chats = [
+      { chat_id: 'plain', project_id: 'p1', title: 'Pricing rework', archived: false, local: true, created_at: '', last_activity_at: '' },
+    ] as unknown as typeof store.chats
+    resultReady('plain', 'Pricing rework')
+    expect(store.toasts.map(t => t.title)).toEqual(['Pricing rework'])
   })
-})
 
-describe('retryInsights', () => {
-  test('posts to the per-chat retry-insights endpoint', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValue({ status: 'started' })
-    await store.retryInsights('c1')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/retry-insights')
-  })
-
-  test('folds the returned manifest onto the chat record', async () => {
+  test('a pass title alone does not suppress a real result', () => {
+    // A user project may legitimately be called "Memory", and a user may
+    // retitle anything. Only the helper kind is a discriminator.
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    apiGet.mockResolvedValue([])
     const store = useProjectStore()
     store.chats = [
-      { chat_id: 'c1', project_id: 'p1', title: 'A', archived: true, postprocess: { state: 'done', steps: {} } },
+      { chat_id: 'c-mem', project_id: 'p1', title: 'Memory pass · my own notes', archived: false, local: true, created_at: '', last_activity_at: '' },
     ] as unknown as typeof store.chats
-    apiPost.mockResolvedValue({
-      status: 'started',
-      job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
-    })
-    await store.retryInsights('c1')
-    expect(store.chatPostprocess('c1')?.state).toBe('incomplete')
-    expect(store.chatPostprocess('c1')?.job?.unfinished).toEqual(['memory_proposals'])
-  })
+    store.activeChatId = null
 
-  test('clears a stale incomplete state when the server reports completion', async () => {
-    const store = useProjectStore()
-    store.chats = [
-      {
-        chat_id: 'c1', project_id: 'p1', title: 'A', archived: true,
-        postprocess: {
-          state: 'incomplete',
-          job: { job_id: 'j', state: 'incomplete', unfinished: ['memory_proposals'] },
-        },
-      },
-    ] as unknown as typeof store.chats
-    // The completion event was missed, so the client still thinks work remains;
-    // the server now confirms nothing is unfinished.
-    apiPost.mockResolvedValue({
-      status: 'complete',
-      job: { job_id: 'j', state: 'done', unfinished: [] },
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_result_ready',
+        chat_id: 'c-mem',
+        project_id: 'p1',
+        title: 'Memory pass · my own notes',
+        snippet: 'done',
+      }),
     })
-    await store.retryInsights('c1')
-    expect(store.chatPostprocess('c1')?.state).toBe('done')
-    expect(store.chatPostprocess('c1')?.job?.unfinished).toEqual([])
+
+    expect(store.toasts.map(t => t.title)).toEqual(['Memory pass · my own notes'])
   })
 })
 
@@ -3839,7 +3871,7 @@ describe('deep-link chat navigation', () => {
       store.activeWorkspace = 'personal'
     })
 
-    test('openChatFromDeepLink selects an archived chat without going live', async () => {
+    test('openChatFromDeepLink selects an archived chat and loads its transcript without going live', async () => {
       await store.openChatFromDeepLink(ARCHIVED.chat_id)
 
       // Selected, and `activeChat` resolves — that is all ChatLayout's
@@ -3847,10 +3879,12 @@ describe('deep-link chat navigation', () => {
       expect(store.activeChatId).toBe(ARCHIVED.chat_id)
       expect(store.activeChat?.archived).toBe(true)
       expect(routerPush).toHaveBeenCalledWith('/chat/c-archived')
-      // Inert: no socket, no history, no subagents. The provider reclaimed the
-      // session, so every one of those is a request that cannot change anything.
+      // History once: /messages serves the archived vault transcript, and
+      // without it a browser that never cached the chat rendered it empty.
+      expect(fetchedPaths().filter(p => p.includes('/api/chats/c-archived/messages'))).toHaveLength(1)
+      // Otherwise inert: no socket, no subagents. The provider reclaimed the
+      // session, so either is a request that cannot change anything.
       expect(chatSockets()).toEqual([])
-      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
       expect(fetchedPaths().some(p => p.includes('/subagents'))).toBe(false)
       // Marking it read is the one request an open still makes.
       expect(apiPost.mock.calls.some(([path]) => path === '/api/chats/c-archived/read')).toBe(true)
@@ -3862,6 +3896,7 @@ describe('deep-link chat navigation', () => {
     // archived chat must not be re-attached from any of them.
     test('re-opening the already-active archived chat does not re-attach a socket', async () => {
       await store.openChatFromDeepLink(ARCHIVED.chat_id)
+      apiGet.mockClear()
       const before = chatSockets().length
 
       store.reconnectNow()
@@ -3894,7 +3929,7 @@ describe('deep-link chat navigation', () => {
       expect(store.chats.find(c => c.chat_id === LIVE.chat_id)?.archived).toBe(true)
     })
 
-    test('the boot URL restore selects an archived chat without going live', async () => {
+    test('the boot URL restore loads an archived chat transcript without going live', async () => {
       window.history.replaceState({}, '', '/chat/c-archived')
       Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
       apiGet.mockImplementation((path: string) => {
@@ -3914,7 +3949,9 @@ describe('deep-link chat navigation', () => {
 
       expect(store.activeChatId).toBe(ARCHIVED.chat_id)
       expect(store.activeChat?.archived).toBe(true)
-      expect(fetchedPaths().some(p => p.includes('/messages'))).toBe(false)
+      await vi.waitFor(() => {
+        expect(fetchedPaths().filter(p => p.includes('/api/chats/c-archived/messages'))).toHaveLength(1)
+      })
       expect(chatSockets()).toEqual([])
       window.history.replaceState({}, '', '/')
     })
@@ -4037,25 +4074,22 @@ describe('deep-link chat navigation', () => {
     expect(store.chats.map(chat => chat.archived)).toEqual([true, false])
   })
 
-  test('archive response keeps the background pipeline status visible', async () => {
+  test('archive response keeps the queued memory pass visible', async () => {
     const store = useProjectStore()
     store.chats = twoChats()
     apiPost.mockResolvedValue({
       ok: true,
       postprocess: {
-        state: 'running',
-        step: 'trajectory',
-        expected: ['trajectory'],
-        steps: {},
+        steps: { memory_pass: { status: 'queued', extra: { chat_id: 'pass-1' } } },
       },
     })
 
     await store.archiveChat('parent')
 
-    expect(store.chatPostprocess('parent')?.state).toBe('running')
+    expect(store.chatPostprocess('parent')?.steps?.memory_pass?.status).toBe('queued')
     // The "Chat archived — processing insights in the background" toast was
-    // removed: archiving is immediate and the pipeline is visible via
-    // postprocess state, so no toast is needed.
+    // removed: archiving is immediate and the memory pass is visible on Home,
+    // so no toast is needed.
     expect(store.toasts.find(t => t.title === 'Chat archived')).toBeUndefined()
   })
 
@@ -5419,6 +5453,166 @@ describe('envelope history window', () => {
     const msgs = store.messages[chatId]
     expect(msgs[0].unattended).toBe(true)
     expect(msgs[1].unattended).toBeUndefined()
+  })
+
+  describe('a queued turn reconciled before the turn ahead of it', () => {
+    // Repro of chat-1215d5ae: a message queued behind a running turn starts
+    // seconds after that turn ends, which stops the first turn's post-result
+    // reconcile before it indexed anything. The second turn's reconcile then
+    // brings both turns at once. The old merge inserted every unmatched server
+    // row before the "follow-up" bubble, so the queued turn's activity and
+    // answer rendered under the previous turn and its own bubble sat empty.
+    const T = '2026-09-30T12:29:26Z'
+    const serverRows = [
+      { role: 'user', content: 'first ask', turn_index: 0, i: 0 },
+      { role: 'system', tool_name: '_activity', content: '$ Bash rename', i: 1 },
+      { role: 'system', tool_name: '_activity', content: '📖 Read a.png', i: 2 },
+      { role: 'assistant', content: 'renamed it', i: 3, sent_at: T },
+      { role: 'user', content: 'queued ask', turn_index: 1, i: 4 },
+      { role: 'system', tool_name: '_activity', content: '$ Bash move', i: 5 },
+      { role: 'system', tool_name: '_activity', content: '📖 Read b.png', i: 6 },
+      { role: 'assistant', content: 'moved it', i: 7, sent_at: T },
+    ]
+    const envelopeOf = (items: ServerRow[]) => (path: string) =>
+      path.includes('/messages')
+        ? Promise.resolve({ items, total: items.length, offset: 0, limit: 50, hasMore: false, nextOffset: null })
+        : Promise.resolve([])
+    const liveTurn = (ask: string, turnIndex: number, trace: string, answer: string): ChatMessage[] => [
+      { role: 'user', content: ask, turn_index: turnIndex, timestamp: T },
+      // The live trace joins consecutive tool calls into one group, so it
+      // never equals the server's per-message rows.
+      { role: 'system', tool_name: '_activity', content: trace, timestamp: T },
+      { role: 'assistant', content: answer, timestamp: T, phase: 'final_answer' },
+    ]
+    const rendered = (chatId: string) => useProjectStore().messages[chatId].map(m => m.content)
+    const expected = serverRows.map(r => r.content)
+
+    test('identical queued sends remain separate turns on repeated refreshes', async () => {
+      const store = useProjectStore()
+      const chatId = 'c-identical-queued'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        ...liveTurn('repeat', 0, 'live tools 1', 'done'),
+        ...liveTurn('repeat', 1, 'live tools 2', 'done'),
+      ]
+      const items = [
+        { role: 'assistant', content: 'older', i: 0, sent_at: T },
+        ...serverRows.map(r => ({
+          ...r,
+          i: r.i + 1,
+          content: r.role === 'user' ? 'repeat' : r.role === 'assistant' ? 'done' : r.content,
+        })),
+      ]
+      apiGet.mockImplementation(envelopeOf(items))
+      await store.loadMessages(chatId)
+      await store.loadMessages(chatId)
+      expect(rendered(chatId)).toEqual(items.map(r => r.content))
+      expect(store.messages[chatId].map(r => r.i)).toEqual(items.map(r => r.i))
+    })
+
+    test('a later completion overlay prunes trace before an already indexed answer', async () => {
+      const store = useProjectStore()
+      const chatId = 'c-delayed-completion'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        ...liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it'),
+      ]
+      const items = [
+        { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+        ...serverRows.slice(0, 4).map(r => ({ ...r, i: r.i + 1, sent_at: '' })),
+      ]
+      // The provider file is visible before record_turn adds completion times.
+      apiGet.mockImplementation(envelopeOf(items))
+      await store.loadMessages(chatId)
+      expect(rendered(chatId)).toContain('$ Bash rename\n📖 Read a.png')
+      apiGet.mockImplementation(envelopeOf(items.map(r => r.i === 4 ? { ...r, sent_at: T } : r)))
+      await store.loadMessages(chatId)
+      expect(rendered(chatId)).toEqual(['older', ...expected.slice(0, 4)])
+    })
+
+    for (const firstTurnIndexed of [false, true]) {
+      test(`each turn keeps its own rows (first turn ${firstTurnIndexed ? 'indexed' : 'still live'})`, async () => {
+        const store = useProjectStore()
+        const chatId = `c-queued-order-${firstTurnIndexed}`
+        store.messages[chatId] = [
+          { role: 'assistant', content: 'older', i: 0, timestamp: T },
+          ...(firstTurnIndexed
+            ? serverRows.slice(0, 4).map(r => ({ ...r, i: r.i + 1, timestamp: r.sent_at || '' } as ChatMessage))
+            : liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it')),
+          ...liveTurn('queued ask', 1, '$ Bash move\n📖 Read b.png', 'moved it'),
+        ]
+        const shifted = serverRows.map(r => ({ ...r, i: r.i + 1 }))
+        apiGet.mockImplementation(envelopeOf([
+          { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+          ...shifted,
+        ]))
+
+        await store.loadMessages(chatId)
+
+        expect(rendered(chatId)).toEqual(['older', ...expected])
+      })
+    }
+
+    test('an answer the live copy cannot pair with still lands under its own bubble', async () => {
+      // The live answer bubble merges streamed text the server stores as
+      // separate parts, so exact matching can miss it too.
+      const store = useProjectStore()
+      const chatId = 'c-queued-order-unpaired'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        ...liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it'),
+        ...liveTurn('queued ask', 1, '$ Bash move\n📖 Read b.png', 'moved it\n\nand checked'),
+      ]
+      apiGet.mockImplementation(envelopeOf([
+        { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+        ...serverRows.map(r => ({ ...r, i: r.i + 1 })),
+      ]))
+
+      await store.loadMessages(chatId)
+
+      expect(rendered(chatId)).toEqual(['older', ...expected])
+    })
+
+    test('an undelivered bubble ahead of the turn does not orphan its live copy', async () => {
+      // A failed send stays in the transcript as an un-indexed bubble. The
+      // next delivered turn must still pair with its own live bubble (by
+      // turn_index), or its live trace and answer render a second time.
+      const store = useProjectStore()
+      const chatId = 'c-queued-order-undelivered'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        { role: 'user', content: 'lost ask', timestamp: T },
+        ...liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it'),
+      ]
+      apiGet.mockImplementation(envelopeOf([
+        { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+        ...serverRows.slice(0, 4).map(r => ({ ...r, i: r.i + 1 })),
+      ]))
+
+      await store.loadMessages(chatId)
+
+      expect(rendered(chatId)).toEqual(['older', 'lost ask', ...expected.slice(0, 4)])
+    })
+
+    test('a queued turn still streaming keeps its live trace below its bubble', async () => {
+      const store = useProjectStore()
+      const chatId = 'c-queued-order-streaming'
+      store.messages[chatId] = [
+        { role: 'assistant', content: 'older', i: 0, timestamp: T },
+        ...liveTurn('first ask', 0, '$ Bash rename\n📖 Read a.png', 'renamed it'),
+        { role: 'user', content: 'queued ask', turn_index: 1, timestamp: T },
+      ]
+      store.projectStreaming[chatId] = true
+      // The session already holds the queued turn's first tool call.
+      apiGet.mockImplementation(envelopeOf([
+        { role: 'assistant', content: 'older', i: 0, sent_at: T } as (typeof serverRows)[number],
+        ...serverRows.slice(0, 6).map(r => ({ ...r, i: r.i + 1 })),
+      ]))
+
+      await store.loadMessages(chatId)
+
+      expect(rendered(chatId)).toEqual(['older', ...expected.slice(0, 5)])
+    })
   })
 })
 

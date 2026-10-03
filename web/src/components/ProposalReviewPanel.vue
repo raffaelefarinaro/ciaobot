@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import { askPrompt } from '../lib/prompt'
 import { useProposalsStore } from '../stores/proposals'
@@ -405,6 +405,68 @@ const selected = computed({
   set: (value: Set<string>) => { store.selected = value },
 })
 
+// -- Revealing a row linked to from another surface ------------------------
+//
+// The review panel links a note's pending verification proposal here rather than
+// rendering its own copy of the card. The link names a row, and a row can be
+// off-screen, behind a filter, or not fetched yet, so the panel scrolls it into
+// view and moves focus onto it — the same state a click would produce. Without
+// the focus move it would land on a row the operator had to go hunting for,
+// which is the one outcome a link must not have.
+//
+// The wait is the part that is easy to get wrong. The caller sets the id and
+// then navigates, and the queue's rows are fetched in parallel with that, so a
+// single `nextTick` finds no element: the watcher would run, find nothing, and
+// either give up or clear the id for a row it never reached. So it waits for
+// the element to actually be there, bounded, and only then claims the arrival.
+// A link that cannot find its row keeps the id, which is the recoverable
+// direction — the next visit to the queue reveals it.
+const rowEls = new Map<string, HTMLElement>()
+
+function bindRowRef(id: string, el: unknown) {
+  // Vue hands a template ref either the element or a component instance, and the
+  // types say the union; a plain `<li>` is always the first.
+  if (el instanceof HTMLElement) rowEls.set(id, el)
+  else rowEls.delete(id)
+}
+
+/** How many frames to wait for a linked row to exist before leaving the id set. */
+const REVEAL_FRAMES = 30
+
+async function revealRow(id: string): Promise<boolean> {
+  for (let frame = 0; frame < REVEAL_FRAMES; frame += 1) {
+    await nextTick()
+    const el = rowEls.get(id)
+    // VISIBLE, not merely mounted. The caller sets the id and navigates in the
+    // same tick, so the first frames find this panel under the review filter's
+    // `v-show` — mounted, laid out nowhere, and `focus()` on a `display: none`
+    // element is a silent no-op. `getClientRects()` is the test, because it is
+    // the one that reflects the box the browser will actually put focus in.
+    if (el && el.getClientRects().length > 0) {
+      el.scrollIntoView({ block: 'center' })
+      el.focus()
+      // One-shot: the highlight and the scroll are for the arrival, not a
+      // position the queue remembers every time it is opened.
+      store.revealedRowId = ''
+      return true
+    }
+    // A frame, not a tick: the rows arrive with a fetch response and the route
+    // change is a macrotask, so a tick loop would spin through all thirty
+    // before either had a chance to answer.
+    await new Promise(resolve => setTimeout(resolve, 16))
+  }
+  return false
+}
+
+watch(
+  () => store.revealedRowId,
+  async (id) => {
+    if (!id) return
+    await revealRow(id)
+  },
+  { flush: 'post' },
+)
+
 /** Rows for the workspace the sidebar has selected, then its kind and search
  * filters.
  *
@@ -592,9 +654,16 @@ function computeDiff(row: ProposalRow): RowDiff | null {
  * and the diff do not already say. */
 function rowReason(row: ProposalRow): string {
   const preview = store.previews[row.id]
-  if (!preview?.reason) return ''
-  if (preview.action === 'fold_doc') return ''
-  return preview.reason
+  if (preview?.reason && preview.action !== 'fold_doc') return preview.reason
+  // A row the server will not let anyone accept offers no card to read, and the
+  // accept button is gone with it — so its own reason is the only thing that can
+  // tell the owner why a suggestion is on screen with nothing to press. That is
+  // `note_edit` alone: a note that moved, a settled record, a record no longer
+  // on file. A healthy row keeps saying what its own preview says.
+  if (isNoteEdit(row) && row.note_edit?.can_accept === false) {
+    return row.note_edit.reason
+  }
+  return ''
 }
 
 // -- Queue load states ------------------------------------------------------
@@ -826,6 +895,17 @@ function isRehome(row: ProposalRow): boolean {
 
 function isSkill(row: ProposalRow): boolean {
   return row.kind === 'skill'
+}
+
+function isNoteEdit(row: ProposalRow): boolean {
+  return row.kind === 'note_edit'
+}
+
+/** Whether the wording can be adjusted before accepting. Most kinds can; a
+ * `note_edit` cannot, because its accept reads the replacement from the record
+ * and the preview ignores the wording. */
+function isEditable(row: ProposalRow): boolean {
+  return descriptorFor(row).editable !== false
 }
 
 /** The sessions behind a skill finding, as the record holds them.
@@ -1490,8 +1570,10 @@ watch(
         <li
           v-for="row in group.rows"
           :key="row.id"
+          :ref="el => bindRowRef(row.id, el)"
           class="pr-row"
-          :class="[`pr-row--${rowChange(row).type}`, { 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id), 'pr-row--linked': hasActiveLink(row) }]"
+          :class="[`pr-row--${rowChange(row).type}`, { 'pr-row--leak': row.leak_warning, 'pr-row--busy': store.isBusy(row.id), 'pr-row--linked': hasActiveLink(row), 'pr-row--revealed': store.revealedRowId === row.id }]"
+          tabindex="-1"
         >
           <!-- Wrapped so the tap target reaches 44px; the input itself keeps its
                native size, and the aria-label names the fact this row controls. -->
@@ -1676,7 +1758,7 @@ watch(
                   :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
                   @click="reconcileFirst(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : 'Check first' }}</button>
-                <button v-if="!editingPreview" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
+                <button v-if="!editingPreview && isEditable(row)" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
                 <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
                 <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
                 <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
@@ -1785,7 +1867,7 @@ watch(
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
             <button
-              v-if="canAccept(row) && !isRehome(row)"
+              v-if="canAccept(row) && !isRehome(row) && isEditable(row)"
               type="button"
               class="mr-link pr-edit-first"
               @click="editFirst(row)"
@@ -2385,6 +2467,26 @@ watch(
 
 .pr-row--leak {
   background: color-mix(in srgb, var(--warning) 6%, transparent);
+}
+
+/* The row a link from the review panel named. An accent edge rather than a
+   full tint, so it reads as "this one" without looking like an error state
+   next to the leak and conflict colours. */
+.pr-row--revealed {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Focusable only so the reveal can move focus onto it. It takes focus
+   programmatically, so it is never in the tab order — a queue of 200 rows
+   would otherwise add 200 stops between the filter controls and the first
+   card. The ring is the same one every focusable row control uses. */
+.pr-row:focus { outline: none; }
+
+.pr-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm, 6px);
 }
 
 .pr-row--busy {

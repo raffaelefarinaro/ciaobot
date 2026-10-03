@@ -42,6 +42,46 @@ def workspace_provider_values(config: Any) -> set[str]:
     return {option["value"] for option in workspace_provider_options(config)}
 
 
+def agent_root_for(config: Any, workspace: str) -> Path:
+    """The agent root that owns one workspace's own assets, and what to do
+    with a name that does not resolve.
+
+    Returns the root for a registered workspace, or the install root for an
+    empty or unknown name. An unknown name is NOT an error here: the caller is
+    usually a read that should degrade to the whole install rather than 400,
+    and every root this returns is one the app already owns. Callers that
+    mutate must confirm the name separately — see
+    :func:`resolve_workspace_name`.
+    """
+    name = str(workspace or "").strip()
+    if name and config.workspace(name):
+        try:
+            return Path(config.agent_root(name))
+        except ValueError:
+            # A registered name that cannot be a folder (it came from a
+            # hand-edited registry) falls back to the install root rather
+            # than raising out of a GET.
+            pass
+    return Path(config.workspace_root)
+
+
+def resolve_workspace_name(config: Any, workspace: str, *, required: bool = True) -> str:
+    """The canonical registered workspace name, or raise ``ValueError``.
+
+    For a write: an unregistered or empty name is refused rather than
+    silently redirected to the install root, so a stale or hostile
+    ``workspace`` field can never file an asset somewhere the user did not
+    ask for.
+    """
+    name = str(workspace or "").strip()
+    if name and config.workspace(name):
+        return name
+    if required:
+        raise ValueError(f"unknown workspace '{workspace or ''}'")
+    primary: str = config.primary_workspace()
+    return primary
+
+
 def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
     try:
         color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
@@ -94,8 +134,7 @@ def vault_root_owner(config: Any, target: Path) -> str | None:
     workspace can read and rewrite the other workspace's data.
 
     One nesting is legitimate: the shared vault root itself. On installs where
-    setup pointed a workspace at ``CIAO_VAULT_ROOT`` (see
-    ``CiaoConfig.legacy_entity_workspace``) every standard per-workspace folder
+    setup pointed a workspace at ``CIAO_VAULT_ROOT`` every standard per-workspace folder
     lives inside that workspace's vault by design, so counting it as a conflict
     would refuse every new workspace on those installs.
     """
@@ -207,5 +246,5 @@ def persist_workspaces(config: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = [workspace_to_dict(workspace, config) for workspace in config.workspaces.values()]
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
     tmp.replace(path)

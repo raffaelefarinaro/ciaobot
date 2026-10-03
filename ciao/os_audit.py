@@ -18,7 +18,15 @@ from collections.abc import Sequence
 from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
-from ciao.memory_audit import audit_entries, find_stale_notes
+from ciao.migration_notices import (
+    UNMIGRATED_LINKS_NOTICE,
+    UNREHOMED_PEOPLE_NOTICE,
+    VAULT_LOCATION_NOTICE,
+    rehomed_people_finding,
+    resolve_links,
+    vault_location_findings,
+)
+from ciao.memory_audit import audit_entries, find_stale_entries, find_stale_notes
 from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
@@ -727,17 +735,37 @@ def _scan_note_staleness(
     workspace_name: str,
     current: datetime.date,
 ) -> dict[str, Any]:
-    """Age the workspace's own notes, for the memory-hygiene section.
+    """Age the workspace's own notes, and the facts inside them, for the
+    memory-hygiene section.
 
     A separate pass from ``_vault_audit`` because it needs parsed frontmatter
     (``updated:``) rather than lint findings; ``scan_vault`` is the same walk
     the index rebuild already does routinely. Failures degrade to an empty
     result with a scan error, never to "checked and clean".
+
+    **The entry half is the same detector, not a second one.**
+    ``find_stale_entries`` measures a note the way ``find_stale_notes`` does and
+    then one bullet in, so a note whose ``updated:`` was re-stamped yesterday
+    cannot hide a fact from 2019 behind a fresh frontmatter date. Reporting the
+    whole-note count alone is what made this section able to say "0 of 214 dated
+    notes" for a vault holding a person note with a two-year-old address in it:
+    the note *is* current, and the fact is not. The four counts
+    (``entries_checked``/``exempt``/``unverified``/``uncovered``) and the
+    per-note coverage rows are informational for the same reason the note count
+    is — age is evidence for the curation routine, not a defect — and none of
+    them contributes to ``memory_actionable_count``.
     """
     empty: dict[str, Any] = {
         "stale_notes": [],
         "notes_checked": 0,
         "notes_exempt": 0,
+        "stale_entries": [],
+        "entries_checked": 0,
+        "entries_exempt": 0,
+        "entries_unverified": 0,
+        "entries_uncovered": 0,
+        "entry_coverage": [],
+        "notes_unreadable": [],
         "errors": [],
     }
     if not vault_root.is_dir():
@@ -759,6 +787,19 @@ def _scan_note_staleness(
             ],
         }
     result = find_stale_notes(entries, vault_root=vault_root, today=current)
+    # The registered workspace's name, for the same reason the entry pass needs
+    # it: the identity an entry finding carries digests it, and a directory name
+    # is not that name on every registered layout. An empty name mints
+    # identities nothing resolves, so a scan with no name reports the counts and
+    # no findings rather than findings that cannot be acted on.
+    result.update(
+        find_stale_entries(
+            entries,
+            vault_root=vault_root,
+            workspace=workspace_name,
+            today=current,
+        )
+    )
     result["errors"] = []
     return result
 
@@ -1138,7 +1179,9 @@ def audit_upgrade_notices(
     lister = getattr(config, "workspace_names", None)
     if vault_raw is None or workspace_raw is None or not callable(lister):
         return {"notices": notices, "notices_found": 0, "errors": errors}
-    names = list(lister())
+    # The registry is read inside each probe rather than listed here: the re-home
+    # notice counts the workspaces to decide whether it applies (#833), and a
+    # count taken beside the caller is one that can drift from the rule using it.
 
     resolver = getattr(config, "workspace_vault_root", None)
     if not callable(resolver):
@@ -1147,69 +1190,46 @@ def audit_upgrade_notices(
     if not callable(standardizer):
         return {"notices": notices, "notices_found": 0, "errors": errors}
 
-    for name in names:
-        # Compare the registry-resolved path with the standard folder supplied
-        # by config. Setup-created whole-vault roots, adopted external folders,
-        # and pre-nesting siblings all remain usable until the user approves an
-        # interactive migration, but all should receive the same guided path
-        # into the standard named folder.
-        try:
-            actual = Path(resolver(name)).resolve()
-            standard = Path(standardizer(name)).resolve()
-        except Exception:  # noqa: BLE001 — advisory section
-            continue
-        if actual != standard and actual.is_dir():
-            notices.append({
-                "type": "vault_outside_vault_root",
-                "workspace": name,
-                "detail": (
-                    f"Workspace '{name}' keeps its vault at the nonstandard "
-                    f"location {actual}; its standard location is {standard}."
-                ),
-                "remedy": (
-                    f"Open a Ciaobot chat in workspace '{name}' and ask it to "
-                    f"migrate the vault from {actual} to {standard}. It should "
-                    "inspect both locations, ask before resolving conflicts, "
-                    "identify which files are vault content when the source also "
-                    "contains Ciaobot runtime files, and make a backup before "
-                    "moving anything. After confirmation it should move the "
-                    "approved content, atomically update the active workspace "
-                    "registry to the standard path, and restart Ciaobot as its "
-                    "final step. Verify the workspace before removing the backup."
-                ),
-            })
+    # The registry-resolved path against the standard folder config supplies, from
+    # the same probe the Home tile reads. Setup-created whole-vault roots, adopted
+    # external folders and pre-nesting siblings all remain usable until the user
+    # approves the managed relocation, but all get one shared description of it
+    # and one shared remedy — the audit used to carry its own copy here, including
+    # a remedy that described moving the folder and hand-editing the registry,
+    # which is the path the engine refuses.
+    for finding in vault_location_findings(config):
+        notices.append({
+            "type": VAULT_LOCATION_NOTICE,
+            "workspace": finding.workspace,
+            "detail": finding.detail,
+            "remedy": finding.remedy,
+        })
 
     # The vault still speaks the retired link dialect. Surfaced, never applied:
     # rewriting a user's own notes is not a decision an upgrade makes on their
     # behalf, and this is the notice that makes the choice visible instead of
     # leaving it in a release note nobody re-reads. Notices are pending actions
     # the weekly hygiene routine surfaces without turning the audit red.
-    if runtime_dir is not None:
-        try:
-            from ciao.vault_migrate_links import has_unmigrated_links, read_receipt
-
-            if read_receipt(runtime_dir) is None:
-                example = has_unmigrated_links(Path(vault_raw))
-                if example:
-                    notices.append({
-                        "type": "unmigrated_vault_links",
-                        "workspace": "",
-                        "detail": (
-                            "The vault still uses `[[wikilinks]]`, which nothing "
-                            "reads any more: they are not graph edges, not "
-                            "backlinks, and not clickable in the file viewer. "
-                            f"First example: {example}."
-                        ),
-                        "remedy": (
-                            "Preview with `ciao vault-migrate-links` (dry-run by "
-                            "default), then apply with "
-                            "`ciao vault-migrate-links --apply`. Every rewrite is "
-                            "recorded, so `ciao vault-unmigrate-links --apply` "
-                            "restores the notes byte for byte."
-                        ),
-                    })
-        except Exception:  # noqa: BLE001 — advisory section, never fail the audit
-            logger.exception("upgrade notices: link-dialect check failed")
+    #
+    # Resolved here, by walking, rather than read from the cache the Home strip
+    # uses: the audit is already a full-install pass over every note, and a
+    # report that reused a stored verdict could report a stale one. What it finds
+    # is published, so a run of the audit warms the strip for free. There is no
+    # vault-mode gate, deliberately — a scratch vault is created conformant and so
+    # is clean, but it is also the vault an operator can hand a wikilink, and
+    # reporting that is what this notice is for.
+    try:
+        links = resolve_links(config, runtime_dir)
+    except Exception:  # noqa: BLE001 — advisory section, never fail the audit
+        logger.exception("upgrade notices: link-dialect check failed")
+        links = None
+    if links is not None:
+        notices.append({
+            "type": UNMIGRATED_LINKS_NOTICE,
+            "workspace": "",
+            "detail": links.detail,
+            "remedy": links.remedy,
+        })
 
     # Person notes filed into the wrong workspace by the per-workspace curation
     # bug. Surfaced, never applied, and detected from the receipt's presence
@@ -1218,42 +1238,27 @@ def audit_upgrade_notices(
     # to avoid. It can never auto-apply either: the judgement bucket is non-empty
     # by construction, and a note with no workspace-naming tag has no single
     # correct destination. A pending action like the link notice, never a defect.
-    # With one registered workspace every candidate comes back with an empty
-    # target and destination: `detect_misfiled_people` still buckets an untagged
-    # note as needs_judgement, but there is no counterpart to move it to, so the
-    # migration has nothing to do. Firing here would tell a fresh install its
-    # people are misfiled and offer no move, and an unactionable tile is how
-    # operators learn to ignore the whole strip.
-    if runtime_dir is not None and len(names) > 1:
-        try:
-            from ciao.vault_rehome import read_receipt
-
-            # `read_receipt` reports only a COMPLETED re-home: a missing status
-            # counts as complete (receipts predating the field record finished
-            # work, and gating on `status == "migrated"` made this notice a
-            # permanent false positive on exactly the installs that had done
-            # it), while an explicitly PARTIAL receipt does not. That second
-            # half is why this moved off `peek_receipt`: a run that half
-            # finished used to silence the notice as thoroughly as a completed
-            # one, so the operator was never told work remained.
-            if read_receipt(runtime_dir) is None:
-                notices.append({
-                    "type": "unrehomed_people",
-                    "workspace": "",
-                    "detail": (
-                        "Person notes may be filed in the wrong workspace, and "
-                        "none have been re-homed yet. A preview lists the "
-                        "candidates without moving anything."
-                    ),
-                    "remedy": (
-                        "Preview with `ciao vault-rehome` (dry-run by default), "
-                        "then apply with `ciao vault-rehome --apply`. Every move "
-                        "and link rewrite is recorded, so `ciao vault-unrehome "
-                        "--apply` restores the notes and their references."
-                    ),
-                })
-        except Exception:  # noqa: BLE001 — advisory section, never fail the audit
-            logger.warning("upgrade notices: person re-home check failed")
+    #
+    # The condition and the wording now live in `migration_notices`, shared with
+    # #833's `unrehomed-people` update task, so the report and the Home card
+    # cannot come to disagree about one install. What is *not* shared is the
+    # suppression: nothing in that module reads an update-task record, so
+    # dismissing the card silences the card and never this line. An exception
+    # there is still logged and dropped rather than failing the report — a
+    # diagnostic that cannot read one receipt is a report with one fewer notice,
+    # not an audit that stops.
+    try:
+        rehome = rehomed_people_finding(config, runtime_dir)
+    except Exception:  # noqa: BLE001 — advisory section, never fail the audit
+        logger.warning("upgrade notices: person re-home check failed")
+        rehome = None
+    if rehome is not None:
+        notices.append({
+            "type": UNREHOMED_PEOPLE_NOTICE,
+            "workspace": "",
+            "detail": rehome.detail,
+            "remedy": rehome.remedy,
+        })
 
     return {"notices": notices, "notices_found": len(notices), "errors": errors}
 
@@ -1726,6 +1731,16 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                     f"{len(memory.get('stale_notes', []))} of "
                     f"{memory.get('notes_checked', 0)} dated notes"
                 ),
+                (
+                    "- Facts inside those notes, on their own dates "
+                    "(informational): "
+                    f"{len(memory.get('stale_entries', []))} of "
+                    f"{memory.get('entries_checked', 0)} checked entries need "
+                    f"a check, {memory.get('entries_unverified', 0)} carry no "
+                    f"usable [verified:] stamp, and "
+                    f"{memory.get('entries_uncovered', 0)} block(s) of note text "
+                    "are not entries at all"
+                ),
             ]
         )
         # Over-cap is actionable only when the workspace is named: a global total
@@ -1763,6 +1778,24 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                 f"{finding['age_days']}d (horizon {finding['threshold_days']}d, "
                 f"last checked {finding['last_verified']} via {finding['source']})"
             )
+        # The entry findings are listed *after* the note ones, and beside them
+        # rather than merged into them, because the two are different claims: a
+        # note can be current and hold a fact from 2019. Merging them would make
+        # "unverified for 988d" about an entry that has no `[verified:]` stamp
+        # and merely inherited the note's date, which is not what the number
+        # means.
+        for finding in memory.get("stale_entries", [])[:8]:
+            when = (
+                f"{finding['age_days']}d"
+                if finding.get("age_days") is not None
+                else "no date"
+            )
+            lines.append(
+                f"  - ℹ️ [{finding['type']}] `{finding['path']}` entry "
+                f"{str(finding['identity'])[:12]}: {finding['detail']} "
+                f"(checked {when}, horizon {finding['threshold_days']}d)"
+            )
+            lines.append(f"      {finding['excerpt']}")
 
     if "job_runs_audit" in report:
         lines.extend(

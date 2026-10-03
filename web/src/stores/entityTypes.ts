@@ -23,6 +23,10 @@ export interface EntityTypeRow {
   enabled: boolean
   /** True for a category the install ships. Read-only, and set by the server. */
   builtin: boolean
+  /** True when the app depends on this category, so it cannot be turned off. Set by the server. */
+  core: boolean
+  /** True for a type the agent writes itself; the Categories page does not list it. Set by the server. */
+  hidden: boolean
   /** Notes carrying this `type:`. The server's own count; not part of a PATCH. */
   note_count: number
 }
@@ -38,7 +42,7 @@ export interface EntityTypesResponse {
  * count the server computed. Named rather than left as a record so the shape a
  * test asserts on is a shape the compiler checks.
  */
-export type EntityTypePatchRow = Omit<EntityTypeRow, 'note_count'>
+export type EntityTypePatchRow = Omit<EntityTypeRow, 'note_count' | 'core' | 'hidden'>
 
 export interface EntityTypesPatchBody {
   types: EntityTypePatchRow[]
@@ -104,6 +108,8 @@ export function fromResponse(json: Partial<EntityTypesResponse> | null | undefin
       stale_after_days: typeof raw.stale_after_days === 'number' ? raw.stale_after_days : 0,
       enabled: raw.enabled !== false,
       builtin: raw.builtin === true,
+      core: raw.core === true,
+      hidden: raw.hidden === true,
       note_count: typeof raw.note_count === 'number' ? raw.note_count : 0,
     }
   })

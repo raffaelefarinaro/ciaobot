@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { renderFileMarkdown, renderMarkdown } from './safeMarkdown'
+import { renderFileMarkdown, renderMarkdown, renderUserMarkdown } from './safeMarkdown'
 
 describe('safe markdown rendering', () => {
   it('removes raw HTML event handlers before v-html rendering', () => {
@@ -67,6 +67,34 @@ describe('safe markdown rendering', () => {
     const html = renderMarkdown('<quoted-text><img src=x onerror=alert(1)></quoted-text>')
     expect(html).not.toContain('onerror')
     expect(html).toContain('<quoted-text>')
+  })
+
+  it('keeps allowed comment markup and safe links while stripping nested unsafe HTML', () => {
+    const html = renderMarkdown(
+      '<user-comment-reference>' +
+      '<reference-source>notes.md (line 3)</reference-source>' +
+      '<quoted-text><img src=x onerror=alert(1)> ' +
+      '<a href="javascript:alert(2)">bad</a> ' +
+      '<a href="https://example.com/guide">safe</a></quoted-text>' +
+      '<user-comment>please check this</user-comment>' +
+      '</user-comment-reference>',
+    )
+
+    // Unsafe event handlers and javascript: URLs nested inside the allowed
+    // quote card are still removed.
+    expect(html).not.toContain('onerror')
+    expect(html).not.toContain('javascript:')
+    expect(html).not.toContain('alert(1)')
+    expect(html).not.toContain('alert(2)')
+    // The app-owned quote-card tags survive so they can be styled.
+    expect(html).toContain('<user-comment-reference>')
+    expect(html).toContain('<reference-source>')
+    expect(html).toContain('<quoted-text>')
+    expect(html).toContain('<user-comment>')
+    expect(html).toContain('please check this')
+    // A safe https link keeps its href and gains the external-link attrs.
+    expect(html).toContain('href="https://example.com/guide"')
+    expect(html).toContain('rel="noopener noreferrer"')
   })
 
   it('wraps tables in a keyboard-scrollable region', () => {
@@ -257,5 +285,107 @@ describe('chat code blocks and long links', () => {
     expect(link.getAttribute('title')).toBe(url)
     expect(link.textContent!.length).toBeLessThan(60)
     expect(link.textContent).toMatch(/^github\.com\/raffaelefarinaro\/ciaobot/)
+  })
+})
+
+// Issue #867: a user bubble is rendered back from the string the person typed,
+// through the same markdown pipeline as the assistant. marked passes raw HTML
+// through, so `<p id=out>` used to disappear from the bubble and split the line.
+// User text must read as text; the only markup allowed in it is what the app
+// itself writes (the comment-context tags).
+describe('renderUserMarkdown', () => {
+  function render(input: string): HTMLElement {
+    const el = document.createElement('div')
+    el.innerHTML = renderUserMarkdown(input)
+    return el
+  }
+
+  it('shows a typed tag as text instead of an element', () => {
+    const el = render('<p id=out>')
+    expect(el.textContent).toContain('<p id=out>')
+    expect(el.querySelector('#out')).toBeNull()
+  })
+
+  it('shows a typed tag inline between text as typed', () => {
+    const el = render('before <p id=out> after')
+    expect(el.textContent?.trim()).toBe('before <p id=out> after')
+    expect(el.querySelector('#out')).toBeNull()
+  })
+
+  it('shows an image tag with an event handler as text', () => {
+    const el = render('<img src=x onerror=alert(1)>')
+    expect(el.querySelector('img')).toBeNull()
+    expect(el.textContent).toContain('<img src=x onerror=alert(1)>')
+  })
+
+  it('shows a script tag as text', () => {
+    const el = render('<script>alert(1)</script>')
+    expect(el.querySelector('script')).toBeNull()
+    expect(el.textContent).toContain('<script>alert(1)</script>')
+  })
+
+  it('leaves a tag inside a code span as text', () => {
+    const el = render('use `<div>` here')
+    expect(el.querySelector('code')?.textContent).toBe('<div>')
+  })
+
+  it('still renders the markdown a user types', () => {
+    const el = render([
+      '**bold**',
+      '',
+      '```js',
+      'const a = 1',
+      '```',
+      '',
+      '| a | b |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '',
+      '[ok](https://example.com)',
+    ].join('\n'))
+
+    expect(el.querySelector('strong')?.textContent).toBe('bold')
+    expect(el.querySelector('.code-block pre code')?.textContent).toContain('const a = 1')
+    expect(el.querySelector('.markdown-table-scroll table')).not.toBeNull()
+    expect(el.querySelector('a[href="https://example.com"]')?.getAttribute('rel')).toBe('noopener noreferrer')
+  })
+
+  it('keeps the comment-context tags the app writes itself', () => {
+    const withSource =
+      '<user-comment-reference><reference-source>a.md (line 3)</reference-source>' +
+      '<quoted-text>\nhello\n</quoted-text><user-comment>\nhi\n</user-comment></user-comment-reference>'
+    const acrossBlankLines =
+      '<user-comment-reference><quoted-text>\npara one\n\npara two\n</quoted-text>' +
+      '<user-comment>\nnote\n</user-comment></user-comment-reference>'
+
+    const html = renderUserMarkdown(withSource)
+    expect(html).toContain('<user-comment-reference>')
+    expect(html).toContain('<reference-source>')
+    expect(html).toContain('<quoted-text>')
+    expect(html).toContain('<user-comment>')
+
+    const spanned = renderUserMarkdown(acrossBlankLines)
+    expect(spanned).toContain('<user-comment-reference>')
+    expect(spanned).toContain('para one')
+    expect(spanned).toContain('para two')
+    expect(spanned).toContain('note')
+
+    // Byte-identical to the assistant renderer: the quote card is markup the
+    // app owns, so the user pipeline must leave it exactly as it found it.
+    expect(html).toBe(renderMarkdown(withSource))
+    expect(spanned).toBe(renderMarkdown(acrossBlankLines))
+  })
+
+  it('escapes raw HTML inside a comment card', () => {
+    const el = render('<quoted-text><img src=x onerror=alert(1)></quoted-text>')
+    expect(el.querySelector('img')).toBeNull()
+    expect(el.innerHTML).toContain('<quoted-text>')
+    expect(el.textContent).toContain('<img src=x onerror=alert(1)>')
+  })
+
+  it('leaves the assistant renderer alone', () => {
+    const el = document.createElement('div')
+    el.innerHTML = renderMarkdown('<p id=out>')
+    expect(el.querySelector('#out')).not.toBeNull()
   })
 })

@@ -15,7 +15,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
-from ciao.setup_status import claude_auth_status, setup_status
+from ciao.setup_status import claude_auth_status, claude_path_command, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,
@@ -418,7 +418,12 @@ def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
     assert "not installed" in claude["detail"]
     # The installer drops `claude` into ~/.local/bin, which a default macOS
     # PATH omits, so the wizard offers the PATH line as a second step.
-    assert "$HOME/.local/bin" in claude["path_command"]
+    if sys.platform == "win32":
+        # A persistent user-PATH update through the registry (C10).
+        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
+        assert ".local" in claude["path_command"]
+    else:
+        assert "$HOME/.local/bin" in claude["path_command"]
 
 
 def test_setup_status_names_the_desktop_app_when_only_the_cli_is_missing(
@@ -488,7 +493,12 @@ def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
 
     claude = setup_status(config, env={})["providers"]["claude"]
 
-    assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
+    if sys.platform == "win32":
+        # A persistent user-PATH update through the registry (C10).
+        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
+        assert ".local" in claude["path_command"]
+    else:
+        assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
 
 
 def test_setup_status_offers_no_path_line_for_the_bundled_cli(tmp_path, monkeypatch) -> None:
@@ -518,6 +528,7 @@ def test_setup_status_offers_no_path_line_when_the_terminal_finds_claude(
     assert "path_command" not in claude
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shells and their rc files; Windows is the test below")
 def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> None:
     """macOS terminals start login shells: bash reads ~/.bash_profile, and
     ~/.bashrc would fix only the shell the user is sitting in."""
@@ -529,6 +540,38 @@ def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> 
     assert claude_path_command() == "fish_add_path $HOME/.local/bin"
     monkeypatch.delenv("SHELL")
     assert "~/.zshrc" in claude_path_command()
+
+
+def test_claude_path_command_on_windows_is_a_powershell_line(monkeypatch) -> None:
+    """The wizard used to hand Windows nothing at all, which left the user
+    one command short with nothing to copy."""
+    from ciao.setup_status import claude_path_command
+
+    monkeypatch.setattr("ciao.os_support.shell_hints.sys.platform", "win32")
+
+    line = claude_path_command(r"C:\Users\me\.local\bin")
+
+    assert line.startswith(
+        "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true);"
+        r" $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); "
+        r"$k.SetValue('Path', 'C:\Users\me\.local\bin'"
+    )
+    assert "export" not in line
+
+
+def test_claude_path_command_delegates_to_the_helper(monkeypatch) -> None:
+    from ciao.setup_status import claude_path_command
+
+    calls: list[tuple[str, bool]] = []
+
+    def record(directory: str, *, persist: bool) -> str:
+        calls.append((directory, persist))
+        return "HINT"
+
+    monkeypatch.setattr("ciao.setup_status.path_hint", record)
+
+    assert claude_path_command("/x/bin") == "HINT"
+    assert calls == [("/x/bin", True)]
 
 
 def test_setup_status_route_is_public_before_login(tmp_path) -> None:
@@ -547,6 +590,22 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     assert resp.status_code == 200
     assert resp.json()["checks"][0]["id"] == "workspace"
 
+
+
+def _fake_engine_python(tmp_path: Path) -> str:
+    """The interpreter setup points the service at.
+
+    POSIX setup only writes it into the plist, so a made-up path will do. The
+    Windows task renderer accepts only python.exe/pythonw.exe and checks that
+    pythonw.exe exists (the task runs hidden), so there it is two empty files.
+    """
+    if sys.platform != "win32":
+        return "/opt/ciao/bin/python"
+    bin_dir = tmp_path / "fake-python"
+    bin_dir.mkdir(exist_ok=True)
+    for name in ("python.exe", "pythonw.exe"):
+        (bin_dir / name).write_bytes(b"")
+    return str(bin_dir / "python.exe")
 
 def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monkeypatch) -> None:
     # Guard the env handoff assertions below: monkeypatch restores these
@@ -578,7 +637,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
             "vault_root": str(notes),
             "launch_agents_dir": str(launch_agents),
             "app_dir": str(apps),
-            "python": "/opt/ciao/bin/python",
+            "python": _fake_engine_python(tmp_path),
             "port": 9443,
         },
     )
@@ -604,7 +663,14 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
-    assert (launch_agents / "com.ciao.server.plist").is_file()
+    # The platform's service definition: the plist, or the Task Scheduler XML
+    # on Windows.
+    if sys.platform == "win32":
+        from ciao import windows_service
+
+        assert (launch_agents / windows_service.TASK_FILE_NAME).is_file()
+    else:
+        assert (launch_agents / "com.ciao.server.plist").is_file()
     # The wizard no longer writes the retired rumps launcher bundle or its
     # LaunchAgent; Ciaobot.app is the menu bar.
     assert not (apps / "Ciaobot Server.app").exists()
@@ -784,7 +850,6 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
 
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
     # `_isolate_launch_agents` redirects the default away from the real
     # ~/Library/LaunchAgents; re-point it at this test's faked home so the
     # assertion still exercises per-user default resolution.
@@ -847,6 +912,85 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     script = " ".join(popen_calls[0])
     assert "com.ciao.server.plist" in script
     assert "launchctl" in script
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
+@pytest.mark.parametrize("handoff_result", [True, False])
+def test_setup_finish_handoff_goes_through_the_backend(
+    handoff_result: bool, tmp_path, monkeypatch
+) -> None:
+    """The wizard's finish asks the seam, not routes_api, to spawn the helper."""
+    import ciao.web.routes_api as routes_api
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setattr(routes_api, "_interactive_foreground_run", lambda: True)
+    calls: list[bool] = []
+
+    class FakeBackend:
+        """Answers only the handoff; the directory methods stay real."""
+
+        name = "fake"
+
+        def agents_dir(self) -> Path:
+            return Path(home / "Library" / "LaunchAgents")
+
+        def live_agents_dir(self) -> Path:
+            return Path(home / "Library" / "LaunchAgents")
+
+        def is_live_agents_dir(self, path: Path) -> bool:
+            return Path(path) == self.live_agents_dir()
+
+        def bootout_agent(self, label: str) -> None:
+            return None
+
+        def load_agent(self, definition: Path) -> int:
+            return 0
+
+        def schedule_server_handoff(self) -> bool:
+            calls.append(handoff_result)
+            return handoff_result
+
+    monkeypatch.setattr(
+        routes_api.service_backend,
+        "current_backend",
+        lambda: FakeBackend(),
+    )
+    real_popen = routes_api.subprocess.Popen
+
+    def fail_popen(cmd, *a, **k):
+        if cmd and cmd[0] == "/bin/sh":
+            raise AssertionError("routes_api must not spawn the helper itself")
+        return real_popen(cmd, *a, **k)
+
+    monkeypatch.setattr(routes_api.subprocess, "Popen", fail_popen)
+
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    restarts: list[int] = []
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    app.state.request_restart = restarts.append
+
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(tmp_path / "workspace"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+
+    assert resp.status_code == 200
+    assert calls == [handoff_result]
+    expected = 0 if handoff_result else routes_api.RESTART_EXIT_CODE
+    assert restarts == [expected]
 
 
 def test_setup_finish_requires_a_password(tmp_path) -> None:
@@ -1060,7 +1204,7 @@ def test_setup_list_dirs_lists_visible_directories_only(tmp_path) -> None:
     assert body["home"] == str(Path.home().resolve())
 
 
-def test_setup_list_dirs_defaults_to_home_and_abbreviates_display_path(tmp_path) -> None:
+def test_setup_list_dirs_defaults_to_home_and_abbreviates_display_path(tmp_path, home_dir) -> None:
     client = _folder_picker_client(tmp_path)
 
     resp = client.get("/api/setup/list-dirs")
@@ -1251,6 +1395,12 @@ async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) ->
 
     monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
     monkeypatch.setattr(routes_api.asyncio, "to_thread", fake_to_thread)
+    # The derivation is under test, not where this machine keeps `claude`: the
+    # SDK wheel bundles the CLI on macOS and Linux but not on Windows, so a
+    # runner without it on PATH answered "Claude CLI not found" instead.
+    from ciao.providers import claude as claude_provider
+
+    monkeypatch.setattr(claude_provider, "get_bundled_claude_path", lambda: str(tmp_path / "claude"))
 
     config = _config(tmp_path)
     request = SimpleNamespace(

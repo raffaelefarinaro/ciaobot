@@ -8,6 +8,7 @@ from ciao.jsonio import read_json_dict
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -38,6 +39,7 @@ class CommitSummary:
 class ReleaseFiles:
     pyproject: Path
     package_init: Path
+    uv_lock: Path
     web_package: Path
     web_lock: Path
     changelog: Path
@@ -52,6 +54,7 @@ class ReleaseFiles:
         return cls(
             pyproject=root / "pyproject.toml",
             package_init=root / "ciao" / "__init__.py",
+            uv_lock=root / "uv.lock",
             web_package=root / "web" / "package.json",
             web_lock=root / "web" / "package-lock.json",
             changelog=root / "CHANGELOG.md",
@@ -65,6 +68,7 @@ class ReleaseFiles:
         return [
             self.pyproject,
             self.package_init,
+            self.uv_lock,
             self.web_package,
             self.web_lock,
             self.changelog,
@@ -142,8 +146,74 @@ def _replace_once(pattern: str, text: str, replacement: str, *, path: Path) -> s
     return updated
 
 
+def _read_lock_text(path: Path) -> str:
+    """Return the lock's exact bytes decoded as UTF-8, without newline translation.
+
+    ``Path.read_text`` opens in universal-newlines mode, so it rewrites CRLF to
+    LF in memory; writing that back would change a Windows checkout's dependency
+    bytes during a metadata-only bump. Decoding the raw bytes keeps every
+    terminator exactly as stored. An undecodable file is a release error naming
+    the path, not an escaping ``UnicodeDecodeError``.
+    """
+    try:
+        return path.read_bytes().decode("utf-8")
+    except OSError as exc:
+        raise ReleaseError(f"missing or unreadable lock file: {path}") from exc
+    except UnicodeDecodeError as exc:
+        raise ReleaseError(f"lock file {path} is not valid UTF-8: {exc}") from exc
+
+
+def _replace_version_value(
+    text: str, version: str, *, path: Path, expected: dict
+) -> str:
+    """Set the single top-level ``version`` value, preserving surrounding text.
+
+    Only the quoted literal changes: the assignment prefix spacing, the quote
+    style, a trailing comment and the line terminator all survive byte for byte.
+    This is deliberately narrower than ``_replace_once``, whose replacement
+    rebuilds the whole assignment and drops that formatting.
+
+    The narrow regex can match the wrong line: an assignment-looking line inside
+    a multi-line TOML string that appears before the real ``version`` would be
+    rewritten while the parsed root version never moved. So the edited block is
+    re-parsed and its ``[[package]]`` entry must equal ``expected`` with only
+    ``version`` substituted - otherwise this raises rather than returning a lock
+    whose root version silently stayed behind.
+    """
+    updated, count = re.subn(
+        r'^([ \t]*version[ \t]*=[ \t]*)(["\'])([^"\']*)\2',
+        lambda match: f"{match.group(1)}{match.group(2)}{version}{match.group(2)}",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise ReleaseError(
+            f"expected one version assignment in {path}, replaced {count}"
+        )
+    try:
+        parsed = tomllib.loads(updated)
+    except tomllib.TOMLDecodeError as exc:
+        raise ReleaseError(
+            f"invalid TOML after version rewrite in {path}: {exc}"
+        ) from exc
+    entries = parsed.get("package")
+    if (
+        not isinstance(entries, list)
+        or len(entries) != 1
+        or not isinstance(entries[0], dict)
+    ):
+        raise ReleaseError(f"malformed [[package]] block after rewrite in {path}")
+    if entries[0] != {**expected, "version": version}:
+        raise ReleaseError(
+            f"refusing to rewrite {path}: the edited block does not match the "
+            "original package with only its version changed"
+        )
+    return updated
+
+
 def _dump_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="")
 
 
 def _update_changelog(existing: str, section: str) -> str:
@@ -199,6 +269,110 @@ def render_changelog_section(
     return "\n".join(lines)
 
 
+def _lock_blocks(lock_text: str, *, path: Path) -> list[tuple[str, dict | None]]:
+    """Split ``uv.lock`` at top-level ``[[package]]`` boundaries.
+
+    Returns ``(block_text, package_entry)`` pairs in document order, where the
+    leading top-level keys block and any non-package block carry ``None``.
+    The whole document is parsed first so a lock that is invalid as a whole
+    (e.g. a table duplicated across blocks) is refused rather than split and
+    rewritten. Every block is then re-parsed so a boundary-looking line buried
+    in a multi-line string cannot split a package in two: the split would leave
+    an unterminated TOML document, which raises here rather than yielding a
+    corrupt edit.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in lock_text.splitlines(keepends=True):
+        if line.strip() == "[[package]]" and current:
+            blocks.append("".join(current))
+            current = []
+        current.append(line)
+    if current:
+        blocks.append("".join(current))
+
+    try:
+        tomllib.loads(lock_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ReleaseError(f"invalid TOML in lock file {path}: {exc}") from exc
+
+    parsed_blocks: list[tuple[str, dict | None]] = []
+    for block in blocks:
+        try:
+            parsed = tomllib.loads(block)
+        except tomllib.TOMLDecodeError as exc:
+            raise ReleaseError(
+                f"invalid TOML block in lock file {path}: {exc}"
+            ) from exc
+        entries = parsed.get("package")
+        if entries is None:
+            parsed_blocks.append((block, None))
+            continue
+        if (
+            not isinstance(entries, list)
+            or len(entries) != 1
+            or not isinstance(entries[0], dict)
+        ):
+            raise ReleaseError(f"malformed [[package]] block in lock file {path}")
+        parsed_blocks.append((block, entries[0]))
+    return parsed_blocks
+
+
+def _align_editable_lock_version(files: ReleaseFiles, *, version: str) -> str:
+    """Return lock text with only the editable root package's version set.
+
+    Release preparation rewrites ``pyproject.toml``'s project version, so the
+    lock's record of the *root* package must follow it or every ``uv --frozen``
+    step after the tag fails. This is metadata alignment, not dependency
+    resolution: it rewrites exactly one ``version`` assignment in the one
+    ``[[package]]`` block whose ``source`` is ``{editable = "."}``, so no
+    dependency version, hash or source byte can move even on a
+    ``--skip-dep-check`` run. Any lock it cannot align exactly - missing,
+    unreadable, malformed, or without a single versioned editable root - raises
+    before the caller writes a release file.
+    """
+    lock_path = files.uv_lock
+    try:
+        project = tomllib.loads(files.pyproject.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError) as exc:
+        raise ReleaseError(
+            f"could not read project metadata from {files.pyproject}: {exc}"
+        ) from exc
+    project_name = project.get("project", {}).get("name")
+    if not isinstance(project_name, str) or not project_name:
+        raise ReleaseError(f"could not find project.name in {files.pyproject}")
+
+    lock_text = _read_lock_text(lock_path)
+
+    blocks = _lock_blocks(lock_text, path=lock_path)
+    matches = [
+        (index, entry)
+        for index, (_, entry) in enumerate(blocks)
+        if entry is not None
+        and entry.get("name") == project_name
+        and entry.get("source") == {"editable": "."}
+    ]
+    if len(matches) != 1:
+        raise ReleaseError(
+            f"lock file {lock_path} must contain exactly one editable package "
+            f"{project_name!r}, found {len(matches)}"
+        )
+    block_index, editable = matches[0]
+    if "version" not in editable:
+        raise ReleaseError(
+            f"editable package {project_name!r} in {lock_path} has no version"
+        )
+
+    block_text, entry = blocks[block_index]
+    blocks[block_index] = (
+        _replace_version_value(
+            block_text, version, path=lock_path, expected=editable
+        ),
+        entry,
+    )
+    return "".join(block for block, _ in blocks)
+
+
 def apply_release_files(
     root: Path | str,
     *,
@@ -212,6 +386,8 @@ def apply_release_files(
     files = ReleaseFiles.for_root(repo)
 
     pyproject_text = files.pyproject.read_text(encoding="utf-8")
+    lock_text = _align_editable_lock_version(files, version=version)
+
     files.pyproject.write_text(
         _replace_once(
             r'^version\s*=\s*"[^"]+"',
@@ -219,7 +395,7 @@ def apply_release_files(
             f'version = "{version}"',
             path=files.pyproject,
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
 
     init_text = files.package_init.read_text(encoding="utf-8")
@@ -230,8 +406,10 @@ def apply_release_files(
             f'__version__ = "{version}"',
             path=files.package_init,
         ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
+
+    files.uv_lock.write_text(lock_text, encoding="utf-8", newline="")
 
     web_package = _read_json(files.web_package)
     web_package["version"] = version
@@ -251,7 +429,7 @@ def apply_release_files(
     )
     files.changelog.write_text(
         _update_changelog(existing_changelog, changelog_section),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     return files.tracked()
 
@@ -273,7 +451,7 @@ def _bump_service_worker_caches(files: ReleaseFiles, version: str) -> None:
             text,
         )
         if bumped != text:
-            path.write_text(bumped, encoding="utf-8")
+            path.write_text(bumped, encoding="utf-8", newline="")
 
 
 def _run(
@@ -286,7 +464,7 @@ def _run(
     result = subprocess.run(
         cmd,
         cwd=str(cwd),
-        text=True,
+        text=True, encoding="utf-8",
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
         check=False,

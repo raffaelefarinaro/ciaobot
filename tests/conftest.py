@@ -4,9 +4,69 @@ import pytest
 from pathlib import Path
 from ciao import config as ciao_config
 from ciao import job_runs as jr
-from ciao import proposal_outcomes as po
 from ciao import transcripts
 from types import SimpleNamespace
+
+# Captured before any fixture runs, so the guard test can prove no test sees it.
+REAL_HOME = Path.home()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point every test's home at ``tmp_path / "home"``, on every OS.
+
+    ``Path.home()`` reads ``HOME`` on POSIX and ``USERPROFILE`` on Windows
+    (``HOMEDRIVE``/``HOMEPATH`` only when that is unset), so a test that faked
+    the home with ``HOME`` alone read and wrote the developer's real
+    ``~/.claude``, ``~/Applications`` and gws config on Windows (#696), and one
+    run's leftovers satisfied the next run's assertions. Autouse and
+    unconditional, like ``_isolate_ciao_home``: remembering it per test is what
+    failed. The directory is not created; a test that needs files in the home
+    uses the ``home_dir`` fixture (same path) and makes them.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+
+
+@pytest.fixture
+def home_dir(tmp_path: Path) -> Path:
+    """This test's isolated home (``_isolate_home``), created."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never find the developer's own ``opencode`` on ``PATH``.
+
+    A setup-status or Settings test that reaches the CLI would read the real
+    home's OpenCode config through it, the leak ``_isolate_home`` closes; and
+    under the isolated home the CLI starts a ``serve --service`` of its own
+    that holds the output pipes, so on Windows the call never returns.
+    CI has no OpenCode installed, so this is what CI already sees. A test that
+    wants a binary sets ``CIAO_OPENCODE_BIN``, which is resolved first.
+    """
+    monkeypatch.setattr("ciao.providers.opencode.resolve_tool", lambda name: None)
+
+
+@pytest.fixture(autouse=True)
+def _git_stores_exact_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every git a test spawns stores exact bytes, as macOS and Linux git do.
+
+    Git for Windows ships ``core.autocrlf=true`` in its system config, so a
+    fixture repo a test committed with plain ``git`` held LF blobs under CRLF
+    files, and the engine (which passes ``git_proc.EXACT_BYTES``) then saw every
+    such file as modified. Environment config overrides every config file and
+    is overridden by an explicit ``git -c``; ``tests/test_git_exact_bytes.py``
+    sets it back to ``true`` to prove the engine does not rely on this.
+    """
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
 
 
 @pytest.fixture(autouse=True)
@@ -149,31 +209,10 @@ def _isolate_queue_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 @pytest.fixture(autouse=True)
 def _isolate_job_runs(tmp_path: Path) -> None:
-    """Isolate job runs recording by pointing to a temp directory for every test.
-
-    Also resets the live-state globals: the publisher and the in-flight registry
-    are module-level, so a test that installs a sink or leaves a run open would
-    otherwise leak into every test after it.
-    """
+    """Isolate job runs recording by pointing to a temp directory for every test."""
     jr.configure(tmp_path)
-    jr.set_publisher(None)
-    jr._inflight.clear()
     yield
     jr._runtime_dir_override = None
-    jr.set_publisher(None)
-    jr._inflight.clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolate_proposal_outcomes(tmp_path: Path) -> None:
-    """Isolate proposal-outcome recording the same way ``_isolate_job_runs``
-    isolates the job-run log: without this, any route test exercising an
-    accept/dismiss would append to the developer's real ``.runtime``."""
-    po.configure(tmp_path)
-    po.reset_tally_cache()
-    yield
-    po._runtime_dir_override = None
-    po.reset_tally_cache()
 
 
 def attach_stub_mcp(manager):

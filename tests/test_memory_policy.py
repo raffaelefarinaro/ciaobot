@@ -17,6 +17,8 @@ reintroduce a hard-cap claim or a different unattended rule.
 
 from __future__ import annotations
 
+import json
+import re
 from importlib import resources
 from pathlib import Path
 
@@ -112,15 +114,8 @@ def test_capsule_unattended_guidance_defers_approval_requiring_work() -> None:
     assert "Defer and report" in text
 
 
-def test_insights_extractor_and_capsule_share_one_marker() -> None:
-    """The marker cannot diverge between the capsule and the extractor again."""
-    from ciao import insights
-
-    assert insights._UNATTENDED_MARKER == mp.UNATTENDED_MARKER
-
-
 def test_capsule_renders_the_shared_guidance_verbatim() -> None:
-    capsule = build_context_capsule(prompt="hi", workspace="work", unattended=True)
+    capsule = build_context_capsule(workspace="work", unattended=True)
     assert mp.UNATTENDED_CAPSULE_GUIDANCE in capsule
 
 
@@ -190,8 +185,8 @@ def test_vault_note_mutation_is_refused_on_an_unattended_turn(tmp_path: Path) ->
 # ── The stock assets and docs must not contradict the matrix ──────────────
 
 
-def test_stock_memory_agent_states_the_advisory_cap() -> None:
-    role = _stock("agents/memory.md")
+def test_stock_memory_skill_states_the_advisory_cap() -> None:
+    role = _stock("skills/ciao-memory/SKILL.md")
     assert "The cap is advisory on every path" in role
     assert "reports `over_cap`" in role
     assert "enforces the cap" not in role
@@ -214,7 +209,7 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
     owner instead of a coined `type:`.
     """
     for relative in (
-        "agents/memory.md",
+        "skills/ciao-memory/SKILL.md",
         "commands/remember.md",
         "commands/interrogation.md",
     ):
@@ -223,8 +218,8 @@ def test_stock_prompts_route_categories_to_the_vocabulary_block() -> None:
         assert "new-category" in asset, relative
 
 
-def test_the_memory_agent_says_where_a_note_goes_and_who_adds_a_category() -> None:
-    role = _stock("agents/memory.md")
+def test_the_memory_skill_says_where_a_note_goes_and_who_adds_a_category() -> None:
+    role = _stock("skills/ciao-memory/SKILL.md")
     assert "Read it before writing a note and file the note in the folder its line names" in role
     assert "queue a new-category question in `Workspace/Memory-Proposals.md`" in role
     # The list is read, never memorized: a category added in Settings must reach
@@ -240,8 +235,8 @@ def test_the_core_prompt_points_at_the_same_block() -> None:
     assert "a note that fits none is a new-category question" in core
 
 
-def test_curation_skill_defers_and_never_hard_caps() -> None:
-    skill = _stock("skills/memory-curation/SKILL.md")
+def test_curation_schedule_defers_and_never_hard_caps() -> None:
+    skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
     assert "You are an unattended run: defer, never ask, never route around" in skill
     assert "The region cap is advisory." in skill
     # The consolidation contract the architecture test also pins must survive.
@@ -289,3 +284,245 @@ def test_proposal_cli_exception_is_named_in_docs() -> None:
         assert "ciao memory-proposal-add" in doc, name
         assert "ciao memory-proposals" in doc, name
         assert "ciao memory-proposal-dismiss" in doc, name
+
+
+# ── Nothing is promoted unattended (#728-D) ────────────────────────────────
+
+
+def test_the_care_schedule_no_longer_instructs_unattended_promotion_or_settlement() -> None:
+    """The three instructions that contradicted the autonomy rule are gone.
+
+    An x3+ learning is a *routing priority*, not permission: the old Pass 4 and
+    Pass 7 told an unattended run to write it into AGENTS.md or a skill, and
+    Pass 9 told it to settle proposals. An unattended run can verify neither
+    destination nor rejection, so each of those is now a filed proposal a
+    person decides.
+    """
+    prompt = next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+    assert "into canonical guidance (the AGENTS.md body or the relevant skill/doc)" not in prompt
+    assert "belongs here as a standing instruction, citing its sources" not in prompt
+    assert "Only settle a proposal after its change is actually in place" not in prompt
+    # And each is replaced by the routed proposal, named with the commands.
+    assert "**Route** an entry at x3 or more" in prompt
+    assert "a priority order and not a licence to edit" in prompt
+    assert "You never edit a skill or this workspace's guide body" in prompt
+    assert "you never settle a proposal" in prompt
+    assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
+    assert "ciao skill-draft-add --input-file FILE" in prompt
+    assert "ciao skill-drafts" in prompt
+
+
+def test_the_care_schedule_ground_rules_list_the_new_deferrals() -> None:
+    """The deferred list is the run's own statement of what it may not do.
+
+    A deferral nobody reads is not a deferral, and the two additions are the two
+    actions an unattended run is most likely to reach for precisely because the
+    old passes told it to. So the list the run reads, the capsule the model is
+    given, and the policy module all three have to name them.
+    """
+    from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE, unattended_deferrals
+
+    prompt = next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+    listed = next(
+        line for line in prompt.splitlines() if "The full deferred list:" in line
+    )
+    actions = {action.action for action in unattended_deferrals()}
+    # The policy module is the machine-readable statement, and both new
+    # deferrals are in it with the reason a person can act on.
+    assert any("Edit a skill" in action for action in actions)
+    assert any("Settle a skill proposal" in action for action in actions)
+    assert any("public GitHub issue" in action for action in actions)
+    # The run's own list names both, and the capsule names both, so no surface
+    # can say something different about what an unattended turn may not do.
+    for phrase in (
+        "editing a skill or the AGENTS.md guide body",
+        "settling a skill proposal or draft",
+    ):
+        assert phrase in listed, phrase
+        assert phrase in UNATTENDED_CAPSULE_GUIDANCE, phrase
+    # The entries an unattended run now has to report rather than perform.
+    assert "Report every one under **What needs you**" in prompt
+
+
+def test_the_memory_skill_never_edits_or_settles_unattended() -> None:
+    """The skill a run loads has to say the same thing the schedule does.
+
+    The schedule prompt and the `ciao-memory` skill are read by the same
+    unattended turn; a rule stated in only one of them is a rule the other
+    surface can contradict, which is how the old "promote it yourself"
+    instruction survived in one copy after the other had moved on.
+    """
+    skill = _stock("skills/ciao-memory/SKILL.md")
+    assert "Propose a skill; never edit or settle one unattended" in skill
+    assert "it may **not** edit a skill, edit the `AGENTS.md` body, or settle a proposal or draft" in skill
+    assert "A recurring learning is a *routing* priority" in skill
+    # And it carries the routing contract the two non-owned destinations need.
+    assert "A reusable tool/workflow instruction routes to the best matching skill" in skill
+    assert "an inventory match is a *candidate*, not proof" in skill
+    assert "never as a `sources` entry or a `turn`" in skill
+    assert "`ciao skill-draft-add --input-file FILE`" in skill
+
+
+def test_the_remember_command_states_the_provenance_rule() -> None:
+    """A `/remember` of a lesson has to keep the origin it really has.
+
+    The command is the one surface that produces a learning from a chat nobody
+    archived, so the rule that a request id replaces a manufactured turn has to
+    be where the model reads it, and the negative has to be explicit: a citation
+    to a conversation that never happened is what the whole field exists to stop.
+    """
+    command = _stock("commands/remember.md")
+    assert "A lesson keeps the origin it really has" in command
+    assert "there is no transcript turn to cite" in command
+    assert "--request <id>" in command
+    assert "cites it as `req:<id>`" in command
+    assert "Never manufacture a turn, a chat id, an archive path or an `excerpt`" in command
+    assert "`--request` is only accepted for `--kind learnings`" in command
+    # And the immediate-write path says the same, so the two agree.
+    assert "carrying the same `--request <id>` the queued copy used" in command
+
+
+def test_the_capabilities_catalog_describes_the_routing_without_overclaiming() -> None:
+    """The catalog is what a user asks "what can it do" and gets an answer from.
+
+    It has to name the lesson route and the drafts, and it has to keep saying
+    that the unattended run prepares rather than acts — otherwise the two
+    surfaces tell a person opposite things about the same nightly run.
+    """
+    skill = _stock("skills/ciao-capabilities/SKILL.md")
+    assert "A reusable lesson in `Workspace/Learnings.md` routes the same way" in skill
+    assert "an inventory match is a candidate, not proof" in skill
+    assert "the issue body is sanitized" in skill
+    assert "it never edits a skill or the workspace guide, never settles a proposal, and never opens a public issue" in skill
+    assert "`ciao skill-draft-approve`" in skill
+
+
+def test_the_routing_contract_is_documented() -> None:
+    """The contract has to be in the architecture doc, not only in the prompts.
+
+    Three surfaces state it — the memory-pass section, the policy module and this
+    table — and they drift silently unless something says they are describing one
+    thing. Each of the four routes and the three cross-cutting rules is pinned
+    here so removing one is a deliberate edit rather than an omission.
+    """
+    doc = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "### Lesson routing contract" in doc
+    for row in (
+        "A skill this workspace owns under `skills/`",
+        "A packaged, mirrored or shared skill",
+        "No skill at all",
+    ):
+        assert row in doc, row
+    assert "An inventory match is a candidate, not proof" in doc
+    assert "`sources` entry or a `turn`, because those would claim" in doc
+    assert "Nothing is promoted unattended" in doc
+    assert "`x3+` recurrence is a" in doc
+    assert "`/remember` keeps a real origin" in doc
+    assert "`req:<id>`" in doc
+    assert "A filed upstream issue is not a deployed lesson" in doc
+
+
+def test_the_development_doc_covers_the_draft_commands() -> None:
+    """A new CLI surface the contributor doc does not mention is one nobody finds."""
+    doc = (REPO / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
+    assert "### Lesson routing and skill drafts" in doc
+    for command in (
+        "ciao skill-draft-add",
+        "ciao skill-drafts",
+        "ciao skill-draft-approve",
+        "ciao skill-draft-reject",
+    ):
+        assert command in doc, command
+    assert "Sanitizing is a gate, not a filter" in doc
+    assert "The attended step is the only step" in doc
+    # And the lesson-routing carve-out in the proposal filer is documented, so a
+    # reader does not read "one or the other" as a loosened check.
+    assert "accepts a lesson with no `sources`" in doc
+
+
+# ── The care prompt may only name what the control plane allows (#882) ────
+
+
+def _care_prompt() -> str:
+    return next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+
+
+# verb as typed on the CLI -> the wire action agent_cli.resolve() sends.
+_VAULT_REVIEW_WIRE = {
+    "list": "list",
+    "show": "inspect",
+    "keep": "decide",
+    "trash": "trash",
+    "restore": "restore",
+    "complete": "complete",
+    "restore-completed": "restore_completed",
+    "delete": "delete",
+}
+
+
+def test_every_vault_review_verb_maps_to_the_wire_action_agent_cli_sends() -> None:
+    """Keeps _VAULT_REVIEW_WIRE honest: it is derived from agent_cli, not a guess."""
+    from ciao import agent_cli
+
+    parser = agent_cli.build_parser()
+    for verb, wire in _VAULT_REVIEW_WIRE.items():
+        argv = ["vault", "review", verb]
+        if verb == "show":
+            argv.append("Some/Note.md")
+        elif verb not in {"list"}:
+            argv += ["--candidate", "c1"]
+            if verb == "delete":
+                argv += ["--confirm", "c1"]
+        operation, arguments = agent_cli.resolve(parser.parse_args(argv))
+        assert operation == "vault_review"
+        assert arguments["action"] == wire, verb
+
+
+def test_unattended_care_prompt_only_names_vault_review_verbs_allowed_unattended() -> None:
+    """#882: the prompt must never tell an unattended run to do what the control plane refuses."""
+    from ciao.vault_review import ATTENDED_ONLY_ACTIONS
+
+    prompt = _care_prompt()
+    mentioned = set(re.findall(r"`?ciao vault review ([a-z]+(?:-[a-z]+)*)", prompt))
+    assert mentioned, "the prompt no longer names any vault review verb; update this guard"
+    unknown = mentioned - set(_VAULT_REVIEW_WIRE)
+    assert not unknown, f"unknown vault review verbs in the prompt: {sorted(unknown)}"
+    refused = {verb for verb in mentioned if _VAULT_REVIEW_WIRE[verb] in ATTENDED_ONLY_ACTIONS}
+    assert not refused, f"the unattended prompt tells the agent to run {sorted(refused)}, which unattended_forbidden refuses"
+
+
+def test_unattended_care_prompt_says_every_review_decision_is_attended_only() -> None:
+    from ciao.vault_review import ATTENDED_ONLY_ACTIONS
+
+    prompt = _care_prompt()
+    assert "Keep and archiving" not in prompt
+    assert "archiving non-destructively" not in prompt
+    sentence = next(s for s in prompt.split(". ") if "is refused unattended" in s)
+    for verb, wire in _VAULT_REVIEW_WIRE.items():
+        if wire in ATTENDED_ONLY_ACTIONS:
+            assert verb in sentence, f"the prompt does not say `{verb}` is attended-only"
+
+
+def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb() -> None:
+    """Catches a typo'd or removed `ciao <noun> <verb>` the run would hit as a usage error."""
+    from ciao import agent_cli
+
+    prompt = _care_prompt()
+    parser = agent_cli.build_parser()
+    for noun, verb in set(re.findall(r"`ciao (memory|context|chat|project|file|note) ([a-z]+(?:-[a-z]+)*)", prompt)):
+        argv = [noun, verb, "--help"]
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(argv)
+        assert excinfo.value.code == 0, f"`ciao {noun} {verb}` is not a command"

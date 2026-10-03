@@ -106,6 +106,17 @@
               :to="reviewPath('revisit')"
               title="Notes unchecked past their type's limit — review them in To decide"
             ><strong>{{ mm.staleNotes.length.toLocaleString() }}</strong> unchecked</router-link>
+            <!-- A second, separate figure, and it is not a subset of the first.
+                 "Unchecked" counts notes whose own date is old; this counts notes
+                 holding at least one fact nobody has re-checked, which is how a
+                 note re-stamped last week still appears here. Merging them into
+                 one number would hide exactly the case this whole level exists
+                 to surface. -->
+            <span
+              v-if="mm.entryStaleNotes.length"
+              class="mm-toolbar-entries"
+              :title="`${mm.entryStaleNotes.length} notes hold at least one fact that has not been re-checked. Open one to see which.`"
+            ><strong>{{ mm.entryStaleNotes.length.toLocaleString() }}</strong> with facts unchecked</span>
           </p>
         </div>
         <div v-if="mm.loading" class="mm-skeleton" role="status" aria-live="polite" aria-label="Loading vault graph">
@@ -264,12 +275,75 @@
           @close="closeDetail"
         >
           <template #lead>
-            <div v-if="mm.selectedNode.stale" class="mm-tile-stale" role="note">
+            <!-- Two states, and the order matters. A note somebody is being
+                 asked about RIGHT NOW is not unchecked — the question is in
+                 flight — so the pending proposal is named first and the stale
+                 callout is suppressed. Otherwise a note whose verdict is
+                 sitting in a queue would show "Unchecked for 4 months, review
+                 this" beside a link to a proposal already filed about it. -->
+            <div v-if="mm.selectedNode.check?.pending" class="mm-tile-pending" role="note">
+              <p>
+                <strong>Being checked.</strong>
+                Ciaobot checked this version on {{ mm.selectedNode.check.checked_at }} and filed a
+                proposal about it. The note's own date still reads
+                {{ staleAgeWords(mm.selectedNode) }} old, which is why it is not being asked again
+                on top of that.
+              </p>
+              <router-link class="mm-tile-stale-link" :to="reviewPath('suggested')">Open the proposal</router-link>
+            </div>
+            <div v-else-if="mm.selectedNode.check?.settled" class="mm-tile-checked" role="note">
+              <p>
+                <strong>Checked {{ mm.selectedNode.check.checked_at }}.</strong>
+                The verdict was {{ verdictWords(mm.selectedNode.check.outcome) }}<template
+                  v-if="mm.selectedNode.check.coverage"
+                >, covering {{ coverageWords(mm.selectedNode.check.coverage) }}</template>.
+                It will be checked again after {{ mm.selectedNode.check.retry_after }}.
+              </p>
+            </div>
+            <div v-else-if="mm.selectedNode.check?.conflicted" class="mm-tile-stale" role="note">
+              <p>
+                <strong>A verification is out of date for this note.</strong>
+                It was checked against an earlier version, so that verdict can no longer be applied.
+                Ciaobot will check the current text and file a new proposal if it needs one.
+              </p>
+              <router-link class="mm-tile-stale-link" :to="reviewPath('revisit')">Review in To decide</router-link>
+            </div>
+            <div v-else-if="mm.selectedNode.stale" class="mm-tile-stale" role="note">
               <p>
                 <strong>Unchecked for {{ staleAgeWords(mm.selectedNode) }}.</strong>
                 {{ staleRuleWords(mm.selectedNode) }}
               </p>
               <router-link class="mm-tile-stale-link" :to="reviewPath('revisit')">Review in To decide</router-link>
+            </div>
+
+            <!-- The facts inside the note, one level below every callout above.
+                 None of them is about this FILE being old: a person note
+                 re-stamped last week is not stale here, and is still holding a
+                 fact from two years ago. Shown whenever the detector ran, not
+                 only when something is wrong, because "every fact in here is
+                 current" is the other half of the claim and the useful one. -->
+            <div
+              v-if="mm.selectedNode.entryCoverage"
+              class="mm-tile-entries"
+              :class="{ 'mm-tile-entries--due': mm.selectedNode.entryCoverage.stale_entries.length > 0 }"
+              role="note"
+            >
+              <p class="mm-tile-entries-head">
+                <strong>Facts inside this note</strong>
+                — {{ entryCoverageWords(mm.selectedNode.entryCoverage) }}
+              </p>
+              <ul v-if="mm.selectedNode.entryCoverage.stale_entries.length" class="mm-tile-entry-list">
+                <li
+                  v-for="entry in mm.selectedNode.entryCoverage.stale_entries"
+                  :key="entry.identity"
+                >
+                  <span class="mm-tile-entry-why">{{ entryReasonWords(entry) }}</span>
+                  <span class="mm-tile-entry-text">{{ entry.excerpt }}</span>
+                </li>
+              </ul>
+              <p v-if="mm.selectedNode.entryCoverage.more_stale_entries" class="mm-hint">
+                And {{ mm.selectedNode.entryCoverage.more_stale_entries }} more.
+              </p>
             </div>
           </template>
           <template #after>
@@ -312,10 +386,10 @@ import { useVaultReviewStore } from '../stores/vaultReview'
 import { useProjectStore } from '../stores/projects'
 import {
   useMemoryMapStore, categoryLabelFor, categoryColorFor, catKeyFor, isMemorySection, isReviewFilter,
-  memorySectionPath, reviewPath, type MemoryGraphNode, type MemorySection, type ReviewFilter,
+  memorySectionPath, reviewPath, type MemoryGraphEntryCoverage, type MemoryGraphEntryFinding, type MemoryGraphNode, type MemorySection, type ReviewFilter,
 } from '../stores/memoryMap'
 import { askConfirm } from '../lib/confirm'
-import { ageInWords } from '../lib/vaultReviewLabels'
+import { ageInWords, coverageLabel, verdictLabel } from '../lib/vaultReviewLabels'
 import { useModalFocus } from '../composables/useModalFocus'
 import { isLightTheme } from '../lib/theme'
 import PinnedFilePanel from './PinnedFilePanel.vue'
@@ -1326,11 +1400,80 @@ watch(() => mm.section, (section) => {
 function staleAgeWords(n: MemoryGraphNode): string {
   return ageInWords(n.ageDays ?? 0)
 }
+
+/** What a verification's verdict was, in words.
+ *
+ * Shared with the review panel rather than re-spelled here: two surfaces
+ * describing the same verdict two ways is how "still_valid" ends up reading as
+ * a problem somewhere and as good news somewhere else. */
+function verdictWords(outcome: string): string {
+  return verdictLabel(outcome)
+}
+
+/** How much of a note a check covered, in words. `partial` is the one that
+ * matters: a re-stamp claims the whole note, so the pass only applies one from
+ * complete coverage, and a half-checked note is asked again. */
+function coverageWords(coverage: string): string {
+  return coverageLabel(coverage)
+}
 /** The rule the note broke. The horizon comes from the server, which resolves
  * the type through the vault's alias table; the map keeps no copy of it. */
 function staleRuleWords(n: MemoryGraphNode): string {
   if (typeof n.thresholdDays !== 'number') return ''
   return `Notes like this are due every ${n.thresholdDays} days.`
+}
+
+/** One note's facts, counted in words.
+ *
+ * The share covered is deliberately absent: a note is mostly frontmatter,
+ * headings and blank lines, so a low ratio is normal and printing it would
+ * train the reader to ignore the number. What matters is whether the
+ * *assertions* were read, which is what the prose count says — and one is
+ * enough to stop the note being called fully checked.
+ *
+ * An exempt type leads with that, because its numbers mean something different
+ * throughout: a journal's prose is a record of what happened and is not meant to
+ * be verified, so "1 block of prose not read as facts" beside a fact nobody has
+ * read makes two different problems look like one. The server sends
+ * `note_exempt`; a client without it says nothing, which is the conservative
+ * direction.
+ */
+function entryCoverageWords(cov: MemoryGraphEntryCoverage): string {
+  const facts = cov.checked + cov.exempt
+  const blocks = `${cov.uncovered} block${cov.uncovered === 1 ? '' : 's'}`
+  const lead = cov.note_exempt
+    ? "This note's type never ages out — it records what happened rather than what is true, so nothing in it needs checking. "
+    : ''
+  if (!facts) {
+    return lead + (cov.uncovered
+      ? `no facts written as list items — ${blocks} of prose this check could not read.`
+      : 'nothing in this note is written as a list item, so there is nothing to check fact by fact.')
+  }
+  const parts = [`${facts} fact${facts === 1 ? '' : 's'}`]
+  if (cov.stale) parts.push(`${cov.stale} past due`)
+  if (cov.unverified) parts.push(`${cov.unverified} not verified`)
+  if (cov.exempt) parts.push(`${cov.exempt} recorded as events`)
+  parts.push(cov.uncovered ? `${blocks} of prose not read as facts` : 'all of the note read as facts')
+  return lead + parts.join(' · ') + '.'
+}
+
+/** Why one fact was picked out, in words.
+ *
+ * The two codes that matter most are the ones a whole-note age cannot express: a
+ * fact nobody ever stamped, and a stamp that is not a usable day. An aged one
+ * carries its date inline rather than a trailing dash — a line that ends in an
+ * em dash reads as a sentence the layout cut off, which is a different claim
+ * from the one this is making.
+ */
+function entryReasonWords(entry: MemoryGraphEntryFinding): string {
+  if (entry.reason === 'no-stamp') return 'Never checked'
+  if (entry.reason === 'unusable-stamp') return 'Check on record is not a usable date'
+  if (entry.reason === 'aged' && entry.own_date) {
+    return entry.last_verified
+      ? `Checked ${entry.last_verified} — ${entry.detail}`
+      : entry.detail
+  }
+  return entry.detail
 }
 
 const sortKey = ref<'title' | 'type' | 'degree' | 'age'>('title')
@@ -1608,6 +1751,22 @@ onBeforeUnmount(() => {
   from { opacity: 0; transform: translateY(18px); }
 }
 
+/* The two states the stale callout's absence would otherwise leave unexplained:
+   a note with a verdict against it, and one being asked about right now. Same
+   box and same type scale as `.mm-tile-stale` so the tile does not change shape
+   depending on which state the note is in — the accent edge, not a warning
+   colour, is what separates them, because neither of these is a problem. */
+.mm-tile-pending,
+.mm-tile-checked {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+
 /* What the tile adds around the note: a stale callout above it, the note's
    links and the delete action under it. */
 .mm-tile-stale {
@@ -1620,6 +1779,50 @@ onBeforeUnmount(() => {
 }
 .mm-tile-stale p { margin: 0; }
 .mm-tile-stale strong { color: var(--warning); }
+
+/* The facts inside a note. Neutral by default, because "every fact in here is
+   current" is not a warning and a box that shouted about a well-kept note would
+   be ignored on the notes that need it. The `--due` variant is the only one
+   that takes the warning edge, and only when a fact is actually past due. */
+.mm-tile-entries {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+.mm-tile-entries--due {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+  border-left-color: var(--warning);
+}
+.mm-tile-entries-head { margin: 0; }
+.mm-tile-entries-head strong { color: var(--fg); }
+.mm-tile-entry-list {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.mm-tile-entry-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: var(--space-2);
+  border-left: 2px solid var(--border);
+}
+.mm-tile-entry-why { color: var(--warning); font-weight: 600; }
+.mm-tile-entry-text {
+  color: var(--fg2);
+  /* The excerpt is capped server-side. A single bullet that is a whole
+     paragraph would otherwise be a wall inside a tile. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .mm-tile-stale-link {
   display: inline-flex;
   align-items: center;
@@ -1904,6 +2107,13 @@ onBeforeUnmount(() => {
   text-underline-offset: 3px;
 }
 .mm-toolbar-stale strong { color: inherit; }
+
+/* Facts unchecked inside notes, in the toolbar. Quieter than the note-level
+   figure on purpose: it is the more speculative of the two (a bullet with no
+   stamp of its own is a weaker signal than a file nobody has touched), and a
+   toolbar where both shout is a toolbar where neither is read. */
+.mm-toolbar-entries { color: var(--fg3); cursor: default; }
+.mm-toolbar-entries strong { color: var(--fg2); }
 .mm-list-wrap { padding: 0 var(--space-5) var(--space-5); }
 @media (max-width: 700px) {
   .mm-toolbar { padding-inline: var(--space-4); }

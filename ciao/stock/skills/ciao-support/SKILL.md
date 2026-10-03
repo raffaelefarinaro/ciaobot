@@ -20,6 +20,18 @@ Inspect, when present:
 State clearly when evidence is missing or empty. Do not claim the problem is
 fixed from a log tail alone.
 
+## Check whether an update already fixes it
+
+Before recommending a new issue, compare the installed version (Settings → Home)
+with the [releases](https://github.com/raffaelefarinaro/ciaobot/releases) and
+[changelog](https://github.com/raffaelefarinaro/ciaobot/blob/main/CHANGELOG.md).
+Search [existing issues](https://github.com/raffaelefarinaro/ciaobot/issues)
+for the symptom and check whether a matching fix was released, not merely
+merged or closed. If it shipped in a newer version, suggest updating and
+retesting first. If the version or fix cannot be verified, say so; do not
+assume an update will resolve the failure. Keep debugging or prepare an issue
+if the failure persists on the fixed version.
+
 ## GitHub issue labels
 
 When the operator has approved creating an issue in `raffaelefarinaro/ciaobot`,

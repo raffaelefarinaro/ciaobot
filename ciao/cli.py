@@ -15,16 +15,25 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from importlib import resources
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, public_release, release
+from ciao import dev, gws_wrapper, package_smoke, public_release, release, service_backend
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
+from ciao.jsonio import write_private_text
+from ciao.os_support.console import use_utf8_stdio
+from ciao.git_proc import EXACT_BYTES
+from ciao.os_support.shell_hints import path_hint, path_hint_note
+from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
+
+if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
+    from ciao import skill_proposals
+    from ciao.config import CiaoConfig
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -44,12 +53,12 @@ def _relaunch_argv() -> list[str]:
     return [sys.executable, "-m", "ciao.cli", *sys.argv[1:]]
 
 
-def _run_server() -> int:
+def _run_server(*, supervised: bool = False) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
-        server_main()
+        server_main(supervised=supervised)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
@@ -58,9 +67,13 @@ def _run_server() -> int:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
         # foreground `ciao run` would just die and leave the site unreachable.
-        # Re-exec (rather than loop) so the relaunch picks up new code.
+        # Re-exec (rather than loop) so the relaunch picks up new code. Under
+        # `ciao supervise` the supervisor owns the relaunch instead and only
+        # needs the code back.
         print("Restart requested — relaunching Ciaobot…", file=sys.stderr)
         sys.stderr.flush()
+        if supervised:
+            return code
         # The exec inherits os.environ, and load_dotenv never overrides a key
         # that is already set, so without this a value edited in the workspace
         # .env would be shadowed by the stale copy the old process exported.
@@ -70,6 +83,15 @@ def _run_server() -> int:
         reset_exported_dotenv()
         os.execv(sys.executable, _relaunch_argv())
     return code
+
+
+def _supervise_command(args: argparse.Namespace) -> int:
+    from ciao.supervise import supervise
+
+    extra = list(args.child_args)
+    if extra[:1] == ["--"]:
+        extra = extra[1:]
+    return supervise(extra)
 
 
 def _copy_tree(src, dest: Path) -> None:
@@ -124,7 +146,7 @@ def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]
 def _write_if_missing(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8", newline="")
 
 
 def _launchd_program_arguments(executable: str) -> str:
@@ -197,12 +219,7 @@ def _write_launchd_plist(
             # launch_agents_dir overrides) are not live — the resolved-path
             # comparison already distinguishes them, so an env override alone
             # must not bypass protection when the target is still the real dir.
-            real_dir = Path.home() / "Library" / "LaunchAgents"
-            try:
-                is_real = launch_agents_dir.expanduser().resolve() == real_dir.expanduser().resolve()
-            except OSError:
-                is_real = launch_agents_dir.expanduser() == real_dir
-            if is_real:
+            if service_backend.current_backend().is_live_agents_dir(launch_agents_dir):
                 existing = _plist_workspace(launch_agents_dir)
                 try:
                     requested = Path(workspace).expanduser().resolve()
@@ -228,7 +245,7 @@ def _write_launchd_plist(
             path=path,
             template_name=f"{plist_name}.tmpl",
             ),
-        encoding="utf-8",
+        encoding="utf-8", newline="",
     )
     return plist
 
@@ -259,7 +276,7 @@ def _rotate_setup_token(workspace: Path) -> str:
     path = _setup_token_path(workspace)
     token = secrets.token_urlsafe(24)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token + "\n", encoding="utf-8")
+    path.write_text(token + "\n", encoding="utf-8", newline="")
     return token
 
 
@@ -284,7 +301,7 @@ def _pwa_port_from_env(workspace: Path, fallback: int) -> int:
 
 
 def _path_export_hint() -> str | None:
-    """An ``export PATH=...`` line for the running interpreter's bin dir, or
+    """A shell line that puts the interpreter's bin dir on PATH, or
     ``None`` when it is already on PATH.
 
     Ciaobot installs into a standalone venv (``~/.ciaobot-venv``) that is not
@@ -303,7 +320,7 @@ def _path_export_hint() -> str | None:
     }
     if str(bin_dir) in entries:
         return None
-    return f'export PATH="{bin_dir}:$PATH"'
+    return path_hint(str(bin_dir), persist=False)
 
 
 def _print_setup_summary(workspace: Path, port: int) -> None:
@@ -324,6 +341,11 @@ def _print_setup_summary(workspace: Path, port: int) -> None:
     if hint is not None:
         print("To run `ciao` from a shell, add its venv to PATH:")
         print(f"  {hint}")
+        # Only alongside the line it qualifies: with the bin dir already on PATH
+        # there is nothing to change and nothing to wait for.
+        note = path_hint_note()
+        if note:
+            print(f"  {note}")
 
 
 def _default_app_dir() -> Path:
@@ -429,20 +451,14 @@ def _disable_legacy_menubar_agent(launch_agents_dir: Path | None = None) -> bool
     the user's real launchd domain.
     """
 
-    real_launch_dir = Path.home() / "Library" / "LaunchAgents"
-    launch_dir = (launch_agents_dir or default_launch_agents_dir()).expanduser()
+    backend = service_backend.current_backend()
+    launch_dir = (launch_agents_dir or backend.agents_dir()).expanduser()
     plist_path = launch_dir / "com.ciao.menubar.plist"
     if not plist_path.exists():
         return False
 
-    if sys.platform == "darwin" and launch_dir == real_launch_dir:
-        label = f"gui/{os.getuid()}/com.ciao.menubar"
-        try:
-            subprocess.run(
-                ["launchctl", "bootout", label], check=False, capture_output=True
-            )
-        except OSError:
-            pass
+    if launch_dir == backend.live_agents_dir():
+        backend.bootout_agent("com.ciao.menubar")
     try:
         plist_path.unlink()
     except OSError:
@@ -455,12 +471,42 @@ from ciao.workspace_guide import guide_path
 # Paths a workspace snapshot must never pick up. No `.codex/` entry: codex is
 # retired (`sync_skills` only prunes what older versions left behind, it never
 # writes there), so ignoring it would be dead config.
+#
+# The runtime root is written as its contents plus one re-include rather than as
+# the directory, because the backup scope commits `.runtime/schedules.json` —
+# the durable automation store — and refuses every other path under that root
+# (#734). Git never descends into an ignored directory, so a `.runtime/` line
+# would make that carve-out inert no matter what followed it.
+#
+# Both halves are spelled the way they have to be, and neither spelling is
+# obvious. The glob is `**/.runtime/*` rather than `.runtime/*` because a
+# pattern with an interior slash is anchored to the repository root: the
+# unanchored `.runtime/` matched a `.runtime` directory at *any* depth, and
+# `.runtime/*` would quietly stop matching `client/.runtime` and `a/b/.runtime`
+# — a real regression, since those hold state such as `bootstrap-auth-token`
+# and the manual sync path still stages the whole tree. The re-include is
+# `!/.runtime/schedules.json` for the mirror-image reason: it pins the
+# root-level file the scope commits, while a nested `sub/.runtime/
+# schedules.json` stays ignored with everything else in that directory.
+_RUNTIME_IGNORE_ENTRIES = ("**/.runtime/*", "!/.runtime/schedules.json")
+
+#: The hand-written spellings of that same rule, repaired in place rather than
+#: appended to. Each ignores the runtime root well enough that a re-include
+#: written beside it is dead — the failure the repair exists to undo — and these
+#: are the forms a person writes by hand, so they are what an existing install
+#: is most likely to carry.
+#:
+#: The limit, stated rather than engineered around: git cannot tell a file from
+#: a directory in one pattern except by the trailing slash, so after the repair
+#: a *plain file* named `.runtime` would no longer be ignored. The runtime root
+#: is always a directory (``state_path.parent``), so there is nothing to lose.
+_RUNTIME_IGNORE_DIRS = (".runtime/", ".runtime", "/.runtime/", "/.runtime")
 _WORKSPACE_GITIGNORE_ENTRIES = (
     ".env",
     ".envrc",
     ".direnv/",
     "secrets/",
-    ".runtime/",
+    *_RUNTIME_IGNORE_ENTRIES,
     ".claude/",
     ".agents/",
     ".opencode/",
@@ -470,18 +516,80 @@ _WORKSPACE_GITIGNORE_ENTRIES = (
 
 
 def _ensure_workspace_gitignore(root: Path) -> None:
-    """Make sure `git add -A` snapshots never pick up secrets or runtime state."""
+    """Make sure `git add -A` snapshots never pick up secrets or runtime state.
+
+    Also repairs the one entry whose meaning needs a rewrite rather than an
+    append. A ``.runtime/`` line ignores the *directory*, so a re-include
+    written beside it does nothing: git never descends into an ignored
+    directory, which is what left the backup scope's carve-out of
+    ``.runtime/schedules.json`` inert on every install scaffolded before #734
+    while the status page listed the file as backed up. Appending cannot fix
+    that, so the hand-written spellings in :data:`_RUNTIME_IGNORE_DIRS` are
+    rewritten in place as the pair.
+
+    Rewriting is safe whichever hand wrote the line, because the pair covers
+    everything each of them covered — every ``.runtime`` at any depth — and
+    re-includes one root-level file. A rule scoped to somebody else's path, such
+    as ``client/.runtime/``, is not one of those spellings and is left alone.
+    """
     gitignore = root / ".gitignore"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    present = {line.strip() for line in existing.splitlines()}
+    # `newline=""` on both ends: the default text mode would translate a CRLF
+    # file to LF on the way in, so the line ending would be gone before the
+    # check below could see it, and the rewrite would convert the whole file.
+    # `open` rather than `read_text` for the `newline` argument, which
+    # `read_text` only grew in 3.13 and the type stubs here predate.
+    existing = ""
+    if gitignore.exists():
+        with gitignore.open(encoding="utf-8", newline="") as handle:
+            existing = handle.read()
+    original = existing.splitlines()
+    lines: list[str] = []
+    repaired = False
+    for line in original:
+        if line.strip() in _RUNTIME_IGNORE_DIRS:
+            if not repaired:
+                lines.extend(_RUNTIME_IGNORE_ENTRIES)
+                repaired = True
+            # A second spelling of a rule the pair now covers: dropping it is
+            # what keeps the pair from being written twice.
+            continue
+        lines.append(line)
+    present = {line.strip() for line in lines}
     missing = [e for e in _WORKSPACE_GITIGNORE_ENTRIES if e not in present]
-    if not missing:
+    if not missing and lines == original:
         return
-    if existing:
-        text = existing if existing.endswith("\n") else existing + "\n"
+    # Rebuild in whatever line ending the file already had: a CRLF `.gitignore`
+    # is a Windows editor's file, and rewriting it wholesale into LF is a
+    # gratuitous whole-file diff on a file this function only appended to.
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    if lines:
+        text = newline.join(lines) + newline
     else:
-        text = "# Ciaobot: keep secrets and runtime state out of git snapshots\n"
-    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8")
+        header = "# Ciaobot: keep secrets and runtime state out of git snapshots"
+        text = header + newline
+    if missing:
+        text += newline.join(missing) + newline
+    with gitignore.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
+def _ensure_exact_bytes(root: Path) -> None:
+    """Have ``root``'s own git config store exact bytes (``core.autocrlf=false``).
+
+    Only when the repo does not set it already: a value the user chose for this
+    repo stands. See ``git_proc.EXACT_BYTES`` for why; the engine passes the same
+    setting on every call, so a repo this has not touched yet behaves the same.
+    """
+    current = subprocess.run(
+        ["git", "-C", str(root), "config", "--local", "--get", "core.autocrlf"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if current.returncode == 0:
+        return
+    subprocess.run(
+        ["git", "-C", str(root), "config", "--local", "core.autocrlf", "false"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
 
 
 def ensure_workspace_git(root: Path) -> None:
@@ -497,29 +605,31 @@ def ensure_workspace_git(root: Path) -> None:
         return
     _ensure_workspace_gitignore(root)
     probe = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-        capture_output=True, text=True,
+        ["git", *EXACT_BYTES, "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0 and probe.stdout.strip() == "true":
+        _ensure_exact_bytes(root)
         return
     init = subprocess.run(
-        ["git", "init", "-b", "main", str(root)],
-        capture_output=True, text=True,
+        ["git", *EXACT_BYTES, "init", "-b", "main", str(root)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if init.returncode != 0:
         print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
         return
+    _ensure_exact_bytes(root)
     subprocess.run(
-        ["git", "-C", str(root), "add", "-A"],
-        capture_output=True, text=True,
+        ["git", *EXACT_BYTES, "-C", str(root), "add", "-A"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     commit = subprocess.run(
         [
-            "git", "-C", str(root),
+            "git", *EXACT_BYTES, "-C", str(root),
             "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
             "commit", "-m", "Initialize Ciaobot workspace",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if commit.returncode != 0:
         print(
@@ -543,7 +653,7 @@ def _ensure_vault_gitignore(root: Path) -> None:
         text = existing if existing.endswith("\n") else existing + "\n"
     else:
         text = "# Ciaobot: keep OS and editor litter out of vault snapshots\n"
-    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8")
+    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8", newline="")
 
 
 def ensure_vault_git(root: Path) -> None:
@@ -570,33 +680,35 @@ def ensure_vault_git(root: Path) -> None:
         print("git not found; skipping vault git init", file=sys.stderr)
         return
     probe = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True,
+        ["git", *EXACT_BYTES, "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0:
         toplevel = Path(probe.stdout.strip())
         if toplevel == root:
             _ensure_vault_gitignore(root)
+            _ensure_exact_bytes(root)
         return
     _ensure_vault_gitignore(root)
     init = subprocess.run(
-        ["git", "init", "-b", "main", str(root)],
-        capture_output=True, text=True,
+        ["git", *EXACT_BYTES, "init", "-b", "main", str(root)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if init.returncode != 0:
         print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
         return
+    _ensure_exact_bytes(root)
     subprocess.run(
-        ["git", "-C", str(root), "add", "-A"],
-        capture_output=True, text=True,
+        ["git", *EXACT_BYTES, "-C", str(root), "add", "-A"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     commit = subprocess.run(
         [
-            "git", "-C", str(root),
+            "git", *EXACT_BYTES, "-C", str(root),
             "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
             "commit", "-m", "Initialize Ciaobot vault",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if commit.returncode != 0:
         print(
@@ -682,6 +794,17 @@ def _setup_registry_vaults(
     ]
 
 
+def _service_platform() -> bool:
+    """True where ``ciao setup`` installs a per-user background service.
+
+    macOS (a LaunchAgent) and Windows (a Task Scheduler logon task) both have
+    one; Linux does not, and there ``--load-launchd`` is refused rather than
+    silently ignored.
+    """
+
+    return sys.platform in ("darwin", "win32")
+
+
 def setup_workspace(
     workspace: Path | str,
     *,
@@ -696,6 +819,7 @@ def setup_workspace(
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
     confirm_repoint: bool = False,
+    sync_failures: list[str] | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -709,7 +833,7 @@ def setup_workspace(
     # existing notes folder when the live LaunchAgent would be hijacked.
     # The later `_write_launchd_plist` guard is defense-in-depth; this one
     # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
-    write_launchd = sys.platform == "darwin" or launch_agents_dir is not None
+    write_launchd = _service_platform() or launch_agents_dir is not None
     if write_launchd and not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
@@ -717,18 +841,14 @@ def setup_workspace(
             "yes",
         )
         if not allow_env:
+            backend = service_backend.current_backend()
             _early_launch = (
                 Path(launch_agents_dir)
                 if launch_agents_dir is not None
-                else default_launch_agents_dir()
+                else backend.agents_dir()
             )
-            real_dir = Path.home() / "Library" / "LaunchAgents"
-            try:
-                is_real = _early_launch.expanduser().resolve() == real_dir.expanduser().resolve()
-            except OSError:
-                is_real = _early_launch.expanduser() == real_dir
-            if is_real:
-                existing = _plist_workspace(_early_launch)
+            if backend.is_live_agents_dir(_early_launch):
+                existing = _registered_service_workspace(_early_launch)
                 if existing is not None and existing != root:
                     raise RuntimeError(
                         f"Refusing to repoint live LaunchAgent from {existing} to {root}: "
@@ -809,11 +929,10 @@ def setup_workspace(
         ("PWA_PORT", str(port)),
     ])
     if not existing_env and not env_path.exists():
-        env_path.write_text(
-            "\n".join(f"{key}={value}" for key, value in desired_env) + "\n",
-            encoding="utf-8",
+        # The password is in here in clear text: owner-only from creation.
+        write_private_text(
+            env_path, "\n".join(f"{key}={value}" for key, value in desired_env) + "\n"
         )
-        env_path.chmod(0o600)
         written.append(env_path)
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace
@@ -842,7 +961,7 @@ def setup_workspace(
                 + "# Added by Ciaobot setup\n"
                 + "\n".join(additions)
                 + "\n",
-                encoding="utf-8",
+                encoding="utf-8", newline="",
             )
             written.append(env_path)
 
@@ -933,13 +1052,19 @@ def setup_workspace(
         # wrong — it just had not synced yet. Local only: no upstream refresh, so
         # setup still does not touch the network.
         try:
-            sync_workspace_skills(
+            sync_result = sync_workspace_skills(
                 asset_root,
                 refresh_upstream=False,
                 workspace_name=_name or None,
             )
         except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
             print(f"skill sync failed for {asset_root}: {exc}", file=sys.stderr)
+        else:
+            if sync_result.memory_error and sync_failures is not None:
+                sync_failures.append(
+                    f"memory regions not set up for {asset_root}: "
+                    f"{sync_result.memory_error}"
+                )
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(
@@ -974,7 +1099,7 @@ def setup_workspace(
             nested_vault = vault_path / ws_name
             scaffold_vaults.append((ws_name, nested_vault))
             try:
-                stored_root = str(nested_vault.relative_to(root))
+                stored_root = nested_vault.relative_to(root).as_posix()
             except ValueError:
                 stored_root = str(nested_vault)
             entries.append(
@@ -1009,7 +1134,7 @@ def setup_workspace(
             scaffold_vault_path = vault_path / name
         scaffold_vaults.append((name, scaffold_vault_path))
         try:
-            stored_root = str(scaffold_vault_path.relative_to(root))
+            stored_root = scaffold_vault_path.relative_to(root).as_posix()
         except ValueError:
             stored_root = str(scaffold_vault_path)
         _write_if_missing(
@@ -1065,11 +1190,6 @@ def setup_workspace(
                     "      It is reversible: `ciao vault-unmigrate-links --apply`.",
                 )
 
-    launch_dir = (
-        Path(launch_agents_dir)
-        if launch_agents_dir is not None
-        else default_launch_agents_dir()
-    )
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     # The bundled launcher exports its own entrypoint so onboarding does not
     # write the embedded interpreter directly into launchd as ``python run``.
@@ -1084,19 +1204,44 @@ def setup_workspace(
     # bundle, which no longer exists.
     _ensure_setup_token(root)
     if write_launchd:
-        written.append(_write_launchd_plist(
-            workspace=root,
-            launch_agents_dir=launch_dir,
-            engine_path=resolved_engine,
-            runtime_root=runtime_root,
-            port=port,
-            path=os.environ.get("PATH", ""),
-            plist_name="com.ciao.server.plist",
-            confirm_repoint=confirm_repoint,
-        ))
-        # Explicit --launch-agents-dir also permits offline plist generation.
-        _remove_legacy_app_shortcuts(app_root_dir)
-        _disable_legacy_menubar_agent(launch_dir)
+        launch_dir = (
+            Path(launch_agents_dir)
+            if launch_agents_dir is not None
+            else service_backend.current_backend().agents_dir()
+        )
+        if sys.platform == "win32":
+            from ciao import windows_service
+
+            # The Windows definition is Task Scheduler XML written by the module
+            # that owns the task, not a plist. The repoint guard already ran
+            # above, through `_registered_service_workspace`.
+            #
+            # The renderer refuses values the task would only reject at logon:
+            # an interpreter that is not python*.exe, a UNC workspace, a
+            # missing USERNAME. Both setup callers report RuntimeError, so a
+            # bad value is a message and an exit code, never a traceback.
+            try:
+                written.append(windows_service.write_task_definition(
+                    workspace=root,
+                    python=resolved_engine,
+                    directory=launch_dir,
+                ))
+            except (ValueError, windows_service.WindowsServiceError) as exc:
+                raise RuntimeError(str(exc)) from exc
+        else:
+            written.append(_write_launchd_plist(
+                workspace=root,
+                launch_agents_dir=launch_dir,
+                engine_path=resolved_engine,
+                runtime_root=runtime_root,
+                port=port,
+                path=os.environ.get("PATH", ""),
+                plist_name="com.ciao.server.plist",
+                confirm_repoint=confirm_repoint,
+            ))
+            # Explicit --launch-agents-dir also permits offline plist generation.
+            _remove_legacy_app_shortcuts(app_root_dir)
+            _disable_legacy_menubar_agent(launch_dir)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -1139,17 +1284,62 @@ def _plist_workspace(launch_agents_dir: Path) -> Path | None:
         return None
 
 
+def _registered_service_workspace(definitions_dir: Path) -> Path | None:
+    """Workspace the installed service definition serves, if it says one.
+
+    The platform's own answer: the plist's ``CIAO_WORKSPACE`` on macOS, the
+    task XML's ``Exec/WorkingDirectory`` on Windows. Both resolve the path, so a
+    caller can compare it with a requested workspace.
+    """
+
+    if sys.platform == "win32":
+        from ciao import windows_service
+
+        # `unregister_task` leaves the XML on disk, so a definition is not proof
+        # a task exists: ask Task Scheduler. Refusing to repoint a task that was
+        # already deleted would strand the user behind a stale file.
+        try:
+            if not windows_service.task_exists():
+                return None
+        except windows_service.WindowsServiceError:
+            return None
+        workspace = windows_service.task_workspace(
+            definitions_dir.expanduser() / windows_service.TASK_FILE_NAME
+        )
+        try:
+            return workspace.expanduser().resolve() if workspace is not None else None
+        except OSError:
+            return workspace
+    return _plist_workspace(definitions_dir)
+
+
+def _service_definition(launch_dir: Path | str | None) -> Path | None:
+    """The service definition this platform keeps in ``launch_dir``, or None.
+
+    The server LaunchAgent on macOS, the Task Scheduler XML on Windows.
+    """
+
+    if launch_dir is None:
+        return None
+    if sys.platform == "win32":
+        from ciao import windows_service
+
+        return Path(launch_dir).expanduser() / windows_service.TASK_FILE_NAME
+    return Path(launch_dir).expanduser() / "com.ciao.server.plist"
+
+
 def _setup_command(args: argparse.Namespace) -> int:
     root = Path(args.workspace).expanduser().resolve()
-    if args.load_launchd and sys.platform != "darwin":
+    if args.load_launchd and not _service_platform():
         print(
-            "Error: --load-launchd requires macOS. On Linux use `ciao linux-service`.",
+            "Error: --load-launchd requires macOS or Windows. "
+            "On Linux use `ciao linux-service`.",
             file=sys.stderr,
         )
         return 2
     launch_dir = args.launch_agents_dir
-    if launch_dir is None and sys.platform == "darwin":
-        launch_dir = default_launch_agents_dir()
+    if launch_dir is None and _service_platform():
+        launch_dir = service_backend.current_backend().agents_dir()
 
     # Guard against the two ways `ciao setup` silently hijacks the workspace:
     # running it inside the source checkout, or re-pointing an already
@@ -1177,7 +1367,10 @@ def _setup_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        existing = _plist_workspace(Path(launch_dir)) if launch_dir is not None else None
+        existing = (
+            _registered_service_workspace(Path(launch_dir))
+            if launch_dir is not None else None
+        )
         if existing is not None and existing != root:
             allow_env = os.environ.get(
                 "CIAO_ALLOW_LAUNCH_AGENT_REPOINT", ""
@@ -1198,6 +1391,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
     except OSError:
         had_token = False
+    sync_failures: list[str] = []
     try:
         written = setup_workspace(
             args.workspace,
@@ -1209,12 +1403,20 @@ def _setup_command(args: argparse.Namespace) -> int:
             launch_agents_dir=args.launch_agents_dir,
             app_dir=args.app_dir,
             confirm_repoint=args.yes,
+            sync_failures=sync_failures,
         )
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     for path in written:
         print(path)
+    for failure in sync_failures:
+        print(
+            f"Warning: {failure}. Skills were synced; fix the error and "
+            "re-run `ciao setup`.",
+            file=sys.stderr,
+        )
+    setup_rc = SETUP_MEMORY_FAILED_RC if sync_failures else 0
     if auth_required and not args.auth_token and not had_token:
         print(
             "\nPassword protection is on. No --auth-token was given, so a random "
@@ -1224,42 +1426,39 @@ def _setup_command(args: argparse.Namespace) -> int:
         )
     # One agent now: setup deletes the retired com.ciao.menubar plist rather
     # than writing it, so there is nothing else here to load.
-    server_plist = (
-        Path(launch_dir).expanduser() / "com.ciao.server.plist"
-        if launch_dir is not None else None
-    )
-    plists = [server_plist] if server_plist is not None and server_plist.is_file() else []
+    definition = _service_definition(launch_dir)
+    definitions = [definition] if definition is not None and definition.is_file() else []
     if args.load_launchd:
-        rc = 0
-        for plist in plists:
-            # The unload is a probe: during an install the agent is normally
-            # not loaded, and launchctl says so on stderr ("Unload failed: 5:
-            # Input/output error"). check=False swallows the status but not the
-            # output, and install.sh redirects only stdout - so that expected
-            # non-event was the first line a user saw when re-running the
-            # installer over a configured workspace, ahead of the success lines.
-            subprocess.run(
-                ["launchctl", "unload", str(plist)],
-                check=False,
-                stderr=subprocess.DEVNULL,
-            )
+        rc = setup_rc
+        backend = service_backend.current_backend()
+        for agent_definition in definitions:
             # Keep a real load failure visible to the installer and preserve
-            # its status as the setup result.
-            rc = subprocess.run(
-                ["launchctl", "load", "-w", str(plist)],
-                check=False,
-            ).returncode or rc
+            # its status as the setup result - except that launchctl's own 3
+            # would be read as the tolerated memory warning, so the installer
+            # would continue with the agent never loaded. Anything load
+            # returns is a hard failure: report it as 1.
+            lrc = backend.load_agent(agent_definition)
+            if lrc:
+                rc = 1 if lrc == SETUP_MEMORY_FAILED_RC else lrc
         _print_setup_summary(root, _pwa_port_from_env(root, args.port))
         return rc
-    for plist in plists:
-        print(f"LaunchAgent not loaded. To load it: launchctl load -w {plist}")
-    if sys.platform.startswith("linux") and not plists:
+    for agent_definition in definitions:
+        if sys.platform == "win32":
+            print(
+                "Task not registered. To register it: "
+                f"ciao setup --workspace {root} --load-launchd"
+            )
+        else:
+            print(
+                f"LaunchAgent not loaded. To load it: launchctl load -w {agent_definition}"
+            )
+    if sys.platform.startswith("linux") and not definitions:
         print(
             "Workspace ready. Run `ciao run` from the workspace, or use "
             "`ciao linux-service` to render a systemd unit."
         )
     _print_setup_summary(root, _pwa_port_from_env(root, args.port))
-    return 0
+    return setup_rc
 
 
 def _setup_url_command(args: argparse.Namespace) -> int:
@@ -1486,7 +1685,9 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         # re-rooted install those differ by the workspace segment, so joining
         # against the parent printed a `file://` link that does not exist.
         abs_path = key_base / result["path"]
-        link = f"file://{abs_path.as_posix()}"
+        # as_uri, not "file://" + the path: on Windows that read `C:` as a host,
+        # and a space or non-ASCII name broke the markdown link on every OS.
+        link = abs_path.as_uri()
         print(f"- **[{result['title']}]({link})** (rank: {result['rank']})")
         if result["snippet"]:
             snippet = result["snippet"].replace("<<<", "**`").replace(">>>", "`**")
@@ -1502,7 +1703,7 @@ def _vault_migrate_command(args: argparse.Namespace) -> int:
     the user's notes, so applying is opt-in even though the substitution is
     mechanical.
     """
-    from ciao.vault_migration import migrate_vault_vocabulary
+    from ciao.vault_migration import migrate_vault_vocabulary, retain_retired_stock_types
 
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
@@ -1512,10 +1713,31 @@ def _vault_migrate_command(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # First, so the renames below are judged against the categories this vault
+    # keeps: a retired stock type still in use becomes a category of its own.
+    retention = retain_retired_stock_types(vault_root, apply=args.apply)
     summary = migrate_vault_vocabulary(vault_root, apply=args.apply)
+    summary["retained"] = retention["retained"]
+    if not args.apply:
+        # Nothing is written yet, so the types the retained categories will
+        # claim still read as unknown; they are not a decision for the user.
+        summary["unresolved"] = {
+            raw: paths
+            for raw, paths in summary["unresolved"].items()
+            if raw.lower() not in retention["covers"]
+        }
+    if "failed" in retention:
+        summary["failed"].append({"path": "entity-types.yaml", "error": retention["failed"]})
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 1 if summary["unresolved"] or summary["failed"] else 0
+
+    if retention["retained"]:
+        verb = "Kept" if args.apply else "Would keep"
+        print(
+            f"{verb} retired stock categories this vault still uses: "
+            f"{', '.join(retention['retained'])}."
+        )
 
     changes = summary["renamed"] if args.apply else summary["planned"]
     verb = "Renamed" if args.apply else "Would rename"
@@ -1695,6 +1917,780 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     elif not args.apply and rewrites:
         print("\nRe-run with --apply to write these changes.")
     return 1 if summary["failed"] else 0
+
+
+def _registered_owner(config: Any, vault: Path) -> str | None:
+    """The registered workspace whose vault is exactly ``vault``, else ``None``."""
+    for owner in config.workspace_names():
+        try:
+            owned = Path(config.workspace_vault_root(owner)).resolve()
+        except ValueError:
+            # One workspace's registered vault being unusable — a symlinked
+            # folder, an empty root — says nothing about the workspace the
+            # operator named, so it must not fail their run.
+            continue
+        if owned == vault:
+            return str(owner)
+    return None
+
+
+def _learnings_workspace(args: argparse.Namespace) -> tuple[Path, str, Path]:
+    """``(vault root, workspace name, runtime root)`` for a learnings command.
+
+    The three belong together because all three are answers read from the same
+    resolved registry: a run that names the right workspace but writes its
+    receipt beside the shell's cwd is the #912 bug in the one place the name no
+    longer comes from a directory. The runtime root is therefore the one the
+    resolved registry was read from — the same ``state_path.parent`` that
+    ``update_tasks`` looks under ``migration/`` for receipts — so a bare-shell
+    receipt lands where the update-task check reads it instead of in
+    ``<cwd>/.runtime``. An explicit ``--runtime-root`` still wins, and with
+    ``CIAO_WORKSPACE`` set this is the directory ``_resolve_runtime_root(None)``
+    already gave, so server-spawned runs do not move.
+
+    The registered name is the only identity scope a learning id is minted
+    under, so every caller resolves the name through the real registry — the
+    same authority :func:`_resolve_workspace_and_vaults` reads — rather than
+    from the vault directory's own name. On a per-root install every workspace's
+    vault directory is called ``memory-vault``, so a name taken from the
+    directory is the same string for every workspace: receipts written under it
+    name a workspace the update-task check does not know, and the cleanup fold
+    looks for a vault under a segment that is not there.
+
+    Precedence, and each rule's reason:
+
+    - an explicit ``--workspace`` is the operator naming a workspace, so an
+      unknown name and a ``--vault-root`` that contradicts it are refused rather
+      than repaired — the run would otherwise write a receipt under one
+      identity while reconciling another;
+    - otherwise a ``--vault-root`` resolves to the workspace that owns it, so
+      the command an operator already had keeps working unchanged;
+    - otherwise the active workspace if there is one, else the primary.
+
+    Raises ``ValueError`` with a message to print; every caller turns that into
+    exit 1 before anything is written.
+    """
+    from ciao.config import CiaoConfig, installed_workspace_env
+
+    # A read-only resolution must not mint a session secret just because the CLI
+    # runs outside the server env (the same rule the memory-audit command and
+    # `_resolve_workspace_and_vaults` follow).
+    #
+    # The install the server sees, overlaid under this process's env — the same
+    # resolution `from_env()` applies to a bare shell — so a learnings run from
+    # any directory reads the real registry and that install's `.env`.
+    env = installed_workspace_env(os.environ)
+    if not env.get("PWA_AUTH_TOKEN", "").strip():
+        # Not `setdefault`: the install's `.env` reaches this mapping now, and an
+        # empty `PWA_AUTH_TOKEN=` hand-written there would leave `from_env`
+        # without a token — minting the session secret this call must not mint.
+        env["PWA_AUTH_TOKEN"] = "learnings-cli"
+    if not env.get("CIAO_WORKSPACE", "").strip():
+        # No installed server to ask: the cwd, the old `./memory-vault` base.
+        env["CIAO_WORKSPACE"] = str(Path.cwd())
+    config = CiaoConfig.from_env(env)
+    # The receipt has to land in the same `.runtime` the update-task check reads
+    # (`<state_path parent>/migration`), which is the one this registry came from —
+    # not `_resolve_runtime_root(args.runtime_root)`, which only sees
+    # `os.environ` and answers `<cwd>/.runtime` for a bare shell.
+    runtime_root = (
+        _resolve_runtime_root(args.runtime_root)
+        if getattr(args, "runtime_root", None) is not None
+        else Path(config.state_path).parent
+    )
+
+    name = (getattr(args, "workspace", None) or "").strip()
+    if name:
+        if config.workspace(name) is None:
+            raise ValueError(
+                f"Unknown workspace `{name}`. Registered: "
+                f"{', '.join(config.workspace_names())}."
+            )
+        registered = Path(config.workspace_vault_root(name)).resolve()
+        if getattr(args, "vault_root", None):
+            named = _resolve_vault_root(args.vault_root)
+            if named != registered:
+                raise ValueError(
+                    f"`--vault-root {named}` is not workspace `{name}`'s vault "
+                    f"(`{registered}`)."
+                )
+        return registered, name, runtime_root
+    if getattr(args, "vault_root", None):
+        vault = _resolve_vault_root(args.vault_root)
+        owner = _registered_owner(config, vault)
+        if owner is not None:
+            return vault, owner, runtime_root
+        # An explicit directory the registry does not know is the one case where
+        # the directory's own name stands in for the registered one, exactly as
+        # `_resolve_workspace_and_vaults` prescribes: the operator pointed at a
+        # directory in person and there is no workspace name to resolve.
+        return vault, vault.name, runtime_root
+    active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if active:
+        # Refused, not repaired, exactly as an unknown `--workspace` is: a name
+        # the registry does not know means the run is about the wrong workspace's
+        # data, and `--apply-settled` would remove entries from it while the
+        # receipt names the primary workspace instead. `_resolve_workspace_and_vaults`
+        # answers this the same way, so the planner and this command agree.
+        if config.workspace(active) is None:
+            raise ValueError(
+                f"CIAO_ACTIVE_WORKSPACE `{active}` is not a registered workspace. "
+                f"Registered: {', '.join(config.workspace_names())}."
+            )
+        resolved = active
+    else:
+        resolved = config.primary_workspace()
+    return Path(config.workspace_vault_root(resolved)).resolve(), resolved, runtime_root
+
+
+def _learnings_migrate_command(args: argparse.Namespace) -> int:
+    """Convert a workspace's legacy ``Learnings.md`` entries to canonical records.
+
+    Dry-run by default, like every other one-off migration here: this rewrites
+    lines the user wrote, so applying is opt-in and the preview *is* the apply
+    rather than a description of it. A receipt records an exact reverse map, and
+    ``--revert`` restores the original bytes from it — so the write is not a
+    one-way door even though the file is not under git.
+
+    The exit code reports findings rather than just failure: a file with a line
+    this code cannot read has been migrated as far as it safely can be, and the
+    operator needs to know that from the status alone. A clean run over clean
+    content exits 0.
+    """
+    from ciao.learnings_migrate import (
+        migrate_learnings_file,
+        new_receipt_path,
+        read_receipt,
+        unmigrate_learnings_file,
+        write_receipt,
+    )
+
+    try:
+        vault_root, workspace, runtime_root = _learnings_workspace(args)
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    if not vault_root.is_dir():
+        print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
+        return 1
+
+    if args.revert:
+        receipt = read_receipt(Path(args.revert))
+        if receipt is None:
+            print(
+                f"Not a readable learnings-migrate receipt: `{args.revert}`",
+                file=sys.stderr,
+            )
+            return 1
+        if receipt.get("vault_root") and str(receipt["vault_root"]) != str(vault_root):
+            # Refused rather than attempted: the receipt's spans are offsets into
+            # one specific file, so reversing from a different root reads the
+            # wrong bytes at those offsets and the offset check would then be
+            # checking the wrong document.
+            print(
+                f"Receipt records a migration of `{receipt['vault_root']}`, not "
+                f"`{vault_root}`. Re-run with `--vault-root "
+                f"{receipt['vault_root']}`.",
+                file=sys.stderr,
+            )
+            return 1
+        summary = unmigrate_learnings_file(vault_root, receipt, apply=args.apply)
+    else:
+        summary = migrate_learnings_file(
+            vault_root,
+            workspace=workspace,
+            apply=args.apply,
+        )
+
+    # Recorded before anything is printed, and only for a run that actually
+    # wrote: a receipt for a dry run would reverse spans that are still in their
+    # original place, and `--revert` on it would corrupt the file rather than
+    # restore it. A run whose write failed is the same thing and is gated by the
+    # same count — `migrate_learnings_file` reports nothing migrated when the
+    # bytes did not land, so the two cannot disagree here.
+    receipt_path = ""
+    if args.apply and not args.revert and summary.get("entries_migrated"):
+        receipt_path = str(
+            write_receipt(new_receipt_path(runtime_root), summary)
+        )
+        summary["receipt_path"] = receipt_path
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return _learnings_migration_status(summary)
+
+    for problem in summary.get("diagnostics") or []:
+        # A line this code could not read is a line nothing downstream can count,
+        # so it is the one thing in an otherwise successful run the owner has to
+        # look at. Printed to stderr and reflected in the exit code, not folded
+        # into a summary that reads as finished.
+        print(f"  kept as written: {problem}", file=sys.stderr)
+    if summary.get("failed"):
+        print("\nFailed:", file=sys.stderr)
+        for item in summary["failed"]:
+            print(f"  {item['path']}: {item['error']}", file=sys.stderr)
+
+    if args.revert:
+        _print_learnings_revert(summary, apply=args.apply)
+    else:
+        _print_learnings_migration(summary, apply=args.apply)
+    if receipt_path:
+        print(f"\nReceipt: {receipt_path}")
+        print(
+            "Reverse it exactly with `ciao learnings-migrate "
+            f"--revert {receipt_path} --apply`."
+        )
+    return _learnings_migration_status(summary)
+
+
+def _print_learnings_migration(summary: dict[str, Any], *, apply: bool) -> None:
+    """What a migration run did, or would do, with every span it touched."""
+    count = summary.get("entries_migrated", 0)
+    if count:
+        verb = "Migrated" if apply else "Would migrate"
+        print(f"{verb} {count} learning entr(y/ies) in Workspace/Learnings.md:")
+        for change in summary.get("rewrites") or []:
+            print(f"  {change['from']}")
+            print(f"    -> {change['to']}")
+        if not apply:
+            print("\nRe-run with --apply to write these changes.")
+        return
+    if summary.get("failed"):
+        # The count is zero because nothing was written, and the spans are still
+        # a plan — so falling through to "already canonical" would be the one
+        # claim in the output nobody could check against the file, because the
+        # file is exactly as it was. Not the spans either: after a concurrent
+        # write they were computed against a revision that no longer holds, and
+        # a stale diff reads as a fresh one. The reason is on stderr, and a dry
+        # run prints the plan against whatever the file holds now.
+        print("Nothing was written: the file is as it was.")
+        return
+    if "skipped" in summary:
+        print(f"Nothing to migrate: {summary['skipped']}.")
+        return
+    scanned = summary.get("entries_scanned", 0)
+    print(f"Nothing to migrate: {scanned} entr(y/ies) already canonical.")
+
+
+def _print_learnings_revert(summary: dict[str, Any], *, apply: bool) -> None:
+    """What a revert did, or would do."""
+    if summary.get("entries_reverted"):
+        verb = "Reverted" if apply else "Would revert"
+        print(f"{verb} {summary['entries_reverted']} learning entr(y/ies):")
+        if not apply:
+            print("\nRe-run with --apply to write these changes.")
+        return
+    if "skipped" in summary:
+        print(f"Nothing to revert: {summary['skipped']}.")
+    else:
+        print("Nothing to revert.")
+
+
+def _learnings_migration_status(summary: dict[str, Any]) -> int:
+    """1 for anything the operator has to look at, 0 only for a fully clean run.
+
+    Not "1 for failure": a migration that rewrote what it could and reported a
+    line it could not read did not fail, and a status of 0 would tell a script it
+    needs no attention — which is precisely the condition that leaves the unreadable
+    line unreadable.
+    """
+    if summary.get("failed") or summary.get("diagnostics"):
+        return 1
+    return 0
+
+
+# ── learnings-cleanup ───────────────────────────────────────────────────────
+
+#: The width of the two text columns that are allowed to be truncated. The key
+#: and the reason are what a reviewer reads across a row; the statement is what
+#: they read *below* it, in full, so it is never cut.
+_CLEANUP_KEY_WIDTH = 22
+_CLEANUP_REASON_WIDTH = 34
+
+
+def _shorten(value: str, width: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "…"
+
+
+def _print_cleanup_table(
+    plan: Any, *, stale: list[str], applied: bool
+) -> None:
+    """The whole Active list, one row per entry, with the decision beside it.
+
+    Every row, not just the removable ones. The rows this command refuses to act
+    on are the ones an operator most needs to see: an entry nothing has ever
+    asked about, an entry whose finding is still open, an entry this code cannot
+    read at all. A table of only the candidates would answer all of those by
+    omission, and "it isn't in the list" is not an answer a person can act on.
+    """
+    from ciao.learnings_cleanup import CONFLICT
+
+    counts = plan.counts
+    print(
+        f"{plan.active} Active entr(y/ies) in {plan.path} for workspace "
+        f"{plan.workspace}:"
+    )
+    if plan.blocked:
+        print(f"  nothing may be removed: {plan.blocked}")
+        return
+    header = (
+        f"  {'KEY':<{_CLEANUP_KEY_WIDTH}}  {'ID':<12}  {'STATE':<8}  "
+        f"{'REASON':<{_CLEANUP_REASON_WIDTH}}  EVIDENCE"
+    )
+    print(header)
+    for row in plan.rows:
+        state = "REMOVE" if row.action == "remove" else row.action.upper()
+        if row.action == "keep" and row.detail.startswith("eligible;"):
+            # Eligible, but not this run's — capped, or settled and not approved.
+            # Still real work, and printing it as `REMOVE` in a table whose apply
+            # left it in place would be a lie.
+            state = "LATER"
+        if row.action == CONFLICT:
+            # A conflict's detail is the parser's whole diagnostic, which is far
+            # too long for a column a reviewer scans across; it goes to stderr
+            # underneath in full, and the column says the one thing that matters.
+            reason = "this code cannot read it; kept as written"
+        else:
+            reason = row.detail or row.reason
+        print(
+            f"  {_shorten(row.key or '(no identity)', _CLEANUP_KEY_WIDTH):<{_CLEANUP_KEY_WIDTH}}  "
+            f"{_shorten(row.learning_id or '-', 12):<12}  {state:<8}  "
+            f"{_shorten(reason, _CLEANUP_REASON_WIDTH):<{_CLEANUP_REASON_WIDTH}}  "
+            f"{_shorten(row.evidence or row.destination, 60)}"
+        )
+        print(f"      {_shorten(row.line, 100)}")
+        if row.learning_id:
+            # The two values an approval names, in full and unabbreviated. An
+            # approval is bound to the exact bytes it was reviewed at, so a
+            # truncated id or a truncated revision would be an approval of nothing —
+            # which is why the scan-friendly columns above are abbreviated and this
+            # line is not.
+            print(f"      id {row.learning_id}")
+            print(f"      rev {row.entry_revision}")
+    print(
+        f"\n{counts['remove']} removable, {counts['keep']} kept, "
+        f"{counts['conflict']} unreadable, {counts['routes']} routed upstream "
+        f"(waiting on another maintainer), {counts['unmatched']} not linked to "
+        "anything yet."
+    )
+    if plan.over_cap:
+        print(
+            "More are settled than one run retires; the rest wait for the next "
+            "one."
+        )
+    spoken = " ".join(row.detail for row in plan.conflicts)
+    for row in plan.conflicts:
+        # The whole diagnostic, not the truncated reason column: this is the line a
+        # person has to go and look at, and the table's width is not enough to say
+        # why.
+        print(f"  kept as written: {row.line.strip()}", file=sys.stderr)
+        for problem in row.detail.split("; "):
+            print(f"    {problem}", file=sys.stderr)
+    for problem in plan.diagnostics:
+        # An Active problem is already spoken for by its conflict row; this loop is
+        # for the rest (a Promoted entry, say), so the two cannot print the same
+        # sentence twice.
+        if problem not in spoken:
+            print(f"  kept as written: {problem}", file=sys.stderr)
+    for note in stale:
+        print(f"  approval not used: {note}", file=sys.stderr)
+    if applied:
+        return
+    if counts["remove"]:
+        print(
+            "\nNothing was written. Copy the ID and entry revision of each row "
+            "you want retired into an approval file, then re-run with --apply."
+        )
+    else:
+        print("\nNothing to remove.")
+
+
+def _read_approval_file(path: Path) -> dict[str, dict[str, Any]]:
+    """The approved rows, keyed by ``learning_id``.
+
+    A JSON list of objects, each naming a ``learning_id``, the ``entry_revision``
+    it was reviewed at, and a ``reason`` and ``evidence``. Both words are
+    required: a removal decided by a tool rather than by a person is exactly the
+    thing the attended workflow exists to replace, and an approval file with an
+    empty reason is a removal nobody owned.
+
+    Returned whole or not at all. A partially-read approval file is an approval
+    of a subset nobody chose, so the file is refused rather than trimmed.
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot read the approval file: {exc}") from exc
+    if not isinstance(data, list):
+        raise ValueError("the approval file must hold a list of approved rows")
+    approved: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ValueError(f"approval {index} must be an object")
+        learning_id = str(item.get("learning_id") or "").strip()
+        revision = str(item.get("entry_revision") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        evidence = str(item.get("evidence") or "").strip()
+        missing = [
+            name
+            for name, value in (
+                ("learning_id", learning_id),
+                ("entry_revision", revision),
+                ("reason", reason),
+                ("evidence", evidence),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"approval {index} needs a non-empty "
+                + ", ".join(f'"{name}"' for name in missing)
+            )
+        if learning_id in approved:
+            raise ValueError(f"approval {index} names {learning_id} twice")
+        approved[learning_id] = {
+            "learning_id": learning_id,
+            "entry_revision": revision,
+            "reason": reason,
+            "evidence": evidence,
+            "reapprove": bool(item.get("reapprove")),
+        }
+    return approved
+
+
+def _apply_approvals(
+    plan: Any, approved: dict[str, dict[str, Any]]
+) -> tuple[list[Any], list[str]]:
+    """Narrow a plan to the approved rows, and say what was left out.
+
+    An approval is bound to the exact bytes it was reviewed against, so one that
+    no longer matches is not honoured — the entry moved, the settlement changed,
+    or the review was of a different document. That is the "stale decision"
+    case, and the answer is to re-run the dry run and approve again rather than
+    to apply the closest thing: the operator's judgement was about specific
+    text, and text that has since changed is not that text.
+
+    Both halves come back together because they are one answer: a row that is
+    not in the approved set has to say *why*, or a reviewer who approved three of
+    four rows cannot tell which one they forgot.
+    """
+    allowed: list[Any] = []
+    stale: list[str] = []
+    matched: set[str] = set()
+    for row in plan.rows:
+        approval = approved.get(row.learning_id)
+        if approval is None or not row.learning_id:
+            continue
+        matched.add(row.learning_id)
+        if approval["entry_revision"] != row.entry_revision:
+            stale.append(
+                f"{row.key or row.learning_id}: approved at revision "
+                f"{approval['entry_revision'][:12]}…, this entry is now "
+                f"{row.entry_revision[:12]}…"
+            )
+            continue
+        if not row.removable and not approval["reapprove"]:
+            stale.append(
+                f"{row.key or row.learning_id}: kept for {row.reason}, and an "
+                "approval to retire a kept entry has to say reapprove"
+            )
+            continue
+        allowed.append(row)
+    for learning_id in approved:
+        if learning_id not in matched:
+            stale.append(
+                f"{learning_id[:12]}…: no Active entry in this document has that "
+                "learning id any more"
+            )
+    return allowed, stale
+
+
+def _learnings_cleanup_command(args: argparse.Namespace) -> int:
+    """Retire settled ``Workspace/Learnings.md`` entries, one reviewed row at a time.
+
+    Dry-run by default, like ``learnings-migrate`` and for the same reason: this
+    removes lines the user wrote. The dry run is the same computation the apply
+    performs, and it lists **every** Active entry with the decision beside it, so
+    the thing being removed is a decision somebody saw rather than a diff they
+    were told about.
+
+    ``--apply`` refuses without ``--approval-file``. That is the whole attended
+    contract: a cleanup that runs because a flag was passed has had its judgement
+    from a flag, and the rows that matter — a legacy entry nothing has ever
+    proposed, an entry a person decided was obsolete — are exactly the rows a
+    flag cannot judge. The file names the entry, the exact revision it was
+    reviewed at, a reason and the evidence for it, and the receipt keeps all four
+    so the decision outlives the run.
+
+    ``--apply-settled`` is the other half, and it is the one the nightly pass
+    names. It removes only the rows the reconciliation *already* proposed —
+    ``actor="system"``, no approval file, no ``reapprove``, and the same
+    :data:`~ciao.curation_run.LEARNINGS_CLEANUP_MAX_ITEMS` cap the worklist
+    budget gives the pass — so what it can remove is exactly what a fold over the
+    proposal queue and the draft sidecar already answered, which is settlement
+    rather than judgement. It is a separate flag rather than a form of
+    ``--apply`` because it is a different decision: every row it removes is
+    reversible from a receipt, and none of them carries anybody's reason, so it
+    never produces the reviewed no-op receipt and never lifts a suppression.
+
+    ``--revert`` restores the removed bytes from a receipt. It does not lift the
+    suppression, so the next nightly pass does not undo the undo; the entry
+    becomes eligible again when it is edited, or when somebody approves it with
+    ``reapprove``.
+
+    The receipt is written by the apply, before the document, so a run whose
+    receipt could not be persisted removes nothing at all rather than printing
+    that the removals landed without a way back.
+
+    The exit code reports what a person has to look at rather than only what
+    failed: an unreadable line, an approval that was not used, or a removal that
+    was refused all exit 1, because in each case something is still outstanding
+    and a script told "0" would stop looking.
+    """
+    from ciao.curation_run import LEARNINGS_CLEANUP_MAX_ITEMS
+    from ciao.learnings_cleanup import (
+        KEEP,
+        apply_cleanup,
+        new_receipt_path,
+        plan_cleanup,
+        read_receipt,
+        unmigrate_cleanup,
+    )
+
+    try:
+        vault_root, workspace, runtime_root = _learnings_workspace(args)
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    if not vault_root.is_dir():
+        print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
+        return 1
+    config = _curation_config(vault_root.parent, vault_root, workspace)
+
+    # The three write flags are three different decisions, and a run may make one.
+    # Refused up here, before any of them does any work, because the point of
+    # refusing is that nothing happened — not that something happened and was then
+    # undone. (``--revert --apply`` is not a conflict: that pair is how an undo is
+    # written at all, and `--apply` is what tells it to write.)
+    if args.revert and args.apply_settled:
+        print(
+            "--revert restores a previous run from its receipt; it takes no "
+            "--apply-settled, and the two say opposite things about a removed "
+            "entry.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.apply_settled and args.approval_file:
+        print(
+            "--apply-settled retires the rows the reconciliation already proposed "
+            "and reads no approval file, so the two cannot be combined. Use "
+            "--apply --approval-file for the attended rows.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.apply_settled and args.apply:
+        print(
+            "--apply and --apply-settled are two different decisions in one run; "
+            "pick the one this run is making.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.revert:
+        receipt = read_receipt(Path(args.revert))
+        if receipt is None:
+            print(
+                f"Not a readable learnings-cleanup receipt: `{args.revert}`",
+                file=sys.stderr,
+            )
+            return 1
+        recorded = str(receipt.get("vault_root") or "")
+        if recorded and recorded != str(vault_root):
+            print(
+                f"Receipt records a cleanup of `{recorded}`, not `{vault_root}`. "
+                f"Re-run with `--vault-root {recorded}`.",
+                file=sys.stderr,
+            )
+            return 1
+        summary = unmigrate_cleanup(vault_root, receipt, apply=args.apply)
+        if args.json:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return 1 if summary.get("failed") else 0
+        _print_cleanup_revert(summary, apply=args.apply)
+        return 1 if summary.get("failed") else 0
+
+    approved: dict[str, dict[str, Any]] = {}
+    if args.approval_file:
+        try:
+            approved = _read_approval_file(Path(args.approval_file))
+        except ValueError as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 1
+    if args.apply and args.approval_file is None:
+        # The file's *presence* is the approval, not its contents: an empty list is
+        # a person saying "I read the whole table and nothing should go", which is
+        # a decision, and a decision that deserves a receipt.
+        print(
+            "--apply needs --approval-file. Run without it to see the table, "
+            "then approve the rows you want retired with their entry revision, "
+            "a reason and the evidence for it. An empty list records that you "
+            "reviewed the table and nothing should be removed. To retire only the "
+            "rows the reconciliation already proposed, unattended, use "
+            "--apply-settled instead.",
+            file=sys.stderr,
+        )
+        return 1
+
+    plan = plan_cleanup(
+        vault_root,
+        workspace=workspace,
+        config=config,
+        # The unattended mode is the nightly pass, and the pass is capped at the
+        # same number of removals. Capped on the *plan* as well as on the apply, so
+        # the table cannot print `REMOVE` beside a row this run will not remove —
+        # the capped rows become `LATER` here, and the run says a backlog exists.
+        max_removals=LEARNINGS_CLEANUP_MAX_ITEMS if args.apply_settled else None,
+    )
+    stale: list[str] = []
+    if args.approval_file:
+        allowed, stale = _apply_approvals(plan, approved)
+        permitted = {row.learning_id for row in allowed}
+        # An approval with ``reapprove`` on a row the planner kept makes it a
+        # candidate: the planner had no evidence for it, and a person with a reason
+        # and the evidence for it is exactly how an obsolete classification gets
+        # retired. The row keeps its span, so the splice and the receipt are the
+        # same shape as any other removal.
+        selected = list(allowed)
+        extra = {row.learning_id for row in allowed if row.action == KEEP}
+        deferred: list[Any] = []
+        for row in plan.removals:
+            if row.learning_id in permitted:
+                continue
+            # Settled and removable, but not approved. That is a decision the
+            # reviewer made, not an outstanding question, so it is neither a stale
+            # approval nor an error — but it must not print as `REMOVE` in a table
+            # whose apply left it in place.
+            deferred.append(
+                replace(
+                    row,
+                    action=KEEP,
+                    reason="pending",
+                    detail="eligible; not approved in this run",
+                )
+            )
+        plan = replace(
+            plan,
+            removals=tuple(selected),
+            kept=tuple(row for row in plan.kept if row.learning_id not in extra)
+            + tuple(deferred),
+        )
+
+    if not args.apply and not args.apply_settled:
+        # The dry run stops here. Not "apply and then describe it": a preview that
+        # has already written is not a preview, and the promise the command makes
+        # is that this computation is the same one the apply performs — not that
+        # it is performed.
+        if args.json:
+            print(json.dumps({"plan": plan.as_dict(), "result": None}, indent=2, sort_keys=True))
+            return 1 if stale or plan.diagnostics or plan.conflicts else 0
+        _print_cleanup_table(plan, stale=stale, applied=False)
+        return _cleanup_status(None, stale, plan)
+
+    # The receipt path is allocated here and handed to the apply, which writes it
+    # *before* the document. A run that cannot record the reverse map removes
+    # nothing, which is the whole point of having this be one call rather than a
+    # write the command does afterwards.
+    receipt_path = new_receipt_path(runtime_root)
+    result = apply_cleanup(
+        vault_root,
+        plan,
+        workspace=workspace,
+        config=config,
+        actor="system" if args.apply_settled else "operator",
+        reapprove=not args.apply_settled,
+        approvals=approved,
+        # An approval file *was* supplied, even an empty one: that is a person
+        # saying they read the table, and the receipt is the only durable record
+        # of it. ``--apply-settled`` supplies none, and gets no such receipt.
+        reviewed=not args.apply_settled and args.approval_file is not None,
+        max_removals=LEARNINGS_CLEANUP_MAX_ITEMS if args.apply_settled else None,
+        receipt_path=receipt_path,
+    )
+    if args.json:
+        print(
+            json.dumps(
+                {"plan": plan.as_dict(), "result": result.as_dict()},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return _cleanup_status(result, stale, plan)
+
+    _print_cleanup_table(plan, stale=stale, applied=result.applied)
+    if result.applied:
+        print(f"\nRemoved {result.removed_count} entr(y/ies).")
+        if result.receipt_path:
+            print(f"Receipt: {result.receipt_path}")
+            print(
+                "Reverse it exactly with `ciao learnings-cleanup --revert "
+                f"{result.receipt_path} --apply`."
+            )
+    elif result.receipt is not None:
+        print("\nNothing was removed; the review itself is recorded.")
+        if result.receipt_path:
+            print(f"Receipt: {result.receipt_path}")
+    for note in result.conflicts:
+        print(f"  not removed: {note}", file=sys.stderr)
+    for failure in result.failed:
+        print(f"  failed: {failure}", file=sys.stderr)
+    if result.skipped:
+        print(f"Nothing was written: {result.skipped}")
+    return _cleanup_status(result, stale, plan)
+
+
+def _cleanup_status(result: Any, stale: list[str], plan: Any) -> int:
+    """1 while anything about this document still needs a person.
+
+    ``result`` is ``None`` for a dry run, which is the same question asked before
+    anything happened: a kept row is a question answered, an unreadable line and an
+    unused approval are not.
+    """
+    if plan.diagnostics or plan.conflicts or stale or plan.blocked:
+        return 1
+    if result is not None and (result.failed or result.conflicts):
+        return 1
+    return 0
+
+
+def _print_cleanup_revert(summary: dict[str, Any], *, apply: bool) -> None:
+    """What an undo did, or would do.
+
+    A failure is printed first whatever else came of it. An undo that restored the
+    file and could not record the restored line as removed has left the next pass
+    free to take it straight out again, and that is the one thing about the run
+    the operator has to read — so it is not swallowed by the success message.
+    """
+    for item in summary.get("failed") or []:
+        print(f"  {item.get('path')}: {item.get('error')}", file=sys.stderr)
+    if summary.get("entries_reverted"):
+        verb = "Restored" if apply else "Would restore"
+        print(f"{verb} {summary['entries_reverted']} learning entr(y/ies).")
+        for item in summary.get("suppressions_kept") or []:
+            print(
+                f"  still recorded as removed: {item['learning_id'][:12]}… — the "
+                "nightly pass will not remove it again until it changes or is "
+                "reapproved"
+            )
+        if not apply:
+            print("\nRe-run with --apply to write these changes.")
+        return
+    if summary.get("skipped"):
+        print(f"Nothing to restore: {summary['skipped']}.")
+    else:
+        print("Nothing to restore.")
 
 
 def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
@@ -2049,9 +3045,22 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
 
 
 def _os_audit_command(args: argparse.Namespace) -> int:
+    from ciao.config import installed_workspace_env
     from ciao.os_audit import format_audit_markdown, run_os_audit
 
-    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    explicit_workspace = args.workspace is not None
+    # A bare shell has no CIAO_WORKSPACE, so the audit used to run over whatever
+    # directory the operator happened to be standing in. The install the
+    # LaunchAgent points at is the workspace they actually have, so discovery
+    # seeds the default below; an explicit --workspace is the operator naming a
+    # workspace and is left exactly as it was.
+    env_source: dict[str, str] = dict(os.environ)
+    if not explicit_workspace:
+        discovered = installed_workspace_env(os.environ)
+        if discovered.get("CIAO_WORKSPACE", "").strip():
+            env_source = discovered
+
+    workspace_raw = args.workspace or env_source.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
     # An explicit --workspace scopes the whole audit. Consulting the ambient
     # environment for the runtime and vault roots then lets an absolute
@@ -2060,14 +3069,13 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     # registry, its job runs, its migration receipts. Auditing a second
     # workspace from inside a running Ciaobot chat hits this every time, because
     # the chat exports CIAO_RUNTIME_ROOT for its own install.
-    explicit_workspace = args.workspace is not None
 
     def resolve_under_workspace(
         explicit: Path | None,
         env_name: str,
         default: str,
     ) -> Path:
-        env_raw = None if explicit_workspace else os.environ.get(env_name)
+        env_raw = None if explicit_workspace else env_source.get(env_name)
         raw = explicit or env_raw or default
         path = Path(raw).expanduser()
         if not path.is_absolute():
@@ -2097,15 +3105,18 @@ def _os_audit_command(args: argparse.Namespace) -> int:
     )
     from ciao.config import CiaoConfig
 
-    config_source = dict(os.environ)
+    config_source = dict(env_source)
     config_source.update({
         "CIAO_WORKSPACE": str(workspace),
         "CIAO_VAULT_ROOT": str(vault),
         "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+    if not config_source.get("PWA_AUTH_TOKEN", "").strip():
         # Loading config for a read-only audit must not create a session
         # secret merely because the CLI was invoked outside the server env.
-        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "os-audit",
-    })
+        # Only when blank: forcing a stand-in over an empty value would hide
+        # the bootstrap combination this resolution exists to avoid.
+        config_source["PWA_AUTH_TOKEN"] = "os-audit"
     audit_config = CiaoConfig.from_env(config_source)
     # Defaults from the dispatch env so the per-workspace hygiene routine needs
     # no prompt templating: its packaged prompt is one static string, and the
@@ -2309,9 +3320,9 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         return 0 if result["status"] in {"undone", "nothing_to_undo"} else 1
 
     if args.mark_migrated:
-        # For a vault migrated by hand or by a model. The receipt is what
-        # `agent_root` reads, so without it the install keeps resolving the shared
-        # layout while the files sit in the new one — the one combination that
+        # For a vault migrated by hand. The receipt is what `agent_root` reads,
+        # so without it the install keeps resolving the shared layout while the
+        # files sit in the new one — the one combination that
         # breaks every layout-dependent path. Verified, not asserted: the folders
         # have to actually be there, or this would tell the app a comforting lie.
         from ciao.workspace_reroot import mark_born_per_root, read_receipt
@@ -2343,11 +3354,25 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
             if not (workspace / n / vault.name).is_dir()
         ]
         if missing:
+            # #812: this used to send the reader to docs/VAULT_MIGRATION_PROMPT.md
+            # as the place to move the vaults by hand, and that document was
+            # rewritten to stop teaching exactly that (#800/#815) — so the refusal
+            # and the reader it named contradicted each other, and the document
+            # was the right one. Name the command that does the move instead,
+            # with the one caveat the refusal cannot check for the operator: an
+            # `--apply` run from the wrong engine boots with no vault at all. The
+            # document stays named, because it is still the reader for what
+            # `--apply` refuses on and for an install already moved by hand.
             print(
                 "Refusing: these workspaces have no "
                 f"<workspace>/{vault.name} directory yet: {', '.join(missing)}.\n"
-                "Move the vaults first (see docs/VAULT_MIGRATION_PROMPT.md), then "
-                "re-run this.",
+                "The move is `ciao workspace-reroot --apply`, run from the engine "
+                "that will serve this install and with the app stopped.\n"
+                "docs/VAULT_MIGRATION_PROMPT.md is the reader for what it refuses "
+                "on.\n"
+                "Only if these vaults are already where they belong because "
+                "someone moved them by hand: finish the directories named above, "
+                "then re-run this.",
                 file=sys.stderr,
             )
             return 1
@@ -2440,7 +3465,7 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     per registered workspace and reports over-cap per guide, not as one global
     number that hides which workspace is over budget.
     """
-    from ciao.config import CiaoConfig
+    from ciao.config import CiaoConfig, installed_workspace_env
     from ciao.memory_tool import DEFAULT_MEMORY_CHAR_LIMIT, DEFAULT_USER_CHAR_LIMIT
     from ciao.os_audit import (
         _aggregate_memory_guides,
@@ -2450,22 +3475,35 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
         memory_actionable_count,
     )
 
-    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    explicit_workspace = args.workspace is not None
+    # A bare shell has no CIAO_WORKSPACE, so the audit used to read the guide
+    # and state under whatever directory the operator was in. Discovery seeds
+    # the installed root instead; an explicit --workspace is left as it was.
+    env_source: dict[str, str] = dict(os.environ)
+    if not explicit_workspace:
+        discovered = installed_workspace_env(os.environ)
+        if discovered.get("CIAO_WORKSPACE", "").strip():
+            env_source = discovered
+
+    workspace_raw = args.workspace or env_source.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
-    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault_raw = args.vault_root or env_source.get("CIAO_VAULT_ROOT") or "memory-vault"
     vault = Path(vault_raw).expanduser()
     if not vault.is_absolute():
         vault = workspace / vault
     vault = vault.resolve()
 
-    config_source = dict(os.environ)
+    config_source = dict(env_source)
     config_source.update({
         "CIAO_WORKSPACE": str(workspace),
         "CIAO_VAULT_ROOT": str(vault),
+    })
+    if not config_source.get("PWA_AUTH_TOKEN", "").strip():
         # Loading config for a read-only audit must not create a session
         # secret merely because the CLI was invoked outside the server env.
-        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "memory-audit",
-    })
+        # Only when blank: forcing a stand-in over an empty value would hide
+        # the bootstrap combination this resolution exists to avoid.
+        config_source["PWA_AUTH_TOKEN"] = "memory-audit"
     config = CiaoConfig.from_env(config_source)
 
     specs = _memory_guide_specs(config, workspace)
@@ -2541,9 +3579,9 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
             # workspace_root is a required config field, populated above from
             # the same value injected into config_source — no fallback.
             key_prefix = vault_key_prefix(vault, Path(config.workspace_root))
+            # Keys, prefix and rendered paths are all `/`-spelled on every OS
+            # (fts_search.KEY_SEPARATOR, Entry.path_key), so they compare as is.
             if hit_paths is not None and key_prefix != NO_MATCH_KEY_PREFIX:
-                normalized_hits = {hit.replace(os.sep, "/") for hit in hit_paths}
-                normalized_prefix = key_prefix.replace(os.sep, "/")
                 # A prefix that no hit carries means the log's keys were
                 # written against a different base (the audit invoked with
                 # another workspace root than the server's). That is missing
@@ -2552,15 +3590,10 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
                 # prefix (vault == workspace root) takes the same rule: every
                 # hit trivially carries it, so marking is skipped only when
                 # the log has no usable hits at all.
-                if any(
-                    hit.startswith(normalized_prefix) for hit in normalized_hits
-                ):
+                if any(hit.startswith(key_prefix) for hit in hit_paths):
                     for finding in report["stale_notes"]["stale_notes"]:
-                        rendered = str(finding["path"]).replace(os.sep, "/")
-                        rel = rendered.removeprefix(render_prefix + "/")
-                        finding["retrieved_recently"] = (
-                            normalized_prefix + rel
-                        ) in normalized_hits
+                        rel = str(finding["path"]).removeprefix(render_prefix + "/")
+                        finding["retrieved_recently"] = (key_prefix + rel) in hit_paths
         except Exception as exc:  # noqa: BLE001 — advisory section
             report["stale_notes"] = {
                 "stale_notes": [],
@@ -2641,12 +3674,14 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
 
 def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
     """Shared workspace/vault resolution for the memory-proposal commands."""
-    workspace, vault, _registry_root = _resolve_workspace_and_vaults(args)
+    workspace, vault, _registry_root, _name = _resolve_workspace_and_vaults(args)
     return workspace, vault
 
 
-def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path, Path]:
-    """``(workspace, notes vault, agent vault root)`` for one CLI invocation.
+def _resolve_workspace_and_vaults(
+    args: argparse.Namespace,
+) -> tuple[Path, Path, Path, str | None]:
+    """``(workspace, notes vault, agent vault root, workspace name)`` for one CLI run.
 
     A scheduled run exports ``CIAO_ACTIVE_WORKSPACE`` (the logical workspace
     name) next to a ``CIAO_VAULT_ROOT`` that points at the install-wide
@@ -2664,24 +3699,40 @@ def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path,
     every category the owner already added as unlisted. In the explicit-argument
     path there is no per-workspace split to resolve, so the vault the caller
     named is both.
+
+    The fourth is the name the *registry* knows this vault's workspace by, and
+    it is returned rather than left to each caller to re-derive, because every
+    operation that consumes an entry identity resolves the vault through this
+    same registry and mints that identity under the name it knows: a caller that
+    guessed the name from the directory would mint identities nothing resolves.
+    For an explicit ``--vault-root`` it is the registered workspace that owns that
+    vault, and the directory's own name only when the registry does not know it.
+    It is ``None`` when no name was resolved at all (no ``--vault-root`` and no
+    registered ``CIAO_ACTIVE_WORKSPACE``). The entry pass is skipped and reported
+    in that case rather than planned under a guess.
     """
     active = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
     if not getattr(args, "vault_root", None) and not getattr(args, "workspace", None):
         if active:
             try:
-                from ciao.config import CiaoConfig
+                from ciao.config import CiaoConfig, installed_workspace_env
 
                 # A read-only resolution must not mint a session secret just
                 # because the CLI runs outside the server env (same rule as
-                # the memory-audit command).
-                env_source = dict(os.environ)
-                env_source.setdefault("PWA_AUTH_TOKEN", "memory-proposals")
+                # the memory-audit command). Discovery first: with
+                # `CIAO_ACTIVE_WORKSPACE` set and no `CIAO_WORKSPACE`, an
+                # explicit env skipped the install and `from_env` took the
+                # bootstrap branch, minting `~/.ciao/bootstrap/.runtime/...`.
+                env_source = installed_workspace_env(os.environ)
+                if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+                    env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
                 config = CiaoConfig.from_env(env_source)
                 if config.workspace(active) is not None:
                     return (
                         config.workspace_root,
                         Path(config.workspace_vault_root(active)),
                         Path(config.agent_vault_root(active)),
+                        active,
                     )
             except Exception:  # noqa: BLE001 — fall through to the legacy path
                 pass
@@ -2692,7 +3743,44 @@ def _resolve_workspace_and_vaults(args: argparse.Namespace) -> tuple[Path, Path,
     if not vault.is_absolute():
         vault = workspace / vault
     resolved = vault.resolve()
-    return workspace, resolved, resolved
+    name: str | None = None
+    discovered_workspace: str | None = None
+    if getattr(args, "vault_root", None):
+        from ciao.config import CiaoConfig, installed_workspace_env
+
+        # The registry this install root holds is the authority, as it is for
+        # `_learnings_workspace`: an explicit vault the registry knows is named
+        # by its owner, and only a vault it does not know falls back to the
+        # directory's own name.
+        if getattr(args, "workspace", None) or os.environ.get("CIAO_WORKSPACE", "").strip():
+            env_source = dict(os.environ)
+            env_source["CIAO_WORKSPACE"] = str(workspace)
+        else:
+            # Neither names an install — a bare shell, so `workspace` above is the
+            # cwd — and its registry knows no vault. Read the installed one.
+            env_source = installed_workspace_env(os.environ)
+            if not env_source.get("CIAO_WORKSPACE", "").strip():
+                # Not `setdefault`: an exported empty `CIAO_WORKSPACE=` survives the
+                # helper (the process wins the merge), and `setdefault` would leave it
+                # in place — `from_env` then sees no workspace with a token, enters
+                # bootstrap mode and MINTS a bootstrap secret while resolving a name.
+                env_source["CIAO_WORKSPACE"] = str(workspace)
+            else:
+                # Discovery found the install this bare shell is actually talking
+                # to, and that install root — not the cwd — is the workspace the
+                # vault is named after and its guide and state live under.
+                discovered_workspace = env_source["CIAO_WORKSPACE"].strip()
+        if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+            # Same reason as the workspace above, one level down: the install's
+            # `.env` is overlaid into this mapping and keeps its empty values.
+            env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
+        config = CiaoConfig.from_env(env_source)
+        name = _registered_owner(config, resolved) or resolved.name
+    if discovered_workspace:
+        discovered_path = Path(discovered_workspace).expanduser().resolve()
+        if discovered_path != workspace:
+            workspace = discovered_path
+    return workspace, resolved, resolved, name
 
 
 def _memory_proposals_command(args: argparse.Namespace) -> int:
@@ -2720,6 +3808,15 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     return 0
 
 
+#: What a ``--request`` identifier may contain. Narrow on purpose: it is cited on
+#: a ``Workspace/Learnings.md`` line as ``req:<id>`` and has to survive a round
+#: trip through a one-line Markdown bullet and back, so anything that would end
+#: the bullet's ``_(request: …)_`` tail — a newline, a ``)``, a backtick — is
+#: refused at the door rather than mangled into a citation that names something
+#: else.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
 def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     """File a fact into a workspace's memory-proposal review queue.
 
@@ -2729,6 +3826,15 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     where it can be promoted or dismissed like any queued item, instead of
     surviving only as prose in one nightly report. Re-filing an identical fact
     is a no-op; the queue dedupes by text.
+
+    ``--kind learnings --request ID`` is how a ``/remember`` of a reusable
+    lesson keeps its provenance. A ``/remember`` usually happens in a chat that
+    is never archived, so there is no transcript turn to cite — and the two ways
+    out are not equivalent: citing a fabricated turn is a reference to a
+    conversation that never happened, whereas the request id is the real,
+    re-readable origin of the sighting. The accepted line renders ``req:<id>``
+    and the learning model deduplicates on it, so a retry of the same
+    ``/remember`` cannot inflate the recurrence count.
     """
     from ciao.memory_proposals import (
         DESTINATIONS,
@@ -2796,11 +3902,33 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # `--request` is lesson provenance: it is what a `[learnings]` accept hands
+    # to `append_learning` so the line can cite the user request the sighting
+    # came from instead of an archive turn that does not exist. A request on any
+    # other kind would be a field the accept cannot act on, so it is refused by
+    # name rather than stored where nothing reads it.
+    request = (getattr(args, "request", "") or "").strip()
+    if request and kind != "learnings":
+        print(
+            f"--request is provenance for a [learnings] fact, not kind {kind!r}: "
+            "the only accept that records one is the learnings append",
+            file=sys.stderr,
+        )
+        return 2
+    if request and not _REQUEST_ID_RE.match(request):
+        print(
+            f"--request {request!r} is not a plain request identifier (letters, "
+            "digits, dot, dash and underscore only): it is cited on a learnings "
+            "line, so it has to survive a round trip through the queue",
+            file=sys.stderr,
+        )
+        return 2
     proposal = MemoryProposal(
         target=kind,
         text=text,
         source_section=args.source.strip() or "curation",
         payload=payload,
+        request=request,
     )
     path = append_proposals(
         [proposal], vault, allow_dismissed=bool(getattr(args, "allow_dismissed", False))
@@ -2821,6 +3949,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
                 "promoted_before": promoted,
                 "path": str(path) if path else None,
                 "text": text,
+                "request": request,
                 # argparse supplies a Path when --workspace is explicit, and
                 # json.dump cannot serialize one; report the resolved root.
                 "workspace": str(workspace),
@@ -2856,7 +3985,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     substring.
     """
     from ciao import proposal_actions
-    from ciao import proposal_outcomes
     from ciao.memory_proposals import (
         find_proposal_matches,
         remove_proposal_by_substring,
@@ -2891,7 +4019,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
     # Two needle forms, because rows reach the queue two ways:
-    # `memory-proposal-add` flattens what it writes, while the curation skill
+    # `memory-proposal-add` flattens what it writes, while the Workspace care schedule prompt
     # appends `[review]` questions directly and may keep repeated whitespace.
     # A needle read from the very file a fact was filed from needs the flattened
     # form; a directly written row needs the raw one.
@@ -2994,17 +4122,6 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         )
         return 1
     kind, removed_text = removed
-    # Pin the outcome log to the same .runtime the server uses before
-    # recording: a CLI run from an arbitrary cwd must not scatter events into
-    # a .runtime beside the shell. Precedence: explicit --runtime-root, then
-    # CIAO_RUNTIME_ROOT, then this workspace's own .runtime.
-    proposal_outcomes.configure(
-        _resolve_runtime_root(
-            args.runtime_root
-            or os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
-            or workspace / ".runtime"
-        )
-    )
     # One handler for both ledgers, shared with the PWA's accept/dismiss
     # routes (`ciao/proposal_actions.py`). Preserve what was decided, not just
     # that something was: append-time dedupe consults the decision history, so
@@ -3016,19 +4133,12 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     # the agent filed itself, and hid it from the review page's History tab
     # as an accepted row. The curator files a fact first and dismisses second,
     # so that flow is a promotion; only a bare rejection is a dismissal.
-    #
-    # The logical workspace name rides in CIAO_ACTIVE_WORKSPACE on scheduled
-    # runs (same convention as os-audit --workspace-name); a manual run
-    # without it lands in the shared bucket rather than recording a filesystem
-    # path as a name. Rehome rows are vault-hygiene decisions, not extraction
-    # outcomes, and the handler keeps them out of the tally.
     proposal_actions.record_decision(
         path,
         action="accept" if args.promoted else "dismiss",
         text=removed_text,
         kind=kind,
         via="agent",
-        workspace=os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip(),
     )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be
@@ -3224,24 +4334,51 @@ def _add_curation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
 
 
-def _curation_context(args: argparse.Namespace) -> tuple[Path, Path, Path, Any, Path]:
+def _curation_context(
+    args: argparse.Namespace,
+) -> tuple[Path, Path, Path, Any, Path, str | None]:
     from ciao.curation_run import RunBudget
 
-    workspace, vault, registry_root = _resolve_workspace_and_vaults(args)
+    workspace, vault, registry_root, name = _resolve_workspace_and_vaults(args)
     guide = Path(args.guide).expanduser().resolve() if args.guide else guide_path(workspace)
     defaults = RunBudget()
     budget = RunBudget(
         max_items=args.max_items if args.max_items is not None else defaults.max_items,
         max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,
     )
-    return workspace, vault, guide, budget, registry_root
+    return workspace, vault, guide, budget, registry_root, name
+
+
+def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
+    """A one-workspace registry that resolves exactly the vault being planned.
+
+    The skill-proposal queue and the upstream draft sidecar are addressed through
+    ``config.workspace_vault_root(workspace)``, and the skills-cleanup fold needs
+    both — so the registry has to name *this* vault, not the install-wide one the
+    server would have loaded. The registry is keyed by the registered workspace
+    name, which is the identity learning ids are minted under: keying it by the
+    vault directory's own name makes ``workspace_vault_root`` look for a segment
+    that is not there on a per-root install, where every workspace's vault
+    directory is called ``memory-vault``.
+    """
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    return CiaoConfig(
+        pwa_auth_token="curation",
+        workspace_root=workspace,
+        state_path=workspace / ".runtime" / "state.json",
+        media_root=workspace / ".runtime" / "media",
+        vault_root=vault,
+        workspaces={name: WorkspaceConfig(name=name, vault_root=str(vault))},
+    )
 
 
 def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     from ciao.curation_run import build_worklist, load_state, plan_run
     from ciao.entity_types import load_entity_types
+    from ciao.vault_index import VAULT_RENDER_PREFIX
 
-    workspace, vault, guide, budget, registry_root = _curation_context(args)
+    workspace, vault, guide, budget, registry_root, name = _curation_context(args)
     state = load_state(vault)
     worklist = build_worklist(
         vault_root=vault,
@@ -3249,6 +4386,20 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         workspace_dir=workspace,
         done_keys=frozenset(state.done_keys),
         category_registry=load_entity_types(registry_root),
+        # The one pass that folds the proposal queue needs the registry; every
+        # other pass reads files, and saying so is cheaper than making the whole
+        # planner conditional.
+        config=_curation_config(workspace, vault, name) if name is not None else None,
+        # Named where `scan_vault` renders it rather than restated here: a
+        # drifted prefix makes every mtime `stat` miss silently, which reads as
+        # "no note is stale" rather than as an error.
+        path_prefix=VAULT_RENDER_PREFIX,
+        # The registered name the same registry read resolved the vault under,
+        # or None when this invocation named a directory and there is no
+        # registry to ask: the entry pass mints identities that digest it, so a
+        # guess would plan work every operation refuses. None skips the pass and
+        # says so in the worklist notes.
+        workspace=name,
     )
     plan = plan_run(worklist, budget)
     payload: dict[str, Any] = {
@@ -3297,7 +4448,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     """
     from ciao.curation_run import CurationBusy, begin_run, end_run
 
-    _workspace, vault, _guide, budget, _registry_root = _curation_context(args)
+    _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
     try:
         lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
     except CurationBusy as exc:
@@ -3336,7 +4487,7 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     """Record finished worklist keys and renew the lease."""
     from ciao.curation_run import CurationBusy, record_done, renew_run
 
-    _workspace, vault, _guide, budget, _registry_root = _curation_context(args)
+    _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
@@ -3370,7 +4521,7 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     """
     from ciao.curation_run import CurationBusy, end_run
 
-    _workspace, vault, _guide, _budget, _registry_root = _curation_context(args)
+    _workspace, vault, _guide, _budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
@@ -3416,8 +4567,8 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
 
     The curation schedule reviews ``Workspace/Skill-Proposals/``; once a
     proposal's decision is made (implemented, or decided against) it is settled
-    here so the queue stops re-asking. NAME matches the record's skill or a
-    unique substring of it.
+    here so the queue stops re-asking. NAME matches the record's skill or id
+    exactly, or else a unique substring of the skill.
 
     Settled, not deleted: this used to unlink the file, which left no record that
     anyone had decided anything, so the next pass that saw the same evidence
@@ -3436,33 +4587,26 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     those: the record stays QUEUED and its chat stays bound to it, because an
     unfinished edit is not an answer and must not archive an open question as
     though a person had rejected it.
+
+    ``--verification``/``--verification-file`` and
+    ``--learning-id``/``--finding`` are how a record that links learnings is
+    settled honestly. ``--applied`` on such a record is refused without a
+    verification, because the two things this command can see for itself — the
+    chat finished, the row left the queue — are not the lesson being in the
+    skill. A readback is free text, so it travels in ``--verification-file``,
+    never as an argument; ``--verification`` carries a short shell-safe value
+    such as a receipt id. A selector settles one finding and leaves its siblings
+    queued, which is the point: a record is one row per skill, so a person who
+    dealt with one of its findings has not dealt with the rest.
     """
-    from ciao.config import CiaoConfig
-
-    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
-    workspace = Path(workspace_raw).expanduser().resolve()
-    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
-    vault = Path(vault_raw).expanduser()
-    if not vault.is_absolute():
-        vault = workspace / vault
-    vault = vault.resolve()
-
-    config_source = dict(os.environ)
-    config_source.update({
-        "CIAO_WORKSPACE": str(workspace),
-        "CIAO_VAULT_ROOT": str(vault),
-        # Deleting a proposal file is a review decision, not a session write;
-        # loading config outside the server env must not mint a session secret.
-        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "skill-proposal-remove",
-    })
-    config = CiaoConfig.from_env(config_source)
+    # Deleting a proposal file is a review decision, not a session write;
+    # loading config outside the server env must not mint a session secret.
+    config = _proposal_config(args, "skill-proposal-remove")
 
     # Which workspace the proposal lives in: the active one, falling back to the
     # primary, so the decision lands in the same queue the proposal was filed
     # into.
-    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
-    if config.workspace(name) is None:
-        name = config.primary_workspace()
+    name = _active_workspace_name(config)
 
     needle = args.name.strip()
     if not needle:
@@ -3471,19 +4615,82 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
 
     from ciao import skill_proposals
 
+    # The improvement prompt hands a learning-linked proposal a placeholder to
+    # replace with the readback file's path; passed through unchanged it is not
+    # evidence of anything, so it must not settle an origin as applied (#933).
+    placeholder = skill_proposals.VERIFICATION_PLACEHOLDER
+    flag = (
+        "--verification" if args.verification.strip() == placeholder
+        else "--verification-file" if (args.verification_file or "").strip() == placeholder
+        else ""
+    )
+    if flag:
+        print(
+            f"{flag} is still the prompt's placeholder {placeholder}; write the lines "
+            "you changed, as you read them back, to a file and pass that file's path "
+            "to --verification-file.",
+            file=sys.stderr,
+        )
+        return 1
+    verification = args.verification.strip()
+    if args.verification_file is not None:
+        try:
+            # Decoded by BOM, not assumed UTF-8: the chat may be in Windows
+            # PowerShell, where `>` writes UTF-16LE with a BOM and
+            # `Out-File -Encoding utf8` leaves a UTF-8 BOM. `utf-8-sig` drops
+            # that BOM, and `str.strip()` would not — it is not whitespace —
+            # so a strict UTF-8 read records a U+FEFF that is not the readback.
+            raw = Path(args.verification_file).read_bytes()
+            encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+            verification = raw.decode(encoding).strip()
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read --verification-file {args.verification_file}: {exc}", file=sys.stderr)
+            return 2
+        if not verification:
+            print(f"--verification-file {args.verification_file} is empty", file=sys.stderr)
+            return 2
+
     if not skill_proposals.queue_dir(config, name).is_dir():
         print("No skill proposals are queued.", file=sys.stderr)
         return 1
 
     queued = skill_proposals.read_queue(config, name)
-    matches = [p for p in queued if needle.casefold() in p.skill.casefold()]
+    wanted = needle.casefold()
+    # Read across every lifecycle, not the queue: the queue is already settled
+    # records taken out of, so an exact name whose own proposal is settled would
+    # find nothing here and the substring tier below would settle a different
+    # skill that happens to contain it. Nobody read that proposal.
+    settled_exact = [
+        p
+        for p in skill_proposals.read_records(config, name)
+        if p.lifecycle in skill_proposals.SETTLED_LIFECYCLES
+        and wanted in (p.skill.casefold(), p.id.casefold())
+    ]
+    # An exact skill name or proposal id wins outright: the improvement prompt
+    # passes the exact name, and `review` must not be ambiguous merely because
+    # `code-review` is queued too. Only a needle that names nothing exactly
+    # falls back to the unique-substring convenience.
+    matches = [
+        p for p in queued if wanted in (p.skill.casefold(), p.id.casefold())
+    ] or [p for p in queued if wanted in p.skill.casefold()]
+    if settled_exact and not any(
+        wanted in (p.skill.casefold(), p.id.casefold()) for p in matches
+    ):
+        print(
+            f"{settled_exact[0].skill} is already settled "
+            f"({settled_exact[0].lifecycle}); nothing to do.",
+            file=sys.stderr,
+        )
+        return 1
     if not matches:
         print(f"No skill proposal matched {needle!r}.", file=sys.stderr)
         return 1
     if len(matches) > 1:
         print(
             f"The name matched more than one skill proposal; use a longer substring: "
-            + ", ".join(p.skill for p in matches),
+            # Names and ids both, because either one selects a single record and
+            # the CLI is the only place a caller can read this list.
+            + ", ".join(f"{p.skill} ({p.id})" for p in matches),
             file=sys.stderr,
         )
         return 1
@@ -3517,6 +4724,18 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
         if args.not_applicable
         else skill_proposals.DISMISSED
     )
+    if args.finding and not args.learning_id:
+        print(
+            "--finding names one finding of a learning, so it needs --learning-id "
+            "with it.",
+            file=sys.stderr,
+        )
+        return 2
+    selectors = (
+        [skill_proposals.OriginRef(args.learning_id.strip(), args.finding.strip())]
+        if args.learning_id.strip()
+        else None
+    )
     try:
         settled = skill_proposals.mark_outcome(
             config,
@@ -3524,6 +4743,8 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
             lifecycle,
             args.reason.strip(),
             via="cli",
+            selectors=selectors,
+            verification=verification,
         )
     except (OSError, ValueError) as exc:
         print(f"could not settle {target.skill}: {exc}", file=sys.stderr)
@@ -3533,24 +4754,45 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
         return 1
 
     if args.json:
-        json.dump(
-            {
-                "settled": True,
-                "name": target.skill,
-                "workspace": name,
-                # Which outcome this was, because the command now records three
-                # and only one of them closes the question: `--interrupted`
-                # leaves the proposal queued.
-                "lifecycle": settled.lifecycle,
-            },
-            sys.stdout,
-            indent=2,
-        )
+        payload: dict[str, Any] = {
+            "settled": True,
+            "name": target.skill,
+            "workspace": name,
+            # Which outcome this was, because the command now records three
+            # and only one of them closes the question: `--interrupted`
+            # leaves the proposal queued.
+            "lifecycle": settled.lifecycle,
+        }
+        if settled.origins:
+            # What each linked finding now says, because a per-finding
+            # settlement leaves the record queued and the caller needs to see
+            # which part is still outstanding. Omitted rather than emitted
+            # empty: a record filed before origins existed must keep producing
+            # the payload it always produced.
+            payload["origins"] = [
+                {
+                    "learning_id": origin.learning_id,
+                    "finding": origin.finding,
+                    "state": origin.state,
+                }
+                for origin in settled.origins
+            ]
+        json.dump(payload, sys.stdout, indent=2)
         sys.stdout.write("\n")
     elif settled.lifecycle == skill_proposals.INTERRUPTED:
         print(
             f"Recorded {settled.skill} in {name} as interrupted; it stays queued "
             "so the work can be picked up again."
+        )
+    elif selectors and settled.lifecycle not in skill_proposals.SETTLED_LIFECYCLES:
+        outstanding = [
+            origin.finding
+            for origin in settled.origins
+            if origin.state not in skill_proposals.CLEARED_ORIGINS
+        ]
+        print(
+            f"Settled one finding of {settled.skill} in {name}; it stays queued "
+            f"for {len(outstanding)} more."
         )
     else:
         print(f"Settled skill proposal {settled.skill} in {name}.")
@@ -3565,6 +4807,23 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
     boundaries are a model has to reproduce exactly is a format that will
     eventually be reproduced slightly wrong. Every complaint names the field it
     is about, because the caller is a model that can only fix what it is told.
+
+    ``origins`` is optional and validated strictly when present. A finding may
+    have come from one entry in ``Workspace/Learnings.md``, and the link to it is
+    the only thing that will later let a settlement say *which* lesson landed —
+    so a malformed one is refused rather than dropped, since a half-read link is
+    a learning that looks settled and is not. Its absence is not an error: most
+    findings are a correction the user made, and only a routed learning gets a
+    link. An entry that carries a ``state`` or a ``verification`` is refused too,
+    because a filing is a question and only a settlement answers one.
+
+    **``sources`` may be absent when ``origins`` is present**, and that is the
+    lesson-routing path rather than a loosened check. A lesson can apply to a
+    skill the conversation never loaded, and the honest record of that finding is
+    the link to the learning — a ``sources`` entry would have to name a ``turn``
+    the transcript never contained, which is a fabricated source. So the
+    requirement is *one or the other*: a payload carrying neither is a finding
+    nobody can check, and is refused by name.
     """
     try:
         raw = Path(path).read_text(encoding="utf-8")
@@ -3579,21 +4838,125 @@ def _read_skill_proposal_input(path: str) -> tuple[dict[str, Any] | None, str]:
     for field in ("title", "problem", "change"):
         value = payload.get(field)
         if not isinstance(value, str) or not value.strip():
-            return None, f"{path} needs a non-empty \"{field}\""
+            return None, f'{path} needs a non-empty "{field}"'
+    problem = _origin_input_problem(payload.get("origins"), path)
+    if problem:
+        return None, problem
     sources = payload.get("sources")
+    if sources is None and payload.get("origins"):
+        # A routed lesson is its evidence. The absence of `sources` here says
+        # "this finding came from Workspace/Learnings.md, not from a turn of this
+        # conversation", which is exactly what it is.
+        return payload, ""
     if not isinstance(sources, list) or not sources:
         return None, (
-            f"{path} needs a non-empty \"sources\" list: a proposal with no "
-            "evidence is not reviewable"
+            f'{path} needs a non-empty "sources" list — every entry carrying the '
+            "chat_id, archive, turn and a short verbatim excerpt — or a non-empty "
+            '"origins" list linking the learning it came from. A finding with '
+            "neither is not reviewable"
         )
     for index, item in enumerate(sources):
         if not isinstance(item, dict):
             return None, f"{path} sources[{index}] must be an object"
         if not isinstance(item.get("excerpt"), str) or not item["excerpt"].strip():
             return None, (
-                f"{path} sources[{index}] needs a non-empty \"excerpt\""
+                f'{path} sources[{index}] needs a non-empty "excerpt"'
             )
     return payload, ""
+
+
+def _origin_input_problem(origins: Any, path: str) -> str:
+    """What is wrong with the ``origins`` list in a filed finding, or ``""``.
+
+    One complaint at a time and it names the entry, for the same reason the rest
+    of this reader does: the caller is a model that can only fix what it is told.
+    An unknown key fails the entry rather than being ignored, because a key this
+    code does not understand is a field whose loss nobody would notice until a
+    learning had been declared settled on a partial read — which is also why
+    ``state`` and ``verification`` are unknown here (:data:`_ORIGIN_INPUT_FIELDS`).
+    """
+    if origins is None:
+        return ""
+    if not isinstance(origins, list):
+        return f'{path} "origins" must be a list of objects'
+    for index, item in enumerate(origins):
+        where = f'{path} origins[{index}]'
+        if not isinstance(item, dict):
+            return f"{where} must be an object"
+        unknown = sorted(set(item) - _ORIGIN_INPUT_FIELDS)
+        if unknown:
+            return f"{where} has unknown field(s) {', '.join(unknown)}"
+        for field in ("workspace", "source_revision", "summary"):
+            if field in item and not isinstance(item[field], str):
+                return f'{where} "{field}" must be a string'
+        for field in ("learning_id", "finding"):
+            value = item.get(field)
+            if value is None:
+                return f'{where} needs a non-empty "{field}"'
+            if not isinstance(value, str):
+                return f'{where} "{field}" must be a string'
+            if not value.strip():
+                return f'{where} needs a non-empty "{field}"'
+    return ""
+
+
+#: The keys one ``origins`` entry in a filed finding may carry. Deliberately
+#: fewer than :data:`ciao.skill_proposals.SkillOrigin` holds: a ``state`` and a
+#: ``verification`` are a decision, and a finding filed by a model or by hand is a
+#: question. Accepting them here would let a payload declare its own finding
+#: ``applied`` — skipping the verification that an applied needs and the explicit
+#: rejection a dismissed needs — and
+#: :func:`ciao.skill_proposals.learning_cleanup_eligibility` would then retire a
+#: lesson nobody applied or rejected. So they are unknown fields here, refused by
+#: name, and only ``ciao skill-proposal-remove`` writes a state.
+_ORIGIN_INPUT_FIELDS = frozenset({
+    "schema",
+    "workspace",
+    "learning_id",
+    "source_revision",
+    "finding",
+    "summary",
+})
+
+
+def _filing_origins(
+    payload: dict[str, Any], workspace: str
+) -> tuple[tuple["skill_proposals.SkillOrigin", ...] | None, str]:
+    """The finding's learning links as records, or ``(None, why)`` if unusable.
+
+    The workspace is decided here, not taken from the payload. The finding names
+    a learning by its id, and an id is only meaningful inside the workspace that
+    minted it, so a payload naming a different one is a link this queue cannot
+    honour — refused by name rather than rewritten, because silently filing it
+    under this workspace would make an id from somewhere else look like a link
+    this queue had verified.
+
+    Every link is filed ``pending`` with no verification, and the reader above is
+    what enforces it: a filing is a question, so there is nothing here to set a
+    state from even if a caller reached past the reader and tried.
+    """
+    from ciao import skill_proposals
+
+    raw = payload.get("origins") or []
+    origins: list[skill_proposals.SkillOrigin] = []
+    for index, item in enumerate(raw):
+        stated = str(item.get("workspace") or "").strip()
+        if stated and stated != workspace:
+            return None, (
+                f'origins[{index}] names the {stated} workspace, but this finding '
+                f"is filed in {workspace}; a learning id only means something in "
+                "the workspace that minted it"
+            )
+        origins.append(
+            skill_proposals.SkillOrigin(
+                workspace=workspace,
+                learning_id=str(item.get("learning_id") or "").strip(),
+                source_revision=str(item.get("source_revision") or "").strip(),
+                finding=" ".join(str(item.get("finding") or "").split()),
+                summary=" ".join(str(item.get("summary") or "").split()),
+            )
+        )
+    return tuple(origins), ""
 
 
 def _skill_proposal_add_command(args: argparse.Namespace) -> int:
@@ -3616,7 +4979,6 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
     Settling stays out of here: this proposes, and ``skill-proposal-remove``
     decides.
     """
-    from ciao.config import CiaoConfig
     from ciao.skill_proposals import (
         PENDING,
         SkillEvidence,
@@ -3632,30 +4994,14 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
         print(problem, file=sys.stderr)
         return 2
 
-    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
-    workspace = Path(workspace_raw).expanduser().resolve()
-    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
-    vault = Path(vault_raw).expanduser()
-    if not vault.is_absolute():
-        vault = workspace / vault
-    vault = vault.resolve()
-
-    config_source = dict(os.environ)
-    config_source.update({
-        "CIAO_WORKSPACE": str(workspace),
-        "CIAO_VAULT_ROOT": str(vault),
-        # Filing a proposal is a review-queue write, not a session write;
-        # loading config outside the server env must not mint a session secret.
-        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "skill-proposal-add",
-    })
-    config = CiaoConfig.from_env(config_source)
+    # Filing a proposal is a review-queue write, not a session write; loading
+    # config outside the server env must not mint a session secret.
+    config = _proposal_config(args, "skill-proposal-add")
 
     # Which workspace the proposal belongs to: the active one, falling back to
     # the primary, matching `skill-proposal-remove`'s routing so both ends of a
     # proposal's life land in the same queue.
-    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
-    if config.workspace(name) is None:
-        name = config.primary_workspace()
+    name = _active_workspace_name(config)
 
     skill = args.skill.strip()
     try:
@@ -3664,6 +5010,11 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
         print(f"cannot file a proposal for {skill!r}: {exc}", file=sys.stderr)
         return 1
 
+    origins, problem = _filing_origins(payload, name)
+    if origins is None:
+        print(problem, file=sys.stderr)
+        return 2
+
     sources = tuple(
         SkillEvidence(
             chat_id=str(item.get("chat_id") or "").strip(),
@@ -3671,7 +5022,7 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
             turn=str(item.get("turn") or "").strip(),
             excerpt=str(item.get("excerpt") or "").strip(),
         )
-        for item in payload["sources"]
+        for item in (payload.get("sources") or [])
     )
     stored = upsert_proposal(
         config,
@@ -3693,6 +5044,7 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
             # The conversation that justified it is in the evidence.
             chat_id="",
             updated_at="",
+            origins=origins,
         ),
     )
     path = proposal_path(config, name, stored.skill)
@@ -3706,6 +5058,7 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
                 "lifecycle": stored.lifecycle,
                 "path": str(path),
                 "evidence": len(stored.sources),
+                "origins": len(stored.origins),
             },
             sys.stdout,
             indent=2,
@@ -3713,6 +5066,14 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
         sys.stdout.write("\n")
     else:
         print(f"Filed skill proposal for {stored.skill} in {name}: {path}")
+        if stored.origins:
+            # The links are what a later settlement folds, so the person filing
+            # gets to see that they landed rather than discovering a missing
+            # one when a learning never goes quiet.
+            print(
+                f"Linked {len(stored.origins)} learning finding(s); they stay "
+                "Active until each one is applied or rejected."
+            )
         if stored.lifecycle != PENDING:
             # A decision already stands for this skill. The merge keeps it
             # settled and only adds the evidence, so the pass is told the
@@ -3731,6 +5092,422 @@ def _skills_list_command(args: argparse.Namespace) -> int:
     inventory = build_skill_inventory(workspace_root)
     json.dump(inventory, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
+    return 0
+
+
+def _proposal_config(args: argparse.Namespace, purpose: str) -> CiaoConfig:
+    """The config a queue-writing review command runs against.
+
+    One function for every command that writes a workspace's review queue,
+    because the workspace/vault/env resolution and the ``PWA_AUTH_TOKEN``
+    stand-in are all the same and two copies of that resolution is how a CLI
+    write ends up in a different vault than the surface that reads it. The token
+    stand-in is what keeps a review-queue write from minting a session secret
+    outside the server env.
+    """
+    from ciao.config import CiaoConfig as _CiaoConfig
+
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+    vault = Path(vault_raw).expanduser()
+    if not vault.is_absolute():
+        vault = workspace / vault
+    vault = vault.resolve()
+
+    config_source = dict(os.environ)
+    config_source.update({
+        "CIAO_WORKSPACE": str(workspace),
+        "CIAO_VAULT_ROOT": str(vault),
+        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or purpose,
+    })
+    return _CiaoConfig.from_env(config_source)
+
+
+def _active_workspace_name(config: CiaoConfig) -> str:
+    """Which workspace a review command is about, matching the proposal CLI.
+
+    The active one, falling back to the primary, so both ends of a record's life
+    land in the same vault.
+    """
+    name = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if config.workspace(name) is None:
+        name = config.primary_workspace()
+    return name
+
+
+def _skill_draft_add_command(args: argparse.Namespace) -> int:
+    """File one ``[review]`` draft for a lesson this workspace cannot edit in place.
+
+    The two destinations a routing pass has when the skill a lesson applies to is
+    not an owned source: an upstream issue for somebody else's packaged skill,
+    and a new skill for a workflow no skill covers. Both are drafts for a person,
+    because filing an issue is a public action and creating a skill writes a file
+    every session of the workspace will load.
+
+    Nothing here reaches GitHub and nothing here creates a skill. ``--input-file``
+    holds a JSON object — ``target`` (``upstream_issue`` or ``new_skill``),
+    ``skill``, ``title``, ``change``, and for an issue a ``body`` that is the
+    sanitized lesson plus the optional ``repository`` and ``version``. Private
+    evidence goes in ``private_evidence`` and stays in this workspace; ``body`` is
+    refused if it carries a transcript excerpt, a path, a name or a credential,
+    because a public issue is public.
+    """
+    from ciao.upstream_drafts import DraftError, file_draft
+
+    payload, problem = _read_skill_draft_input(args.input_file)
+    if payload is None:
+        print(problem, file=sys.stderr)
+        return 2
+    config = _proposal_config(args, "skill-draft-add")
+    name = _active_workspace_name(config)
+    origins, problem = _draft_origins(payload, name)
+    if origins is None:
+        print(problem, file=sys.stderr)
+        return 2
+    try:
+        stored = file_draft(
+            config,
+            name,
+            target=str(payload["target"]),
+            skill=str(payload["skill"]),
+            title=str(payload["title"]),
+            change=str(payload["change"]),
+            body=str(payload.get("body") or ""),
+            repository=str(payload.get("repository") or ""),
+            version=str(payload.get("version") or ""),
+            private_evidence=str(payload.get("private_evidence") or ""),
+            origins=origins,
+        )
+    except DraftError as exc:
+        print(f"cannot file the draft: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        json.dump(
+            {
+                "filed": True,
+                "id": stored.id,
+                "target": stored.target,
+                "skill": stored.skill,
+                "workspace": name,
+                "lifecycle": stored.lifecycle,
+                "origins": len(stored.origins),
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+    else:
+        print(f"Filed {stored.target} draft {stored.id} for {stored.skill} in {name}.")
+        _print_route_note(config, name, stored)
+        if stored.lifecycle != "pending":
+            print(
+                f"Note: this change is already {stored.lifecycle}; the evidence "
+                "was added to the settled record and nothing was re-queued."
+            )
+    return 0
+
+
+def _print_route_note(config: CiaoConfig, workspace: str, draft) -> None:
+    """Say so when the filed target disagrees with where the name actually lives.
+
+    Advisory rather than a refusal, because both mismatches have a legitimate
+    reading: a workspace that forked a packaged skill owns the fork and may
+    still want the change reported upstream, and a name a pass believes is new
+    may be a typo of one that exists. What is not legitimate is filing blind, so
+    the note names the real answer and the command that acts on it.
+    """
+    from ciao.upstream_drafts import NEW_SKILL, route_for_skill
+
+    try:
+        actual = route_for_skill(config, workspace, draft.skill)
+    except Exception:  # noqa: BLE001 — a note is never a reason to lose the filing
+        return
+    if actual == "owned" and draft.target == NEW_SKILL:
+        print(
+            f"Note: skills/{draft.skill}/SKILL.md already exists here, so this is "
+            "not a new skill. `ciao skill-draft-approve` will refuse the "
+            "creation; an improvement to the existing source is a skill "
+            "proposal (ciao skill-proposal-add)."
+        )
+    elif actual == "owned":
+        print(
+            f"Note: {draft.skill} is a source this workspace owns under skills/, "
+            "so an improvement to it can be made here directly with "
+            "`ciao skill-proposal-add` rather than filed upstream. Keep this "
+            "draft if the change belongs to whoever maintains the packaged copy."
+        )
+    elif actual == "new" and draft.target != NEW_SKILL:
+        print(
+            f"Note: there is no skill called {draft.skill} in this workspace or "
+            "in its installed catalog, so there is no packaged copy to report "
+            "upstream either. If this is a reusable workflow with no skill yet, "
+            'file it with "target": "new_skill".'
+        )
+
+
+def _read_skill_draft_input(path: str) -> tuple[dict[str, Any] | None, str]:
+    """The draft in *path* as ``(payload, "")``, or ``(None, why)`` if unusable.
+
+    The same structured reader the skill-proposal filer uses, and for the same
+    reason: a draft is a target, a title, a change and (for an issue) a body
+    somebody has to read before approving it, so its boundaries cannot be
+    delimiters a model has to reproduce. Every complaint names the field, because
+    the caller is a model that can only fix what it is told.
+    """
+    from ciao.upstream_drafts import DRAFT_KIND, TARGETS
+
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return None, f"could not read {path}: {exc}"
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        return None, f"{path} is not valid JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"{path} must hold one JSON object, not a {type(payload).__name__}"
+    for field in ("target", "skill", "title", "change"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return None, f'{path} needs a non-empty "{field}"'
+    if payload["target"].strip() not in TARGETS:
+        return None, (
+            f'{path} "target" must be one of: {", ".join(TARGETS)} — the draft '
+            f"is filed as a [{DRAFT_KIND}] row a person routes, not as a new queue kind"
+        )
+    for field in ("body", "repository", "version", "private_evidence", "rationale"):
+        if field in payload and not isinstance(payload[field], str):
+            return None, f'{path} "{field}" must be a string'
+    return payload, ""
+
+
+def _draft_origins(
+    payload: dict[str, Any], workspace: str
+) -> tuple[list[dict[str, str]] | None, str]:
+    """The draft's learning links, or ``(None, why)`` if one cannot be honoured.
+
+    The workspace is decided here rather than taken from the payload, for the
+    reason the skill-proposal filer gives: a learning id only means something in
+    the workspace that minted it, so a payload naming a different one is a link
+    this queue cannot hold and is refused by name rather than rewritten.
+    """
+    raw = payload.get("origins") or []
+    if not isinstance(raw, list):
+        return None, f'{payload.get("skill")!r}: "origins" must be a list of objects'
+    links: list[dict[str, str]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None, f"origins[{index}] must be an object"
+        stated = str(item.get("workspace") or "").strip()
+        if stated and stated != workspace:
+            return None, (
+                f"origins[{index}] names the {stated} workspace, but this draft is "
+                f"filed in {workspace}; a learning id only means something in the "
+                "workspace that minted it"
+            )
+        links.append({k: v for k, v in item.items() if k != "workspace"})
+    return links, ""
+
+
+#: A draft decision an unattended run asked for. Distinct from 1 ("the command
+#: could not do it") because nothing failed: the request was well-formed, the
+#: draft exists, and the answer is that this run has no reviewer. 4 is EPERM,
+#: and a scheduled agent that sees it can report the item as deferred rather than
+#: retrying an action it is not allowed to take.
+UNATTENDED_REFUSED_EXIT = 4
+
+
+def _refuse_unattended_draft(
+    config: CiaoConfig, workspace: str, action: str
+) -> int | None:
+    """Refuse ``action`` when a run holds this vault's curation lease.
+
+    The check lives here as well as inside the decision helpers so the CLI fails
+    *before* it reads ``--content-file`` or reports a draft nobody may act on,
+    and so a caller can tell "you are not allowed" from "this draft could not be
+    acted on" by the exit code alone. The signal is the run's own lease — see
+    :func:`ciao.upstream_drafts.unattended_run` — and there is no flag that turns
+    it off, which is the whole point: the unattended Workspace care run shells
+    this same command a person would.
+    """
+    from ciao.upstream_drafts import UnattendedRefused, _refuse_if_unattended
+
+    try:
+        _refuse_if_unattended(config, workspace, action)
+    except UnattendedRefused as exc:
+        print(f"refused unattended: {exc}", file=sys.stderr)
+        return UNATTENDED_REFUSED_EXIT
+    return None
+
+
+def _skill_draft_approve_command(args: argparse.Namespace) -> int:
+    """Approve one draft: link a matching upstream issue, or create a new skill.
+
+    Two operations behind one verb, because both are "a person approved this
+    draft" and the draft says which one it is. The upstream path searches before
+    it creates and records the URL it linked or filed; the new-skill path creates
+    the owned source, reads it back, checks its frontmatter and syncs, and only
+    settles the row once the file exists and the sync finished.
+
+    Attended only, and read from the run rather than from a flag: there is
+    deliberately no ``--unattended` here, and no argument the caller could set to
+    override :func:`ciao.upstream_drafts.unattended_run`. An automation that
+    shells this command while it holds the vault's curation lease is refused with
+    :data:`UNATTENDED_REFUSED_EXIT`, so it can only prepare the draft and report
+    it.
+    """
+    from ciao.upstream_drafts import (
+        DraftError,
+        UnattendedRefused,
+        approve_draft,
+        create_new_skill,
+        find_draft,
+    )
+
+    config = _proposal_config(args, "skill-draft-approve")
+    name = _active_workspace_name(config)
+    refused = _refuse_unattended_draft(config, name, "approving a skill draft")
+    if refused is not None:
+        return refused
+    draft_id = args.draft_id.strip()
+    draft = find_draft(config, draft_id)
+    if draft is None:
+        print(f"no open draft has id {draft_id!r}", file=sys.stderr)
+        return 1
+    content = ""
+    if draft.target == "new_skill":
+        content, problem = _read_skill_file(args.content_file)
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
+    try:
+        stored = (
+            create_new_skill(config, draft_id, content=content)
+            if draft.target == "new_skill"
+            else approve_draft(config, draft_id, reason=args.reason or "")
+        )
+    except UnattendedRefused as exc:
+        # The run context is re-read inside the decision helper, so a lease taken
+        # between the check above and this call is caught here rather than acted
+        # on. Same answer, same code, from whichever side sees it first.
+        print(f"cannot act on draft {draft_id}: {exc}", file=sys.stderr)
+        return UNATTENDED_REFUSED_EXIT
+    except DraftError as exc:
+        print(f"cannot act on draft {draft_id}: {exc}", file=sys.stderr)
+        return 1
+    if stored is None:
+        print(f"no open draft has id {draft_id!r}", file=sys.stderr)
+        return 1
+    _report_draft(stored, name, args)
+    return 0
+
+
+def _read_skill_file(path: str) -> tuple[str, str]:
+    """The new skill's own text, or ``("", why)`` if it cannot be read."""
+    if not path.strip():
+        return "", (
+            "a new-skill draft needs --content-file holding the SKILL.md text: "
+            "the file is created from exactly those bytes, so a creation with no "
+            "content would write an empty skill"
+        )
+    try:
+        return Path(path).read_text(encoding="utf-8"), ""
+    except (OSError, UnicodeError) as exc:
+        return "", f"could not read {path}: {exc}"
+
+
+def _report_draft(stored, workspace: str, args: argparse.Namespace) -> None:
+    """Print what a decision did, in the form each reader needs."""
+    if args.json:
+        json.dump(
+            {
+                "id": stored.id,
+                "target": stored.target,
+                "skill": stored.skill,
+                "workspace": workspace,
+                "lifecycle": stored.lifecycle,
+                "issue_url": stored.issue_url,
+                "reason": stored.reason,
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return
+    if stored.lifecycle == "filed":
+        print(f"Draft {stored.id} is filed: {stored.issue_url or stored.skill}")
+        if stored.reason:
+            print(stored.reason)
+        if stored.target == "upstream_issue":
+            print(
+                "That is a report upstream, not a local change: nothing in this "
+                "workspace changed, and the lesson is still not in any skill here."
+            )
+    elif stored.lifecycle == "rejected":
+        print(f"Draft {stored.id} rejected. It will not be offered again.")
+    else:
+        print(f"Draft {stored.id} is still {stored.lifecycle}.")
+        if stored.reason:
+            print(stored.reason)
+
+
+def _skill_draft_reject_command(args: argparse.Namespace) -> int:
+    """Turn one draft down, so the next pass does not offer it again.
+
+    A rejection settles exactly as an approval does, so it is refused in an
+    unattended run for the same reason: the draft's own ground rules say
+    settlement follows a person, and a run that could reject would archive an
+    unanswered question as an answer.
+    """
+    from ciao.upstream_drafts import reject_draft
+
+    config = _proposal_config(args, "skill-draft-reject")
+    name = _active_workspace_name(config)
+    refused = _refuse_unattended_draft(config, name, "rejecting a skill draft")
+    if refused is not None:
+        return refused
+    stored = reject_draft(config, args.draft_id.strip(), reason=args.reason or "")
+    if stored is None:
+        print(f"no open draft has id {args.draft_id!r}", file=sys.stderr)
+        return 1
+    _report_draft(stored, name, args)
+    return 0
+
+
+def _skill_drafts_command(args: argparse.Namespace) -> int:
+    """List the workspace's open drafts, settled ones included under ``--all``."""
+    from ciao.upstream_drafts import read_queue, read_records
+
+    config = _proposal_config(args, "skill-drafts")
+    name = _active_workspace_name(config)
+    drafts = read_records(config, name) if args.all else read_queue(config, name)
+    rows = [
+        {
+            "id": draft.id,
+            "target": draft.target,
+            "skill": draft.skill,
+            "title": draft.title,
+            "lifecycle": draft.lifecycle,
+            "repository": draft.repository,
+            "version": draft.version,
+            "issue_url": draft.issue_url,
+            "origins": len(draft.origins),
+        }
+        for draft in drafts
+    ]
+    if args.json:
+        json.dump(
+            {"workspace": name, "drafts": rows}, sys.stdout, indent=2, ensure_ascii=False
+        )
+        sys.stdout.write("\n")
+        return 0
+    if not rows:
+        print(f"No {'' if args.all else 'open '}skill drafts in {name}.")
+        return 0
+    for row in rows:
+        where = f" → {row['issue_url']}" if row["issue_url"] else ""
+        print(f"[{row['lifecycle']}] {row['id']} {row['target']} {row['skill']}: {row['title']}{where}")
     return 0
 
 
@@ -3972,12 +5749,15 @@ def _service_command(args: argparse.Namespace) -> int:
     as_json = bool(args.as_json)
     if getattr(args, "deprecated_alias", False) and not as_json:
         print("`ciao desktop-service` is deprecated; use `ciao service`.", file=sys.stderr)
+    if sys.platform == "win32":
+        return _windows_service_command(args, as_json)
     if sys.platform != "darwin":
         return macos_service.print_result(
             macos_service.ServiceResult(
                 False,
                 str(action),
-                "`ciao service` manages the macOS LaunchAgent. On Linux use `ciao linux-service` and systemctl.",
+                "`ciao service` manages the macOS LaunchAgent and the Windows "
+                "logon task. On Linux use `ciao linux-service` and systemctl.",
                 {},
             ),
             as_json=as_json,
@@ -4052,6 +5832,123 @@ def _service_command(args: argparse.Namespace) -> int:
     return macos_service.print_result(result, as_json=as_json)
 
 
+# The macOS desktop shell, including its `update-engine` action. They have no
+# Windows equivalent, so they fail with a clean result instead of half-running;
+# Windows updates the engine with `ciao update` (#857).
+_WINDOWS_UNAVAILABLE_ACTIONS = (
+    "login",
+    "update-engine",
+    "migrate",
+    "migration-classify",
+    "rollback",
+)
+
+
+def _validate_service_workspace(workspace: Path) -> Path:
+    """Resolve and check a workspace the engine service may serve.
+
+    The two checks `_register_launchd_service` makes before writing a plist: a
+    Ciaobot workspace has a ``.env``, and the app's own source checkout never is
+    one. The macOS TCC check is left out -- it names launchd and macOS privacy
+    protection, neither of which exists on Windows.
+    """
+
+    root = workspace.expanduser().resolve()
+    if not (root / ".env").is_file():
+        raise RuntimeError(
+            f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
+        )
+    if _looks_like_source_checkout(root):
+        raise RuntimeError(
+            f"{root} looks like the Ciaobot source checkout, not a workspace. "
+            "Pass your workspace folder to --workspace."
+        )
+    return root
+
+
+def _windows_service_port() -> int:
+    """Port the Windows engine answers on: the task workspace's ``.env``, else the default."""
+
+    from ciao import macos_service, windows_service
+
+    workspace = windows_service.task_workspace(
+        windows_service.default_task_dir() / windows_service.TASK_FILE_NAME
+    )
+    if workspace is None:
+        return macos_service.DEFAULT_PORT
+    return _pwa_port_from_env(workspace, macos_service.DEFAULT_PORT)
+
+
+def _windows_service_command(args: argparse.Namespace, as_json: bool) -> int:
+    """`ciao service` on Windows: the engine's Task Scheduler logon task.
+
+    Only the generic lifecycle exists there. The macOS path answers with the
+    same `ServiceResult`, so plain and `--json` output are one shape everywhere.
+    """
+
+    from ciao import macos_service, windows_service
+
+    action = str(args.service_action)
+    if action == "status":
+        result = windows_service.service_status(_windows_service_port())
+    elif action == "start":
+        workspace = getattr(args, "workspace", None)
+        if workspace is not None:
+            requested: Path | None = None
+            try:
+                requested = _validate_service_workspace(Path(workspace))
+            except (RuntimeError, OSError) as exc:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(
+                        False, "start", str(exc), {"setup_required": True}
+                    ),
+                    as_json=as_json,
+                )
+            # Refuse to repoint a task that already serves another workspace,
+            # before anything is written. Same wording as the macOS path.
+            installed = _registered_service_workspace(
+                windows_service.default_task_dir()
+            )
+            if installed is not None and installed != requested:
+                return macos_service.print_result(
+                    macos_service.ServiceResult(
+                        False,
+                        "start",
+                        f"The registered task serves {installed}, not {requested}. "
+                        f"Run `ciao setup --workspace {requested} --load-launchd --yes` to repoint it.",
+                        {
+                            "installed_workspace": str(installed),
+                            "requested_workspace": str(requested),
+                        },
+                    ),
+                    as_json=as_json,
+                )
+        result = windows_service.start_service(workspace)
+    elif action == "stop":
+        result = windows_service.stop_service(
+            _windows_service_port(), force=bool(args.force)
+        )
+    elif action == "restart":
+        result = windows_service.restart_service(
+            _windows_service_port(), force=bool(args.force)
+        )
+    elif action in _WINDOWS_UNAVAILABLE_ACTIONS:
+        result = macos_service.ServiceResult(
+            False,
+            action,
+            f"`ciao service {action}` is not available on Windows yet.",
+            {},
+        )
+    else:  # pragma: no cover - argparse constrains the action.
+        result = macos_service.ServiceResult(
+            False,
+            action,
+            "Unknown service action.",
+            {},
+        )
+    return macos_service.print_result(result, as_json=as_json)
+
+
 def _linux_service_command(args: argparse.Namespace) -> int:
     from ciao.linux_service import render_service
 
@@ -4120,7 +6017,21 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run the Ciaobot server.")
-    run_parser.set_defaults(func=lambda _args: _run_server())
+    run_parser.add_argument(
+        "--supervised",
+        action="store_true",
+        help="Exit with the restart code instead of re-execing; for `ciao supervise`.",
+    )
+    run_parser.set_defaults(func=lambda args: _run_server(supervised=args.supervised))
+
+    supervise_parser = subparsers.add_parser(
+        "supervise",
+        help="Run the server as a child process and relaunch it when it asks to restart.",
+    )
+    supervise_parser.add_argument(
+        "child_args", nargs=argparse.REMAINDER, help="Extra arguments passed to `ciao run`."
+    )
+    supervise_parser.set_defaults(func=_supervise_command)
 
     def add_service_parser(
         name: str,
@@ -4543,8 +6454,10 @@ def build_parser() -> argparse.ArgumentParser:
         "vault-migrate",
         help="Rename non-canonical frontmatter types onto the vocabulary.",
         description=(
-            "One-off migration for an existing vault: renames aliased types "
-            "(doc -> document, project-log -> log) and reports types with no "
+            "One-off migration for an existing vault: keeps the stock categories "
+            "that no longer ship (product, feature, automation, document, "
+            "reference, content) when notes still use them, renames aliased "
+            "types (project-log -> journal) and reports types with no "
             "canonical equivalent. Dry-run unless --apply is passed."
         ),
     )
@@ -4665,6 +6578,159 @@ def build_parser() -> argparse.ArgumentParser:
             )
         links_parser.set_defaults(func=handler)
 
+    learnings_parser = subparsers.add_parser(
+        "learnings-migrate",
+        help="Convert legacy Learnings.md entries to canonical records.",
+        description=(
+            "One-off migration for an existing workspace: rewrites the entries "
+            "under `## Active` in Workspace/Learnings.md into the canonical "
+            "record shape, preserving every other byte — frontmatter, format "
+            "notes, the `## Promoted / Resolved` section, the BOM and CRLF line "
+            "endings included. A line whose shape cannot be read is reported and "
+            "kept exactly as written, and no entry is ever dropped. Records an "
+            "exact reverse map under .runtime/migration/. Dry-run unless --apply "
+            "is passed."
+        ),
+    )
+    learnings_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to the workspace's registered vault.",
+    )
+    learnings_parser.add_argument(
+        "--workspace",
+        default=None,
+        help=(
+            "Registered workspace whose learnings are migrated. Defaults to the "
+            "workspace that owns --vault-root, else CIAO_ACTIVE_WORKSPACE, else "
+            "the primary workspace."
+        ),
+    )
+    learnings_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Runtime root holding the migration receipt. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime."
+        ),
+    )
+    learnings_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the changes. Without this, only report what would change.",
+    )
+    learnings_parser.add_argument(
+        "--revert",
+        type=Path,
+        default=None,
+        help=(
+            "Reverse a previous run from its receipt instead of migrating. The "
+            "spans are restored from the recorded bytes, and a file that changed "
+            "since is left entirely untouched."
+        ),
+    )
+    learnings_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the raw summary as JSON.",
+    )
+    learnings_parser.set_defaults(func=_learnings_migrate_command)
+
+    cleanup_parser = subparsers.add_parser(
+        "learnings-cleanup",
+        help="Retire Learnings.md entries whose findings are durably settled.",
+        description=(
+            "Reconciles one workspace's Workspace/Learnings.md against the "
+            "skill-proposal queue and the upstream draft sidecar, and lists "
+            "every Active entry with the decision beside it: settled and "
+            "removable, kept and why, or unreadable and untouched. Entries whose "
+            "findings are pending, implementing, never proposed, held back by an "
+            "unattributable finding, or routed only to an upstream issue are "
+            "never removed. The write is lock-serialized, revision-checked, and "
+            "reversible from a receipt under .runtime/migration/; every other "
+            "byte of the file, the `## Promoted / Resolved` section, the format "
+            "notes, the BOM and CRLF endings included, is preserved except the "
+            "frontmatter's `updated:`. Dry-run unless --apply or --apply-settled "
+            "is passed; --apply refuses without --approval-file, and "
+            "--apply-settled retires only the rows the reconciliation already "
+            "proposed."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to the workspace's registered vault.",
+    )
+    cleanup_parser.add_argument(
+        "--workspace",
+        default=None,
+        help=(
+            "Registered workspace whose learnings are reconciled. Defaults to "
+            "the workspace that owns --vault-root, else CIAO_ACTIVE_WORKSPACE, "
+            "else the primary workspace."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=(
+            "Runtime root holding the cleanup receipt. Defaults to "
+            "CIAO_RUNTIME_ROOT or <workspace>/.runtime."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--approval-file",
+        type=Path,
+        default=None,
+        help=(
+            "JSON list of approved rows: a learning_id, the entry_revision it "
+            "was reviewed at, a reason and the evidence for retiring it. "
+            "Required by --apply; an approval naming a revision the entry no "
+            "longer has is not honoured."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Write the removals named in --approval-file. Without both flags "
+            "nothing is written."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--apply-settled",
+        action="store_true",
+        help=(
+            "Retire only the entries the reconciliation already proposed, "
+            "unattended and without an approval file: no reapproval, no judgement "
+            "of a kept row, and no more removals than "
+            "LEARNINGS_CLEANUP_MAX_ITEMS. This is what the nightly cleanup pass "
+            "names; everything that needs a person is still --apply "
+            "--approval-file. Cannot be combined with --apply or "
+            "--approval-file."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--revert",
+        type=Path,
+        default=None,
+        help=(
+            "Restore a previous run's removals from its receipt instead of "
+            "reconciling. The bytes come back exactly, and the suppression stays "
+            "recorded so the nightly pass does not remove them again."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the plan and the result as JSON.",
+    )
+    cleanup_parser.set_defaults(func=_learnings_cleanup_command)
+
     os_audit_parser = subparsers.add_parser(
         "os-audit",
         help="Run AI OS context hygiene and setup audit.",
@@ -4756,11 +6822,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Record that this install is ALREADY in the per-workspace layout, "
-            "without moving anything. For a vault migrated by hand or by a model "
-            "following docs/VAULT_MIGRATION_PROMPT.md: `agent_root` answers "
-            "per-root only when a receipt says so, so without this the install "
-            "keeps resolving the old layout and --repair refuses. Verifies the "
-            "layout is actually in place first and refuses if it is not."
+            "without moving anything. For a vault migrated by hand: `agent_root` "
+            "answers per-root only when a receipt says so, so without this the "
+            "install keeps resolving the old layout and --repair refuses. "
+            "docs/VAULT_MIGRATION_PROMPT.md is the reader for this flag and for "
+            "what to do when it refuses. Verifies the layout is actually in "
+            "place first and refuses if it is not."
         ),
     )
     reroot_parser.set_defaults(func=_workspace_reroot_command)
@@ -4948,6 +7015,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Provenance label recorded on the bullet. Defaults to curation.",
     )
     memory_proposal_add_parser.add_argument(
+        "--request",
+        default="",
+        help=(
+            "The user-request identifier this fact was asked for under. "
+            "Learnings only: it is what the accepted line cites as `req:<id>` "
+            "when the `/remember` has no archived turn behind it, so the "
+            "sighting keeps a real origin instead of a manufactured transcript "
+            "one. Plain letters, digits, dot, dash and underscore."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
         "--workspace",
         type=Path,
         default=None,
@@ -5022,12 +7100,6 @@ def build_parser() -> argparse.ArgumentParser:
             "promote-then-dismiss flow); record the outcome as promoted "
             "instead of dismissed."
         ),
-    )
-    memory_proposal_dismiss_parser.add_argument(
-        "--runtime-root",
-        type=Path,
-        default=None,
-        help="Runtime root for the outcome log. Defaults to CIAO_RUNTIME_ROOT or <workspace>/.runtime.",
     )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
 
@@ -5179,6 +7251,153 @@ def build_parser() -> argparse.ArgumentParser:
     )
     skill_proposal_add_parser.set_defaults(func=_skill_proposal_add_command)
 
+    def _add_queue_workspace_arguments(parser: argparse.ArgumentParser) -> None:
+        """The workspace/vault pair every review-queue command resolves the same way.
+
+        One helper, because :func:`_proposal_config` reads both of these and two
+        commands spelling them differently is how a CLI write lands in a
+        different vault than the surface that reads it.
+        """
+        parser.add_argument(
+            "--workspace",
+            type=Path,
+            default=None,
+            help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+        )
+        parser.add_argument(
+            "--vault-root",
+            type=Path,
+            default=None,
+            help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Emit the structured result as JSON instead of text.",
+        )
+
+    skill_draft_add_parser = subparsers.add_parser(
+        "skill-draft-add",
+        help="File one [review] draft for a lesson this workspace cannot edit in place.",
+        description=(
+            "Files one deduplicated [review] draft in a workspace's review queue "
+            "for a reusable lesson whose target is not a source this workspace "
+            "owns. `target` is `upstream_issue` for a packaged, mirrored or "
+            "shared skill — the change belongs to whoever maintains it — or "
+            "`new_skill` for a workflow no existing skill covers.\n\n"
+            "This files and nothing more: no issue is opened and no skill is "
+            "created. `ciao skill-draft-approve` is the attended step, and it "
+            "searches GitHub for a matching issue before it creates one.\n\n"
+            "--input-file holds a JSON object with `target`, `skill`, `title` and "
+            "`change`, plus for an issue a `body` — the sanitized lesson a "
+            "stranger could reproduce — and optionally `repository`, `version`, "
+            "private_evidence` and `origins`. `title`, `skill` and `version` reach "
+            "`gh` too, so they go through the same gate as the body: any of them "
+            "carrying a transcript excerpt, a path, a name or a credential is "
+            "refused. `repository` must be `owner/name` when given, and an issue "
+            "whose draft names none stays pending rather than guessing a public "
+            "target. The private evidence stays in `private_evidence` and never "
+            "leaves the vault."
+        ),
+    )
+    skill_draft_add_parser.add_argument(
+        "--input-file",
+        required=True,
+        help=(
+            "Read the draft from this file as JSON. Never pass the draft as an "
+            "argument: it is lesson-derived prose."
+        ),
+    )
+    _add_queue_workspace_arguments(skill_draft_add_parser)
+    skill_draft_add_parser.set_defaults(func=_skill_draft_add_command)
+
+    skill_draft_approve_parser = subparsers.add_parser(
+        "skill-draft-approve",
+        help="Act on an approved skill draft: file its issue, or create its skill.",
+        description=(
+            "Approves one draft in a workspace's queue. An `upstream_issue` draft "
+            "is searched for in the repository the draft names, linked to a "
+            "matching open issue when the search finds one and filed as a new "
+            "issue when it does not; the URL is recorded on the record either "
+            "way. A `new_skill` draft is created under this workspace's own "
+            "`skills/` directory — refusing a name that already exists — then read "
+            "back, checked and synced, and the row is settled only once the file is "
+            "there and the sync finished.\n\n"
+            "Attended only, and read from the run rather than from a flag. There is "
+            "no unattended mode to turn off: while a run holds this vault's "
+            "curation lease the command exits 4 without filing, creating or "
+            "settling anything, so the nightly Workspace care run can only report "
+            "the draft. Opening a public issue is a deferred action, and creating a "
+            "skill writes a file every session of this workspace loads.\n\n"
+            "A failed or ambiguous GitHub request, an issue whose draft names no "
+            "owning repository, and a sync that did not finish all leave the draft "
+            "pending with the reason recorded, and a retry resumes rather than "
+            "starting over."
+        ),
+    )
+    skill_draft_approve_parser.add_argument(
+        "draft_id",
+        help="The draft id `ciao skill-drafts` printed.",
+    )
+    skill_draft_approve_parser.add_argument(
+        "--content-file",
+        default="",
+        help=(
+            "A new-skill draft only: the SKILL.md text to create, read from this "
+            "file. Required for `new_skill` and ignored for an upstream issue."
+        ),
+    )
+    skill_draft_approve_parser.add_argument(
+        "--reason",
+        default="",
+        help="Why you approved it, in your own words. Recorded on the draft.",
+    )
+    _add_queue_workspace_arguments(skill_draft_approve_parser)
+    skill_draft_approve_parser.set_defaults(func=_skill_draft_approve_command)
+
+    skill_draft_reject_parser = subparsers.add_parser(
+        "skill-draft-reject",
+        help="Turn one skill draft down, so it is not offered again.",
+        description=(
+            "Records an attended decision against one skill draft, takes it out "
+            "of the review queue and keeps the record on disk. A rejected change "
+            "is not re-filed: the next pass that reaches the same conclusion adds "
+            "its evidence to the settled record instead of opening a second row.\n\n"
+            "A rejection settles exactly as an approval does, so it is refused the "
+            "same way: while a run holds this vault's curation lease the command "
+            "exits 4 and the draft stays queued for a person."
+        ),
+    )
+    skill_draft_reject_parser.add_argument(
+        "draft_id",
+        help="The draft id `ciao skill-drafts` printed.",
+    )
+    skill_draft_reject_parser.add_argument(
+        "--reason",
+        default="",
+        help="Why you rejected it, in your own words. Recorded on the draft.",
+    )
+    _add_queue_workspace_arguments(skill_draft_reject_parser)
+    skill_draft_reject_parser.set_defaults(func=_skill_draft_reject_command)
+
+    skill_drafts_parser = subparsers.add_parser(
+        "skill-drafts",
+        help="List a workspace's skill drafts.",
+        description=(
+            "Lists the [review] drafts a routing pass filed in one workspace: the "
+            "upstream-issue and new-skill proposals for lessons this workspace "
+            "cannot apply by editing one of its own skills. Open ones by default, "
+            "settled ones with --all."
+        ),
+    )
+    skill_drafts_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Include settled drafts, which stay on disk as decision records.",
+    )
+    _add_queue_workspace_arguments(skill_drafts_parser)
+    skill_drafts_parser.set_defaults(func=_skill_drafts_command)
+
     skill_proposal_parser = subparsers.add_parser(
         "skill-proposal-remove",
         help="Settle a resolved skill proposal in the review queue.",
@@ -5186,13 +7405,13 @@ def build_parser() -> argparse.ArgumentParser:
             "Records the decision for one proposal in a workspace's "
             "Workspace/Skill-Proposals/ and takes it out of the queue, after its "
             "decision is made (implemented, or decided against). The record stays "
-            "on disk and readable. NAME matches the proposal's skill or a unique "
-            "substring of it."
+            "on disk and readable. NAME matches the proposal's skill or id exactly, "
+            "or else a unique substring of the skill."
         ),
     )
     skill_proposal_parser.add_argument(
         "name",
-        help="Skill name or unique substring of the queued proposal to settle.",
+        help="Skill name or proposal id of the queued proposal to settle, or a unique substring of the skill name.",
     )
     skill_proposal_parser.add_argument(
         "--workspace",
@@ -5241,6 +7460,49 @@ def build_parser() -> argparse.ArgumentParser:
         "--reason",
         default="",
         help="Free-text note recorded with the outcome (the History 'outcome' field).",
+    )
+    # One proof, two doors: a readback is free text with no shell-neutral
+    # quoting, so it travels in a file, and only a short shell-safe value (a
+    # receipt id) may be an argument. Passing both is a contradiction, not a
+    # preference, so argparse refuses the combination.
+    verification_group = skill_proposal_parser.add_mutually_exclusive_group()
+    verification_group.add_argument(
+        "--verification",
+        default="",
+        help=(
+            "What proves the lesson is in the skill when it is a short shell-safe "
+            "value, such as a managed write receipt id. Required (or "
+            "--verification-file) by --applied when the proposal links a learning, "
+            "because a finished chat and a row leaving the queue are not evidence "
+            "that anything landed. A readback goes in --verification-file, never "
+            "here."
+        ),
+    )
+    verification_group.add_argument(
+        "--verification-file",
+        default=None,
+        help=(
+            "A file whose content proves the lesson is in the skill: the lines you "
+            "changed, as you read them back. Read as UTF-8 (or UTF-16 with a BOM); "
+            "the readback never travels as a shell argument, so no quoting applies "
+            "in any shell."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--learning-id",
+        default="",
+        help=(
+            "Settle only the finding linked to this learning id, leaving the "
+            "proposal's other findings queued. Implies a per-finding settlement."
+        ),
+    )
+    skill_proposal_parser.add_argument(
+        "--finding",
+        default="",
+        help=(
+            "Narrow --learning-id to one finding. Needs --learning-id: a finding "
+            "text on its own names nothing."
+        ),
     )
     skill_proposal_parser.set_defaults(func=_skill_proposal_remove_command)
 
@@ -5571,6 +7833,7 @@ def _resolve_critique_paths(args: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    use_utf8_stdio()
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)

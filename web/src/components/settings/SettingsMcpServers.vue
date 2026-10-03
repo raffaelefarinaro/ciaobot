@@ -5,8 +5,9 @@
         <p class="section-title">MCP servers</p>
         <p class="hint">
           Servers give Ciaobot agents tools, such as your calendar or a database.
-          Custom servers are saved in <code>.mcp.json</code>; their secrets go to the workspace <code>.env</code>.
+          The list below shows the servers of the <strong>{{ workspaceLabel }}</strong> workspace: connections in its <code>.mcp.json</code> and secrets in its <code>.env</code>.
         </p>
+        <p class="hint">MCP servers installed directly in Claude Code or opencode may also be available in chats run by that provider. See their connection status under Models &amp; providers. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/models.html#inherit" target="_blank" rel="noopener noreferrer">How provider tools carry over</a></p>
       </div>
       <div class="settings-card-header-actions mcp-head-actions">
         <button class="mcp-quiet-link" type="button" @click="emit('create-via-chat')">Ask Ciao to add one</button>
@@ -86,7 +87,7 @@
             </div>
             <p v-if="srv.url" class="skill-description">URL: {{ srv.url }}</p>
             <p v-else-if="srv.command" class="skill-description">
-              Command: {{ srv.command }}<template v-if="srv.args?.length"> {{ srv.args.join(' ') }}</template>
+              Command: {{ commandLine(srv) }}
             </p>
             <div v-if="isExpanded(srv.name)" class="skill-detail" @click.stop>
               <div class="settings-field-grid mcp-edit-grid">
@@ -234,6 +235,8 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+
 // Settings → MCP. Markup only: every piece of state and every `/api/mcp/*`
 // call belongs to the `useMcpServers` controller SettingsView creates and
 // passes in, so this component owns nothing that outlives a render. The one
@@ -245,6 +248,7 @@
 // them unwrapped.
 import { assetOriginClass, assetOriginLabel, mcpServerOrigin } from '../../lib/assetOrigin'
 import type { McpServersController } from '../../composables/useMcpServers'
+import type { McpProjectServer } from '../../lib/types'
 
 const props = defineProps<{ mcp: McpServersController }>()
 
@@ -286,6 +290,23 @@ const {
   addCustomServer,
   deleteCustomServer,
 } = props.mcp
+
+// Which workspace's `.mcp.json` the list above is showing. The controller
+// echoes it back from the status payload, so the copy cannot name a
+// different workspace than the one whose servers are listed.
+const workspaceLabel = computed(
+  () => props.mcp.status.value?.workspace || 'selected',
+)
+
+// One interpolation, not `{{ srv.command }}<template> {{ args }}</template>`:
+// Vue's whitespace condensing trims the leading space inside the <template>,
+// so `{"command": "python", "args": ["server.py"]}` read as
+// `Command: pythonserver.py`. Args containing whitespace are quoted so the
+// line stays unambiguous.
+function commandLine(srv: McpProjectServer): string {
+  const quote = (arg: string) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)
+  return [srv.command ?? '', ...(srv.args ?? []).map(quote)].join(' ')
+}
 </script>
 
 <!-- The rules this markup needs used to live in SettingsView's own scoped
