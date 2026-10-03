@@ -506,7 +506,7 @@ Three keys, each solving a different problem:
 |---|---|---|
 | `(provider, source_id, anchor)` | the same message seen twice (re-scan, resume, overlapping batch) | new; per-adapter |
 | `(destination workspace, one-line normalized fact text)` | a fact already queued, already dismissed, or already promoted | `append_proposals` exact-text dedupe (L1611-1618), which already checks the queue **and** the `.dismissed.jsonl` sidecar, compared exactly as `MemoryProposal.as_bullet` will write it |
-| Ciaobot session identity | importing a conversation Ciaobot already knows | `ChatInfo.session_id` + `previous_session_ids` and the archive paths in `ciao/transcripts.py`, plus a `source_chat_id`-style marker in the batch record |
+| Ciaobot session identity | importing a conversation Ciaobot already knows | `ciao/import_decouple.py` (#994) — see [Decoupling from Ciaobot's own usage](#decoupling-from-ciaobots-own-usage). `ChatInfo.session_id` + `previous_session_ids` are necessary but not sufficient on their own: reclaim is fail-open and the idle sweep keeps files |
 
 Note that `append_proposals` already returns `None` for a fact that is already
 queued **and** for one already decided, and `ciao.cli._memory_proposal_add_command`
@@ -517,7 +517,9 @@ for a fact they previously dismissed.
 Ciaobot's own archive memory pass dedupes by `helper.source_chat_id`
 (`memory_pass.py:324-330`), including archived rows. An importer must not
 re-use that key — external sessions have no Ciaobot `chat_id` — so external
-identity needs its own field rather than an overload of the existing one.
+identity needs its own field rather than an overload of the existing one. #994
+makes that a rule rather than a caution: a Ciaobot-own session is never a fact
+source, and `assert_external_provenance` refuses a tag that names one.
 
 ### Provenance and old-versus-new
 
@@ -578,6 +580,93 @@ with the archive-time auto-apply it guarded. An importer therefore needs its
 **own** model-free admission check — shape, destination vocabulary
 (`DESTINATIONS`, L274-281), one-line length, citation presence — rather than
 reusing a verdict that no longer exists.
+
+### Decoupling from Ciaobot's own usage
+
+#994 settles the question the [Dedupe](#dedupe) table's last row and the
+provenance bullets above both leave open: **Ciaobot's own sessions are not the
+user's history, and an imported fact may never cite one.** The contract is
+code rather than prose — `ciao/import_decouple.py`, a leaf module that reads
+Ciaobot's own registry and state and nothing else (no `~/.claude`, no
+`~/.opencode`, no account export, no provider session listing, no engine, no
+model turn) — and this subsection is the statement of it, so a later reader
+does not re-derive it from the diff.
+
+**Why matching `session_id` alone is not sufficient.** Two observed facts
+about the reclaim path, both read from `ciao/web/project_chats.py`:
+
+* **Reclaim is fail-open.** `_archive_chat_unlocked` and `delete_chat` both
+  schedule `_reclaim_provider_sessions_async`, which calls
+  `delete_sdk_session_blob` (Claude's JSONL blob) or
+  `OpencodeProvider.delete_thread` (`DELETE /api/session/{id}`) and **logs and
+  continues** when the provider is unavailable. A session that should have been
+  reclaimed can still be on disk, so "the chat is archived, therefore the file
+  is gone" is not an assumption an importer may make. The vault markdown
+  transcript is the durable record of an archived chat; it is not the absence
+  of a session file.
+* **The idle sweep deletes nothing.** `reap_idle_providers` only *disconnects*
+  a provider idle past `_PROVIDER_IDLE_TIMEOUT_SECONDS` (900 s): "Only the
+  provider is released. The chat row, its `session_id` and its transcript are
+  untouched." A live chat's provider file is therefore still on disk and a
+  naive scan will find it.
+
+**The exclusion set.** `ciaobot_own_session_ids(config, workspace)` returns the
+`(provider, session_id)` pairs Ciaobot owns, from the two records the engine
+already keeps:
+
+| Source | Covers | Why it belongs in the set |
+|---|---|---|
+| `web_projects.json`, every chat row | live chats, archived chats, helper chats (the hidden Memory project's pass, proposal helpers, update-task chats) and each row's `previous_session_ids` rotation lineage | `_archive_chat_unlocked` keeps `session_id` on an archived row, so the row keeps naming the session it reclaimed **even when the reclaim failed**. A helper chat is an ordinary row with its own `session_id`, so there is no second helper list to keep in step with the first |
+| `state.json`, every context | a chat whose registry row is gone but whose state context survives | `delete_chat` writes two files — the registry pop and `StateStore.delete_context` — and the second is the one that can be missed. The state store records no provider (one provider-agnostic slot per context), so an id it still holds is excluded against **every** supported provider rather than guessed at one |
+
+**The classification rule.** `classify_session(provider, session_id,
+first_user_turn, known_ids)` returns `ciaobot_own` / `external` /
+`ambiguous`, in this order:
+
+1. `(provider, session_id)` in the exclusion set ⇒ `ciaobot_own`;
+2. a session id that is a Ciaobot chat id (`chat-<8 hex>`, a shape no provider
+   mints) ⇒ `ciaobot_own`;
+3. the `[CIAO_CONTEXT_BEGIN]` capsule — the marker Ciaobot prepends to every
+   prompt it seeds a provider session with — in the session's own first user
+   turn ⇒ `ciaobot_own`. This is the only rule that can see a session Ciaobot
+   drove without keeping a row for it (an OpenCode child session, a helper
+   whose row is gone);
+4. nothing readable — no session id, or no first user turn to read —
+   ⇒ `ambiguous`;
+5. otherwise ⇒ `external`.
+
+`ambiguous` is reported, never guessed. A scan must refuse it rather than read
+"no evidence" as "external"; a session is `external` only once its opening turn
+has been read and carries no marker. The two facts a caller can surface
+instead of importing — "Ciaobot's own session, not imported" and "this one is
+not decided" — are both refusals, and only the second is honest when the first
+could not be established.
+
+**The provenance rule.** Every imported fact names its **external** source as
+`provider:session_id:anchor`, and `assert_external_provenance` refuses a tag
+naming a Ciaobot chat id (by shape, or from the caller's own chat-id set) or a
+recorded Ciaobot-own session. A blank tag, or anything outside the three-part
+shape, is refused too: a bare chat id is exactly the misuse this exists to
+catch. Classification decides what may be **read**; the assertion decides what
+may be **written**, and an import that skipped it would file a perfectly
+attributed fact from the wrong conversation. It also keeps an imported fact
+distinguishable from one the archive memory pass filed, whose provenance is a
+Ciaobot chat id by construction.
+
+**The mixed-session policy.** `MIXED_SESSION_POLICY` is
+**`exclude_whole_session`**: a session Ciaobot has also used is excluded whole,
+never imported turn by turn. Once Ciaobot has used it, the file holds
+Ciaobot's prompt scaffolding, injected context, memory-pass output and
+compaction summaries, so it no longer cleanly represents the user's standalone
+usage. A per-turn carve-out would need a reliable "was this turn typed by the
+user" signal inside a foreign file, and the only one Ciaobot keeps
+(`ChatInfo.user_turn_unattended`) lives in its own registry rather than in the
+session — a partial import would then be indistinguishable from an import of
+Ciaobot's own work, which is the failure the rest of this section removes.
+
+**Consumed by** C5 (which candidates discovery may offer at all) and C6 (which
+uses the exclusion set **in addition to** `append_proposals` exact-text dedupe
+and the cross-batch digests), and it lands before C7.
 
 ## Fixture and test plan
 
