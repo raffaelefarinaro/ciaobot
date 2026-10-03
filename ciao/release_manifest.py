@@ -327,15 +327,18 @@ def select_server_host_artifact(manifest: dict[str, Any]) -> dict[str, Any]:
     the selector trusts those bytes, so it must never be the only check.
     """
     artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, list):
+    if not isinstance(artifacts, list) or not artifacts:
         raise ValueError("manifest lists no artifacts")
-    hosts = [e for e in artifacts if e.get("kind") == SERVER_HOST_KIND]
+    # The same per-entry and ambiguity checks verify_manifest runs, so a
+    # non-object entry is a ValueError rather than an AttributeError, and a
+    # second host or the host filename under another kind is refused here too.
+    for artifact in artifacts:
+        _check_artifact(artifact)
+    _check_artifact_ambiguity(artifacts)
+    hosts = [e for e in artifacts if e["kind"] == SERVER_HOST_KIND]
     if not hosts:
         raise ValueError("manifest has no server host artifact")
-    if len(hosts) != 1:
-        raise ValueError("manifest lists more than one server host artifact")
     entry: dict[str, Any] = hosts[0]
-    _check_artifact(entry)
     return entry
 
 

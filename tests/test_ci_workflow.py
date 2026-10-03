@@ -241,6 +241,14 @@ def test_publish_host_asset_is_built_and_signed_in_manifest() -> None:
     # system interpreter that might predate tarfile's data filter.
     assert '"$RUNNER_TEMP/engine-check/bin/python" scripts/build-server-host.py' in workflow
 
+    # The manifest step and the upload step each define the archive path; both
+    # must be the builder's --output directory plus the fixed archive name, so
+    # the bytes uploaded are the bytes the signed manifest digested.
+    archive_paths = re.findall(r'^\s*host_archive="([^"]+)"$', workflow, re.MULTILINE)
+    assert archive_paths == [
+        "$RUNNER_TEMP/server-host-build/ciaobot-server-host-macos-universal-v1.tar.gz"
+    ] * 2
+
 
 def test_windows_job_checks_the_install_ps1_advisorily() -> None:
     # #838: the Windows installer can only be exercised on a Windows runner,

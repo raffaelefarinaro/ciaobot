@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -469,6 +471,46 @@ def test_server_host_selection_rejects_unsupported_entry() -> None:
         select_server_host_artifact(manifest)
 
 
+def test_server_host_selection_refuses_malformed_or_ambiguous_entries() -> None:
+    # The selector is called on a dict, so it repeats the per-entry and
+    # ambiguity checks rather than calling .get on whatever the list holds.
+    def manifest(*artifacts: Any) -> dict[str, Any]:
+        return {"schema": 1, "version": "1.2.3", "tag": "v1.2.3", "artifacts": list(artifacts)}
+
+    with pytest.raises(ValueError, match="malformed"):
+        select_server_host_artifact(manifest(_host_entry(), "not an object"))
+    with pytest.raises(ValueError, match="no artifacts"):
+        select_server_host_artifact(manifest())
+    with pytest.raises(ValueError, match="more than one server host"):
+        select_server_host_artifact(manifest(_host_entry(), _host_entry()))
+    with pytest.raises(ValueError, match="reuses the server host filename"):
+        select_server_host_artifact(
+            manifest(_host_entry(), _entry(filename=SERVER_HOST_FILENAME, kind="wheel"))
+        )
+    # Order does not matter: the host filename listed first under another kind
+    # is just as ambiguous.
+    with pytest.raises(ValueError, match="reuses the server host filename"):
+        select_server_host_artifact(
+            manifest(_entry(filename=SERVER_HOST_FILENAME, kind="wheel"), _host_entry())
+        )
+
+
+def test_server_host_constants_match_the_builder() -> None:
+    # The manifest pins what scripts/build-server-host.py produces; if the two
+    # drift, the release would sign an entry the archive does not match.
+    script = Path(__file__).parents[1] / "scripts" / "build-server-host.py"
+    spec = importlib.util.spec_from_file_location("build_server_host_contract", script)
+    assert spec is not None and spec.loader is not None
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+
+    assert builder.ARCHIVE_NAME == SERVER_HOST_FILENAME
+    assert builder.BUNDLE_ID == SERVER_HOST_BUNDLE_ID
+    assert builder.HOST_REVISION == SERVER_HOST_REVISION
+    assert builder.HOST_PROTOCOL_REVISION == SERVER_HOST_PROTOCOL
+    assert set(builder.ARCHITECTURES) == {"arm64", "x86_64"}
+
+
 def test_main_build_with_server_host(tmp_path: Path) -> None:
     wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel bytes")
@@ -552,6 +594,21 @@ def test_server_host_signature_tampering_fails_before_schema() -> None:
 
     with pytest.raises(SignatureError):
         verify_manifest(raw, _sign(honest, priv, key_id), public_key)
+
+
+def test_server_host_digest_tampering_fails_signature() -> None:
+    # Swapping the host bytes means swapping the signed digest; a manifest
+    # whose host sha256 was edited after signing never reaches the selector.
+    priv, public_key, key_id = _keypair()
+    honest = json.dumps(
+        build_manifest("1.2.3", [_entry(), _host_entry()], created="2026-09-25T10:00:00+00:00")
+    ).encode()
+    signature = _sign(honest, priv, key_id)
+    tampered = honest.replace(("cd" * 32).encode(), ("ef" * 32).encode())
+    assert tampered != honest
+
+    with pytest.raises(SignatureError):
+        verify_manifest(tampered, signature, public_key)
 
 
 def test_missing_static_assets(tmp_path: Path) -> None:

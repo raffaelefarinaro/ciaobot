@@ -56,9 +56,10 @@ first (`verify_manifest`, or `verify_signature` over the same bytes); the
 selector trusts those bytes and must never be the only check.
 
 A manifest is refused when the host is ambiguous: a second `server-host` entry,
-the host filename reused under another kind, or two entries sharing a filename.
-Which bytes a consumer stages must follow from the signed identity, not from
-list order.
+or the host filename reused under another kind. Both `verify_manifest` and the
+selector apply this check. Which bytes a consumer stages must follow from the
+signed identity, not from list order. Entries that do not involve the host keep
+the wheel-only rules unchanged.
 
 ## Build the manifest
 
