@@ -181,9 +181,14 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     one file may appear, and it is the queue. ``queue-locks/`` is skipped — the
     suite pins ``CIAO_QUEUE_LOCK_DIR`` inside the scratch tree, and a lock file
     is not workspace content.
+
+    Keys are ``as_posix()``, never ``str()``: ``str`` spells the separators with
+    backslashes on Windows, so a ``/``-spelled expectation (``vault/Workspace/…``)
+    would match nothing there. This is the same id convention as
+    ``vault_index.Entry.path_key``.
     """
     return {
-        str(path.relative_to(root)): path.read_bytes()
+        path.relative_to(root).as_posix(): path.read_bytes()
         for path in sorted(root.rglob("*"))
         if path.is_file() and "queue-locks" not in path.parts
     }
