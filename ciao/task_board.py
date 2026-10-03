@@ -78,6 +78,7 @@ import re
 import stat
 import tempfile
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -350,6 +351,28 @@ def _coerce_due(value: Any) -> str | None:
     )
 
 
+def _reject_non_roundtrip_controls(value: str, name: str) -> None:
+    """Refuse chars PyYAML would not read back identically.
+
+    Any control or surrogate (Unicode categories Cc/Cs) other than tab,
+    plus ``\\x85``/``\\u2028``/``\\u2029``, is ``invalid_task``: such a
+    title would otherwise be silently altered or leave a malformed file.
+    """
+    for char in value:
+        if char == "\t":
+            continue
+        if char in ("\x85", "\u2028", "\u2029"):
+            raise TaskBoardError(
+                "invalid_task",
+                f"{name} must not contain U+{ord(char):04X}",
+            )
+        if unicodedata.category(char) in ("Cc", "Cs"):
+            raise TaskBoardError(
+                "invalid_task",
+                f"{name} must not contain U+{ord(char):04X}",
+            )
+
+
 def _coerce_optional_id(value: Any, name: str) -> str | None:
     """A nullable linkage/project string: None, or a non-empty string."""
     if value is None:
@@ -359,6 +382,7 @@ def _coerce_optional_id(value: Any, name: str) -> str | None:
             "invalid_task",
             f"{name} must be a string or null, not {value!r}",
         )
+    _reject_non_roundtrip_controls(value, name)
     return value
 
 
@@ -374,6 +398,7 @@ def _coerce_title(value: Any) -> str:
             "invalid_task",
             f"title must be 1-200 characters after trimming (got {len(title)})",
         )
+    _reject_non_roundtrip_controls(title, "title")
     return title
 
 
@@ -447,11 +472,11 @@ def _split_document(raw: bytes) -> _SplitDocument:
     if bom:
         text = text[1:]
     lines = _split_lines(text)
-    if not lines or lines[0][0].strip() != "---":
+    if not lines or lines[0][0].rstrip() != "---":
         raise TaskBoardError("invalid_task", "task file has no opening frontmatter delimiter")
     close_index = -1
     for index in range(1, len(lines)):
-        if lines[index][0].strip() in ("---", "..."):
+        if lines[index][0].rstrip() in ("---", "..."):
             close_index = index
             break
     if close_index == -1:
@@ -505,7 +530,7 @@ def _reject_ambiguous_yaml(frontmatter: str) -> None:
             raise TaskBoardError(
                 "invalid_task", "task frontmatter must not use YAML aliases"
             )
-        if isinstance(event, ScalarEvent) and event.value == "<<":
+        if isinstance(event, ScalarEvent) and event.value == "<<" and event.style is None:
             raise TaskBoardError(
                 "invalid_task", "task frontmatter must not use YAML merge keys"
             )
@@ -583,6 +608,17 @@ def _build_record(data: Mapping[str, Any], expected_id: str) -> TaskRecord:
     """
     if not isinstance(data, dict):
         raise TaskBoardError("invalid_task", "task frontmatter must be a mapping")
+    if "schema" in data:
+        early_schema = data["schema"]
+        if type(early_schema) is not int:
+            raise TaskBoardError(
+                "invalid_task", f"task schema must be an integer, not {early_schema!r}"
+            )
+        if early_schema != SCHEMA_VERSION:
+            raise TaskBoardError(
+                "unsupported_schema",
+                f"task schema {early_schema} is not supported (this store implements {SCHEMA_VERSION})",
+            )
     missing = [key for key in _REQUIRED_FIELDS if key not in data]
     if missing:
         raise TaskBoardError(
@@ -648,7 +684,7 @@ def _parse_document(raw: bytes, expected_id: str) -> tuple[TaskRecord, str]:
     _compose_mapping(frontmatter)
     try:
         loaded: Any = yaml.safe_load(frontmatter)
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, ValueError) as exc:
         raise TaskBoardError("invalid_task", f"task frontmatter does not parse: {exc}") from None
     if loaded is None:
         raise TaskBoardError("invalid_task", "task frontmatter holds no mapping")
@@ -690,7 +726,7 @@ def _render_string(value: str) -> str:
         try:
             if yaml.safe_load(value) == value:
                 return value
-        except yaml.YAMLError:
+        except (yaml.YAMLError, ValueError):
             pass
     return json.dumps(value, ensure_ascii=False)
 
@@ -880,6 +916,11 @@ def patch_task(
                 f"cannot patch {key}: stored in a YAML shape with no plain value span",
             )
         absolute = split.starts[line_index]
+        if start_col == end_col and start_col > 0 and content[start_col - 1] == ":":
+            # An empty value (`due:`) has a zero-width span right after the
+            # colon; splicing the rendering there would glue it to the key
+            # (`due:"..."`). Prefix one space so the patch stays valid YAML.
+            rendered = " " + rendered
         replacements.append((absolute + start_col, absolute + end_col, rendered))
 
     text = split.text
@@ -901,10 +942,13 @@ def patch_task(
         after = split.close_index + 1
         if after >= len(split.lines):
             body_offset = len(split.text)
+            delta = len(text) - len(split.text)
+            prefix = split.newline if split.lines[split.close_index][1] == "" else ""
+            text = text[: body_offset + delta] + prefix + body
         else:
             body_offset = split.starts[after]
-        delta = len(text) - len(split.text)
-        text = text[: body_offset + delta] + body
+            delta = len(text) - len(split.text)
+            text = text[: body_offset + delta] + body
     if split.bom:
         text = "\ufeff" + text
     try:
@@ -1028,6 +1072,31 @@ class TaskBoardStore:
         _check_id(task_id)
         return self._tasks_dir() / f"{task_id}.md"
 
+    def _check_tasks_dir_links(self) -> None:
+        """Refuse a linked ``Workspace`` or ``Tasks`` directory.
+
+        Either link would let a read or write escape the explicit vault
+        root, so any of them is ``unsafe_path``. Filesystem inspection
+        failures are ``read_failed``.
+        """
+        try:
+            if (self._vault_root / "Workspace").is_symlink():
+                raise TaskBoardError(
+                    "unsafe_path",
+                    "workspace directory is a link; refusing to follow it",
+                )
+            if self._tasks_dir().is_symlink():
+                raise TaskBoardError(
+                    "unsafe_path",
+                    "task directory is a link; refusing to follow it",
+                )
+        except TaskBoardError:
+            raise
+        except OSError as exc:
+            raise TaskBoardError(
+                "read_failed", f"could not inspect task directory: {exc}"
+            ) from None
+
     def _read_file_bytes(self, path: Path, task_id: str) -> bytes:
         """Read one task file without following links.
 
@@ -1035,14 +1104,7 @@ class TaskBoardStore:
         reports a missing file as ``not_found``. Link checks run before
         any byte is read.
         """
-        tasks_dir = self._tasks_dir()
-        try:
-            if tasks_dir.is_symlink():
-                raise TaskBoardError(
-                    "unsafe_path", f"task directory {tasks_dir} is a link; refusing to follow it"
-                )
-        except OSError as exc:
-            raise TaskBoardError("read_failed", f"could not inspect task directory: {exc}") from None
+        self._check_tasks_dir_links()
         try:
             if path.is_symlink():
                 raise TaskBoardError(
@@ -1112,6 +1174,7 @@ class TaskBoardStore:
         second board, index or ranking file is read or written.
         """
         tasks_dir = self._tasks_dir()
+        self._check_tasks_dir_links()
         try:
             exists = tasks_dir.exists()
         except OSError as exc:
@@ -1121,10 +1184,6 @@ class TaskBoardStore:
         if not exists:
             return TaskListResult(tasks=(), invalid=())
         try:
-            if tasks_dir.is_symlink():
-                raise TaskBoardError(
-                    "unsafe_path", "task directory is a link; refusing to follow it"
-                )
             if not tasks_dir.is_dir():
                 raise TaskBoardError("read_failed", "task directory is not a directory")
         except TaskBoardError:
@@ -1149,6 +1208,9 @@ class TaskBoardStore:
 
         for entry in entries:
             name = entry.name
+            if re.fullmatch(r"\.[0-9a-f]{32}\.md\..+\.tmp", name):
+                # This store's own staged write; never a task or an error.
+                continue
             try:
                 if entry.is_symlink():
                     refuse(name, "unsafe_path", f"{name} is a link; refusing to follow it")
@@ -1271,12 +1333,8 @@ class TaskBoardStore:
         now = self._now()
         with _workspace_lock(self._workspace, self._runtime_dir):
             tasks_dir = self._tasks_dir()
+            self._check_tasks_dir_links()
             try:
-                if tasks_dir.is_symlink():
-                    raise TaskBoardError(
-                        "unsafe_path",
-                        "task directory is a link; refusing to write through it",
-                    )
                 tasks_dir.mkdir(parents=True, exist_ok=True)
             except TaskBoardError:
                 raise
@@ -1304,8 +1362,19 @@ class TaskBoardStore:
                     attempt_id=None,
                 )
                 raw = render_new_task(record, body)
+                parsed = parse_task(raw, expected_id=task_id)
+                if (
+                    parsed.record.title != clean_title
+                    or parsed.record.project_id != clean_project
+                    or parsed.record.due != clean_due
+                    or parsed.body != body
+                ):
+                    raise TaskBoardError(
+                        "invalid_task",
+                        "rendered task did not read back the requested values",
+                    )
                 self._atomic_write(target, raw, existing=None)
-                return parse_task(raw, expected_id=task_id)
+                return parsed
             raise TaskBoardError("read_failed", "could not mint a fresh task id")
 
     def update(
@@ -1363,6 +1432,14 @@ class TaskBoardStore:
                 )
             document = parse_task(current_raw, expected_id=task_id)
             effective = self._plan_changes(document, dict(changes), actor)
+            body_unchanged = body is None or body == document.body
+            if body_unchanged and all(
+                _change_is_noop(key, _normalize_change(key, value), document.record)
+                for key, value in effective.items()
+            ):
+                # No effective change other than a clock bump: return the
+                # unchanged document without rewriting or advancing.
+                return document
             effective["updated_at"] = self._now()
             new_raw = patch_task(document, effective, body=body)
             if new_raw == current_raw:

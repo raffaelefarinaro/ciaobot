@@ -621,3 +621,132 @@ def test_patch_rejects_uneditable_linkage_fields(tmp_path: Path) -> None:
         with pytest.raises(TaskBoardError) as excinfo:
             patch_task(created, {field: "x"})
         assert excinfo.value.code == "invalid_task"
+
+
+# ── Review round 1 fixes ─────────────────────────────────────────────
+
+
+def test_bare_invalid_date_is_invalid_not_a_crash(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    task_id = "a" * 32
+    lines = valid_frontmatter(task_id)
+    lines[5] = "due: 2026-13-45"
+    hand_file(vault, task_id, lines)
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.get(task_id)
+    assert excinfo.value.code == "invalid_task"
+    result = store.list()
+    assert result.tasks == ()
+    assert len(result.invalid) == 1
+    assert result.invalid[0].relative_path == f"Workspace/Tasks/{task_id}.md"
+    assert result.invalid[0].code == "invalid_task"
+
+
+def test_control_char_title_is_refused_without_writing(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.create(title="a\x7fb")
+    assert excinfo.value.code == "invalid_task"
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.create(title="ok", project_id="a\x7f")
+    assert excinfo.value.code == "invalid_task"
+    tasks = vault / "Workspace" / "Tasks"
+    assert not tasks.exists() or list(tasks.iterdir()) == []
+
+
+def test_quoted_merge_key_title_is_accepted(tmp_path: Path) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    created = store.create(title="<<")
+    assert created.record.title == "<<"
+    assert store.get(created.record.id).record.title == "<<"
+    assert store.list().invalid == ()
+
+
+def test_symlinked_workspace_is_refused(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(outside, vault / "Workspace")
+    except OSError:
+        pytest.skip("this platform could not create a symlink for the test")
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.create(title="escape")
+    assert excinfo.value.code == "unsafe_path"
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.list()
+    assert excinfo.value.code == "unsafe_path"
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.get("a" * 32)
+    assert excinfo.value.code == "unsafe_path"
+    assert list(outside.iterdir()) == []
+
+
+def test_atomic_temp_files_are_invisible_to_list(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    created = store.create(title="real")
+    tasks_dir(vault).joinpath(f".{created.record.id}.md.abc123.tmp").write_bytes(b"junk")
+    result = store.list()
+    assert [document.record.id for document in result.tasks] == [created.record.id]
+    assert result.invalid == ()
+
+
+def test_patch_empty_due_value(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    task_id = "b" * 32
+    lines = valid_frontmatter(task_id)
+    lines[5] = "due:"
+    hand_file(vault, task_id, lines)
+    document = store.get(task_id)
+    assert document.record.due is None
+    before = task_path(vault, task_id).read_bytes().split(b"\n")
+    updated = store.update(
+        task_id,
+        expected_revision=document.revision,
+        changes={"due": "2026-10-05"},
+        actor="user",
+    )
+    assert updated.record.due == "2026-10-05"
+    after = task_path(vault, task_id).read_bytes().split(b"\n")
+    assert len(before) == len(after)
+    changed = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
+    assert len(changed) == 1
+    assert b"2026-10-05" in after[changed[0]]
+    assert after[changed[0]].startswith(b"due:")
+
+
+def test_indented_delimiter_inside_block_scalar_survives(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    task_id = "c" * 32
+    hand_file(
+        vault,
+        task_id,
+        valid_frontmatter(
+            task_id,
+            title="Old",
+            extra=["notes: |", "  keep this", "  ---", "  and this"],
+        ),
+    )
+    document = store.get(task_id)
+    assert document.record.title == "Old"
+    before = task_path(vault, task_id).read_bytes().split(b"\n")
+    updated = store.update(
+        task_id,
+        expected_revision=document.revision,
+        changes={"title": "New"},
+        actor="user",
+    )
+    assert updated.record.title == "New"
+    after = task_path(vault, task_id).read_bytes().split(b"\n")
+    assert b"  ---" in task_path(vault, task_id).read_bytes()
+    assert len(before) == len(after)
+    changed = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
+    assert len(changed) == 1
+    assert b"title:" in after[changed[0]]
