@@ -1,7 +1,7 @@
 # Ciaobot Server Host experiment
 
 Isolated, developer-operated macOS spike. It exists to answer one question the
-earlier permission-identity probe (#993's predecessor) did not:
+earlier probe in `experiments/macos-permission-identity` did not:
 
 > When a native **Ciaobot Server** host spawns the Python engine as a child, are
 > that child's Accessibility and Automation requests attributed to the
@@ -50,8 +50,10 @@ macOS-only subprocesses are gated behind the platform check.
 
 The output directory must not exist. The builder refuses an existing file,
 directory, **or symlink** and never follows or replaces it. It writes the app
-and the child sidecar, then prints the exact paths and the host executable's
-SHA-256. It never launches the app.
+and the child sidecar, then prints the exact paths, the host executable's
+SHA-256, and the signed bundle's CDHash. The CDHash — not the executable hash —
+is the signature evidence for the sidecar-update check (`codesign -dv
+--verbose=4 <app>`). It never launches the app.
 
 ```sh
 python3 experiments/macos-server-host/build.py --output "$HOME/Ciaobot Server Host Experiment"
@@ -70,25 +72,34 @@ python3 experiments/macos-server-host/build.py \
 
 Use Launch Services (`open`), not the inner executable from Terminal, so macOS
 attributes the request to the app identity. Each invocation writes one JSON
-receipt at the explicit absolute `--output` and exits.
+receipt at the explicit absolute `--output` and exits. `open -W` discards the
+app's exit code and stderr, so pass `--stdout`/`--stderr` too: **no receipt means
+a malformed invocation or a write failure — check `host.err`**. Set `DIR` to the
+same output directory the app was built in.
+
+```sh
+DIR="$HOME/Ciaobot Server Host Experiment"
+APP="$DIR/Ciaobot Server Host (Experiment).app"
+```
 
 For the child modes, pass an **absolute** Python interpreter with `--python`.
 This is a developer spike, not an exposed API; the absolute-path requirement is
-deliberate.
+deliberate. Prefer an interpreter whose pid is stable (a venv or Homebrew
+`python3`); a `/usr/bin/python3`-style xcrun shim may spawn rather than exec, and
+a `parent_mismatch` receipt is **not** evidence.
 
 ### 1. Native baseline (no prompt, read-only)
 
 ```sh
-APP="$HOME/Ciaobot Server Host Experiment/Ciaobot Server Host (Experiment).app"
 open -W -n "$APP" --args native \
-  --output "$HOME/Ciaobot Server Host Experiment/native.json"
+  --output "$DIR/native.json" --stdout "$DIR/host.out" --stderr "$DIR/host.err"
 ```
 
 ### 2. Request Accessibility (prompts once, five-second lifetime)
 
 ```sh
 open -W -n "$APP" --args request \
-  --output "$HOME/Ciaobot Server Host Experiment/request.json"
+  --output "$DIR/request.json" --stdout "$DIR/host.out" --stderr "$DIR/host.err"
 ```
 
 macOS shows the prompt asynchronously. In System Settings, verify **both the
@@ -100,33 +111,43 @@ TCC database; remove stale entries by hand in System Settings only.
 ### 3. Python Accessibility child
 
 ```sh
-PY=/usr/bin/python3   # or an absolute venv interpreter
+PY="$HOME/.venvs/ciaobot/bin/python"   # an absolute, stable-pid interpreter
 open -W -n "$APP" --args python --python "$PY" \
-  --output "$HOME/Ciaobot Server Host Experiment/python.json"
+  --output "$DIR/python.json" --stdout "$DIR/host.out" --stderr "$DIR/host.err"
 ```
 
-### 4. Python → osascript (System Events Automation) child
+### 4. Python → osascript (System Events) child
+
+Reading a process role needs **both** the Automation grant (System Events) and
+Accessibility for the responsible process; this mode exercises both.
 
 ```sh
 open -W -n "$APP" --args osascript --python "$PY" \
-  --output "$HOME/Ciaobot Server Host Experiment/osascript.json"
+  --output "$DIR/osascript.json" --stdout "$DIR/host.out" --stderr "$DIR/host.err"
 ```
 
 The host stays alive while the child runs, bounds and drains the child's stdout
 and stderr without pipe deadlock, enforces a finite timeout, terminates and reaps
 a stalled child, and classifies the transport outcome as `ok`, `launch`, `exit`,
-`timeout`, or `parse`. A permission denial is a **valid negative experiment
-receipt**, not a transport failure; the receipt preserves the denied result and
-never reports success on child exit alone.
+`timeout`, `oversized`, `parse`, or `parent_mismatch`. A permission denial is a
+**valid negative experiment receipt**, not a transport failure; the receipt
+preserves the denied result and never reports success on child exit alone. Only
+`ok` implies the parent proof held.
 
 ## Receipts
 
 Every receipt includes the host PID, bundle ID/name, actual bundle path, the
-host's AX trust state, the mode, and a timestamp. Child-mode receipts add the
-child script path, Python path, child PID, the child's self-reported PID and
-PPID, whether the reported parent matches the host, the exit status, the timeout
-flag, bounded stdout/stderr, the parsed child receipt, and `transport_status`.
-Receipts are written atomically.
+host's own AX trust state (`host_accessibility_trusted`, which is **not** proof
+that the child had access), the mode, and a timestamp. Child-mode receipts add
+the child script path, Python path, child PID, the child's self-reported PID and
+PPID, whether the reported parent matches the host (`child_parent_matches_host`),
+whether the self-reported pid matches the spawned pid (`child_pid_matches_spawn`),
+the exit status, the termination reason (`exit` / `uncaught_signal`), the timeout
+flag, whether the drains completed (`child_output_drained`), bounded
+stdout/stderr with byte counts and truncation flags
+(`child_stdout_bytes`/`child_stderr_bytes`,
+`child_stdout_truncated`/`child_stderr_truncated`), the parsed child receipt, and
+`transport_status`. Receipts are written atomically.
 
 The child's own receipt records `mode`, `pid`, `ppid`, `platform`, and then:
 
@@ -135,22 +156,25 @@ The child's own receipt records `mode`, `pid`, `ppid`, `platform`, and then:
   `no_focused_element` / `error`). A missing focused element is distinct from a
   missing grant.
 - `osascript`: the exact `osascript_argv`, `osascript_returncode`,
-  `osascript_timed_out`, bounded stdout/stderr, and `osascript_classification`
-  (`ok` / `automation_denied` / `timeout` / `exit`). Automation denial `-1743`
-  is separated from Accessibility denial. No public API can automatically grant
-  either; only a human can approve in System Settings.
+  `osascript_timed_out`, `osascript_error_code`, `osascript_stdout_truncated` /
+  `osascript_stderr_truncated`, bounded stdout/stderr, and
+  `osascript_classification` (`ok` / `automation_denied` /
+  `accessibility_denied` / `timeout` / `exit`). Automation denial (`-1743`) is
+  separated from Accessibility denial (`-1719` / `-25211`), matched on the exact
+  trailing code so `-17430` is not mistaken for `-1743`. No public API can
+  automatically grant either; only a human can approve in System Settings.
 
 ## Evidence matrix (do not infer untested rows)
 
 | Case | Procedure | Required evidence |
 |---|---|---|
-| Native baseline | `native` before any grant | `accessibility_trusted` recorded; honest `focused_element_result` (a denial here is a valid datum) |
-| Python AX | `python` with the intended interpreter | Child PID/PPID match the host; raw AX codes; classification |
-| Python → osascript | `osascript` with the intended interpreter | Child PID/PPID match; `automation_denied` vs `ok` distinguished from Accessibility |
+| Native baseline | `native` before any grant | `host_accessibility_trusted` recorded; honest `focused_element_result` (a denial here is a valid datum) |
+| Python AX | `python` with the intended interpreter | Child PID/PPID match the host; raw AX codes; `ax_classification` |
+| Python → osascript | `osascript` with the intended interpreter | Child PID/PPID match; `automation_denied` vs `accessibility_denied` vs `ok` separated |
 | Relaunch | Repeat `native`/`python` through `open` after quits | Result retained without rebuild |
-| Mutable sidecar update | Copy a revision fixture to `<output>/child/child_probe.py` with the same read-only operations; repeat the child modes | Host executable SHA-256 and strict signature **unchanged**; only the sidecar differs |
+| Mutable sidecar update | Copy a revision fixture to `<output>/child/child_probe.py` with the same read-only operations; repeat the child modes | Host executable SHA-256 **and** signed bundle CDHash unchanged; only the sidecar differs |
 | Interpreter replacement | Re-run a child mode with a different absolute `--python` at a disposable path, only if needed to disambiguate an existing Python grant | Whether attribution follows the host identity or a pre-existing interpreter grant |
-| Host rebuild (negative case) | Build revision 2 to a new directory; replace only this experiment app at a stable path; repeat | Record whether reapproval is needed, plus hash/signature changes |
+| Host rebuild (negative case) | Build revision 2 to a new directory; replace only this experiment app at a stable path; repeat | Record whether reapproval is needed, plus SHA-256/CDHash changes |
 
 ### Reading the result honestly
 

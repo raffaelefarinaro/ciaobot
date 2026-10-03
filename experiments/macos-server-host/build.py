@@ -97,6 +97,25 @@ def compile_command(source: Path, executable: Path) -> list[str]:
     return ["xcrun", "swiftc", str(source), "-o", str(executable)]
 
 
+def codesign_cdhash(app: Path, runner: Callable[..., Any] = subprocess.run) -> str | None:
+    """The signed bundle's CDHash, or None if `codesign -dv` did not report one.
+
+    The executable SHA-256 alone is not signature evidence; this is what
+    `codesign -dv --verbose=4` prints as ``CDHash=`` (on stderr in current
+    macOS). The sidecar-update row in the README asks for it.
+    """
+    completed = runner(
+        ["codesign", "-dv", "--verbose=4", str(app)],
+        capture_output=True,
+        text=True,
+    )
+    combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    for line in combined.splitlines():
+        if line.startswith("CDHash="):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
 def _refuse_existing(output: Path) -> None:
     # Called before Path.resolve(), which would dereference a symlink and could
     # then create the target. lexists() also catches a dangling symlink.
@@ -144,6 +163,7 @@ def build(
         runner(compile_command(HOST_SOURCE, paths["executable"]), check=True)
         runner(["codesign", "--force", "--sign", "-", str(paths["app"])], check=True)
         runner(["codesign", "--verify", "--strict", str(paths["app"])], check=True)
+        cdhash = codesign_cdhash(paths["app"], runner)
 
         # The host resolves only <app-parent>/child/child_probe.py; updating this
         # copy cannot change the host executable or its signature.
@@ -156,7 +176,7 @@ def build(
         raise
 
     digest = hashlib.sha256(paths["executable"].read_bytes()).hexdigest()
-    return {"paths": paths, "digest": digest, "revision": revision}
+    return {"paths": paths, "digest": digest, "revision": revision, "cdhash": cdhash}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -181,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"App: {paths['app']}")
     print(f"Child sidecar (outside signed bundle): {paths['sidecar_script']}")
     print(f"Host executable SHA256: {result['digest']}")
+    print(f"Signed bundle CDHash: {result['cdhash']}")
     print("Built only. No launch agents, engine changes, or permission requests made.")
     return 0
 

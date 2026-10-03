@@ -16,9 +16,14 @@
 // The Python child lives at the FIXED sidecar path <app-parent>/child/child_probe.py,
 // deliberately outside the signed bundle, so updating the mutable child script
 // cannot change the host executable or its signature.
+//
+// This file's receipt validation is a hand-maintained Swift mirror of
+// child_probe.REQUIRED_FIELDS. The child also self-checks with
+// parse_child_receipt before emitting, so both sides enforce the same contract.
 
 import AppKit
 import ApplicationServices
+import CoreFoundation
 import Darwin
 import Foundation
 
@@ -44,10 +49,13 @@ func usage() -> Never {
 }
 
 /// Bounded, lock-protected capture of a child pipe. Keeps draining after the cap
-/// so the writer can never deadlock on a full pipe, but stops growing the buffer.
+/// so the writer can never deadlock on a full pipe, but records the total byte
+/// count and whether anything past the cap was dropped, so a truncation is never
+/// silently mistaken for a parse failure.
 final class OutputBuffer {
     private let lock = NSLock()
     private var data = Data()
+    private var total = 0
     private let limit: Int
 
     init(limit: Int) {
@@ -57,6 +65,7 @@ final class OutputBuffer {
     func append(_ chunk: Data) {
         lock.lock()
         defer { lock.unlock() }
+        total += chunk.count
         let room = limit - data.count
         if room > 0 {
             data.append(chunk.prefix(room))
@@ -66,12 +75,28 @@ final class OutputBuffer {
     func text() -> String {
         lock.lock()
         defer { lock.unlock() }
-        return String(data: data, encoding: .utf8) ?? ""
+        // String(decoding:as:) replaces invalid bytes (a cut at the cap or a
+        // non-UTF-8 stream) with U+FFFD instead of erasing the evidence the way
+        // String(data:encoding:.utf8) would by returning nil.
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    func totalBytes() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return total
+    }
+
+    func truncated() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return total > limit
     }
 }
 
-/// Parse the fixed invocation. Rejects unknown/repeated arguments and invalid
-/// mode/path combinations before any probe or filesystem work happens.
+/// Parse the fixed invocation. Rejects unknown/repeated arguments, invalid
+/// mode/path combinations, and an output path inside the signed bundle, before
+/// any probe or filesystem work happens.
 func parseInvocation(_ arguments: [String]) -> (mode: String, output: String, python: String?) {
     guard arguments.count >= 4 else { usage() }
     let mode = arguments[1]
@@ -96,12 +121,29 @@ func parseInvocation(_ arguments: [String]) -> (mode: String, output: String, py
         index += 2
     }
     guard let resolvedOutput = output, resolvedOutput.hasPrefix("/") else { usage() }
+    // A receipt written inside the signed bundle would break its strict signature
+    // on the next verify, so refuse it here.
+    let bundlePrefix = Bundle.main.bundleURL.path + "/"
+    if resolvedOutput == Bundle.main.bundleURL.path
+        || resolvedOutput.hasPrefix(bundlePrefix) {
+        fputs("CiaobotServerHost: refusing --output inside the signed bundle\n", stderr)
+        exit(2)
+    }
     if CHILD_MODES.contains(mode) {
         guard let resolvedPython = python, resolvedPython.hasPrefix("/") else { usage() }
         return (mode, resolvedOutput, resolvedPython)
     }
     guard python == nil else { usage() }
     return (mode, resolvedOutput, nil)
+}
+
+/// Integral, non-boolean NSNumber -> Int. `true` and `4242.0` are rejected the
+/// same way the Python validator rejects them, so the two contracts cannot drift.
+func integralNumber(_ value: Any) -> Int? {
+    guard let number = value as? NSNumber else { return nil }
+    if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+    if CFNumberIsFloatType(number) { return nil }
+    return number.intValue
 }
 
 func baseReceipt(mode: String) -> [String: Any] {
@@ -112,8 +154,10 @@ func baseReceipt(mode: String) -> [String: Any] {
         "bundle_id": bundle.bundleIdentifier ?? "missing",
         "display_name": (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String) ?? "missing",
         "bundle_path": bundle.bundleURL.path,
-        // The host's own trust state, never prompted here (request mode owns the prompt).
-        "accessibility_trusted": AXIsProcessTrusted(),
+        // The HOST's own trust state, never prompted here (request mode owns the
+        // prompt). Named apart from the child's `accessibility_trusted` so a true
+        // host value is never read as proof that the child had access.
+        "host_accessibility_trusted": AXIsProcessTrusted(),
         "timestamp": ISO8601DateFormatter().string(from: Date()),
     ]
 }
@@ -242,6 +286,11 @@ func runChild(mode: String, python: String, output: String) -> Int32 {
         Thread.sleep(forTimeInterval: 0.05)
     }
     if process.isRunning {
+        // This reaches only the direct child. A grandchild (e.g. an in-flight
+        // osascript) is not reaped here; its own 15 s timeout is shorter than the
+        // host's 30 s, and close_fds keeps the host's pipes from being held open,
+        // so the orphan is bounded. Process-group handling is deliberately out
+        // of scope for this spike.
         process.terminate()
         let graceDeadline = Date().addingTimeInterval(CHILD_TERMINATE_GRACE_SECONDS)
         while process.isRunning && Date() < graceDeadline {
@@ -250,35 +299,57 @@ func runChild(mode: String, python: String, output: String) -> Int32 {
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
     }
     process.waitUntilExit()
-    _ = drainGroup.wait(timeout: .now() + 5)
+    let drained = drainGroup.wait(timeout: .now() + 5) == .success
 
     let stdoutText = stdoutBuffer.text()
     let stderrText = stderrBuffer.text()
+    let stdoutTruncated = stdoutBuffer.truncated()
+    let terminationReason = process.terminationReason == .uncaughtSignal ? "uncaught_signal" : "exit"
+
     receipt["child_exit_status"] = Int(process.terminationStatus)
+    receipt["child_termination_reason"] = terminationReason
     receipt["child_timed_out"] = timedOut
+    receipt["child_output_drained"] = drained
     receipt["child_stdout"] = stdoutText
     receipt["child_stderr"] = stderrText
+    receipt["child_stdout_bytes"] = stdoutBuffer.totalBytes()
+    receipt["child_stderr_bytes"] = stderrBuffer.totalBytes()
+    receipt["child_stdout_truncated"] = stdoutTruncated
+    receipt["child_stderr_truncated"] = stderrBuffer.truncated()
 
     var childReceipt: [String: Any]? = nil
     var transportStatus = "ok"
     if timedOut {
         transportStatus = "timeout"
+    } else if stdoutTruncated {
+        // Too large to be a valid child receipt, so it cannot be trusted anyway.
+        transportStatus = "oversized"
     } else if process.terminationStatus != 0 {
         transportStatus = "exit"
     } else if let data = stdoutText.data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: data),
               let dict = parsed as? [String: Any],
-              let childPid = dict["pid"] as? Int,
-              let childPpid = dict["ppid"] as? Int,
+              let childPid = integralNumber(dict["pid"] as Any),
+              let childPpid = integralNumber(dict["ppid"] as Any),
               let childMode = dict["mode"] as? String,
-              childMode == mode {
+              let childPlatform = dict["platform"] as? String,
+              childMode == mode,
+              !childPlatform.isEmpty,
+              childPid > 0,
+              childPpid >= 0 {
         childReceipt = dict
         receipt["child_self_pid"] = childPid
         receipt["child_reported_parent_pid"] = childPpid
         // Parent proof: the child must report the host as its parent, and its
-        // self-reported pid must match the pid the host spawned.
-        receipt["child_parent_matches_host"] = (childPpid == Int(getpid()))
-        receipt["child_pid_matches_spawn"] = (childPid == Int(process.processIdentifier))
+        // self-reported pid must match the pid the host spawned. A mismatch means
+        // the probe ran in a grandchild whose responsible process is unproven.
+        let parentMatches = (childPpid == Int(getpid()))
+        let pidMatches = (childPid == Int(process.processIdentifier))
+        receipt["child_parent_matches_host"] = parentMatches
+        receipt["child_pid_matches_spawn"] = pidMatches
+        if !parentMatches || !pidMatches {
+            transportStatus = "parent_mismatch"
+        }
     } else {
         transportStatus = "parse"
     }

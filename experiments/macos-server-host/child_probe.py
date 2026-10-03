@@ -19,8 +19,10 @@ Modes
 Import-safe on non-macOS: no framework is loaded and no subprocess runs at
 import time.
 
-The host validates the same receipt fields; ``parse_child_receipt`` exposes that
-contract so offline tests can exercise it without a Mac.
+``parse_child_receipt`` is the reference contract and the child's own self-check:
+``main`` validates the assembled receipt before emitting it. The host enforces a
+hand-maintained Swift mirror of the same fields (``HostProbe.swift``), because it
+must validate the bytes it receives rather than trust the child.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -36,10 +39,12 @@ from typing import Any
 
 MODES = ("python", "osascript")
 
-# A child receipt is small by design; larger evidence is rejected rather than
-# truncated silently.
+# A child receipt is small by design; oversized evidence is rejected rather than
+# truncated silently. This is the size of the whole child receipt.
 MAX_RECEIPT_BYTES = 65536
-MAX_OUTPUT_BYTES = 65536
+# The embedded osascript streams are capped well below the host's 64 KiB stdout
+# cap, so the child receipt can never overflow the host and be misread as parse.
+OSASCRIPT_OUTPUT_BYTES = 4096
 
 OSASCRIPT_BIN = "/usr/bin/osascript"
 OSASCRIPT_TIMEOUT_SECONDS = 15.0
@@ -52,6 +57,10 @@ OSASCRIPT_SCRIPT = (
 
 # macOS Automation denial: "Not authorized to send Apple events to System Events."
 AUTOMATION_DENIED_CODE = -1743
+
+# Accessibility denials surfaced through osascript/System Events UI scripting:
+# "… is not allowed assistive access." (-1719) and the AX "API disabled" code.
+ACCESSIBILITY_DENIED_CODES = (-1719, -25211)
 
 # Accessibility API result codes used by the classifier.
 AX_ERROR_API_DISABLED = -25211
@@ -151,24 +160,55 @@ def classify_python_ax(
 
 
 def classify_osascript(returncode: int | None, timed_out: bool, stderr: str) -> str:
-    """Classify an osascript probe: timeout, automation denial, exit, or ok."""
+    """Classify an osascript probe: timeout, a known denial, exit, or ok.
+
+    ``automation_denied`` is the Automation grant (`-1743`). Reading a process
+    role also needs Accessibility for the responsible process, which surfaces as
+    ``-1719`` / ``-25211`` and is classified separately as
+    ``accessibility_denied``. The trailing parenthesised code is matched exactly
+    so ``-17430`` cannot be mistaken for ``-1743``.
+    """
     if timed_out:
         return "timeout"
     if returncode == 0:
         return "ok"
-    if str(AUTOMATION_DENIED_CODE) in stderr:
+    code = _parse_osascript_error_code(stderr)
+    if code == AUTOMATION_DENIED_CODE:
         return "automation_denied"
+    if code in ACCESSIBILITY_DENIED_CODES:
+        return "accessibility_denied"
     return "exit"
 
 
-def _truncate(data: bytes) -> str:
-    return data[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
+def _parse_osascript_error_code(stderr: str) -> int | None:
+    """The trailing ``(-NNNN)`` code osascript prints, or None."""
+    match = re.search(r"\((-?\d+)\)\s*$", stderr.strip())
+    return int(match.group(1)) if match else None
+
+
+def _truncate(data: bytes) -> tuple[str, bool]:
+    """Decode at most ``OSASCRIPT_OUTPUT_BYTES`` and report whether it was cut.
+
+    Truncation is on byte length before decoding, and invalid bytes are replaced
+    rather than dropped.
+    """
+    truncated = len(data) > OSASCRIPT_OUTPUT_BYTES
+    return data[:OSASCRIPT_OUTPUT_BYTES].decode("utf-8", errors="replace"), truncated
 
 
 def _load_ax_frameworks() -> tuple[Any, Any, Any]:
     """Load CoreFoundation and ApplicationServices with explicit ctypes types."""
     import ctypes
-    from ctypes import POINTER, c_char_p, c_int32, c_size_t, c_uint8, c_uint32, c_void_p
+    from ctypes import (
+        POINTER,
+        c_char_p,
+        c_int32,
+        c_long,
+        c_uint8,
+        c_uint32,
+        c_ulong,
+        c_void_p,
+    )
 
     core = ctypes.CDLL(
         "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
@@ -181,8 +221,13 @@ def _load_ax_frameworks() -> tuple[Any, Any, Any]:
 
     core.CFStringCreateWithCString.argtypes = [c_void_p, c_char_p, c_uint32]
     core.CFStringCreateWithCString.restype = c_void_p
-    core.CFStringGetCString.argtypes = [c_void_p, c_char_p, c_size_t, c_uint32]
+    # CFIndex is signed; a size_t declaration would misread the return on error.
+    core.CFStringGetCString.argtypes = [c_void_p, c_char_p, c_long, c_uint32]
     core.CFStringGetCString.restype = c_uint8
+    core.CFGetTypeID.argtypes = [c_void_p]
+    core.CFGetTypeID.restype = c_ulong
+    core.CFStringGetTypeID.argtypes = []
+    core.CFStringGetTypeID.restype = c_ulong
     core.CFRelease.argtypes = [c_void_p]
     core.CFRelease.restype = None
 
@@ -226,6 +271,7 @@ def run_python_ax() -> dict[str, Any]:
         if not system_wide:
             outcome["focused_element_result"] = None
             outcome["error"] = "AXUIElementCreateSystemWide returned null"
+            outcome["ax_classification"] = "error"
             return outcome
         owned_refs.append(system_wide)
         focused = c_void_p()
@@ -247,11 +293,20 @@ def run_python_ax() -> dict[str, Any]:
                 )
             )
             outcome["role_result"] = role_result
-            if role_result == 0 and role.value:
+            # The role must actually be a CFString; CFStringGetCString on another
+            # CFType is undefined.
+            if (
+                role_result == 0
+                and role.value
+                and core.CFGetTypeID(role) == core.CFStringGetTypeID()
+            ):
                 owned_refs.append(role)
                 buffer = ctypes.create_string_buffer(256)
                 if core.CFStringGetCString(
-                    role, ctypes.cast(buffer, ctypes.c_char_p), len(buffer), core_foundation_utf8
+                    role,
+                    ctypes.cast(buffer, ctypes.c_char_p),
+                    len(buffer),
+                    core_foundation_utf8,
                 ):
                     outcome["focused_role"] = buffer.value.decode(
                         "utf-8", errors="replace"
@@ -259,8 +314,11 @@ def run_python_ax() -> dict[str, Any]:
     finally:
         for ref in owned_refs:
             core.CFRelease(ref)
-        core.CFRelease(focused_attr)
-        core.CFRelease(role_attr)
+        # CFStringCreateWithCString can return NULL; CFRelease(NULL) would crash.
+        if focused_attr:
+            core.CFRelease(focused_attr)
+        if role_attr:
+            core.CFRelease(role_attr)
 
     outcome["ax_classification"] = classify_python_ax(
         trusted, focused_result, focused_present
@@ -282,21 +340,28 @@ def run_osascript() -> dict[str, Any]:
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        stderr = _truncate(exc.stderr or b"")
+        stdout, stdout_truncated = _truncate(exc.stdout or b"")
+        stderr, stderr_truncated = _truncate(exc.stderr or b"")
         outcome["osascript_timed_out"] = True
         outcome["osascript_returncode"] = None
-        outcome["osascript_stdout"] = _truncate(exc.stdout or b"")
+        outcome["osascript_stdout"] = stdout
         outcome["osascript_stderr"] = stderr
+        outcome["osascript_stdout_truncated"] = stdout_truncated
+        outcome["osascript_stderr_truncated"] = stderr_truncated
+        outcome["osascript_error_code"] = _parse_osascript_error_code(stderr)
         outcome["osascript_classification"] = classify_osascript(None, True, stderr)
         return outcome
 
-    stdout = _truncate(completed.stdout)
-    stderr = _truncate(completed.stderr)
+    stdout, stdout_truncated = _truncate(completed.stdout)
+    stderr, stderr_truncated = _truncate(completed.stderr)
     classification = classify_osascript(completed.returncode, False, stderr)
     outcome["osascript_timed_out"] = False
     outcome["osascript_returncode"] = completed.returncode
     outcome["osascript_stdout"] = stdout
     outcome["osascript_stderr"] = stderr
+    outcome["osascript_stdout_truncated"] = stdout_truncated
+    outcome["osascript_stderr_truncated"] = stderr_truncated
+    outcome["osascript_error_code"] = _parse_osascript_error_code(stderr)
     outcome["osascript_classification"] = classification
     if classification == "ok":
         outcome["frontmost_role"] = stdout.strip()
@@ -327,9 +392,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("mode", choices=MODES)
     args = parser.parse_args(argv)
     receipt = build_receipt(args.mode)
+    try:
+        parse_child_receipt(receipt)
+    except ChildReceiptError as exc:
+        # Never emit a receipt that breaks the contract both sides enforce.
+        fputs_error(f"child_probe: refusing to emit an invalid receipt: {exc}")
+        return 1
     json.dump(receipt, sys.stdout, sort_keys=True)
     sys.stdout.write("\n")
     return 0
+
+
+def fputs_error(message: str) -> None:
+    sys.stderr.write(message + "\n")
 
 
 if __name__ == "__main__":
