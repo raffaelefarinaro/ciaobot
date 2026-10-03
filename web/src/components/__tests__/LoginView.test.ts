@@ -547,4 +547,34 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.text()).toContain('restarting')
   })
 
+  it('explains memory during setup without fetching categories or history', async () => {
+    // The tour teaches the concept — preferences, people and projects, and the
+    // categories they are filed under — before anyone has a session. The one
+    // thing it must not do is go and look: this screen runs before login, so
+    // every workspace fact here is static copy.
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {},
+    })
+
+    const wrapper = await mountLoginView()
+    const memoryTile = wrapper.findAll('.tour-list li')[4]!
+
+    expect(memoryTile.text()).toContain('Archive into a second brain.')
+    expect(memoryTile.text()).toContain('preferences')
+    expect(memoryTile.text()).toContain('people and projects')
+    expect(memoryTile.text()).toContain('sorted by category')
+    // Customization is offered after setup, not performed from here.
+    expect(memoryTile.text()).toContain('change those categories any time after setup')
+    // No vault of this install's has been read to write it.
+    const paths = mockApiGet.mock.calls.map(([path]) => path as string)
+    expect(paths.some((p) => p.includes('entity-types') || p.includes('memory'))).toBe(false)
+    expect(paths.some((p) => p.includes('/api/chats') || p.includes('history'))).toBe(false)
+    expect(mockApiPost).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+  })
+
 })

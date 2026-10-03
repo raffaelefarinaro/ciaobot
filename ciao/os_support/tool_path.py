@@ -63,6 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import threading
 from pathlib import Path
 from typing import Iterable
@@ -126,6 +127,45 @@ def _join_path_sources(values: Iterable[str]) -> str:
                 seen.add(key)
                 entries.append(entry)
     return ";".join(entries)
+
+
+def engine_bin_dir() -> str:
+    """The directory holding the ``ciao`` entry point of the running engine.
+
+    ``sysconfig.get_path("scripts")``, deliberately not the resolved interpreter
+    path and not the interpreter's own directory. On a venv the interpreter's
+    directory *is* the scripts directory, but a **global** install keeps them
+    apart: ``pip`` writes the console script to a sibling ``Scripts`` on Windows
+    (``...\\Python\\3.12\\x64\\python.exe`` vs ``...\\Python\\3.12\\Scripts\\ciao.exe``),
+    so ``Path(sys.executable).parent`` holds no ``ciao`` there and the
+    engine-first PATH this feeds (:func:`prepend_engine_path`) would be inert.
+    ``get_path`` is venv-aware and does not resolve symlinks, so on POSIX both a
+    venv and a global install still yield the interpreter's own ``bin/``, never
+    the venv's resolved base interpreter — where no ``ciao`` entry point lives.
+    """
+    return str(Path(sysconfig.get_path("scripts")))
+
+
+def prepend_engine_path(path: str | None = None) -> str:
+    """``path`` (or the process PATH) with :func:`engine_bin_dir` moved to the front.
+
+    The user's other directories stay in their original order behind the engine's
+    bin dir, and the engine dir is not duplicated if it is already first. The
+    agent harness inherits this PATH, so a ``ciao <command>`` the agent runs
+    resolves to the engine that launched the turn rather than to a stale install
+    (for example an older uv-tool ``ciao``) earlier on the user's PATH.
+    """
+    current = os.environ.get("PATH", "") if path is None else path
+    entries = [entry for entry in current.split(os.pathsep) if entry]
+    bin_dir = engine_bin_dir()
+    remaining = [
+        entry
+        for entry in entries
+        if os.path.normcase(entry) != os.path.normcase(bin_dir)
+    ]
+    # Always exactly one engine entry, first: an already-first dir keeps its
+    # place and a repeated one elsewhere is not duplicated.
+    return os.pathsep.join([bin_dir, *remaining])
 
 
 # npm writes the shim's own directory into the wrapper it generates, spelled

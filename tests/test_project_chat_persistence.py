@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import AsyncMock
 
+from ciao import entity_types
 from ciao.config import CiaoConfig
 from ciao.models import ResultEvent
 from ciao.sessions import StateStore
@@ -49,6 +50,25 @@ def _persisted_chats(tmp_path: Path) -> dict[str, dict]:
     return payload["chats"]
 
 
+def _seeded_welcome(manager: ProjectChatManager, title: str) -> tuple[str, str]:
+    """The seeded welcome's own prompt and its visible first message, by title."""
+    chat = next(chat for chat in manager._chats.values() if chat.title == title)
+    prompt, welcome = chat.handover_messages[0], chat.handover_messages[1]
+    return str(prompt["content"]), str(welcome["content"])
+
+
+def _write_registry(root: Path, overrides: str) -> None:
+    """The `<vault>/entity-types.yaml` the Categories API reads, plus a cache reset.
+
+    The cache is process-wide, so a registry written here has to be visible to
+    the manager built next; a stale entry would answer from stock and the test
+    would pass for the wrong reason.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / entity_types.VAULT_FILENAME).write_text(overrides, encoding="utf-8")
+    entity_types.clear_entity_types_cache()
+
+
 def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -78,6 +98,288 @@ def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
     assert "projects/active/" in fresh_prompt
     assert "Do not create `personal/`, `work/`, or `Templates/`" in fresh_prompt
     assert "Create Directory Structure" not in fresh_prompt
+
+
+def test_onboarding_names_effective_enabled_non_hidden_categories(
+    tmp_path: Path,
+) -> None:
+    """The welcome names the categories the Categories page would list (#979).
+
+    Read through the registry the owner edits — the AGENT vault root — which on
+    an install that has not re-rooted is a different directory from the notes
+    root the welcome names. Reading the notes root would report the shipped list
+    while the owner's own page shows their edits, so both files are seeded here
+    with different labels and the welcome has to pick the right one.
+    """
+    registry_root = tmp_path / "memory-vault"          # config.agent_vault_root("personal")
+    notes_root = registry_root / "personal"            # config.workspace_vault_root("personal")
+    _write_registry(
+        registry_root,
+        "- id: person\n"
+        "  label: Human\n"
+        "- id: idea\n"
+        "  enabled: false\n"
+        "- id: client\n"
+        "  label: Client account\n"
+        "  kind: entity\n"
+        "  folder: Clients\n"
+        "  description: An account the user works with.\n"
+        "  aliases: []\n"
+        "  stale_after_days: 0\n"
+        "  enabled: true\n",
+    )
+    _write_registry(
+        notes_root,
+        "- id: notebook\n"
+        "  label: Notes root only\n"
+        "  kind: note\n"
+        "  folder: Notebook\n"
+        "  aliases: []\n"
+        "  stale_after_days: 0\n"
+        "  enabled: true\n",
+    )
+
+    manager = _make_manager(tmp_path)
+    _, welcome = _seeded_welcome(manager, "Welcome to Ciaobot! 👋")
+
+    # A renamed builtin and a custom one, in registry order.
+    assert "Human, Project, Place, Resource, Journal, Note, Client account" in welcome
+    # A category the owner turned off is not promoted into a first impression…
+    assert "Idea" not in welcome
+    # …and neither is one the agent writes itself (`hidden`).
+    assert "Skill proposal" not in welcome
+    assert "Workspace," not in welcome
+    # The source is this workspace's own registry, not a list seeded beside it.
+    assert "Notes root only" not in welcome
+    # And naming them created none: seeding writes nothing into the vault.
+    assert not (registry_root / "People").exists()
+    assert not (registry_root / "Clients").exists()
+    entity_types.clear_entity_types_cache()
+
+
+def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Scratch and existing-vault onboarding both teach the two memory layers."""
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    existing = _make_manager(tmp_path / "existing")
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    scratch = _make_manager(tmp_path / "scratch")
+
+    for manager, title in (
+        (existing, "Connect Existing Vault 👋"),
+        (scratch, "Welcome to Ciaobot! 👋"),
+    ):
+        _, welcome = _seeded_welcome(manager, title)
+
+        # The two layers, and the one editor that changes the second one.
+        assert "**Profile & preferences**" in welcome
+        assert "**Notes, by category**" in welcome
+        assert "[See or customize memory categories](/memory/categories)" in welcome
+        # A category is a filing rule for future notes, not a standing order to
+        # remember everything.
+        assert "**future**" in welcome
+        # What the memory pass really does, and where a person reviews it.
+        assert "proposal" in welcome
+        assert "**Memory · To decide**" in welcome
+        assert "**Memory · History**" in welcome
+        # Undo is offered where the receipt is, and only as long as the note is
+        # still as the pass left it — a note edited since is refused.
+        assert "undo it while the note is still as the pass left it" in welcome
+        # No promise that past conversations are read, imported or filed.
+        assert "import" not in welcome.lower()
+        # The interview still opens the chat, and memory comes before it.
+        assert "What is your name" in welcome
+        assert welcome.index("memory is organized") < welcome.index("What is your name")
+
+        # The agent is told to explain it early, once, without a second round of
+        # questions — and never to go looking for conversations to file.
+        prompt, _ = _seeded_welcome(manager, title)
+        assert "**Explain memory early**" in prompt
+        assert "Do not run a second interview round about categories" in prompt
+        assert "do not scan past chats" in prompt
+        assert "Ask the user 2-3 important questions" in prompt
+
+    # The existing-vault preservation and routing instructions are untouched.
+    existing_prompt, _ = _seeded_welcome(existing, "Connect Existing Vault 👋")
+    assert "Preserve before reorganizing" in existing_prompt
+    assert "Never delete or overwrite them" in existing_prompt
+    assert "Workspace/Memory-Proposals.md" in existing_prompt
+    scratch_prompt, _ = _seeded_welcome(scratch, "Welcome to Ciaobot! 👋")
+    assert "Onboarding interview and curation" in scratch_prompt
+    assert "Do not create `personal/`, `work/`, or `Templates/`" in scratch_prompt
+
+
+def test_onboarding_asks_workspace_purpose_and_style(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Both shapes ask what this workspace is for, and how to work with them (#987).
+
+    The seeded interview used to ask only about name, role, key people and active
+    projects, so the workspace's scope was never asked at all and style was only
+    named as a routing target — nothing ever sent a fact there. Both shapes carry
+    the same ordered interview, so one pass over the two covers an adopted vault
+    and a brand-new one.
+    """
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    existing = _make_manager(tmp_path / "existing")
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    scratch = _make_manager(tmp_path / "scratch")
+
+    for manager, title in (
+        (existing, "Connect Existing Vault 👋"),
+        (scratch, "Welcome to Ciaobot! 👋"),
+    ):
+        prompt, _ = _seeded_welcome(manager, title)
+
+        # (a) What this workspace is for, what belongs in it, and what does not.
+        assert "**(a) Purpose and scope**" in prompt
+        assert "what this workspace is for" in prompt
+        assert "what should live in it, and what should stay out of it" in prompt
+        # (b) How the user wants to be talked to and worked with, in the words
+        # the interview has to actually ask for.
+        assert "**(b) How to work with them**" in prompt
+        assert "tone, length, language, when to challenge a plan, formatting" in prompt
+        # (c) The operating context around the work.
+        assert "**(c) Operating context and preferences**" in prompt
+        assert "tools, environment, recurring constraints" in prompt
+        # And the name and role the old round asked for are still asked for.
+        assert "Ask their name and role too" in prompt
+        # Still a conversation the user can decline — not a form to complete, and
+        # a skipped question is never answered on the user's behalf.
+        assert "2-3 short questions per turn" in prompt
+        assert "never a numbered interrogation, never a gate" in prompt
+        assert "move on without inventing an answer" in prompt
+
+
+def test_onboarding_routes_purpose_to_context_and_style_to_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Purpose is workspace scope; style and operating context are bounded facts (#987).
+
+    A workspace's purpose is not a fact about the user, so filing it in the small
+    bounded regions would spend the cap on scope and crowd out the person. The
+    interview therefore names the workspace guide and the General project doc as
+    its home and rules the bounded regions out for it, while style and operating
+    context go where the memory tool says they belong.
+    """
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    existing = _make_manager(tmp_path / "existing")
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    scratch = _make_manager(tmp_path / "scratch")
+
+    for manager, title in (
+        (existing, "Connect Existing Vault 👋"),
+        (scratch, "Welcome to Ciaobot! 👋"),
+    ):
+        prompt, _ = _seeded_welcome(manager, title)
+
+        # Purpose and scope: workspace/project context, and no bounded region.
+        assert "route that answer to the workspace/project context" in prompt
+        assert "`AGENTS.md` workspace guide or the General project doc" in prompt
+        assert "never to a bounded region" in prompt
+        # How to work together: the profile region, which is loaded every turn.
+        assert "route that to the `ciao:profile` region" in prompt
+        # Operating context and preferences: the environment/memory region.
+        assert "route that to the `ciao:memory` region" in prompt
+        # Name and role stay personal facts, in the profile region with style.
+        assert "both belong in the `ciao:profile` region" in prompt
+
+
+def test_onboarding_starting_knowledge_is_confirmed_facts_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Starting knowledge is seeded from confirmed facts, and from own state only (#987).
+
+    A guess written as a note is indistinguishable from a fact once it is on disk,
+    so the pass files only what the user confirmed and parks everything else in
+    `Workspace/Memory-Proposals.md`. Nothing about it creates scaffolding ahead of
+    the facts, and nothing about it reaches outside Ciaobot's own vault state:
+    reading past conversations is the consent-gated memory job, which the user
+    starts from Memory whenever they choose, not a side effect of onboarding.
+    """
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    existing = _make_manager(tmp_path / "existing")
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    scratch = _make_manager(tmp_path / "scratch")
+
+    for manager, title in (
+        (existing, "Connect Existing Vault 👋"),
+        (scratch, "Welcome to Ciaobot! 👋"),
+    ):
+        prompt, _ = _seeded_welcome(manager, title)
+
+        # Confirmed facts only, seeded into the places the vault layout owns.
+        assert "run a **starting-knowledge pass** from confirmed facts only" in prompt
+        # The pass asks for the facts it files, so seeding never relies on what
+        # the interview happened to volunteer.
+        assert "ask which key people, active projects and top resources" in prompt
+        assert (
+            "key people to `People/`, active projects to their own project docs, "
+            "and at most a few top resources to `Resources/`" in prompt
+        )
+        # Anything uncertain waits for the user instead of being filed.
+        assert (
+            "put anything you are not sure about in "
+            "`Workspace/Memory-Proposals.md` instead of filing it" in prompt
+        )
+        # No empty folders: a category/entity folder appears only where a
+        # confirmed fact needs it.
+        assert (
+            "Create an entity folder only when a confirmed fact needs it, "
+            "never an empty one" in prompt
+        )
+        # What the pass must not do: read the provider's history, import
+        # anything, or touch the categories the user owns.
+        assert "It reads no provider history and starts no extraction" in prompt
+        assert (
+            "Do not scan past chats, do not import anything, and do not write "
+            "category files" in prompt
+        )
+        # The state it does read is reported, not migrated.
+        assert (
+            "report a short, read-only summary of what this workspace already "
+            "holds" in prompt
+        )
+        assert (
+            "Keep this summary a summary, not a migration: no moves, no deletes, "
+            "no category writes, no entity-folder creation" in prompt
+        )
+
+
+def test_custom_category_label_is_plain_text_in_welcome(tmp_path: Path) -> None:
+    """A label is user-typed text: it is named, never rendered as markup (#979).
+
+    The welcome is Markdown, so a category label carrying a link or a tag would
+    otherwise become one — and the one link the message offers would not be the
+    only one in it.
+    """
+    _write_registry(
+        tmp_path / "memory-vault",
+        "- id: sneaky\n"
+        "  label: Read [more](https://evil.example/steal) <img src=x onerror=alert(1)>\n"
+        "  kind: note\n"
+        "  folder: Sneaky\n"
+        "  aliases: []\n"
+        "  stale_after_days: 0\n"
+        "  enabled: true\n",
+    )
+
+    manager = _make_manager(tmp_path)
+    _, welcome = _seeded_welcome(manager, "Welcome to Ciaobot! 👋")
+
+    # The Categories link is still the one real link in the message.
+    assert welcome.count("](/memory/categories)") == 1
+    # The label's own text survives, escaped rather than dropped…
+    assert "Read \\[more\\]" in welcome
+    assert "onerror" in welcome
+    # …and it is not a link target, a tag, or anything a click would follow.
+    assert "](https://evil.example/steal)" not in welcome
+    assert "](https" not in welcome
+    # The tag is readable text (an escaped `<`), never markup a renderer sees.
+    assert "\\<img src\\=x onerror\\=alert\\(1\\)\\>" in welcome
+    assert "<img src=x onerror=alert(1)>" not in welcome
+    entity_types.clear_entity_types_cache()
 
 
 def test_stale_manager_does_not_drop_chat_created_by_other_process(tmp_path: Path) -> None:

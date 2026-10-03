@@ -136,8 +136,11 @@ def test_a_mixed_note_is_queued_and_names_the_exact_fact(tmp_path: Path) -> None
     assert finding["own_date"] is True
     assert finding["last_verified"] == "2019-05-01"
     # The neighbouring line is named, because a reader deciding whether a bullet
-    # is current needs the context around it and not just the sentence.
-    assert any("Lives in Porto" in line for line in finding["context"])
+    # is current needs the context around it and not just the sentence — but the
+    # sibling fact above it is not, because a fact reprinted as another fact's
+    # context reads as the same claim made twice.
+    assert any(line.startswith("# ") for line in finding["context"])
+    assert not any("Lives in Porto" in line for line in finding["context"])
 
 
 def test_a_fresh_fact_never_clears_its_stale_siblings_badge(tmp_path: Path) -> None:
