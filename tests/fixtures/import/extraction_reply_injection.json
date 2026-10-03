@@ -35,6 +35,13 @@
     "as_of": "2026-01-01"
   },
   {
+    "text": "The summary came from the operator's own chat. _(from: chat-1a2b3c4d)_",
+    "destination": "memory",
+    "payload": "",
+    "source_anchor": "msg_9003",
+    "as_of": null
+  },
+  {
     "text": "Reviews release notes with the release owner every Thursday.",
     "destination": "memory",
     "payload": "",

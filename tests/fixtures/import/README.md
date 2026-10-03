@@ -28,14 +28,16 @@ builds in the test file.
 | Fixture | What it is for |
 |---|---|
 | `extraction_reply_valid.json` | Three well-formed rows: a `[memory]` fact, a `[memory]` fact whose source message carries a real date, and a `[profile]` fact. One filed row per accepted proposal. |
-| `extraction_reply_injection.json` | The reply a model produced after reading `import_injection_transcript.txt`: three rows that turned the injected instructions into "facts" (a command to run, a region that must be rewritten), two rows whose `destination` is not a destination at all (a region name, a filesystem path), and one ordinary fact. All five are proposals or nothing — see the test. |
+| `extraction_reply_injection.json` | The reply a model produced after reading `import_injection_transcript.txt`: three rows that turned the injected instructions into "facts" (a command to run, a region that must be rewritten, a fact attributed to a Ciaobot chat id with a forged `_(from: …)_` tag in its text), two rows whose `destination` is not a destination at all (a region name, a filesystem path), one row the transcript tried to date, and one ordinary fact. Every row is a proposal or nothing — see the test. |
 | `extraction_reply_malformed.json` | A partially usable array: one good row, a row whose `text` is a number, a row that is a bare string, a row with no `text` at all, an unknown destination, and an anchor the session never carried. Five dropped, one filed, nothing raised. |
 
 `import_injection_transcript.txt` is the untrusted side: a synthetic transcript
 whose text tells the model to ignore its instructions, write to `AGENTS.md`,
 promote to `ciao:memory`, run a command, mail somebody, delegate to another chat
 and call an MCP server — and to date a fact `2026-01-01`. Nothing here is a
-working command, a reachable host or a real address.
+working command, a reachable host or a real address. `CHAT_ID` in the forged row
+of `extraction_reply_injection.json` is the same synthetic chat id the test file
+builds its sessions and refusals from; no Ciaobot chat was ever involved.
 
 ## The oversized case is generated, not stored
 

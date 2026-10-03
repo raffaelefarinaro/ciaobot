@@ -41,6 +41,13 @@ Three rules the admission check enforces, each of which a prompt cannot:
   wrote *into the fact text* drops the row rather than dating it — import time
   is not verification time, and an injected transcript is the obvious way to
   smuggle one in;
+* **the fact text carries no marker of the queue's grammar.** ``as_bullet``
+  writes it verbatim before the real ``  _(from: <tag>)_`` tail, so a
+  ``_(from: chat-…)_`` in it would parse back as the row's *own* source — past
+  the ``assert_external_provenance`` check that only ever saw the backend-built
+  tag — and would truncate the fact a reviewer reads. A forged ``[idx=N]`` or a
+  model-written ``[as-of: …]`` / ``[expires: …]`` is the same class of forgery
+  and is dropped with it. See :data:`_TEXT_MARKERS_RE`;
 * **a Ciaobot-own session is refused before any turn.**
   :func:`ciao.import_decouple.classify_session` decides what may be read, and
   ``assert_external_provenance`` decides what may be written.
@@ -80,7 +87,6 @@ from pathlib import Path
 from typing import Any
 
 from ciao.critique import extract_json
-from ciao.fact_candidates import candidate_from_proposal
 from ciao.import_decouple import (
     EXTERNAL,
     ProvenanceNotExternal,
@@ -126,6 +132,31 @@ MAX_TEXT_CHARS = 240
 MAX_PAYLOAD_CHARS = 120
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+#: Markers the queue's grammar gives a meaning *inside* a bullet's text, which a
+#: model-supplied fact text must therefore not carry. ``as_bullet`` writes the
+#: text verbatim before the real ``  _(from: <tag>)_`` tail, so:
+#:
+#: * ``_(`` / ``)_`` — the tags :func:`ciao.proposal_kinds.parse_bullet` reads
+#:   back off the line. A forged one is parsed as the row's *own* source or
+#:   request, which puts a Ciaobot chat id into the parsed provenance that
+#:   :func:`assert_external_provenance` never saw (it checks the backend-built
+#:   tag, not the bullet), and it truncates the fact the reviewer reads, because
+#:   the parser stops at the first tag it finds;
+#: * ``[idx`` — the transcript-citation marker ``ciao.memory_audit`` scans for.
+#:   ``citations`` stays empty for an import, so any such marker is a forgery;
+#:   the space before ``=`` and any casing are tolerated because both are how
+#:   the marker is written in the wild;
+#: * ``[as-of`` / ``[expires`` — the date tags
+#:   :func:`ciao.fact_candidates.candidate_from_proposal` reads. Matching the
+#:   tag head rather than the parsed date is what makes this catch every
+#:   spelling, including the ones that regex does not parse into a date.
+#:
+#: Backend code writes the date tag itself, from the source message, after this
+#: check runs.
+_TEXT_MARKERS_RE = re.compile(
+    r"_\(|_\)|\[\s*idx|\[\s*as-of|\[\s*expires", re.IGNORECASE
+)
 
 #: Where ``memory_proposals.append_proposals`` writes, relative to the
 #: workspace's vault root. Mirrored here rather than imported from the private
@@ -196,17 +227,20 @@ class ExtractionResult:
     """What one extraction filed, and nothing about the vault beyond that.
 
     ``proposals_filed`` counts the bullets this run actually appended to the
-    queue. A row the queue's exact-text dedupe already held — queued earlier, or
-    decided and dismissed — was not appended again, so it is not counted here,
-    which is what makes the number a count of writes rather than a count of
-    requests.
+    queue, read back off the queue file rather than inferred from the write: a
+    row the queue's exact-text dedupe already held — queued earlier, or decided
+    and dismissed — was not appended again and is not counted here, which is
+    what makes the number a count of writes rather than a count of requests.
 
-    ``skipped`` counts rows the model proposed that were not filed: an
+    ``skipped`` counts rows the model proposed that admission dropped: an
     unreadable shape, an unknown destination, an anchor the session does not
-    carry, a model-written date, a refused provenance tag, a row past
-    :data:`MAX_PROPOSALS`. A reply that could not be parsed at all contributes
-    one, because "nothing proposed" and "could not read what was proposed" are
-    different facts and a batch that reported both as zero would look clean.
+    carry, a queue marker or model-written date in the fact text, a refused
+    provenance tag, a row past :data:`MAX_PROPOSALS`. A reply that could not be
+    parsed at all contributes one, because "nothing proposed" and "could not
+    read what was proposed" are different facts and a batch that reported both
+    as zero would look clean. A fact repeated inside one reply is neither: it is
+    one bullet, so it is counted once in ``proposals_filed`` and not counted as
+    skipped either.
 
     ``refused_anchor`` names the source anchor a refusal was about — the
     session's own ``source_id`` when the session was refused before the turn, or
@@ -340,10 +374,28 @@ def _admit_row(
     text = _one_line(row.get("text"))
     if not text or len(text) > MAX_TEXT_CHARS:
         return None, "fact text missing or over the one-line cap", ""
+    if _TEXT_MARKERS_RE.search(text):
+        # A date the model wrote, or a forged queue marker of any kind. The
+        # date on an imported fact is the source message's, added below, so one
+        # the model or an injected transcript put in the text is dropped with
+        # the row rather than believed — the alternative is an unearned "as of"
+        # in durable memory, or a parsed source nobody checked. See
+        # ``_TEXT_MARKERS_RE``.
+        return (
+            None,
+            "fact text carries a queue marker or a date the source did not supply",
+            "",
+        )
     destination = _one_line(row.get("destination")).lower()
     if destination not in DESTINATIONS:
         return None, f"destination {destination!r} is not in the queue's vocabulary", ""
     anchor = _one_line(row.get("source_anchor"))
+    if anchor.startswith("[") and anchor.endswith("]"):
+        # The transcript block renders every turn as ``[msg_0003] …`` and the
+        # prompt asks for that anchor "copied exactly", so the bracketed echo is
+        # the expected spelling of a real citation, not an invented one. One
+        # pair of brackets is stripped; anything else still has to resolve.
+        anchor = anchor[1:-1].strip()
     message = by_anchor.get(anchor)
     if message is None:
         # An invented citation: the anchor is a key into the session, so one that
@@ -365,13 +417,6 @@ def _admit_row(
         # anchors are strings. See the module docstring.
         citations=(),
     )
-    lifted = candidate_from_proposal(proposal)
-    if lifted.as_of or lifted.expires:
-        # The model's own date, or one an injected transcript pushed into the
-        # fact text. The date on an imported fact is the source message's, added
-        # below, so a date the model wrote is dropped with the row rather than
-        # believed — the alternative is an unearned "as of" in a durable memory.
-        return None, "fact text carries a date the source did not supply", ""
     source_date = message.timestamp.strip()[:10] if message.timestamp else ""
     if _DATE_RE.match(source_date):
         proposal = replace(proposal, text=f"{text} [as-of: {source_date}]")
@@ -400,12 +445,23 @@ async def extract_facts(
     stated in the prompt so a ``[project]`` row can name its document; it routes
     nothing. ``known_own_ids`` / ``known_chat_ids`` are
     :mod:`ciao.import_decouple`'s two caller-supplied answers and make the
-    provenance check exact rather than shape-only.
+    provenance check exact rather than shape-only. **C5, the first caller, must
+    pass ``known_own_ids=ciaobot_own_session_ids(...)``** (and the chat ids it
+    derives); left at the default ``()`` the check is still a refusal on shape
+    and on Ciaobot's own marker, but a Ciaobot-own session whose id does not look
+    like a chat id would not be recognised, and both of those answers are
+    collected from Ciaobot's own state rather than guessed here.
 
     The only write is ``append_proposals``. This never calls a region edit, a
     note write, an entity write, ``append_learning`` or the control plane, and it
     holds no agent token, so there is no operation here for an imported
     conversation to reach.
+
+    ``payload`` is admitted here the way the manual ``ciao memory-proposal-add``
+    admits it — any string up to :data:`MAX_PAYLOAD_CHARS`, for ``people`` a
+    name and for ``project`` a document path — so what confines it to the vault
+    is C7's accept path, which resolves the path and routes the row; nothing in
+    this module writes where ``payload`` names.
     """
     started = time.monotonic()
     omitted_entries = sum(session.omission_counts().values())
@@ -509,16 +565,27 @@ async def extract_facts(
     filed = 0
     if kept:
         queue = destination_workspace / PROPOSALS_RELATIVE
-        already = {_one_line(row["text"]) for row in list_proposals(queue)}
-        if append_proposals(kept, destination_workspace) is not None:
-            # `append_proposals` answers a path or None, and None means every
-            # bullet was already queued or already decided. A mixed batch
-            # answers a path and drops only its duplicate rows, so the count
-            # comes from the queue's before-state rather than from the call:
-            # "this run filed three facts" and "this run asked about three
-            # facts" are different claims and only one of them is true. The
-            # residue is one bullet too low at worst, never one too high.
-            filed = sum(1 for row in kept if _one_line(row.text) not in already)
+        before = {_one_line(row["text"]) for row in list_proposals(queue)}
+        # `append_proposals` dedupes each bullet against the queue's before-state
+        # and its decided-text log, but not against the other rows in this batch,
+        # so a reply carrying the same fact twice queues it twice. Collapse the
+        # batch first, on the same key `append_proposals` compares.
+        unique: list[MemoryProposal] = []
+        seen: set[str] = set()
+        for proposal in kept:
+            text = _one_line(proposal.text)
+            if text not in seen:
+                seen.add(text)
+                unique.append(proposal)
+        append_proposals(unique, destination_workspace)
+        # Counted from the queue itself, before and after, rather than from
+        # whether the call answered a path: `append_proposals` answers a path for
+        # a mixed batch after silently dropping the rows that were already queued
+        # or already decided, so "this run filed three facts" and "this run asked
+        # about three facts" would otherwise be the same number. Only the texts
+        # that appeared in the queue during this call were filed here.
+        after = {_one_line(row["text"]) for row in list_proposals(queue)}
+        filed = len((seen & after) - before)
     if refused_anchor:
         logger.info(
             "import extract: refused a row citing %s; it was not filed",
