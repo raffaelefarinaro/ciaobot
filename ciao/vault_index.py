@@ -183,7 +183,7 @@ def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
     ``Tasks`` directory anywhere else is not.
     """
     parts = rel_to_root.parts
-    if len(parts) >= 3:
+    if len(parts) in {3, 4}:
         parent_pair = tuple(part.casefold() for part in parts[-3:-1])
         if parent_pair == TASK_RECORDS_PARENT_PARTS:
             return True

@@ -170,7 +170,10 @@ KEY_SEPARATOR = "/"
 # directory, derived from the shared rule so this walk cannot drift from it. A
 # substring test rather than a suffix one: it has to also cover a top-level
 # `Workspace/Tasks/` (no leading separator) and may over-match, which only
-# costs a `Path` construction the predicate then settles.
+# costs a `Path` construction the predicate then settles. The gate is therefore
+# a strict superset of `is_reserved_bookkeeping` by construction and decides
+# nothing on its own — keep it that way, or the walk could start rejecting rows
+# the predicate would accept.
 _TASK_RECORDS_PARENT_KEY = KEY_SEPARATOR.join(vault_index.TASK_RECORDS_PARENT_PARTS)
 
 # Every stored key is a path relative to the key base, so no key can begin with

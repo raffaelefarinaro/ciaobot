@@ -573,7 +573,9 @@ def test_task_records_are_never_indexed(
 
     The decoy is the half that matters: a `Tasks` directory the user named
     themselves is ordinary content. The rule is the `Workspace/Tasks` pair, not
-    the name, or the fix would silently hide their notes.
+    the name, or the fix would silently hide their notes. The nested decoy pins
+    the depth half: the pair only counts at the depths the store writes it, so a
+    note in `projects/acme/workspace/tasks/` is the user's, not the board's.
     """
     record = (
         "---\n"
@@ -607,19 +609,32 @@ def test_task_records_are_never_indexed(
         encoding="utf-8",
     )
 
+    nested_decoy_dir = temp_vault / "projects" / "acme" / "workspace" / "tasks"
+    nested_decoy_dir.mkdir(parents=True)
+    nested_decoy = nested_decoy_dir / "todo.md"
+    nested_decoy.write_text(
+        "# Acme venue changeover\n\nThe user's own note, in a folder they named "
+        "`workspace`.\n",
+        encoding="utf-8",
+    )
+
     fts_search.index_vault(db_conn, temp_vault)
 
     paths = [r["path"] for r in fts_search.search_vault(db_conn, "changeover")]
     assert paths, "the user's own note must still hit"
     assert not any("9f2c4a1b" in p for p in paths), paths
+    assert any("workspace/tasks/todo" in p for p in paths), paths
     row = db_conn.execute(
         "SELECT COUNT(*) FROM vault_meta WHERE path LIKE ?", ("%Tasks/%",)
     ).fetchone()
-    assert row is not None and row[0] == 1, "only the user's own Tasks note is indexed"
+    assert row is not None and row[0] == 2, (
+        "only the user's own Tasks notes are indexed, at any depth"
+    )
 
     # Force-indexing honours the same rule: the walk's skip is not the only way a
     # task record could reach the index.
     assert fts_search.index_file(db_conn, temp_vault, record_path) is False
+    assert fts_search.index_file(db_conn, temp_vault, nested_decoy) is True
     assert not any(
         "9f2c4a1b" in r["path"] for r in fts_search.search_vault(db_conn, "changeover")
     )

@@ -339,6 +339,15 @@ def test_is_reserved_bookkeeping_covers_the_task_record_directory():
     assert not vi.is_reserved_bookkeeping(Path("Other/Tasks/abc.md"))
     assert not vi.is_reserved_bookkeeping(Path("Tasks/abc.md"))
     assert not vi.is_reserved_bookkeeping(Path("Workspace/Tasks/sub/abc.md"))
+    # The pair is only the board's at the depths the store writes it: three
+    # parts under the vault root, or four behind the legacy `memory-vault/`
+    # prefix. Without that cap the rule hid a user's own note in a folder they
+    # named `workspace` — the same hole the reserved-name branch closes with
+    # `len(parts) in {2, 3}`.
+    assert not vi.is_reserved_bookkeeping(Path("projects/acme/workspace/tasks/todo.md"))
+    assert not vi.is_reserved_bookkeeping(Path("a/b/c/Workspace/Tasks/x.md"))
+    assert not vi.is_excluded(Path("projects/acme/workspace/tasks/todo.md"))
+    assert vi.is_reserved_bookkeeping(Path("memory-vault/Workspace/Tasks/abc.md"))
     # The reserved-name branch is unchanged: `Workspace/` notes the app does not
     # write, and a user's own `workspace` folder, are untouched.
     assert vi.is_reserved_bookkeeping(Path("Workspace/Update-Tasks.json"))
