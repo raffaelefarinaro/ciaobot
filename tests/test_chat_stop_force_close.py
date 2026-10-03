@@ -807,6 +807,102 @@ async def test_stop_exception_persists_partial_before_archive(
     consumer.cancel()
 
 
+async def test_stop_with_sdk_error_diagnostic_persists_streamed_partial(
+    tmp_path: Path,
+) -> None:
+    """A stop whose provider terminal is an SDK diagnostic keeps the partial.
+
+    The real SDK does not end an interrupted Claude turn on an *empty* error
+    frame: the CLI exits non-zero after reporting a diagnostic, and the SDK
+    surfaces it as a ``ResultError`` carrying ``[ede_diagnostic] ...``. #952
+    only normalized the empty-error shape, so the internal string replaced the
+    streamed partial in the durable turn. The streamed partial must win and no
+    SDK internal may reach the transcript or the archive.
+    """
+    from claude_agent_sdk._errors import ResultError
+
+    diagnostic = (
+        "Claude Code returned an error result: [ede_diagnostic] "
+        "result_type=user last_content_type=n/a stop_reason=null "
+        "(exit code: 1)"
+    )
+    release = asyncio.Event()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield AssistantTextDelta(type="text", text="partial answer")
+            await release.wait()
+            # The CLI reports the terminal diagnostic as a non-empty error
+            # result frame (``_convert_message`` joins ``ResultMessage.errors``
+            # into ``result``) and then exits non-zero, which the SDK surfaces
+            # as a ``ResultError``.
+            yield ResultEvent(
+                type="result",
+                result=(
+                    "[ede_diagnostic] result_type=user "
+                    "last_content_type=n/a stop_reason=null"
+                ),
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+            )
+            raise ResultError(diagnostic, exit_code=1)
+
+        return gen()
+
+    (
+        pcm,
+        chat,
+        stream,
+        consumer,
+        captured,
+    ) = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name="stop-sdk-diagnostic",
+        title="stop-sdk-diagnostic",
+    )
+    await _wait_for(lambda: any(e.get("type") == "text_delta" for e in captured))
+
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(lambda: stream.done)
+
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    assert results[0].get("stopped") is True
+    assert results[0].get("is_error") is False
+    assert results[0].get("text") == "partial answer"
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    await _wait_for(lambda: bool(pcm._transcripts.current_messages(ctx, "claude")))
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    assert len(stored["turns"]) == 1
+    turn = stored["turns"][-1]
+    assert turn["is_partial"] is True
+    assert turn["is_error"] is False
+    assert turn["response"] == "partial answer"
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    assert [row["role"] for row in rows] == ["user", "assistant"]
+    assert rows[1]["content"] == "partial answer"
+    assert rows[1].get("partial") is True
+    assert "is_error" not in rows[1]
+    assert "ede_diagnostic" not in rows[1]["content"]
+
+    archived = await pcm.archive_chat(chat.chat_id)
+    assert archived is not None
+    archive_text = archived.path.read_text(encoding="utf-8")
+    assert "partial answer" in archive_text
+    assert "ede_diagnostic" not in archive_text
+    assert "ResultError" not in archive_text
+
+    consumer.cancel()
+
+
 async def test_stop_followup_does_not_inherit_stopped_state(
     tmp_path: Path,
 ) -> None:

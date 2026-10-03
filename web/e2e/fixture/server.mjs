@@ -65,6 +65,40 @@ const TRANSCRIPT = [
 ]
 
 /**
+ * A settled reply followed by the user's comment-reference turn: the sent
+ * `<user-comment-reference>` card (see lib/commentContext.ts) sits immediately
+ * under the reply it annotates. It exists so a browser spec can select the
+ * reply and measure that its accent outline does not cross the reference card
+ * below it (#968), which jsdom's 0x0 rects cannot see.
+ */
+const COMMENT_TRANSCRIPT = [
+  { role: 'user', content: 'First request.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  {
+    role: 'assistant',
+    content: 'First answer, long enough to wrap on a phone-sized transcript.',
+    sent_at: '2026-01-01T09:50:20Z',
+    duration_ms: 20000,
+    effective_model: 'synthetic-model',
+    usage: { input_tokens: 18, output_tokens: 6478, context_pct: '39.2%' },
+    turn_index: 0,
+  },
+  {
+    role: 'user',
+    content: [
+      '<user-comment-reference>',
+      '<reference-source>assistant message, paragraph 1</reference-source>',
+      '<quoted-text>First answer, long enough to wrap on a phone-sized transcript.</quoted-text>',
+      '<user-comment>we already have this</user-comment>',
+      '</user-comment-reference>',
+      '',
+      'and a note that rides along with it',
+    ].join('\n'),
+    sent_at: '2026-01-01T09:52:00Z',
+    turn_index: 1,
+  },
+]
+
+/**
  * One OpenCode-shaped turn as the server replays it: a phase-less text row per
  * part, then tool work, then a short reply that opens like narration, then a
  * reasoning-only step. Guards the reply against being folded into Activity.
@@ -334,7 +368,11 @@ const server = http.createServer(async (req, res) => {
       // action-footer journey needs real turns to select, ending at the bottom
       // of the transcript, to reproduce a footer falling under the composer.
       const body = await readBody(req)
-      state.transcript = body?.shape === 'opencode-fold' ? FOLD_TRANSCRIPT : TRANSCRIPT
+      state.transcript = body?.shape === 'opencode-fold'
+        ? FOLD_TRANSCRIPT
+        : body?.shape === 'comment'
+          ? COMMENT_TRANSCRIPT
+          : TRANSCRIPT
       return sendJson(res, { ok: true, turns: state.transcript.length })
     }
     if (pathname === '/__fixture__/update-tasks') {
