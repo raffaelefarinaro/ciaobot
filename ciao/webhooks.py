@@ -936,6 +936,23 @@ class WebhookStore:
             self._write(records)
             return updated, secret
 
+    def delete(self, trigger_id: str, *, expected_revision: int) -> None:
+        """Remove a trigger and its verifier under an optimistic revision check.
+
+        ``expected_revision`` is the revision the caller read. A mismatch
+        raises ``revision_conflict`` and writes nothing, so a caller working
+        from a stale read cannot delete a trigger it never saw; an unknown id
+        raises ``not_found``. A deleted secret is gone with its record: there
+        is nothing to recover, and re-creating the trigger mints a new secret.
+        """
+        expected = _validated_revision(expected_revision, code=INVALID_TRIGGER)
+        with self._mutation():
+            records = self._read()
+            record = _require_record(records, trigger_id)
+            _require_current(record, expected)
+            del records[record.trigger.trigger_id]
+            self._write(records)
+
     def revoke_workspace(self, workspace: str) -> int:
         """Destroy every verifier in ``workspace``; return how many changed.
 

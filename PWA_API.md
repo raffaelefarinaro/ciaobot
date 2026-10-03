@@ -78,6 +78,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
+| GET | `/api/webhooks?workspace=` | List a workspace's webhook triggers (public records only, never secrets) |
+| POST | `/api/webhooks` | Create a webhook trigger; returns the trigger plus its one-time secret |
+| PATCH | `/api/webhooks/{trigger_id}` | Update a trigger's name, instructions, or enabled flag (revision-checked) |
+| POST | `/api/webhooks/{trigger_id}/rotate` | Rotate a trigger's secret; returns the trigger plus the new one-time secret |
+| DELETE | `/api/webhooks/{trigger_id}` | Delete a trigger and its verifier (`?expected_revision=`, revision-checked) |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands; `?workspace=<name>` scopes them to that workspace's agent root |
 | GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings; `?workspace=<name>` scopes the subagent and command lists to that workspace's agent root |
