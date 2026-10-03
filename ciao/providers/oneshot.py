@@ -25,6 +25,8 @@ from claude_agent_sdk import (
     query,
 )
 
+from ciao.tool_path import prepend_engine_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -288,11 +290,16 @@ async def run_oneshot(
 
     if provider == "opencode":
         async def _attempt() -> str:
+            one_shot_env = dict(env or {})
+            # The engine's own bin dir leads PATH so a ``ciao`` the one-shot's
+            # opencode server launches is this engine's CLI, not a stale install
+            # earlier on the user's PATH (#989).
+            one_shot_env["PATH"] = prepend_engine_path(one_shot_env.get("PATH"))
             return await _run_opencode_oneshot(
                 prompt,
                 system_prompt=system_prompt,
                 model=model,
-                env=env,
+                env=one_shot_env,
                 cwd=cwd,
             )
     elif provider == "claude":
@@ -302,6 +309,8 @@ async def run_oneshot(
             merged_env.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
             # Artifacts publish to claude.ai; ciaobot has no use for that surface
             merged_env.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
+            # Same engine-first PATH as the opencode path (#989).
+            merged_env["PATH"] = prepend_engine_path(merged_env.get("PATH"))
             return await _run_claude_oneshot(
                 prompt,
                 system_prompt=system_prompt,

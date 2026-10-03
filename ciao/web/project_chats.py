@@ -102,6 +102,7 @@ from ciao.schedules import (
 )
 from ciao.sessions import StateStore
 from ciao.subagent_tracking import SubagentInfo
+from ciao.tool_path import prepend_engine_path
 from ciao.transcripts import (
     TranscriptStore,
     TurnJournal,
@@ -4280,6 +4281,11 @@ class ProjectChatManager:
         env: dict[str, str] = {}
         project = self._projects.get(chat.project_id)
         env["CIAO_WORKSPACE"] = str(self._config.workspace_root)
+        # The running engine's own executable directory goes at the front of the
+        # agent's PATH so a ``ciao <command>`` the agent runs is THIS engine's
+        # CLI, not a stale install earlier on the user's PATH. The user's PATH
+        # stays behind it, so their own tools still resolve (#989).
+        env["PATH"] = prepend_engine_path()
         workspace = project.workspace if project else ""
         # The vault this chat's CLI commands should read and write. Exported
         # explicitly rather than inherited, because there is one process-level

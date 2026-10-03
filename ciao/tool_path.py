@@ -31,6 +31,8 @@ import os
 from ciao.os_support.tool_path import (
     clear_terminal_path_cache,
     common_tool_dirs,
+    engine_bin_dir,
+    prepend_engine_path,
     resolve_command as _resolve_command,
     resolve_executable as _resolve_executable,
     terminal_path,
@@ -39,7 +41,9 @@ from ciao.os_support.tool_path import (
 __all__ = [
     "clear_terminal_path_cache",
     "common_tool_dirs",
+    "engine_bin_dir",
     "login_shell_path",
+    "prepend_engine_path",
     "resolve_command",
     "resolve_on_terminal_path",
     "resolve_tool",
