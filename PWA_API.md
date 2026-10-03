@@ -80,6 +80,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
 | GET | `/api/tasks?workspace=` | One workspace's board rows (`?workspace=` is required, 400 otherwise), valid tasks in board order followed by one row per file that could not be read as a task — a row carrying `code` and no task fields, so a malformed file never reads as an empty board. A row carries `id`, `title`, `status`, `project_id`, `due`, `assignee`, `review_state`, `chat_id`, `attempt_id`, `created_at`, `updated_at`, `revision` and `relative_path` |
+| GET | `/api/tasks/{task_id}?workspace=` | One task as the store reads it now, `body` included — the list above deliberately carries no description, so this is the read an editor needs before it writes one back. `?workspace=` is required (400 otherwise), an unknown id in this workspace is a 404 |
 | POST | `/api/tasks` | File one task: `{"workspace", "title", "body", "project_id", "due"}`. `project_id` takes an id or a name and must be a project of this workspace (400 otherwise). Answers 201 with the record as stored, `body` and `revision` included |
 | PATCH | `/api/tasks/{task_id}` | Edit one task at `expected_revision` (required, 400 without it): only the fields sent change — `title`, `status`, `project_id`, `due`, `assignee`, `review_state`, and `body` replacing the description wholesale. Any other key is a 400. A stale revision is a **409** and writes nothing |
 | DELETE | `/api/tasks/{task_id}` | Remove one task record at `expected_revision` (required, 400 without it). The record is the user's own Markdown file and this unlinks it — there is no trash. A stale revision is a 409 and the file stays |
@@ -450,6 +451,11 @@ same operation from the agent CLI (`ciao task complete`) is refused with
 # `code` instead of task fields, so a malformed file never reads as an empty
 # board.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/tasks?workspace=personal"
+
+# Read one task, description included. The list rows above carry no `body`,
+# so an editor that shows the prose and writes it back reads it from here.
+curl -sS -b /tmp/ciao.jar \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c?workspace=personal"
 
 # File a task. `project_id` accepts an id or a name and must belong to this
 # workspace; `due` is a calendar date (YYYY-MM-DD). Answers 201 with the record

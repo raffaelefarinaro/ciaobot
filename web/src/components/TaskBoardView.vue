@@ -16,7 +16,7 @@ import PaneHeader from './PaneHeader.vue'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
 import { useTaskBoardStore, type TaskChanges } from '../stores/taskBoard'
-import { askConfirm } from '../lib/confirm'
+import { askConfirm, pendingConfirm } from '../lib/confirm'
 import { renderUserMarkdown } from '../lib/safeMarkdown'
 import {
   TASK_DUE_FILTERS,
@@ -47,20 +47,40 @@ const workspace = computed(() => projectStore.activeWorkspace)
 /**
  * Where the four columns become one list.
  *
- * The same 900px Memory Map draws its tile at, and it is a threshold on the
- * window rather than the pane because that is the measurement this app already
- * reacts to (`isMobile` in ChatLayout is the same idea at 768). Four columns of
- * cards need more room than that; below it the board reads as a scrolling list,
- * which is what a phone wants anyway.
+ * One measurement, and it is the one the CSS below uses: the `chat-pane`
+ * container's own inline size, against the same 940px the
+ * `@container chat-pane (max-width: 940px)` rule uses. The window is not that
+ * measurement — with the sidebar open or the split pane showing, a window
+ * comfortably past any window threshold can still leave the pane under it, and
+ * two thresholds is how the board ends up rendering four *stacked* lanes: not
+ * the four columns, and not the status-filtered list either.
+ *
+ * The pane root is a block that fills its container, so observing the root
+ * measures the container. `contentRect` is the same inline-size the container
+ * query resolves against; the window keeps a listener off this component
+ * entirely, since the pane resizes when the sidebar drags, not only on resize.
  */
-const NARROW_PANE_PX = 900
-const isNarrow = ref(typeof window !== 'undefined' && window.innerWidth <= NARROW_PANE_PX)
-function onResize() {
-  isNarrow.value = typeof window !== 'undefined' && window.innerWidth <= NARROW_PANE_PX
-}
-if (typeof window !== 'undefined') window.addEventListener('resize', onResize)
+const NARROW_PANE_PX = 940
+const paneEl = ref<HTMLElement | null>(null)
+const paneWidth = ref<number | null>(null)
+const isNarrow = computed(() => paneWidth.value !== null && paneWidth.value <= NARROW_PANE_PX)
+
+let paneObserver: ResizeObserver | null = null
+onMounted(() => {
+  const node = paneEl.value
+  if (!node) return
+  // jsdom has no ResizeObserver; the width stays null and the board draws its
+  // columns, which is what a test reads.
+  if (typeof ResizeObserver === 'undefined') return
+  paneObserver = new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1]
+    if (entry) paneWidth.value = entry.contentRect.width
+  })
+  paneObserver.observe(node)
+})
 onBeforeUnmount(() => {
-  if (typeof window !== 'undefined') window.removeEventListener('resize', onResize)
+  paneObserver?.disconnect()
+  paneObserver = null
 })
 
 // ── Load states ───────────────────────────────────────────────────────────
@@ -84,19 +104,46 @@ const unreadable = computed(() => invalidTaskRows(board.rows))
 const counts = computed(() => statusCounts(tasks.value))
 const openCount = computed(() => openTaskCount(tasks.value))
 
+/**
+ * Re-read the board: on mount, on a workspace switch, and after a refused write.
+ *
+ * On mount it is a refresh rather than a first load: coming back to the board
+ * should show what an agent or `ciao task` did while the user was elsewhere, so
+ * the rows stay on screen and only `loading` is set. The same call is the way
+ * out of a 409 — the write was refused precisely because the record moved on, so
+ * re-reading is the only correct next step.
+ */
 function load() {
-  void board.ensureLoaded(workspace.value)
+  void board.reload(workspace.value)
+}
+
+/**
+ * What the Retry and Reload buttons call.
+ *
+ * Identical to `load` plus clearing the message being recovered from. The
+ * automatic reload above must *not* do that: it runs while the server's refusal
+ * is the sentence the user still needs to read, and the re-read does not clear
+ * the action slot.
+ */
+function reloadBoard() {
+  board.clearError()
+  load()
 }
 
 onMounted(load)
-// The board is per workspace, so a switch is the one thing that re-reads it, and
-// only when the held rows are another workspace's.
-watch(workspace, load)
-
-function retry() {
-  board.clearError()
-  void board.reload(workspace.value)
-}
+// A switch is the one case that must not keep the old rows: `reload` drops them
+// first, so the new workspace's own first-load and failed states are what shows.
+//
+// Both dialogs close with it, and that is a correctness point rather than a
+// gesture one: `1`–`9` keep switching workspaces while the board is open, so an
+// open editor would otherwise be editing a task id from the workspace the user
+// just left, and its next Save would present that task's revision to a
+// workspace that has never heard of it.
+watch(workspace, () => {
+  closeCreate()
+  closeDetail()
+  load()
+})
 
 // ── Filters ───────────────────────────────────────────────────────────────
 
@@ -178,12 +225,10 @@ const projectName = (projectId: string): string => {
 /**
  * Whether this board holds the description for a task.
  *
- * A list row carries no `body` and `/api/tasks*` has no read-by-id route, so the
- * only tasks whose Markdown description the board can honestly show are the ones
- * it created or last wrote. Everywhere else the field is absent and a Save omits
- * `body`, because sending an empty one would erase prose nobody was shown. The
- * read-by-id route that would close this gap is an API change, and that is not
- * this surface's to make.
+ * A list row carries no `body`, so the description is what `get` read for it.
+ * Without it the field stays absent and a Save omits `body`: sending an empty
+ * one would erase prose nobody was shown, which is the one failure an editor
+ * cannot undo.
  */
 function describesTask(taskId: string): boolean {
   return board.described?.id === taskId
@@ -217,6 +262,9 @@ async function moveTask(task: Task, event: Event) {
   if (next === 'done') await board.complete(workspace.value, task.id, revision)
   else await board.update(workspace.value, task.id, revision, { status: next })
   busyTaskId.value = ''
+  // A refused write means the record moved on, so re-read rather than leave the
+  // user holding a conflict they can only clear by switching workspace.
+  if (board.error) load()
 }
 
 async function markDone(task: Task) {
@@ -226,6 +274,7 @@ async function markDone(task: Task) {
   busyTaskId.value = task.id
   await board.complete(workspace.value, task.id, revision)
   busyTaskId.value = ''
+  if (board.error) load()
 }
 
 // ── Create ────────────────────────────────────────────────────────────────
@@ -278,6 +327,10 @@ const detailEl = ref<HTMLElement | null>(null)
 const detailTitleField = ref<HTMLInputElement | null>(null)
 const detailSaving = ref(false)
 const detailId = ref('')
+/** The description read is in flight, or failed and wants a retry. */
+const descriptionState = ref<'idle' | 'loading' | 'failed'>('idle')
+/** A successful Save, so the dialog says so rather than only going quiet. */
+const savedAt = ref(0)
 const detailForm = reactive({
   title: '',
   status: 'backlog' as TaskStatus,
@@ -287,7 +340,23 @@ const detailForm = reactive({
   body: '',
 })
 
-useModalFocus(detailEl, detailOpen, { initialFocus: detailTitleField, onEscape: () => { if (!detailSaving.value) closeDetail() } })
+/**
+ * The detail dialog's focus and Escape handling, while a confirm is over it.
+ *
+ * `useModalFocus` claims Escape in the capture phase and stops propagation, so
+ * with both up the *detail* dialog answered it — closing the editor behind a
+ * delete confirm the user was still being asked about, and leaving the confirm
+ * with no Escape of its own. The active ref is therefore false while the
+ * confirm is pending: this dialog claims nothing, and the confirm above it owns
+ * the key. `detailSaving` is guarded separately, since an in-flight write is
+ * this dialog's own business and the confirm is not involved.
+ */
+const detailFocusActive = computed(() => detailOpen.value && !pendingConfirm.value)
+
+useModalFocus(detailEl, detailFocusActive, {
+  initialFocus: detailTitleField,
+  onEscape: () => { if (pendingConfirm.value || detailSaving.value) return; closeDetail() },
+})
 
 /** The row a dialog is editing, or undefined once it has been deleted. */
 const detailTask = computed(() => tasks.value.find((task) => task.id === detailId.value) ?? null)
@@ -296,6 +365,15 @@ const detailTask = computed(() => tasks.value.find((task) => task.id === detailI
 const detailDescribed = computed(() => describesTask(detailId.value))
 
 const detailValid = computed(() => detailForm.title.trim() !== '')
+
+/** Read the description the list never carries, then fill the dialog from it. */
+async function loadDescription(taskId: string) {
+  descriptionState.value = 'loading'
+  const held = await board.get(workspace.value, taskId)
+  descriptionState.value = held ? 'idle' : 'failed'
+  if (!held) return
+  detailForm.body = held.body
+}
 
 function openDetail(task: Task) {
   board.clearError()
@@ -307,13 +385,20 @@ function openDetail(task: Task) {
   detailForm.assignee = task.assignee
   detailForm.project_id = task.project_id
   detailForm.body = held?.body ?? ''
+  savedAt.value = 0
   detailOpen.value = true
+  // A task the board has already read (one it created, or an open dialog it
+  // read before) needs no second round trip; every other task does, and until
+  // that answer lands the description is not something the board may write.
+  if (held) descriptionState.value = 'idle'
+  else void loadDescription(task.id)
 }
 
 function closeDetail() {
   if (detailSaving.value) return
   detailOpen.value = false
   detailId.value = ''
+  descriptionState.value = 'idle'
   board.clearError()
 }
 
@@ -328,35 +413,72 @@ async function onDetailStatusChange(event: Event) {
   if (!revision) return
   board.clearError()
   detailSaving.value = true
-  await board.complete(workspace.value, task.id, revision)
+  // Only Done is the completion gesture. Any other status is a plain move, and
+  // routing it through `complete` would mark a task done while the user chose
+  // "On hold" — a write to the record, not just to this dialog.
+  const saved = next === 'done'
+    ? await board.complete(workspace.value, task.id, revision)
+    : await board.update(workspace.value, task.id, revision, { status: next })
   detailSaving.value = false
+  if (!saved) {
+    load()
+    return
+  }
+  // The select is bound to this field, so it has to follow the record the write
+  // actually stored rather than snapping back to what it was when it opened.
+  detailForm.status = saved.status
+  board.clearError()
+}
+
+/**
+ * The fields the Save sends: only what this dialog changed.
+ *
+ * A `PATCH` writes every key it is given, so sending the form wholesale would
+ * make every Save an edit — and a `project_id` the workspace no longer has is a
+ * 400 `project_not_found`, which would block a title-only Save on a task whose
+ * project was deleted underneath the board. Nothing changed and no description
+ * was read means there is nothing to send at all.
+ */
+function detailChanges(task: Task): TaskChanges {
+  const changes: TaskChanges = {}
+  const title = detailForm.title.trim()
+  if (title !== task.title) changes.title = title
+  const due = detailForm.due || null
+  if ((due ?? '') !== (task.due || '')) changes.due = due
+  if (detailForm.assignee !== task.assignee) changes.assignee = detailForm.assignee
+  const project = detailForm.project_id || null
+  if ((project ?? '') !== (task.project_id || '')) changes.project_id = project
+  return changes
 }
 
 async function saveDetail() {
   const task = detailTask.value
   if (detailSaving.value || !task || !detailValid.value) return
-  const changes: TaskChanges = {
-    title: detailForm.title.trim(),
-    due: detailForm.due || null,
-    assignee: detailForm.assignee,
-    project_id: detailForm.project_id || null,
-  }
+  const changes = detailChanges(task)
+  // `body` rides only when this dialog is the one that showed the prose and the
+  // prose was edited. A description the board never read is omitted rather than
+  // sent empty, which would erase it; an unedited one needs no write at all.
+  const held = describesTask(task.id) ? board.described : null
+  const body = held && held.body !== detailForm.body ? detailForm.body : undefined
+  if (!Object.keys(changes).length && body === undefined) return
   detailSaving.value = true
-  // `body` rides only when this dialog is the one that showed it, so a Save on
-  // the fields the board does know can never clear a description it never read.
   const saved = await board.update(
     workspace.value,
     task.id,
     board.revisionOf(task.id),
     changes,
-    detailDescribed.value ? detailForm.body : undefined,
+    body,
   )
   detailSaving.value = false
-  if (!saved) return
+  if (!saved) {
+    load()
+    return
+  }
   detailForm.title = saved.title
   detailForm.due = saved.due
   detailForm.assignee = saved.assignee
   detailForm.project_id = saved.project_id
+  savedAt.value = Date.now()
   board.clearError()
 }
 
@@ -375,6 +497,14 @@ async function deleteTask() {
   const removed = await board.remove(workspace.value, task.id, revision)
   detailSaving.value = false
   if (removed) closeDetail()
+  // A refused delete is a stale revision or a file already gone; re-read so the
+  // row on screen matches the disk.
+  else load()
+}
+
+/** Re-read the description after a failed one, without closing the dialog. */
+function retryDescription() {
+  if (detailId.value) void loadDescription(detailId.value)
 }
 
 /**
@@ -391,7 +521,7 @@ const today = localDateKey()
 </script>
 
 <template>
-  <div class="task-view">
+  <div ref="paneEl" class="task-view">
     <PaneHeader page-tag="Tasks" @open-sidebar="emit('open-sidebar')">
       <template #actions>
         <button type="button" class="btn-primary btn-small task-new" @click="openCreate">New task</button>
@@ -458,7 +588,7 @@ const today = localDateKey()
              "empty board" claim, which is what a failed GET would be read as. -->
         <div v-else-if="loadFailed" class="task-failed" role="alert">
           <p class="task-failed-text">{{ board.loadError }}</p>
-          <button type="button" class="btn-small" @click="retry">Retry</button>
+          <button type="button" class="btn-small" @click="reloadBoard">Retry</button>
         </div>
 
         <template v-else>
@@ -466,11 +596,12 @@ const today = localDateKey()
                marked stale, with the same Retry. -->
           <p v-if="loadStale" class="task-stale" role="status">
             <span>{{ board.loadError }} These are the tasks as they were last read.</span>
-            <button type="button" class="btn-chip task-chip" @click="retry">Retry</button>
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Retry</button>
           </p>
 
           <p class="task-lede">
             {{ openCount }} open of {{ tasks.length }} in {{ workspace }}.
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
           </p>
 
           <!-- A file the server could not read as a task is shown, never dropped:
@@ -503,8 +634,8 @@ const today = localDateKey()
 
           <!-- 5 · genuinely empty. -->
           <p v-else-if="boardEmpty" class="task-empty hint">
-            No tasks in {{ workspace }} yet. New task files one, and Ciaobot's
-            <code>ciao task</code> command files the rest.
+            No tasks in {{ workspace }} yet. Add one with New task, or file them
+            from the command line with <code>ciao task</code>.
           </p>
 
           <!-- One card, one status select, one render path. Wide with no status
@@ -581,8 +712,13 @@ const today = localDateKey()
 
           <!-- A refused write keeps the rows it had and says the server's own
                sentence; the action slot is separate from the load slot so an
-               unread 409 cannot be cleared by a later list read. -->
-          <p v-if="board.error" class="task-action-error" role="alert">{{ board.error }}</p>
+               unread 409 cannot be cleared by a later list read. The Reload is
+               the way out: a conflict is the record moving on, and re-reading is
+               how this board catches up. -->
+          <p v-if="board.error" class="task-action-error" role="alert">
+            {{ board.error }}
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
+          </p>
         </template>
       </div>
     </div>
@@ -719,29 +855,37 @@ const today = localDateKey()
               </select>
             </div>
           </div>
-          <!-- The description, where this board actually holds it: a list row
-               carries none and the API has no read-by-id, so for every other task
+          <!-- The description. A list row carries none, so it is read by id: the editor
+               shows the prose it will write back, and while the read is in flight
                the field is absent rather than an empty box whose Save would clear
-               prose nobody was shown. -->
-          <div v-if="detailDescribed" class="form-group">
+               what nobody was shown. -->
+          <div class="form-group">
             <label for="task-detail-body">Description</label>
-            <textarea
-              id="task-detail-body"
-              v-model="detailForm.body"
-              rows="6"
-            ></textarea>
-            <details v-if="detailForm.body" class="task-preview">
-              <summary>Preview</summary>
-              <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
-              <div class="task-preview-body markdown" v-html="bodyPreview"></div>
-            </details>
+            <p v-if="descriptionState === 'loading'" class="hint" role="status">Loading description…</p>
+            <template v-else-if="detailDescribed">
+              <textarea
+                id="task-detail-body"
+                v-model="detailForm.body"
+                rows="6"
+              ></textarea>
+              <details v-if="detailForm.body" class="task-preview">
+                <summary>Preview</summary>
+                <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+                <div class="task-preview-body markdown" v-html="bodyPreview"></div>
+              </details>
+            </template>
+            <p v-else class="hint">
+              This board could not read this task's description, so it will not
+              overwrite it.
+              <button type="button" class="btn-chip task-chip" @click="retryDescription">Retry</button>
+            </p>
           </div>
-          <p v-else class="hint">
-            This board has not read this task's description, so it will not
-            overwrite it. File one with the task, or from the command line.
-          </p>
 
-          <p v-if="board.error" class="task-action-error" role="alert">{{ board.error }}</p>
+          <p v-if="board.error" class="task-action-error" role="alert">
+            {{ board.error }}
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
+          </p>
+          <p v-else-if="savedAt" class="task-saved" role="status">Saved</p>
 
           <div class="form-actions">
             <button
@@ -764,6 +908,9 @@ const today = localDateKey()
 </template>
 
 <style scoped>
+/* The pane root. It is also the element `NARROW_PANE_PX` observes: a block
+   filling the `chat-pane` container, so its inline size IS the container's, and
+   the one number both the JS lanes and the CSS breakpoint agree on. */
 .task-view {
   display: flex;
   flex-direction: column;
@@ -834,6 +981,26 @@ const today = localDateKey()
   font-size: var(--text-sm);
   line-height: 1.5;
 }
+/* The action error carries a Reload beside it, so it lays out as a line rather
+   than as prose with a button jammed into the sentence. */
+.task-action-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+.task-lede {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.task-saved {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
 .task-stale {
   display: flex;
   flex-wrap: wrap;
@@ -843,8 +1010,6 @@ const today = localDateKey()
 }
 .task-lede {
   margin: 0 0 var(--space-3);
-  color: var(--fg3);
-  font-size: var(--text-sm);
 }
 
 /* ── Unreadable files ──────────────────────────────────────────────────── */
@@ -880,7 +1045,8 @@ const today = localDateKey()
 
 /* A narrow pane gets the one lane the filters chose, read as a list. The grid
    above already collapsed to a single track; the lane only has to stop dressing
-   itself like a column. */
+   itself like a column. Same 940px the script's NARROW_PANE_PX uses — one
+   measurement, two renderers. */
 @container chat-pane (max-width: 940px) {
   .task-lanes--columns { grid-template-columns: minmax(0, 1fr); }
 }
@@ -995,6 +1161,11 @@ const today = localDateKey()
 
 /* ── Dialogs ───────────────────────────────────────────────────────────── */
 .task-sheet { padding: 0; }
+/* The shared `.btn-icon` is already 44px square, but a scoped rule for the
+   board's own headers wins on specificity over a change to the shared one, and
+   the close button is the one target in the dialog a coarse pointer cannot miss
+   if it is small. */
+.task-sheet-head .btn-icon { min-width: var(--touch); min-height: var(--touch); }
 .task-sheet-head {
   display: flex;
   align-items: center;

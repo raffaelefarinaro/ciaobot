@@ -818,22 +818,28 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // claims the keys it uses in the capture phase; this covers every chord it
   // does not.
   if (pendingNewChat.value) return
-  // Switch top-level sections (chat → schedules → memory → settings) with
-  // Option+Arrow, because the browser has already spent Cmd+Left/Right on
+  // Switch top-level sections (chat → schedules → tasks → memory → settings)
+  // with Option+Arrow, because the browser has already spent Cmd+Left/Right on
   // back/forward. Never Tab: that stays the native focus traversal.
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
   const isSectionArrow = alt && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
   if (isSectionArrow) {
     if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
-    const sections = ['/', '/schedules', '/memory', '/settings']
+    // Order matches the sidebar's own destination order (Chats, Automations,
+    // Tasks, Memory, Settings), so Option+Arrow walks the sections the way the
+    // nav lists them. `/tasks` needs its own index: it has no `viewMode` fall
+    // through to, so without one Alt+Right from the board jumped to Home.
+    const sections = ['/', '/schedules', '/tasks', '/memory', '/settings']
     const current = viewMode.value === 'chat' || viewMode.value === 'project'
       ? 0
       : viewMode.value === 'schedules'
         ? 1
-        : viewMode.value === 'memory' || viewMode.value === 'proposals'
+        : viewMode.value === 'tasks'
           ? 2
-          : 3
+          : viewMode.value === 'memory' || viewMode.value === 'proposals'
+            ? 3
+            : 4
     const next = (current + (e.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length
     e.preventDefault()
     void router.push(sections[next])

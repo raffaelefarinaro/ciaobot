@@ -188,6 +188,7 @@ from ciao.web.routes_tasks import (
     task_complete,
     task_create,
     task_delete,
+    task_get,
     task_list,
     task_update,
 )
@@ -336,8 +337,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Literal `complete` precedes the `{task_id}` pattern so it is not
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
-        # Same path, two handlers: a PATCH edits the record, a DELETE removes
-        # it, and both present the revision they read.
+        # Same path, three handlers: a GET reads one task with its description
+        # (the list carries none), a PATCH edits the record, a DELETE removes
+        # it, and both writes present the revision they read.
+        Route("/api/tasks/{task_id}", task_get, methods=["GET"]),
         Route("/api/tasks/{task_id}", task_update, methods=["PATCH"]),
         Route("/api/tasks/{task_id}", task_delete, methods=["DELETE"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
