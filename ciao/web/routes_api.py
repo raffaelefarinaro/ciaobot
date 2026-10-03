@@ -607,6 +607,20 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
         except OSError as exc:
             logger.exception("Could not save the registry after archiving %s", name)
             return _roll_back(f"the workspace registry could not be saved ({exc})")
+        # Archiving destroys the workspace's webhook verifiers: a revoked
+        # trigger cannot be re-enabled until it is rotated, so a restored
+        # workspace name reactivates no old credential. Idempotent; best-effort
+        # here because the archive itself already stands.
+        try:
+            from ciao.webhooks import WebhookStore  # noqa: PLC0415
+
+            WebhookStore(config.state_path.parent / "webhooks.json").revoke_workspace(
+                name
+            )
+        except Exception:  # noqa: BLE001 - the archive stands either way
+            logger.exception(
+                "Could not revoke webhook triggers for archived workspace %s", name
+            )
         _refresh_project_manager_workspaces(request)
         _publish_workspaces_changed(request)
         if schedules:

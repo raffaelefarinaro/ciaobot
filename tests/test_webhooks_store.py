@@ -707,3 +707,38 @@ def test_store_is_private_using_platform_privacy_helper(
     store.create(name="second", workspace="personal", instructions="go")
     assert is_private(path), "a replaced store must not inherit a looser mode"
     assert store.get(trigger.trigger_id).name == "CI push"
+
+
+# ── Deletion ───────────────────────────────────────────────────────────────
+
+
+def test_delete_removes_the_record_under_a_revision_check(
+    path: Path, clock: _Clock
+) -> None:
+    """Delete drops the record so `get` raises `not_found`.
+
+    A stale revision writes nothing first: the bytes, the record and the
+    credential are exactly as they were until the caller names the revision it
+    actually read.
+    """
+    store = _store(path, clock)
+    trigger, secret = _enabled_trigger(store)
+    before = path.read_bytes()
+
+    stale = _refused(
+        lambda: store.delete(trigger.trigger_id, expected_revision=trigger.revision + 1)
+    )
+    assert stale.code == webhooks.REVISION_CONFLICT
+    assert path.read_bytes() == before, "a refused delete must not touch the bytes"
+
+    store.delete(trigger.trigger_id, expected_revision=trigger.revision)
+
+    assert _refused(lambda: store.get(trigger.trigger_id)).code == webhooks.NOT_FOUND
+    assert store.list("personal") == []
+    assert store.authenticate(trigger.trigger_id, secret) is None
+    assert (
+        _refused(
+            lambda: store.delete(trigger.trigger_id, expected_revision=trigger.revision)
+        ).code
+        == webhooks.NOT_FOUND
+    )

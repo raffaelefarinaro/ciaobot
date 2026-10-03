@@ -20,8 +20,8 @@ questions and refuses everything else:
 - "which triggers exist for this workspace?" — `list`, `get`
 - "does this secret authorize this trigger right now?" — `authenticate`
 
-and it owns the writes that answer them: `create`, `update`, `rotate_secret`,
-`revoke_workspace`.
+and it owns the writes that answer them: `create`, `update`, `delete`,
+`rotate_secret`, `revoke_workspace`.
 
 ## File schema
 
@@ -69,6 +69,7 @@ store.create(*, name: str, workspace: str, project_id: str | None = None,
              instructions: str, mode: WebhookMode = "auto") -> tuple[WebhookTrigger, str]
 store.update(trigger_id: str, *, expected_revision: int, name: str | None = None,
              instructions: str | None = None, enabled: bool | None = None) -> WebhookTrigger
+store.delete(trigger_id: str, *, expected_revision: int) -> None
 store.rotate_secret(trigger_id: str, *, expected_revision: int) -> tuple[WebhookTrigger, str]
 store.revoke_workspace(workspace: str) -> int
 store.authenticate(trigger_id: str, secret: str) -> WebhookTrigger | None
@@ -200,8 +201,11 @@ happen must not be reported as a store state.
 ## What the later children owe
 
 - **A2 — management and lifecycle.** Session-authenticated `/api/*` routes over
-  these methods, and workspace archive → `revoke_workspace`, so archiving a
-  workspace destroys its verifiers and restoring the name reactivates nothing.
+  these methods (`ciao/web/routes_webhooks.py`: list, create, update, rotate and
+  delete; a raw secret is returned once, by create/rotate only), and workspace
+  archive → `revoke_workspace`, so archiving a workspace destroys its verifiers
+  and restoring the name reactivates nothing. Still no ingress: there is no
+  `/hooks/*` receiver, no bearer auth and no request recipe.
 - **A3 — ingress.** A bearer-secret route that never accepts a cookie, carries
   no secret in a query string, and fails closed on `corrupt_store` instead of
   answering "no" to everything. It re-reads the document per request, so a
