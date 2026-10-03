@@ -327,6 +327,30 @@ async function saveDraft() {
       </p>
     </header>
 
+    <!-- What the two memory layers are, and what a category is for — above the
+         controls, and outside the load branches on purpose: it is true while the
+         list is loading and after a failure too, so it must never be read as a
+         claim about an empty registry (#979). Static text, no request, no state. -->
+    <section class="cat-why" aria-labelledby="cat-why-heading">
+      <h3 id="cat-why-heading" class="cat-why-h">How memory is organized</h3>
+      <p class="cat-why-line">
+        <strong>Profile &amp; preferences</strong> — a small, bounded block kept in
+        your workspace guide and loaded into every conversation, so you stop
+        repeating yourself. <em>Keeps answers short and jargon-free.</em>
+      </p>
+      <p class="cat-why-line">
+        <strong>Notes, by category</strong> — everything else is a note you own,
+        filed under one of the categories in this list.
+        <em>The decision behind a launch, who someone is, the reference you keep
+        coming back to.</em>
+      </p>
+      <p class="cat-why-line cat-why-foot">
+        A category is a filing rule, not a request: changing one shapes how
+        <strong>future</strong> notes are organized, and no empty folder is created
+        for a category you never write in.
+      </p>
+    </section>
+
     <div v-if="catLoading" class="cat-loading" role="status" aria-live="polite">
       <span class="cat-spinner" aria-hidden="true"></span> Loading categories…
     </div>
@@ -587,6 +611,34 @@ async function saveDraft() {
   line-height: 1.55;
 }
 .cat-lede code { font-family: var(--font-mono); }
+
+/* The explanation: one neutral surface, quiet type, no accent — it is reading,
+   not a control, and nothing in it is clickable. */
+.cat-why {
+  margin-bottom: var(--space-3);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+.cat-why-h {
+  margin: 0 0 4px;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+.cat-why-line {
+  margin: 0;
+  /* The surface spans the pane like the table below it, but the reading keeps
+     a measure: prose across a 1400px pane is 130 characters a line. */
+  max-width: 78ch;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+}
+.cat-why-line strong { color: var(--fg); font-weight: 600; }
+.cat-why-line em { font-style: normal; color: var(--fg3); }
+.cat-why-foot { margin-top: 4px; }
 
 .cat-loading {
   display: flex;

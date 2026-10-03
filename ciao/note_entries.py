@@ -196,6 +196,39 @@ _LIST_ITEM_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-*+]|\d{1,9}[.)])(?=[ \t]|$)"
 )
 
+# ── Markdown display ──────────────────────────────────────────────────────
+#
+# A preview that is rendered as plain text spends its budget on syntax: a row
+# reading "**Learn.** People…" or "- item" shows the markers instead of the
+# fact. One shared strip keeps the note-row preview and the entry excerpt from
+# disagreeing, which they did while only the row stripped.
+_MD_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
+# A leading heading or list marker, or any 1–2 char emphasis run. The ordered
+# marker is separate from the unordered one and guarded by trailing whitespace
+# so a decimal like "3.14" is prose, not a list item. The emphasis run treats
+# `_` differently from `*`/`` ` ``: an underscore between two word characters
+# is part of the word (`barcode_capture`, `timeout_s`), not decoration, so only
+# a run at a word edge is stripped. That keeps snake_case identifiers and paths
+# intact while `_italic_` still loses its markers.
+_MD_NOISE_RE = re.compile(
+    r"(?m)^[ \t]*(?:#{1,6}[ \t]+|\d{1,9}[.)][ \t]+|[-*+][ \t]+|>[ \t]?)"
+    r"|[*`]{1,2}|(?<![A-Za-z0-9])_{1,2}|_{1,2}(?![A-Za-z0-9])"
+)
+
+
+def strip_markdown_noise(text: str) -> str:
+    """Plain text for a preview that is *shown*, not parsed.
+
+    Emphasis and backticks come off, a link keeps its label and drops the URL,
+    and a leading heading or list marker (unordered or ordered) is removed.
+    Nothing else is normalized here — a caller decides whether to collapse
+    whitespace and how far to truncate — and the input is never mutated, so
+    identity, fingerprints and coverage still read the source text.
+    """
+    body = _MD_LINK_RE.sub(r"\1", text)
+    return _MD_NOISE_RE.sub("", body)
+
+
 # Internal block kinds. Not part of the public vocabulary: a caller reports on
 # entries and coverage, not on how the line walk classified a line.
 _BLOCK_BLANK = "blank"
@@ -1080,6 +1113,35 @@ def _is_frontmatter_opener(line: _Line) -> bool:
     return line.index == 0 and line.view.rstrip() == "---"
 
 
+def _continues_frontmatter_value(line: _Line) -> bool:
+    """True when ``line`` continues a frontmatter value rather than ending it.
+
+    Frontmatter is not only ``key: value`` lines. A list-valued key — ``tags:``,
+    ``related:``, ``aliases:`` — puts an indented block sequence under it, and a
+    value may nest a mapping one level deeper still::
+
+        tags:
+          - travel
+          - name: Ipek
+            role: sister
+
+    Every one of those lines is indented, and that is what tells them apart from
+    the body a thematic break would open. An indented list item or an indented
+    ``key: value`` continues the value; the indented run below one continues it
+    too, which is what lets a nested mapping item be read instead of ending the
+    block.
+
+    A *non-indented* line is never a continuation. That is the whole point: a
+    note that opens with a thematic break puts real body content at column zero,
+    and reading a bullet there as the start of the frontmatter would swallow it.
+    """
+    if line.indent == 0:
+        return False
+    return _LIST_ITEM_RE.match(line.view) is not None or bool(
+        _FRONTMATTER_KEY_RE.match(line.view.lstrip(" \t"))
+    )
+
+
 def _frontmatter_end(lines: list[_Line]) -> int | None:
     """Index of the line closing a frontmatter block, or ``None``.
 
@@ -1090,18 +1152,29 @@ def _frontmatter_end(lines: list[_Line]) -> int | None:
     between them read as frontmatter and silently dropped. Refusing to guess is
     the whole point; ``None`` leaves the caller treating the opener as the rule
     it almost certainly is and reading the body.
+
+    Once a key has been seen, its indented block-sequence value (see
+    :func:`_continues_frontmatter_value`) is frontmatter too. Without that, a
+    ``tags:`` list put an indented ``- item`` where a key was expected, the
+    block was judged a rule, and the walk read the note's own metadata as
+    facts.
     """
     if not lines or not _is_frontmatter_opener(lines[0]):
         return None
+    seen_key = False
     for index in range(1, len(lines)):
         line = lines[index]
         if line.indent == 0 and line.view.rstrip() in _FRONTMATTER_DELIMITERS:
             return index
         if line.blank:
             continue
-        if not _FRONTMATTER_KEY_RE.match(line.view):
-            # Real content where a key was expected: this `---` was a rule.
-            return None
+        if _FRONTMATTER_KEY_RE.match(line.view):
+            seen_key = True
+            continue
+        if seen_key and _continues_frontmatter_value(line):
+            continue
+        # Real content where a key was expected: this `---` was a rule.
+        return None
     # An unterminated block is reported by the caller; the body is still read.
     return None
 
