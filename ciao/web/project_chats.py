@@ -1306,6 +1306,53 @@ class ProjectChatManager:
             "Turning insights off only stops new passes — it never deletes what "
             "is already saved."
         )
+        # One block, both shapes, for the same reason as `memory_intro` (#987):
+        # the known state, the interview and the starting-knowledge pass are the
+        # same job whichever vault the user pointed us at, and a second copy of
+        # either would drift from the other the first time one is edited.
+        # Read-only and skippable throughout — a summary of what Ciaobot already
+        # knows, then questions the user may decline, then a seed from confirmed
+        # facts only. It reads no provider history, moves nothing, and writes no
+        # category; curating past conversations stays the separate, consent-gated
+        # memory job (#975's later children), reachable from Memory at any time.
+        known_state = (
+            "Before asking anything, report a short, read-only summary of what "
+            "this workspace already holds, taken from Ciaobot's own state only: "
+            "the vault's notes, the category registry, the entity notes "
+            "(people, resources) and the project docs. The point is to name what "
+            "exists so the interview neither re-asks nor re-files what is already "
+            "known; on a brand-new vault the summary is simply that there is "
+            "nothing there yet. It reads no provider history and starts no "
+            "extraction. Keep it a summary, not a migration: no moves, no "
+            "deletes, no category writes, no entity-folder creation."
+        )
+        interview = (
+            "Ask the user 2-3 important questions per turn, in this order. "
+            "**(a) Purpose and scope**: what this workspace is for, what should "
+            "live in it, and what should stay out of it — route that answer to "
+            "the workspace/project context (the `AGENTS.md` workspace guide or "
+            "the General project doc), never to a bounded region, because it is "
+            "scope rather than a personal fact. "
+            "**(b) How to work with them**: tone, length, language, when to "
+            "challenge a plan, formatting — route that to the `ciao:profile` "
+            "region. "
+            "**(c) Operating context and preferences**: tools, environment, "
+            "recurring constraints — route that to the `ciao:memory` region. "
+            "Ask their name and role too; both belong in the `ciao:profile` "
+            "region. Keep it conversational and skippable: 2-3 short questions "
+            "per turn, never a numbered interrogation, never a gate. If the user "
+            "declines a question, move on without inventing an answer. Do not "
+            "scan past chats, do not import anything, and do not write category "
+            "files."
+        )
+        starting_knowledge = (
+            "After the interview, run a **starting-knowledge pass** from "
+            "confirmed facts only: key people to `People/`, active projects to "
+            "their own project docs, and at most a few top resources to "
+            "`Resources/`. Create an entity folder only when a confirmed fact "
+            "needs it, never an empty one, and put anything you are not sure "
+            "about in `Workspace/Memory-Proposals.md` instead of filing it."
+        )
 
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
@@ -1315,14 +1362,15 @@ class ProjectChatManager:
                 f"`{vault_root}`\n\n"
                 f"This is logical workspace **{workspace_name}**. Do not create a second personal/work split inside it.\n\n"
                 f"Your task is to onboard the user and adapt this existing folder into the current Ciaobot vault layout:\n"
-                f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable.\n"
+                f"1. **Inventory first**: Scan the vault and report its top-level files and folders, separating user notes from Ciaobot-managed files (`.env`, `.runtime/`, `.claude/`, `AGENTS.md`). Do not assume an unfamiliar folder is disposable. {known_state}\n"
                 f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout.\n"
                 f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
                 f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `AGENTS.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
-                f"5. **Initial memory curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then run an initial curation in this chat: search for duplicates, update the relevant project canonical docs, create durable person/entity notes only for confirmed facts, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
+                f"5. **Initial memory curation**: {interview} Then run an initial curation in this chat: search for duplicates, update the relevant project canonical docs, create durable person/entity notes only for confirmed facts, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
                 f"6. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
-                f"7. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
-                f"8. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"7. **Starting knowledge**: {starting_knowledge}\n"
+                f"8. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
+                f"9. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
@@ -1343,10 +1391,12 @@ class ProjectChatManager:
                 f"Your task is to bootstrap the current vault structure and core documentation:\n"
                 f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
                 f"2. **Core files**: Setup has already seeded the workspace-level `AGENTS.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `AGENTS.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
-                f"3. **Onboarding interview and curation**: Ask the user 2-3 important questions about their name, role, key people, and active projects. Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, project facts to project canonical docs, people to `People/`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
-                f"4. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
-                f"5. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
-                f"6. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"3. **Known state first**: {known_state}\n"
+                f"4. **Onboarding interview and curation**: {interview} Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, project facts to project canonical docs, people to `People/`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
+                f"5. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
+                f"6. **Starting knowledge**: {starting_knowledge}\n"
+                f"7. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
+                f"8. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, explain that you are starting logical workspace **{workspace_name}** at `{vault_root}`, and ask the first onboarding questions to bootstrap their profile."
             )
             assistant_msg = (

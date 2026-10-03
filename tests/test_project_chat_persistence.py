@@ -210,6 +210,140 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
     assert "Do not create `personal/`, `work/`, or `Templates/`" in scratch_prompt
 
 
+def test_onboarding_asks_workspace_purpose_and_style(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Both shapes ask what this workspace is for, and how to work with them (#987).
+
+    The seeded interview used to ask only about name, role, key people and active
+    projects, so the workspace's scope was never asked at all and style was only
+    named as a routing target — nothing ever sent a fact there. Both shapes carry
+    the same ordered interview, so one pass over the two covers an adopted vault
+    and a brand-new one.
+    """
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    existing = _make_manager(tmp_path / "existing")
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    scratch = _make_manager(tmp_path / "scratch")
+
+    for manager, title in (
+        (existing, "Connect Existing Vault 👋"),
+        (scratch, "Welcome to Ciaobot! 👋"),
+    ):
+        prompt, _ = _seeded_welcome(manager, title)
+
+        # (a) What this workspace is for, what belongs in it, and what does not.
+        assert "**(a) Purpose and scope**" in prompt
+        assert "what this workspace is for" in prompt
+        assert "what should live in it, and what should stay out of it" in prompt
+        # (b) How the user wants to be talked to and worked with, in the words
+        # the interview has to actually ask for.
+        assert "**(b) How to work with them**" in prompt
+        assert "tone, length, language, when to challenge a plan, formatting" in prompt
+        # (c) The operating context around the work.
+        assert "**(c) Operating context and preferences**" in prompt
+        assert "tools, environment, recurring constraints" in prompt
+        # And the name and role the old round asked for are still asked for.
+        assert "Ask their name and role too" in prompt
+        # Still a conversation the user can decline — not a form to complete, and
+        # a skipped question is never answered on the user's behalf.
+        assert "2-3 short questions per turn" in prompt
+        assert "never a numbered interrogation, never a gate" in prompt
+        assert "move on without inventing an answer" in prompt
+
+
+def test_onboarding_routes_purpose_to_context_and_style_to_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Purpose is workspace scope; style and operating context are bounded facts (#987).
+
+    A workspace's purpose is not a fact about the user, so filing it in the small
+    bounded regions would spend the cap on scope and crowd out the person. The
+    interview therefore names the workspace guide and the General project doc as
+    its home and rules the bounded regions out for it, while style and operating
+    context go where the memory tool says they belong.
+    """
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    existing = _make_manager(tmp_path / "existing")
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    scratch = _make_manager(tmp_path / "scratch")
+
+    for manager, title in (
+        (existing, "Connect Existing Vault 👋"),
+        (scratch, "Welcome to Ciaobot! 👋"),
+    ):
+        prompt, _ = _seeded_welcome(manager, title)
+
+        # Purpose and scope: workspace/project context, and no bounded region.
+        assert "route that answer to the workspace/project context" in prompt
+        assert "`AGENTS.md` workspace guide or the General project doc" in prompt
+        assert "never to a bounded region" in prompt
+        # How to work together: the profile region, which is loaded every turn.
+        assert "route that to the `ciao:profile` region" in prompt
+        # Operating context and preferences: the environment/memory region.
+        assert "route that to the `ciao:memory` region" in prompt
+        # Name and role stay personal facts, in the profile region with style.
+        assert "both belong in the `ciao:profile` region" in prompt
+
+
+def test_onboarding_starting_knowledge_is_confirmed_facts_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Starting knowledge is seeded from confirmed facts, and from own state only (#987).
+
+    A guess written as a note is indistinguishable from a fact once it is on disk,
+    so the pass files only what the user confirmed and parks everything else in
+    `Workspace/Memory-Proposals.md`. Nothing about it creates scaffolding ahead of
+    the facts, and nothing about it reaches outside Ciaobot's own vault state:
+    reading past conversations is the consent-gated memory job, which the user
+    starts from Memory whenever they choose, not a side effect of onboarding.
+    """
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    existing = _make_manager(tmp_path / "existing")
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    scratch = _make_manager(tmp_path / "scratch")
+
+    for manager, title in (
+        (existing, "Connect Existing Vault 👋"),
+        (scratch, "Welcome to Ciaobot! 👋"),
+    ):
+        prompt, _ = _seeded_welcome(manager, title)
+
+        # Confirmed facts only, seeded into the places the vault layout owns.
+        assert "run a **starting-knowledge pass** from confirmed facts only" in prompt
+        assert (
+            "key people to `People/`, active projects to their own project docs, "
+            "and at most a few top resources to `Resources/`" in prompt
+        )
+        # Anything uncertain waits for the user instead of being filed.
+        assert (
+            "put anything you are not sure about in "
+            "`Workspace/Memory-Proposals.md` instead of filing it" in prompt
+        )
+        # No empty folders: a category/entity folder appears only where a
+        # confirmed fact needs it.
+        assert (
+            "Create an entity folder only when a confirmed fact needs it, "
+            "never an empty one" in prompt
+        )
+        # What the pass must not do: read the provider's history, import
+        # anything, or touch the categories the user owns.
+        assert "It reads no provider history and starts no extraction" in prompt
+        assert (
+            "Do not scan past chats, do not import anything, and do not write "
+            "category files" in prompt
+        )
+        # The state it does read is reported, not migrated.
+        assert (
+            "report a short, read-only summary of what this workspace already "
+            "holds" in prompt
+        )
+        assert (
+            "Keep it a summary, not a migration: no moves, no deletes, no "
+            "category writes, no entity-folder creation" in prompt
+        )
+
+
 def test_custom_category_label_is_plain_text_in_welcome(tmp_path: Path) -> None:
     """A label is user-typed text: it is named, never rendered as markup (#979).
 
