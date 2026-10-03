@@ -1,15 +1,17 @@
-# Webhook trigger store and ingress receiver (#981, #1010)
+# Webhook trigger store, ingress receiver and dispatch (#981, #1010, #1020)
 
 > **This is not a finished webhook feature.** `ciao/webhooks.py` owns the
 > private configuration and credential store for the webhook feature tracked in
-> #974, plus the ingress receiver that records what a secret caused. What ships
-> today is: management routes over the store (A2), and one bearer-authenticated
-> endpoint that records a durable receipt for an accepted event (A3). What does
-> **not** ship is the part a user would call the feature — **there is no
-> dispatch, no chat creation, no UI, no CLI or recipe**: a `202` from the
-> receiver means "your event is recorded", not "a turn ran", and no page,
-> skill or recipe may claim otherwise until the dispatch child lands. This
-> document is the store's and the receiver's own contract.
+> #974, plus the ingress receiver that records what a secret caused;
+> `ciao/webhook_dispatch.py` turns an accepted event into an ordinary chat.
+> What ships today is: management routes over the store (A2), one
+> bearer-authenticated endpoint that records a durable receipt for an accepted
+> event (A3), and the dispatch that launches that event as an ordinary project
+> chat (A4). What does **not** ship is the part a user would call a *surface* —
+> **there is no Automations UI, no receipt history page, no CLI, skill or
+> recipe**: a `202` from the receiver means "your event is recorded", not "a
+> turn ran", and no page, skill or recipe may claim otherwise. This document is
+> the store's, the receiver's and the dispatcher's own contract.
 
 ## What it is
 
@@ -199,9 +201,11 @@ than folding onto the old receipt, which would erase how it settled.
 **Bounds.** `MAX_BODY_BYTES` (65536), `RATE_LIMIT_PER_MINUTE` (10) on an
 in-process per-trigger sliding window — the credential *is* the caller, and a
 shared IP is not — and `MAX_PENDING_RECEIPTS` (20) receipts left open per
-trigger. The pending bound is what bounds an unattended sender while there is no
-dispatch: accepted receipts do not settle on their own, so a trigger fills up and
-says so with a `503` rather than accumulating work nobody is doing.
+trigger (`accepted` or `launched`). Dispatch settles a receipt in seconds, so the
+pending bound is not what a healthy sender meets; it is what a stopped engine,
+an unresolvable target, or a crash in the launch window amount to, and it is
+what makes an unattended sender fill up and be told so with a `503` rather than
+accumulating work nobody is doing.
 
 **Ordering, which is the whole point.** The `accepted` row is durable before any
 launch is attempted, and the `launched` allocation is durable before the model
@@ -211,11 +215,79 @@ saying it needs review. Nothing replays it: a second unattended run is a cost
 nobody asked for, and the receipt is the evidence that something already
 happened.
 
-**Deliberately not here.** Dispatch (`begin_launch` and `settle_failed` are the
-dispatcher's entry points, and nothing in this child calls them), startup
-recovery wiring, a receipt-list API, outbound callbacks, and any
-provider-specific signature adapter — the bearer secret is the whole
-authentication story.
+**Deliberately not here.** The launch itself (`begin_launch` and `settle_failed`
+are the dispatcher's entry points, and nothing in `ciao/webhooks.py` calls
+them), a receipt-list API, outbound callbacks, and any provider-specific
+signature adapter — the bearer secret is the whole authentication story.
+
+## Dispatch (#1020)
+
+`ciao/webhook_dispatch.py` turns one accepted receipt into one ordinary chat.
+Two callers, both deliberately thin: `ciao/web/routes_hooks.py` schedules
+`dispatch_receipt` off the response path, and `ciao/main.py` calls
+`resume_pending` once at startup for the events a restart left `accepted`.
+
+**The response is a receipt, not a launch result.** The `202` does not wait on
+the model turn. A turn can run for minutes, and a sender has no way to read
+progress from it; what it gets back is the receipt id, and the chat the launch
+created is an ordinary one the operator opens like any other.
+
+**An ordinary chat, with no escalation.** `ProjectChatManager.start_stream` is
+called as `start_stream(chat_id, prompt)` — the `unattended` flag is never
+named. That flag is what `_effective_mode_for_chat` turns into `bypass` for any
+non-plan chat, and a webhook is not authorization for it: the trigger's
+authorization was for the trigger, not for the permissions its turn runs under.
+So the turn runs with the trigger's configured mode (`normal`, `auto` or `plan`
+— the only modes this store can represent), the chat takes its model and
+provider from the operator's own Settings, and an approval card raised in the
+turn is an ordinary approval card that surfaces in Needs-you, exactly as it does
+for a wake turn or the `chat_prompt` route.
+
+**The sender's only input is the event text.** The prompt is the trigger's
+`instructions` followed by the receipt's `event_text`, quoted inside a fixed
+`<webhook-event>` fence and labelled as data. A fence tag inside the payload is
+escaped, so a sender cannot close the fence and have the rest of its own text
+read as Ciaobot's framing. Nothing else in the body is a field the receiver
+accepts at all (`{"text": …}` is the whole schema), so "a sender cannot choose
+the workspace, project, model or permission" is a property of the shape rather
+than a blocklist of field names to keep current.
+
+**The target is the trigger's, and it has to resolve.** The pinned
+`project_id` must exist *and* belong to the trigger's workspace; `null` means
+that workspace's `General`. A deleted project, a project in another workspace, or
+a workspace with no `General` each settle the receipt `failed` with a detail
+naming the reason. Never a silent `General` fallback: the one thing an operator
+must be able to trust is that deleting a project stops work arriving in it. A
+trigger deleted between accepting the event and dispatching it settles `failed`
+too — its instructions are gone, so there is no turn to build.
+
+**The off switch reaches an event already in the journal.** A receipt launches
+only while its trigger is still configured *and* enabled. `enabled` gates
+authentication at the door and it gates the launch too, so an operator who
+disables or revokes a trigger does not find it running turns that were accepted a
+moment earlier. `revoke_workspace` disables *and* destroys the verifier, so that
+one check is what keeps archive-and-restore safe here as well: an event accepted
+just before the archive settles `failed` rather than launching into a workspace
+whose old secret is already dead.
+
+**What the three settled states mean.**
+
+| status | meaning | what happens next |
+| --- | --- | --- |
+| `launched` | the chat was created and the turn was started. **This is the success outcome**, not a pending one: the turn is now an ordinary chat and its progress lives there, not in the receipt. | nothing; the pending bound stops counting it only when it is terminal, so it still occupies the trigger until the journal is trimmed |
+| `failed` | the launch was attempted and did not complete — an unresolvable target, a trigger that is gone, or a turn that would not start. Terminal on purpose: a failed launch is an event that happened and failed, and re-running it is the operator's decision. | the operator fixes the target or retargets the trigger; the sender's next delivery with a new key is a new attempt |
+| `interrupted` | the allocation was recorded but the outcome was not, so a process died inside the launch window. **Needs an operator.** | never replayed automatically — a second unattended turn is a cost nobody asked for — and a dispatch of an `interrupted` receipt is a no-op |
+
+**The ordering, and the startup sweep.** `begin_launch` is durable *before*
+`start_stream` is called, which is what makes `interrupted` honest rather than a
+guess. At startup, `resume_pending` runs `recover_interrupted` first — so the
+journal says what is ambiguous before any new turn starts — and then dispatches
+the remaining `accepted` receipts, oldest first, once. Once because dispatch is
+idempotent by receipt state: after a sweep each receipt it touched is `launched`
+or `failed`, so a sweep that runs twice starts no second turn. The sweep is
+bounded (`MAX_RESUMED_LAUNCHES`, 20): a journal that accumulated `accepted` rows
+while nothing dispatched them would otherwise start a turn per row at boot, and
+anything past the bound stays `accepted` for an operator to look at.
 
 ## Errors
 
@@ -258,11 +330,12 @@ cannot accidentally pick a status:
 - **Caller-supplied prompts.** `input_policy` is `event_text` only: fixed
   instructions plus bounded event text. A caller-prompt mode is a separately
   approved per-trigger choice, and payload URLs are never fetched.
-- **Membership validation.** `workspace` and `project_id` are checked for
-  *shape* against the registry's own name rule. Whether the workspace is
-  registered and live, and whether the named project exists, is a later
-  service's obligation: an explicit project that has been deleted must fail
-  rather than fall back to General, and that check cannot live here.
+- **Membership validation in the store.** `workspace` and `project_id` are
+  checked for *shape* against the registry's own name rule, and that is all this
+  store will ever do: refusing an unregistered workspace name here would make it
+  own workspace lifecycle. Whether the workspace is registered and live, and
+  whether the named project exists, is dispatch's obligation — and dispatch fails
+  the launch rather than falling back to General.
 - **A principal, a session or a login.** There is none.
 
 ## What the later children owe
@@ -282,16 +355,17 @@ cannot accidentally pick a status:
   `WebhookReceiver` here. **It does not dispatch**: it records an `accepted`
   receipt and answers `202`.
 - **A4 — dispatch.** Turning an authenticated trigger into an ordinary chat, with
-  the same provenance and the same approval behaviour as any unattended dispatch
-  that is not an unattended bypass. It calls `WebhookReceiver.begin_launch`
-  before the model turn and `settle_failed` when the attempt does not complete,
-  and it calls `recover_interrupted` at startup: a receipt left `launched` is
-  genuinely ambiguous, so it is recorded `interrupted` and reviewed, never
-  replayed. Until then every accepted receipt stays open, which is what
-  `MAX_PENDING_RECEIPTS` bounds — an unattended sender gets an explicit `503`
-  rather than an unbounded queue.
-- **A5/A6 — surfaces.** The Automations UI, the agent CLI, user recipes,
-  capabilities and public docs — all of which must describe only what has
-  actually shipped.
+  the same provenance and the same approval behaviour as any dispatch that is not
+  a bypass. It calls `WebhookReceiver.begin_launch` before the model turn and
+  `settle_failed` when the attempt does not complete, and it calls
+  `recover_interrupted` at startup: a receipt left `launched` is genuinely
+  ambiguous, so it is recorded `interrupted` and reviewed, never replayed. Shipped
+  in #1020 — `ciao/webhook_dispatch.py`, with the receiver answering `202`
+  without waiting on the turn and `main.py` sweeping at startup. See
+  **Dispatch** above.
+- **A5/A6 — surfaces.** The Automations UI and receipt history, the agent CLI,
+  user recipes, capabilities and public docs — all of which must describe only
+  what has actually shipped. Until they do, no surface may present a webhook
+  event as though the receiver had run it.
 
 Until a child ships, this file is the whole of the feature.

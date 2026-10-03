@@ -43,17 +43,18 @@ Two layers, deliberately separable:
   durable before the model turn, so a crash in that window can only ever be
   ``interrupted``.
 
-  Deliberately **not** in the receiver: dispatch. ``WebhookReceiver.begin_launch``
-  and ``WebhookReceiver.fail`` exist for A4, which owns ``start_stream``; this
-  child never calls them. An accepted event therefore stays open, which is
-  exactly what ``MAX_PENDING_RECEIPTS`` bounds. The HTTP edge around it is
+  Deliberately **not** in the receiver: the launch itself.
+  ``WebhookReceiver.begin_launch`` and ``WebhookReceiver.settle_failed`` are the
+  dispatcher's entry points (``ciao/webhook_dispatch.py``, #1020) and nothing in
+  this module calls them — the receiver records what a secret caused, and
+  turning that into a chat is a different file's job. The HTTP edge around it is
   ``ciao/web/routes_hooks.py`` and it shares nothing with the browser session:
   the receiver is a machine surface, authorized only by one trigger's own
   secret.
 
 Still **not** here, because a later child owns each of them: whether the named
-workspace is registered and the named project exists (this module validates the
-*shape* of a target, never membership), dispatch into an ordinary chat, the
+workspace is registered (this module validates the *shape* of a target, never
+membership — resolving the target against live projects is dispatch's job), the
 Automations UI, and the CLI/skills/recipes that would describe all of it.
 """
 
@@ -1169,9 +1170,11 @@ RATE_LIMIT_PER_MINUTE = 10
 #: sender is given: the window empties a second after the last attempt in it.
 RATE_WINDOW_SECONDS = 60
 
-#: How long a pending receipt blocks its trigger before the attempt is refused.
-#: Without a dispatch path (A4) an accepted receipt never leaves ``accepted``,
-#: so this is what bounds an unattended sender rather than letting receipts
+#: How many receipts a trigger may leave open before the next attempt is
+#: refused. Open means ``accepted`` or ``launched``: with dispatch (A4) a
+#: receipt normally settles in seconds, but an engine that is down, a target
+#: that cannot be resolved, or a crash in the launch window all leave receipts
+#: open, and this is what bounds an unattended sender rather than letting them
 #: accumulate forever.
 MAX_PENDING_RECEIPTS = 20
 
@@ -2019,6 +2022,34 @@ class WebhookReceiver:
             if str(row.get("trigger_id") or "") == trigger_id
             for receipt in (WebhookReceipt.from_row(row),)
         ]
+
+    def accepted_receipts(
+        self, *, limit: int = MAX_PENDING_RECEIPTS
+    ) -> list[WebhookReceipt]:
+        """Receipts still waiting for a launch, oldest first, at most ``limit``.
+
+        Read by the dispatcher's startup sweep (``ciao/webhook_dispatch.py``): an
+        event that was accepted and never dispatched — the engine was stopped
+        first, or the scheduled dispatch did not get to run — is still exactly
+        what the sender was told had happened, so it is the one receipt a
+        restart may still act on.
+
+        Bounded on purpose. A journal that accumulated ``accepted`` rows while
+        nothing dispatched them would otherwise start one model turn per row at
+        once, which is a stampede no sender asked for; the remainder stay
+        ``accepted`` for an operator to look at, which is the same open state
+        :data:`MAX_PENDING_RECEIPTS` already bounds per trigger.
+
+        Lock-free, like every other read here: the journal is appended to, and a
+        reader that misses a row being appended concurrently sees the same
+        receipt one moment later.
+        """
+        return [
+            receipt
+            for row in read_rows(self._journal)
+            for receipt in (WebhookReceipt.from_row(row),)
+            if receipt.status == ACCEPTED
+        ][:limit]
 
     def get(self, receipt_id: str) -> WebhookReceipt:
         """One receipt by id, or raise ``invalid_receipt``."""
