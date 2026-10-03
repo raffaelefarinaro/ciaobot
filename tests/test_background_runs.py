@@ -225,7 +225,10 @@ def test_bare_ciao_resolves_to_the_engine_over_a_stale_decoy(
 
     decoy_dir = tmp_path / "stale-local-bin"
     decoy_dir.mkdir()
-    decoy = decoy_dir / "ciao"
+    # The decoy needs a PATHEXT suffix on Windows, or a bare-name lookup cannot
+    # see it at all and the assertion below would hold vacuously there.
+    decoy_name = "ciao.bat" if sys.platform == "win32" else "ciao"
+    decoy = decoy_dir / decoy_name
     decoy.write_text("#!/bin/sh\necho stale\n", encoding="utf-8")
     decoy.chmod(decoy.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", os.pathsep.join([str(decoy_dir), "/user/bin"]))
@@ -239,12 +242,16 @@ def test_other_bare_names_still_resolve_from_the_user_path(
     """Only the engine-first promotion is new; a user's own command resolves as before."""
     user_dir = tmp_path / "user-bin"
     user_dir.mkdir()
-    tool = user_dir / "background-test-tool"
+    # A bare-name PATH lookup searches PATHEXT on Windows, so the tool needs a
+    # launchable suffix there or the name resolves to nothing and the test only
+    # exercises the POSIX path.
+    name = "background-test-tool.bat" if sys.platform == "win32" else "background-test-tool"
+    tool = user_dir / name
     tool.write_text("#!/bin/sh\n", encoding="utf-8")
     tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", str(user_dir))
 
-    assert resolve_executable("background-test-tool", tmp_path, tmp_path) == str(tool)
+    assert resolve_executable(name, tmp_path, tmp_path) == str(tool)
 
 
 def test_env_rejects_loader_hooks_and_the_session_token() -> None:
