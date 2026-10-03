@@ -17,6 +17,18 @@ from typing import Any
 MANIFEST_NAME = "ciaobot-engine-manifest.json"
 SIGNATURE_NAME = MANIFEST_NAME + ".sig"
 SCHEMA_VERSION = 1
+# The prebuilt universal macOS server host (#1022, child D of #1008). Its
+# metadata is fixed and independent of the engine version: the same archive
+# authenticates every engine release and is only replaced by a deliberate host
+# upgrade. The fields are exact because a consumer that trusts the manifest also
+# trusts them to pick and stage the one host it will run.
+SERVER_HOST_KIND = "server-host"
+SERVER_HOST_PLATFORM = "macos"
+SERVER_HOST_ARCH = "universal"
+SERVER_HOST_REVISION = 1
+SERVER_HOST_PROTOCOL = 1
+SERVER_HOST_BUNDLE_ID = "local.ciaobot.server"
+SERVER_HOST_FILENAME = "ciaobot-server-host-macos-universal-v1.tar.gz"
 # The release signing key, generated with the app updater back when the release
 # also shipped Ciaobot.app and every consumer of a signature trusted this one
 # key. The app and its verifier are gone (#656), so this is now the only copy
@@ -51,6 +63,31 @@ def artifact_entry(
         "sha256": digest.hexdigest(),
         "size": size,
     }
+
+
+def server_host_artifact_entry(path: Path) -> dict[str, Any]:
+    """Describe the fixed universal macOS server host archive.
+
+    The entry carries the digest and size of ``path`` plus the host's fixed
+    identity and its revision/protocol, which are independent of the engine
+    version. ``path`` must already be named ``SERVER_HOST_FILENAME``: the
+    archive name is part of the contract, so a mismatch is refused here rather
+    than discovered by a manifest consumer.
+    """
+    if path.name != SERVER_HOST_FILENAME:
+        raise ValueError(
+            f"server host archive must be named {SERVER_HOST_FILENAME}, not {path.name!r}"
+        )
+    entry = artifact_entry(
+        path,
+        kind=SERVER_HOST_KIND,
+        platform=SERVER_HOST_PLATFORM,
+        arch=SERVER_HOST_ARCH,
+    )
+    entry["bundle_id"] = SERVER_HOST_BUNDLE_ID
+    entry["host_revision"] = SERVER_HOST_REVISION
+    entry["host_protocol"] = SERVER_HOST_PROTOCOL
+    return entry
 
 
 def build_manifest(
@@ -184,6 +221,41 @@ def _check_artifact(entry: Any) -> None:
     # `True` would pass as a size of 1 and a float would pass as a size.
     if type(entry.get("size")) is not int or entry["size"] < 0:
         raise ValueError("manifest artifact is malformed")
+    if kind == SERVER_HOST_KIND:
+        _check_server_host_artifact(entry)
+
+
+def _check_server_host_artifact(entry: dict[str, Any]) -> None:
+    """Reject a ``server-host`` entry whose fixed host identity is wrong.
+
+    A wheel is validated by the generic fields alone, but the host archive is
+    picked by its exact identity, so every field a consumer acts on — the fixed
+    filename, platform, arch, bundle id and the revision/protocol the host
+    binary answers with — is pinned here. ``host_revision`` and
+    ``host_protocol`` use ``type(...) is int`` so a boolean, which is an ``int``
+    subclass, cannot stand in for revision ``1``; the size must also be
+    positive, since a host archive is never empty.
+    """
+    if entry.get("platform") != SERVER_HOST_PLATFORM:
+        raise ValueError("manifest server host platform is not supported")
+    if entry.get("arch") != SERVER_HOST_ARCH:
+        raise ValueError("manifest server host architecture is not supported")
+    if entry.get("filename") != SERVER_HOST_FILENAME:
+        raise ValueError("manifest server host filename is not supported")
+    if entry.get("bundle_id") != SERVER_HOST_BUNDLE_ID:
+        raise ValueError("manifest server host bundle id is not supported")
+    if (
+        type(entry.get("host_revision")) is not int
+        or entry["host_revision"] != SERVER_HOST_REVISION
+    ):
+        raise ValueError("manifest server host revision is not supported")
+    if (
+        type(entry.get("host_protocol")) is not int
+        or entry["host_protocol"] != SERVER_HOST_PROTOCOL
+    ):
+        raise ValueError("manifest server host protocol is not supported")
+    if entry.get("size", 0) <= 0:
+        raise ValueError("manifest server host archive is empty")
 
 
 def verify_manifest(
@@ -216,7 +288,55 @@ def verify_manifest(
         raise ValueError("manifest lists no artifacts")
     for entry in artifacts:
         _check_artifact(entry)
+    _check_artifact_ambiguity(artifacts)
     return manifest
+
+
+def _check_artifact_ambiguity(artifacts: list[Any]) -> None:
+    """Reject two artifacts a consumer could not tell apart.
+
+    A consumer selects the host by kind or filename, so a second ``server-host``
+    entry, or the host filename reused under another kind, makes the choice
+    ambiguous: which bytes it stages would depend on list order rather than on
+    the signed identity. A wheel-only manifest keeps exactly its old behaviour;
+    this is only about the host the selector resolves.
+    """
+    host_entries = [e for e in artifacts if e.get("kind") == SERVER_HOST_KIND]
+    if len(host_entries) > 1:
+        raise ValueError("manifest lists more than one server host artifact")
+    if host_entries:
+        host_filename = host_entries[0]["filename"]
+        for entry in artifacts:
+            if (
+                entry.get("kind") != SERVER_HOST_KIND
+                and entry["filename"] == host_filename
+            ):
+                raise ValueError(
+                    "manifest reuses the server host filename under another kind"
+                )
+
+
+def select_server_host_artifact(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return the one supported ``server-host`` entry in a verified manifest.
+
+    Absence raises a clear ``ValueError`` rather than falling back to the wheel:
+    a caller that needs the host must fail rather than run a release that never
+    shipped one. This checks shape and the supported identity only — it does
+    **not** prove the manifest authentic. The caller must have verified the
+    signature with :func:`verify_manifest` (or :func:`verify_signature`) first;
+    the selector trusts those bytes, so it must never be the only check.
+    """
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise ValueError("manifest lists no artifacts")
+    hosts = [e for e in artifacts if e.get("kind") == SERVER_HOST_KIND]
+    if not hosts:
+        raise ValueError("manifest has no server host artifact")
+    if len(hosts) != 1:
+        raise ValueError("manifest lists more than one server host artifact")
+    entry: dict[str, Any] = hosts[0]
+    _check_artifact(entry)
+    return entry
 
 
 def missing_static_assets(static_dir: Path) -> list[str]:
@@ -253,6 +373,12 @@ def main(argv: list[str] | None = None) -> int:
     build = sub.add_parser("build", help="Write the engine release manifest")
     build.add_argument("--version", required=True, help="release version, no leading v")
     build.add_argument("--out", required=True, type=Path, help="manifest path to write")
+    build.add_argument(
+        "--server-host",
+        type=Path,
+        default=None,
+        help=f"optional {SERVER_HOST_FILENAME} to authenticate",
+    )
     build.add_argument("wheels", nargs="+", type=Path, help="wheels to list")
 
     verify = sub.add_parser("verify", help="Verify a signed engine manifest")
@@ -275,17 +401,35 @@ def main(argv: list[str] | None = None) -> int:
         version: str = args.version
         out: Path = args.out
         wheels: list[Path] = args.wheels
-        for wheel in wheels:
-            if f"-{version}-" not in wheel.name:
-                print(f"Error: {wheel.name} is not version {version}", file=sys.stderr)
-                return 1
-        artifacts = [artifact_entry(wheel, kind="wheel") for wheel in wheels]
-        manifest = build_manifest(
-            version,
-            artifacts,
-            created=datetime.now(UTC).isoformat(timespec="seconds"),
-        )
-        out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="")
+        server_host: Path | None = args.server_host
+        try:
+            for wheel in wheels:
+                if f"-{version}-" not in wheel.name:
+                    raise ValueError(f"{wheel.name} is not version {version}")
+                if not wheel.is_file():
+                    raise ValueError(f"wheel is not a regular file: {wheel}")
+            artifacts = [artifact_entry(wheel, kind="wheel") for wheel in wheels]
+            if server_host is not None:
+                if not server_host.is_file():
+                    raise ValueError(
+                        f"server host archive is not a regular file: {server_host}"
+                    )
+                if server_host.stat().st_size == 0:
+                    raise ValueError(f"server host archive is empty: {server_host}")
+                artifacts.append(server_host_artifact_entry(server_host))
+            manifest = build_manifest(
+                version,
+                artifacts,
+                created=datetime.now(UTC).isoformat(timespec="seconds"),
+            )
+            serialized = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            out.write_text(serialized, encoding="utf-8", newline="")
+        except (OSError, ValueError) as exc:
+            # Every wheel and the host are validated before the manifest is
+            # built, so a refusal writes nothing: an existing manifest is left
+            # untouched rather than replaced by a partial or inconsistent one.
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
         print(out)
         return 0
 
