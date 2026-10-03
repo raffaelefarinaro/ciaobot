@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from ciao import macos_service
+from ciao.os_support.limits import SERVER_NOFILE_TARGET
 
 # These reach the real launchd domain (`gui/<uid>`, built from os.getuid) or
 # classify the Ciaobot.app launchd layout; neither exists on Windows, whose
@@ -329,6 +330,8 @@ def test_service_start_registers_missing_launch_agent(
     environment = plist_data["EnvironmentVariables"]
     assert environment["CIAO_WORKSPACE"] == str(workspace.resolve())
     assert environment["CIAO_PORT"] == "9555"
+    assert plist_data["SoftResourceLimits"]["NumberOfFiles"] == SERVER_NOFILE_TARGET
+    assert plist_data["HardResourceLimits"]["NumberOfFiles"] == SERVER_NOFILE_TARGET
     assert ["bootstrap", f"gui/{os.getuid()}", str(plist_path)] in calls
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
