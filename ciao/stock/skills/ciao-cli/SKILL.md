@@ -1,6 +1,6 @@
 ---
 name: ciao-cli
-description: The `ciao` command-line surface for Ciaobot's own state — memory, vault, files, chats, projects, schedules, and background runs. Use whenever a chat needs to read or change Ciaobot state itself, not the user's workspace files: checking or editing bounded memory, searching or reviewing the vault, surfacing a file in the pinned panel, listing/creating/sending to/archiving chats, managing projects, creating or running schedules, or starting/checking/cancelling a tracked background command.
+description: The `ciao` command-line surface for Ciaobot's own state — memory, vault, files, chats, projects, tasks, schedules, and background runs. Use whenever a chat needs to read or change Ciaobot state itself, not the user's workspace files: checking or editing bounded memory, searching or reviewing the vault, surfacing a file in the pinned panel, listing/creating/sending to/archiving chats, managing projects, filing and moving the workspace task board, creating or running schedules, or starting/checking/cancelling a tracked background command.
 ---
 
 # ciao CLI
@@ -10,7 +10,7 @@ One `ciao <noun> <verb>` command per Ciaobot operation, callable from the shell.
 ## When to use / when not to
 
 Use it for:
-- Reading or changing Ciaobot's own state: bounded memory, the vault, chats, projects, schedules, background runs.
+- Reading or changing Ciaobot's own state: bounded memory, the vault, chats, projects, the task board, schedules, background runs.
 - Surfacing a file you produced in the user's pinned preview panel.
 
 Not for:
@@ -130,6 +130,20 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 | `project complete ID` | Move a vault-backed project to completed and archive its active record. | Destructive. |
 | `project delete ID` | Delete a non-vault-backed project and its chats. | Destructive. |
 
+### Tasks
+
+| Command | Purpose | Guard |
+|---|---|---|
+| `task list` | List this workspace's board: valid tasks in board order (dated first), then one row per file that is not a readable task, carrying `code` instead of task fields. | Read-only. A malformed file is always reported, never dropped, so an empty-looking board is never the truth. |
+| `task get TASK_ID` | Get one task, description/links body included. | Read-only. |
+| `task create --title TITLE [--body-file FILE.md] [--project P] [--due YYYY-MM-DD]` | File a task. `--project` takes an id or a name and must belong to this workspace; `--due` is a calendar day, never an instant. | The body is Markdown prose, so it travels as a file — never as a shell argument. A project in another workspace is `project_not_found`. |
+| `task update TASK_ID --revision REV [--title T] [--body-file FILE.md] [--due D] [--assignee user\|agent] [--status STATUS]` | Edit one task; only the fields passed change. `REV` is the `revision` you read. | `task_revision_conflict` (retryable) means the file moved: re-read and re-plan, never resend the same revision. An unknown field is refused. |
+| `task move TASK_ID --to STATUS --revision REV` | Set the column: `backlog`, `in_progress`, `on_hold`, `done`. | Same revision guard. `--to done` is refused exactly like `complete` — see below. |
+| `task complete TASK_ID --revision REV` | Ask to mark a task done. | **Always refused to you** with `task_completion_requires_user`: the user closes their own tasks. Report the finished work and let them complete it; never look for another route to the same status. |
+
+There is no `task delete` on this surface: a task record is the user's own
+Markdown file, and removing one is their decision, made in the PWA.
+
 ### Schedules
 
 | Command | Purpose | Guard |
@@ -235,6 +249,9 @@ ciao context get
 - **`unattended_forbidden`** — `vault review keep|trash|restore|complete|restore-completed|delete` only resolve during an attended turn. Running as a schedule or other unattended automation, don't attempt the mutation: report the candidate and its evidence instead, and let an attended turn decide.
 - **`payload_required` / `payload_invalid` / `payload_too_large`** — `note verify` takes a path, and the server reads and bounds the document. An empty flag, a path outside the workspace, malformed JSON, an `outcome` outside `still_valid|update|retire|unverified`, or a payload over the cap are all refused before anything is written. Put long evidence in the vault and cite its path instead of pasting it.
 - **`workspace_forbidden`** — a `note verify` payload may not name a workspace other than this chat's. The check state and the note-edit proposal are filed per workspace; pairing one workspace's name with another's vault would record a verdict about a vault nobody claimed. Drop the `workspace` field or make it match.
+- **`task_revision_conflict`** — the task file changed since you read it. Nothing was written. Run `task get` (or `task list`) again, re-plan your edit against what is there now, and send the new `revision`; resending the old one is the same refusal.
+- **`task_completion_requires_user`** — the user, not you, marks a task done. Do not retry, do not reach for `task move --to done`, and do not edit the file: say which task is finished and let them close it.
+- **`task_not_found`** — a task id that is well formed but absent *from this workspace*. Another workspace's task is answered exactly this way, so this is also the answer when you reached for an id from the wrong vault.
 
 ## Operation names for telemetry
 
@@ -271,6 +288,12 @@ ciao context get
   "project restore": "project",
   "project complete": "project_action",
   "project delete": "project_action",
+  "task list": "task_list",
+  "task get": "task_get",
+  "task create": "task_create",
+  "task update": "task_update",
+  "task move": "task_action",
+  "task complete": "task_action",
   "schedule list": "schedules_list",
   "schedule preview": "schedule",
   "schedule create": "schedule",

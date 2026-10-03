@@ -17,7 +17,7 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -53,6 +53,7 @@ from ciao.schedules import (
     stamp_fallback_project,
     wall_clock_time_error,
 )
+from ciao.task_board import Actor, TaskBoardError, TaskBoardStore, TaskDocument
 from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,75 @@ def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
     if data is not None:
         payload["data"] = data
     payload.update(extra)
+    return payload
+
+
+# ---- Task operations (#1021, child B3 of #973) ------------------------
+#
+# ``ciao/task_board.py`` owns the storage contract for one workspace's task
+# records: a typed error with a ``code``, and a rule that only a user may mark a
+# task done. This block is the application layer over it — project membership
+# (the store keeps the string without judging it) and the translation of a store
+# refusal into an application error code a transport can act on.
+
+
+#: One store refusal becomes one application error code. The codes are what the
+#: agent CLI's ``error.code`` and the session routes' status mapping read, so
+#: this table is the only place a ``TaskBoardError.code`` is given a meaning;
+#: adding a store code without a row here is a 500 by construction rather than a
+#: silent default.
+_TASK_ERROR_CODES: dict[str, tuple[str, bool]] = {
+    # TaskBoardError.code -> (ControlPlaneError code, retryable)
+    "not_found": ("task_not_found", False),
+    # Stale means the caller must re-read and re-plan, never retry the same
+    # revision: retryable in the sense that re-reading makes the edit succeed.
+    "revision_conflict": ("task_revision_conflict", True),
+    "invalid_task": ("task_invalid", False),
+    "unsafe_path": ("task_invalid", False),
+    "unsupported_schema": ("task_unsupported_schema", False),
+    "completion_requires_user": ("task_completion_requires_user", False),
+    "read_failed": ("task_read_failed", True),
+}
+
+
+def _task_error(exc: TaskBoardError) -> ControlPlaneError:
+    """Re-raise one store refusal as the control plane's typed error."""
+    code, retryable = _TASK_ERROR_CODES.get(exc.code, ("task_read_failed", True))
+    return ControlPlaneError(code, str(exc), retryable=retryable)
+
+
+def _utc_now() -> datetime:
+    """The store's clock: an aware UTC moment, never a naive one."""
+    return datetime.now(UTC)
+
+
+def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict[str, Any]:
+    """One task as a transport payload.
+
+    ``revision`` is the SHA-256 of the file's exact bytes: every write has to
+    present it back, which is what makes a stale edit a refusal instead of a
+    lost update. The body is omitted from a list row (it is Markdown prose, and
+    a board renders many cards) and present on a get, where the caller asked
+    for this one task.
+    """
+    record = document.record
+    payload: dict[str, Any] = {
+        "id": record.id,
+        "title": record.title,
+        "status": record.status,
+        "project_id": record.project_id,
+        "due": record.due,
+        "assignee": record.assignee,
+        "review_state": record.review_state,
+        "chat_id": record.chat_id,
+        "attempt_id": record.attempt_id,
+        "created_at": record.created_at.isoformat(),
+        "updated_at": record.updated_at.isoformat(),
+        "revision": document.revision,
+        "relative_path": document.relative_path,
+    }
+    if include_body:
+        payload["body"] = document.body
     return payload
 
 
@@ -1046,11 +1116,10 @@ class CiaoControlPlane:
         return parent_mode
 
     def _vault_root(self, principal: AgentPrincipal) -> Path:
-        workspace = self._workspace(principal)
-        resolver = getattr(self.pcm, "_workspace_vault_root", None)
-        if callable(resolver):
-            return Path(resolver(workspace)).resolve()
-        return Path(self.config.vault_root).resolve()
+        # The task service resolves a workspace name to its root through
+        # `workspace_vault_root` too, so there is one resolver behind both
+        # callers and no second spelling of the fallback to drift from it.
+        return self.workspace_vault_root(self._workspace(principal))
 
     def _unattended_turn(self, principal: AgentPrincipal) -> bool:
         """Whether the turn asking right now was fired by a schedule, not a person.
@@ -2148,6 +2217,321 @@ class CiaoControlPlane:
                 "The current turn cannot stop itself through MCP; use the PWA stop control.",
             )
         return _ok({"chat_id": chat_id, "stopped": await self.pcm.stop_chat(chat_id)})
+
+    # ---- tasks -----------------------------------------------------------
+    #
+    # One workspace-scoped task service with two callers. The agent operations
+    # (``ciao task …``) enter through the ``task_*`` wrappers below, which scope
+    # the call to the principal's own workspace and act as ``actor="agent"``;
+    # the session routes in ``ciao/web/routes_tasks.py`` enter through the same
+    # ``workspace_task_*`` methods with a validated workspace name and
+    # ``actor="user"``, because a signed-in browser is the person the store's
+    # completion rule protects. Nothing else may reach the store, and the root
+    # it is built from is always the workspace's own vault — never a root a
+    # request supplied.
+
+    def workspace_vault_root(self, workspace: str) -> Path:
+        """The authoritative vault root of one registered workspace.
+
+        The one place a workspace *name* becomes a path. ``_vault_root`` is this
+        behind ``_workspace``; both the agent wrappers and the session routes
+        resolve through here, which is what keeps an HTTP-supplied root out of
+        the task store: a route may only name a workspace, never a directory.
+        """
+        name = str(workspace or "").strip()
+        if not name or self.config.workspace(name) is None:
+            raise ControlPlaneError("workspace_not_found", f"Workspace '{name}' was not found.")
+        resolver = getattr(self.pcm, "_workspace_vault_root", None)
+        if callable(resolver):
+            try:
+                return Path(resolver(name)).resolve()
+            except (AttributeError, ValueError, OSError) as exc:
+                raise ControlPlaneError(
+                    "workspace_unavailable", f"Workspace '{name}' has no usable vault: {exc}"
+                ) from exc
+        return Path(self.config.vault_root).resolve()
+
+    def _task_store(self, workspace: str) -> TaskBoardStore:
+        """One workspace's task store, with the runtime dir beside the state file."""
+        return TaskBoardStore(
+            workspace=workspace,
+            vault_root=self.workspace_vault_root(workspace),
+            runtime_dir=Path(self.config.state_path).parent,
+            clock=_utc_now,
+        )
+
+    def _task_call(self, workspace: str, call: Callable[[TaskBoardStore], Any]) -> Any:
+        """One store call for *workspace*, its typed refusal translated into ours.
+
+        The single boundary: a ``TaskBoardError`` never escapes past this, so
+        neither the agent envelope nor a session route can see a store code the
+        error table above does not name.
+        """
+        try:
+            return call(self._task_store(workspace))
+        except TaskBoardError as exc:
+            raise _task_error(exc) from exc
+
+    def _task_project(self, workspace: str, ref: str) -> str:
+        """The exact project id a task may name inside *workspace*.
+
+        Same name-or-id resolution the project surfaces use, and a project in
+        another workspace reads exactly like a nonexistent one so the two codes
+        never become an existence oracle over other workspaces' project ids.
+        """
+        value = str(ref or "").strip()
+        resolved = ""
+        exact = self.pcm.get_project(value)
+        if exact is not None and getattr(exact, "workspace", "") == workspace:
+            resolved = str(exact.project_id)
+        if not resolved:
+            matches = [
+                project
+                for project in self.pcm.list_projects(workspace)
+                if str(getattr(project, "name", "")).casefold() == value.casefold()
+            ]
+            if len(matches) == 1:
+                resolved = str(matches[0].project_id)
+            elif len(matches) > 1:
+                raise ControlPlaneError(
+                    "project_ambiguous",
+                    f"'{value}' matches more than one project; use its exact id instead.",
+                )
+        if not resolved:
+            raise ControlPlaneError("project_not_found", f"Project '{value}' was not found.")
+        return resolved
+
+    def workspace_task_list(self, workspace: str) -> list[dict[str, Any]]:
+        """One workspace's board rows, valid tasks first, then unreadable files.
+
+        A file that is not a readable task is never dropped: it comes back as a
+        row carrying ``code`` (and no task fields), so a malformed file cannot
+        masquerade as an empty or healthy board.
+        """
+        result = self._task_call(workspace, lambda store: store.list())
+        return [_task_payload(document) for document in result.tasks] + [
+            {
+                "id": entry.relative_path.rsplit("/", 1)[-1].removesuffix(".md"),
+                "path": entry.relative_path,
+                "code": entry.code,
+                "message": entry.message,
+            }
+            for entry in result.invalid
+        ]
+
+    def workspace_task_get(self, workspace: str, task_id: str) -> dict[str, Any]:
+        """One task as source currently reads it, body included."""
+        document = self._task_call(workspace, lambda store: store.get(str(task_id or "").strip()))
+        return _task_payload(document, include_body=True)
+
+    def workspace_task_create(
+        self,
+        workspace: str,
+        *,
+        title: str,
+        body: str = "",
+        project_id: str | None = None,
+        due: str | None = None,
+    ) -> dict[str, Any]:
+        """Create one task in one workspace and return it as stored."""
+        project = self._task_project(workspace, project_id) if project_id else None
+        document = self._task_call(
+            workspace,
+            lambda store: store.create(
+                title=str(title or ""),
+                body=str(body or ""),
+                project_id=project,
+                due=due or None,
+            ),
+        )
+        return _task_payload(document, include_body=True)
+
+    def workspace_task_update(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        changes: Mapping[str, object],
+        body: str | None = None,
+        actor: Actor = "agent",
+    ) -> dict[str, Any]:
+        """Apply managed edits to one task at the revision the caller read.
+
+        The store owns the edit contract — which fields exist, which value
+        shapes are legal, and the rule that only a user may mark a task done.
+        This layer adds the one thing a pure file store cannot know: that a
+        ``project_id`` names a live project in this same workspace.
+        """
+        planned: dict[str, object] = {}
+        for key, value in dict(changes or {}).items():
+            if key == "project_id":
+                # An id or a name in this workspace, or `None` to clear it. A
+                # non-string is refused by the resolver's own str() rather than
+                # reaching the store as a value it would coerce differently.
+                planned[key] = self._task_project(workspace, str(value)) if value else None
+            else:
+                planned[key] = value
+        document = self._task_call(
+            workspace,
+            lambda store: store.update(
+                str(task_id or "").strip(),
+                expected_revision=str(expected_revision or ""),
+                changes=planned,
+                body=body,
+                actor=actor,
+            ),
+        )
+        return _task_payload(document, include_body=True)
+
+    def workspace_task_action(
+        self,
+        workspace: str,
+        action: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        status: str | None = None,
+        assignee: str | None = None,
+        project_id: str | None = None,
+        due: str | None = None,
+        actor: Actor = "agent",
+    ) -> dict[str, Any]:
+        """One board gesture: ``move``, ``complete`` or ``reassign``.
+
+        ``complete`` is an ordinary status edit to ``done``, so an agent caller
+        is refused by the store (``completion_requires_user``) exactly as it is
+        through ``task_update``; the gesture exists so the surface has a verb for
+        "mark this done" rather than a free-text status the caller must know.
+        """
+        verb = str(action or "").strip()
+        if verb == "move":
+            target = str(status or "").strip()
+            if not target:
+                raise ControlPlaneError("invalid_action", "move requires a target status.")
+            changes: dict[str, object] = {"status": target}
+        elif verb == "complete":
+            changes = {"status": "done"}
+        elif verb == "reassign":
+            who = str(assignee or "").strip()
+            if not who:
+                raise ControlPlaneError("invalid_action", "reassign requires an assignee.")
+            changes = {"assignee": who}
+        else:
+            raise ControlPlaneError(
+                "invalid_action", "action must be move, complete, or reassign."
+            )
+        if project_id is not None:
+            changes["project_id"] = project_id
+        if due is not None:
+            changes["due"] = due
+        return self.workspace_task_update(
+            workspace,
+            task_id,
+            expected_revision=expected_revision,
+            changes=changes,
+            actor=actor,
+        )
+
+    def workspace_task_delete(
+        self, workspace: str, task_id: str, *, expected_revision: str
+    ) -> dict[str, Any]:
+        """Remove one task record from one workspace, revision-checked.
+
+        User-only, and deliberately not an agent operation: there is no
+        ``ciao task delete`` verb and no operation entry for one. A record is
+        the user's own Markdown file, so removing it is a decision the person
+        who owns the vault makes, exactly as completion is.
+        """
+        clean = str(task_id or "").strip()
+        self._task_call(
+            workspace,
+            lambda store: store.delete(
+                clean, expected_revision=str(expected_revision or "")
+            ),
+        )
+        return {"id": clean, "deleted": True}
+
+    def task_list(self, principal: AgentPrincipal) -> list[dict[str, Any]]:
+        """Every task in the calling chat's workspace.
+
+        A list rather than an envelope on purpose: ``_invoke`` wraps a
+        non-dict result as ``{"ok": true, "data": …}``, and a board is a list
+        of rows.
+        """
+        return self.workspace_task_list(self._workspace(principal))
+
+    def task_get(self, principal: AgentPrincipal, task_id: str) -> dict[str, Any]:
+        """One task in the calling chat's workspace."""
+        return _ok(self.workspace_task_get(self._workspace(principal), task_id))
+
+    def task_create(
+        self,
+        principal: AgentPrincipal,
+        *,
+        title: str,
+        body: str = "",
+        project_id: str | None = None,
+        due: str | None = None,
+    ) -> dict[str, Any]:
+        """File a task in the calling chat's workspace."""
+        return _ok(
+            self.workspace_task_create(
+                self._workspace(principal),
+                title=title,
+                body=body,
+                project_id=project_id,
+                due=due,
+            )
+        )
+
+    def task_update(
+        self,
+        principal: AgentPrincipal,
+        task_id: str,
+        *,
+        expected_revision: str,
+        changes: Mapping[str, object],
+        body: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit one task at the revision it was read at. The agent cannot mark it done."""
+        return _ok(
+            self.workspace_task_update(
+                self._workspace(principal),
+                task_id,
+                expected_revision=expected_revision,
+                changes=changes,
+                body=body,
+                actor="agent",
+            )
+        )
+
+    def task_action(
+        self,
+        principal: AgentPrincipal,
+        action: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        status: str | None = None,
+        assignee: str | None = None,
+        project_id: str | None = None,
+        due: str | None = None,
+    ) -> dict[str, Any]:
+        """Move, complete or reassign one task; an agent completion is refused."""
+        return _ok(
+            self.workspace_task_action(
+                self._workspace(principal),
+                action,
+                task_id,
+                expected_revision=expected_revision,
+                status=status,
+                assignee=assignee,
+                project_id=project_id,
+                due=due,
+                actor="agent",
+            )
+        )
 
     # ---- background command runs ----------------------------------------
 

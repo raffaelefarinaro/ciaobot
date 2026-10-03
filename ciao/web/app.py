@@ -184,6 +184,13 @@ from ciao.web.routes_push import (
 )
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
 from ciao.web.routes_service_login import service_login_status, service_login_update
+from ciao.web.routes_tasks import (
+    task_complete,
+    task_create,
+    task_delete,
+    task_list,
+    task_update,
+)
 from ciao.web.routes_webhooks import (
     webhook_create,
     webhook_delete,
@@ -318,6 +325,21 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
+        # Workspace task board (B3). Every route names a *workspace*, never a
+        # root: the service resolves the name to its own vault. The three
+        # state-changing routes require the `expected_revision` the caller
+        # read, so a card drawn from an older read is a 409 rather than a
+        # silent overwrite, and `/complete` acts as the signed-in user — the
+        # same operation through the agent CLI is refused by the store.
+        Route("/api/tasks", task_list, methods=["GET"]),
+        Route("/api/tasks", task_create, methods=["POST"]),
+        # Literal `complete` precedes the `{task_id}` pattern so it is not
+        # read as a task id.
+        Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+        # Same path, two handlers: a PATCH edits the record, a DELETE removes
+        # it, and both present the revision they read.
+        Route("/api/tasks/{task_id}", task_update, methods=["PATCH"]),
+        Route("/api/tasks/{task_id}", task_delete, methods=["DELETE"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
