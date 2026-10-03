@@ -155,6 +155,10 @@
           @close="showNewSchedule = false"
           @open-sidebar="sidebarCollapsed = false"
         />
+        <TaskBoardView
+          v-else-if="viewMode === 'tasks'"
+          @open-sidebar="sidebarCollapsed = false"
+        />
         <MemoryMapView
           v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
           @open-sidebar="sidebarCollapsed = false"
@@ -288,6 +292,7 @@ const MemoryMapView = defineAsyncComponent(() => import('./MemoryMapView.vue'))
 const SubagentChatView = defineAsyncComponent(() => import('./SubagentChatView.vue'))
 const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
+const TaskBoardView = defineAsyncComponent(() => import('./TaskBoardView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
@@ -526,10 +531,11 @@ const subagentRoute = computed(() => {
   const agentId = (route.params.agentId as string) || ''
   return chatId && agentId ? { chatId, agentId } : null
 })
-const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals'>(() => {
+const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
   if (path.startsWith('/schedules')) return 'schedules'
+  if (path.startsWith('/tasks')) return 'tasks'
   if (path.startsWith('/memory')) return 'memory'
   if (path.startsWith('/proposals')) return 'proposals'
   if (projectIdParam.value) return 'project'
@@ -544,17 +550,20 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memor
 // /chat/:id and revived the handler. One predicate, so the next view mode
 // added has a single place to declare itself.
 // Split in two so the number-key workspace shortcut, which is useful on the
-// schedules view, does not have to restate the rest of the gate and drift
-// from it. Anything that owns the screen — a confirm dialog, the file viewer
-// modal — belongs in the base predicate, so a new overlay is declared once.
+// schedules and task-board views, does not have to restate the rest of the gate
+// and drift from it. Anything that owns the screen — a confirm dialog, the file
+// viewer modal — belongs in the base predicate, so a new overlay is declared once.
 const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
   && !pendingConfirm.value
   && !pendingPrompt.value
   && !fileViewer.isOpen,
 )
+// The chat-only chords are inert on the full-screen views that own the keyboard
+// themselves. `1`–`9` keep switching workspaces from all of them: they are gated
+// on `viewShortcutsActive`, which the board does not exclude.
 const shortcutsActive = computed(() =>
-  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
+  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
 )
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
@@ -624,6 +633,7 @@ const pageDocumentTitle = computed(() => {
   }
   if (viewMode.value === 'memory') return 'memory'
   if (viewMode.value === 'proposals') return 'proposals'
+  if (viewMode.value === 'tasks') return 'tasks'
   if (projectIdParam.value) {
     const project = store.projects.find(p => p.project_id === projectIdParam.value)
     return project?.name || 'project'
@@ -660,11 +670,11 @@ const activePinKey = computed(() => {
 const pinnedFilePath = computed(() => {
   if (isMobile.value) return ''
   // Pinned files are scoped. When the user navigates to a global
-  // surface (settings, schedules), the split layout would otherwise mask
-  // those views entirely because the v-if="pinnedFilePath" branch only
-  // renders ProjectView/ChatPanel. Hide the pin in those modes; the store
+  // surface (settings, schedules, the task board), the split layout would
+  // otherwise mask those views entirely because the v-if="pinnedFilePath" branch
+  // only renders ProjectView/ChatPanel. Hide the pin in those modes; the store
   // entry stays intact, so coming back restores it.
-  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') return ''
+  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'proposals') return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
 })
 function unpinCurrent(): void {
@@ -864,9 +874,12 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     const workspace = store.workspaceOptions[Number(e.key) - 1]
     if (workspace) {
       e.preventDefault()
-      // The schedules and memory views have no chat to transition into.
+      // The schedules, task-board and memory views have no chat to transition
+      // into: switching workspace there re-reads the page in place, and
+      // navigating to `/` would throw the user off the surface they pressed a
+      // number on.
       void store.switchWorkspace(workspace.name, {
-        transition: viewMode.value !== 'schedules' && viewMode.value !== 'memory',
+        transition: viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory',
       })
       return
     }
@@ -920,7 +933,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       memoryMapStore.selectNode(null)
       return
     }
-    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
       e.preventDefault()
       void router.push('/')
       return

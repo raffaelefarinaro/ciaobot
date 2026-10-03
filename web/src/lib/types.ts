@@ -1035,6 +1035,75 @@ export interface HousekeepingDismissResponse {
   actions: OperatorAction[]
 }
 
+// ── Task board: /api/tasks* ───────────────────────────────────────────────
+//
+// The shape is `ciao/control_plane.py::_task_payload`, copied rather than
+// invented. `revision` is a **string** (the SHA-256 of the file's exact bytes),
+// not a number: every write has to present it back, which is what makes a stale
+// edit a 409 instead of a lost update, so a client that rounded it into a number
+// would be sending back a revision the server never issued.
+
+/** The four board columns, in board order. */
+export type TaskStatus = 'backlog' | 'in_progress' | 'on_hold' | 'done'
+
+/** Who the task is for. Delegation is B5; the field exists so the card can say. */
+export type TaskAssignee = 'user' | 'agent'
+
+/** Whether a result is waiting to be looked at. */
+export type TaskReviewState = 'none' | 'ready'
+
+/** One readable task file, as `GET /api/tasks` serves it (no `body`). */
+export interface Task {
+  id: string
+  title: string
+  status: TaskStatus
+  /** Empty when the task belongs to no project; the board reads that as General. */
+  project_id: string
+  /** `YYYY-MM-DD`, or empty for no date. */
+  due: string
+  assignee: TaskAssignee
+  review_state: TaskReviewState
+  chat_id: string
+  attempt_id: string
+  created_at: string
+  updated_at: string
+  /** SHA-256 of the file's exact bytes, hex. Every write presents the one it read. */
+  revision: string
+  relative_path: string
+}
+
+/**
+ * A file the server could not read as a task.
+ *
+ * `GET /api/tasks` appends one of these per unreadable file rather than dropping
+ * it, so a malformed task can never read as an empty or healthy board.
+ */
+export interface TaskInvalidRow {
+  id: string
+  path: string
+  code: string
+  message: string
+}
+
+/** What one entry of `GET /api/tasks`'s `tasks` array may be. */
+export type TaskRow = Task | TaskInvalidRow
+
+export interface TaskListResponse {
+  workspace: string
+  tasks: TaskRow[]
+}
+
+/**
+ * The same record with its Markdown description.
+ *
+ * Every write answers with one (`create`, `update`, `complete`), and there is no
+ * read-by-id route to get it for an arbitrary task — which is why the board only
+ * ever shows a description it actually holds.
+ */
+export interface TaskDetail extends Task {
+  body: string
+}
+
 // ── Update tasks: the "After this update" group ────────────────────────────
 
 /** The lifecycles `ciao/update_tasks.py::LIFECYCLES` defines. The `| string`
