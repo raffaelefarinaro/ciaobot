@@ -48,7 +48,7 @@ and session, exactly as `ciao/os_support/processes.py`'s `dies_with_engine`
 contract expects.
 
 Because the host shares that one group, **it never calls `killpg` on it**:
-signalling the group would also signal the host itself and its launchd peers.
+signalling the group would also signal the host itself.
 launchd remains the final job-group owner. When the host exits or crashes,
 launchd's own cleanup of the job group reaches the supervisor, the engine and
 the OpenCode server. The host's own escalation therefore targets only the
@@ -119,12 +119,15 @@ the builder reads that tracked file and never touches Git history at build time.
 ## Build
 
 ```sh
-python3 scripts/build-server-host.py --output /tmp/ciaobot-server-host-build
+python scripts/build-server-host.py --output /tmp/ciaobot-server-host-build
 ```
+
+Run it with the development venv's Python (3.12+); the archive re-check needs
+`tarfile`'s `data` filter, which the Command Line Tools' `python3` lacks.
 
 The builder:
 
-- refuses a non-macOS platform before writing anything, and refuses an existing
+- refuses a non-macOS platform or a Python older than 3.12 before writing anything, and refuses an existing
   output path including a dangling symlink;
 - compiles `arm64-apple-macosx13.0` and `x86_64-apple-macosx13.0` with `xcrun
   swiftc` against the current macOS SDK, staging the thin binaries **outside** the

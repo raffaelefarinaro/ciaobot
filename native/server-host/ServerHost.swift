@@ -196,8 +196,6 @@ final class ServeController {
     private var signalSources: [DispatchSourceSignal] = []
     private var escalation: DispatchSourceTimer?
     private var stopRequested = false
-    private var stopForwarded = false
-    private var finished = false
 
     init(python: String) {
         self.python = python
@@ -226,18 +224,15 @@ final class ServeController {
         }
     }
 
+    /// A stop that lands before this runs exits the host from `handleStop`, so
+    /// reaching here means no stop has been requested yet.
     private func launch() {
-        if finished { return }
-        if stopRequested {
-            // A stop landed during startup and already exited the host.
-            finish(0)
-        }
         switch spawnSupervisor(python: python) {
         case .failed(let message):
             writeStderr(
                 "CiaobotServerHost: could not launch supervisor \(python): \(message)\n"
             )
-            finish(EXIT_LAUNCH_FAILURE)
+            exit(EXIT_LAUNCH_FAILURE)
         case .spawned(let pid):
             childPid = pid
             let source = DispatchSource.makeProcessSource(
@@ -255,7 +250,7 @@ final class ServeController {
     /// Collect the child's status exactly once, whether the dispatch exit
     /// source fired or an immediate `WNOHANG` check found it already gone.
     private func reap(_ pid: pid_t, blocking: Bool) {
-        guard !finished, childPid == pid else { return }
+        guard childPid == pid else { return }
         var status: Int32 = 0
         var result: pid_t
         let options = blocking ? 0 : WNOHANG
@@ -272,38 +267,33 @@ final class ServeController {
         stopRequested = true
         guard let pid = childPid else {
             // A stop during startup: no child was ever launched.
-            finish(0)
+            exit(0)
         }
-        if stopForwarded { return }
-        stopForwarded = true
         // Forward to the tracked, still-unreaped PID only. Never `killpg`: the
         // host shares launchd's job group, so signalling the group here would
-        // also signal the host itself and its launchd peers.
+        // also signal the host itself and every sibling the supervisor started.
         _ = kill(pid, SIGTERM)
         armEscalation(pid)
     }
 
     /// Arm exactly one SIGKILL escalation for the child we forwarded to. The
     /// handler re-checks the still-unreaped PID, so the kill can never target a
-    /// recycled PID or a replaced child. It does not kill the shared group:
-    /// launchd's final job-group cleanup is what reaches the descendants after
-    /// the host exits.
+    /// recycled PID or a replaced child. The process-exit source reaps the
+    /// killed child, so the main queue never blocks in `waitpid` here. It does
+    /// not kill the shared group: launchd's final job-group cleanup is what
+    /// reaches the descendants after the host exits.
     private func armEscalation(_ pid: pid_t) {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + STOP_GRACE_SECONDS)
         timer.setEventHandler { [weak self] in
-            guard let self = self, !self.finished, self.childPid == pid else { return }
-            if kill(pid, SIGKILL) == 0 || errno == ESRCH {
-                self.reap(pid, blocking: true)
-            }
+            guard let self = self, self.childPid == pid else { return }
+            _ = kill(pid, SIGKILL)
         }
         timer.resume()
         escalation = timer
     }
 
     private func collect(status: Int32) {
-        guard !finished else { return }
-        finished = true
         escalation?.cancel()
         escalation = nil
         exitSource?.cancel()
@@ -327,11 +317,6 @@ final class ServeController {
         }
         if exitedNormally { return exitStatus }
         return 128 + signalNumber
-    }
-
-    private func finish(_ code: Int32) -> Never {
-        finished = true
-        exit(code)
     }
 }
 
@@ -362,7 +347,11 @@ func runServe(python: String) -> Never {
     controller.begin()
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    app.run()
+    // Every handler holds the controller weakly, and Swift may release a local
+    // after its last use, so pin it for the whole event loop.
+    withExtendedLifetime(controller) {
+        app.run()
+    }
     exit(0)
 }
 

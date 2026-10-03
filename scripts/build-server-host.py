@@ -13,7 +13,7 @@ macOS-only subprocesses are injected and never reached until ``build`` has
 passed the platform check.
 
 ```sh
-python3 scripts/build-server-host.py --output /tmp/ciaobot-server-host-build
+python scripts/build-server-host.py --output /tmp/ciaobot-server-host-build
 ```
 """
 
@@ -133,7 +133,7 @@ def codesign_cdhash(path: Path, arch: str, runner: Callable[..., Any]) -> str | 
 def _refuse_existing(output: Path) -> None:
     # Called before Path.resolve(), which would dereference a symlink and could
     # then create the target. lexists() also catches a dangling symlink.
-    if output.is_symlink() or os.path.lexists(output):
+    if os.path.lexists(output):
         raise BuildError(f"refusing to overwrite existing output: {output}")
     if not output.is_absolute():
         raise BuildError(f"refusing non-absolute output path: {output}")
@@ -204,6 +204,11 @@ def _archive_app(app: Path, archive: Path) -> None:
             dirs.sort()
             files.sort()
             add(root_path)
+            for name in dirs:
+                # os.walk lists a symlinked directory here without descending
+                # into it, so refuse it explicitly instead of dropping it.
+                if (root_path / name).is_symlink():
+                    raise BuildError(f"refusing to archive a symlink: {root_path / name}")
             for name in files:
                 add(root_path / name)
 
@@ -247,6 +252,10 @@ def build(
     effective_platform = sys.platform if platform_name is None else platform_name
     if effective_platform != "darwin":
         raise BuildError("the Ciaobot Server host requires macOS; Windows and Linux are unchanged")
+    if sys.version_info < (3, 12):
+        # The archive re-verification needs tarfile's ``filter="data"``, which
+        # the macOS Command Line Tools' python3 (3.9) does not have.
+        raise BuildError("the builder requires Python 3.12+; run it with the Ciaobot venv's python")
 
     output = output.expanduser()
     _refuse_existing(output)

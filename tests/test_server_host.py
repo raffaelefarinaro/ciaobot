@@ -825,7 +825,8 @@ def test_host_stop_escalates_stalled_child(
         host.send_signal(signal.SIGTERM)
         started = time.time()
         assert host.wait(timeout=45) == 137
-        assert time.time() - started < 40
+        # The grace is honoured (no early kill) and the host is the outer bound.
+        assert 34 <= time.time() - started < 40
         # The supervisor was SIGKILLed and reaped; a zombie counts as dead.
         assert _await_dead(rec["pid"])
         # The standalone host cannot kill the shared group, so the descendant is
