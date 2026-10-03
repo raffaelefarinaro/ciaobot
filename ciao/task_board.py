@@ -1453,6 +1453,51 @@ class TaskBoardStore:
             self._atomic_write(path, new_raw, existing=path)
             return parse_task(new_raw, expected_id=task_id)
 
+    def delete(self, task_id: str, *, expected_revision: str) -> None:
+        """Remove one task record, revision-checked.
+
+        The same protocol as :meth:`update`, for the one write that is not a
+        rewrite: ``expected_revision`` is required and rechecked under the
+        workspace lock, so a delete planned against an older read is a
+        ``revision_conflict`` with the record left in place. Confinement is
+        inherited rather than re-derived: the id is validated before any path
+        is built (:meth:`_task_path`) and the record is read through
+        :meth:`_read_file_bytes` first, which refuses a link where the file
+        must be and any non-regular file — so the unlink below can only ever
+        remove a real task record inside this workspace's ``Tasks``
+        directory, never a link target and never anything outside it.
+
+        There is no trash: the record is the user's own Markdown file, and
+        this unlinks it. Raises ``unsafe_path`` for a malformed id, a link or
+        non-regular file; ``not_found`` when no file exists;
+        ``invalid_task`` when no revision was presented; and ``read_failed``
+        when the removal itself fails, with the record still there.
+        """
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never removes a task it has not read",
+            )
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since this removal was planned; nothing was removed",
+                )
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                raise TaskBoardError("not_found", f"no such task: {task_id}") from None
+            except OSError as exc:
+                raise TaskBoardError(
+                    "read_failed",
+                    f"could not remove task {task_id}; the file is unchanged: {exc}",
+                ) from None
+            self._fsync_dir(path.parent)
+
     def _plan_changes(
         self, document: TaskDocument, changes: dict[str, object], actor: Actor
     ) -> dict[str, object]:

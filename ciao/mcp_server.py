@@ -1023,6 +1023,111 @@ async def _op_schedule_action(service: CiaoMcpService, schedule_id: str, action:
     return await service._invoke("schedule_action", op, mutating=True)
 
 
+async def _op_task_list(service: CiaoMcpService) -> dict[str, Any]:
+    """List this workspace's tasks in board order.
+
+    Every task row carries its `revision` (the SHA-256 of the file's bytes),
+    which is what a later edit has to present back. A file in the task
+    directory that is not a readable task is returned as a row carrying
+    `code` instead of task fields: it is never dropped, so a malformed file
+    cannot read as an empty board.
+    """
+    return await service._invoke("task_list", lambda cp, p: cp.task_list(p))
+
+
+async def _op_task_get(service: CiaoMcpService, task_id: str) -> dict[str, Any]:
+    """Get one task in this workspace, with its description/links body."""
+    return await service._invoke("task_get", lambda cp, p: cp.task_get(p, task_id))
+
+
+async def _op_task_create(service: CiaoMcpService, title: str, body: str = "",
+                          project_id: str | None = None, due: str | None = None) -> dict[str, Any]:
+    """File a task in this workspace.
+
+    Args:
+        title: 1-200 characters after trimming.
+        body: Markdown description, links and acceptance criteria.
+            Long prose belongs here, not in a shell argument.
+        project_id: Project id or name in this workspace. Omit for no
+            project. A project in another workspace is refused.
+        due: Calendar date `YYYY-MM-DD`, or omit for no due date.
+    """
+    return await service._invoke(
+        "task_create",
+        lambda cp, p: cp.task_create(
+            p, title=title, body=body, project_id=project_id, due=due
+        ),
+        mutating=True,
+    )
+
+
+async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revision: str,
+                          title: str | None = None, body: str | None = None,
+                          status: str | None = None, project_id: str | None = None,
+                          due: str | None = None, assignee: str | None = None,
+                          review_state: str | None = None) -> dict[str, Any]:
+    """Edit one task at the revision you read.
+
+    Args:
+        task_id: The task's 32-hex id, from `task_list` or `task_get`.
+        expected_revision: The `revision` you read. A stale one is a
+            `task_revision_conflict` with nothing written — re-read and
+            re-plan rather than resending the same revision.
+        title, status, project_id, due, assignee, review_state: Only the
+            fields you pass change. Omit one to leave it alone.
+        body: Replaces the description/links wholesale when given.
+
+    Setting `status: done` here is refused: only the user completes a task
+    (`task_completion_requires_user`). Use `task_action` with `complete` for
+    the same reason it is a separate verb — it is a human decision, and a
+    refused completion must not be mistaken for a broken edit.
+    """
+    changes: dict[str, Any] = {
+        key: value
+        for key, value in (
+            ("title", title), ("status", status), ("project_id", project_id),
+            ("due", due), ("assignee", assignee), ("review_state", review_state),
+        )
+        if value is not None
+    }
+    return await service._invoke(
+        "task_update",
+        lambda cp, p: cp.task_update(
+            p, task_id, expected_revision=expected_revision, changes=changes, body=body
+        ),
+        mutating=True,
+    )
+
+
+async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
+                          expected_revision: str, status: str | None = None,
+                          assignee: str | None = None, project_id: str | None = None,
+                          due: str | None = None) -> dict[str, Any]:
+    """Move, complete or reassign one task, at the revision you read.
+
+    action:
+        "move"     — set the column. status is required
+            (`backlog`, `in_progress`, `on_hold`, `done`).
+        "complete" — mark it done. **Refused for you**: the user completes a
+            task, not the agent, so this returns
+            `task_completion_requires_user` however it is spelled. Ask the
+            user to mark it done rather than trying another route to the
+            same status.
+        "reassign" — set the assignee (`user` or `agent`).
+
+    Args:
+        project_id, due: Applied with the gesture when given.
+    """
+    return await service._invoke(
+        "task_action",
+        lambda cp, p: cp.task_action(
+            p, action, task_id, expected_revision=expected_revision,
+            status=status, assignee=assignee, project_id=project_id, due=due,
+        ),
+        mutating=True,
+    )
+
+
 async def _op_file_surface(service: CiaoMcpService, path: str) -> dict[str, Any]:
     """Deliberately open a workspace file in the user's pinned preview panel.
 
@@ -1074,6 +1179,14 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("schedules_list", _READ, _op_schedules_list.__doc__ or "", _op_schedules_list),
     Operation("schedule", _WRITE, _op_schedule.__doc__ or "", _op_schedule),
     Operation("schedule_action", _DESTRUCTIVE, _op_schedule_action.__doc__ or "", _op_schedule_action),
+    Operation("task_list", _READ, _op_task_list.__doc__ or "", _op_task_list),
+    Operation("task_get", _READ, _op_task_get.__doc__ or "", _op_task_get),
+    Operation("task_create", _WRITE, _op_task_create.__doc__ or "", _op_task_create),
+    Operation("task_update", _WRITE, _op_task_update.__doc__ or "", _op_task_update),
+    # `_WRITE`, not `_DESTRUCTIVE`: the store is the authority on agent
+    # completion and refuses it, so this operation carries no reachable
+    # destructive effect for an agent caller.
+    Operation("task_action", _WRITE, _op_task_action.__doc__ or "", _op_task_action),
     Operation("file_surface", _READ, _op_file_surface.__doc__ or "", _op_file_surface),
 )
 
