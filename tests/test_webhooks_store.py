@@ -2,8 +2,9 @@
 
 Everything here runs against a `tmp_path` store with an injected clock, so no
 test touches an operator's runtime directory, reads a real credential, or
-depends on wall-clock time. There is no live path to touch yet: this child adds
-no route, no receiver and no startup wiring.
+depends on wall-clock time. The live paths are the management routes and the
+receiver (`routes_webhooks.py`, `routes_hooks.py`); neither is what this file
+exercises.
 """
 
 from __future__ import annotations

@@ -50,6 +50,81 @@ session. The issue's field list is narrower than the candidate schema above, so
 decided against. Nothing under a real `~/.claude` was read to build it; the
 adapter's tests run on synthetic fixtures under `tests/fixtures/import/`.
 
+**Update — C3b landed (#1011).** `ciao/import_sources/opencode.py` is the OpenCode
+adapter, and it reads through the **V2 CLI** rather than a file, because
+OpenCode's history is in a running server's database: `read_opencode_session`
+runs `opencode session export <id>` and
+`discover_opencode_sessions` runs `opencode session list --max-count N --format
+json` with the project directory as the working directory (the listing is
+`process.cwd()`-scoped). Both go through one bounded `subprocess.run` mirroring
+`ciao/providers/opencode.py:_server_list`, and the binary and the `(2, 0, 16)`
+floor come from that module's own `resolve_opencode_binary` /
+`_server_version_error`, so an importer and the engine cannot disagree about
+which opencode is supported. Four points are settled by code rather than left as
+proposals: the export's `messages[]` are **flat objects discriminated on `type`**
+— there is no `role` field and no `{info, parts}` nesting — so role is the tag
+(`user`/`assistant`), `anchor` is `messages[].id`, and everything else in the
+union (`synthetic`, `system`, `skill`, `shell`, `compaction`, `idle`, the
+`*-switched` records) is counted as an omission; `time.created` is epoch
+milliseconds and is rendered as ISO-8601 UTC, with `None` where a message has no
+`time` and no mtime anywhere in this source; `isSettled` is applied in the adapter
+as well as relied on in the CLI, so an assistant turn with no `time.completed`
+produces no message and a counted omission rather than passing for something the
+model said; and because an export is **one** JSON object, an answer past
+`MAX_SESSION_BYTES` is never parsed — the session comes back with zero messages,
+`truncated`, and a `truncated` omission. The adapter makes no `ciaobot_own`
+decision: it hands the caller `source.provider`, `source.source_id` and
+`first_user_turn` for `import_decouple.classify_session`, and
+`discover_opencode_sessions` returns metadata only, setting `--max-count`
+explicitly to `DISCOVERY_MAX_COUNT` and logging a full page as a full page
+because `session list` has no cursor. Two corrections to this report's prose,
+both settled against the tagged source at the floor: `session export` has **no**
+`--format` flag (its parameters are the session id plus `--sanitize`, `--server`
+and `--standalone`, and it always prints JSON), and the message role comes from
+the `type` tag rather than a `role` field. `--sanitize` is never passed: it
+replaces prose with `[redacted:<kind>:<id>]` placeholders. Nothing under a real
+`~/.opencode` was read, no opencode server was started, and the adapter's tests
+run on synthetic fixtures with the bounded runner replaced.
+
+**Update — C4 landed (#1012).** The "Recommended architecture" below is now
+code, and the two things this report left as a proposal and a prerequisite seam
+are the two things #1012 changed:
+
+* `ciao/import_extract.py` — `extract_facts(session, *, model,
+  destination_workspace, …)` runs **one** `providers.oneshot.run_oneshot` turn
+  over one `NormalizedSession`'s text and writes every accepted row through
+  `memory_proposals.append_proposals`, the same surface
+  `ciao memory-proposal-add` uses. There is no region, note, entity or learnings
+  write in it, no agent token and no chat, so the boundary is **no tools +
+  backend-only proposal writes** and not the prompt: the system prompt's
+  untrusted-transcript instruction is defense in depth for output quality, and a
+  test that asserted it would still pass with the prompt deleted.
+* the seam `ciao/providers/oneshot.py` gained so E1 is a test of a contract
+  rather than of an import name: an optional `options_hook`, called with the
+  constructed `ClaudeAgentOptions` just before the Claude turn starts. It sets
+  no option, no existing caller passes it, and it is **not** called on the
+  opencode path, whose deny-all is derived at session-create time — so nothing
+  here changes what a one-shot may do.
+
+Admission is backend code rather than wording, which is the part worth carrying
+forward to C7: a row's `source_anchor` is resolved against the session's own
+messages (an unresolved anchor is an invented citation), the
+`provider:session_id:anchor` tag is built from that message and checked with
+`assert_external_provenance`, the destination must be in
+`memory_proposals.DESTINATIONS`, and a date the model wrote into a fact is
+dropped — the date on an imported fact is the source message's own, appended as
+the `[as-of: …]` tag the accept path already parses, so import time is never
+passed off as verification time. A `ciaobot_own` or `ambiguous` session is
+refused by `classify_session` before any turn runs, and unreadable rows degrade
+to `ExtractionResult.skipped` rather than to an exception that loses the batch.
+`citations` stays empty and the anchor rides in `source_section`: the prose
+fallback named under
+[Provenance and old-versus-new](#provenance-and-old-versus-new) is what C4
+takes, so **C7 still owes `ciao/fact_candidates.py` the structured field**. The
+judgment gap (Q4) is unchanged and still open — nothing in #1012 claims to have
+closed it.
+
+
 ## What this report had to settle
 
 #980 asks four questions, and the parent #975 asks the same four:

@@ -1,11 +1,12 @@
 """Session-authenticated webhook trigger management routes (#1001, child A2 of #974).
 
-Management only: list, create, update, rotate and delete over ``WebhookStore``.
-There is deliberately no ingress here — no ``/hooks/*`` receiver, no bearer
-auth, no request recipe — that is the A3 child's design. Every route reads the
-session cookie through the shared ``AuthMiddleware`` like every other
-``/api/*`` route; a raw secret appears only in the create and rotate
-responses, exactly once, and never in a list, an error, or a log.
+Management routes only: list, create, update, rotate and delete over
+``WebhookStore``. The ingress receiver is ``routes_hooks.py``, which takes a
+bearer secret and an idempotency key; nothing here authorizes a machine sender
+or carries a request recipe. Every route reads the session cookie through the
+shared ``AuthMiddleware`` like every other ``/api/*`` route; a raw secret appears
+only in the create and rotate responses, exactly once, and never in a list, an
+error, or a log.
 
 ``project_id`` is shape-checked here and nowhere else: the store validates its
 form, not that the workspace has such a project. Binding it to a real project

@@ -1,8 +1,9 @@
 """Webhook trigger management routes: session-authenticated CRUD plus rotate.
 
 Covers #1001 (child A2 of #974) against a real ``CiaoConfig`` over a tmp
-runtime, behind the signed session cookie. Management only: there is no
-``/hooks/*`` route and no bearer auth anywhere in this surface.
+runtime, behind the signed session cookie. Management routes only; the receiver
+is ``routes_hooks.py``, so nothing in this surface is authorized by a bearer
+secret.
 """
 
 from __future__ import annotations
