@@ -1879,6 +1879,27 @@ def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
     assert "Stdio" in result["tools_note"]
 
 
+def test_task_operations_are_registered_in_the_shared_table() -> None:
+    """The task board is part of the one operation table, with the right split.
+
+    `OPERATIONS` is the shared source both surfaces run, so an operation absent
+    from it is a command that only exists in the CLI's help text. Reads are
+    `_READ`; every write is `_WRITE` with `readOnlyHint=False`, which is what
+    `_invoke`'s plan-mode gate reads — a plan-mode chat could otherwise file a
+    task. `task_action` stays `_WRITE` rather than `_DESTRUCTIVE` because the
+    store refuses an agent's completion, so the only status change it can
+    reach is a column move.
+    """
+    declared = {operation.name: operation.annotations for operation in mcp_server.OPERATIONS}
+    for name in ("task_list", "task_get", "task_create", "task_update", "task_action"):
+        assert name in declared, name
+    assert declared["task_list"] == mcp_server._READ
+    assert declared["task_get"] == mcp_server._READ
+    for name in ("task_create", "task_update", "task_action"):
+        assert declared[name] == mcp_server._WRITE, name
+        assert declared[name].readOnlyHint is False, name
+
+
 def test_tools_list_reports_the_whole_catalog(tmp_path: Path) -> None:
     """Every registered operation is present in the shared table.
 

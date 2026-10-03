@@ -1,11 +1,12 @@
 # Task board records
 
-Foundation storage contract for the shared workspace task board
-(issue #978, part of #973). This document describes the file format, the
-`ciao.task_board` API, and the rules a later integration must honor. There
-is no production writer, no route, no UI, and no advertised task capability
-yet: this child establishes the contract so integration cannot invent a
-second source of truth.
+Storage contract for the shared workspace task board (issue #978, part of
+#973). This document describes the file format, the `ciao.task_board` API,
+and the rules its callers must honor. The production callers are the
+session-authenticated `/api/tasks*` routes and the `ciao task …` agent CLI
+(#1021), both over the workspace-scoped service in `ciao/control_plane.py`;
+there is still no board UI. The contract is stated in one place so
+integration cannot invent a second source of truth.
 
 ## Layout
 
@@ -78,9 +79,9 @@ See [the runbook outline](https://example.test/runbook).
 
 `TaskBoardStore(*, workspace, vault_root, runtime_dir, clock)` — one store
 per logical workspace. `vault_root` and `runtime_dir` must come from
-authoritative workspace resolution in a later service, never from
-HTTP-supplied arbitrary roots; this store does not resolve or fall back
-across workspaces.
+authoritative workspace resolution — the control plane's
+`workspace_vault_root` — never from HTTP-supplied arbitrary roots; this
+store does not resolve or fall back across workspaces.
 
 - `create(*, title, body="", project_id=None, due=None)` — fresh identity,
   `backlog` / `user` / `none` defaults, null linkage, `created_at ==
@@ -89,6 +90,14 @@ across workspaces.
 - `update(task_id, *, expected_revision, changes, body=None, actor)` —
   managed field edits plus an optional wholesale body replacement. The
   body changes only when `body` is not None.
+- `delete(task_id, *, expected_revision)` — revision-checked under the
+  workspace lock; unlinks only a real task record inside
+  `Workspace/Tasks`, never a link target or anything outside it. Raises
+  `invalid_task` with no revision, `not_found` when there is no file,
+  `unsafe_path` for a malformed id, a link or a non-regular file,
+  `revision_conflict` on a stale one and `read_failed` if the removal
+  fails (record unchanged). There is no trash: the file is the user's own
+  Markdown, and this removes it.
 - `list()` — `TaskListResult(tasks, invalid)`: valid documents in board
   order plus one `{relative_path, code, message}` entry per unreadable
   file. A missing `Tasks/` directory reads as empty and creates nothing;
@@ -193,5 +202,5 @@ The rule is keyed on the *directory pair* `Workspace/Tasks`, not on the name
 - Linkage mutation (`chat_id`/`attempt_id`) belongs to the delegation
   child. Source hand edits may carry nullable linkage, but this store
   never creates a live chat or attempt.
-- No production writer, route, board, or UI is advertised yet, and #973
-  stays open for the operations, board, and delegation children.
+- No board UI is shipped yet (B4), and #973 stays open for the board and
+  delegation children.

@@ -30,7 +30,7 @@ from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
 #: gws passthrough), so those route only for the verbs in ``_SHARED_NOUN_VERBS``.
 AGENT_NOUNS: frozenset[str] = frozenset(
     {
-        "memory", "vault", "note", "file", "chat", "project", "schedule",
+        "memory", "vault", "note", "file", "chat", "project", "task", "schedule",
         "workspace", "context", "help",
     }
 )
@@ -217,6 +217,33 @@ def build_parser() -> argparse.ArgumentParser:
         sub = project.add_parser(verb)
         sub.add_argument("project_id")
 
+    task = _verbs(nouns.add_parser("task", help="Tasks in the active workspace."))
+    task.add_parser("list")
+    tget = task.add_parser("get")
+    tget.add_argument("task_id")
+    tcreate = task.add_parser("create")
+    tcreate.add_argument("--title", required=True)
+    # The body is Markdown prose (description, links, acceptance criteria):
+    # a path, for the same reason `note verify --payload-file` is one.
+    tcreate.add_argument("--body-file", default=None, metavar="FILE", help="Markdown file holding the task body: @file.md or a plain path.")
+    tcreate.add_argument("--project", default=None)
+    tcreate.add_argument("--due", default=None, metavar="YYYY-MM-DD")
+    tupdate = task.add_parser("update")
+    tupdate.add_argument("task_id")
+    tupdate.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
+    tupdate.add_argument("--title", default=None)
+    tupdate.add_argument("--body-file", default=None, metavar="FILE")
+    tupdate.add_argument("--due", default=None, metavar="YYYY-MM-DD")
+    tupdate.add_argument("--assignee", default=None, choices=["user", "agent"])
+    tupdate.add_argument("--status", default=None, choices=["backlog", "in_progress", "on_hold", "done"])
+    tmove = task.add_parser("move")
+    tmove.add_argument("task_id")
+    tmove.add_argument("--to", required=True, choices=["backlog", "in_progress", "on_hold", "done"])
+    tmove.add_argument("--revision", required=True)
+    tcomplete = task.add_parser("complete")
+    tcomplete.add_argument("task_id")
+    tcomplete.add_argument("--revision", required=True)
+
     schedule = _verbs(nouns.add_parser("schedule", help="Schedules in the active workspace."))
     schedule.add_parser("list")
     for verb in ("create", "preview"):
@@ -293,6 +320,33 @@ def _handover_messages(raw: str | None) -> list[dict[str, Any]] | None:
     if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
         raise UsageError("--messages must be a JSON array of message objects.")
     return messages
+
+
+def _task_body(raw: str | None) -> str | None:
+    """The task body from a Markdown file, or None when no file was given.
+
+    Read here rather than posted as a path because a task body is Markdown
+    prose, exactly the case `--payload-file` and `--messages` already handle:
+    as a shell argument it would be mangled by `$()`, backticks and quotes,
+    and it would sit in the process table. The same credential-adjacency check
+    applies, because a task body is written into the vault.
+    """
+    if raw is None:
+        return None
+    path = Path(raw[1:]).expanduser() if raw.startswith("@") else Path(raw).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        raise UsageError(f"--body-file cannot be read: {exc}") from exc
+    if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+        raise UsageError(
+            f"--body-file refuses credential-adjacent paths ({path}): "
+            "pass the content in a workspace file instead."
+        )
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise UsageError(f"--body-file must be a readable UTF-8 file: {exc}") from exc
 
 
 def _run_start_arguments(args: argparse.Namespace) -> dict[str, Any]:
@@ -407,6 +461,46 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         if verb == "restore":
             return "project", {"action": "restore", "stem": args.stem}
         return "project_action", {"action": verb, "project_id": args.project_id}
+    if noun == "task":
+        if verb == "list":
+            return "task_list", {}
+        if verb == "get":
+            return "task_get", {"task_id": args.task_id}
+        if verb == "create":
+            arguments = {"title": args.title}
+            body = _task_body(args.body_file)
+            if body is not None:
+                arguments["body"] = body
+            if args.project is not None:
+                arguments["project_id"] = args.project
+            if args.due is not None:
+                arguments["due"] = args.due
+            return "task_create", arguments
+        if verb == "update":
+            arguments = {"task_id": args.task_id, "expected_revision": args.revision}
+            for param in ("title", "due", "assignee", "status"):
+                value = getattr(args, param)
+                if value is not None:
+                    arguments[param] = value
+            body = _task_body(args.body_file)
+            if body is not None:
+                arguments["body"] = body
+            return "task_update", arguments
+        if verb == "move":
+            return "task_action", {
+                "action": "move",
+                "task_id": args.task_id,
+                "status": args.to,
+                "expected_revision": args.revision,
+            }
+        # `complete` stays its own verb even though the store refuses it: the
+        # refusal is the answer, and the agent needs a name for it to report
+        # rather than another route it has to guess at.
+        return "task_action", {
+            "action": "complete",
+            "task_id": args.task_id,
+            "expected_revision": args.revision,
+        }
     if noun == "schedule":
         if verb == "list":
             return "schedules_list", {}
