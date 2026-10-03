@@ -10,9 +10,15 @@ user history.
 | | |
 |---|---|
 | Verified | 2026-10-03 |
-| Base | `develop` at `45496abea7206382fc2112680c9b462907a89e1f` (2026-10-03 13:03:01 +0200) |
-| Branch | `raffaelefarinaro/issue-980-import-feasibility` at `80bfce94494fcacd12a8bee8195849ba0d55340c` |
+| Base | `develop` at `45496abea7206382fc2112680c9b462907a89e1f` (2026-10-03 13:03:01 +0200), **as named by #980** |
+| Branch | `raffaelefarinaro/issue-980-import-feasibility`, **branched from `80bfce94494fcacd12a8bee8195849ba0d55340c`** (the #972 fd-limit merge) |
 | Recommendation | Go for **OpenCode** and **Claude Code** (both conditional); **No-go** for Claude account export until a user-supplied non-private sample exists. Extraction runs as a **tool-less turn owned by backend code**, not as a Ciaobot chat — see [Recommended architecture](#recommended-architecture). |
+
+The **Base** row is the sha #980 names, not a moving target. `develop` has
+already advanced past the branch point since this was written (`origin/develop`
+was `607eb390f15f9a51737e84d9b0bb1fcedb3d36e9` at this revision), so whoever
+merges this must **re-state the base against the then-current
+`origin/develop`** and confirm that the shas cited below still resolve.
 
 Every path and line reference below was read in this worktree. Every URL was
 fetched during this work. Anything not observed is labelled **unverified** or
@@ -76,13 +82,14 @@ readable in public source at exactly the version floor Ciaobot enforces.
 | Export | `opencode session export <sessionID>` (writes JSON to stdout) |
 | Version evidence | **Installed:** `opencode --version` → `opencode v2.0.22`, binary `/Users/raffaelefarinaro/.opencode/bin/opencode`. **Floor Ciaobot enforces:** `ciao/providers/opencode.py:_server_version_error` (L400-409) rejects anything that is not `2.x` with `>= (2, 0, 16)`. **Both commands exist at that floor:** in `sst/opencode`, the files `packages/cli/src/commands/handlers/session/list.ts` and `.../export.ts` are present at tag `v2.0.16` and byte-identical in length to `v2.0.22` (3633 and 3381 bytes). **Documentation:** https://opencode.ai/v2/docs/cli/commands/ documents `opencode session list`, `opencode session list --max-count 20 --format json`, `opencode session export ses_4f2a1c`, `--sanitize`, `opencode session import session.json` (with `--directory`), and states that server-backed commands accept `--standalone` or `--server <url>`. That page is *latest* docs and does **not** state a minimum version — the v2.0.16 claim rests on the tagged source, not on the docs page |
 | Known format | **The export payload is `{info, messages}`**, declared in public source at `v2.0.16` as `packages/schema/src/session-transfer.ts`: `Data = Schema.Struct({ info: Session.Info, messages: Schema.Array(SessionMessage.Info) })`, built in `packages/core/src/session/transfer.ts` as `{ info: sessions.get(sessionID), messages: sessions.messages({sessionID, order: "asc"}).filter(isSettled) }`. `info` fields exercised by that file's own import path: `id`, `parentID`, `title`, `agent`, `model`, `metadata`, `permissions`, `cost`, `tokens.{input,output,reasoning,cache.read,cache.write}`, `time.{created,updated,idle,viewed,archived}`, `outcome`, `revert.files[].{file,patch}`, `location.directory`. Message shape is a tagged union on `type`: `sanitizeMessage` in the same file handles `user` (`text`, `files`, `agents`, `skills`), `synthetic` (`text`, `description`), `system` (`text`), `skill` (`text`), `shell` (`command`, `output.output`), `assistant` (`content[]` of `text`/`reasoning`/tool parts, each with a `state`, plus `providerState`/`providerResultState`), `compaction` (`status`, `summary`, `recent`, `providerState`). **Listing shape** is exactly `[{id, title, updated, created, projectId, directory}]` (`list.ts` L28-42) |
-| Known completeness | Three real losses, all visible in `transfer.ts`: `isSettled` keeps an assistant message **only** when `time.completed !== undefined` (an interrupted or in-flight assistant turn is dropped) and a `shell`/`compaction` message only when `status !== "running"`. Ordering is ascending, so order is recoverable. `session list` filters `parentID: null`, so **child/branch sessions are not discoverable by listing** (the protocol schema in `packages/protocol/src/groups/session.ts` documents `parentID` as "Use null to return only root sessions") |
+| Known completeness | Four real losses, all visible in `transfer.ts` or the `list.ts` handler. Three are export-side: `isSettled` keeps an assistant message **only** when `time.completed !== undefined` (an interrupted or in-flight assistant turn is dropped) and a `shell`/`compaction` message only when `status !== "running"`; ordering is ascending, so order is recoverable; and `session list` filters `parentID: null`, so **child/branch sessions are not discoverable by listing** (the protocol schema in `packages/protocol/src/groups/session.ts` documents `parentID` as "Use null to return only root sessions"). The fourth is the **listing's own cap**: `opencode session list` returns **exactly one page** — `list.ts` calls `session.list({project, parentID: null, order: "desc", limit: Option.getOrElse(input.maxCount, () => 100)})` with **no cursor or offset**, so `--max-count` defaults to 100 (`opencode session list --help`, `v2.0.22`) and a project with more than 100 root sessions is silently truncated to the 100 most recent. **An importer must therefore set the cap explicitly and say so, or paginate** — and it cannot paginate through the CLI as it stands, so C5's discovery has to record that the cap was raised and whether it was reached |
 | Unresolved evidence | (a) no export has actually been observed — the schema above is read from tagged source, not from a run, so field *population* (`parentID` on a real root session, `revert`, `outcome`, tool `state` variants) is unverified; (b) `session list` is **project-scoped to `process.cwd()`** (`list.ts` resolves `client.location.get({location:{directory: process.cwd()}})` then `session.list({project: location.project.id, …})`), so there is no single global listing — discovery must enumerate project directories, and how those are discovered is undecided; (c) both commands resolve a **server** connection (`ServerConnection.resolve({server, standalone})`), so neither is a pure file read: an importer must have a running background service or start a private `--standalone` server, which is a service command, not a file scan; (d) `session export` in a non-TTY **fails without an explicit session id** ("Pass a session ID when running without an interactive terminal"), which is fine for an importer but must be coded for; (e) `opencode session import` refuses an id that already exists and requires the parent session to exist when `info.parentID` is set, so a branch cannot be round-tripped into an install that lacks its parent |
 | Engine host vs client upload | Engine host. **Both `list` and `export` need an opencode server**, so this source is the only one that requires a service to be reachable — a fact the parent's "no live service as a test shortcut" rule has to be reconciled with deliberately, not accidentally |
 
 **Verdict: feasible**, on the strength of a schema read at the enforced floor.
-Two operational constraints must be designed around, not discovered later: the
-listing is per-project, and both commands require a server.
+Three operational constraints must be designed around, not discovered later: the
+listing is per-project, both commands require a server, and the listing is
+capped at one page of `--max-count` (100 by default).
 
 **`--sanitize` is unusable for import.** `sanitize()` in `transfer.ts` does not
 selectively redact; it **replaces** the session title, metadata, location
@@ -132,8 +139,8 @@ Two layers are separated deliberately, because they fail differently:
 
 | Harness | Currently allowed (observed) | Escape that matters for import | Enforced by |
 |---|---|---|---|
-| Claude (memory pass) | Full tool set minus a denylist. `ciao/providers/claude.py:501-559` passes `disallowed_tools=list(request.disallowed_tools or [])` (L514) and `permission_mode=_sdk_permission_mode(request.mode)` (L504), with `setting_sources=["user","project","local"]` (L517). `project_chats.disallowed_tools_for_chat` (L3989-4027) adds `config.memory_pass_denied_tools` (L1495-1518) = every declared `mcp__<server>` plus `Skill(gws-*)` for every shipped gws skill read from disk | **The pass keeps `Bash`.** Nothing in the pass denylist denies it. `ciao/execution_modes.py:106-113` says it outright: "the shell: Claude's `Bash(cmd:*)` … match the command, not a path, so no glob can path-scope a shell. Closing that needs a sandbox, not a denylist." | `disallowed_tools` (name/pattern based) + credential denies; **not** a sandbox |
-| OpenCode (memory pass) | `ciao/providers/opencode.py:memory_pass_guardrail_rules` (L700-730) = wildcard `deny`, then allows for `_MEMORY_PASS_ALLOWED_ACTIONS` (L694-697: `read, edit, write, shell, bash, external_directory, list, question, skill`), then `glob`/`grep` deny, `skill gws-*` deny, then `opencode_credential_deny_rules` last | **`shell` and `bash` are both allowed**, as are `write` and `edit`. `external_directory` is allowed. The credential denies (`ciao/execution_modes.py:200-247`) only cover `read, edit, glob, grep` against `.env`/`.runtime`/`secrets` patterns — they do not touch `shell`, and `opencode_credential_deny_rules` is appended last precisely because OpenCode resolves last-match-wins (`mode_settings` L683-686) | Session permission rules, verified to be applied: `_session_settings` (L1492-1514) selects the ruleset, `_ensure_session` (L1782-1924) sends `{"agent", "permissions"}` on create and, on resume, refuses to reuse a session whose `permissions` do not match exactly (`_session_permission_matches` L733-740, L1863-1866) |
+| Claude (memory pass) | **The pass runs in `mode="bypass"`**, and on Claude that is `permission_mode="bypassPermissions"`. `memory_pass.enqueue` creates the chat with `mode="bypass"` (`ciao/web/memory_pass.py:349`, `host.create_chat(..., mode="bypass")`), which `docs/MEMORY_DESIGN.md:118-119` describes as "a `bypass` chat scoped to memory and the vault (no messages, no commits, no external calls)". `project_chats._effective_mode_for_chat` (L4313-4343) returns `chat.mode` unchanged for an attended turn (only `unattended` forces bypass, and `plan` is exempt), and `claude._BRIDGE_TO_SDK_MODE` (L334-343) maps `"bypass" → "bypassPermissions"`, which `claude.py:504` passes as `permission_mode=_sdk_permission_mode(request.mode)`. On top of that the full tool set minus a denylist: `ciao/providers/claude.py:501-559` passes `disallowed_tools=list(request.disallowed_tools or [])` (L514) with `setting_sources=["user","project","local"]` (L517). `project_chats.disallowed_tools_for_chat` (L3989-4027) adds `config.memory_pass_denied_tools` (L1495-1518) = every declared `mcp__<server>` plus `Skill(gws-*)` for every shipped gws skill read from disk | **`Bash`, `Edit` and `Write` are auto-approved with no approval card, so the denylist is the only restriction.** Under `bypassPermissions` the SDK's `can_use_tool` callback is *never consulted* — the SDK says so in its own words: "`can_use_tool` will not be invoked: permission_mode `'bypassPermissions'` auto-approves every tool call (except explicit deny rules) before the callback is consulted" (`claude_agent_sdk/types.py:1868-1874`, and the same note on the `can_use_tool` docstring at L2159-2173), so the `can_use_tool=self._permission_gate.handle` gate wired at `claude.py:551` is a card *only* in `auto`/`normal`. The only backstop left is the two `PreToolUse` hooks (`claude.py:537-544`): `build_foreground_bash_hook` denies detached shell launches (`nohup … &`, `setsid`, `disown`) and `build_monitor_deny_hook` denies the CLI's `Monitor` (`ciao/observability/hooks.py:105-199`). Neither is a policy — everything else the model reaches for is approved before Ciaobot sees it. `ciao/execution_modes.py:106-113` says the shell point outright: "the shell: Claude's `Bash(cmd:*)` … match the command, not a path, so no glob can path-scope a shell. Closing that needs a sandbox, not a denylist." | `disallowed_tools` (name/pattern based) + credential denies; **not** a sandbox |
+| OpenCode (memory pass) | **The pass also runs in `mode="bypass"`, and `request.memory_pass` is what displaces that mode's ruleset.** `_session_settings` (L1492-1514) checks `request.memory_pass` *before* `mode_settings`, so the pass does **not** get bypass's allow-all: it gets `memory_pass_guardrail_rules` (L700-730) = wildcard `deny`, then allows for `_MEMORY_PASS_ALLOWED_ACTIONS` (L694-697: `read, edit, write, shell, bash, external_directory, list, question, skill`), then `glob`/`grep` deny, `skill gws-*` deny, then `opencode_credential_deny_rules` last. The chat's own `mode="bypass"` survives only as the agent name — `_session_settings` hardcodes `"build"`, and `mode_settings`' `_MODE_AGENTS` would map bypass to `build` too | **`shell` and `bash` are both allowed**, as are `write` and `edit`. `external_directory` is allowed. The credential denies (`ciao/execution_modes.py:200-247`) only cover `read, edit, glob, grep` against `.env`/`.runtime`/`secrets` patterns — they do not touch `shell`, and `opencode_credential_deny_rules` is appended last precisely because OpenCode resolves last-match-wins (`mode_settings` L683-686) | Session permission rules, verified to be applied: `_session_settings` (L1492-1514) selects the ruleset, `_ensure_session` (L1782-1924) sends `{"agent", "permissions"}` on create (L1910) and, on resume, refuses to reuse a session whose `permissions` do not match exactly (`_session_permission_matches` L733-740, L1868-1871) |
 | Either harness, any chat | The agent surface is reachable from **every** chat: `project_chats.build_agent_request` injects `CIAO_AGENT_URL`/`CIAO_AGENT_TOKEN` unconditionally (L4476-4477), and `AgentPrincipal` has exactly one role | `ciao run start -- bash -lc "…"` is an agent-surface operation (`agent_cli._SHARED_NOUN_VERBS` L37-40) that runs arbitrary argv in a tracked background process with no model in the loop (`mcp_server._op_background_run_start` L764-794) | Nothing. It is simply an available operation |
 
 The specific claim #975 asks to be checked — "a wildcard rule followed by
@@ -224,10 +231,23 @@ critique, schedule summaries, and the behavioral eval:
   reaches the provider at all, and the empty setting sources stop `CLAUDE.md`
   and skill listings from being discovered.
 * **OpenCode** — `_run_opencode_oneshot` (L205-248) creates the provider in a
-  fresh `tempfile.TemporaryDirectory` (so opencode cannot discover project
-  instructions, configs, or MCP registrations from the workspace) with
-  `tools_enabled=False`, which `mode_settings` (L674-676) turns into a deny-all
-  session ruleset.
+  fresh `tempfile.TemporaryDirectory`, which isolates the **workspace** layer:
+  opencode merges configs "from the current directory to the filesystem root"
+  (https://opencode.ai/v2/docs/config/), so an empty tempdir means no project
+  instructions, no project `opencode.json(c)`, and no project `.opencode/`
+  MCP registrations are discovered. It also passes `tools_enabled=False`, which
+  `mode_settings` (L674-676) turns into a deny-all session ruleset.
+  **Two limits on that isolation, and E1 must cover both.** First, the
+  **user-global config is still read by the server**: `~/.config/opencode/opencode.json(c)`
+  is documented as the settings-for-every-project file and is merged at lowest
+  precedence regardless of cwd, so a global `permissions`, `agents`, `mcp` or
+  `plugins` entry is present in the session even from a tempdir. Second, a
+  deny-all *session* permission wins over config because the session-create
+  payload carries `permissions` explicitly (`_ensure_session` L1910). The point
+  to pin in a test is therefore the ordering: **tool use is blocked by the
+  deny-all permission, not by the absence of configuration.** A test that only
+  asserts "no config in the cwd" proves nothing about a machine whose global
+  config grants something.
 
 So the model in an extraction turn cannot `Edit` a vault note, cannot promote a
 region, cannot call `ciao`, cannot reach MCP or `gws`, and cannot run a command.
@@ -274,10 +294,35 @@ the distinction matters:
   produced `Insights.md` bullets and promoted confident facts without a person.
   #594 measured it against the agentic chat on 50 real conversations; the chat
   won on judgment; the pipeline was deleted in #627.
+* **It was retired for judgment quality, not for safety.**
+  `docs/MEMORY_DESIGN.md:105-113` is explicit that the one-shot's *case was
+  real* — an archived transcript is untrusted, "a sandboxed one-shot (transcript
+  in, markdown out, no tools) cannot turn every archived chat into a
+  prompt-injection vector against memory", it runs cheap, and parse/route/dedupe
+  stay pure functions. The prompt-injection posture was the one-shot's **selling
+  point**. What it could not do was judgment: "deciding what is already in a
+  note, what a changed fact supersedes, whether a person is genuinely new".
+  #594 compared the two on 50 real conversations and the agentic chat won.
 * What is proposed here reuses the **`run_oneshot` transport that survives** for
-  unrelated callers, and it changes the three things that made the old one
-  unsafe: selection is explicit and consented; output is a candidate list, not
-  a write; and **nothing is auto-applied**.
+  unrelated callers, and it changes three things about how the extraction runs —
+  selection is explicit and consented, output is a candidate list rather than a
+  write, and **nothing is auto-applied**. None of those three is a safety
+  repair, and this design must not be read as one: the safety argument lives in
+  [What the honest security claim is](#what-the-honest-security-claim-is) and
+  rests on the turn having no tools at all, not on having been made safer than
+  the retired pipeline.
+* **[proposed] the judgment gap is therefore still open.** Tool-lessness buys
+  no judgment, and the gap `MEMORY_DESIGN.md:111-113` names is the one this
+  design does not close: is this already in a note, does a changed fact
+  supersede what a region already says, is this person genuinely new. The
+  mitigation is the one the design doc already records as the right answer —
+  **fact-augmentation** at `MEMORY_DESIGN.md:123-125`, where *code* retrieves the
+  destination region and the top-k `ciao vault search` hits and puts them in the
+  prompt. That is a real C4 follow-up, not an optional extra: without it the
+  extractor inherits the exact failure #594 measured, and proposals-only review
+  then bounds the **cost** of bad judgment to review noise without removing it.
+  A user who reviews a queue of low-quality proposals pays for the mistake every
+  time; the queue does not learn which of them were bad.
 
 What is deliberately **not** reintroduced: archive-time automatic extraction,
 `insights-markdown/v1` as a live contract, or the evidence-policy auto-apply
@@ -346,11 +391,15 @@ the whole permission apparatus above.
 
 ### Remaining design decisions this report does not settle
 
-* Whether extraction gets a **second, read-only look at the destination** (e.g.
-  the current region entries and top-k `ciao vault search` hits in the prompt,
-  which `docs/MEMORY_DESIGN.md:123-125` names as the right way to add context
-  without tools). It is cheap and probably right, but it is product scope, not
-  feasibility, and it changes what "already known" means for dedupe.
+* Whether extraction gets a **second, read-only look at the destination** (the
+  current region entries and top-k `ciao vault search` hits put in the prompt by
+  backend code, which `docs/MEMORY_DESIGN.md:123-125` names as the right way to
+  add context without tools). The judgment argument makes it a stated C4
+  follow-up rather than a maybe — see [This does not restore the retired
+  one-shot extractor](#this-does-not-restore-the-retired-one-shot-extractor) —
+  but the **product** decision is still open: it changes what "already known"
+  means for dedupe, and a first import into an empty vault has nothing to look
+  at yet, so whether it lands in C4 or immediately after is a scope call.
 * Whether a **re-import of a changed source** re-proposes facts the user
   already accepted. The provenance and dedupe rules below say no by default;
   confirming that with the user is a product question.
@@ -472,18 +521,41 @@ identity needs its own field rather than an overload of the existing one.
 
 ### Provenance and old-versus-new
 
-**[proposed]**, and it reuses machinery that already exists:
+**[proposed]**, and the first two bullets reuse machinery that already exists
+while the third has to add a field — see the type mismatch named in it.
 
-* Each bullet's `source_section` (`MemoryProposal`, L304-343) carries
-  `provider:source_id` so a filed-but-never-accepted row is still attributable.
-  `as_bullet` already flattens to one line and strips `]` and `)`, so this
-  cannot break the queue format.
-* `FactCandidate` (`ciao/fact_candidates.py:60-88`) is the record a region write
-  is stamped with. It already has `source_message_ids`, `as_of`, `expires`,
-  `attended` (tri-state), and `provenance` (`cited`/`unknown`). An importer
-  should populate `source_message_ids` with the **external** anchors and keep
-  `provenance="unknown"` when it cites none — the module's own rule is that
-  unknown is recorded as unknown and never upgraded to a guess.
+* **[proposed]** Each bullet's `source_section` (`MemoryProposal`, L304-343)
+  carries `provider:source_id` so a filed-but-never-accepted row is still
+  attributable. `as_bullet` already flattens to one line and strips `]` and
+  `)`, so this cannot break the queue format.
+* **[proposed]** The **existing citation fields cannot hold the external
+  anchors**, which is a type mismatch and not a matter of taste:
+  `FactCandidate.source_message_ids` is `tuple[int, ...]`
+  (`ciao/fact_candidates.py:75`) and `MemoryProposal.citations` is also
+  `tuple[int, ...]` (`ciao/memory_proposals.py:315`) — *transcript* indices,
+  peeled from a bullet's `[idx=N]` tag by `candidate_from_proposal`
+  (`fact_candidates.py:126-137`, which calls `int(i)` on each). The anchors
+  this contract proposes are **strings**: OpenCode `msg_…` ids and Claude Code
+  uuids. They cannot go in either field without the integer parser raising.
+  The contract therefore needs a **new Ciaobot-side field** — e.g.
+  `FactCandidate.source_anchors: tuple[str, ...]` alongside
+  `source_message_ids`, or a single string provenance tag carrying
+  `provider:session_id:anchor` — and **[proposed]** the importer populates that
+  field with the external anchors while `source_message_ids` stays empty for an
+  import (there is no Ciaobot transcript index to cite) and
+  `provenance="unknown"` follows from it, which is exactly the module's own
+  rule that unknown is recorded as unknown and never upgraded to a guess.
+  **Consequence for the DAG:** C7 is *not* "only if" — it must touch
+  `ciao/fact_candidates.py`, and probably `ciao/memory_proposals.py` too if the
+  anchor has to survive the round trip through the bullet text.
+* **[proposed] the fallback, and what it costs:** if instead the anchors ride
+  inside `source_section` (or in `evidence_excerpt`), then no module needs a new
+  field — but structured citation is lost, because the region write's
+  provenance row can then only carry prose, `source_message_ids` stays empty,
+  and there is nothing a later reader can match a claim back to a specific
+  message on. Given Q3 explicitly asks which anchor fields ride along on an
+  accepted entry, the structured field is the version worth building; the
+  prose version should be a conscious rejection, not an accident.
 * `attended` is a genuine gap for import: it currently means "was the cited
   turn typed by the user". An imported conversation has no Ciaobot
   `user_turn_unattended` record, so the honest value is `None` (unknown), not
@@ -539,7 +611,7 @@ hand-written. No private transcript, ever.
 
 | # | Case | Assertion (must be an enforcement result, not a string check) |
 |---|---|---|
-| E1 | Extraction runs the injection fixture | The provider session is constructed with **no tools**: on Claude, `tools == []`, `setting_sources == []`, `strict_mcp_config is True`; on OpenCode, `permission_rules == [{"action":"*","resource":"*","effect":"deny"}]` and the cwd is a fresh empty tempdir. Assert on the constructed options, as `tests/test_opencode_provider.py` already does for rulesets |
+| E1 | Extraction runs the injection fixture | The provider session is constructed with **no tools**. Assert on the points that actually carry the decision, not on an attribute that is vacuous for the one-shot path (it builds the provider with `tools_enabled=False` and `permission_rules=None`, so the provider object's rules attribute is `None` and the deny-all is *derived*, not stored): **Claude** — patch `ciao.providers.oneshot.query` (the SDK entry point it calls at `oneshot.py:167`; the `ClaudeAgentOptions` are built inline in `_run_claude_oneshot` with no seam, so a patched `query` capturing the options is the only observation point) and assert `tools == []`, `setting_sources == []`, `skills == []`, `strict_mcp_config is True`, `max_turns == 2`. **OpenCode** — assert the `permissions` list actually sent in the `POST /api/session` body (`_ensure_session`, `payload = {"agent", "permissions"}` at L1910) equals `[{"action": "*", "resource": "*", "effect": "deny"}]`, or assert `_session_settings(request)` returns that ruleset, since for a one-shot it is `mode_settings("plan", tools_enabled=False)` → `_rules(("*", "deny"))` (`opencode.py:674-676`) and `self._permission_rules` is `None`; and assert the provider's `workspace_root` is a **fresh empty tempdir** (`oneshot.py:220`). **Both** — assert no `~/.config/opencode/opencode.json(c)`-sourced capability is what makes this safe: the deny-all permission is the boundary, *not* an absent user-global config (see below) |
 | E2 | Extraction with the injection fixture | **No agent-surface request is made.** Assert `CIAO_AGENT_TOKEN`/`CIAO_AGENT_URL` are absent from the extraction environment, and spy the dispatcher to assert zero calls. This is the check that fails loudly if someone later "helpfully" turns extraction into a chat |
 | E3 | Extraction output containing injection-derived candidates | Every candidate is schema-validated; a candidate naming a command, a path outside the vault, or an unknown destination is **dropped**, and the surviving bullets are ordinary `[review]`-tagged proposals. Nothing is applied |
 | E4 | Batch completes after E3 | `Workspace/Memory-Proposals.md` gained bullets **only**. Assert the workspace `AGENTS.md` `ciao:memory`/`ciao:profile` regions, `Workspace/Learnings.md`, the category folders, and every other vault note are byte-identical to the pre-run snapshot |
@@ -548,7 +620,7 @@ hand-written. No private transcript, ever.
 | E7 | Upload path (when it exists) | A ZIP whose entries escape the extraction root (`../`, absolute, drive-letter), a symlink entry, and a decompression bomb are all refused; the size and entry-count caps are enforced; credential-shaped paths inside the archive are flagged and never read |
 | E8 | Re-import of the same source | Second run files nothing new (`append_proposals` returns `None` for every bullet) and records an explicit re-import attempt with the unchanged digest |
 | E9 | Source changed since the first import | Only the changed messages' facts are proposed; already-accepted facts are not re-proposed by default; the batch records the prior revision |
-| E10 | Fact dated 2024 imported in 2026 | The bullet and the eventual `FactCandidate` carry `[as-of: 2024-…]`, **not** the import date; `attended is None`, never `False` |
+| E10 | Fact dated 2024 imported in 2026 | The bullet and the eventual `FactCandidate` carry `[as-of: 2024-…]`, **not** the import date; `attended is None`, never `False`. The external string anchors ride in the **new** field added for them (see [Provenance and old-versus-new](#provenance-and-old-versus-new)), assert `source_message_ids == ()` — the integer transcript-index field is not overloaded — and assert the anchor survives a bullet round trip |
 | E11 | Candidate conflicting with a live region entry | It is queued; on accept it takes the existing reconcile/defer path and a conflict is reported rather than overwriting. Assert the region is unchanged when reconcile defers |
 | E12 | Destination with custom / disabled / hidden categories | Proposals use only the effective category registry (`ciao/entity_types.py:load_entity_types`, the shipped `entity-types.yaml`, `web/src/stores/entityTypes.ts`); a fact that fits none is queued as a new-category question, never typed into an invented category |
 | E13 | Oversized and unbounded batches | The per-batch conversation cap (parent proposes 10) and per-message size caps are enforced with an explicit omission; a cancel mid-batch leaves the queue consistent (`queue_lock` held, no partial bullet) and does not claim to unsend provider input |
@@ -621,9 +693,28 @@ entry point and its deterministic admission check. **No UI.**
 * New: `ciao/import_admission.py` — the model-free check (shape, destination
   vocabulary, one-line length, citation presence, omission record completeness)
 * New: `tests/test_import_extract.py`, `tests/test_import_admission.py`
-* Touches at most one existing file if needed: `ciao/providers/oneshot.py` (only
-  if an explicit `no_tools` assertion or a provider/model pin is needed — the
-  existing behavior already has no tools)
+* **Touches `ciao/providers/oneshot.py` — a prerequisite, not "only if
+  needed".** The no-tools behavior is already there, but it is not *observable*,
+  and E1 is only a test if it can see the thing it asserts on. Today
+  `_run_claude_oneshot` (L128-165) builds its `ClaudeAgentOptions` inline and
+  calls the SDK's `query` directly (L167), so the only way to read the
+  constructed options is to monkeypatch `ciao.providers.oneshot.query` — which
+  works, but binds the test to a module-level import name rather than to a
+  contract. On the OpenCode side the deny-all is *derived* at call time
+  (`_session_settings` → `mode_settings(..., tools_enabled=False)`), and
+  `_run_opencode_oneshot` accepts a `cwd` parameter it never uses. So C4 adds a
+  minimal seam: **an injectable client, or an options hook.** Either is enough —
+  something like an optional `options_hook: Callable[[ClaudeAgentOptions], None]`
+  or a `query_fn` parameter on `run_oneshot` that receives the constructed
+  options, so E1 asserts on a real object without patching an import. It should
+  stay narrow: no new policy, no `no_tools` flag to set (the tools are already
+  absent and must stay absent), and no change to any existing caller.
+* **Also a C4 follow-up:** fact-augmentation of the extraction prompt — backend
+  code retrieving the destination region and top-k `ciao vault search` hits —
+  because #594 rejected the one-shot on judgment and this design does not close
+  that gap. See [This does not restore the retired one-shot
+  extractor](#this-does-not-restore-the-retired-one-shot-extractor) and Q4;
+  whether it ships inside C4 or immediately after is the open scope question.
 * Delivers enforcement tests **E1-E5**, which must fail if anyone converts
   extraction into a chat
 
@@ -637,7 +728,8 @@ separate child with its own policy marker, named in
 
 Discovery and selection, with the selection boundary explained before any
 content is read and before any provider call. This is also where the OpenCode
-**server requirement** and the **per-project listing** have to be solved.
+**server requirement**, the **per-project listing** and the **`--max-count`
+single-page cap** have to be solved.
 
 * New: `ciao/web/routes_import.py` — authenticated, loopback/session-cookie
   gated like every other `/api/*` route; discovery returns metadata only
@@ -675,10 +767,17 @@ existing review/accept/undo, unchanged.
 * New: `ciao/import_pipeline.py` — orchestrate chunking, cap, disclosure,
   extraction, admission, `append_proposals`, omission and provenance recording
 * New: `tests/test_import_pipeline.py` — including E3-E14
-* Touches: `ciao/memory_proposals.py` **only** if a proposal needs a field the
-  current bullet format cannot carry (it cannot today: `as_bullet` already
-  flattens and sanitizes `source_section`), and `ciao/fact_candidates.py` only
-  if external anchors need a field on `FactCandidate`
+* Touches: `ciao/fact_candidates.py` — **not optional.** The external anchors
+  are strings and `source_message_ids` is `tuple[int, ...]`
+  (`ciao/fact_candidates.py:75`), so the record a region write is stamped with
+  needs a field of its own for them (e.g. `source_anchors: tuple[str, ...]`).
+  See [Provenance and old-versus-new](#provenance-and-old-versus-new) for the
+  type mismatch and for the prose-riding alternative that skips the change by
+  losing structured citation.
+* Touches: `ciao/memory_proposals.py` if the anchor has to survive the round
+  trip through the bullet line — `as_bullet` flattens and sanitizes
+  `source_section`, so a structured anchor may need a field or a tag of its own
+  rather than riding in prose
 
 Depends on: **C4 and C6 merged**. No UI.
 
@@ -725,10 +824,22 @@ enough or the verbatim snippet is wanted.
 
 **Q4 — the #594/#627 line.** Reusing the surviving no-tools transport for
 extraction is not the same as restoring the retired archive-time extractor, but
-it touches a decision you made deliberately. Confirm the boundary as stated in
-[This does not restore the retired one-shot extractor](#this-does-not-restore-the-retired-one-shot-extractor):
-consent-scoped selection, candidate output only, nothing auto-applied, and no
-reintroduction of `insights-markdown/v1` or the evidence-policy auto-apply.
+it touches a decision you made deliberately. Two things to confirm, and the
+second is the one that matters:
+
+1. The boundary as stated in [This does not restore the retired
+   one-shot extractor](#this-does-not-restore-the-retired-one-shot-extractor):
+   consent-scoped selection, candidate output only, nothing auto-applied, and no
+   reintroduction of `insights-markdown/v1` or the evidence-policy auto-apply.
+2. **That the judgment gap is accepted as still open.** #594 rejected the
+   one-shot on judgment — what is already in a note, what a changed fact
+   supersedes, whether a person is genuinely new — not on safety. Tool-lessness
+   does not close that gap, and proposals-only review bounds its cost to review
+   noise rather than removing it. Should C4 ship with fact-augmentation (the
+   design doc's own answer: backend code puts the destination region and top-k
+   `ciao vault search` hits in the prompt) as a **prerequisite** for the first
+   import, or land it as an immediate follow-up? This report's reading: without
+   it, C4 re-runs the experiment #594 already lost, just behind a review queue.
 
 **Q5 — re-import of a changed source.** If a conversation grew since a previous
 import, do already-accepted facts get re-proposed? Proposed default: no, and
@@ -749,7 +860,7 @@ should be settled before C5 is dispatched.
 ### What was run
 
 From the worktree, on branch `raffaelefarinaro/issue-980-import-feasibility`
-at `80bfce94494fcacd12a8bee8195849ba0d55340c`:
+branched from `80bfce94494fcacd12a8bee8195849ba0d55340c`:
 
 ```
 PYTHONPATH=$PWD /Users/raffaelefarinaro/repos/ciaobot/.venv/bin/python \
@@ -781,6 +892,8 @@ provider contract changed.
 | `isSettled` drops interrupted assistant turns and running shell/compaction | `isSettled` in `transfer.ts` |
 | `--sanitize` replaces content with `[redacted:…]` placeholders rather than selectively redacting | `sanitize()` / `sanitizeMessage()` in `transfer.ts` |
 | `session list` is project-scoped to `process.cwd()` | `list.ts` at `v2.0.16` |
+| `session list` returns one page: `limit: Option.getOrElse(input.maxCount, () => 100)`, no cursor/offset | `list.ts` at `v2.0.16`; the `--max-count` default of 100 from `opencode session list --help` on `v2.0.22` |
+| opencode merges config from the cwd up, and the user-global `~/.config/opencode/opencode.json(c)` is read regardless of cwd | https://opencode.ai/v2/docs/config/ ("Locations") |
 | Both commands resolve a server connection | `ServerConnection.resolve({server, standalone})` in `list.ts` and `export.ts` |
 | V2 tags `v2.0.0`/`v2.0.16`/`v2.0.22` exist in `sst/opencode` | GitHub git-ref API, HTTP 200 for each |
 | V2 CLI commands as documented | https://opencode.ai/v2/docs/cli/commands/ |
@@ -788,6 +901,9 @@ provider contract changed.
 | Claude Code session locations and slug rules | `ciao/agent_paths.py:51-62`, `tests/test_agent_paths.py`, `tests/fixtures/agent_discovery/claude_project_slugs.json` (Claude Code 2.1.285 / 2.1.286) |
 | Current memory-pass architecture, policy and restart behavior | `ciao/web/memory_pass.py` (622 lines, read in full) |
 | Current OpenCode and Claude policy construction | `ciao/providers/opencode.py` L266-317, L649-740, L1492-1514, L1782-1924; `ciao/providers/claude.py` L501-559 |
+| The memory pass runs in `mode="bypass"`, and what that resolves to per harness | `ciao/web/memory_pass.py:349` (`host.create_chat(..., mode="bypass")`) and `docs/MEMORY_DESIGN.md:118-119`; `ciao/web/project_chats.py:_effective_mode_for_chat` (L4313-4343) plus its two callers (L4483, L5890); `ciao/providers/claude.py:_BRIDGE_TO_SDK_MODE` (L334-343) and `_sdk_permission_mode` (L346-347); `ciao/providers/opencode.py:_session_settings` (L1492-1514) checked ahead of `mode_settings` |
+| `bypassPermissions` bypasses `can_use_tool`, leaving only the two `PreToolUse` hooks | the installed SDK, `claude_agent_sdk/types.py:1868-1874` and the `can_use_tool` docstring at L2159-2173; the hooks themselves at `ciao/providers/claude.py:537-544` and `ciao/observability/hooks.py:105-199` |
+| `FactCandidate.source_message_ids` and `MemoryProposal.citations` are `tuple[int, ...]`, so external string anchors fit neither | `ciao/fact_candidates.py:75` (`source_message_ids: tuple[int, ...]`), `ciao/memory_proposals.py:315` (`citations: tuple[int, ...]`), and `candidate_from_proposal` (`ciao/fact_candidates.py:126-137`) parsing them with `int(i)` off the bullet's `[idx=N]` tag |
 | Application-operation authorization surface | `ciao/mcp_server.py` L199-216, L247-347, L1046-1078, L764-794, L1807-1865; `ciao/agent_surface.py` (read in full); `ciao/control_plane.py` L98-135, L1055-1084, L1198-1250 |
 | Proposal queue and accept path | `ciao/memory_proposals.py`, `ciao/proposal_actions.py`, `ciao/fact_candidates.py`, `ciao/web/proposal_service.py`, `ciao/cli.py` L3675-3975, `ciao/agent_cli.py` |
 | The no-tools turn already exists on both harnesses | `ciao/providers/oneshot.py` L128-165, L205-248 |
@@ -827,9 +943,23 @@ provider contract changed.
    derived from reading `ciao/providers/oneshot.py`, not from running an
    injection fixture through it. Enforcement cases E1-E5 exist precisely to turn
    that derivation into evidence in C4.
-6. **No local `develop` content was compared.** The base sha in the status table
-   is the one #975 names; this worktree's branch is one merge ahead of it
+6. **The judgment gap is not closed by anything in this design.** #594
+   retired the one-shot extractor because it could not decide what is already in
+   a note, what a changed fact supersedes, or whether a person is genuinely new
+   (`docs/MEMORY_DESIGN.md:111-113`). Giving the extraction turn no tools does
+   not change that, and requiring a human to press accept bounds the **cost** of
+   bad judgment to review noise — it does not remove it. The named mitigation is
+   fact-augmentation (`MEMORY_DESIGN.md:123-125`): backend code retrieves the
+   destination region and top-k `ciao vault search` hits and puts them in the
+   prompt. This report makes that a stated **C4 follow-up** and a Q4 question,
+   not something an importer can be assumed to have solved.
+7. **No local `develop` content was compared.** The base sha in the status table
+   is the one #980 names; this worktree's branch is one merge ahead of it
    (`80bfce94`, the #972 fd-limit merge), which touches no file cited here.
+   `origin/develop` has moved on since — it was
+   `607eb390f15f9a51737e84d9b0bb1fcedb3d36e9` when this revision was written —
+   so that claim is only true of the branch point, and the merge must re-state
+   the base.
 
 ## References
 
@@ -841,12 +971,18 @@ Repository (read in this worktree):
 * `ciao/providers/opencode.py` — `mode_settings`,
   `_MEMORY_PASS_ALLOWED_ACTIONS`, `memory_pass_guardrail_rules`,
   `_session_settings`, `_ensure_session`, `_server_version_error`
-* `ciao/providers/claude.py` — `ClaudeAgentOptions` construction
+* `ciao/providers/claude.py` — `ClaudeAgentOptions` construction, and
+  `_BRIDGE_TO_SDK_MODE` / `_sdk_permission_mode` (L334-347), the map that turns
+  the pass's `mode="bypass"` into SDK `bypassPermissions`
 * `ciao/providers/oneshot.py` — the existing no-tools turn on both harnesses
 * `ciao/execution_modes.py` — credential deny rules and the recorded reason a
   shell cannot be path-scoped
-* `ciao/config.py`, `ciao/web/project_chats.py` — denylist composition, mode
-  selection, agent-token injection
+* `ciao/observability/hooks.py` — the two `PreToolUse` hooks that are the only
+  thing still consulting the process under `bypassPermissions`
+* `ciao/config.py`, `ciao/web/project_chats.py` — denylist composition
+  (`disallowed_tools_for_chat`), mode resolution
+  (`_effective_mode_for_chat`, L4313-4343, and its `unattended` rule), and
+  agent-token injection
 * `ciao/mcp_server.py`, `ciao/agent_surface.py`, `ciao/agent_cli.py`,
   `ciao/control_plane.py` — the application-operation surface
 * `ciao/memory_proposals.py`, `ciao/proposal_actions.py`,
@@ -863,6 +999,9 @@ External:
 
 * https://opencode.ai/v2/docs/cli/commands/ — V2 CLI commands (latest docs;
   states no minimum version)
+* https://opencode.ai/v2/docs/config/ — config discovery: the
+  user-global `~/.config/opencode/opencode.json(c)` and the "searches from the
+  current directory to the filesystem root" merge order (latest docs)
 * `sst/opencode` at tag `v2.0.16` —
   `packages/cli/src/commands/handlers/session/list.ts`,
   `packages/cli/src/commands/handlers/session/export.ts`,
