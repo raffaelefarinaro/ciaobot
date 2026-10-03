@@ -249,6 +249,8 @@ def test_parse_hosted_is_syntax_only_not_ownership() -> None:
         ["/opt/something", "run"],
         ["C:\\ciao\\ciao.exe", "run"],
         ["/usr/bin/python3", "-m", "ciao.cli", "run\x00"],
+        ["/usr/bin/../bin/python3", "-m", "ciao.cli", "run"],
+        ["/opt//ciao", "run"],
     ],
 )
 def test_parse_rejects_invalid_direct_shapes(bad: object) -> None:
@@ -296,6 +298,19 @@ def test_parse_rejects_invalid_direct_shapes(bad: object) -> None:
             "--python",
             "/usr/bin/python3",
         ],
+        # The host runs `<python> -I -m ciao.cli supervise`: a shell is not one.
+        [
+            f"/x/{APP_NAME}/Contents/MacOS/{EXECUTABLE_NAME}",
+            "serve",
+            "--python",
+            "/bin/sh",
+        ],
+        [
+            f"/x/../{APP_NAME}/Contents/MacOS/{EXECUTABLE_NAME}",
+            "serve",
+            "--python",
+            "/usr/bin/python3",
+        ],
     ],
 )
 def test_parse_rejects_invalid_hosted_shapes(bad: object) -> None:
@@ -330,6 +345,8 @@ def test_host_service_argv_round_trips_through_the_parser() -> None:
         (POSIX_BUNDLE, "/usr/bin/python3\x00"),
         ("/Users/x/Other.app", "/usr/bin/python3"),
         (POSIX_BUNDLE, "C:\\Python\\python.exe"),
+        (POSIX_BUNDLE, "/bin/sh"),
+        ("/Users/x/../y/" + APP_NAME, "/usr/bin/python3"),
     ],
 )
 def test_host_service_argv_rejects_strict_absent_inputs(
@@ -398,6 +415,36 @@ def test_read_record_missing_file(tmp_path: Path) -> None:
     assert caught.value.code == server_host.MISSING_RECORD
 
 
+def test_an_unexaminable_record_is_not_a_missing_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A record the reader cannot stat is not proof that none was written.
+    def denied(path: object) -> os.stat_result:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(server_host.os, "lstat", denied)
+    with pytest.raises(ServerHostError) as caught:
+        read_host_ownership(tmp_path / "record.json")
+    assert caught.value.code == server_host.INVALID_OWNERSHIP
+
+
+def test_a_record_swapped_after_its_checks_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The checks and the read must be about the same inode.
+    record = _write_record(tmp_path / "record.json", _record())
+    other = _write_record(tmp_path / "other.json", _record())
+    real_lstat = os.lstat
+    monkeypatch.setattr(
+        server_host.os,
+        "lstat",
+        lambda path: real_lstat(other) if Path(path) == record else real_lstat(path),
+    )
+    with pytest.raises(ServerHostError) as caught:
+        read_host_ownership(record)
+    assert caught.value.code == server_host.INVALID_OWNERSHIP
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -463,6 +510,8 @@ def test_read_record_rejects_newer_schema(tmp_path: Path) -> None:
         lambda d: d.__setitem__("executable_sha256", "ABC"),
         lambda d: d.__setitem__("executable_sha256", "a" * 63),
         lambda d: d.__setitem__("executable_sha256", "A" * 64),
+        # Two different digests for the one executable.
+        lambda d: d.__setitem__("executable_sha256", _HASH_B),
         lambda d: d.__setitem__("bundle_path", "relative/app"),
         lambda d: d.__setitem__("bundle_path", "C:\\app"),
         lambda d: d.__setitem__("per_arch_cdhashes", {"arm64": _CDHASH["arm64"]}),
@@ -767,6 +816,19 @@ def test_inspect_rejects_a_special_file(
     [
         (
             lambda b: (b / _PLIST_REL).write_bytes(b"not a plist"),
+            server_host.INSPECTION_FAILED,
+        ),
+        (
+            lambda b: (b / _PLIST_REL).write_bytes(
+                b"<?xml version='1.0'?><plist><dict><key>a</key>"
+            ),
+            server_host.INSPECTION_FAILED,
+        ),
+        (
+            lambda b: (b / _PLIST_REL).write_bytes(
+                b"<?xml version='1.0'?><plist version='1.0'><dict>"
+                b"<key>a</key><integer>zz</integer></dict></plist>"
+            ),
             server_host.INSPECTION_FAILED,
         ),
         (

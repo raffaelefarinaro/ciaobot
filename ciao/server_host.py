@@ -44,10 +44,12 @@ import hashlib
 import json
 import os
 import plistlib
+import posixpath
 import re
 import stat
 import subprocess
 import sys
+import xml.parsers.expat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
@@ -223,7 +225,24 @@ def _absolute_posix(value: object, *, what: str, code: str) -> str:
         )
     if not PurePosixPath(value).is_absolute():
         raise ServerHostError(f"{what} must be absolute: {value!r}", code=code)
+    if posixpath.normpath(value) != value:
+        raise ServerHostError(
+            f"{what} must be a normalized path (no '.', '..', '//' or trailing '/'): "
+            f"{value!r}",
+            code=code,
+        )
     return value
+
+
+def _python_interpreter(value: object) -> str:
+    """An absolute interpreter path whose basename is python, python3 or python3.N."""
+    interpreter = _absolute_posix(value, what="the interpreter", code=INVALID_COMMAND)
+    if not _PYTHON_RE.fullmatch(PurePosixPath(interpreter).name):
+        raise ServerHostError(
+            f"the interpreter must be a python executable: {interpreter!r}",
+            code=INVALID_COMMAND,
+        )
+    return interpreter
 
 
 def _parse_direct(program: str, argv: tuple[str, ...]) -> ServiceCommand:
@@ -299,7 +318,7 @@ def parse_service_command(arguments: object) -> ServiceCommand:
                 f"{PurePosixPath(host).name!r}",
                 code=INVALID_COMMAND,
             )
-        python = _absolute_posix(argv[3], what="the interpreter", code=INVALID_COMMAND)
+        python = _python_interpreter(argv[3])
         return ServiceCommand("hosted", host, python, argv)
 
     program = _absolute_posix(argv[0], what="the program", code=INVALID_COMMAND)
@@ -322,9 +341,7 @@ def host_service_argv(bundle_path: PurePath, python: PurePath) -> tuple[str, ...
         raise ServerHostError(
             f"the bundle must be named {APP_NAME!r}: {bundle!r}", code=INVALID_COMMAND
         )
-    interpreter = _absolute_posix(
-        os.fspath(python), what="the interpreter", code=INVALID_COMMAND
-    )
+    interpreter = _python_interpreter(os.fspath(python))
     host = PurePosixPath(bundle) / "Contents" / "MacOS" / EXECUTABLE_NAME
     return (os.fspath(host), "serve", "--python", interpreter)
 
@@ -405,12 +422,6 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             )
         result[key] = value
     return result
-
-
-def _current_uid() -> int:
-    """This user's uid, read through ``getattr`` so the module imports on Windows."""
-    getuid: Callable[[], int] = getattr(os, "getuid")
-    return getuid()
 
 
 def _decode_record(raw: str, *, path: Path) -> HostOwnership:
@@ -504,6 +515,11 @@ def _decode_record(raw: str, *, path: Path) -> HostOwnership:
         name: _require_sha256(files[name], what=f"the digest of {name}")
         for name in sorted(REQUIRED_BUNDLE_FILES)
     }
+    if bundle_files[_EXECUTABLE_REL] != executable_sha256:
+        raise ServerHostError(
+            f"the ownership record at {path.name} gives two executable digests",
+            code=INVALID_OWNERSHIP,
+        )
 
     return HostOwnership(
         schema=SCHEMA_VERSION,
@@ -515,6 +531,22 @@ def _decode_record(raw: str, *, path: Path) -> HostOwnership:
         per_arch_cdhashes=per_arch,
         bundle_files=bundle_files,
     )
+
+
+def _read_same_file(path: Path, checked: os.stat_result) -> bytes:
+    """Read ``path`` without following a symlink, refusing a swapped inode.
+
+    The ``lstat`` checks and the read are two lookups of one name; opening with
+    ``O_NOFOLLOW`` and comparing the open descriptor's device and inode to the
+    checked ones keeps a rename between them from substituting another file.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+            raise OSError(f"{path} changed while it was being read")
+        return handle.read()
 
 
 def read_host_ownership(path: Path) -> HostOwnership:
@@ -530,10 +562,15 @@ def read_host_ownership(path: Path) -> HostOwnership:
     record = Path(path)
     try:
         info = os.lstat(record)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ServerHostError(
             f"the host ownership record is missing at {record}",
             code=MISSING_RECORD,
+        ) from exc
+    except OSError as exc:
+        raise ServerHostError(
+            f"the host ownership record at {record} cannot be examined: {exc}",
+            code=INVALID_OWNERSHIP,
         ) from exc
     if stat.S_ISLNK(info.st_mode):
         raise ServerHostError(
@@ -546,7 +583,7 @@ def read_host_ownership(path: Path) -> HostOwnership:
             code=INVALID_OWNERSHIP,
         )
     if sys.platform == "darwin":
-        if info.st_uid != _current_uid():
+        if info.st_uid != os.getuid():
             raise ServerHostError(
                 f"the host ownership record is not owned by this user: {record}",
                 code=INVALID_OWNERSHIP,
@@ -557,7 +594,7 @@ def read_host_ownership(path: Path) -> HostOwnership:
                 code=INVALID_OWNERSHIP,
             )
     try:
-        raw = record.read_text(encoding="utf-8")
+        raw = _read_same_file(record, info).decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise ServerHostError(
             f"the host ownership record at {record} is unreadable",
@@ -592,7 +629,7 @@ def _run_native(runner: Runner, argv: list[str]) -> subprocess.CompletedProcess[
             timeout=NATIVE_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
         raise ServerHostError(
             f"the host bundle could not be inspected ({' '.join(argv[:2])}): {exc}",
             code=INSPECTION_FAILED,
@@ -642,9 +679,12 @@ def _collect_sealed_files(bundle: Path) -> dict[str, str]:
                     code=INSPECTION_FAILED,
                 )
             try:
-                mode = os.lstat(entry).st_mode
+                checked = os.lstat(entry)
+                mode = checked.st_mode
                 if stat.S_ISREG(mode):
-                    files[relative] = hashlib.sha256(entry.read_bytes()).hexdigest()
+                    files[relative] = hashlib.sha256(
+                        _read_same_file(entry, checked)
+                    ).hexdigest()
             except OSError as exc:
                 raise ServerHostError(
                     f"the host bundle file {relative} cannot be read: {exc}",
@@ -672,7 +712,7 @@ def _read_bundle_plist(bundle: Path) -> dict[str, Any]:
     plist_path = bundle / _PLIST_REL
     try:
         info: Any = plistlib.loads(plist_path.read_bytes())
-    except (OSError, plistlib.InvalidFileException) as exc:
+    except (OSError, ValueError, xml.parsers.expat.ExpatError) as exc:
         raise ServerHostError(
             f"the host bundle's Info.plist is unreadable: {plist_path}",
             code=INSPECTION_FAILED,

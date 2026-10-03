@@ -56,8 +56,8 @@ host_service_argv(verified_bundle, Path("/usr/bin/python3"))
 
 The accepted shapes are exactly:
 
-- **hosted** — `[<abs>/CiaobotServerHost, serve, --python, <abs interpreter>]`
-  (host executable basename checked, both paths absolute);
+- **hosted** — `[<abs>/CiaobotServerHost, serve, --python, <abs python|python3|python3.N>]`
+  (host executable and interpreter basenames checked, both paths absolute);
 - **direct** — `[<abs python|python3|python3.N>, [-I], -m, ciao.cli, run|supervise]`
   or `[<abs ciao>, run|supervise]`.
 
@@ -66,8 +66,10 @@ The hosted host itself launches `[<python>, -I, -m, ciao.cli, supervise]`
 constant and require it to parse as a direct `supervise` command that
 `ciao.cli` really exposes.
 
-Repeated, unknown, extra or relative arguments, a non-string element and a wrong
-host basename are refusals carrying a stable `ServerHostError.code`. The direct
+Every path must be absolute and already normalized (no `.`, `..`, doubled or
+trailing `/`), so the rendered command names the canonical bundle a verification
+resolved. Repeated, unknown, extra or relative arguments, a non-string element and
+a wrong host or interpreter basename are refusals carrying a stable `ServerHostError.code`. The direct
 shape is the existing migration shape, stated explicitly rather than as a
 recovery shim.
 
@@ -101,7 +103,7 @@ resource is a new host revision, not a wider mapping.
 - a symlinked, special or unreadable file, an unlistable directory, a stray file
   (bundled Python, a config, a thin staging product, an extra signature file) or
   a stray directory anywhere in the tree;
-- a missing sealed file, a wrong `CFBundleIdentifier`, `CFBundleExecutable`,
+- a missing sealed file, an `Info.plist` that does not parse, a wrong `CFBundleIdentifier`, `CFBundleExecutable`,
   protocol (an integer: a plist `<true/>` is not `1`), bundle revision or
   `LSMinimumSystemVersion`;
 - a bundle that fails `codesign --verify --strict` (which checks every
@@ -133,17 +135,20 @@ writes the record: B1 defines the reader and the shape, and the installer
 (#1008 child E) serializes `HostOwnership.to_record()` owner-only, only after a
 verified installation.
 
-`read_host_ownership` is strict. It refuses a missing file (`missing_record`), a
-symlink or non-regular file, malformed JSON, a duplicate JSON key anywhere
+`read_host_ownership` is strict. It refuses an absent file (`missing_record`;
+a record it cannot stat for any other reason is `invalid_ownership`, not
+missing), a symlink or non-regular file (the read goes through an `O_NOFOLLOW`
+descriptor that must be the inode the checks examined), malformed JSON, a duplicate JSON key anywhere
 (including nested), an unknown or non-integer schema (`unsupported_schema` — a
 JSON `true` is not `1`), a wrong bundle id / revision / protocol, a hash that is
 not 64 lowercase hex, a CDHash that is not 40 lowercase hex, a `bundle_files`
 mapping that is not exactly the four sealed names (so an absolute, backslashed,
 non-canonical or traversing name is refused), and extra or missing top-level
-fields. Values are never
-coerced. On macOS it additionally requires the record's owner to be this uid and
-its mode to grant nothing to group or other; the uid is read through `getattr`
-so the module imports and type-checks on Windows.
+fields, and an `executable_sha256` that differs from the executable's
+`bundle_files` digest. Values are never coerced. On macOS it additionally
+requires the record's owner to be this uid and its mode to grant nothing to group
+or other; that check sits inside a `sys.platform == "darwin"` branch, so mypy on
+Windows does not see `os.getuid`.
 
 ## Sidecar, defaults and the launchd bounds
 
