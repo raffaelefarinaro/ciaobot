@@ -36,7 +36,7 @@ import {
   taskStatusLabel,
   type TaskDueFilter,
 } from '../lib/taskBoard'
-import type { Task, TaskStatus } from '../lib/types'
+import type { Task, TaskDetail, TaskStatus } from '../lib/types'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -223,15 +223,26 @@ const projectName = (projectId: string): string => {
 }
 
 /**
- * Whether this board holds the description for a task.
+ * The description this dialog may show and write back, or `null`.
  *
- * A list row carries no `body`, so the description is what `get` read for it.
- * Without it the field stays absent and a Save omits `body`: sending an empty
+ * A list row carries no `body`, so the description is what `get` read for it, and
+ * without one the field stays absent and a Save omits `body`: sending an empty
  * one would erase prose nobody was shown, which is the one failure an editor
  * cannot undo.
+ *
+ * It has to be the record at the revision the row carries, and those two
+ * revisions have to be the same. The row is the newest read of what is on disk,
+ * and a `described` slot left over from an earlier open is the record as it was
+ * then. Another writer's edit moves the row's revision on while the slot keeps
+ * the prose it was read with, and a body written at that newer revision goes out
+ * with no 409 to stop it: the write succeeds and their prose is gone. So a stale
+ * slot is not a prefill and never rides on a Save — {@link loadDescription} reads
+ * it again, and the read is the only thing that can make it current.
  */
-function describesTask(taskId: string): boolean {
-  return board.described?.id === taskId
+function heldDescription(task: Task | null): TaskDetail | null {
+  const held = board.described
+  if (!task || !held || held.id !== task.id) return null
+  return held.revision === task.revision ? held : null
 }
 
 // ── Writes ────────────────────────────────────────────────────────────────
@@ -361,24 +372,68 @@ useModalFocus(detailEl, detailFocusActive, {
 /** The row a dialog is editing, or undefined once it has been deleted. */
 const detailTask = computed(() => tasks.value.find((task) => task.id === detailId.value) ?? null)
 
-/** Whether this dialog is offering the description, and may therefore write it. */
-const detailDescribed = computed(() => describesTask(detailId.value))
+/**
+ * Whether this dialog is offering the description, and may therefore write it.
+ *
+ * Offered only while it is the record at the revision being presented — see
+ * {@link heldDescription}. A slot the dialog has not re-read at this revision
+ * keeps the field absent, which is what stops a Save from clearing prose nobody
+ * was shown.
+ */
+const detailDescribed = computed(() => Boolean(heldDescription(detailTask.value)))
 
 const detailValid = computed(() => detailForm.title.trim() !== '')
 
-/** Read the description the list never carries, then fill the dialog from it. */
+/**
+ * Read the description the list never carries, then fill the dialog from it.
+ *
+ * The answer is applied only while this dialog is still the one that asked:
+ * `detailId` is cleared when it closes and set to whoever is open next, and a
+ * late answer landing on a task the user has moved on to would put the previous
+ * task's prose — and the failure state of a read they are no longer waiting for —
+ * under their next edit. A dialog can also ask twice for the same task (close and
+ * reopen, or a Retry behind a first answer still in flight), so the newest ask
+ * wins over an older one for the same id too.
+ */
+let descriptionSeq = 0
 async function loadDescription(taskId: string) {
+  const seq = ++descriptionSeq
   descriptionState.value = 'loading'
-  const held = await board.get(workspace.value, taskId)
-  descriptionState.value = held ? 'idle' : 'failed'
-  if (!held) return
-  detailForm.body = held.body
+  const read = await board.get(workspace.value, taskId)
+  if (seq !== descriptionSeq || !detailOpen.value || detailId.value !== taskId) return
+  if (read) {
+    descriptionState.value = 'idle'
+    detailForm.body = read.body
+    return
+  }
+  // No answer: either the read was refused, or the board was told something newer
+  // while it was in flight — a write of this dialog's own, say. The slot decides,
+  // by the same rule as everywhere else in this dialog: a write's answer is the
+  // record at the revision now presented, so a Save in the middle of a read keeps
+  // the description the form was filled with, and a refused read has nothing to
+  // offer and leaves the field absent.
+  descriptionState.value = heldDescription(detailTask.value) ? 'idle' : 'failed'
 }
 
+/**
+ * Open one task's editor.
+ *
+ * Every open reads. The description slot outlives both the dialog and the pane —
+ * it is store state — so "the board already has this body" is a claim about an
+ * instant that has passed: `ciao task`, an agent or a second browser can have
+ * edited the task since, and the reload that reported it did not carry the prose.
+ * Skipping the read on a slot is how a stale body gets written back at a fresh
+ * revision, with no 409 to stop it.
+ *
+ * What the slot still buys is the form being filled the instant the dialog
+ * appears rather than empty for the length of a GET, so a Save in that window
+ * writes the other fields and leaves the description alone. It is a prefill, and
+ * only while it is the record at the row's revision — {@link heldDescription}.
+ */
 function openDetail(task: Task) {
   board.clearError()
   detailId.value = task.id
-  const held = describesTask(task.id) ? board.described : null
+  const held = heldDescription(task)
   detailForm.title = task.title
   detailForm.status = task.status
   detailForm.due = task.due
@@ -387,11 +442,7 @@ function openDetail(task: Task) {
   detailForm.body = held?.body ?? ''
   savedAt.value = 0
   detailOpen.value = true
-  // A task the board has already read (one it created, or an open dialog it
-  // read before) needs no second round trip; every other task does, and until
-  // that answer lands the description is not something the board may write.
-  if (held) descriptionState.value = 'idle'
-  else void loadDescription(task.id)
+  void loadDescription(task.id)
 }
 
 function closeDetail() {
@@ -399,6 +450,7 @@ function closeDetail() {
   detailOpen.value = false
   detailId.value = ''
   descriptionState.value = 'idle'
+  descriptionSeq++
   board.clearError()
 }
 
@@ -454,18 +506,27 @@ function detailChanges(task: Task): TaskChanges {
 async function saveDetail() {
   const task = detailTask.value
   if (detailSaving.value || !task || !detailValid.value) return
+  // The revision is read first and the slot asked about *it* below:
+  // `revisionOf` drops a slot that disagrees with the row, so the two questions
+  // have to be about the same instant or the answer is about a different one.
+  const revision = board.revisionOf(task.id)
   const changes = detailChanges(task)
-  // `body` rides only when this dialog is the one that showed the prose and the
-  // prose was edited. A description the board never read is omitted rather than
-  // sent empty, which would erase it; an unedited one needs no write at all.
-  const held = describesTask(task.id) ? board.described : null
-  const body = held && held.body !== detailForm.body ? detailForm.body : undefined
+  // `body` rides only when this dialog showed the prose and it is the record at
+  // that revision: a description read for an earlier revision is not something
+  // this dialog may write (its body is not what the row says is on disk, so
+  // sending it erases whatever replaced it, and the newer revision going out
+  // means no 409 stands in the way), an unread one is omitted rather than sent
+  // empty, and an unedited one needs no write at all.
+  const held = heldDescription(task)
+  const body = held && held.revision === revision && held.body !== detailForm.body
+    ? detailForm.body
+    : undefined
   if (!Object.keys(changes).length && body === undefined) return
   detailSaving.value = true
   const saved = await board.update(
     workspace.value,
     task.id,
-    board.revisionOf(task.id),
+    revision,
     changes,
     body,
   )
@@ -990,11 +1051,16 @@ const today = localDateKey()
   gap: var(--space-2);
   padding: var(--space-2) 0;
 }
+/* Muted small text with a Reload beside it: it is a caption on the board, not
+   one of its voices. */
 .task-lede {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  color: var(--fg3);
+  font-size: var(--text-sm);
 }
 .task-saved {
   margin: 0;
@@ -1007,9 +1073,6 @@ const today = localDateKey()
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) 0;
-}
-.task-lede {
-  margin: 0 0 var(--space-3);
 }
 
 /* ── Unreadable files ──────────────────────────────────────────────────── */

@@ -65,6 +65,20 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
   const described = ref<TaskDetail | null>(null)
   /** Ticket for the newest in-flight list request; older responses are dropped. */
   let requestSeq = 0
+  /**
+   * Ticket for the newest read-by-id. A description read is dropped once the
+   * board has been told something newer.
+   *
+   * Separate from `requestSeq` on purpose: a list read and a description read are
+   * both things this board is told, and neither may cancel the other — a dialog
+   * opened while a refresh is in flight still has to get its prose. So `reload`
+   * takes a ticket here too (the whole board re-read is newer than one task read
+   * that started before it), and so does every write (its own answer is the
+   * newest record this board holds). Either way the late read is dropped rather
+   * than allowed to put a stale revision back on a row the newer answer replaced,
+   * or prose older than the last write into the dialog that write updated.
+   */
+  let descriptionSeq = 0
 
   /**
    * Read the board for `workspace`, always.
@@ -91,6 +105,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       described.value = null
     }
     const seq = ++requestSeq
+    descriptionSeq++
     loading.value = true
     loadError.value = ''
     try {
@@ -154,13 +169,27 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * puts the server's sentence in `error` and returns `null`: the caller keeps the
    * description out of the form, and a Save on the other fields omits `body`
    * rather than sending an empty one over prose nobody was shown.
+   *
+   * The answer is for the board that asked, and only while that board is still the
+   * one being drawn. Two things can stop it being that. The workspace can have
+   * moved on — `1`–`9` switch it while a GET is in flight, and a description read
+   * for the workspace on screen a moment ago is another workspace's task, which
+   * on a shared id would be indistinguishable from this one's. And a newer read of
+   * the same thing can have landed: two dialogs opened back to back answer out of
+   * order, and the older one must not decide what the newer is showing. Both
+   * answers drop to `null` rather than an error: nothing failed, and the caller
+   * that asked has since been answered by something newer.
    */
   async function get(workspace: string, taskId: string): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
+    const seq = ++descriptionSeq
+    /** Whether this answer is still one the board it was asked for can use. */
+    const current = () => seq === descriptionSeq && loadedWorkspace.value === workspace
     try {
       const data = await api.get<{ task?: unknown }>(
         `${taskUrl(taskId)}?workspace=${encodeURIComponent(workspace)}`,
       )
+      if (!current()) return null
       const task = taskDetailFrom(data?.task)
       described.value = task
       // Only the revision is adopted onto the row. The list row is what the
@@ -168,16 +197,20 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       // open form would leave the form describing a record the card no longer
       // matches. The revision is the part a later write has to present, and this
       // read is the newest thing the board knows.
+      //
+      // Only onto a row that is already there: a description read is not a source
+      // of rows, and one that landed late onto a board that had just been cleared
+      // would draw a task nobody listed — with an id and a revision the next write
+      // would present.
       const index = rows.value.findIndex(
         (row) => !isTaskInvalidRow(row) && row.id === task.id,
       )
       if (index >= 0) {
         rows.value.splice(index, 1, { ...rows.value[index]!, revision: task.revision })
-      } else if (task.id) {
-        rows.value.push(toTaskListRow(task))
       }
       return task
     } catch (e) {
+      if (!current()) return null
       error.value = taskApiErrorMessage(e, 'Could not read the task')
       return null
     }
@@ -186,6 +219,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
   /** File a task. Returns the record as stored, or `null` with `error` set. */
   async function create(workspace: string, input: TaskCreateInput): Promise<TaskDetail | null> {
     if (!workspace || !input.title.trim()) return null
+    // This write's answer is about to be the newest record the board holds.
+    descriptionSeq++
     saving.value = true
     error.value = ''
     try {
@@ -224,6 +259,9 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     body?: string,
   ): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
+    // A description read that started before this write is behind it, and its
+    // answer would put the revision it read back on the row this write moved on.
+    descriptionSeq++
     saving.value = true
     error.value = ''
     try {
@@ -257,6 +295,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     expectedRevision: string,
   ): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
+    descriptionSeq++
     saving.value = true
     error.value = ''
     try {
@@ -284,6 +323,9 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    */
   async function remove(workspace: string, taskId: string, expectedRevision: string): Promise<boolean> {
     if (!workspace || !taskId) return false
+    // The record this read is about is about to be gone: its answer has nowhere
+    // to go, and putting it back would resurrect a file the vault has lost.
+    descriptionSeq++
     saving.value = true
     error.value = ''
     try {

@@ -42,6 +42,7 @@ vi.mock('../../lib/confirm', () => ({
 
 const REVISION = 'a'.repeat(64)
 const NEXT_REVISION = 'b'.repeat(64)
+const THIRD_REVISION = 'c'.repeat(64)
 
 function task(overrides: Partial<Task> = {}): Task {
   return {
@@ -483,7 +484,63 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
-  it('edits the description of a task it created without a second read', async () => {
+  // A `described` slot outlives the dialog and the pane, so "the board already
+  // has this body" is a claim about an instant that has passed. Reusing it without
+  // reading is how another writer's prose gets written back over at their own
+  // revision: the write succeeds, so there is no 409 to notice it by.
+  it('re-reads on reopen, so prose another writer has since replaced is never written back', async () => {
+    const wrapper = await mountBoard([task()])
+    apiGet.mockResolvedValue(detailAnswer(task(), 'OLD'))
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.get<HTMLTextAreaElement>('#task-detail-body').element.value).toBe('OLD')
+    await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+    await nextTick()
+
+    // Another writer edits the body. The board re-reads and reports the new
+    // revision — a list row carries no body, so nothing on the board has theirs.
+    const theirs = task({ revision: THIRD_REVISION })
+    let releaseRead: (answer: unknown) => void = () => {}
+    apiGet.mockImplementation((url: string) => (url.includes('/api/tasks?')
+      ? Promise.resolve({ workspace: 'personal', tasks: [theirs] })
+      : new Promise((resolve) => { releaseRead = resolve })))
+    await useTaskBoardReload(wrapper)
+    await flushPromises()
+    await nextTick()
+
+    // Reopening reads again, even though the slot still holds a body for this
+    // task: the slot's revision is not the row's any more.
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await nextTick()
+    expect(apiGet.mock.calls.map((call) => call[0])).toContain('/api/tasks/ship?workspace=personal')
+    releaseRead({ workspace: 'personal', task: { ...theirs, body: 'THEIR PROSE' } })
+    await flushPromises()
+    await nextTick()
+
+    // What the dialog shows is what they wrote.
+    const textarea = wrapper.get<HTMLTextAreaElement>('#task-detail-body')
+    expect(textarea.element.value).toBe('THEIR PROSE')
+
+    apiPatch.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...theirs, revision: 'd'.repeat(64), body: 'THEIR PROSE\n\nMINE' },
+    })
+    await textarea.setValue('THEIR PROSE\n\nMINE')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+
+    const sent = apiPatch.mock.calls[0]![1] as Record<string, unknown>
+    expect(sent.expected_revision).toBe(THIRD_REVISION)
+    // Built on the prose that was on screen. The one this board used to hold would
+    // go out at the same revision and overwrite their edit with no 409.
+    expect(sent.body).toBe('THEIR PROSE\n\nMINE')
+    expect(sent.body).not.toContain('OLD')
+    wrapper.unmount()
+  })
+
+  it('prefills a description it already holds, so a Save before the read lands writes no body', async () => {
     const wrapper = await mountBoard([])
     apiPost.mockResolvedValue({
       workspace: 'personal',
@@ -496,26 +553,45 @@ describe('TaskBoardView', () => {
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     await nextTick()
-    const reads = apiGet.mock.calls.length
 
     // The create answer carried the record as stored, so the board holds this
-    // description and the editor opens on it without a round trip.
+    // description at the row's own revision and the form is filled the moment the
+    // dialog opens — with the read that will confirm it still in flight.
+    let releaseRead: (answer: unknown) => void = () => {}
+    apiGet.mockImplementation((url: string) => url.includes('/api/tasks?')
+      ? Promise.resolve({ workspace: 'personal', tasks: [] })
+      : new Promise((resolve) => { releaseRead = resolve }))
     await card(wrapper, 'First task').get('.task-open').trigger('click')
-    await flushPromises()
     await nextTick()
-    expect(apiGet.mock.calls.length).toBe(reads)
-    const textarea = wrapper.get<HTMLTextAreaElement>('#task-detail-body')
-    expect(textarea.element.value).toContain('<b>not html</b>')
+    expect(apiGet.mock.calls.map((call) => call[0])).toContain('/api/tasks/new?workspace=personal')
 
     apiPatch.mockResolvedValue({
       workspace: 'personal',
-      task: { ...task({ id: 'new', title: 'First task' }), revision: 'c'.repeat(64), body: '# Notes\n\n<b>not html</b>' },
+      task: { ...task({ id: 'new', title: 'First task, carefully' }), revision: THIRD_REVISION, body: '# Notes\n\n<b>not html</b>' },
     })
-    await textarea.setValue('Now with a second paragraph.')
+    await wrapper.get('#task-detail-name').setValue('First task, carefully')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     await nextTick()
-    expect((apiPatch.mock.calls[0]![1] as Record<string, unknown>).body).toBe('Now with a second paragraph.')
+
+    // A Save inside that window writes the title alone. An unfilled form would be
+    // `''` against prose the board does hold, and that difference is a `body: ''`
+    // — the description the user just wrote, deleted by the first Save.
+    const sent = apiPatch.mock.calls[0]![1] as Record<string, unknown>
+    expect(sent.title).toBe('First task, carefully')
+    expect('body' in sent).toBe(false)
+    expect(sent.expected_revision).toBe(NEXT_REVISION)
+
+    // The read answers for the record as it was before that Save, so the board
+    // is newer: the read is dropped rather than refilling the form with prose the
+    // write has already superseded, and the description the Save left in place
+    // stays on screen.
+    releaseRead(detailAnswer(task({ id: 'new', title: 'First task' }), '# Notes\n\n<b>not html</b>'))
+    await flushPromises()
+    await nextTick()
+    const textarea = wrapper.get<HTMLTextAreaElement>('#task-detail-body')
+    expect(textarea.element.value).toContain('<b>not html</b>')
+    expect(wrapper.get('.task-sheet').text()).not.toContain('could not read')
     wrapper.unmount()
   })
 
@@ -672,6 +748,75 @@ describe('TaskBoardView', () => {
     // `1`–`9` can switch workspace with a dialog open, so an open editor would
     // otherwise be editing a task from the workspace the user just left.
     expect(wrapper.find('.task-sheet').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('drops a description read that answers after the workspace has changed', async () => {
+    const store = useProjectStore()
+    let releaseRead: (answer: unknown) => void = () => {}
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('workspace=work')) return Promise.resolve({ workspace: 'work', tasks: [] })
+      if (url.includes('/api/tasks?')) return Promise.resolve({ workspace: 'personal', tasks: BOARD })
+      // The by-id read is still in flight when the user switches with `1`–`9`.
+      return new Promise((resolve) => { releaseRead = resolve })
+    })
+    const wrapper = mount(TaskBoardView, { attachTo: document.body })
+    await flushPromises()
+    await nextTick()
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await nextTick()
+
+    store.activeWorkspace = 'work'
+    await flushPromises()
+    await nextTick()
+
+    // The GET answers now, for the workspace the pane has left.
+    releaseRead(detailAnswer(task(), 'Prose from another workspace'))
+    await flushPromises()
+    await nextTick()
+
+    // A task from the workspace on screen a moment ago, drawn under the new one
+    // with an id and a revision the next write from that card would present.
+    expect(wrapper.findAll('.task-card')).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('Ship the board')
+    expect(wrapper.text()).not.toContain('Prose from another workspace')
+    wrapper.unmount()
+  })
+
+  it('does not let one task\'s late answer land on the dialog opened after it', async () => {
+    const wrapper = await mountBoard()
+    const pending: Array<(answer: unknown) => void> = []
+    apiGet.mockImplementation((url: string) => (url.includes('/api/tasks?')
+      ? Promise.resolve({ workspace: 'personal', tasks: BOARD })
+      : new Promise((resolve) => { pending.push(resolve) })))
+
+    // Open one task, close it, open another: two reads in flight for two
+    // different tasks, either of which can answer first.
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await nextTick()
+    await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+    await nextTick()
+    await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
+    await nextTick()
+
+    pending[0]!(detailAnswer(task(), 'Prose belonging to Ship the board'))
+    await flushPromises()
+    await nextTick()
+
+    // The first read is behind the second. It is not this dialog's answer, and it
+    // does not get to report a failure either: the read the user is waiting for
+    // has not failed, and the field is still the one it was waiting on.
+    expect(wrapper.get<HTMLInputElement>('#task-detail-name').element.value).toBe('Wire the store')
+    expect(wrapper.get('.task-sheet').text()).toContain('Loading description…')
+    expect(wrapper.find('#task-detail-body').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('could not read')
+    expect(wrapper.text()).not.toContain('Prose belonging to Ship the board')
+
+    pending[1]!(detailAnswer(task({ id: 'doing', title: 'Wire the store' }), 'Prose belonging to Wire the store'))
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.get<HTMLTextAreaElement>('#task-detail-body').element.value)
+      .toBe('Prose belonging to Wire the store')
     wrapper.unmount()
   })
 
