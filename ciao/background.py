@@ -358,6 +358,11 @@ def build_env(overrides: Any, *, run_id: str, workspace: str) -> dict[str, str]:
     env["CIAO_BACKGROUND_RUN_ID"] = run_id
     if workspace:
         env["CIAO_ACTIVE_WORKSPACE"] = workspace
+    # After overrides, so a caller-supplied PATH cannot remove it — the same
+    # resolve-before-overrides property ``resolve_executable`` documents. A
+    # nested ``ciao`` inside the command then runs the engine that launched it
+    # rather than a stale install earlier on the user's PATH.
+    env["PATH"] = prepend_engine_path(env.get("PATH"))
     return env
 
 
