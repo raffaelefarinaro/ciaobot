@@ -6,6 +6,8 @@ from importlib import resources
 from pathlib import Path
 import re
 
+from ciao.os_support.limits import SERVER_NOFILE_TARGET
+
 
 def _quoted(value: str) -> str:
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
@@ -48,4 +50,5 @@ def render_service(*, workspace: Path, user: str, home: Path, python: Path) -> s
         home_env=_quoted(f"HOME={home}"),
         path_env=_quoted(f"PATH={tool_path}"),
         python=_quoted(str(python)).replace("$", "$$"),
+        nofile=SERVER_NOFILE_TARGET,
     )

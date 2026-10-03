@@ -33,6 +33,7 @@ from ciao.transcripts import TranscriptStore
 from ciao.upgrade import update_skills
 from ciao.web.app import create_app
 from ciao.error_log import install_asyncio_noise_filter, setup_error_logging
+from ciao.os_support.limits import raise_file_descriptor_limit
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
 
@@ -375,6 +376,13 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     """Server implementation; caller owns the workspace instance lock."""
 
     setup_error_logging(config.workspace_root)
+    # The engine holds a descriptor per accepted connection. A service manager
+    # starts it with a low soft limit (macOS launchd: 256) unless the service
+    # definition raises it, so raise it in-process before uvicorn binds. A
+    # fresh install gets the raised limit from the packaged unit too; this
+    # covers `ciao run`/`ciao supervise` and an upgrade that did not rewrite
+    # the unit. Best-effort: the engine must still start if the call fails.
+    raise_file_descriptor_limit()
     # When CIAO_LOG_LEVEL=debug, also capture DEBUG+ records into a rotating
     # server_debug.log so verbose runtime detail is inspectable after the fact
     # (surfaced through the debug issue report). No-op at the default INFO.

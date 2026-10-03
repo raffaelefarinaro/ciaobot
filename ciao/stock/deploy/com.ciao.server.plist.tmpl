@@ -38,6 +38,22 @@
     <key>KeepAlive</key>
     <true/>
 
+    <!-- launchd's default soft limit is 256, which a long-running PWA session
+         exhausts: every tab, websocket and short-lived poll holds a
+         descriptor. Keep the packaged agent's budget aligned with
+         ciao.os_support.limits.SERVER_NOFILE_TARGET, which the engine also
+         raises at startup. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+
     <key>StandardOutPath</key>
     <string>{{CIAO_WORKSPACE}}/.runtime/ciao.stdout.log</string>
     <key>StandardErrorPath</key>
