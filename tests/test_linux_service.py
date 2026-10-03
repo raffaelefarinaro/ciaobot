@@ -7,6 +7,7 @@ import pytest
 
 from ciao import cli
 from ciao.linux_service import render_service
+from ciao.os_support.limits import SERVER_NOFILE_TARGET
 from ciao.os_support.private import is_private
 
 
@@ -53,6 +54,7 @@ def test_service_keeps_virtualenv_and_escapes_systemd_expansions(tmp_path):
     assert 'WorkingDirectory=/srv/ciao "personal" %%n' in unit
     assert 'Environment="HOME=/var/lib/ciaobot"' in unit
     assert "KillMode=control-group" in unit
+    assert f"LimitNOFILE={SERVER_NOFILE_TARGET}" in unit
     assert "EnvironmentFile=" not in unit  # dotenv owns parsing of the workspace file
 
 

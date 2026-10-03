@@ -18,6 +18,11 @@ ExecStart={python} -m ciao.cli run
 Restart=on-failure
 RestartSec=5
 KillMode=control-group
+# The engine holds a descriptor per accepted connection; systemd's default
+# soft limit (1024) is far below what a long-running PWA session needs. Kept
+# aligned with ciao.os_support.limits.SERVER_NOFILE_TARGET, which the engine
+# also raises at startup.
+LimitNOFILE={nofile}
 TimeoutStopSec=120
 UMask=0077
 
