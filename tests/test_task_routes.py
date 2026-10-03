@@ -27,6 +27,7 @@ from ciao.web.routes_tasks import (
     task_complete,
     task_create,
     task_delete,
+    task_get,
     task_list,
     task_update,
 )
@@ -99,6 +100,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             Route("/api/tasks", task_list, methods=["GET"]),
             Route("/api/tasks", task_create, methods=["POST"]),
             Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+            Route("/api/tasks/{task_id}", task_get, methods=["GET"]),
             Route("/api/tasks/{task_id}", task_update, methods=["PATCH"]),
             Route("/api/tasks/{task_id}", task_delete, methods=["DELETE"]),
         ],
@@ -253,6 +255,89 @@ def test_delete_removes_the_record(world) -> None:
         / f"{created['id']}.md"
     ).exists()
     assert client.get("/api/tasks?workspace=personal", cookies=cookies).json()["tasks"] == []
+
+
+# ── Reading one task ─────────────────────────────────────────────────────
+
+
+def test_a_read_carries_the_description_the_list_leaves_out(world) -> None:
+    """The list rows carry no `body`, so a read is the only place a description
+    comes from — without it an editor could only ever show the prose for a task
+    it happened to create this session."""
+    client, cookies, _config = world
+    created = _create(
+        client,
+        cookies,
+        title="Describe me",
+        body="Steps, links, acceptance criteria.",
+    )
+
+    listed = client.get("/api/tasks?workspace=personal", cookies=cookies).json()["tasks"]
+    assert "body" not in listed[0]
+
+    response = client.get(
+        f"/api/tasks/{created['id']}?workspace=personal", cookies=cookies
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["workspace"] == "personal"
+    assert payload["task"]["body"] == "Steps, links, acceptance criteria."
+    # The revision this read carried is the one a following edit presents.
+    assert payload["task"]["revision"] == created["revision"]
+
+    # And an edit replaces the description the read showed.
+    revised = client.patch(
+        f"/api/tasks/{created['id']}",
+        json={
+            "workspace": "personal",
+            "expected_revision": payload["task"]["revision"],
+            "body": "Rewritten.",
+        },
+        cookies=cookies,
+    )
+    assert revised.status_code == 200, revised.text
+    assert (
+        client.get(f"/api/tasks/{created['id']}?workspace=personal", cookies=cookies)
+        .json()["task"]["body"]
+        == "Rewritten."
+    )
+
+
+def test_a_read_still_requires_a_workspace(world) -> None:
+    client, cookies, _config = world
+    created = _create(client, cookies, title="Scoped")
+    for query in ("", "?workspace=", "?workspace=somewhere-else"):
+        response = client.get(f"/api/tasks/{created['id']}{query}", cookies=cookies)
+        assert response.status_code == 400, query
+        assert response.json()["error"]["code"] == "workspace_required"
+
+
+def test_an_unknown_or_foreign_id_is_a_404_on_a_read(world) -> None:
+    client, cookies, _config = world
+    mine = _create(client, cookies, title="Personal task")
+    theirs = _create(client, cookies, title="Work task", workspace="work")
+
+    unknown = client.get(f"/api/tasks/{'f' * 32}?workspace=personal", cookies=cookies)
+    assert unknown.status_code == 404
+    assert unknown.json()["error"]["code"] == "task_not_found"
+
+    # Another workspace's task is not readable from here either: naming the
+    # workspace is the whole of the caller's authority, and it resolves to that
+    # workspace's own vault.
+    foreign = client.get(f"/api/tasks/{theirs['id']}?workspace=personal", cookies=cookies)
+    assert foreign.status_code == 404
+    assert client.get(
+        f"/api/tasks/{theirs['id']}?workspace=work", cookies=cookies
+    ).json()["task"]["title"] == "Work task"
+    assert theirs["id"] != mine["id"]
+
+
+def test_a_read_needs_the_session_cookie(world) -> None:
+    client, cookies, _config = world
+    created = _create(client, cookies, title="Private")
+    assert (
+        client.get(f"/api/tasks/{created['id']}?workspace=personal").status_code == 401
+    )
 
 
 # ── Revisions are required, and a stale one writes nothing ──────────────

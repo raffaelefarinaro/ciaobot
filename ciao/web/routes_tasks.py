@@ -1,6 +1,6 @@
 """``/api/tasks*``: the session-authenticated task board surface.
 
-Five routes over one workspace-scoped service — the same ``workspace_task_*``
+Six routes over one workspace-scoped service — the same ``workspace_task_*``
 methods in ``ciao.control_plane`` that back ``ciao task …`` on the agent
 surface — so the board a browser drives and the board an agent reads cannot
 drift apart in what they are allowed to do. This module is transport only:
@@ -154,6 +154,32 @@ async def task_list(request: Request) -> JSONResponse:
     except ControlPlaneError as exc:
         return _error(exc)
     return JSONResponse({"workspace": workspace, "tasks": rows})
+
+
+async def task_get(request: Request) -> JSONResponse:
+    """One task, body included; ``?workspace=`` names the workspace.
+
+    The list deliberately carries no ``body``, so this is the only honest read
+    of a description: an editor that shows one and writes it back needs the prose
+    it was shown, and a task the board never created has no other source. The
+    record comes back exactly as the store reads it now, ``revision`` included,
+    so the edit that follows presents the revision this answer carried.
+    """
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    workspace = _workspace(request.app.state.config, request.query_params.get("workspace", ""))
+    if workspace is None:
+        return _workspace_required()
+    try:
+        task = await asyncio.to_thread(
+            plane.workspace_task_get,
+            workspace,
+            str(request.path_params.get("task_id") or ""),
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, "task": task})
 
 
 async def task_create(request: Request) -> JSONResponse:

@@ -54,6 +54,15 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
+    // The workspace task board. Its pane is a `viewMode` branch in
+    // ChatLayout like every other destination; this record only names the
+    // address and the auth gate.
+    path: '/tasks',
+    name: 'tasks',
+    component: () => import('./components/ChatLayout.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     // The proposal queue's old address; To decide is where it lives now.
     path: '/proposals',
     redirect: '/memory/review?show=suggested',

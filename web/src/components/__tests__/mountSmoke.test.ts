@@ -236,6 +236,7 @@ function makeRouter() {
       { path: '/chat/:chatId?', name: 'chat-detail', component: Stub },
       { path: '/project/:projectId', name: 'project', component: Stub },
       { path: '/schedules', name: 'schedules', component: Stub },
+      { path: '/tasks', name: 'tasks', component: Stub },
       { path: '/memory', name: 'memory', component: Stub },
       { path: '/settings', name: 'settings', component: Stub },
       { path: '/settings/:tab', name: 'settings-tab', component: Stub },
@@ -352,6 +353,34 @@ describe('component mount smoke', () => {
     await nextTick()
 
     expect(wrapper.find('[data-testid="memory-map-stub"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('TaskBoardView mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../TaskBoardView.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('ChatLayout renders the task board at /tasks', async () => {
+    const router = makeRouter()
+    await router.push('/tasks')
+    await router.isReady()
+    const mod = await import('../ChatLayout.vue')
+    const wrapper = mount(mod.default as never, {
+      global: {
+        plugins: [router],
+        stubs: { Teleport: true },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The pane is a `viewMode` branch, so the route is what puts it on screen.
+    // The shared `/api/tasks` fixture answers `{ tasks: [] }`, which is an empty
+    // board rather than a load error — the mount must not mistake one for the
+    // other and throw.
+    expect(wrapper.text()).toContain('No tasks in')
+    expect(wrapper.text()).not.toContain('Could not load')
     wrapper.unmount()
   })
 

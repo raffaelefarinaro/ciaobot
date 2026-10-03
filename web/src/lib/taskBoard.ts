@@ -1,0 +1,351 @@
+/**
+ * The task board's pure half: the four columns, how rows are bucketed and
+ * ordered, the filters, and the one envelope reader `/api/tasks*` needs.
+ *
+ * Vue-free and store-free on purpose. Everything here is a decision about rows
+ * that the store and the pane must agree on, so it lives where both can read it
+ * and where `taskBoard.test.ts` can pin it without mounting anything.
+ */
+
+import { apiErrorMessage, errorPayload } from './errorMessage'
+import type { Task, TaskDetail, TaskInvalidRow, TaskRow, TaskStatus } from './types'
+
+/** The board's four fixed columns, in board order. */
+export const TASK_COLUMNS: ReadonlyArray<{ status: TaskStatus; label: string }> = [
+  { status: 'backlog', label: 'Backlog' },
+  { status: 'in_progress', label: 'In progress' },
+  { status: 'on_hold', label: 'On hold' },
+  { status: 'done', label: 'Done' },
+]
+
+export const TASK_STATUSES: ReadonlyArray<TaskStatus> = TASK_COLUMNS.map((c) => c.status)
+
+export function taskStatusLabel(status: TaskStatus): string {
+  return TASK_COLUMNS.find((c) => c.status === status)?.label ?? status
+}
+
+/** The statuses a `<select>` offers, in board order. */
+export const TASK_STATUS_OPTIONS = TASK_COLUMNS
+
+export const TASK_ASSIGNEE_LABELS: Record<string, string> = {
+  user: 'For me',
+  agent: 'For the agent',
+}
+
+export function taskAssigneeLabel(assignee: string): string {
+  return TASK_ASSIGNEE_LABELS[assignee] ?? assignee
+}
+
+/**
+ * Whether a list row is one of the "this file is not a task" entries.
+ *
+ * A structural check rather than `code in row`: the server decides this by not
+ * being able to read the file, so the fields that make a row a task are exactly
+ * the ones a refusal does not carry.
+ */
+export function isTaskInvalidRow(row: TaskRow | null | undefined): row is TaskInvalidRow {
+  return Boolean(row) && typeof (row as TaskInvalidRow).code === 'string'
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function asStatus(value: unknown): TaskStatus {
+  return TASK_STATUSES.includes(value as TaskStatus) ? (value as TaskStatus) : 'backlog'
+}
+
+/**
+ * One readable task, every field defaulted.
+ *
+ * The single reader both the list and a detail read go through, so a drifting
+ * field set is fixed once. `status` a build does not know becomes `backlog`
+ * rather than a fifth column; `revision` is read as the hex string it is,
+ * because rounding it into a number would send back a revision the server never
+ * issued.
+ */
+function taskFrom(raw: Partial<Task> | null | undefined): Task {
+  const row = raw ?? {}
+  return {
+    id: asString(row.id),
+    title: asString(row.title),
+    status: asStatus(row.status),
+    project_id: asString(row.project_id),
+    due: asString(row.due),
+    assignee: row.assignee === 'agent' ? 'agent' : 'user',
+    review_state: row.review_state === 'ready' ? 'ready' : 'none',
+    chat_id: asString(row.chat_id),
+    attempt_id: asString(row.attempt_id),
+    created_at: asString(row.created_at),
+    updated_at: asString(row.updated_at),
+    revision: asString(row.revision),
+    relative_path: asString(row.relative_path),
+  }
+}
+
+/** A task with every field at its empty value: what a payload that is not a task
+ *  normalises to, and never a card worth drawing. */
+function emptyTask(): Task {
+  return taskFrom(null)
+}
+
+/**
+ * The rows a `GET` answered with, every field defaulted.
+ *
+ * This is the one place a payload's field set can drift, so each value is read
+ * defensively and a missing list is an empty board rather than a throw. A file
+ * the server could not read as a task stays a row of its own.
+ */
+export function taskRowsFrom(json: unknown): TaskRow[] {
+  const rows = (json as { tasks?: unknown } | null | undefined)?.tasks
+  if (!Array.isArray(rows)) return []
+  const out: TaskRow[] = []
+  for (const raw of rows) {
+    const row = (raw ?? {}) as Partial<Task> & Partial<TaskInvalidRow>
+    if (isTaskInvalidRow(row as TaskRow)) {
+      out.push({
+        id: asString(row.id),
+        path: asString(row.path),
+        code: asString(row.code),
+        message: asString(row.message),
+      })
+      continue
+    }
+    out.push(taskFrom(row))
+  }
+  return out
+}
+
+/**
+ * One task read or written, with its description.
+ *
+ * `GET /api/tasks/{id}` and every write answer with `body`; the same drift
+ * argument applies, and the editor writes the description back, so a payload
+ * without one must read as an empty description rather than as `undefined` the
+ * editor would then refuse to trim.
+ */
+export function taskDetailFrom(json: unknown): TaskDetail {
+  const raw = (json ?? {}) as Partial<Task> & { body?: unknown }
+  // An unreadable-file row has no task fields at all; reading it as a task would
+  // put an empty card on the board.
+  const base = isTaskInvalidRow(raw as TaskRow) ? emptyTask() : taskFrom(raw)
+  return { ...base, body: typeof raw.body === 'string' ? raw.body : '' }
+}
+
+/** The readable tasks in a row list, in the order the server sent them. */
+export function readableTasks(rows: TaskRow[]): Task[] {
+  return rows.filter((row): row is Task => !isTaskInvalidRow(row))
+}
+
+/** The unreadable files in a row list. */
+export function invalidTaskRows(rows: TaskRow[]): TaskInvalidRow[] {
+  return rows.filter(isTaskInvalidRow)
+}
+
+/**
+ * A write's record, back to the shape the list serves.
+ *
+ * Every write answers with `body` included and the list never carries it, so
+ * storing the write's own answer verbatim would put prose into every later list
+ * render. The fields are listed rather than spread so a field added to `Task`
+ * later has to be a deliberate decision here instead of leaking in by default.
+ */
+export function toTaskListRow(detail: TaskDetail | Task): Task {
+  return {
+    id: detail.id,
+    title: detail.title,
+    status: detail.status,
+    project_id: detail.project_id,
+    due: detail.due,
+    assignee: detail.assignee,
+    review_state: detail.review_state,
+    chat_id: detail.chat_id,
+    attempt_id: detail.attempt_id,
+    created_at: detail.created_at,
+    updated_at: detail.updated_at,
+    revision: detail.revision,
+    relative_path: detail.relative_path,
+  }
+}
+
+// ── Filters ───────────────────────────────────────────────────────────────
+
+export const TASK_DUE_FILTERS = [
+  { value: 'any', label: 'Any due date' },
+  { value: 'overdue', label: 'Overdue' },
+  { value: 'today', label: 'Due today' },
+  { value: 'week', label: 'Due this week' },
+  { value: 'none', label: 'No due date' },
+] as const
+
+export type TaskDueFilter = (typeof TASK_DUE_FILTERS)[number]['value']
+
+/** Project filter values are project ids, `''` for every project, or
+ *  {@link TASK_NO_PROJECT}. */
+export type TaskProjectFilter = string
+
+/**
+ * Today's date as `YYYY-MM-DD` in the browser's own timezone.
+ *
+ * A due date is a calendar day the user reads, so it is compared as a local
+ * calendar day. Parsing it as UTC (what `new Date('2026-03-12')` does) reads
+ * back as the 11th for anyone west of Greenwich.
+ */
+export function localDateKey(date: Date = new Date()): string {
+  const year = String(date.getFullYear())
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+/** Whether a `due` value is a `YYYY-MM-DD` day this pane can compare. */
+export function isDueDate(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+}
+
+function addDays(day: string, delta: number): string {
+  const date = new Date(`${day}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return day
+  date.setDate(date.getDate() + delta)
+  return localDateKey(date)
+}
+
+/** True for a task dated before today. An undated task is never overdue. */
+export function isOverdue(task: Pick<Task, 'due'>, today: string = localDateKey()): boolean {
+  return isDueDate(task.due) && task.due < today
+}
+
+/** The due date as a card reads it, or `''` when there is none. */
+export function formatTaskDue(due: unknown): string {
+  if (!isDueDate(due)) return ''
+  const date = new Date(`${due}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/** The project filter's value for "filed under no project". */
+export const TASK_NO_PROJECT = 'no-project'
+
+/**
+ * Whether a task survives a project filter.
+ *
+ * `''` means every project and {@link TASK_NO_PROJECT} the tasks filed under
+ * none, which is a real state on the board (a card reads *General*) rather than
+ * an absence, so it gets its own filter value. A project whose id happened to
+ * equal the sentinel is unreachable through the filter rather than silently
+ * answering for the unfiled tasks.
+ */
+export function matchesProjectFilter(task: Task, filter: TaskProjectFilter): boolean {
+  if (!filter) return true
+  if (filter === TASK_NO_PROJECT) return !task.project_id
+  return task.project_id === filter
+}
+
+export function matchesDueFilter(task: Task, filter: TaskDueFilter, today: string = localDateKey()): boolean {
+  switch (filter) {
+    case 'any':
+      return true
+    case 'none':
+      return !isDueDate(task.due)
+    case 'overdue':
+      return isOverdue(task, today)
+    case 'today':
+      return task.due === today
+    case 'week':
+      return isDueDate(task.due) && task.due >= today && task.due <= addDays(today, 7)
+    default:
+      return true
+  }
+}
+
+// ── Ordering ──────────────────────────────────────────────────────────────
+
+/**
+ * One column's order: the dated work by date, then the undated, then by title.
+ *
+ * A board's question is "what is next", and a due date is the only field that
+ * answers it, so it leads. Undated work sinks below every dated card instead of
+ * sorting as infinitely overdue, and the title breaks ties so the order does not
+ * shift between two renders of the same rows.
+ */
+export function sortTasks(tasks: Task[]): Task[] {
+  return [...tasks].sort((a, b) => {
+    const aDue = isDueDate(a.due)
+    const bDue = isDueDate(b.due)
+    if (aDue !== bDue) return aDue ? -1 : 1
+    if (aDue && bDue && a.due !== b.due) return a.due < b.due ? -1 : 1
+    return a.title.localeCompare(b.title) || a.id.localeCompare(b.id)
+  })
+}
+
+/** One lane of the board: a fixed column, or the one list a filter narrowed it to. */
+export interface TaskLane {
+  /** The status this lane draws, or `null` when it is the unfiltered list. */
+  status: TaskStatus | null
+  label: string
+  tasks: Task[]
+}
+
+/**
+ * The lanes the board draws.
+ *
+ * Wide with no status picked, that is the four fixed columns. Narrow — or with a
+ * status picked on either layout — it is one lane holding the filtered tasks, so
+ * a card, its status `<select>` and its count are rendered from one code path
+ * rather than a second copy of the card for the narrow layout.
+ */
+export function taskLanes(
+  tasks: Task[],
+  options: { status: TaskStatus | 'all'; narrow: boolean },
+): TaskLane[] {
+  if (options.status === 'all' && !options.narrow) {
+    return TASK_COLUMNS.map((column) => ({
+      status: column.status,
+      label: column.label,
+      tasks: sortTasks(tasks.filter((task) => task.status === column.status)),
+    }))
+  }
+  const label = options.status === 'all'
+    ? 'All tasks'
+    : taskStatusLabel(options.status)
+  const kept = options.status === 'all'
+    ? tasks
+    : tasks.filter((task) => task.status === options.status)
+  return [{ status: options.status === 'all' ? null : options.status, label, tasks: sortTasks(kept) }]
+}
+
+/** The board's counts per status, unreadable files excluded. */
+export function statusCounts(tasks: Task[]): Record<TaskStatus, number> {
+  const counts = { backlog: 0, in_progress: 0, on_hold: 0, done: 0 } as Record<TaskStatus, number>
+  for (const task of tasks) counts[task.status] += 1
+  return counts
+}
+
+/** How many tasks are still open (everything not `done`). */
+export function openTaskCount(tasks: Task[]): number {
+  let open = 0
+  for (const task of tasks) if (task.status !== 'done') open += 1
+  return open
+}
+
+// ── The error envelope ────────────────────────────────────────────────────
+
+/**
+ * The sentence a `/api/tasks*` refusal carries.
+ *
+ * This surface answers `{"error": {"code", "message", "retryable"}}` rather than
+ * the flat `{"error": "…"}` the rest of the API uses, so `apiErrorMessage` on its
+ * own would hand back `[object Object]` — and a stale-revision 409 whose text is
+ * `[object Object]` is the one refusal the user most needs to read. The envelope
+ * is unwrapped here; everything else falls through to the shared reader.
+ */
+export function taskApiErrorMessage(error: unknown, fallback: string): string {
+  const detail = errorPayload(error)?.error
+  if (detail && typeof detail === 'object') {
+    const message = (detail as { message?: unknown }).message
+    if (typeof message === 'string' && message) return message
+    const code = (detail as { code?: unknown }).code
+    if (typeof code === 'string' && code) return code
+  }
+  return apiErrorMessage(error, fallback)
+}
