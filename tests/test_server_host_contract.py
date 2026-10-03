@@ -251,6 +251,7 @@ def test_parse_hosted_is_syntax_only_not_ownership() -> None:
         ["/usr/bin/python3", "-m", "ciao.cli", "run\x00"],
         ["/usr/bin/../bin/python3", "-m", "ciao.cli", "run"],
         ["/opt//ciao", "run"],
+        ["//opt/ciao", "run"],
     ],
 )
 def test_parse_rejects_invalid_direct_shapes(bad: object) -> None:
@@ -347,6 +348,7 @@ def test_host_service_argv_round_trips_through_the_parser() -> None:
         (POSIX_BUNDLE, "C:\\Python\\python.exe"),
         (POSIX_BUNDLE, "/bin/sh"),
         ("/Users/x/../y/" + APP_NAME, "/usr/bin/python3"),
+        ("//Users/x/" + APP_NAME, "/usr/bin/python3"),
     ],
 )
 def test_host_service_argv_rejects_strict_absent_inputs(
@@ -609,10 +611,32 @@ def test_read_record_rejects_a_directory(tmp_path: Path) -> None:
     assert caught.value.code == server_host.INVALID_OWNERSHIP
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
-def test_read_record_rejects_group_or_other_readable(tmp_path: Path) -> None:
+@requires_posix_uid
+def test_read_record_rejects_group_or_other_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The owner/mode contract is macOS-only in production (`if sys.platform ==
+    # "darwin"`). Native Linux CI cannot run that branch, so mock the platform
+    # to exercise the contract on any POSIX host; it is the tested behaviour on
+    # the macOS job all the same.
+    monkeypatch.setattr(sys, "platform", "darwin")
     record = _write_record(tmp_path / "record.json", _record(), private=False)
     os.chmod(record, 0o644)
+    with pytest.raises(ServerHostError) as caught:
+        read_host_ownership(record)
+    assert caught.value.code == server_host.INVALID_OWNERSHIP
+
+
+@requires_posix_uid
+def test_read_record_rejects_a_foreign_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The other half of the darwin branch: a record another account owns is not
+    # this install's proof, even with owner-only mode bits.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    record = _write_record(tmp_path / "record.json", _record())
+    real_uid = os.getuid()
+    monkeypatch.setattr(server_host.os, "getuid", lambda: real_uid + 1)
     with pytest.raises(ServerHostError) as caught:
         read_host_ownership(record)
     assert caught.value.code == server_host.INVALID_OWNERSHIP
@@ -699,10 +723,11 @@ def _install_record(path: Path, snapshot: HostOwnership) -> Path:
     return _write_record(path, snapshot.to_record())
 
 
-@requires_posix_uid
 def test_inspect_bundle_snapshot_and_probe_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Needs no uid: the happy path reads no record. It exercises the bundle
+    # collection (the O_NOFOLLOW/inode read) on native Windows too.
     monkeypatch.setattr(sys, "platform", "darwin")
     bundle = _make_bundle(tmp_path)
     runner = _FakeRunner()
@@ -831,6 +856,21 @@ def test_inspect_rejects_a_special_file(
             ),
             server_host.INSPECTION_FAILED,
         ),
+        # `plistlib.loads` raises AttributeError on a malformed <date>, and
+        # LookupError on a bogus encoding declaration; both must refuse.
+        (
+            lambda b: (b / _PLIST_REL).write_bytes(
+                b"<plist version='1.0'><date>zz</date></plist>"
+            ),
+            server_host.INSPECTION_FAILED,
+        ),
+        (
+            lambda b: (b / _PLIST_REL).write_bytes(
+                b"<?xml version='1.0' encoding='bogus'?><plist version='1.0'>"
+                b"<dict/></plist>"
+            ),
+            server_host.INSPECTION_FAILED,
+        ),
         (
             lambda b: _rewrite_plist(b, bundle_id="local.other"),
             server_host.INSPECTION_FAILED,
@@ -864,9 +904,32 @@ def test_inspect_rejects_broken_bundles(
     monkeypatch.setattr(sys, "platform", "darwin")
     bundle = _make_bundle(tmp_path)
     mutate(bundle)
+    runner = _FakeRunner()
     with pytest.raises(ServerHostError) as caught:
-        inspect_host_bundle(bundle, runner=_FakeRunner())
+        inspect_host_bundle(bundle, runner=runner)
     assert caught.value.code == code
+    # Every refusal above happens while reading the tree or the plist, before
+    # the first native probe: a malformed bundle never reaches codesign.
+    assert runner.commands == []
+
+
+def test_inspect_refuses_a_plist_the_parser_escapes_as_indexerror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A malformed XML/binary plist can make plistlib raise IndexError, which the
+    # module must convert to an inspection_failed refusal rather than let escape.
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def explode(_raw: bytes) -> object:
+        raise IndexError("list index out of range")
+
+    monkeypatch.setattr(server_host.plistlib, "loads", explode)
+    bundle = _make_bundle(tmp_path)
+    runner = _FakeRunner()
+    with pytest.raises(ServerHostError) as caught:
+        inspect_host_bundle(bundle, runner=runner)
+    assert caught.value.code == server_host.INSPECTION_FAILED
+    assert runner.commands == []
 
 
 def test_inspect_rejects_a_bundle_with_another_name(

@@ -49,7 +49,6 @@ import re
 import stat
 import subprocess
 import sys
-import xml.parsers.expat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
@@ -222,6 +221,12 @@ def _absolute_posix(value: object, *, what: str, code: str) -> str:
     if "\\" in value:
         raise ServerHostError(
             f"{what} must not contain a backslash: {value!r}", code=code
+        )
+    if value.startswith("//"):
+        # POSIX treats a leading ``//`` as implementation-defined and
+        # ``posixpath.normpath`` keeps it, so it must be refused explicitly.
+        raise ServerHostError(
+            f"{what} must not start with a doubled slash: {value!r}", code=code
         )
     if not PurePosixPath(value).is_absolute():
         raise ServerHostError(f"{what} must be absolute: {value!r}", code=code)
@@ -711,8 +716,22 @@ def _collect_sealed_files(bundle: Path) -> dict[str, str]:
 def _read_bundle_plist(bundle: Path) -> dict[str, Any]:
     plist_path = bundle / _PLIST_REL
     try:
-        info: Any = plistlib.loads(plist_path.read_bytes())
-    except (OSError, ValueError, xml.parsers.expat.ExpatError) as exc:
+        raw = plist_path.read_bytes()
+    except OSError as exc:
+        raise ServerHostError(
+            f"the host bundle's Info.plist is unreadable: {plist_path}",
+            code=INSPECTION_FAILED,
+        ) from exc
+    try:
+        info: Any = plistlib.loads(raw)
+    except Exception as exc:
+        # `plistlib.loads` parses untrusted bytes (a foreign or tampered bundle
+        # reaches this before `codesign --verify`), and beyond `ValueError` it
+        # raises `AttributeError` (`<date>zz</date>`), `LookupError` (a bogus
+        # encoding declaration) and `IndexError` on malformed XML/binary plists.
+        # Any of them is an `inspection_failed` refusal, not a crash that would
+        # escape a B2 consumer catching only `ServerHostError`. `Exception` is
+        # the parser boundary alone; `KeyboardInterrupt`/`SystemExit` pass.
         raise ServerHostError(
             f"the host bundle's Info.plist is unreadable: {plist_path}",
             code=INSPECTION_FAILED,
@@ -826,9 +845,10 @@ def inspect_host_bundle(
     symlinked, special or unreadable file, a missing sealed file, a stray
     directory or file (a thin build product, a config, bundled Python), a wrong
     identity, a non-ad-hoc or invalid signature, a slice set other than exactly
-    ``arm64``/``x86_64``, a malformed CDHash and a probe that fails or hangs. What it returns is a well-formed host —
-    **not** proof that this machine installed it. Only :func:`verify_owned_host`
-    answers that, against an existing private record.
+    ``arm64``/``x86_64``, a malformed CDHash and a probe that fails or hangs. What
+    it returns is a well-formed host — **not** proof that this machine installed
+    it. Only :func:`verify_owned_host` answers that, against an existing private
+    record.
     """
     if sys.platform != "darwin":
         raise ServerHostError(

@@ -50,8 +50,10 @@ parse_service_command(
      "serve", "--python", "/usr/bin/python3"]
 )
 
-# Render the hosted command AFTER verify_owned_host(bundle) has returned:
-host_service_argv(verified_bundle, Path("/usr/bin/python3"))
+# Render the hosted command AFTER verify_owned_host(bundle) has returned. A
+# verified snapshot carries a str path; wrap it in PurePosixPath for rendering:
+verified = verify_owned_host(bundle)
+host_service_argv(PurePosixPath(verified.bundle_path), Path("/usr/bin/python3"))
 ```
 
 The accepted shapes are exactly:
