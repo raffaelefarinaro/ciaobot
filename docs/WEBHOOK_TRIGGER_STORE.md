@@ -1,15 +1,15 @@
-# Webhook trigger store (internal foundation, #981)
+# Webhook trigger store and ingress receiver (#981, #1010)
 
-> **This is not a shipped webhook feature.** `ciao/webhooks.py` is the private
-> configuration and credential store for the webhook feature tracked in #974,
-> and it is the first child of it (#981). There is **no HTTP endpoint, no
-> receiver, no dispatch, no chat creation and no startup wiring**: nothing in
-> this engine constructs a `WebhookStore` today, and nothing you can call
-> reaches it. Do not document a request shape, an auth header, a capability or
-> a user recipe for webhooks anywhere yet — there is none to document, and a
-> page that implies one would be wrong until the ingress child (#981's
-> successors) actually ships. This document is the store's own contract, for the
-> children that will build on it.
+> **This is not a finished webhook feature.** `ciao/webhooks.py` owns the
+> private configuration and credential store for the webhook feature tracked in
+> #974, plus the ingress receiver that records what a secret caused. What ships
+> today is: management routes over the store (A2), and one bearer-authenticated
+> endpoint that records a durable receipt for an accepted event (A3). What does
+> **not** ship is the part a user would call the feature — **there is no
+> dispatch, no chat creation, no UI, no CLI or recipe**: a `202` from the
+> receiver means "your event is recorded", not "a turn ran", and no page,
+> skill or recipe may claim otherwise until the dispatch child lands. This
+> document is the store's and the receiver's own contract.
 
 ## What it is
 
@@ -165,6 +165,58 @@ itself does not follow a link (`O_NOFOLLOW` on POSIX,
 for being a link: a link in a parent directory is a layout choice, not a
 threat to this store — macOS resolves `/var` to `/private/var` on every install.
 
+## The ingress receipts (#1010)
+
+`POST /hooks/v1/{trigger_id}` records one `WebhookReceipt` per accepted event in
+`<runtime>/webhook-receipts.jsonl`, beside the store. It is append-only JSONL,
+0600, one `fsync` per row, latest row per id wins — the same protocol as
+`Memory-Receipts.jsonl`, and deliberately *not* `job_runs.py`'s (unlocked,
+fail-open). A whole-document trim bounds it in bytes and rows and never drops a
+row that is still open.
+
+| field | meaning |
+| --- | --- |
+| `id` | `wbrcpt_<sha256(trigger_id\|key)[:20]>`, plus a `.2`, `.3` generation for a later attempt of the same key |
+| `trigger_id`, `trigger_name`, `workspace`, `project_id` | where the accepted event was headed, copied from the authenticated trigger so the record survives the trigger's own later deletion |
+| `idempotency_key` | the sender's key, as received |
+| `status` | `accepted`, `launched`, `failed` or `interrupted` |
+| `body_digest` | SHA-256 of the request body **as it arrived**, hex |
+| `event_text` | the sender's event text, at most 8,000 characters |
+| `created_at`, `updated_at` | ISO-8601, UTC |
+| `detail` | why a receipt failed or was interrupted; empty otherwise |
+
+No credential is in it: the receipt names the trigger, never the secret that
+authorized it.
+
+**Dedupe.** `(trigger_id, idempotency_key)` names one attempt. The same key with
+the same body returns the receipt already written and appends nothing; the same
+key with a *different* body raises `idempotency_conflict` and leaves the recorded
+event untouched — a key names one event, and picking which of two bodies to run
+is not a decision this receiver may make. Past `DEDUPE_RETENTION_DAYS` (7) the
+key is the sender's to reuse: the new attempt takes the next generation rather
+than folding onto the old receipt, which would erase how it settled.
+
+**Bounds.** `MAX_BODY_BYTES` (65536), `RATE_LIMIT_PER_MINUTE` (10) on an
+in-process per-trigger sliding window — the credential *is* the caller, and a
+shared IP is not — and `MAX_PENDING_RECEIPTS` (20) receipts left open per
+trigger. The pending bound is what bounds an unattended sender while there is no
+dispatch: accepted receipts do not settle on their own, so a trigger fills up and
+says so with a `503` rather than accumulating work nobody is doing.
+
+**Ordering, which is the whole point.** The `accepted` row is durable before any
+launch is attempted, and the `launched` allocation is durable before the model
+turn. A crash in that second window is genuinely ambiguous — the turn may or may
+not have started — so `recover_interrupted` records `interrupted` with a detail
+saying it needs review. Nothing replays it: a second unattended run is a cost
+nobody asked for, and the receipt is the evidence that something already
+happened.
+
+**Deliberately not here.** Dispatch (`begin_launch` and `settle_failed` are the
+dispatcher's entry points, and nothing in this child calls them), startup
+recovery wiring, a receipt-list API, outbound callbacks, and any
+provider-specific signature adapter — the bearer secret is the whole
+authentication story.
+
 ## Errors
 
 One class, `WebhookStoreError`, with a stable `code`:
@@ -181,6 +233,21 @@ One class, `WebhookStoreError`, with a stable `code`:
 A failed **write** (permissions, disk full, a refused replace) is *not* one of
 these codes: it propagates as the `OSError` it is, because a write that did not
 happen must not be reported as a store state.
+
+The receiver raises `WebhookReceiverError` with a code of its own, and the route
+maps codes to statuses rather than to exception classes, so adding a reason
+cannot accidentally pick a status:
+
+| code | HTTP | retryable | meaning |
+| --- | --- | --- | --- |
+| `invalid_event` | 400 | no | the body is not a JSON object, or not exactly `{"text": ...}` with bounded non-empty text |
+| `invalid_idempotency_key` | 400 | no | the key is missing, empty, over 200 characters, or holds a control character |
+| `idempotency_conflict` | 409 | no | this `(trigger, key)` was accepted with a different body; the recorded event is untouched |
+| `payload_too_large` | 413 | no | the body is over `MAX_BODY_BYTES` |
+| `rate_limited` | 429 | yes | over `RATE_LIMIT_PER_MINUTE` for this trigger; `Retry-After` says one window |
+| `too_many_pending` | 503 | yes | the trigger already has `MAX_PENDING_RECEIPTS` open receipts |
+| `receipt_unavailable` | 503 | yes | the journal could not be read, locked or appended to — the event was **not** recorded |
+| `invalid_receipt` | 500 | no | a journal row cannot be decoded as a receipt this code wrote; failed closed rather than read as absent |
 
 ## Deliberately not supported yet
 
@@ -204,17 +271,25 @@ happen must not be reported as a store state.
   these methods (`ciao/web/routes_webhooks.py`: list, create, update, rotate and
   delete; a raw secret is returned once, by create/rotate only), and workspace
   archive → `revoke_workspace`, so archiving a workspace destroys its verifiers
-  and restoring the name reactivates nothing. Still no ingress: there is no
-  `/hooks/*` receiver, no bearer auth and no request recipe.
+  and restoring the name reactivates nothing. Shipped in #1001.
 - **A3 — ingress.** A bearer-secret route that never accepts a cookie, carries
   no secret in a query string, and fails closed on `corrupt_store` instead of
   answering "no" to everything. It re-reads the document per request, so a
   revocation takes effect on the next call; a check that has already returned is
   a snapshot, and ordering an already-accepted request against a revocation that
-  lands afterwards is the receiver's problem, not this store's.
+  lands afterwards is the receiver's problem, not this store's. Shipped in #1010
+  — `POST /hooks/v1/{trigger_id}` (`ciao/web/routes_hooks.py`) plus
+  `WebhookReceiver` here. **It does not dispatch**: it records an `accepted`
+  receipt and answers `202`.
 - **A4 — dispatch.** Turning an authenticated trigger into an ordinary chat, with
   the same provenance and the same approval behaviour as any unattended dispatch
-  that is not an unattended bypass.
+  that is not an unattended bypass. It calls `WebhookReceiver.begin_launch`
+  before the model turn and `settle_failed` when the attempt does not complete,
+  and it calls `recover_interrupted` at startup: a receipt left `launched` is
+  genuinely ambiguous, so it is recorded `interrupted` and reviewed, never
+  replayed. Until then every accepted receipt stays open, which is what
+  `MAX_PENDING_RECEIPTS` bounds — an unattended sender gets an explicit `503`
+  rather than an unbounded queue.
 - **A5/A6 — surfaces.** The Automations UI, the agent CLI, user recipes,
   capabilities and public docs — all of which must describe only what has
   actually shipped.
