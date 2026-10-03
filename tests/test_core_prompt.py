@@ -85,6 +85,10 @@ def test_system_prompt_includes_project_canonical_doc_notes() -> None:
     append = payload["append"]
     assert "canonical document" in append
     assert "meaningful decisions" in append
+    assert "`README.md` first, then `<folder-name>.md`" in append
+    assert "Use the supplied canonical path" in append
+    assert "do not duplicate or rename it" in append
+    assert "not a folder-naming rule" in append
 
 
 def test_system_prompt_includes_native_memory_and_vault_routing() -> None:
