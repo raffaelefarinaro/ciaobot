@@ -1983,9 +1983,6 @@ const forkLoadingKey = ref<string | null>(null)
 // On touch devices there is no hover, so a tap on the bubble reveals the
 // per-message action icons. Holds the key of the message whose actions are open.
 const tappedMessageKey = ref<string | null>(null)
-// Breathing room left between a selected turn's bottom edge and the bottom of
-// the transcript once the scroll below has pulled it into view.
-const FOOTER_SCROLL_GAP = 12
 
 // Click (any pointer) or Enter selects a message and shows its actions;
 // clicking the same message again puts them away. A click that lands on
@@ -1997,27 +1994,13 @@ function toggleMessageActions(key: string, e: Event): void {
   if (window.getSelection()?.toString()) return
   const opening = tappedMessageKey.value !== key
   tappedMessageKey.value = opening ? key : null
-  if (opening) nextTick(scrollSelectedMessageIntoView)
-}
-
-// Selecting a message grows it: the action footer was not in the layout a
-// moment ago, so on the last turn of a phone-sized transcript the footer lands
-// under the composer, half its buttons and all of the turn facts. Bring the
-// whole selected turn back into view — downward only, so a footer that already
-// fits never yanks the transcript away from where the reader was.
-//
-// Measured with rects against the scroll box rather than offsetTop/offsetHeight
-// on the turn: the card is the turn's child and hangs 16px below it (the
-// selected card's negative bottom margin), so the turn's own box under-reports
-// the bottom by exactly the 16px that matters here.
-function scrollSelectedMessageIntoView(): void {
-  const root = messagesEl.value
-  const card = root?.querySelector<HTMLElement>('.message-wrap--selected .message-row') ?? null
-  if (!root || !card) return
-  const viewportBottom = root.getBoundingClientRect().top + root.clientHeight
-  const overflow = card.getBoundingClientRect().bottom - (viewportBottom - FOOTER_SCROLL_GAP)
-  if (overflow <= 0) return
-  root.scrollTo({ top: root.scrollTop + overflow, behavior: 'smooth' })
+  // Selecting grows the card by its action footer, and the open-time bottom
+  // pin re-anchors `scrollTop` to the new bottom on its next frame, so the
+  // transcript would slide under the reader. A real pointer already releases
+  // the pin (the pointerdown listener below); this makes the guarantee hold
+  // for a click that arrives without one — a synthetic or keyboard-driven
+  // selection — by stopping the pin before Vue flushes the grown card.
+  releasePin()
 }
 
 function onSelectedMessageKeydown(e: KeyboardEvent): void {
@@ -5052,10 +5035,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 /* The footer band under a reply: a hairline below the prose, bled to the
    card's own edges and re-inset to the text column, so the buttons share the
-   prose's left edge rather than hanging outside the card. 20px of air above
-   the rule (4 here + the card's 16px padding), 10px below the buttons. */
+   prose's left edge rather than hanging outside the card. 16px of air above
+   the rule (4 here + the card's 12px padding), 10px below the buttons. The
+   -12px bottom cancels the card's vertical bleed so the band, and the outline
+   around it, stay inside the turn instead of crossing into the next one. */
 .message-wrap--selected.assistant .message-actions {
-  margin: 4px -18px -16px;
+  margin: 4px -18px -12px;
   padding: 10px 18px;
   border-top: 1px solid var(--border);
 }
@@ -5076,10 +5061,15 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   outline-offset: 3px;
 }
 /* Replies are plain prose, so a selected one is outlined around a box the same
-   size as the selected card. The negative margin keeps the text from moving. */
+   size as the selected card. The negative margin keeps the text from moving.
+   The card bleeds 12px vertically rather than 16px: the transcript's turn gap
+   is 14px, so a 16px bleed drew the accent outline over the bubble above and
+   below (the comment reference card is the surface the user sees it clash
+   with). Padding and negative margin cancel, so the prose still does not move;
+   the outline just clears the neighbouring turn. */
 .message-wrap--selected.assistant .message-row {
-  margin: -16px -18px;
-  padding: 16px 18px;
+  margin: -12px -18px;
+  padding: 12px 18px;
   border-radius: 14px;
   outline: 1px solid var(--accent);
 }
