@@ -161,6 +161,30 @@ a hand edit may hold any schema-valid state:
 - `ready` requires `agent` assignment and `in_progress` status. Leaving
   `in_progress` without an explicit review change clears `ready` to `none`.
 
+## Task records are bookkeeping, not notes
+
+A task record is the system's own paperwork, so #1002 keeps the whole
+`Workspace/Tasks/` directory out of every surface that presents the vault as
+the operator's memories, and inside the one that preserves them:
+
+- **Excluded from recall.** `Workspace/Tasks/<id>.md` is reserved bookkeeping
+  (`vault_index.is_reserved_bookkeeping`), so neither the bulk FTS walk nor a
+  forced `index_file` writes a row for it and no task id or status is ever a
+  recall result.
+- **Excluded from the Memory Map.** `scan_vault` skips it, so a task record is
+  not a node and its body links are not edges.
+- **Excluded from review and curation.** Vault review already refused any path
+  holding a `Workspace` part, and the record is not an orphan candidate.
+- **Excluded from the lint's note checks**, by the same shared predicate: it is
+  not a note to validate, link-check, or count.
+- **Included in the durable backup.** `memory-vault` is a durable scope base, so
+  every task record is committed by the unattended backup — the board is
+  user-owned data and losing it loses the work.
+
+The rule is keyed on the *directory pair* `Workspace/Tasks`, not on the name
+`Tasks`: a user's own folder called `Tasks` anywhere else
+(`Other/Tasks/x.md`) is ordinary note content and stays indexed and scannable.
+
 ## Future obligations
 
 - Live project membership and completion validation is a later
@@ -169,8 +193,5 @@ a hand edit may hold any schema-valid state:
 - Linkage mutation (`chat_id`/`attempt_id`) belongs to the delegation
   child. Source hand edits may carry nullable linkage, but this store
   never creates a live chat or attempt.
-- Foundation only: before any production writer is exposed, parent #973-B2
-  must exclude task bookkeeping from recall/graph/review/curation and
-  verify backup inclusion. No task capability is advertised yet, and #973
-  stays open for the bookkeeping, operations, board, and delegation
-  children.
+- No production writer, route, board, or UI is advertised yet, and #973
+  stays open for the operations, board, and delegation children.
