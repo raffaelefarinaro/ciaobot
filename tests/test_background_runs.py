@@ -254,6 +254,28 @@ def test_other_bare_names_still_resolve_from_the_user_path(
     assert resolve_executable(name, tmp_path, tmp_path) == str(tool)
 
 
+def test_build_env_prepends_the_engine_bin_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested ``ciao`` in a background command resolves to this engine."""
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/user/bin"]))
+
+    entries = build_env({}, run_id="bg-1", workspace="work")["PATH"].split(os.pathsep)
+
+    assert entries[0] == engine_bin_dir()
+    assert entries[1:] == ["/usr/bin", "/user/bin"]
+
+
+def test_build_env_prepends_even_over_a_path_override() -> None:
+    """A caller-supplied PATH override cannot strip the engine-first promotion."""
+    env = build_env({"PATH": "/user/bin"}, run_id="bg-1", workspace="work")
+
+    entries = env["PATH"].split(os.pathsep)
+
+    assert entries[0] == engine_bin_dir()
+    assert entries[1:] == ["/user/bin"]
+
+
 def test_env_rejects_loader_hooks_and_the_session_token() -> None:
     for key in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "CIAO_AGENT_TOKEN"):
         with pytest.raises(BackgroundRunError) as excinfo:

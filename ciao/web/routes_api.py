@@ -453,11 +453,12 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
     refused before anything changes; schedules are taken and the folder moves
     first, so a failed move changes nothing that cannot be put back; only then
     are the chats archived (irreversible), still while the workspace is
-    registered; the registry entry goes last. A failure after the move puts
-    the folder and schedules back so the workspace stays registered and the
-    archive can be retried.
+    registered; its webhook verifiers are revoked just after that; the registry
+    entry goes last. A failure after the move puts the folder and schedules
+    back so the workspace stays registered and the archive can be retried.
     """
     from ciao import workspace_archive  # noqa: PLC0415
+    from ciao.web.routes_webhooks import webhook_store  # noqa: PLC0415
 
     config = request.app.state.config
     name = str(request.path_params.get("name", "")).strip()
@@ -602,6 +603,24 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 # primary workspace.
                 logger.exception("Could not archive every chat of workspace %s", name)
                 return _roll_back(f"its chats could not be archived ({exc})")
+        # Archiving destroys the workspace's webhook verifiers: a revoked
+        # trigger cannot be re-enabled until it is rotated, so a restored
+        # workspace name reactivates no old credential. Revoked before the
+        # registry entry goes, and with no await in between: a create passes
+        # the ``config.workspace(name)`` check only while the workspace is
+        # registered, so this cannot race a trigger being created for a name
+        # that is about to be unregistered. A failure here rolls back like any
+        # other step after the move, so the archive is refused rather than
+        # completed with live verifiers. If ``unregister`` then fails and rolls
+        # back, the triggers stay revoked on a still-registered workspace, which
+        # is the safe direction: rotating recovers.
+        try:
+            webhook_store(config).revoke_workspace(name)
+        except Exception as exc:  # noqa: BLE001 - unregistering would leave them live
+            logger.exception(
+                "Could not revoke webhook triggers for archived workspace %s", name
+            )
+            return _roll_back(f"its webhook triggers could not be revoked ({exc})")
         try:
             workspace_archive.unregister(config, name)
         except OSError as exc:
