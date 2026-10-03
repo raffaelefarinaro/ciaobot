@@ -158,17 +158,38 @@ RESERVED_UNINDEXED_FILES = frozenset(
 )
 
 
+# The task board's record directory (`ciao/task_board.py`, #978): one Markdown
+# file per task under `<vault>/Workspace/Tasks/`, each named by its 32-hex id.
+# The whole directory is bookkeeping rather than notes — #973-B2 requires it to
+# be kept out of recall, the Memory Map graph, review and curation before any
+# production writer is exposed — so it is reserved by *location*, not by name.
+# Deliberately not a member of `EXCLUDED_VAULT_DIRS`/`EXCLUDED_PATH_PARTS`: those
+# match a bare directory name at any depth and would prune a user's own folder
+# that happens to be called `Tasks` (`Other/Tasks/x.md` is their note).
+TASK_RECORDS_PARENT_PARTS: tuple[str, str] = ("workspace", "tasks")
+
+
 def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
     """True for the app's own vault bookkeeping, exactly where it writes it.
 
-    ``rel_to_root`` is the path relative to the vault root. These files are only
-    ever written at ``<vault>/Workspace/<name>``, so the match is exact: a user's
-    note under any other directory that happens to be named ``workspace``
-    (``projects/acme/workspace/Curation-Log.md``) stays indexed.
+    ``rel_to_root`` is the path relative to the vault root. The reserved files
+    are only ever written at ``<vault>/Workspace/<name>``, so that match is
+    exact: a user's note under any other directory that happens to be named
+    ``workspace`` (``projects/acme/workspace/Curation-Log.md``) stays indexed.
+
+    Task records (#973-B2) are the second branch and a rule about the parent
+    rather than the filename, because a task file is named by its id: any file
+    directly under a ``Workspace/Tasks`` directory is the board's, and a
+    ``Tasks`` directory anywhere else is not.
     """
+    parts = rel_to_root.parts
+    if len(parts) >= 3:
+        parent_pair = tuple(part.casefold() for part in parts[-3:-1])
+        if parent_pair == TASK_RECORDS_PARENT_PARTS:
+            return True
     return (
-        len(rel_to_root.parts) in {2, 3}
-        and rel_to_root.parts[-2].casefold() == "workspace"
+        len(parts) in {2, 3}
+        and parts[-2].casefold() == "workspace"
         and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
     )
 

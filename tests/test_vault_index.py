@@ -276,6 +276,75 @@ def test_scan_vault_neighbors_walk_uses_body_edges(tmp_path: Path):
     assert "memory-vault/People/Mo.md" in paths
 
 
+def test_task_records_are_not_graph_nodes(tmp_path: Path):
+    """`Workspace/Tasks/<id>.md` is bookkeeping, not a Memory Map node (#1002).
+
+    One Markdown file per task board record, and folder type inference would
+    type every one of them `workspace` and hang a permanent node off a hex id
+    the operator never sees. A task is work in progress, not a memory.
+
+    The decoy pins the other half of the rule: `Tasks` is matched as the
+    `Workspace/Tasks` directory pair, never as a bare folder name, so a user's
+    own `Tasks` folder stays an ordinary part of their graph.
+    """
+    record = (
+        "---\n"
+        "schema: 1\n"
+        "id: 9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c\n"
+        "title: Draft the migration runbook\n"
+        "status: in_progress\n"
+        "project_id: null\n"
+        "due: null\n"
+        "assignee: agent\n"
+        "review_state: none\n"
+        'created_at: "2026-10-03T12:00:00+00:00"\n'
+        'updated_at: "2026-10-03T12:00:00+00:00"\n'
+        "chat_id: null\n"
+        "attempt_id: null\n"
+        "---\n"
+        "# Draft the migration runbook\n\n"
+        "Rollback rehearsal for the venue changeover.\n"
+    )
+    _write(
+        tmp_path / "Workspace" / "Tasks" / "9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c.md",
+        record,
+    )
+    _write(
+        tmp_path / "Other" / "Tasks" / "Venue-Changeover.md",
+        "---\nname: Venue changeover\ntype: note\n---\n# Venue changeover\n",
+    )
+
+    entries = _scan(tmp_path)
+    paths = [e.path_key for e in entries]
+
+    assert not any("9f2c4a1b" in p for p in paths), paths
+    assert "memory-vault/Other/Tasks/Venue-Changeover.md" in paths
+
+
+def test_is_reserved_bookkeeping_covers_the_task_record_directory():
+    """The predicate both consumers share, pinned directly.
+
+    `fts_search._is_reserved_key`, `scan_vault`'s `is_excluded`, the lint and
+    `note_receipts` all read this one function, so this is where the shape of
+    the task rule lives. `Other/Tasks/` is the case that would otherwise be
+    lost: the plan is the parent directory pair, not the name.
+    """
+    record = Path("Workspace/Tasks/9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c.md")
+    assert vi.is_reserved_bookkeeping(record)
+    assert vi.is_excluded(record)
+    # Casefolded, because a case-insensitive filesystem will happily hand back
+    # either spelling of the directory the store created.
+    assert vi.is_reserved_bookkeeping(Path("workspace/tasks/abc.md"))
+    # Only the board's own directory, only directly under it.
+    assert not vi.is_reserved_bookkeeping(Path("Other/Tasks/abc.md"))
+    assert not vi.is_reserved_bookkeeping(Path("Tasks/abc.md"))
+    assert not vi.is_reserved_bookkeeping(Path("Workspace/Tasks/sub/abc.md"))
+    # The reserved-name branch is unchanged: `Workspace/` notes the app does not
+    # write, and a user's own `workspace` folder, are untouched.
+    assert vi.is_reserved_bookkeeping(Path("Workspace/Update-Tasks.json"))
+    assert not vi.is_reserved_bookkeeping(Path("projects/acme/workspace/x.md"))
+
+
 # ---- strip_references (delete-note backlink cleanup) ------------------------
 
 

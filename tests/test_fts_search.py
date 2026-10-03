@@ -560,6 +560,71 @@ def test_reserved_names_only_excluded_under_workspace(
     assert any("Weekly-Review-Log" in p for p in paths)
 
 
+def test_task_records_are_never_indexed(
+    db_conn: sqlite3.Connection, temp_vault: Path
+) -> None:
+    """`Workspace/Tasks/<id>.md` is bookkeeping, not recallable memory (#1002).
+
+    One Markdown file per task under the board's own directory, named by its id
+    rather than by anything recognisable. A task title, status or acceptance
+    criterion ranking as an ordinary recall hit would put the system's
+    paperwork in front of the operator's notes — the same failure the reserved
+    basename set exists to prevent, and one a filename rule cannot catch here.
+
+    The decoy is the half that matters: a `Tasks` directory the user named
+    themselves is ordinary content. The rule is the `Workspace/Tasks` pair, not
+    the name, or the fix would silently hide their notes.
+    """
+    record = (
+        "---\n"
+        "schema: 1\n"
+        "id: 9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c\n"
+        "title: Draft the migration runbook\n"
+        "status: in_progress\n"
+        "project_id: null\n"
+        "due: null\n"
+        "assignee: agent\n"
+        "review_state: none\n"
+        'created_at: "2026-10-03T12:00:00+00:00"\n'
+        'updated_at: "2026-10-03T12:00:00+00:00"\n'
+        "chat_id: null\n"
+        "attempt_id: null\n"
+        "---\n"
+        "# Draft the migration runbook\n\n"
+        "Rollback rehearsal for the Villa Australis venue changeover.\n"
+    )
+    tasks = temp_vault / "Workspace" / "Tasks"
+    tasks.mkdir(parents=True)
+    record_path = tasks / "9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c.md"
+    record_path.write_text(record, encoding="utf-8")
+
+    decoy_dir = temp_vault / "Other" / "Tasks"
+    decoy_dir.mkdir(parents=True)
+    decoy = decoy_dir / "Venue-Changeover.md"
+    decoy.write_text(
+        "# Venue changeover\n\nRollback rehearsal for the Villa Australis "
+        "venue changeover.\n",
+        encoding="utf-8",
+    )
+
+    fts_search.index_vault(db_conn, temp_vault)
+
+    paths = [r["path"] for r in fts_search.search_vault(db_conn, "changeover")]
+    assert paths, "the user's own note must still hit"
+    assert not any("9f2c4a1b" in p for p in paths), paths
+    row = db_conn.execute(
+        "SELECT COUNT(*) FROM vault_meta WHERE path LIKE ?", ("%Tasks/%",)
+    ).fetchone()
+    assert row is not None and row[0] == 1, "only the user's own Tasks note is indexed"
+
+    # Force-indexing honours the same rule: the walk's skip is not the only way a
+    # task record could reach the index.
+    assert fts_search.index_file(db_conn, temp_vault, record_path) is False
+    assert not any(
+        "9f2c4a1b" in r["path"] for r in fts_search.search_vault(db_conn, "changeover")
+    )
+
+
 def test_search_false_frontmatter_opts_a_note_out(
     db_conn: sqlite3.Connection, temp_vault: Path
 ) -> None:
