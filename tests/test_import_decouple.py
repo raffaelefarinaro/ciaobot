@@ -292,6 +292,102 @@ def test_workspace_narrowing_keeps_unattributable_rows() -> None:
     assert ("claude", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb") not in mine
 
 
+def test_row_naming_an_unconfigured_workspace_is_kept_for_every_workspace(
+    tmp_path: Path,
+) -> None:
+    """A project naming a workspace this install no longer has is not dropped.
+
+    ``_workspace_for_chat`` sends an unknown workspace name to
+    ``primary_workspace()``, so such a row belongs to whichever workspace is
+    primary. Resolving that here would be guessing, and a wrong guess drops a
+    Ciaobot-own session from every workspace but one — so the name is treated as
+    unattributable and the row is kept everywhere, like a row with no project.
+    """
+    config = _config(tmp_path)
+    registry = _registry(
+        **{
+            "chat-stale": {
+                "project_id": "proj-renamed",
+                "provider": "claude",
+                "session_id": "abcdabcd-1111-4111-8111-111111111111",
+                "previous_session_ids": [],
+            }
+        }
+    )
+    registry["projects"]["proj-renamed"] = {
+        "name": "Renamed",
+        "workspace": "retired",
+        "kind": "",
+    }
+    _write(config, registry, None)
+
+    for workspace in (WORKSPACE, OTHER_WORKSPACE):
+        assert ("claude", "abcdabcd-1111-4111-8111-111111111111") in (
+            dec.ciaobot_own_session_ids(config, workspace)
+        )
+
+
+def test_workspace_narrowing_reaches_the_state_half(tmp_path: Path) -> None:
+    """The other workspace's chat stays out of *both* halves of the set.
+
+    Every live chat has a state context, so narrowing the chat rows alone would
+    hand back the other workspace's session through ``state.json`` — the filter
+    would exclude less than the workspace it names. A context with no surviving
+    chat row (a deleted chat) is still read: that is the case the state half
+    exists for, and no workspace can claim it.
+    """
+    config = _config(tmp_path)
+    registry = _registry(
+        **{
+            "chat-mine02": {
+                "project_id": "proj-notes",
+                "provider": "claude",
+                "session_id": "11111111-2222-4222-8222-222222222222",
+                "previous_session_ids": [],
+            },
+            "chat-theirs": {
+                "project_id": "proj-client",
+                "provider": "claude",
+                "session_id": "33333333-4444-4433-8444-444444444444",
+                "previous_session_ids": [],
+            },
+        }
+    )
+    state = _state(
+        **{
+            "chat-mine02": "55555555-6666-4666-8666-666666666666",
+            "chat-theirs": "77777777-8888-4778-8778-888888888888",
+            "chat-gone": "99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        }
+    )
+    _write(config, registry, state)
+
+    mine = dec.ciaobot_own_session_ids(config, WORKSPACE)
+
+    # Both of this workspace's chats, through the registry row and the context.
+    assert ("claude", "11111111-2222-4222-8222-222222222222") in mine
+    assert ("claude", "55555555-6666-4666-8666-666666666666") in mine
+    # No trace of the other workspace, in either half.
+    assert ("claude", "33333333-4444-4433-8444-444444444444") not in mine
+    assert ("claude", "77777777-8888-4778-8778-888888888888") not in mine
+    # The deleted chat has no registry row left, so it is kept for every
+    # workspace — against every provider, since the state store names none.
+    assert ("claude", "99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa") in mine
+    assert ("opencode", "99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa") in mine
+
+    theirs = dec.ciaobot_own_session_ids(config, OTHER_WORKSPACE)
+    assert ("claude", "33333333-4444-4433-8444-444444444444") in theirs
+    assert ("claude", "77777777-8888-4778-8778-888888888888") in theirs
+    assert ("claude", "11111111-2222-4222-8222-222222222222") not in theirs
+    assert ("claude", "55555555-6666-4666-8666-666666666666") not in theirs
+
+    # Install-wide both workspaces are back: the narrowing was a copy of the
+    # snapshot, not an edit a later caller would inherit.
+    everywhere = dec.ciaobot_own_session_ids(config)
+    assert ("claude", "33333333-4444-4433-8444-444444444444") in everywhere
+    assert ("claude", "77777777-8888-4778-8778-888888888888") in everywhere
+
+
 def test_legacy_row_without_a_provider_is_excluded_as_claude() -> None:
     """A row predating the ``provider`` key is read the way ``_load`` reads it."""
     registry = _registry(
@@ -361,6 +457,31 @@ def test_session_with_a_ciaobot_marker_and_no_known_id_is_ciaobot_own() -> None:
     )
 
 
+def test_the_two_provider_vocabularies_match_each_other() -> None:
+    """An adapter's ``claude_code`` is the ``claude`` Ciaobot recorded.
+
+    The two sides of every lookup speak different dialects: Ciaobot's registry
+    and state store say ``claude``/``opencode``, an importer's source adapter
+    says ``claude_code``. Compared literally, a Ciaobot-own Claude session finds
+    no record naming itself and is filed as the user's own history — the exact
+    failure this module exists to prevent.
+    """
+    session = "abcdabcd-abcd-4abc-8abc-abcdabcdabcd"
+    known = {("claude", session)}
+
+    assert dec.canonical_provider(" claude_code ") == "claude"
+    assert dec.canonical_provider("opencode") == "opencode"
+
+    assert dec.classify_session("claude_code", session, "hello", known) == (
+        dec.CIAOBOT_OWN
+    )
+    # Still exact: a session Ciaobot recorded nothing about stays external, so
+    # the alias is a spelling and not a blanket match on the provider.
+    assert dec.classify_session(
+        "claude_code", "11111111-2222-4333-8444-555555555555", "hello", known
+    ) == dec.EXTERNAL
+
+
 def test_undecidable_session_is_ambiguous_and_never_external() -> None:
     """Nothing readable means ``ambiguous`` — absence of evidence is not evidence.
 
@@ -414,6 +535,36 @@ def test_provenance_assertion_rejects_a_ciaobot_chat_id() -> None:
         dec.assert_external_provenance(
             "opencode:ses_not_a_chat_id:msg_9", known_chat_ids=["ses_not_a_chat_id"]
         )
+
+    # The provider segment is a chat id too: a tag naming Ciaobot's bookkeeping
+    # in either segment is not a source, whatever the rest of the tag says.
+    with pytest.raises(dec.ProvenanceNotExternal):
+        dec.assert_external_provenance("chat-abcd1234:ses_user_owned:msg_9")
+    with pytest.raises(dec.ProvenanceNotExternal):
+        dec.assert_external_provenance(
+            "ses_not_a_provider:ses_x:msg_9", known_chat_ids=["ses_not_a_provider"]
+        )
+
+
+def test_provenance_assertion_compares_the_adapter_provider_vocabulary() -> None:
+    """A ``claude_code`` tag is refused against a ``claude`` Ciaobot record.
+
+    The same vocabulary rule the classification follows: the adapter's
+    ``claude_code`` and Ciaobot's ``claude`` are one provider, so a fact
+    attributed to a Ciaobot-own Claude session cannot be written under the other
+    spelling of it.
+    """
+    session = "abcdabcd-abcd-4abc-8abc-abcdabcdabcd"
+    known = {("claude", session)}
+
+    with pytest.raises(dec.ProvenanceNotExternal):
+        dec.assert_external_provenance(
+            f"claude_code:{session}:uuid-7", known_own_ids=known
+        )
+
+    # The same tag as the user's own session is still writable, so the refusal
+    # is the vocabulary rule and not a ban on the shape.
+    dec.assert_external_provenance(f"claude_code:{session}:uuid-7")
 
 
 def test_provenance_assertion_rejects_a_recorded_ciaobot_session() -> None:

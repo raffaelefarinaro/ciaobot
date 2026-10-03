@@ -623,7 +623,9 @@ already keeps:
 first_user_turn, known_ids)` returns `ciaobot_own` / `external` /
 `ambiguous`, in this order:
 
-1. `(provider, session_id)` in the exclusion set ⇒ `ciaobot_own`;
+1. `(provider, session_id)` in the exclusion set ⇒ `ciaobot_own`. Provider ids
+   are compared canonically, so an adapter's `claude_code` is Ciaobot's
+   `claude` and the two vocabularies cannot miss each other;
 2. a session id that is a Ciaobot chat id (`chat-<8 hex>`, a shape no provider
    mints) ⇒ `ciaobot_own`;
 3. the `[CIAO_CONTEXT_BEGIN]` capsule — the marker Ciaobot prepends to every

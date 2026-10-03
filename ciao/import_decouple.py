@@ -66,7 +66,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -103,6 +103,27 @@ CIAO_CONTEXT_END = "[CIAO_CONTEXT_END]"
 #: than a conversation — the exact ``source_chat_id`` overload the feasibility
 #: report's dedupe section rules out.
 CIAOBOT_CHAT_ID_RE = re.compile(r"^chat-[0-9a-f]{8}$")
+
+#: One provider, two vocabularies. Ciaobot's registry and state store record
+#: ``claude``/``opencode`` (``ciao.provider_registry.provider_ids``), while an
+#: importer's source adapter reports the very same session as ``claude_code``
+#: (the feasibility report's ``SourceRef.provider``). A literal comparison would
+#: miss every Ciaobot-own Claude session and classify it as the user's history,
+#: which is the one failure this module exists to prevent — so both sides of a
+#: lookup go through :func:`canonical_provider`.
+_PROVIDER_ALIASES = {"claude_code": "claude"}
+
+
+def canonical_provider(provider: str) -> str:
+    """The provider id Ciaobot's own records use for ``provider``.
+
+    Unmapped names are returned as they are: a provider Ciaobot has no record
+    for cannot be excluded either way, and inventing an id for it would drop a
+    Ciaobot-own session out of the set rather than keep it.
+    """
+    text = provider.strip()
+    return _PROVIDER_ALIASES.get(text, text)
+
 
 MIXED_SESSION_POLICY = "exclude_whole_session"
 """What an importer does with a session Ciaobot has also used.
@@ -181,19 +202,31 @@ def _row_session_ids(row: Mapping[str, Any]) -> list[str]:
 def _chat_workspace(
     row: Mapping[str, Any],
     projects: Mapping[str, Any],
+    known_workspaces: Collection[str] | None = None,
 ) -> str:
     """The workspace a chat row belongs to, or ``""`` when unattributable.
 
     ``""`` means the row cannot be claimed for another workspace: either it has
     no project or its project names none, which is exactly the case
     ``ProjectChatManager._workspace_for_chat`` sends to ``primary_workspace()``.
+
+    A project naming a workspace this install no longer has is that same case:
+    the manager sends an unknown name to ``primary_workspace()`` as well. This
+    module does not model which workspace is primary — and picking one would
+    *drop* the row from the set for every workspace but that one — so an
+    unconfigured name is reported as unattributable and the row is kept
+    everywhere. ``known_workspaces`` is ``config.workspace_names()``; ``None``
+    means the caller has no configured registry to check against (the pure
+    snapshot helper), and the name is then taken at face value.
     """
     project_id = row.get("project_id")
     project = projects.get(project_id) if isinstance(project_id, str) else None
     if isinstance(project, Mapping):
         raw = project.get("workspace")
         if isinstance(raw, str) and raw.strip():
-            return raw.strip()
+            workspace = raw.strip()
+            if known_workspaces is None or workspace in known_workspaces:
+                return workspace
     return ""
 
 
@@ -201,6 +234,7 @@ def own_session_ids_from_snapshot(
     snapshot: Mapping[str, Any],
     *,
     workspace: str = "",
+    known_workspaces: Collection[str] | None = None,
 ) -> set[tuple[str, str]]:
     """``(provider, session_id)`` pairs Ciaobot owns, from a chat-registry snapshot.
 
@@ -220,7 +254,9 @@ def own_session_ids_from_snapshot(
     ``workspace`` narrows to one logical workspace. A row whose workspace cannot
     be resolved is kept for **every** workspace: it is the fallback case, and
     excluding it from a workspace it may well belong to is the direction that
-    would re-ingest Ciaobot's own work.
+    would re-ingest Ciaobot's own work. ``known_workspaces`` is the install's
+    configured workspace names (see :func:`_chat_workspace`); a caller without
+    them cannot tell an unconfigured workspace from a live one.
     """
     projects = snapshot.get("projects")
     chats = snapshot.get("chats")
@@ -233,7 +269,9 @@ def own_session_ids_from_snapshot(
     for row in chat_rows.values():
         if not isinstance(row, Mapping):
             continue
-        if workspace and _chat_workspace(row, project_rows) not in (
+        if workspace and _chat_workspace(
+            row, project_rows, known_workspaces
+        ) not in (
             "",
             workspace,
         ):
@@ -266,6 +304,12 @@ def own_session_ids_from_state(
     That over-excludes, which is the recoverable direction: an external session
     wrongly withheld is the user's to notice, while an imported Ciaobot turn is
     indistinguishable from the user's own history once filed.
+
+    A ``state.json`` with no ``contexts`` key returns an empty set rather than
+    raising: that is a pre-v3 file (v2 filed sessions under
+    ``sessions.<provider>.session_id``), and the engine migrates one on load and
+    rewrites it as v3, so a file still on disk in the old shape is not a set of
+    Ciaobot sessions this module could have read.
     """
     contexts = state_snapshot.get("contexts")
     if not isinstance(contexts, Mapping):
@@ -324,7 +368,12 @@ def ciaobot_own_session_ids(
     model.
 
     ``workspace`` narrows the chat rows (see
-    :func:`own_session_ids_from_snapshot`); an empty value is install-wide.
+    :func:`own_session_ids_from_snapshot`); an empty value is install-wide. The
+    narrowing reaches the **state** half too: every live chat has a state
+    context, so a snapshot narrowed only over chat rows would still return every
+    other workspace's chats. Contexts with no surviving chat row (a deleted
+    chat) are kept for every workspace — they are exactly what the state half
+    exists for.
 
     Raises :class:`RegistrySnapshotError` when a record exists but cannot be
     read. A caller that got an empty set from a corrupt registry would scan
@@ -335,15 +384,44 @@ def ciaobot_own_session_ids(
     registry = _read_snapshot(state_path.parent / REGISTRY_FILENAME)
     state = _read_snapshot(state_path)
 
-    chat_rows = registry.get("chats")
+    known_workspaces = config.workspace_names()
+    projects = registry.get("projects")
+    project_rows: Mapping[str, Any] = (
+        projects if isinstance(projects, Mapping) else {}
+    )
+    rows = registry.get("chats")
+    chat_rows: Mapping[str, Any] = rows if isinstance(rows, Mapping) else {}
+
     providers_by_chat = {
         str(chat_id): _row_provider(row)
-        for chat_id, row in (chat_rows.items() if isinstance(chat_rows, Mapping) else [])
+        for chat_id, row in chat_rows.items()
         if isinstance(row, Mapping)
     }
-    return own_session_ids_from_snapshot(
-        registry, workspace=workspace
-    ) | own_session_ids_from_state(state, providers_by_chat)
+    own = own_session_ids_from_snapshot(
+        registry, workspace=workspace, known_workspaces=known_workspaces
+    )
+
+    contexts = state.get("contexts")
+    if workspace and isinstance(contexts, Mapping):
+        other = {
+            str(chat_id)
+            for chat_id, row in chat_rows.items()
+            if isinstance(row, Mapping)
+            and _chat_workspace(row, project_rows, known_workspaces)
+            not in ("", workspace)
+        }
+        if other:
+            # A copy, never an in-place edit: the caller's payload stays whole,
+            # and a dropped context is dropped for this narrowing only.
+            state = {
+                **state,
+                "contexts": {
+                    key: entry
+                    for key, entry in contexts.items()
+                    if str(key) not in other
+                },
+            }
+    return own | own_session_ids_from_state(state, providers_by_chat)
 
 
 # ── Classification ────────────────────────────────────────────────────────
@@ -377,14 +455,16 @@ def classify_session(
     the first could not be established.
 
     ``known_ids`` is an iterable of ``(provider, session_id)`` pairs, as
-    :func:`ciaobot_own_session_ids` returns.
+    :func:`ciaobot_own_session_ids` returns. Both sides of that comparison go
+    through :func:`canonical_provider`, so an adapter's ``claude_code`` is
+    matched against a Ciaobot record's ``claude``.
     """
-    normalized_provider = provider.strip()
+    normalized_provider = canonical_provider(provider)
     normalized_session = session_id.strip()
     turn = first_user_turn.strip()
 
     if (normalized_provider, normalized_session) in {
-        (str(p).strip(), str(s).strip()) for p, s in known_ids
+        (canonical_provider(str(p)), str(s).strip()) for p, s in known_ids
     }:
         return CIAOBOT_OWN
     if normalized_session and is_ciaobot_chat_id(normalized_session):
@@ -417,12 +497,13 @@ def assert_external_provenance(
 
     Refused: a blank tag; anything not in the three-part shape (a bare chat id
     is the misuse this exists to catch); a blank provider or session segment;
-    a session segment that is a Ciaobot chat id, by shape or by
+    a provider or session segment that is a Ciaobot chat id, by shape or by
     ``known_chat_ids``; and a ``(provider, session_id)`` in ``known_own_ids``.
 
     The keyword-only sets are the caller's own answers, so the check is exact
     rather than shape-only; called without them the shape rules still hold, and
-    a Ciaobot chat id is refused either way.
+    a Ciaobot chat id is refused either way. The ``known_own_ids`` comparison is
+    made through :func:`canonical_provider`, like every other one.
     """
     text = anchor.strip()
     if not text:
@@ -445,8 +526,15 @@ def assert_external_provenance(
             f"Provenance {text!r} names Ciaobot chat id {session_id!r}; "
             "an imported fact's source must be an external session."
         )
-    if (provider, session_id) in {
-        (str(p).strip(), str(s).strip()) for p, s in known_own_ids
+    if is_ciaobot_chat_id(provider) or provider in {
+        str(chat_id).strip() for chat_id in known_chat_ids
+    }:
+        raise ProvenanceNotExternal(
+            f"Provenance {text!r} names Ciaobot chat id {provider!r} as its "
+            "provider; an imported fact's source must be an external session."
+        )
+    if (canonical_provider(provider), session_id) in {
+        (canonical_provider(str(p)), str(s).strip()) for p, s in known_own_ids
     }:
         raise ProvenanceNotExternal(
             f"Provenance {text!r} names Ciaobot's own session "
