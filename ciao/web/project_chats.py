@@ -7061,7 +7061,13 @@ class ProjectChatManager:
 
         for p in self._projects.values():
             if p.workspace == workspace and p.name == "General":
-                if not wanted:
+                # A system routine carries no project name on purpose: it is
+                # dispatched without a `web_project_id` (stock definition), so
+                # there is nothing stale to repair and General IS its intended
+                # home. Warning here fired on every Workspace-care tick — a
+                # standing false positive that trained the operator to ignore
+                # the one signal meant for a genuinely dead target.
+                if not wanted and getattr(entry, "scope", "") != "system":
                     logger.warning(
                         "Schedule target %s is stale and records no project name; "
                         "falling back to %s General. Re-pick the project to repair it.",
