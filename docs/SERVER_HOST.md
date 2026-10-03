@@ -1,0 +1,143 @@
+# Ciaobot Server native host
+
+`native/server-host/ServerHost.swift` is the production, persistent macOS host
+for Ciaobot (#1009, child A of #1008). It is small on purpose: a stable,
+immutable permission identity in front of a Python engine that stays
+independently updatable. The installer does **not** wire it up yet — service
+activation, manifest coverage and the installer transaction are later children.
+
+## What it does
+
+The host exposes exactly two fixed operations, revision 1:
+
+```sh
+Ciaobot Server.app/Contents/MacOS/CiaobotServerHost serve --python /absolute/interpreter
+Ciaobot Server.app/Contents/MacOS/CiaobotServerHost request-accessibility
+```
+
+- **`serve`** launches exactly `[python, -I, -m, ciao.cli, supervise]` as a child
+  and stays alive until that child exits, then mirrors its status: a normal exit
+  forwards the exit code, an uncaught signal maps to `128 + signal`, and a launch
+  failure prints a diagnostic on stderr and exits `1`. The child inherits the
+  host's working directory, environment, stdout and stderr; nothing is captured,
+  buffered, rotated or deleted, and no `DYLD`/`PYTHONPATH` or other environment
+  knob is set. The event loop stays responsive — there is no blocking wait on
+  the main queue.
+- **`request-accessibility`** calls
+  `AXIsProcessTrustedWithOptions(prompt: true)` once and keeps the process alive
+  for five seconds so macOS can present the asynchronous settings prompt. It
+  never grants anything itself, never reads, clicks, types or scripts, and never
+  runs AppleScript.
+
+The parser is strict. It accepts exactly `serve --python <absolute existing
+executable>` or `request-accessibility` and rejects repeated, unknown and extra
+arguments, relative and empty paths, and non-executable targets. Invalid argv
+exits `2` before AppKit is set up or any permission call is reachable. A
+symlinked or dot-alias path is resolved by the filesystem as an ordinary
+executable path.
+
+## Signals and lifetime
+
+`SIGTERM` and `SIGINT` are handled through safe dispatch signal sources, never
+with Foundation work inside a POSIX signal callback. On the first stop:
+
+1. If the child has not launched yet, nothing is launched and the host exits `0`.
+2. Otherwise the host forwards `SIGTERM` to the tracked child exactly once and
+   arms one `SIGKILL` escalation for `STOP_GRACE_SECONDS` (35 s, deliberately
+   longer than the Python supervisor's own 30 s grace so the child's grace wins
+   and the host is the outer bound).
+3. When the child exits, the escalation is cancelled, the child is reaped, and
+   the host exits `0`. The escalation handler re-checks the pid and liveness, so
+   a recycled pid is never signalled and a replaced child is never killed by a
+   stale timer.
+
+The host never restarts or relaunches itself or its child. The Python
+supervisor (`ciao/supervise.py`) still owns restart-code 75, the crash-loop
+backoff and the engine descendants; the host is only the outer process. launchd
+will be the final job-group owner as a later child.
+
+## Identity and versioning
+
+| Field | Value |
+|---|---|
+| Bundle ID | `local.ciaobot.server` |
+| Display name | `Ciaobot Server` |
+| Executable | `CiaobotServerHost` |
+| Host protocol | `CiaobotServerHostProtocol` = `1` |
+| Bundle version | host revision (`1`), never the engine release |
+| Minimum system | `13.0` |
+| `LSUIElement` | `true` (accessory app: no window, no Dock) |
+
+The bundle ID is distinct from the retired app, the PWA and the earlier
+`local.ciaobot.server-host-experiment` spike, so a permission grant can never be
+inherited across identities. `CFBundleVersion`/`CFBundleShortVersionString`
+express the host revision; they are deliberately not the engine version.
+
+The bundle ships only the executable, its `Info.plist`, the tracked
+`CiaobotServer.icns` and the signature. No Python, configuration or sidecar
+lives inside the sealed app. The icon is the exact PR #119 indigo Ciaobot Server
+bytes, restored once as a tracked file at `ciao/stock/deploy/CiaobotServer.icns`;
+the builder reads that tracked file and never touches Git history at build time.
+
+## Build
+
+```sh
+python3 scripts/build-server-host.py --output /tmp/ciaobot-server-host-build
+```
+
+The builder:
+
+- refuses a non-macOS platform before writing anything, and refuses an existing
+  output path including a dangling symlink;
+- compiles `arm64-apple-macosx13.0` and `x86_64-apple-macosx13.0` with `xcrun
+  swiftc` against the current macOS SDK, staging the thin binaries **outside** the
+  `.app` and `lipo`-creating the universal executable into the bundle;
+- writes the plist and icon, then ad-hoc signs the finished app once, strict
+  verifies it, checks both `lipo -archs` slices, and extracts the per-arch
+  CDHashes;
+- archives exactly the app subtree into
+  `caibot-server-host-macos-universal-v1.tar.gz` (ordinary files and directories
+  only, modes preserved, uid/gid and user/group names cleared, no absolute paths,
+  no thin build files), then re-extracts to a fresh scratch directory and
+  strict-verifies the app without recompiling.
+
+It prints the archive path, archive and executable digests, archive size and the
+per-arch CDHashes. The build fails if the tracked icon is empty or if `codesign`
+reports no CDHash for a slice. It never installs into `~/Applications`, never
+writes a launch agent, never launches what it builds and never requests a
+permission.
+
+## Ad-hoc signing and reapproval
+
+The host is ad-hoc signed, not signed with a paid Developer ID. Its permission
+grants are therefore tied to the exact signed bytes: any rebuild changes the
+CDHash and can require the user to reapprove the Accessibility/Automation prompt
+in System Settings. That is why ordinary engine updates must keep these bytes
+unchanged, and why a host upgrade is a separate, explicit, warned action — see
+the installer plan (`plans/permission-identity/installer-plan.md`, decision
+D-03). The builder and tests never edit TCC and never remove a grant.
+
+## Tests
+
+`tests/test_server_host.py` runs the pure checks everywhere (identity distinct
+from the PWA/retired/experiment IDs, revision independent of engine version, the
+icon digest, no Python bundled, the exact both-arch compile commands and
+deployment floor, output refusal, non-macOS refusal before writes, injected
+build ordering, archive safety and metadata). On macOS with Command Line Tools
+it compiles the real host once and exercises it against a scratch fake child:
+fixed supervisor argv, inherited cwd/environment/stdio, lifetime, exit and
+signal mirroring, stop forwarding and reaping, the stalled-child escalation, and
+launch failure. The `request-accessibility` branch is **never executed** by the
+tests.
+
+```sh
+PYTHONPATH=$PWD python -m pytest tests/test_server_host.py -q
+```
+
+## Not in this child
+
+Service activation, the update/rollback ownership contract, release-manifest
+coverage of the host archive, the installer transaction, and all live
+launchd/TCC validation are later children of #1008. This foundation alone does
+not integrate the installer, and it never runs `launchctl`, `open`, a live
+permission request, or the engine.

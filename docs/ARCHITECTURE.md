@@ -306,6 +306,10 @@ scripts/
   vault-lint.py                Compatibility wrapper for `ciao vault-lint`.
   cleanup_sdk_blobs.py         Compatibility wrapper for `ciao cleanup-sdk-blobs`.
   prepare-release              Release helper wrapper.
+  build-server-host.py         Build the universal, ad-hoc-signed Ciaobot Server native host archive (#1009). Compiles both architectures, assembles the app with the tracked icon, signs once, verifies and archives without installing or launching anything.
+
+native/                        Non-Python, installer-facing sources (see docs/SERVER_HOST.md).
+  server-host/ServerHost.swift The persistent macOS host: fixed `serve` (launches `[python, -I, -m, ciao.cli, supervise]` and mirrors its exit) and `request-accessibility` operations. Host protocol revision 1, 35 s stop grace, accessory app, no shell/IPC/network/arbitrary-command surface. The installer does not activate it yet (#1008 child A).
 
 tests/                         pytest suite for the Python backend.
 pyproject.toml                 Python package metadata, package-data declarations, and dev/test deps.
@@ -373,6 +377,19 @@ relaunches it on exit code 75 (with a crash-loop backoff) and forwards
 SIGTERM/SIGINT (SIGBREAK on Windows); the Windows logon task is the service
 file that uses it (below). `POST /api/admin/deploy` refuses a bundled app up
 front.
+
+**Native host (#1008/#1009).** The installer plan separates the immutable
+permission identity from the mutable engine: launchd → **Ciaobot Server.app**
+native host → installed `python -I -m ciao.cli supervise` → engine → provider
+tools. The host source is `native/server-host/ServerHost.swift`, built and
+archived by `scripts/build-server-host.py`, documented in
+[docs/SERVER_HOST.md](SERVER_HOST.md). It owns only two fixed operations
+(`serve` and `request-accessibility`), forwards a bounded stop to the existing
+Python supervisor and mirrors its exit, and never restarts itself or the child;
+the engine's restart/backoff loop stays in `ciao/supervise.py`. This child ships
+the host and its artifact builder only — the installer, the update/rollback
+ownership contract, release-manifest coverage, and every live launchd/TCC gate
+are later children of #1008, so nothing activates the host yet.
 
 **Windows lifecycle (#696).** There is no LaunchAgent or systemd unit on
 Windows. `ciao setup --load-launchd` (the flag name is historical: on macOS
