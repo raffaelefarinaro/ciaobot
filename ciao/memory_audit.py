@@ -877,8 +877,34 @@ def _lines_with_offsets(text: str) -> list[tuple[int, int, str]]:
     return lines
 
 
+def context_index(
+    text: str, document: ne.EntryDocument
+) -> tuple[list[tuple[int, int, str]], list[bool]]:
+    """A note's line table and the flag for each line lying inside an entry.
+
+    Built once per note and handed to every :func:`_context_for` call. The
+    obvious implementation — re-walking the text and re-scanning every entry
+    span for each candidate line — is ``entries × lines × entries`` per note,
+    which is the entire page-load cost on a dense note; a sweep here is
+    ``lines`` once. Entries never overlap, so the first span still open at a
+    line is the only one that can cover it.
+    """
+    lines = _lines_with_offsets(text)
+    spans = sorted((other.start, other.end) for other in document.entries)
+    inside: list[bool] = []
+    cursor = 0
+    for line_start, line_end, _line in lines:
+        while cursor < len(spans) and spans[cursor][1] <= line_start:
+            cursor += 1
+        inside.append(cursor < len(spans) and spans[cursor][0] < line_end)
+    return lines, inside
+
+
 def _context_for(
-    text: str, entry: ne.NoteEntry, document: ne.EntryDocument
+    text: str,
+    entry: ne.NoteEntry,
+    document: ne.EntryDocument,
+    index: tuple[list[tuple[int, int, str]], list[bool]] | None = None,
 ) -> tuple[str, ...]:
     """The nearest physical lines either side that are not sibling facts.
 
@@ -891,28 +917,25 @@ def _context_for(
     skipped and the walk continues outward; a heading or a prose line is not an
     entry and is still shown. Blank lines are dropped, because a gap is context
     of nothing.
+
+    ``index`` is the note's :func:`context_index`, built once by the caller. A
+    caller that passes none gets the index built here, so a one-off use stays
+    correct.
     """
-    spans = [(other.start, other.end) for other in document.entries]
+    lines, inside = context_index(text, document) if index is None else index
 
-    def is_fact_line(line_start: int, line_end: int) -> bool:
-        return any(
-            line_start < span_end and line_end > span_start
-            for span_start, span_end in spans
-        )
-
-    def first(lines: list[tuple[int, int, str]]) -> str:
-        for line_start, line_end, line in lines:
-            if is_fact_line(line_start, line_end):
+    def first(candidates: list[int]) -> str:
+        for candidate in candidates:
+            if inside[candidate]:
                 continue
-            shown = _excerpt_line(line)
+            shown = _excerpt_line(lines[candidate][2])
             if shown:
                 return shown
         return ""
 
-    lines = _lines_with_offsets(text)
-    before = [line for line in reversed(lines) if line[1] <= entry.start]
-    after = [line for line in lines if line[0] >= entry.end]
-    return tuple(line for line in (first(before), first(after)) if line)
+    before = [i for i, line in enumerate(lines) if line[1] <= entry.start]
+    after = [i for i, line in enumerate(lines) if line[0] >= entry.end]
+    return tuple(line for line in (first(before[::-1]), first(after)) if line)
 
 
 def _normalized_section(section: str) -> str:
@@ -1254,6 +1277,7 @@ def note_entry_coverage(
     checked = exempt = unverified = stale = 0
     unsupported = 0
     selected: list[EntryVerdict] = []
+    index = context_index(text, document)
     for entry in document.entries:
         if note_exempt:
             exempt += 1
@@ -1309,6 +1333,7 @@ def note_entry_coverage(
                 entry,
                 document=document,
                 text=text,
+                index=index,
                 code=code,
                 dated=dated,
                 own_date=own is not None,
@@ -1350,6 +1375,7 @@ def _verdict_for(
     *,
     document: ne.EntryDocument,
     text: str,
+    index: tuple[list[tuple[int, int, str]], list[bool]] | None = None,
     code: str,
     dated: datetime.date | None,
     own_date: bool,
@@ -1395,7 +1421,7 @@ def _verdict_for(
         fingerprint=entry.fingerprint,
         revision=revision,
         excerpt=_excerpt(entry.text),
-        context=_context_for(text, entry, document),
+        context=_context_for(text, entry, document, index),
         last_verified=dated,
         own_date=own_date,
         age_days=age,

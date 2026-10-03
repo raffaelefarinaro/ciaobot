@@ -205,10 +205,14 @@ _LIST_ITEM_RE = re.compile(
 _MD_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
 # A leading heading or list marker, or any 1–2 char emphasis run. The ordered
 # marker is separate from the unordered one and guarded by trailing whitespace
-# so a decimal like "3.14" is prose, not a list item.
+# so a decimal like "3.14" is prose, not a list item. The emphasis run treats
+# `_` differently from `*`/`` ` ``: an underscore between two word characters
+# is part of the word (`barcode_capture`, `timeout_s`), not decoration, so only
+# a run at a word edge is stripped. That keeps snake_case identifiers and paths
+# intact while `_italic_` still loses its markers.
 _MD_NOISE_RE = re.compile(
     r"(?m)^[ \t]*(?:#{1,6}[ \t]+|\d{1,9}[.)][ \t]+|[-*+][ \t]+|>[ \t]?)"
-    r"|[*_`]{1,2}"
+    r"|[*`]{1,2}|(?<![A-Za-z0-9])_{1,2}|_{1,2}(?![A-Za-z0-9])"
 )
 
 

@@ -938,7 +938,7 @@ def test_entry_excerpt_drops_backticks_link_urls_and_stays_capped() -> None:
         "- " + "word " * 80 + "\n"
     )
     linked = next(v for v in selected if "docs" in v.excerpt)
-    assert linked.excerpt == "See the docs for timeouts."
+    assert linked.excerpt == "See the docs for timeout_s."
     long = next(v for v in selected if v.excerpt.startswith("word"))
     assert long.excerpt.endswith(" …")
 
