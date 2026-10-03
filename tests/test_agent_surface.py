@@ -161,6 +161,177 @@ def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> Non
     assert group <= set(service.operation_table)
 
 
+# ── The task board surface (#1021, B3) ────────────────────────────────────
+#
+# One workspace-scoped service behind both `ciao task …` and `/api/tasks*`, so
+# what an agent can do to a task is a property of the operation table and the
+# store, not of whichever surface asked.
+
+
+def _task_service(tmp_path: Path, *, mode: str = "auto"):
+    """A real control plane over two sibling workspaces, plus a dispatcher."""
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.control_plane import CiaoControlPlane
+
+    config = CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal"),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+
+    class _Pcm:
+        """Only what the task service reads: one chat's mode, and the roots."""
+
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(mode=mode)
+
+        def _workspace_vault_root(self, workspace: str) -> Path:
+            return config.workspace_vault_root(workspace)
+
+        def get_chat(self, _chat_id: str):
+            return self.chat
+
+        def get_active_stream(self, _chat_id: str):
+            return None
+
+        def get_project(self, _project_id: str):
+            return None
+
+        def list_projects(self, _workspace: str | None = None):
+            return []
+
+    service, _fake = _service(tmp_path)
+    service.bind(
+        CiaoControlPlane(
+            config, project_chat_manager=_Pcm(), schedule_manager=SimpleNamespace()
+        )
+    )
+    return service
+
+
+def test_task_operations_register_as_two_reads_and_three_writes(tmp_path: Path) -> None:
+    """Reads are `_READ`, every write is `_WRITE` and mutating.
+
+    The annotations are what the plan-mode gate and the approval split read, so
+    a `_READ` entry on a write would let a plan-mode chat file a task. And
+    `task_action` is `_WRITE`, not `_DESTRUCTIVE`: the store refuses an agent's
+    completion outright, so it carries no reachable destructive effect.
+    """
+    from ciao import mcp_server
+
+    service = _task_service(tmp_path)
+    assert {
+        "task_list", "task_get", "task_create", "task_update", "task_action",
+    } <= set(service.operation_table)
+    for name in ("task_list", "task_get"):
+        assert mcp_server.OPERATIONS_BY_NAME[name].annotations == mcp_server._READ
+    for name in ("task_create", "task_update", "task_action"):
+        annotations = mcp_server.OPERATIONS_BY_NAME[name].annotations
+        assert annotations == mcp_server._WRITE, name
+        assert annotations.readOnlyHint is False
+
+
+def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path) -> None:
+    """The store's completion rule, end to end through the CLI surface.
+
+    Filing and moving work; completing does not, however it is spelled, and the
+    refusal leaves the record exactly where it was.
+    """
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Review the diff", "due": "2026-10-20"})
+        assert created.status_code == 200, created.text
+        task = created.json()["data"]
+        assert task["title"] == "Review the diff"
+        assert task["due"] == "2026-10-20"
+
+        listed = _post(client, token, "task_list", {})
+        assert [row["id"] for row in listed.json()["data"]] == [task["id"]]
+
+        moved = _post(
+            client,
+            token,
+            "task_action",
+            {"action": "move", "task_id": task["id"], "status": "in_progress",
+             "expected_revision": task["revision"]},
+        )
+        assert moved.status_code == 200, moved.text
+        revision = moved.json()["data"]["revision"]
+
+        refused = _post(
+            client, token, "task_action",
+            {"action": "complete", "task_id": task["id"], "expected_revision": revision},
+        )
+        assert refused.status_code == 422
+        assert refused.json()["error"]["code"] == "task_completion_requires_user"
+
+        # Spelling it as a plain status edit is the same refusal, not a way in.
+        edited = _post(
+            client, token, "task_update",
+            {"task_id": task["id"], "expected_revision": revision, "status": "done"},
+        )
+        assert edited.json()["error"]["code"] == "task_completion_requires_user"
+        assert _post(client, token, "task_get", {"task_id": task["id"]}).json()["data"]["status"] == "in_progress"
+
+
+def test_a_stale_task_revision_is_a_retryable_refusal_over_the_cli(tmp_path: Path) -> None:
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Plan the launch"}).json()["data"]
+        first = _post(
+            client, token, "task_update",
+            {"task_id": created["id"], "expected_revision": created["revision"], "due": "2026-10-05"},
+        )
+        assert first.status_code == 200, first.text
+        stale = _post(
+            client, token, "task_update",
+            {"task_id": created["id"], "expected_revision": created["revision"], "title": "stale"},
+        )
+        assert stale.status_code == 422
+        error = stale.json()["error"]
+        assert error["code"] == "task_revision_conflict"
+        assert error["retryable"] is True
+        assert _post(client, token, "task_get", {"task_id": created["id"]}).json()["data"]["due"] == "2026-10-05"
+
+
+def test_a_task_in_another_workspace_is_not_reachable_from_this_chat(tmp_path: Path) -> None:
+    service = _task_service(tmp_path)
+    personal, work = _token(service), _token(service, "chat-w", workspace="work")
+    with _client(service) as client:
+        mine = _post(client, personal, "task_create", {"title": "Personal"}).json()["data"]
+        theirs = _post(client, work, "task_create", {"title": "Work"}).json()["data"]
+        assert [row["id"] for row in _post(client, personal, "task_list").json()["data"]] == [mine["id"]]
+        assert [row["id"] for row in _post(client, work, "task_list").json()["data"]] == [theirs["id"]]
+        cross = _post(client, work, "task_get", {"task_id": mine["id"]})
+    assert cross.status_code == 422
+    assert cross.json()["error"]["code"] == "task_not_found"
+
+
+def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
+    """The gate the annotations claim, checked on the operations it applies to."""
+    service = _task_service(tmp_path, mode="plan")
+    token = _token(service)
+    with _client(service) as client:
+        listed = _post(client, token, "task_list", {})
+        filed = _post(client, token, "task_create", {"title": "Not in plan mode"})
+        moved = _post(
+            client, token, "task_action",
+            {"action": "move", "task_id": "a" * 32, "status": "in_progress", "expected_revision": "r"},
+        )
+    assert listed.status_code == 200
+    for response in (filed, moved):
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "plan_mode_read_only"
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -207,6 +378,29 @@ def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> Non
         (["project", "update", "p1", "--vault-folder", "Projects/Q4"], ("project", {"action": "update", "project_id": "p1", "vault_folder": "Projects/Q4"})),
         (["project", "restore", "q4-launch"], ("project", {"action": "restore", "stem": "q4-launch"})),
         (["project", "complete", "p1"], ("project_action", {"action": "complete", "project_id": "p1"})),
+        (["task", "list"], ("task_list", {})),
+        (["task", "get", "a1b2"], ("task_get", {"task_id": "a1b2"})),
+        (["task", "create", "--title", "Ship the board"], ("task_create", {"title": "Ship the board"})),
+        (
+            ["task", "create", "--title", "Ship it", "--project", "p1", "--due", "2026-10-20"],
+            ("task_create", {"title": "Ship it", "project_id": "p1", "due": "2026-10-20"}),
+        ),
+        (
+            ["task", "update", "a1b2", "--revision", "rev1", "--title", "Ship the board"],
+            ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "title": "Ship the board"}),
+        ),
+        (
+            ["task", "update", "a1b2", "--revision", "rev1", "--status", "on_hold"],
+            ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "status": "on_hold"}),
+        ),
+        (
+            ["task", "move", "a1b2", "--to", "in_progress", "--revision", "rev1"],
+            ("task_action", {"action": "move", "task_id": "a1b2", "status": "in_progress", "expected_revision": "rev1"}),
+        ),
+        (
+            ["task", "complete", "a1b2", "--revision", "rev1"],
+            ("task_action", {"action": "complete", "task_id": "a1b2", "expected_revision": "rev1"}),
+        ),
         (
             ["run", "start", "--label", "report", "--timeout-s", "900", "--env", "A=1", "--", "bash", "-lc", "a && b"],
             ("background_run_start", {"cmd": ["bash", "-lc", "a && b"], "env": {"A": "1"}, "timeout_s": 900, "label": "report"}),
@@ -235,7 +429,11 @@ def test_every_documented_command_parses() -> None:
         "note verify": ["--payload-file", "p.json"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
-        "project complete": ["p"], "project delete": ["p"], "schedule update": ["s"], "schedule pause": ["s"],
+        "project complete": ["p"], "project delete": ["p"], "task create": ["--title", "t"],
+        "task get": ["a" * 32], "task update": ["a" * 32, "--revision", "r"],
+        "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
+        "task complete": ["a" * 32, "--revision", "r"],
+        "schedule update": ["s"], "schedule pause": ["s"],
         "schedule resume": ["s"], "schedule run": ["s"], "schedule delete": ["s"],
         "run start": ["--", "true"], "run status": ["r"], "run cancel": ["r"],
     }
@@ -364,8 +562,13 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     # be described at all. A command with no line here is a command the model
     # does not know exists, which for this one means it hand-edits a note's
     # `updated:` and leaves no receipt behind: exactly the defect the child
-    # exists to close. Pay for the line, and keep the ceiling honest.
-    assert len(cli) < 9500
+    # exists to close. Raised to 10300 for the task board (#1021, B3), which is
+    # the same trade for six commands: an agent that never sees `task list`
+    # invents its own board in a note and there is no second source of truth for
+    # it to have come from. The revision discipline and the completion refusal
+    # have to travel with the verbs, or the first thing it does is overwrite a
+    # task nobody read. Pay for the line, and keep the ceiling honest.
+    assert len(cli) < 10300
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
