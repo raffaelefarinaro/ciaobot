@@ -117,11 +117,17 @@ test.describe('narrow viewport', () => {
 
     const measured = await page.evaluate(() => {
       const row = document.querySelector('.message-wrap--selected .message-row')!
-      const ref = document.querySelector('user-comment-reference')!
+      // The collision is with the next TURN's box (the `.message-wrap` that
+      // carries the reference card), not the inner `user-comment-reference`
+      // quote card, which sits inside that turn's padding. Measuring the inner
+      // card gives false confidence: the outline crosses the turn boundary
+      // before it ever reaches the quote.
+      const selectedWrap = document.querySelector('.message-wrap--selected')!
+      const next = selectedWrap.nextElementSibling as HTMLElement
       // The 1px outline sits on the row's border box.
-      return { outlineBottom: row.getBoundingClientRect().bottom + 1, refTop: ref.getBoundingClientRect().top }
+      return { outlineBottom: row.getBoundingClientRect().bottom + 1, nextTop: next.getBoundingClientRect().top }
     })
-    expect(measured.outlineBottom - measured.refTop, 'the selected outline crosses the comment card').toBeLessThanOrEqual(0)
+    expect(measured.outlineBottom - measured.nextTop, 'the selected outline crosses the next turn').toBeLessThanOrEqual(0)
   })
 
   test('icon-only controls still hit the 44px touch minimum', async ({ page }) => {
