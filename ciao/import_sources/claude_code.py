@@ -43,6 +43,7 @@ no engine, and opens no socket.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -84,6 +85,17 @@ _READ_CHUNK = 256 * 1024
 #: Windows has no such open flag — ``os_support.files.create_fd`` ignores a flag
 #: it does not map — and no FIFO either, so the absence costs nothing there.
 _NO_BLOCK = getattr(os, "O_NONBLOCK", 0)
+
+#: The only errno values that mean "this is not a plain file". A link at the
+#: final component, a directory and a device with nothing behind it are refusals
+#: because the *path* is not a session. Everything else the open can fail with —
+#: a permission the user has not granted, a descriptor limit, a name too long —
+#: is a real error about a real file and is propagated as itself: reporting it
+#: as "not a plain file" would tell a consent screen the file is damaged when
+#: what happened is that nobody could open it.
+_NOT_PLAIN_FILE_ERRNOS = frozenset(
+    code for code in (errno.ELOOP, errno.EISDIR, errno.ENXIO) if code is not None
+)
 
 #: The two types that are a turn of the conversation. A leaf is the nearest
 #: ancestor-or-self of this kind: Claude Code appends non-message records
@@ -176,9 +188,13 @@ def read_claude_code_session(
 
     A file that holds no readable conversation comes back as a session with no
     messages and the omissions that say why — a corrupt file is a result the
-    caller can show, not an exception it has to catch to find out. What *is*
-    refused is the file itself: :class:`SourceRefusal` for a symlink or any
-    non-regular file, and ``FileNotFoundError`` for one that is not there.
+    caller can show, not an exception it has to catch to find out. That includes a
+    file whose entries are **all** subagent turns: branch selection has to pick
+    a leaf to walk up from, and it still counts what it dropped, so such a
+    session yields zero messages and an ``isSidechain`` count rather than the
+    subagent's turns read as the user's own conversation. What *is* refused is
+    the file itself: :class:`SourceRefusal` for a symlink or any non-regular
+    file, and ``FileNotFoundError`` for one that is not there.
 
     Over :data:`~ciao.import_sources.contract.MAX_SESSION_BYTES` the read stops
     at the file's last whole line, :attr:`NormalizedSession.truncated` is set,
@@ -188,9 +204,14 @@ def read_claude_code_session(
     """
     target = Path(path)
     raw, truncated = _read_bounded(target)
-    entries, unreadable = _parse_entries(raw)
+    entries, unreadable, uuid_less = _parse_entries(raw)
     chain = _main_chain(entries)
-    on_chain = {entry["uuid"] for entry in chain}
+    # Identity, not uuid: a file that repeats a uuid (a resumed or copied
+    # transcript) has two entries under one id, and only one of them is on the
+    # chain the walk took. The shadowed duplicate is a real turn somebody wrote
+    # and has to be counted, which a set of uuids cannot tell from the one that
+    # was read.
+    on_chain = {id(entry) for entry in chain}
 
     messages: list[NormalizedMessage] = []
     non_text_blocks = 0
@@ -222,6 +243,10 @@ def read_claude_code_session(
 
     if unreadable:
         _count_omission(OMISSION_UNREADABLE_LINE, unreadable)
+    # A valid record the file does not chain: not corruption, and never read as
+    # a turn, so it is filed with the other non-message records.
+    if uuid_less:
+        _count_omission(OMISSION_ENTRY_TYPE, uuid_less)
     if truncated:
         _count_omission(OMISSION_TRUNCATED)
     if non_text_blocks:
@@ -230,7 +255,7 @@ def read_claude_code_session(
     # counted what happened on the chain it took would make the fork it dropped
     # look like there had been no fork.
     for entry in entries:
-        kind = _omission_kind(entry, on_chain=entry["uuid"] in on_chain)
+        kind = _omission_kind(entry, on_chain=id(entry) in on_chain)
         if kind is not None:
             _count_omission(kind)
 
@@ -270,6 +295,11 @@ def _read_bounded(path: Path) -> tuple[str, bool]:
         # "this is not a file" claim about a file that was there.
         if isinstance(exc, (FileNotFoundError, NotADirectoryError)):
             raise
+        if exc.errno not in _NOT_PLAIN_FILE_ERRNOS:
+            # A permission or a resource limit, not a wrong-shaped path. It
+            # propagates as the error it is rather than being dressed up as a
+            # refusal about a file that is in fact a plain file.
+            raise
         raise SourceRefusal(f"{path} is not a plain file, so it is not read: {exc}") from exc
 
     try:
@@ -288,6 +318,11 @@ def _read_bounded(path: Path) -> tuple[str, bool]:
     finally:
         os.close(fd)
 
+    # The file can grow between the ``fstat`` and the read — a live session is
+    # appended to while it is being imported — so a read that ends with the cap
+    # exhausted was truncated even when the size said it fitted. Without this the
+    # last line would be half an entry and the flag would say the read was whole.
+    truncated = truncated or remaining == 0
     data = b"".join(chunks)
     if truncated:
         # Back to the last newline: an entry is one line, so a partial trailing
@@ -300,23 +335,38 @@ def _read_bounded(path: Path) -> tuple[str, bool]:
     return data.decode("utf-8", errors="replace"), truncated
 
 
-def _parse_entries(raw: str) -> tuple[list[dict[str, Any]], int]:
-    """The entries a chain can be walked over, and how many lines were not.
+def _parse_entries(raw: str) -> tuple[list[dict[str, Any]], int, int]:
+    """The entries a chain can be walked over, and what the other lines were.
 
     An entry is any JSON object carrying a string ``uuid`` — which is every
-    record Claude Code writes into the file, including the non-message types the
-    walk treats as chain links. Entries of a type this reader does not know are
-    kept rather than dropped at parse, so the omission count can account for
-    them instead of losing them.
+    record Claude Code writes as part of the chain, including the non-message
+    types the walk treats as chain links. Entries of a type this reader does not
+    know are kept rather than dropped at parse, so the omission count can
+    account for them instead of losing them.
 
-    A line that is not one of those — unparseable, not an object, no uuid — is
-    counted and skipped. It is counted because the contract says omissions are
-    never silent, and a corrupt line that vanished would be the one omission
-    nobody could notice.
+    The other two counts are what the rest of the lines were, kept apart because
+    they are different facts to tell a user:
+
+    * **unreadable** is a line that is not JSON at all, or JSON that is not an
+      object. That is corruption, and the one omission a user has to be shown
+      because nothing else about it is legible.
+    * **uuid-less** is a perfectly valid record the file simply does not chain —
+      ``summary``, ``file-history-snapshot``, ``custom-title``, and whatever else
+      the format adds. Calling it corruption would tell a consent screen the
+      transcript is damaged when it is not; it is this reader with nothing to
+      walk, so it is an ``other_entry_type`` like any other non-message record.
+
+    Split on ``"\\n"`` and not with :meth:`str.splitlines`, which also breaks on
+    U+2028, U+2029, U+0085, ``\\x0b``, ``\\x0c`` and ``\\x1c``–``\\x1e``. Those
+    are legal *inside* a JSON string — and Claude Code is Node, whose
+    ``JSON.stringify`` leaves U+2028/U+2029 unescaped — so pasted text carrying
+    one would be split down the middle of a message, and both halves then counted
+    as unreadable lines.
     """
     entries: list[dict[str, Any]] = []
     unreadable = 0
-    for line in raw.splitlines():
+    uuid_less = 0
+    for line in raw.split("\n"):
         text = line.strip()
         if not text:
             continue
@@ -325,11 +375,14 @@ def _parse_entries(raw: str) -> tuple[list[dict[str, Any]], int]:
         except (json.JSONDecodeError, ValueError):
             unreadable += 1
             continue
-        if not isinstance(entry, dict) or not isinstance(entry.get("uuid"), str):
+        if not isinstance(entry, dict):
             unreadable += 1
             continue
+        if not isinstance(entry.get("uuid"), str):
+            uuid_less += 1
+            continue
         entries.append(entry)
-    return entries, unreadable
+    return entries, unreadable, uuid_less
 
 
 def _main_chain(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -372,7 +425,12 @@ def _main_chain(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return []
     main = [leaf for leaf in leaves if _is_conversational(leaf)]
     # The latest-indexed candidate. `max` on the index rather than a loop, and
-    # `max` keeps the first of equals, which is the earlier entry on a tie.
+    # `max` keeps the first of equals, which is the earlier entry on a tie. The
+    # `main or leaves` fallback is NOT a "read the sidechain anyway" path: when
+    # every leaf is flagged, the reader needs some chain to walk down from so
+    # that each flagged entry reaches the omission loop below and is counted
+    # under its own kind. Every one of them is still dropped on the way to a
+    # message, so the session comes back with none.
     leaf = max(main or leaves, key=lambda item: index[str(item["uuid"])])
 
     chain: list[dict[str, Any]] = []
@@ -435,9 +493,17 @@ def _is_conversational(entry: Mapping[str, Any]) -> bool:
 
     The same three flags the chain walk drops: ``isSidechain`` is a subagent's
     turn, ``teamName`` is a team agent's, and ``isMeta`` is the transcript's own
-    bookkeeping. A session whose only leaves are sidechain ones is still read —
-    falling back to them beats reporting no conversation at all — but they lose
-    to a real leaf whenever the file has one.
+    bookkeeping. A flagged leaf loses to a real one whenever the file has one,
+    however late in the file it appears.
+
+    A file whose leaves are **all** flagged still has a chain walked down from
+    one of them — :func:`_main_chain` needs a leaf to start from — but every
+    entry on it is refused by :func:`_omission_kind`, so the session comes back
+    with zero messages and an ``isSidechain``/``teamName``/``isMeta`` count. That
+    is the intended answer, not a fallback: a subagent's turns are not the
+    user's conversation, and importing them under this session's id would put
+    words in the user's mouth. They are reported instead, which is what makes
+    the difference visible rather than silent.
     """
     return not entry.get("isSidechain") and not entry.get("teamName") and not entry.get("isMeta")
 

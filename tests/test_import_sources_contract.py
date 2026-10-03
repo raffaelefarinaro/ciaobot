@@ -206,6 +206,25 @@ def test_omission_counts_state_what_happened_and_nothing_else() -> None:
     assert _session(omissions=()).omission_counts() == {}
 
 
+def test_a_repeated_omission_kind_is_summed_not_overwritten() -> None:
+    """Two rows of one kind are that much more of it, however they got grouped.
+
+    ``omissions`` is a tuple rather than a mapping, so nothing stops two callers
+    appending the same kind. The count is *how much was left out*, which is a
+    quantity: overwriting the first with the second would report three dropped
+    entries as one and make the consent screen understate what the import did.
+    """
+    session = _session(
+        omissions=(
+            Omission(kind=OMISSION_KINDS[0], count=2),
+            Omission(kind=OMISSION_KINDS[1], count=0),
+            Omission(kind=OMISSION_KINDS[0], count=3),
+        )
+    )
+
+    assert session.omission_counts() == {OMISSION_KINDS[0]: 5}
+
+
 def test_the_first_user_turn_is_the_thing_classify_session_reads() -> None:
     """The contract hands the classifier its input, so no consumer re-derives it.
 

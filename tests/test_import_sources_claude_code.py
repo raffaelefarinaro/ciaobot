@@ -10,6 +10,7 @@ at somebody's history.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -25,10 +26,13 @@ from ciao.import_sources.claude_code import (
 from ciao.import_sources.contract import (
     MAX_SESSION_BYTES,
     OMISSION_ENTRY_TYPE,
+    OMISSION_META,
     OMISSION_NON_TEXT_CONTENT,
     OMISSION_OFF_CHAIN,
     OMISSION_SIDECHAIN,
+    OMISSION_TEAM,
     OMISSION_TRUNCATED,
+    OMISSION_UNREADABLE_LINE,
     PROVIDER_CLAUDE_CODE,
     ROLE_ASSISTANT,
     ROLE_USER,
@@ -42,8 +46,14 @@ def _fixture(name: str) -> Path:
     return FIXTURES / name
 
 
-def _line(uuid: str, parent: str | None, kind: str, text: str) -> str:
-    """One JSONL entry, in the shape Claude Code writes."""
+def _line(uuid: str, parent: str | None, kind: str, text: str, **flags: object) -> str:
+    """One JSONL entry, in the shape Claude Code writes.
+
+    ``ensure_ascii=False`` because Claude Code is Node and ``JSON.stringify``
+    leaves U+2028/U+2029 unescaped: a test that wrote the escape sequence would
+    not be the file the reader actually has to survive. Extra keyword arguments
+    become the entry's own flags (``isSidechain``, ``teamName``, ``isMeta``).
+    """
     return json.dumps(
         {
             "type": kind,
@@ -51,7 +61,9 @@ def _line(uuid: str, parent: str | None, kind: str, text: str) -> str:
             "parentUuid": parent,
             "sessionId": "synthetic-session",
             "message": {"role": kind, "content": text},
-        }
+            **flags,
+        },
+        ensure_ascii=False,
     )
 
 
@@ -337,3 +349,296 @@ def test_discovery_lists_session_files_as_metadata_only(home_dir: Path) -> None:
     assert refs[0].path == str(session)
     # A workspace nobody ran Claude Code in is an empty list, not a failure.
     assert discover_claude_code_sessions(project_dir / "no-such-slug") == []
+
+
+# ── Reading the file as it is really written ────────────────────────────────
+# Everything below is a tmp file rather than a fixture because each one is a
+# shape of line the provider does not guarantee, and a checked-in file would
+# hide what the tests are about.
+
+
+def test_a_message_holding_a_json_legal_line_separator_stays_one_entry(
+    tmp_path: Path,
+) -> None:
+    """U+2028, U+0085 and the rest end no JSON string, and end no JSONL line.
+
+    Claude Code is Node, and ``JSON.stringify`` leaves U+2028/U+2029 unescaped,
+    so pasted text carrying one is ordinary rather than adversarial.
+    :meth:`str.splitlines` breaks on all six of U+2028, U+2029, U+0085, ``\\x0b``,
+    ``\\x0c`` and ``\\x1c``–``\\x1e`` as if they ended the line, which cut one
+    message in half and then counted both halves as unreadable lines: the head of
+    the conversation was gone and the file was reported corrupt. Only ``"\\n"``
+    separates JSONL lines.
+    """
+    separated = "first\u2028second\u0085third\u000bfourth\u001cfifth"
+    path = tmp_path / "line-separators.jsonl"
+    path.write_text(
+        "\n".join(
+            (
+                _line("u1", None, "user", "start here"),
+                _line("a1", "u1", "assistant", separated),
+                _line("u2", "a1", "user", "and then?"),
+                _line("a2", "u2", "assistant", "then that"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # The separators are in the file as themselves; an escaped fixture would
+    # never have exercised this.
+    assert "\u2028" in path.read_text(encoding="utf-8")
+
+    session = read_claude_code_session(path)
+
+    assert [message.anchor for message in session.messages] == ["u1", "a1", "u2", "a2"]
+    assert session.messages[1].text == "first second third fourth fifth"
+    assert session.omission_counts() == {}
+
+
+def test_a_valid_record_with_no_uuid_is_a_non_message_not_corruption(
+    tmp_path: Path,
+) -> None:
+    """``summary`` and ``file-history-snapshot`` are records, not damaged lines.
+
+    Real transcripts are full of parseable objects carrying no ``uuid``. Calling
+    them unreadable would tell a consent screen the user's own history is partly
+    corrupt when the file is fine and this reader simply has nothing to walk:
+    they are ``other_entry_type``, the same kind as any other non-message
+    record, and the conversation beside them still reads.
+    """
+    path = tmp_path / "bookkeeping.jsonl"
+    path.write_text(
+        "\n".join(
+            (
+                _line("u1", None, "user", "what did we decide?"),
+                json.dumps({"type": "summary", "summary": "A short session", "leafUuid": "u1"}),
+                json.dumps(
+                    {"type": "file-history-snapshot", "messageId": "m1", "snapshot": {}}
+                ),
+                _line("a1", "u1", "assistant", "we decided to ship on Friday"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session = read_claude_code_session(path)
+
+    assert [message.anchor for message in session.messages] == ["u1", "a1"]
+    assert session.omission_counts() == {OMISSION_ENTRY_TYPE: 2}
+
+
+def test_a_repeated_uuid_is_counted_rather_than_silently_dropped(tmp_path: Path) -> None:
+    """A file that repeats a uuid loses one of the two entries — and says so.
+
+    A resumed or copied transcript can carry the same ``uuid`` twice. The chain
+    walk indexes by uuid, so the later entry is the one that reads; the earlier
+    one is still a turn somebody wrote. Comparing on the uuid string would call
+    it on-chain and lose it without a word, which is the silent drop this
+    package exists to prevent.
+    """
+    path = tmp_path / "repeated-uuid.jsonl"
+    path.write_text(
+        "\n".join(
+            (
+                _line("u1", None, "user", "start here"),
+                _line("a1", "u1", "assistant", "the first answer"),
+                _line("a1", "u1", "assistant", "the answer after the resume"),
+                _line("u2", "a1", "user", "one more question"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session = read_claude_code_session(path)
+
+    # The entry that indexed last is the turn that reads...
+    assert [message.anchor for message in session.messages] == ["u1", "a1", "u2"]
+    assert "the answer after the resume" in [message.text for message in session.messages]
+    # ...and the one it shadowed is counted as a branch this import did not take.
+    assert session.omission_counts() == {OMISSION_OFF_CHAIN: 1}
+
+
+def test_a_session_whose_every_leaf_is_a_subagent_yields_no_messages(
+    tmp_path: Path,
+) -> None:
+    """All-sidechain means zero messages and an ``isSidechain`` count.
+
+    Branch selection still walks down from one of the flagged leaves, so that
+    every entry reaches the omission loop, but nothing on that chain becomes a
+    message. That is the answer on purpose: a subagent's turns are not the
+    user's conversation, and importing them under this session's id would put
+    words in the user's mouth. Reported, not read — and not silently empty
+    either.
+    """
+    path = tmp_path / "subagent-only.jsonl"
+    path.write_text(
+        "\n".join(
+            (
+                _line("s1", None, "user", "read the file", isSidechain=True),
+                _line("s2", "s1", "assistant", "read it", isSidechain=True),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session = read_claude_code_session(path)
+
+    assert session.messages == ()
+    assert session.omission_counts() == {OMISSION_SIDECHAIN: 2}
+
+
+@pytest.mark.parametrize(
+    ("flags", "kind"),
+    [
+        ({"isSidechain": True}, OMISSION_SIDECHAIN),
+        ({"teamName": "researcher"}, OMISSION_TEAM),
+        ({"isMeta": True}, OMISSION_META),
+    ],
+    ids=("isSidechain", "teamName", "isMeta"),
+)
+def test_a_flagged_entry_is_excluded_and_declared(
+    tmp_path: Path, flags: dict[str, object], kind: str
+) -> None:
+    """Each of the provider's three flags excludes the turn and names itself.
+
+    Claude Code marks a subagent's turn, a team agent's turn and the
+    transcript's own bookkeeping with three different fields. The omission kind
+    is named after the field so a stored omission is greppable against the
+    source schema, and each has to be pinned: a flag the reader ignored would
+    import somebody else's words as the user's, and a flag it honoured without
+    counting would hide that it did.
+    """
+    path = tmp_path / f"flagged-{kind}.jsonl"
+    path.write_text(
+        "\n".join(
+            (
+                _line("u1", None, "user", "the user's own question"),
+                _line("a1", "u1", "assistant", "the user's own answer", **flags),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session = read_claude_code_session(path)
+
+    assert [message.anchor for message in session.messages] == ["u1"]
+    assert session.omission_counts() == {kind: 1}
+
+
+def test_a_line_that_is_not_json_is_counted_as_unreadable(tmp_path: Path) -> None:
+    """A line cut short is corruption, and the conversation beside it still reads.
+
+    Half a write — a live session being appended to, a truncated copy — is the
+    one omission a user genuinely has to be shown, because nothing else about it
+    is legible. It is counted, and the entries around it are unaffected.
+    """
+    path = tmp_path / "corrupt.jsonl"
+    path.write_text(
+        "\n".join(
+            (
+                _line("u1", None, "user", "start here"),
+                '{"type": "user", "uuid": "a1", "message": {"role": "user",',
+                _line("a2", "u1", "assistant", "the answer"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session = read_claude_code_session(path)
+
+    assert [message.anchor for message in session.messages] == ["u1", "a2"]
+    assert session.omission_counts() == {OMISSION_UNREADABLE_LINE: 1}
+
+
+def test_a_json_line_that_is_not_an_object_is_counted_as_unreadable(
+    tmp_path: Path,
+) -> None:
+    """JSON that parses but carries no object is unreadable, not a record.
+
+    A bare array or string on a line is not an entry in any shape this reader
+    could walk, and it is not a valid record either — the same thing as a line
+    that does not parse, and counted as such.
+    """
+    path = tmp_path / "not-an-object.jsonl"
+    path.write_text(
+        "\n".join(
+            (
+                _line("u1", None, "user", "start here"),
+                '["u1", "user"]',
+                _line("a1", "u1", "assistant", "the answer"),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    session = read_claude_code_session(path)
+
+    assert [message.anchor for message in session.messages] == ["u1", "a1"]
+    assert session.omission_counts() == {OMISSION_UNREADABLE_LINE: 1}
+
+
+def test_a_missing_session_file_raises_file_not_found(tmp_path: Path) -> None:
+    """A file that is not there is a ``FileNotFoundError``, not a refusal.
+
+    A caller that listed a directory and is reading what it found has to see the
+    race when the file goes away. A ``SourceRefusal`` would instead claim the
+    path is not a plain file, which is a different statement and a wrong one.
+    """
+    with pytest.raises(FileNotFoundError):
+        read_claude_code_session(tmp_path / "no-such-session.jsonl")
+
+
+def test_a_file_that_grew_past_the_cap_between_stat_and_read_is_truncated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live session appended to while it was read still reads as truncated.
+
+    The size the reader trusts comes from the descriptor a moment before the
+    bytes arrive, and a session being imported is a session Claude Code may be
+    writing. A read that ends with the cap exhausted stopped early whether or
+    not the size said so, and a ``truncated`` flag that stayed ``False`` there
+    would promise a whole conversation this reader never saw.
+    """
+    path = tmp_path / "grew.jsonl"
+    path.write_text(
+        "\n".join((_line("u1", None, "user", "one"), _line("a1", "u1", "assistant", "two")))
+        + "\n",
+        encoding="utf-8",
+    )
+    # Exactly the file's own size: `st_size > cap` is false, so the truncation
+    # has to come from the read running out of budget.
+    monkeypatch.setattr(
+        "ciao.import_sources.claude_code.MAX_SESSION_BYTES", path.stat().st_size
+    )
+
+    session = read_claude_code_session(path)
+
+    assert session.truncated is True
+    assert session.omission_counts() == {OMISSION_TRUNCATED: 1}
+    assert [message.anchor for message in session.messages] == ["u1", "a1"]
+
+
+def test_a_file_nobody_could_open_raises_its_own_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permission failure is that failure, not "this is not a plain file".
+
+    Only a link or a wrong type says the *path* is not a session. An
+    unreadable-but-plain file has to reach the caller as the error it is, or a
+    consent screen would tell the user their transcript is damaged when what
+    happened is that the engine was not allowed to open it.
+    """
+
+    def _refuse(*args: object, **kwargs: object) -> int:
+        raise PermissionError(errno.EACCES, "permission denied", str(tmp_path))
+
+    monkeypatch.setattr("ciao.import_sources.claude_code.open_fd", _refuse)
+
+    with pytest.raises(PermissionError):
+        read_claude_code_session(tmp_path / "unreadable.jsonl")

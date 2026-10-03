@@ -109,8 +109,12 @@ OMISSION_OFF_CHAIN = "not_on_main_chain"
 #: Content blocks inside a message that were not text: tool calls and results,
 #: reasoning, attachments, inline file data.
 OMISSION_NON_TEXT_CONTENT = "non_text_content"
-#: A line that carried no entry at all — unparseable, or not an object with a
-#: uuid. Counted, never dropped without saying so.
+#: A line this reader could not read as an entry at all — it does not parse as
+#: JSON, or it parses as JSON that is not an object. A valid object that carries
+#: no string ``uuid`` (``summary``, ``file-history-snapshot``, ``custom-title``)
+#: is :data:`OMISSION_ENTRY_TYPE` instead: the file is not damaged, this reader
+#: simply has nothing to walk there. Counted either way, never dropped without
+#: saying so.
 OMISSION_UNREADABLE_LINE = "unreadable_line"
 #: The read stopped at :data:`MAX_SESSION_BYTES`; what follows is unknown, not
 #: empty. Always accompanied by :attr:`NormalizedSession.truncated`.
@@ -228,11 +232,14 @@ class NormalizedMessage:
     this turn — a Claude Code entry ``uuid``, an OpenCode message id — and it is
     the only stable way back to the source, so it is required and never blank.
 
-    ``text`` is normalized (whitespace collapsed to single spaces, see the
-    module docstring): it is what an extractor reads and what a normalized-fact
-    dedupe compares, and the source's own formatting is not either of those.
-    An empty ``text`` with a recorded omission beside it means the turn carried
-    no prose (a tool call, say), which is a different fact from a missing turn.
+    ``text`` is normalized (whitespace collapsed to single spaces): it is what an
+    extractor reads and what a normalized-fact dedupe compares, and the source's
+    own formatting is not either of those. That collapsing is an **adapter
+    convention**, not something this dataclass enforces — it is the provider
+    adapter that knows how the source formats its text, and a different provider
+    may normalize a different way. An empty ``text`` with a recorded omission
+    beside it means the turn carried no prose (a tool call, say), which is a
+    different fact from a missing turn.
 
     ``timestamp`` is ``None`` when the source has no date for the turn. See the
     module docstring: nothing here may supply one.
@@ -323,13 +330,15 @@ class NormalizedSession:
         The whole record in one mapping, for a consent screen or a log line. A
         kind absent from the mapping was not dropped; a kind mapped to zero is
         dropped from the result rather than carried, so the mapping says only
-        what happened.
+        what happened. A kind named twice is **summed**, not overwritten: the
+        count is how much was left out, so two rows of the same kind are that
+        much more of it however they were grouped on the way in.
         """
-        return {
-            omission.kind: omission.count
-            for omission in self.omissions
-            if omission.count
-        }
+        counts: dict[str, int] = {}
+        for omission in self.omissions:
+            if omission.count:
+                counts[omission.kind] = counts.get(omission.kind, 0) + omission.count
+        return counts
 
     def to_json(self) -> dict[str, Any]:
         """The snapshot form: every field, so the round trip is lossless."""
