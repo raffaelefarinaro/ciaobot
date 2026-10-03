@@ -268,6 +268,31 @@ def test_entries_without_a_recorded_name_keep_the_old_behaviour(tmp_path: Path) 
     assert resolved.name == "General"
 
 
+def test_a_system_routine_fallback_is_not_logged_as_a_dead_target(
+    tmp_path: Path, caplog
+) -> None:
+    """A system routine is dispatched without a web_project_id on purpose.
+
+    Its stock definition never records a project name, so it always reaches the
+    General fallback — not because its target went stale, but because General is
+    where that routine runs. That must stay a silent, expected resolution: logging
+    it as a stale target made every Workspace-care tick look broken.
+    """
+    import logging
+
+    pcm = _make_manager(tmp_path)
+    entry = _entry(schedule_id="system-memory-curation@work", workspace="work")
+    entry.scope = "system"
+
+    with caplog.at_level(logging.WARNING, logger="ciao.web.project_chats"):
+        resolved = pcm._resolve_schedule_project("", entry)
+
+    assert resolved is not None
+    assert resolved.name == "General"
+    assert resolved.workspace == "work"
+    assert "is stale and records no project name" not in caplog.text
+
+
 def test_the_name_round_trips_through_the_schedule_store(tmp_path: Path) -> None:
     """It has to survive serialization, or it is useless on the next run."""
     store = ScheduleStore(tmp_path)
