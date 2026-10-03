@@ -550,7 +550,7 @@ def test_the_preview_states_the_provider_model_volume_and_cap(
     assert preview.batch_cap == BATCH_CAP
     assert preview.estimated_messages == 2
     assert preview.estimated_chars > 0
-    assert preview.destination.endswith("memory-vault/personal")
+    assert Path(preview.destination) == config.workspace_vault_root("personal")
 
 
 def test_an_opencode_id_from_another_project_is_refused_before_the_export(

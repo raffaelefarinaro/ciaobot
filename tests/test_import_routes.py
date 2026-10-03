@@ -336,7 +336,7 @@ def test_the_preview_returns_counts_and_the_confirmation_and_no_transcript_text(
     )
     assert preview["estimated_messages"] == 2
     assert preview["batch_cap"] == BATCH_CAP
-    assert preview["destination"].endswith("memory-vault/personal")
+    assert Path(preview["destination"]) == config.workspace_vault_root("personal")
     assert preview["workspace"] == "personal"
 
 
