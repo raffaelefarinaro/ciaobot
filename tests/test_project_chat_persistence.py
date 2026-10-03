@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import AsyncMock
 
+from ciao import entity_types
 from ciao.config import CiaoConfig
 from ciao.models import ResultEvent
 from ciao.sessions import StateStore
@@ -49,6 +50,25 @@ def _persisted_chats(tmp_path: Path) -> dict[str, dict]:
     return payload["chats"]
 
 
+def _seeded_welcome(manager: ProjectChatManager, title: str) -> tuple[str, str]:
+    """The seeded welcome's own prompt and its visible first message, by title."""
+    chat = next(chat for chat in manager._chats.values() if chat.title == title)
+    prompt, welcome = chat.handover_messages[0], chat.handover_messages[1]
+    return str(prompt["content"]), str(welcome["content"])
+
+
+def _write_registry(root: Path, overrides: str) -> None:
+    """The `<vault>/entity-types.yaml` the Categories API reads, plus a cache reset.
+
+    The cache is process-wide, so a registry written here has to be visible to
+    the manager built next; a stale entry would answer from stock and the test
+    would pass for the wrong reason.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    (root / entity_types.VAULT_FILENAME).write_text(overrides, encoding="utf-8")
+    entity_types.clear_entity_types_cache()
+
+
 def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -78,6 +98,148 @@ def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
     assert "projects/active/" in fresh_prompt
     assert "Do not create `personal/`, `work/`, or `Templates/`" in fresh_prompt
     assert "Create Directory Structure" not in fresh_prompt
+
+
+def test_onboarding_names_effective_enabled_non_hidden_categories(
+    tmp_path: Path,
+) -> None:
+    """The welcome names the categories the Categories page would list (#979).
+
+    Read through the registry the owner edits — the AGENT vault root — which on
+    an install that has not re-rooted is a different directory from the notes
+    root the welcome names. Reading the notes root would report the shipped list
+    while the owner's own page shows their edits, so both files are seeded here
+    with different labels and the welcome has to pick the right one.
+    """
+    registry_root = tmp_path / "memory-vault"          # config.agent_vault_root("personal")
+    notes_root = registry_root / "personal"            # config.workspace_vault_root("personal")
+    _write_registry(
+        registry_root,
+        "- id: person\n"
+        "  label: Human\n"
+        "- id: idea\n"
+        "  enabled: false\n"
+        "- id: client\n"
+        "  label: Client account\n"
+        "  kind: entity\n"
+        "  folder: Clients\n"
+        "  description: An account the user works with.\n"
+        "  aliases: []\n"
+        "  stale_after_days: 0\n"
+        "  enabled: true\n",
+    )
+    _write_registry(
+        notes_root,
+        "- id: notebook\n"
+        "  label: Notes root only\n"
+        "  kind: note\n"
+        "  folder: Notebook\n"
+        "  aliases: []\n"
+        "  stale_after_days: 0\n"
+        "  enabled: true\n",
+    )
+
+    manager = _make_manager(tmp_path)
+    _, welcome = _seeded_welcome(manager, "Welcome to Ciaobot! 👋")
+
+    # A renamed builtin and a custom one, in registry order.
+    assert "Human, Project, Place, Resource, Journal, Note, Client account" in welcome
+    # A category the owner turned off is not promoted into a first impression…
+    assert "Idea" not in welcome
+    # …and neither is one the agent writes itself (`hidden`).
+    assert "Skill proposal" not in welcome
+    assert "Workspace," not in welcome
+    # The source is this workspace's own registry, not a list seeded beside it.
+    assert "Notes root only" not in welcome
+    # And naming them created none: seeding writes nothing into the vault.
+    assert not (registry_root / "People").exists()
+    assert not (registry_root / "Clients").exists()
+    entity_types.clear_entity_types_cache()
+
+
+def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Scratch and existing-vault onboarding both teach the two memory layers."""
+    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
+    existing = _make_manager(tmp_path / "existing")
+    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
+    scratch = _make_manager(tmp_path / "scratch")
+
+    for manager, title in (
+        (existing, "Connect Existing Vault 👋"),
+        (scratch, "Welcome to Ciaobot! 👋"),
+    ):
+        _, welcome = _seeded_welcome(manager, title)
+
+        # The two layers, and the one editor that changes the second one.
+        assert "**Profile & preferences**" in welcome
+        assert "**Notes, by category**" in welcome
+        assert "[See or customize memory categories](/memory/categories)" in welcome
+        # A category is a filing rule for future notes, not a standing order to
+        # remember everything.
+        assert "**future**" in welcome
+        # What the memory pass really does, and where a person reviews it.
+        assert "proposal" in welcome
+        assert "**Memory · To decide**" in welcome
+        assert "undo from **Memory · History**" in welcome
+        # No promise that past conversations are read, imported or filed.
+        assert "import" not in welcome.lower()
+        # The interview still opens the chat, and memory comes before it.
+        assert "What is your name" in welcome
+        assert welcome.index("memory is organized") < welcome.index("What is your name")
+
+        # The agent is told to explain it early, once, without a second round of
+        # questions — and never to go looking for conversations to file.
+        prompt, _ = _seeded_welcome(manager, title)
+        assert "**Explain memory early**" in prompt
+        assert "Do not run a second interview round about categories" in prompt
+        assert "do not scan past chats" in prompt
+        assert "Ask the user 2-3 important questions" in prompt
+
+    # The existing-vault preservation and routing instructions are untouched.
+    existing_prompt, _ = _seeded_welcome(existing, "Connect Existing Vault 👋")
+    assert "Preserve before reorganizing" in existing_prompt
+    assert "Never delete or overwrite them" in existing_prompt
+    assert "Workspace/Memory-Proposals.md" in existing_prompt
+    scratch_prompt, _ = _seeded_welcome(scratch, "Welcome to Ciaobot! 👋")
+    assert "Onboarding interview and curation" in scratch_prompt
+    assert "Do not create `personal/`, `work/`, or `Templates/`" in scratch_prompt
+
+
+def test_custom_category_label_is_plain_text_in_welcome(tmp_path: Path) -> None:
+    """A label is user-typed text: it is named, never rendered as markup (#979).
+
+    The welcome is Markdown, so a category label carrying a link or a tag would
+    otherwise become one — and the one link the message offers would not be the
+    only one in it.
+    """
+    _write_registry(
+        tmp_path / "memory-vault",
+        "- id: sneaky\n"
+        "  label: Read [more](https://evil.example/steal) <img src=x onerror=alert(1)>\n"
+        "  kind: note\n"
+        "  folder: Sneaky\n"
+        "  aliases: []\n"
+        "  stale_after_days: 0\n"
+        "  enabled: true\n",
+    )
+
+    manager = _make_manager(tmp_path)
+    _, welcome = _seeded_welcome(manager, "Welcome to Ciaobot! 👋")
+
+    # The Categories link is still the one real link in the message.
+    assert welcome.count("](/memory/categories)") == 1
+    # The label's own text survives, escaped rather than dropped…
+    assert "Read \\[more\\]" in welcome
+    assert "onerror" in welcome
+    # …and it is not a link target, a tag, or anything a click would follow.
+    assert "](https://evil.example/steal)" not in welcome
+    assert "](https" not in welcome
+    # The tag is readable text (an escaped `<`), never markup a renderer sees.
+    assert "\\<img src\\=x onerror\\=alert\\(1\\)\\>" in welcome
+    assert "<img src=x onerror=alert(1)>" not in welcome
+    entity_types.clear_entity_types_cache()
 
 
 def test_stale_manager_does_not_drop_chat_created_by_other_process(tmp_path: Path) -> None:
