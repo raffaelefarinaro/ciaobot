@@ -64,9 +64,9 @@ Live project membership and completion validation belong to a later
 application service; this store keeps the ``project_id`` string but knows
 no project registry. Linkage mutation (``chat_id``/``attempt_id``) belongs
 to the delegation child: source hand edits may carry nullable linkage, but
-this store never creates a live chat or attempt. Before any production
-writer is exposed, parent #973-B2 must exclude task bookkeeping from
-recall/graph/review/curation and verify backup inclusion.
+this store never creates a live chat or attempt. Task records are reserved
+bookkeeping (#1002): excluded from recall, the Memory Map graph, review and
+curation, and inside the durable backup scope.
 """
 
 from __future__ import annotations

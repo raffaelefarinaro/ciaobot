@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "1.0.1"
+version = "1.1.0"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk[otel]==0.2.161",
+  "claude-agent-sdk[otel]==0.2.163",
   # Runtime security pins for transitive dependencies (#953). `mcp` accepts
   # PyJWT[crypto]>=2.10.1 and `pywebpush`->`requests` accepts urllib3>=1.26,<3,
   # but a wheel install resolves published Requires-Dist rather than uv.lock, so
