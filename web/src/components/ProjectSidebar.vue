@@ -935,6 +935,10 @@ const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
   { label: 'Explore', items: [
     { section: 'map', label: 'Map' },
     { section: 'categories', label: 'Categories' },
+    // The way conversations get in: a scan of this computer's own agent folders,
+    // opt-in, in its own page. No count — nothing is listed until it is asked
+    // for, so a number here would describe a scan nobody ran.
+    { section: 'import', label: 'Import' },
   ] },
   { label: 'Records', items: [
     { section: 'retired', label: 'Retired' },
@@ -957,6 +961,9 @@ function memoryNavCount(section: MemorySection): number | null {
     // ask for attention no click can clear, and the map's own note count already
     // says how much of the vault there is.
     case 'categories': return null
+    // Nothing is listed until the reader presses Find, so there is nothing to
+    // count before then and nothing stale to show after.
+    case 'import': return null
     case 'history': return historyLoaded ? proposals.historyTotal || null : null
   }
 }

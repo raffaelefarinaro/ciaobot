@@ -686,6 +686,27 @@ describe('MemoryMapView sections', () => {
     wrapper.unmount()
   })
 
+  it('shows the import panel on /memory/import, as a page and not a card on the map', async () => {
+    const { wrapper, mm } = await mountSection('import')
+    expect(mm.section).toBe('import')
+    expect(wrapper.get('.pane-header').text()).toContain('Memory · Import')
+    // Its own scrolling page: no canvas, no map toolbar, no review rail, so a
+    // listing of any length scrolls the pane instead of squeezing the map to
+    // zero height and pushing the controls below the list out of reach (#1029).
+    expect(wrapper.find('.import-sources').exists()).toBe(true)
+    expect(wrapper.find('.mm-review-wrap').exists()).toBe(true)
+    expect(wrapper.find('.mm-body').exists()).toBe(false)
+    expect(wrapper.find('.mm-toolbar').exists()).toBe(false)
+    expect(wrapper.find('.mm-review-rail').exists()).toBe(false)
+    // Discovery is opt-in: mounting the section scans nothing.
+    expect(apiGet.mock.calls.some(([url]) => String(url).includes('/api/import/'))).toBe(false)
+    wrapper.unmount()
+
+    const map = await mountSection('map')
+    expect(map.wrapper.find('.import-sources').exists()).toBe(false)
+    map.wrapper.unmount()
+  })
+
   it('follows the route when the sidebar moves to another section', async () => {
     const { wrapper, mm } = await mountSection('review')
     await wrapper.router.push('/memory/map')

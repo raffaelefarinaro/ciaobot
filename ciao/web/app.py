@@ -183,6 +183,7 @@ from ciao.web.routes_push import (
     push_unsubscribe,
 )
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
+from ciao.web.routes_import import import_preview, import_sources
 from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.routes_tasks import (
     task_complete,
@@ -452,6 +453,12 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         ),
         Route("/api/webhooks/{trigger_id}", webhook_update, methods=["PATCH"]),
         Route("/api/webhooks/{trigger_id}", webhook_delete, methods=["DELETE"]),
+        # Import consent (C5): discovery is metadata only and the preview reads
+        # the *selected* conversations, so neither answers before a person has
+        # chosen what to process. Session-protected like every other /api route;
+        # no extraction lives here (C7) and no batch store (C6).
+        Route("/api/import/sources", import_sources, methods=["GET"]),
+        Route("/api/import/preview", import_preview, methods=["POST"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),
