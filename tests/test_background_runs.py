@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import stat
 import sys
@@ -39,6 +40,7 @@ from ciao.background import (
 from ciao.config import CiaoConfig
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 from ciao.sessions import StateStore
+from ciao.tool_path import engine_bin_dir
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 
@@ -212,6 +214,37 @@ def test_missing_executable_fails_at_validation_not_in_the_log(tmp_path: Path) -
     with pytest.raises(BackgroundRunError) as excinfo:
         resolve_executable("definitely-not-a-real-binary-xyz", tmp_path, tmp_path)
     assert excinfo.value.code == "cmd_not_found"
+
+
+def test_bare_ciao_resolves_to_the_engine_over_a_stale_decoy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A background ``ciao`` runs the engine, not a stale install earlier on PATH (#995)."""
+    engine = shutil.which("ciao", path=engine_bin_dir())
+    assert engine is not None, "the test interpreter's bin dir must hold the engine ciao"
+
+    decoy_dir = tmp_path / "stale-local-bin"
+    decoy_dir.mkdir()
+    decoy = decoy_dir / "ciao"
+    decoy.write_text("#!/bin/sh\necho stale\n", encoding="utf-8")
+    decoy.chmod(decoy.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(decoy_dir), "/user/bin"]))
+
+    assert resolve_executable("ciao", tmp_path, tmp_path) == engine
+
+
+def test_other_bare_names_still_resolve_from_the_user_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the engine-first promotion is new; a user's own command resolves as before."""
+    user_dir = tmp_path / "user-bin"
+    user_dir.mkdir()
+    tool = user_dir / "background-test-tool"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(user_dir))
+
+    assert resolve_executable("background-test-tool", tmp_path, tmp_path) == str(tool)
 
 
 def test_env_rejects_loader_hooks_and_the_session_token() -> None:
