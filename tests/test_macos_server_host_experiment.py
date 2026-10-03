@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -57,13 +58,81 @@ def test_identity_is_separate_from_pwa_and_previous_experiment() -> None:
     assert info["LSUIElement"] is True
     # A distinct identity from the real Ciaobot bundles, so a grant can never be
     # inherited from the PWA, the retired app, a launcher, or the menu bar agent.
-    # These are the actual constants, imported rather than copied.
+    # These are the actual constants, imported rather than copied. The menu bar ID
+    # stays a literal because ciao/cli.py:392 spells it inline with no constant to
+    # import.
     from ciao import cli, macos_service
 
     reserved = {macos_service.DESKTOP_BUNDLE_ID, "local.ciaobot.menubar", *cli._OUR_BUNDLE_IDS}
     assert BUILD.BUNDLE_ID not in reserved
     # The earlier direct AX probe lives in a separate, uncommitted checkout, so its
     # bundle ID is not a constant here and is deliberately not asserted.
+
+
+# --- README run-command arguments (regression) ----------------------------
+
+
+def _fenced_sh_commands(text: str) -> list[str]:
+    """Every shell command inside a ```sh fence, comments stripped.
+
+    A command continues only across a trailing backslash; a new line without one
+    starts a new command, so a `PY=...` assignment and the `open` that follows it
+    stay separate.
+    """
+    commands: list[str] = []
+    in_fence = False
+    buffer: list[str] = []
+    continuing = False
+    for line in text.splitlines():
+        if line.strip() == "```sh":
+            in_fence = True
+            buffer = []
+            continuing = False
+            continue
+        if in_fence and line.strip() == "```":
+            in_fence = False
+            if buffer:
+                commands.append(" ".join(buffer))
+            buffer = []
+            continue
+        if not in_fence:
+            continue
+        # Drop an inline comment (the README uses ` # ...`).
+        stripped = re.sub(r"\s+#.*$", "", line).strip()
+        if not stripped and not continuing:
+            continue
+        continuing = stripped.endswith("\\")
+        if continuing:
+            stripped = stripped[:-1].rstrip()
+        if stripped:
+            buffer.append(stripped)
+        if not continuing and buffer:
+            commands.append(" ".join(buffer))
+            buffer = []
+    if buffer:
+        commands.append(" ".join(buffer))
+    return commands
+
+
+def test_readme_open_invocations_place_options_before_app_and_args() -> None:
+    text = (EXPERIMENT / "README.md").read_text()
+    commands = _fenced_sh_commands(text)
+    opens = [c for c in commands if c.startswith("open ")]
+    # All four documented modes are present, no more.
+    assert len(opens) == 4
+    for command in opens:
+        tokens = command.split()
+        app_index = tokens.index("--args")
+        stdout_index = tokens.index("--stdout")
+        stderr_index = tokens.index("--stderr")
+        # --stdout/--stderr are open's own options and must precede the app path
+        # and --args; after --args they become the host's argv and exit 2.
+        assert stdout_index < app_index
+        assert stderr_index < app_index
+        # The app argument is the token immediately before --args.
+        assert tokens[app_index - 1] == '"$APP"'
+        # --output is a host argument, so it lives after --args.
+        assert tokens.index("--output") > app_index
 
 
 # --- builder refusals -----------------------------------------------------
@@ -402,3 +471,90 @@ def test_swift_integral_number_rejects_bool_and_float(tmp_path: Path) -> None:
     run_completed = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
     assert run_completed.returncode == 0, run_completed.stderr
     assert run_completed.stdout.split() == ["4242", "reject", "reject", "reject"]
+
+
+# Extracts the exact path-validation functions from the real HostProbe.swift and
+# compiles them with an injected bundle root, so the test runs the shipped logic
+# rather than a copy. AX/AppKit are not imported by these functions and nothing
+# is launched.
+_PATH_EXTRACTOR_SNIPPET = r"""
+import Foundation
+import Darwin
+
+__FUNCTIONS__
+
+let bundleRoot = CommandLine.arguments[1]
+let output = CommandLine.arguments[2]
+print(outputPathRejection(output, bundleRoot: bundleRoot) ?? "ACCEPT")
+"""
+
+
+def _extract_path_validation_source() -> str:
+    host = (EXPERIMENT / "HostProbe.swift").read_text()
+    wanted = ("func resolveExistingPath(", "func outputPathRejection(")
+    lines = host.splitlines()
+    chunks: list[str] = []
+    for start, line in enumerate(lines):
+        if any(line.startswith(name) for name in wanted):
+            depth = 0
+            started = False
+            for candidate in lines[start:]:
+                depth += candidate.count("{") - candidate.count("}")
+                chunks.append(candidate)
+                if "{" in candidate:
+                    started = True
+                if started and depth == 0:
+                    break
+    assert len(chunks) > 10, "could not extract the path-validation functions"
+    return "\n".join(chunks)
+
+
+@pytest.mark.skipif(not HAS_XCRUN, reason="swift snippet requires macOS Command Line Tools")
+def test_swift_output_path_validation(tmp_path: Path) -> None:
+    # Build a fake "bundle root" out of real directories, without touching any
+    # signed app. `alias` is a symlink to `bin`, and `.` / `..` name segments.
+    fake_root = tmp_path / "h"
+    (fake_root / "bin").mkdir(parents=True)
+    (fake_root / "child").mkdir()
+    (fake_root / "bin2").mkdir()
+    (fake_root / "out").mkdir()
+    alias = fake_root / "alias"
+    alias.symlink_to(fake_root / "bin")
+
+    bundle_root = str(fake_root / "bin")
+    source = tmp_path / "pathval.swift"
+    source.write_text(
+        _PATH_EXTRACTOR_SNIPPET.replace("__FUNCTIONS__", _extract_path_validation_source())
+    )
+    binary = tmp_path / "pathval"
+    compiled = subprocess.run(
+        ["xcrun", "swiftc", str(source), "-o", str(binary)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+
+    def rejection(output: str, root: str = bundle_root) -> str:
+        completed = subprocess.run(
+            [str(binary), root, output], capture_output=True, text=True, timeout=60
+        )
+        assert completed.returncode == 0, completed.stderr
+        return completed.stdout.strip()
+
+    inside = "output is inside the signed bundle"
+    assert rejection(f"{bundle_root}/receipt.json") == inside
+    assert rejection(f"{fake_root}/child/../bin/dot.json") == inside
+    assert rejection(f"{alias}/sym.json") == inside
+    assert rejection(f"{bundle_root}/.") != "ACCEPT"
+    assert rejection(f"{bundle_root}/..") != "ACCEPT"
+    # A sibling whose name shares a prefix is not inside (path-boundary compare).
+    assert rejection(f"{fake_root}/bin2/sib.json") == "ACCEPT"
+    # A valid external path is accepted.
+    assert rejection(f"{fake_root}/out/ok.json") == "ACCEPT"
+    # A missing parent and a relative path are refused.
+    assert rejection(f"{fake_root}/nope/x.json") == "output directory does not exist"
+    assert rejection("rel/x.json") == "output must be an absolute path"
+    # A canonical-alias bundle root (e.g. /tmp vs /private/tmp) is matched too.
+    if Path("/tmp").resolve() != Path("/tmp"):
+        assert rejection("/tmp/never-there/x.json", root="/tmp") != "ACCEPT"

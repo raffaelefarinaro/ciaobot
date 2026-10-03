@@ -91,15 +91,15 @@ a `parent_mismatch` receipt is **not** evidence.
 ### 1. Native baseline (no prompt, read-only)
 
 ```sh
-open -W -n "$APP" --args native \
-  --output "$DIR/native.json" --stdout "$DIR/host.out" --stderr "$DIR/host.err"
+open -W -n --stdout "$DIR/host.out" --stderr "$DIR/host.err" \
+  "$APP" --args native --output "$DIR/native.json"
 ```
 
 ### 2. Request Accessibility (prompts once, five-second lifetime)
 
 ```sh
-open -W -n "$APP" --args request \
-  --output "$DIR/request.json" --stdout "$DIR/host.out" --stderr "$DIR/host.err"
+open -W -n --stdout "$DIR/host.out" --stderr "$DIR/host.err" \
+  "$APP" --args request --output "$DIR/request.json"
 ```
 
 macOS shows the prompt asynchronously. In System Settings, verify **both the
@@ -112,8 +112,8 @@ TCC database; remove stale entries by hand in System Settings only.
 
 ```sh
 PY="$HOME/.venvs/ciaobot/bin/python"   # an absolute, stable-pid interpreter
-open -W -n "$APP" --args python --python "$PY" \
-  --output "$DIR/python.json" --stdout "$DIR/host.out" --stderr "$DIR/host.err"
+open -W -n --stdout "$DIR/host.out" --stderr "$DIR/host.err" \
+  "$APP" --args python --python "$PY" --output "$DIR/python.json"
 ```
 
 ### 4. Python → osascript (System Events) child
@@ -122,8 +122,8 @@ Reading a process role needs **both** the Automation grant (System Events) and
 Accessibility for the responsible process; this mode exercises both.
 
 ```sh
-open -W -n "$APP" --args osascript --python "$PY" \
-  --output "$DIR/osascript.json" --stdout "$DIR/host.out" --stderr "$DIR/host.err"
+open -W -n --stdout "$DIR/host.out" --stderr "$DIR/host.err" \
+  "$APP" --args osascript --python "$PY" --output "$DIR/osascript.json"
 ```
 
 The host stays alive while the child runs, bounds and drains the child's stdout
@@ -198,6 +198,9 @@ routing; this experiment grants agents no desktop control and reroutes nothing.
 
 - Run the installer, replace the live engine, reboot, or modify actual grants.
 - Commit receipts or build output to the repository.
+- Point `--output` inside the signed `.app` (directly, with a `..` segment, or
+  through a symlinked parent); the host refuses it because a receipt there breaks
+  `codesign --verify --strict`.
 - Remove the PWA, the Python grant, existing Ciaobot bundles, or production
   service files when cleaning up.
 

@@ -132,6 +132,8 @@ def parse_child_receipt(raw: Any) -> dict[str, Any]:
 
     if normalized["mode"] not in MODES:
         raise ChildReceiptError(f"receipt mode {normalized['mode']!r} is not a fixed mode")
+    if not normalized["platform"]:
+        raise ChildReceiptError("receipt platform must not be empty")
     if normalized["pid"] <= 0:
         raise ChildReceiptError("receipt pid must be positive")
     if normalized["ppid"] < 0:
@@ -293,24 +295,21 @@ def run_python_ax() -> dict[str, Any]:
                 )
             )
             outcome["role_result"] = role_result
-            # The role must actually be a CFString; CFStringGetCString on another
-            # CFType is undefined.
-            if (
-                role_result == 0
-                and role.value
-                and core.CFGetTypeID(role) == core.CFStringGetTypeID()
-            ):
+            # Release any successfully copied non-null role, whatever its CF
+            # type; only the string read is gated on it being a CFString.
+            if role_result == 0 and role.value:
                 owned_refs.append(role)
-                buffer = ctypes.create_string_buffer(256)
-                if core.CFStringGetCString(
-                    role,
-                    ctypes.cast(buffer, ctypes.c_char_p),
-                    len(buffer),
-                    core_foundation_utf8,
-                ):
-                    outcome["focused_role"] = buffer.value.decode(
-                        "utf-8", errors="replace"
-                    )
+                if core.CFGetTypeID(role) == core.CFStringGetTypeID():
+                    buffer = ctypes.create_string_buffer(256)
+                    if core.CFStringGetCString(
+                        role,
+                        ctypes.cast(buffer, ctypes.c_char_p),
+                        len(buffer),
+                        core_foundation_utf8,
+                    ):
+                        outcome["focused_role"] = buffer.value.decode(
+                            "utf-8", errors="replace"
+                        )
     finally:
         for ref in owned_refs:
             core.CFRelease(ref)

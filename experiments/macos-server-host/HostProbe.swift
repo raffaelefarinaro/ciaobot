@@ -94,6 +94,45 @@ final class OutputBuffer {
     }
 }
 
+/// Canonicalize an EXISTING path with realpath(3). Returns nil on any resolution
+/// error so the caller can fail closed.
+func resolveExistingPath(_ path: String) -> String? {
+    guard let pointer = realpath(path, nil) else { return nil }
+    defer { free(pointer) }
+    return String(cString: pointer)
+}
+
+/// The reason an `--output` path is refused, or nil when it is acceptable.
+///
+/// The path must be absolute. Both the output's parent and the bundle root are
+/// canonicalized with realpath, so `..` segments, a symlinked parent and an
+/// alias such as `/var` -> `/private/var` cannot bypass the in-bundle guard. The
+/// parent must already exist; the atomic write renames over a final-component
+/// symlink rather than following it, so resolving the parent is sufficient.
+/// Fails closed on any resolution error and on a `.`/`..`/empty final component.
+///
+/// Kept free of `Bundle`/`AppKit` so the offline tests can compile this exact
+/// logic with an injected bundle root and no launch.
+func outputPathRejection(_ rawOutput: String, bundleRoot rawBundleRoot: String) -> String? {
+    guard rawOutput.hasPrefix("/") else { return "output must be an absolute path" }
+    let output = rawOutput as NSString
+    let lastComponent = output.lastPathComponent
+    if lastComponent.isEmpty || lastComponent == "." || lastComponent == ".." {
+        return "output must name a file, not '.' or '..'"
+    }
+    guard let canonicalParent = resolveExistingPath(output.deletingLastPathComponent) else {
+        return "output directory does not exist"
+    }
+    guard let bundleRoot = resolveExistingPath(rawBundleRoot) else {
+        return "could not resolve the bundle root"
+    }
+    let candidate = (canonicalParent as NSString).appendingPathComponent(lastComponent)
+    if candidate == bundleRoot || candidate.hasPrefix(bundleRoot + "/") {
+        return "output is inside the signed bundle"
+    }
+    return nil
+}
+
 /// Parse the fixed invocation. Rejects unknown/repeated arguments, invalid
 /// mode/path combinations, and an output path inside the signed bundle, before
 /// any probe or filesystem work happens.
@@ -122,11 +161,10 @@ func parseInvocation(_ arguments: [String]) -> (mode: String, output: String, py
     }
     guard let resolvedOutput = output, resolvedOutput.hasPrefix("/") else { usage() }
     // A receipt written inside the signed bundle would break its strict signature
-    // on the next verify, so refuse it here.
-    let bundlePrefix = Bundle.main.bundleURL.path + "/"
-    if resolvedOutput == Bundle.main.bundleURL.path
-        || resolvedOutput.hasPrefix(bundlePrefix) {
-        fputs("CiaobotServerHost: refusing --output inside the signed bundle\n", stderr)
+    // on the next verify. Compare canonical paths so `..` segments, a symlinked
+    // parent and an alias such as /tmp -> /private/tmp cannot bypass this.
+    if let reason = outputPathRejection(resolvedOutput, bundleRoot: Bundle.main.bundleURL.path) {
+        fputs("CiaobotServerHost: refusing --output: \(reason)\n", stderr)
         exit(2)
     }
     if CHILD_MODES.contains(mode) {
