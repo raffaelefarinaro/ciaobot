@@ -41,8 +41,13 @@ reason to trust a bundle, and there is no direct-engine fallback.
 ## The command contract
 
 ```python
-from pathlib import Path
-from ciao.server_host import parse_service_command, host_service_argv
+from pathlib import Path, PurePosixPath
+from ciao.server_host import (
+    default_bundle_path,
+    host_service_argv,
+    parse_service_command,
+    verify_owned_host,
+)
 
 # Syntax only:
 parse_service_command(
@@ -52,7 +57,7 @@ parse_service_command(
 
 # Render the hosted command AFTER verify_owned_host(bundle) has returned. A
 # verified snapshot carries a str path; wrap it in PurePosixPath for rendering:
-verified = verify_owned_host(bundle)
+verified = verify_owned_host(default_bundle_path())
 host_service_argv(PurePosixPath(verified.bundle_path), Path("/usr/bin/python3"))
 ```
 
@@ -128,7 +133,7 @@ Accessibility call, and no installed bundle, engine or TCC state is touched.
 ## The ownership record
 
 The record is a JSON object at an explicit path — the default is
-`~/.local/state/ciaobot/server-host.json` (`DEFAULT_OWNERSHIP_PATH`) — written
+`~/.local/state/ciaobot/server-host.json` (`default_ownership_path()`) — written
 **outside** the sealed app. A record inside the bundle would change the very
 digest the next read compares and would be covered by the signature it vouches
 for, so a record path inside the recorded bundle is refused; both paths are
@@ -145,7 +150,8 @@ descriptor that must be the inode the checks examined), malformed JSON, a duplic
 JSON `true` is not `1`), a wrong bundle id / revision / protocol, a hash that is
 not 64 lowercase hex, a CDHash that is not 40 lowercase hex, a `bundle_files`
 mapping that is not exactly the four sealed names (so an absolute, backslashed,
-non-canonical or traversing name is refused), and extra or missing top-level
+non-canonical or traversing name is refused), a `bundle_path` not named
+`Ciaobot Server.app`, and extra or missing top-level
 fields, and an `executable_sha256` that differs from the executable's
 `bundle_files` digest. Values are never coerced. On macOS it additionally
 requires the record's owner to be this uid and its mode to grant nothing to group
@@ -168,9 +174,10 @@ not re-spell them:
   under the host's own stop. This is a later consumer's obligation; the constants
   exist so the plist and the host cannot drift.
 
-There are no environment variables and no compatibility shims. The defaults are
-hardcoded home-anchored constants; an environment-redirectable install path is a
-path an unprivileged writer could redirect.
+There are no Ciaobot-specific environment variables and no compatibility shims.
+The defaults (`default_bundle_path()`, `default_ownership_path()`) are
+home-anchored and resolved at call time, like the install receipt's path; they
+follow `Path.home()` and nothing else.
 
 The record is outside the sealed app on purpose: an engine update changes the
 engine and its sidecar files, never the host bytes, so the host keeps its CDHash

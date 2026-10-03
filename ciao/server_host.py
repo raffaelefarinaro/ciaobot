@@ -59,8 +59,6 @@ __all__ = [
     "APP_NAME",
     "ARCHITECTURES",
     "BUNDLE_ID",
-    "DEFAULT_BUNDLE_PATH",
-    "DEFAULT_OWNERSHIP_PATH",
     "EXECUTABLE_NAME",
     "EXIT_TIMEOUT_SECONDS",
     "HOST_PROTOCOL",
@@ -74,6 +72,8 @@ __all__ = [
     "HostOwnership",
     "ServerHostError",
     "ServiceCommand",
+    "default_bundle_path",
+    "default_ownership_path",
     "host_service_argv",
     "inspect_host_bundle",
     "parse_service_command",
@@ -113,13 +113,21 @@ NATIVE_TIMEOUT_SECONDS = 10
 #: that does both, so the slices are read from ``codesign``'s ``Format=`` line.)
 CODESIGN = "/usr/bin/codesign"
 
-#: Where the host bundle and its ownership record live by default. Hardcoded
-#: constants, not environment variables: a path that could be redirected by the
-#: environment is a path an unprivileged writer could redirect.
-DEFAULT_BUNDLE_PATH = Path.home() / "Applications" / APP_NAME
-DEFAULT_OWNERSHIP_PATH = (
-    Path.home() / ".local" / "state" / "ciaobot" / "server-host.json"
-)
+
+def default_bundle_path() -> Path:
+    """Where the host bundle lives by default: ``~/Applications/Ciaobot Server.app``.
+
+    Home-anchored and resolved at call time, like
+    :func:`ciao.install_receipt.default_receipt_path`, so the per-test home
+    isolation applies. There is no Ciaobot-specific environment override.
+    """
+    return Path.home() / "Applications" / APP_NAME
+
+
+def default_ownership_path() -> Path:
+    """Where the ownership record lives by default, outside the sealed app."""
+    return Path.home() / ".local" / "state" / "ciaobot" / "server-host.json"
+
 
 ARCHITECTURES = ("arm64", "x86_64")
 
@@ -491,6 +499,12 @@ def _decode_record(raw: str, *, path: Path) -> HostOwnership:
     bundle_path = _absolute_posix(
         document["bundle_path"], what="the recorded bundle path", code=INVALID_OWNERSHIP
     )
+    if PurePosixPath(bundle_path).name != APP_NAME:
+        raise ServerHostError(
+            f"the ownership record at {path.name} names a bundle not called "
+            f"{APP_NAME!r}: {bundle_path!r}",
+            code=INVALID_OWNERSHIP,
+        )
     executable_sha256 = _require_sha256(
         document["executable_sha256"], what="executable_sha256"
     )
@@ -544,8 +558,16 @@ def _read_same_file(path: Path, checked: os.stat_result) -> bytes:
     The ``lstat`` checks and the read are two lookups of one name; opening with
     ``O_NOFOLLOW`` and comparing the open descriptor's device and inode to the
     checked ones keeps a rename between them from substituting another file.
+    ``O_NONBLOCK`` keeps a FIFO swapped in after the check from blocking the
+    ``open`` forever before the inode comparison can refuse it; it does not
+    change how a regular file reads.
     """
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     descriptor = os.open(path, flags)
     with os.fdopen(descriptor, "rb") as handle:
         opened = os.fstat(handle.fileno())
@@ -653,9 +675,14 @@ def _refuse_unreadable(error: OSError) -> None:
     ) from error
 
 
-def _collect_sealed_files(bundle: Path) -> dict[str, str]:
-    """Digest every regular file, refusing a symlink, special file or stray entry."""
+def _collect_sealed_files(bundle: Path) -> tuple[dict[str, str], bytes]:
+    """Digest every regular file, refusing a symlink, special file or stray entry.
+
+    Returns the digests and the ``Info.plist`` bytes that were digested, so the
+    plist the identity checks parse is the one the snapshot records.
+    """
     files: dict[str, str] = {}
+    plist = b""
     for current, dirs, names in os.walk(
         bundle, onerror=_refuse_unreadable, followlinks=False
     ):
@@ -687,9 +714,10 @@ def _collect_sealed_files(bundle: Path) -> dict[str, str]:
                 checked = os.lstat(entry)
                 mode = checked.st_mode
                 if stat.S_ISREG(mode):
-                    files[relative] = hashlib.sha256(
-                        _read_same_file(entry, checked)
-                    ).hexdigest()
+                    data = _read_same_file(entry, checked)
+                    files[relative] = hashlib.sha256(data).hexdigest()
+                    if relative == _PLIST_REL:
+                        plist = data
             except OSError as exc:
                 raise ServerHostError(
                     f"the host bundle file {relative} cannot be read: {exc}",
@@ -710,18 +738,10 @@ def _collect_sealed_files(bundle: Path) -> dict[str, str]:
         raise ServerHostError(
             f"the host bundle does not seal {absent}", code=INSPECTION_FAILED
         )
-    return files
+    return files, plist
 
 
-def _read_bundle_plist(bundle: Path) -> dict[str, Any]:
-    plist_path = bundle / _PLIST_REL
-    try:
-        raw = plist_path.read_bytes()
-    except OSError as exc:
-        raise ServerHostError(
-            f"the host bundle's Info.plist is unreadable: {plist_path}",
-            code=INSPECTION_FAILED,
-        ) from exc
+def _check_bundle_plist(raw: bytes) -> None:
     try:
         info: Any = plistlib.loads(raw)
     except Exception as exc:
@@ -733,8 +753,7 @@ def _read_bundle_plist(bundle: Path) -> dict[str, Any]:
         # escape a B2 consumer catching only `ServerHostError`. `Exception` is
         # the parser boundary alone; `KeyboardInterrupt`/`SystemExit` pass.
         raise ServerHostError(
-            f"the host bundle's Info.plist is unreadable: {plist_path}",
-            code=INSPECTION_FAILED,
+            "the host bundle's Info.plist is unreadable", code=INSPECTION_FAILED
         ) from exc
     if not isinstance(info, dict):
         raise ServerHostError(
@@ -768,7 +787,6 @@ def _read_bundle_plist(bundle: Path) -> dict[str, Any]:
             f"not {MINIMUM_SYSTEM_VERSION!r}",
             code=INSPECTION_FAILED,
         )
-    return info
 
 
 def _display_value(text: str, key: str) -> str | None:
@@ -875,15 +893,9 @@ def inspect_host_bundle(
         )
     bundle = Path(os.path.realpath(supplied))
 
-    contents = bundle / "Contents"
-    if contents.is_symlink() or not contents.is_dir():
-        raise ServerHostError(
-            "the host bundle has no Contents directory", code=INSPECTION_FAILED
-        )
-
-    executable = bundle / _EXECUTABLE_REL
-    files = _collect_sealed_files(bundle)
-    _read_bundle_plist(bundle)
+    # The walk refuses a symlinked `Contents` and a missing sealed file.
+    files, plist = _collect_sealed_files(bundle)
+    _check_bundle_plist(plist)
 
     # Verification covers every architecture of a universal binary by default.
     verify = _run_native(runner, [CODESIGN, "--verify", "--strict", os.fspath(bundle)])
@@ -893,18 +905,15 @@ def inspect_host_bundle(
             code=INSPECTION_FAILED,
         )
     _require_signed_universal(bundle, runner)
-    cdhashes = _per_arch_cdhashes(executable, runner)
+    cdhashes = _per_arch_cdhashes(bundle / _EXECUTABLE_REL, runner)
 
-    executable_sha256 = _require_sha256(
-        files[_EXECUTABLE_REL], what="executable_sha256"
-    )
     return HostOwnership(
         schema=SCHEMA_VERSION,
         bundle_path=os.fspath(bundle),
         bundle_id=BUNDLE_ID,
         host_revision=HOST_REVISION,
         host_protocol=HOST_PROTOCOL,
-        executable_sha256=executable_sha256,
+        executable_sha256=files[_EXECUTABLE_REL],
         per_arch_cdhashes=cdhashes,
         bundle_files=files,
     )
@@ -921,7 +930,7 @@ def verify_owned_host(
 ) -> HostOwnership:
     """Prove a bundle is this machine's host by matching an existing record.
 
-    Reads the owner-only record (default :data:`DEFAULT_OWNERSHIP_PATH`), then
+    Reads the owner-only record (default :func:`default_ownership_path`), then
     inspects the bundle, and requires the canonical bundle path, identity,
     revision, protocol, executable digest, both CDHashes and the whole file set
     to be equal. It never falls back to a direct engine when the record is
@@ -930,7 +939,7 @@ def verify_owned_host(
     is refused here, before any service change.
     """
     record_path = (
-        DEFAULT_OWNERSHIP_PATH if ownership_path is None else Path(ownership_path)
+        default_ownership_path() if ownership_path is None else Path(ownership_path)
     )
     record = read_host_ownership(record_path)
     inspected = inspect_host_bundle(bundle_path, runner=runner)
@@ -941,11 +950,9 @@ def verify_owned_host(
             f"{inspected.bundle_path}",
             code=NOT_OWNED,
         )
-    if (
-        record.executable_sha256 != inspected.executable_sha256
-        or dict(record.per_arch_cdhashes) != dict(inspected.per_arch_cdhashes)
-        or dict(record.bundle_files) != dict(inspected.bundle_files)
-    ):
+    # Both snapshots carry the fixed identity constants, so equality is the
+    # executable digest, both CDHashes and the whole file set.
+    if record != inspected:
         raise ServerHostError(
             "the installed host bundle does not match its ownership record",
             code=NOT_OWNED,

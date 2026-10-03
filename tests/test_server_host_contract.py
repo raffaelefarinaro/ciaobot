@@ -152,18 +152,12 @@ def test_exit_timeout_outlasts_stop_grace_which_outlasts_supervisor() -> None:
     assert server_host.STOP_GRACE_SECONDS < server_host.EXIT_TIMEOUT_SECONDS
 
 
-def test_defaults_are_hardcoded_user_paths() -> None:
-    # The defaults are absolute, home-anchored and hardcoded; the tests'
-    # redirected HOME only proves the shape, not the machine's real home.
-    assert server_host.DEFAULT_BUNDLE_PATH.is_absolute()
-    assert server_host.DEFAULT_BUNDLE_PATH.name == APP_NAME
-    assert server_host.DEFAULT_BUNDLE_PATH.parent.name == "Applications"
-    assert server_host.DEFAULT_OWNERSHIP_PATH.is_absolute()
-    assert server_host.DEFAULT_OWNERSHIP_PATH.name == "server-host.json"
-    assert server_host.DEFAULT_OWNERSHIP_PATH.parts[-3:] == (
-        "state",
-        "ciaobot",
-        "server-host.json",
+def test_defaults_are_home_anchored_at_call_time(home_dir: Path) -> None:
+    # Resolved when called, so the per-test home isolation applies and no test
+    # can read the developer's real record through the default.
+    assert server_host.default_bundle_path() == home_dir / "Applications" / APP_NAME
+    assert server_host.default_ownership_path() == (
+        home_dir / ".local" / "state" / "ciaobot" / "server-host.json"
     )
     assert server_host.SCHEMA_VERSION == 1
     assert server_host.NATIVE_TIMEOUT_SECONDS == 10
@@ -516,6 +510,8 @@ def test_read_record_rejects_newer_schema(tmp_path: Path) -> None:
         lambda d: d.__setitem__("executable_sha256", _HASH_B),
         lambda d: d.__setitem__("bundle_path", "relative/app"),
         lambda d: d.__setitem__("bundle_path", "C:\\app"),
+        # A record must name the host bundle, not a parent such as the home.
+        lambda d: d.__setitem__("bundle_path", "/Users/x"),
         lambda d: d.__setitem__("per_arch_cdhashes", {"arm64": _CDHASH["arm64"]}),
         lambda d: d.__setitem__("per_arch_cdhashes", {**dict(_CDHASH), "arm64": "x"}),
         lambda d: d.__setitem__(
@@ -823,14 +819,19 @@ def test_inspect_rejects_a_symlinked_file(
     assert caught.value.code == server_host.INSPECTION_FAILED
 
 
+@pytest.mark.parametrize("name", ["pipe", "CodeResources"])
 def test_inspect_rejects_a_special_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
+    # A stray FIFO and a FIFO at a sealed name: the second reaches the
+    # special-file branch rather than the unexpected-name one.
     monkeypatch.setattr(sys, "platform", "darwin")
     if not hasattr(os, "mkfifo"):
         pytest.skip("no mkfifo on this platform")
     bundle = _make_bundle(tmp_path)
-    os.mkfifo(bundle / "Contents" / "_CodeSignature" / "pipe")
+    fifo = bundle / "Contents" / "_CodeSignature" / name
+    fifo.unlink(missing_ok=True)
+    os.mkfifo(fifo)
     with pytest.raises(ServerHostError) as caught:
         inspect_host_bundle(bundle, runner=_FakeRunner())
     assert caught.value.code == server_host.INSPECTION_FAILED
@@ -990,7 +991,6 @@ def _rewrite_plist(
         plistlib.dump(document, handle)
 
 
-@requires_posix_uid
 @pytest.mark.parametrize(
     "runner, code",
     [
