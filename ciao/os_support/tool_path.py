@@ -128,6 +128,41 @@ def _join_path_sources(values: Iterable[str]) -> str:
     return ";".join(entries)
 
 
+def engine_bin_dir() -> str:
+    """The directory holding the ``ciao`` entry point of the running engine.
+
+    Deliberately ``Path(sys.executable).parent`` and NOT ``.resolve()``: a venv's
+    ``bin/python`` is a symlink to the base interpreter, so resolving it reports
+    the base interpreter's bin dir — which has no ``ciao`` — instead of the
+    venv's own ``bin/`` where the console script actually lives. ``ciao/cli.py``
+    documents the same rule for its PATH hint. On Windows the interpreter itself
+    is what was spawned, so its own directory is where the ``ciao`` shim sits.
+    """
+    return str(Path(sys.executable).parent)
+
+
+def prepend_engine_path(path: str | None = None) -> str:
+    """``path`` (or the process PATH) with :func:`engine_bin_dir` moved to the front.
+
+    The user's other directories stay in their original order behind the engine's
+    bin dir, and the engine dir is not duplicated if it is already first. The
+    agent harness inherits this PATH, so a ``ciao <command>`` the agent runs
+    resolves to the engine that launched the turn rather than to a stale install
+    (for example an older uv-tool ``ciao``) earlier on the user's PATH.
+    """
+    current = os.environ.get("PATH", "") if path is None else path
+    entries = [entry for entry in current.split(os.pathsep) if entry]
+    bin_dir = engine_bin_dir()
+    remaining = [
+        entry
+        for entry in entries
+        if os.path.normcase(entry) != os.path.normcase(bin_dir)
+    ]
+    # Always exactly one engine entry, first: an already-first dir keeps its
+    # place and a repeated one elsewhere is not duplicated.
+    return os.pathsep.join([bin_dir, *remaining])
+
+
 # npm writes the shim's own directory into the wrapper it generates, spelled
 # three ways across its templates, all of them still in use: the modern shim
 # `SET`s a variable and references it (`SET dp0=%~dp0` then

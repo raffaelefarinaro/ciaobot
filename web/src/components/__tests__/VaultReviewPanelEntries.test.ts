@@ -47,8 +47,12 @@ const IDENTITY = 'a'.repeat(64)
 function staleEntry(over = {}) {
   return {
     identity: IDENTITY, line_number: 8, section: 'Alice',
-    excerpt: '- Landlord is Mr Silva [verified: 2019-05-01]',
-    context: ['- Lives in Porto [verified: 2026-09-28]'],
+    // The engine strips markdown from the excerpt, so the panel never sees a
+    // leading `-` or `**` — it renders plain prose. The context is the nearest
+    // non-fact line, which for a dense list is the note's heading, not the
+    // sibling bullet (that used to be reprinted here and read as a second fact).
+    excerpt: 'Landlord is Mr Silva [verified: 2019-05-01]',
+    context: ['# Alice'],
     reason: 'aged', detail: 'unverified for 2698d against a 90d horizon',
     age_days: 2698, last_verified: '2019-05-01', own_date: true, supported: true,
     ...over,
@@ -122,7 +126,38 @@ describe('VaultReviewPanel — the facts inside a note', () => {
     expect(wrapper.get('.vr-entry-section').text()).toContain('Alice')
     // The context is the point of the block: a reader deciding whether a bullet
     // is current needs the neighbouring line, not just the sentence.
-    expect(wrapper.get('.vr-entry-context').text()).toContain('Lives in Porto')
+    expect(wrapper.get('.vr-entry-context').text()).toContain('# Alice')
+    wrapper.unmount()
+  })
+
+  it('renders a markdown fact as prose and does not repeat its sibling as context', async () => {
+    // The boxed fact is plain text: the engine strips the markers before the
+    // panel sees them, so a bold, ordered list item reads "Learn. People…"
+    // rather than "1. **Learn.** People…". And the grey context line is a
+    // neighbour that is *not* itself a fact — a sibling bullet reprinted here
+    // read as the same claim made twice.
+    const wrapper = await mountWith([
+      candidate({
+        evidence: {
+          ...candidate().evidence,
+          entry_verification: coverage({
+            stale_entries: [
+              staleEntry({
+                excerpt: 'Learn. People leave each session knowing more.',
+                context: ['# Sessions'],
+              }),
+            ],
+          }),
+        },
+      }),
+    ])
+    const text = wrapper.get('.vr-entry-text').text()
+    expect(text).toContain('Learn. People leave each session knowing more.')
+    expect(text).not.toContain('**')
+    expect(text).not.toContain('1.')
+    const context = wrapper.get('.vr-entry-context').text()
+    expect(context).toContain('# Sessions')
+    expect(context).not.toContain('Learn. People')
     wrapper.unmount()
   })
 
