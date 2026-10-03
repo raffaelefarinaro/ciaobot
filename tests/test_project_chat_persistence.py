@@ -311,6 +311,9 @@ def test_onboarding_starting_knowledge_is_confirmed_facts_only(
 
         # Confirmed facts only, seeded into the places the vault layout owns.
         assert "run a **starting-knowledge pass** from confirmed facts only" in prompt
+        # The pass asks for the facts it files, so seeding never relies on what
+        # the interview happened to volunteer.
+        assert "ask which key people, active projects and top resources" in prompt
         assert (
             "key people to `People/`, active projects to their own project docs, "
             "and at most a few top resources to `Resources/`" in prompt
@@ -339,8 +342,8 @@ def test_onboarding_starting_knowledge_is_confirmed_facts_only(
             "holds" in prompt
         )
         assert (
-            "Keep it a summary, not a migration: no moves, no deletes, no "
-            "category writes, no entity-folder creation" in prompt
+            "Keep this summary a summary, not a migration: no moves, no deletes, "
+            "no category writes, no entity-folder creation" in prompt
         )
 
 

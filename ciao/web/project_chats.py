@@ -1323,8 +1323,8 @@ class ProjectChatManager:
             "exists so the interview neither re-asks nor re-files what is already "
             "known; on a brand-new vault the summary is simply that there is "
             "nothing there yet. It reads no provider history and starts no "
-            "extraction. Keep it a summary, not a migration: no moves, no "
-            "deletes, no category writes, no entity-folder creation."
+            "extraction. Keep this summary a summary, not a migration: no moves, "
+            "no deletes, no category writes, no entity-folder creation."
         )
         interview = (
             "Ask the user 2-3 important questions per turn, in this order. "
@@ -1347,11 +1347,14 @@ class ProjectChatManager:
         )
         starting_knowledge = (
             "After the interview, run a **starting-knowledge pass** from "
-            "confirmed facts only: key people to `People/`, active projects to "
-            "their own project docs, and at most a few top resources to "
-            "`Resources/`. Create an entity folder only when a confirmed fact "
-            "needs it, never an empty one, and put anything you are not sure "
-            "about in `Workspace/Memory-Proposals.md` instead of filing it."
+            "confirmed facts only. If they have not already said, ask which key "
+            "people, active projects and top resources they want seeded (2-3 "
+            "short questions, skippable, no invented answers), then file: key "
+            "people to `People/`, active projects to their own project docs, and "
+            "at most a few top resources to `Resources/`. Create an entity "
+            "folder only when a confirmed fact needs it, never an empty one, "
+            "and put anything you are not sure about in "
+            "`Workspace/Memory-Proposals.md` instead of filing it."
         )
 
         if vault_mode == "existing":
@@ -1366,7 +1369,7 @@ class ProjectChatManager:
                 f"2. **Current structure**: The required vault roots are `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. `Workspace/` is for cross-project learnings and memory proposals. Entity folders such as `People/`, `Ideas/`, `Resources/`, `Places/`, and `Documents/` are created only when useful. `Templates/` and `personal/`/`work/` are not required by the current layout.\n"
                 f"3. **Preserve before reorganizing**: Existing files and content are the source of truth. Never delete or overwrite them. Reorganize only when the classification is clear: active projects go under `projects/active/<slug>/`, completed projects under `projects/completed/<slug>/`, people under `People/`, and reusable cross-project lessons under `Workspace/Learnings.md`. Leave ambiguous or unsupported material in place and report it. Use the existing Git history as the rollback point and keep a concise curation summary.\n"
                 f"4. **Core-file hygiene**: Preserve an existing `MEMORY.md`; create it only if missing. Preserve the existing `AGENTS.md` and add any missing bounded regions without replacing user instructions: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
-                f"5. **Initial memory curation**: {interview} Then run an initial curation in this chat: search for duplicates, update the relevant project canonical docs, create durable person/entity notes only for confirmed facts, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
+                f"5. **Initial memory curation**: {interview} Then run an initial curation in this chat: search for duplicates, put reusable lessons in `Workspace/Learnings.md`, and put uncertain cross-project facts in `Workspace/Memory-Proposals.md`. Identity and communication style belong in the `ciao:profile` region; cross-project preferences and environment facts belong in `ciao:memory`; project-specific facts do not belong in bounded memory.\n"
                 f"6. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
                 f"7. **Starting knowledge**: {starting_knowledge}\n"
                 f"8. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
@@ -1392,7 +1395,7 @@ class ProjectChatManager:
                 f"1. **Current structure**: Use `MEMORY.md`, generated `INDEX.md`, `projects/active/`, `projects/completed/`, and `Logs/Chats/`. Create `Workspace/`, `People/`, `Ideas/`, `Resources/`, `Places/`, or `Documents/` only when the user's confirmed knowledge needs them. Do not create `personal/`, `work/`, or `Templates/` as required directories.\n"
                 f"2. **Core files**: Setup has already seeded the workspace-level `AGENTS.md` and the vault-level `MEMORY.md`, `INDEX.md`, and General project. Preserve them and add only missing content. `AGENTS.md` must contain both bounded regions with their exact fenced markers: `<!-- ciao:memory:start cap=3000 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`.\n"
                 f"3. **Known state first**: {known_state}\n"
-                f"4. **Onboarding interview and curation**: {interview} Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, project facts to project canonical docs, people to `People/`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
+                f"4. **Onboarding interview and curation**: {interview} Then route confirmed facts correctly: identity/style to the `ciao:profile` region, cross-project preferences/environment to `ciao:memory`, and reusable lessons to `Workspace/Learnings.md`. Put uncertain durable facts in `Workspace/Memory-Proposals.md` for review.\n"
                 f"5. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
                 f"6. **Starting knowledge**: {starting_knowledge}\n"
                 f"7. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
