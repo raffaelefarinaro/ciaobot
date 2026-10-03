@@ -181,11 +181,11 @@ row that is still open.
 | `id` | `wbrcpt_<sha256(trigger_id\|key)[:20]>`, plus a `.2`, `.3` generation for a later attempt of the same key |
 | `trigger_id`, `trigger_name`, `workspace`, `project_id` | where the accepted event was headed, copied from the authenticated trigger so the record survives the trigger's own later deletion |
 | `idempotency_key` | the sender's key, as received |
-| `status` | `accepted`, `launched`, `failed` or `interrupted` |
+| `status` | `accepted`, `launching`, `launched`, `failed` or `interrupted` |
 | `body_digest` | SHA-256 of the request body **as it arrived**, hex |
 | `event_text` | the sender's event text, at most 8,000 characters |
 | `created_at`, `updated_at` | ISO-8601, UTC |
-| `detail` | why a receipt failed or was interrupted; empty otherwise |
+| `detail` | why a receipt failed or was interrupted; on a `launched` receipt, the chat the event became |
 
 No credential is in it: the receipt names the trigger, never the secret that
 authorized it.
@@ -201,24 +201,29 @@ than folding onto the old receipt, which would erase how it settled.
 **Bounds.** `MAX_BODY_BYTES` (65536), `RATE_LIMIT_PER_MINUTE` (10) on an
 in-process per-trigger sliding window — the credential *is* the caller, and a
 shared IP is not — and `MAX_PENDING_RECEIPTS` (20) receipts left open per
-trigger (`accepted` or `launched`). Dispatch settles a receipt in seconds, so the
+trigger (`accepted` or `launching`). Dispatch settles a receipt in seconds, so the
 pending bound is not what a healthy sender meets; it is what a stopped engine,
 an unresolvable target, or a crash in the launch window amount to, and it is
 what makes an unattended sender fill up and be told so with a `503` rather than
-accumulating work nobody is doing.
+accumulating work nobody is doing. A settled receipt — a `launched` one included
+— hands its slot back, so a trigger whose events all succeed keeps accepting.
 
 **Ordering, which is the whole point.** The `accepted` row is durable before any
-launch is attempted, and the `launched` allocation is durable before the model
-turn. A crash in that second window is genuinely ambiguous — the turn may or may
-not have started — so `recover_interrupted` records `interrupted` with a detail
-saying it needs review. Nothing replays it: a second unattended run is a cost
-nobody asked for, and the receipt is the evidence that something already
-happened.
+launch is attempted, the `launching` allocation is durable before the model turn,
+and the `launched` outcome is a third row written after the turn starts. A crash
+in the window between the allocation and the outcome is genuinely ambiguous — the
+turn may or may not have started — so `recover_interrupted` records
+`interrupted` with a detail saying it needs review. Nothing replays it: a second
+unattended run is a cost nobody asked for, and the receipt is the evidence that
+something already happened. The allocation is deliberately *not* the outcome:
+one state cannot honestly mean both, and conflating them rewrote every healthy
+launch as a crash at the next boot.
 
-**Deliberately not here.** The launch itself (`begin_launch` and `settle_failed`
-are the dispatcher's entry points, and nothing in `ciao/webhooks.py` calls
-them), a receipt-list API, outbound callbacks, and any provider-specific
-signature adapter — the bearer secret is the whole authentication story.
+**Deliberately not here.** The launch itself (`begin_launch`, `settle_launched`
+and `settle_failed` are the dispatcher's entry points, and nothing in
+`ciao/webhooks.py` calls them), a receipt-list API, outbound callbacks, and any
+provider-specific signature adapter — the bearer secret is the whole
+authentication story.
 
 ## Dispatch (#1020)
 
@@ -270,24 +275,43 @@ one check is what keeps archive-and-restore safe here as well: an event accepted
 just before the archive settles `failed` rather than launching into a workspace
 whose old secret is already dead.
 
-**What the three settled states mean.**
+**What the states mean.** Two are open (the event is still in flight), three are
+settled, and only the two open ones count against the pending bound:
 
 | status | meaning | what happens next |
 | --- | --- | --- |
-| `launched` | the chat was created and the turn was started. **This is the success outcome**, not a pending one: the turn is now an ordinary chat and its progress lives there, not in the receipt. | nothing; the pending bound stops counting it only when it is terminal, so it still occupies the trigger until the journal is trimmed |
-| `failed` | the launch was attempted and did not complete — an unresolvable target, a trigger that is gone, or a turn that would not start. Terminal on purpose: a failed launch is an event that happened and failed, and re-running it is the operator's decision. | the operator fixes the target or retargets the trigger; the sender's next delivery with a new key is a new attempt |
+| `launching` | **not an outcome**: the allocation is on disk and the turn has not reported back. The only state in which a crash is ambiguous. | a live dispatch settles it `launched` or `failed`; a process that died here is recorded `interrupted` at the next startup. It still occupies the trigger's pending slots while it is open |
+| `launched` | the chat was created and the turn was started, and the receipt says so. **This is the success outcome**, not a pending one: the turn is now an ordinary chat and its progress lives there, not in the receipt. The `detail` names the chat. | nothing; it is terminal, so the pending bound stops counting it and the journal may trim it like any other settled row |
+| `failed` | the launch was attempted and did not complete — an unresolvable target, a trigger that is gone, an allocation the journal would not record, or a turn that would not start. Terminal on purpose: a failed launch is an event that happened and failed, and re-running it is the operator's decision. | the operator fixes the target or retargets the trigger; the sender's next delivery with a new key is a new attempt |
 | `interrupted` | the allocation was recorded but the outcome was not, so a process died inside the launch window. **Needs an operator.** | never replayed automatically — a second unattended turn is a cost nobody asked for — and a dispatch of an `interrupted` receipt is a no-op |
 
 **The ordering, and the startup sweep.** `begin_launch` is durable *before*
 `start_stream` is called, which is what makes `interrupted` honest rather than a
-guess. At startup, `resume_pending` runs `recover_interrupted` first — so the
-journal says what is ambiguous before any new turn starts — and then dispatches
-the remaining `accepted` receipts, oldest first, once. Once because dispatch is
-idempotent by receipt state: after a sweep each receipt it touched is `launched`
-or `failed`, so a sweep that runs twice starts no second turn. The sweep is
-bounded (`MAX_RESUMED_LAUNCHES`, 20): a journal that accumulated `accepted` rows
-while nothing dispatched them would otherwise start a turn per row at boot, and
-anything past the bound stays `accepted` for an operator to look at.
+guess, and `settle_launched` records the success and the chat id as soon as
+`start_stream` returns. At startup, `resume_pending` runs `recover_interrupted`
+first — so the journal says what is ambiguous before any new turn starts — and
+then dispatches the remaining `accepted` receipts, oldest first, once. Once
+because dispatch is idempotent by receipt state: after a sweep each receipt it
+touched is `launched` or `failed`, so a sweep that runs twice starts no second
+turn. The sweep is bounded (`MAX_RESUMED_LAUNCHES`, 20): a journal that
+accumulated `accepted` rows while nothing dispatched them would otherwise start a
+turn per row at boot, and anything past the bound stays `accepted` for an
+operator to look at.
+
+**One receipt, one turn.** Receipt state cannot carry that on its own — reading
+`accepted` and then writing the allocation spans several `await` points, so a
+sweep that read its list of accepted receipts while a request was being served
+could dispatch the same receipt twice — so `dispatch_receipt` claims the receipt
+in an in-process `_IN_FLIGHT` set before its first `await` and the loser does
+nothing at all. There is one engine and one journal, so the only two callers that
+can race are in the same process.
+
+**A crash between the chat and the allocation leaves an orphan chat.** The chat
+is created before `begin_launch`, so a process that dies in between leaves an
+empty chat that will never carry a turn, and the sweep then creates a second chat
+for the same event. It is harmless — no turn ran, and one empty chat is not a
+record of anything — but it is why a project may show a "New Chat"-titled chat
+that no event ever ran in.
 
 ## Errors
 
@@ -356,13 +380,15 @@ cannot accidentally pick a status:
   receipt and answers `202`.
 - **A4 — dispatch.** Turning an authenticated trigger into an ordinary chat, with
   the same provenance and the same approval behaviour as any dispatch that is not
-  a bypass. It calls `WebhookReceiver.begin_launch` before the model turn and
-  `settle_failed` when the attempt does not complete, and it calls
-  `recover_interrupted` at startup: a receipt left `launched` is genuinely
-  ambiguous, so it is recorded `interrupted` and reviewed, never replayed. Shipped
-  in #1020 — `ciao/webhook_dispatch.py`, with the receiver answering `202`
-  without waiting on the turn and `main.py` sweeping at startup. See
-  **Dispatch** above.
+  a bypass. It calls `WebhookReceiver.begin_launch` before the model turn,
+  `settle_launched` once `start_stream` has returned (with the chat id, so a
+  settled receipt names the chat the event became) and `settle_failed` when the
+  attempt does not complete, and it calls `recover_interrupted` at startup: a
+  receipt left `launching` is genuinely ambiguous, so it is recorded `interrupted`
+  and reviewed, never replayed, while a `launched` one is left as the success it
+  recorded. Shipped in #1020 — `ciao/webhook_dispatch.py`, with the receiver
+  answering `202` without waiting on the turn and `main.py` sweeping at startup.
+  See **Dispatch** above.
 - **A5/A6 — surfaces.** The Automations UI and receipt history, the agent CLI,
   user recipes, capabilities and public docs — all of which must describe only
   what has actually shipped. Until they do, no surface may present a webhook

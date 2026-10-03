@@ -1076,7 +1076,7 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
 
         # A webhook event accepted before the restart is still `accepted`: the
         # event happened and nothing ran yet. Dispatch what is left, once, and
-        # record the receipts a crash left in the ambiguous window (`launched`
+        # record the receipts a crash left in the ambiguous window (`launching`
         # with no outcome) as `interrupted` for a person instead of replaying
         # them. Bounded, so a journal that accumulated accepted rows while
         # nothing dispatched them cannot start a turn per row at boot.

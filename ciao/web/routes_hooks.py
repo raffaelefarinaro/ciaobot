@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 
 #: Strong references to the dispatch tasks this process started, so the event
 #: loop's task GC cannot collect one mid-flight. A dispatch that is garbage
-#: collected mid-turn is a receipt stuck ``launched`` — which reads as a crash
+#: collected mid-turn is a receipt stuck ``launching`` — which reads as a crash
 #: and needs an operator — so the reference is kept until the task is done and
 #: dropped there. The set is the engine's bound on concurrent launches: one
 #: entry per accepted receipt, and the receiver's ``MAX_PENDING_RECEIPTS`` (20

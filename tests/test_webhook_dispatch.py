@@ -13,9 +13,13 @@ The properties, in the order they matter:
 * a null ``project_id`` resolves to that workspace's General, and a project that
   was deleted, or that belongs to another workspace, **fails** rather than
   falling back to General;
-* a crash in the window between the launch allocation and the outcome leaves the
-  receipt ``launched`` for recovery to record as ``interrupted``, and is never
+* a launch that ran is settled ``launched`` with its chat, so it neither becomes
+  ``interrupted`` at the next boot nor occupies its trigger's pending slots, and
+  a crash in the window between the launch allocation and the outcome leaves the
+  receipt ``launching`` for recovery to record as ``interrupted``, never
   replayed;
+* two callers dispatching one receipt concurrently still produce one chat and one
+  turn;
 * the startup sweep dispatches what a restart left ``accepted``, once;
 * nothing a sender wrote reaches model, provider or permission selection, or
   escapes its fence to read as an instruction.
@@ -23,6 +27,7 @@ The properties, in the order they matter:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +49,8 @@ from ciao.webhooks import (
     FAILED,
     INTERRUPTED,
     LAUNCHED,
+    LAUNCHING,
+    MAX_PENDING_RECEIPTS,
     WebhookReceiver,
     WebhookStore,
     WebhookTrigger,
@@ -202,7 +209,9 @@ async def test_an_accepted_receipt_launches_one_chat_in_its_pinned_project(
 
     assert settled is not None
     assert settled.status == LAUNCHED
-    assert settled.detail == ""
+    # The chat the event became is recorded on the receipt, so history can say
+    # which one without a second lookup.
+    assert settled.detail == "chat chat-webhook-1"
     # Exactly one chat, in the project the trigger pins — not in General, and not
     # a second chat for one event.
     assert len(pcm.created) == 1
@@ -218,14 +227,20 @@ async def test_an_accepted_receipt_launches_one_chat_in_its_pinned_project(
     assert "unattended" not in json.dumps(pcm.started[0][1])
 
     # The journal says the same thing, in the order it says it: accepted first,
-    # then the launch allocation.
+    # then the launch allocation, then the outcome. `launching` is the allocation
+    # and `launched` the success — three rows because the allocation is not the
+    # outcome, and conflating them is what made every healthy launch look like a
+    # crash at the next boot.
     rows = [
         json.loads(line)
         for line in world.receiver.journal.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert [row["status"] for row in rows] == [ACCEPTED, LAUNCHED]
+    assert [row["status"] for row in rows] == [ACCEPTED, LAUNCHING, LAUNCHED]
     assert world.receiver.get(receipt_id).status == LAUNCHED
+    # Nothing is open, so this trigger is not one step from `too_many_pending`.
+    assert world.receiver.accepted_receipts() == []
+    assert world.receiver.recover_interrupted() == []
 
 
 async def test_a_null_project_resolves_to_that_workspaces_general(
@@ -304,9 +319,10 @@ async def test_a_crash_after_begin_launch_leaves_the_receipt_interrupted(
         await dispatch_receipt(world.receiver, world.store, crashing, receipt_id)
 
     # The allocation is on disk and the outcome is not: exactly the state that
-    # cannot be repaired by guessing.
+    # cannot be repaired by guessing. `launching`, not `launched` — the outcome
+    # is a separate row, written only when the turn actually started.
     stranded = world.receiver.get(receipt_id)
-    assert stranded.status == LAUNCHED
+    assert stranded.status == LAUNCHING
 
     recovered = world.receiver.recover_interrupted()
     assert [receipt.id for receipt in recovered] == [receipt_id]
@@ -321,6 +337,115 @@ async def test_a_crash_after_begin_launch_leaves_the_receipt_interrupted(
     assert pcm.started == []
 
 
+# ── A success is not a crash ────────────────────────────────────────────────
+
+
+async def test_a_settled_success_stays_launched_through_a_restart(
+    tmp_path: Path,
+) -> None:
+    """The state that made a healthy trigger break after twenty events.
+
+    ``begin_launch`` wrote ``launched`` and nothing wrote a later success row, so
+    ``recover_interrupted`` rewrote every healthy event as ``interrupted`` at the
+    next boot, and ``_pending_for`` counted all of them until the trigger was
+    refused ``too_many_pending``. A launch that ran must survive both.
+    """
+    world = _World(tmp_path, project_id="proj-alpha")
+    receipt_id = world.accept()
+    pcm = _FakePcm(_personal_world())
+
+    launched = await dispatch_receipt(world.receiver, world.store, pcm, receipt_id)
+    assert launched is not None and launched.status == LAUNCHED
+
+    # The next boot: recovery finds nothing ambiguous, and the sweep leaves the
+    # settled receipt exactly where it was.
+    summary = await resume_pending(world.receiver, world.store, pcm)
+
+    assert (summary.launched, summary.failed, summary.interrupted) == (0, 0, 0)
+    assert world.receiver.recover_interrupted() == []
+    assert world.receiver.get(receipt_id).status == LAUNCHED
+    assert world.receiver.get(receipt_id).detail == "chat chat-webhook-1"
+    # No second turn for it, either.
+    assert len(pcm.created) == 1
+    assert len(pcm.started) == 1
+
+
+async def test_a_healthy_trigger_keeps_accepting_past_the_pending_bound(
+    tmp_path: Path,
+) -> None:
+    """``MAX_PENDING_RECEIPTS`` bounds what is *open*, and a launch settles it.
+
+    Twenty successful dispatches and the twenty-first arrival used to be refused
+    ``too_many_pending`` — a trigger that worked perfectly stopped working.
+    """
+    world = _World(tmp_path, project_id="proj-alpha")
+    pcm = _FakePcm(_personal_world())
+
+    for index in range(MAX_PENDING_RECEIPTS + 1):
+        receipt_id = world.accept(key=f"k{index}")
+        settled = await dispatch_receipt(world.receiver, world.store, pcm, receipt_id)
+        assert settled is not None and settled.status == LAUNCHED, index
+
+    # One chat and one turn per event, and none of them counted as open.
+    assert len(pcm.created) == MAX_PENDING_RECEIPTS + 1
+    assert len(pcm.started) == MAX_PENDING_RECEIPTS + 1
+    assert world.receiver.accepted_receipts() == []
+
+
+async def test_two_concurrent_dispatches_of_one_receipt_start_one_turn(
+    tmp_path: Path,
+) -> None:
+    """Receipt state alone is a read-then-write across ``await`` points.
+
+    The startup sweep's list of accepted receipts can be read while a request is
+    being served, so both callers saw ``accepted``, both created a chat and both
+    started a turn for one event. The claim in ``dispatch_receipt`` is what makes
+    the loser do nothing at all.
+    """
+    world = _World(tmp_path, project_id="proj-alpha")
+    receipt_id = world.accept()
+    pcm = _FakePcm(_personal_world())
+
+    first, second = await asyncio.gather(
+        dispatch_receipt(world.receiver, world.store, pcm, receipt_id),
+        dispatch_receipt(world.receiver, world.store, pcm, receipt_id),
+    )
+
+    assert len(pcm.created) == len(pcm.started) == 1
+    # Exactly one of the two callers owned the receipt: the loser said nothing
+    # rather than inventing an outcome, and the winner settled it.
+    assert [settled for settled in (first, second) if settled is None] == [None]
+    assert world.receiver.get(receipt_id).status == LAUNCHED
+    assert world.receiver.recover_interrupted() == []
+
+
+async def test_a_refused_allocation_says_no_turn_was_attempted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A journal that cannot record the allocation means nothing ran.
+
+    Reported as a refusal with its own sentence: "the turn could not be started"
+    blames a turn nobody tried to run, and the chat created above is an orphan
+    that will never carry one.
+    """
+    world = _World(tmp_path, project_id="proj-alpha")
+    receipt_id = world.accept()
+    pcm = _FakePcm(_personal_world())
+
+    def refuse(_receipt_id: str) -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(world.receiver, "begin_launch", refuse)
+    settled = await dispatch_receipt(world.receiver, world.store, pcm, receipt_id)
+
+    assert settled is not None and settled.status == FAILED
+    assert "never attempted" in settled.detail
+    assert "no space left on device" in settled.detail
+    assert pcm.started == []
+    # It never entered the ambiguous window, so recovery has nothing to say.
+    assert world.receiver.recover_interrupted() == []
+
+
 # ── The startup sweep ───────────────────────────────────────────────────────
 
 
@@ -333,13 +458,13 @@ async def test_a_resumed_sweep_dispatches_accepted_receipts_once(
     second = world.accept(key="k2")
 
     # A receipt a previous process left in the ambiguous window: still
-    # ``launched``, so the sweep must record it as ``interrupted`` and not run
+    # ``launching``, so the sweep must record it as ``interrupted`` and not run
     # a second turn for it.
     stranded = world.accept(key="k0")
     crashing = _FakePcm(_personal_world(), stream_error=_Crash())
     with pytest.raises(_Crash):
         await dispatch_receipt(world.receiver, world.store, crashing, stranded)
-    assert world.receiver.get(stranded).status == LAUNCHED
+    assert world.receiver.get(stranded).status == LAUNCHING
 
     pcm = _FakePcm(_personal_world())
     assert pcm.created == []

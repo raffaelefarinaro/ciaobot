@@ -463,7 +463,7 @@ def test_the_receiver_answers_202_without_waiting_for_the_launch(
             ]
             # The allocation is durable before the turn, so a crash here would be
             # `interrupted` rather than a receipt that looks un-run.
-            assert [row["status"] for row in rows] == ["accepted", "launched"]
+            assert [row["status"] for row in rows] == ["accepted", "launching"]
             release.set()
             assert finished.wait(timeout=30)
     finally:

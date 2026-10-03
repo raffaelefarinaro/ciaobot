@@ -7,7 +7,7 @@ project chat out, and a durable answer of ``launched``, ``failed`` or
 trigger-management API, no history UI, no CLI and no recipe. The one thing this
 module decides is whether a remote sender's event becomes an ordinary turn.
 
-Five rules, and each of them is a refusal somebody could otherwise have taken:
+Six rules, and each of them is a refusal somebody could otherwise have taken:
 
 * **A webhook is not authorization for `bypass`.**
   ``ProjectChatManager._effective_mode_for_chat`` returns ``"bypass"`` for any
@@ -39,12 +39,21 @@ Five rules, and each of them is a refusal somebody could otherwise have taken:
   earlier, and because ``revoke_workspace`` disables as well as destroying the
   verifier, that one check is what keeps "archive the workspace and its old
   secret stays dead" true for an event that arrived just before the archive.
-* **Intent is durable before the side effect.** ``begin_launch`` is on disk
-  before ``start_stream`` is called, so a crash in that window is
-  ``interrupted`` — recorded at the next startup and left for a person, never
-  replayed — rather than a second turn nobody asked for. Anything that refuses
-  settles ``failed``, which is terminal on purpose: re-running it is the
-  operator's decision.
+* **Intent is durable before the side effect.** ``begin_launch`` writes
+  ``launching`` on disk before ``start_stream`` is called, so a crash in that
+  window is ``interrupted`` — recorded at the next startup and left for a person,
+  never replayed — rather than a second turn nobody asked for. The turn that did
+  run is settled ``launched`` with its chat id, separately, so a success is never
+  mistaken for a crash: the allocation is not the outcome, and one state cannot
+  honestly mean both. Anything that refuses settles ``failed``, which is terminal
+  on purpose: re-running it is the operator's decision.
+* **One event is one turn, even with two callers racing.** ``accepted`` plus
+  ``begin_launch`` cannot enforce that on their own — they are a read followed by
+  a write across several ``await`` points, and the startup sweep's list of
+  accepted receipts can be read while a request is being served. So
+  :func:`dispatch_receipt` claims the receipt in :data:`_IN_FLIGHT` before its
+  first ``await``, and the loser does nothing at all rather than dispatching a
+  second copy.
 
 The two callers are deliberately thin. ``ciao/web/routes_hooks.py`` schedules
 :func:`dispatch_receipt` off the response path, because the ``202`` is a
@@ -111,6 +120,16 @@ EVENT_PREAMBLE = (
 #: which is the same open state the receiver's own per-trigger bound counts and
 #: an operator can still see.
 MAX_RESUMED_LAUNCHES = 20
+
+#: Receipt ids this process is dispatching right now. The claim is what keeps one
+#: event from becoming two turns: receipt state alone is a read-then-write across
+#: several ``await`` points, so the startup sweep and a route-scheduled task can
+#: both read ``accepted`` for the same receipt and both start a turn. In-process
+#: is the whole scope of the claim, and it is enough — there is one engine and
+#: one journal, so every caller of :func:`dispatch_receipt` is in this process.
+#: Not a lock: the membership test and the add run on the event loop with no
+#: ``await`` between them, so they cannot interleave.
+_IN_FLIGHT: set[str] = set()
 
 
 class WebhookDispatchHost(Protocol):
@@ -252,6 +271,33 @@ async def _settle_failed(
     return settled
 
 
+async def _settle_launched(
+    receiver: WebhookReceiver, receipt_id: str, chat_id: str
+) -> WebhookReceipt | None:
+    """Record the success outcome and the chat it started, or report the refusal.
+
+    ``None`` here means the journal could not be written, which leaves the
+    receipt ``launching``: the turn did run, but its outcome is not on disk, so
+    the next startup records it ``interrupted`` for a person. That is the honest
+    answer — inferring success from the fact that ``start_stream`` returned is
+    exactly the guess this journal exists to prevent. Swallowed for the same
+    reason as in :func:`_settle_failed`: the caller is a background task or a
+    startup sweep, and a raised exception would reach neither the sender nor
+    anybody reading the journal.
+    """
+    try:
+        return await asyncio.to_thread(
+            receiver.settle_launched, receipt_id, chat_id=chat_id
+        )
+    except WebhookReceiverError:
+        logger.exception(
+            "webhook dispatch: receipt %s launched but its outcome could not be "
+            "recorded",
+            receipt_id,
+        )
+        return None
+
+
 async def dispatch_receipt(
     receiver: WebhookReceiver,
     store: WebhookStore,
@@ -263,18 +309,58 @@ async def dispatch_receipt(
     Returns the receipt as it now stands, or ``None`` when the journal could not
     be read or written at all — never a receipt it invented.
 
-    Idempotent by receipt state, which is what makes both callers safe to retry.
-    A receipt that is not ``accepted`` is returned untouched: one that is
-    ``launched`` already has a turn behind it (a second dispatch would be a
-    second turn for one event), and one that is ``failed`` or ``interrupted`` is
+    **One receipt, one turn, even with two callers racing for it.** Receipt state
+    alone cannot carry that: reading ``accepted`` and then writing the allocation
+    spans several ``await`` points, so a startup sweep that read its list of
+    accepted receipts while a request was being served could both read
+    ``accepted``, both create a chat and both start a turn for one event. The
+    claim below is what closes that window, and it is atomic without a lock
+    because the check and the add both run on the event loop with no ``await``
+    between them. :data:`_IN_FLIGHT` is in-process on purpose: there is one
+    engine, one journal and one dispatcher, so the two callers that can race
+    (``routes_hooks.py`` and ``main.py``) are in the same process by definition.
+
+    A second caller that loses the claim returns ``None`` and does nothing at
+    all, which is also why the startup sweep treats ``None`` as "not mine to
+    count": the winner is dispatching this receipt, not skipping it.
+
+    Idempotent by receipt state as well, which is what makes a retry after the
+    fact safe. A receipt that is not ``accepted`` is returned untouched: one that
+    already reached its outcome has a turn behind it (a second dispatch would be
+    a second turn for one event), and one that is ``failed`` or ``interrupted`` is
     an outcome a person has to look at.
 
     Never raises for an expected refusal — a deleted project, an unknown model,
     a chat the manager refused to create are all *outcomes* and are recorded as
     ``failed``. A ``BaseException`` (a cancellation, a crash) is deliberately
     not caught: that is the ambiguous window, and the receipt has to stay
-    ``launched`` for :meth:`~ciao.webhooks.WebhookReceiver.recover_interrupted`
+    ``launching`` for :meth:`~ciao.webhooks.WebhookReceiver.recover_interrupted`
     to record honestly at the next startup.
+    """
+    if receipt_id in _IN_FLIGHT:
+        logger.debug(
+            "webhook dispatch: receipt %s is already being dispatched; "
+            "not launching it a second time",
+            receipt_id,
+        )
+        return None
+    _IN_FLIGHT.add(receipt_id)
+    try:
+        return await _dispatch_claimed(receiver, store, pcm, receipt_id)
+    finally:
+        _IN_FLIGHT.discard(receipt_id)
+
+
+async def _dispatch_claimed(
+    receiver: WebhookReceiver,
+    store: WebhookStore,
+    pcm: WebhookDispatchHost,
+    receipt_id: str,
+) -> WebhookReceipt | None:
+    """The launch itself, for a receipt this process has already claimed.
+
+    Everything here may run to a refusal; none of it may start a second turn for
+    the same receipt, which is what :func:`dispatch_receipt`'s claim buys.
     """
     try:
         receipt = await asyncio.to_thread(receiver.get, receipt_id)
@@ -332,10 +418,18 @@ async def dispatch_receipt(
             receiver, receipt.id, f"the chat could not be created ({exc})"
         )
 
+    # The allocation is what recovery looks for, so it is a separate step from
+    # the turn and gets its own refusal: a journal that could not record it means
+    # no turn was attempted at all, which is not the same statement as "the turn
+    # could not be started", and the chat above is an orphan nothing will run.
     try:
-        # Durable before the turn, which is the whole ordering rule. From here a
-        # crash is `interrupted`, not a receipt that looks un-run.
         await asyncio.to_thread(receiver.begin_launch, receipt.id)
+    except Exception as exc:  # noqa: BLE001 — the receipt is the record of this
+        return await _settle_failed(
+            receiver, receipt.id, f"the turn was never attempted ({exc})"
+        )
+
+    try:
         # Deliberately not unattended: see the module docstring. A webhook event
         # is not permission to escalate, and an approval card raised here is
         # answered in the ordinary chat like any other.
@@ -345,6 +439,7 @@ async def dispatch_receipt(
             receiver, receipt.id, f"the turn could not be started ({exc})"
         )
 
+    settled = await _settle_launched(receiver, receipt.id, chat.chat_id)
     logger.info(
         "webhook dispatch: receipt %s launched chat %s in %s for trigger %s",
         receipt.id,
@@ -352,7 +447,7 @@ async def dispatch_receipt(
         project.project_id,
         trigger.trigger_id,
     )
-    return await asyncio.to_thread(receiver.get, receipt.id)
+    return settled
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +465,7 @@ class ResumeSummary:
     #: ``failed`` receipts: the target could not be resolved, or the turn could
     #: not start.
     failed: int = 0
-    #: ``launched`` receipts a crash had left ambiguous, now recorded
+    #: ``launching`` receipts a crash had left ambiguous, now recorded
     #: ``interrupted``. Each one needs a person; none is replayed.
     interrupted: int = 0
 
@@ -386,16 +481,20 @@ async def resume_pending(
 
     Two passes, in that order, and the order is load-bearing:
 
-    1. ``recover_interrupted`` records every ``launched`` receipt with no outcome
+    1. ``recover_interrupted`` records every ``launching`` receipt with no outcome
        as ``interrupted``. It runs first so the journal says what is ambiguous
        before any new turn starts — an ambiguous receipt is evidence, and it
-       should be evidence before the boot log grows more.
+       should be evidence before the boot log grows more. A ``launched`` receipt
+       is untouched here: it recorded its own success.
     2. Every remaining ``accepted`` receipt is dispatched, oldest first, once.
 
     Once, because dispatch is idempotent by receipt state: after this pass each
     receipt it touched is ``launched`` or ``failed``, so a second sweep over the
     same journal — this startup running twice, an operator calling it by hand —
-    starts no second turn. Nothing is ever replayed for having been left open.
+    starts no second turn. Nothing is ever replayed for having been left open. A
+    receipt some other caller is dispatching right now is skipped rather than
+    duplicated (:func:`dispatch_receipt` claims it first), and is neither
+    launched nor failed by this summary: the other caller owns its outcome.
 
     What is past ``limit`` is *not* counted here: it is left ``accepted``, which
     is the open state the receiver's own per-trigger bound already counts and
@@ -405,7 +504,7 @@ async def resume_pending(
     stranded = await asyncio.to_thread(receiver.recover_interrupted)
     for receipt in stranded:
         logger.warning(
-            "webhook dispatch: receipt %s was left launched by a previous process "
+            "webhook dispatch: receipt %s was left launching by a previous process "
             "and is now %s; review it before retrying",
             receipt.id,
             INTERRUPTED,
