@@ -25,9 +25,9 @@
 // the supervisor out of launchd's job group and orphan the engine (and the
 // OpenCode server) when the host dies. With `posix_spawn` the child keeps the
 // host's process group and session, so launchd's cleanup of the job group still
-// reaches every descendant. The host therefore never calls `killpg` itself: a
-// stop is forwarded to the tracked, still-unreaped child PID only, and launchd
-// is the final group owner.
+// reaches the supervisor and its dies_with_engine helpers. The host therefore
+// never calls `killpg` itself: a stop is forwarded to the tracked,
+// still-unreaped child PID only, and launchd is the final group owner.
 //
 // Protocol revision 1. Invalid argv exits 2 before AppKit is set up and before
 // any permission call is reachable.
@@ -120,7 +120,8 @@ enum SpawnOutcome {
 /// Spawn the fixed supervisor with the public `posix_spawn` API.
 ///
 /// No `POSIX_SPAWN_SETPGROUP`: the child stays in the host's process group and
-/// session, so launchd's final job-group cleanup still reaches the whole tree.
+/// session, so launchd's final job-group cleanup still reaches the supervisor
+/// and its `dies_with_engine` helpers.
 /// `POSIX_SPAWN_SETSIGDEF` resets SIGTERM/SIGINT (which the host ignores) to
 /// their defaults, `POSIX_SPAWN_SETSIGMASK` clears the inherited mask, and
 /// `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every descriptor except the explicitly
@@ -213,10 +214,15 @@ final class ServeController {
     /// delivered during startup is already queued ahead of it.
     func begin() {
         for sig in [SIGTERM, SIGINT] {
-            signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler { [weak self] in self?.handleStop() }
             source.resume()
+            // Register the source BEFORE ignoring the signal's disposition: the
+            // kqueue source records the arrival, so a signal landing in this
+            // window is delivered to the handler instead of being silently
+            // discarded. Ignoring the disposition stops the default action
+            // (terminate) from racing the handler.
+            signal(sig, SIG_IGN)
             signalSources.append(source)
         }
         DispatchQueue.main.async { [weak self] in
@@ -262,7 +268,9 @@ final class ServeController {
         }
     }
 
-    private func handleStop() {
+    /// A stop requested by a signal source or by the replaced Quit Apple Event
+    /// handler. Internal so the delegate's quit handler can reach it.
+    func handleStop() {
         if stopRequested { return }
         stopRequested = true
         guard let pid = childPid else {
@@ -303,16 +311,21 @@ final class ServeController {
     }
 
     /// The status the host exits with. A requested stop is a clean stop — 0 —
-    /// only when the child exited 0 or died by the forwarded SIGTERM. Every
-    /// other outcome (a stalled child killed by the escalation, a non-zero exit
-    /// after the stop, a crash) is preserved so launchd and logs see the failed
+    /// for the codes the real supervisor answers a stop with: exit 0, exit 130
+    /// (the supervisor saw the stop before its first launch or during its
+    /// restart backoff) and exit 143 (the engine it terminated died by the
+    /// forwarded SIGTERM), plus death by the forwarded SIGTERM itself. Every
+    /// other outcome (a stalled child killed by the escalation, any other
+    /// non-zero exit, a crash) is preserved so launchd and logs see the failed
     /// shutdown instead of a false success.
     private func exitCode(_ status: Int32) -> Int32 {
         let signalNumber = status & 0x7f
         let exitedNormally = signalNumber == 0
         let exitStatus = (status >> 8) & 0xff
         if stopRequested {
-            if exitedNormally && exitStatus == 0 { return 0 }
+            if exitedNormally && (exitStatus == 0 || exitStatus == 130 || exitStatus == 143) {
+                return 0
+            }
             if !exitedNormally && signalNumber == SIGTERM { return 0 }
         }
         if exitedNormally { return exitStatus }
@@ -340,6 +353,45 @@ func runRequestAccessibility() -> Never {
     exit(0)
 }
 
+/// Replaces AppKit's default Quit Apple Event handler so a graceful macOS quit
+/// (logout, restart, shutdown, or `quit app "Ciaobot Server"`) forwards a stop
+/// to the supervisor instead of calling `terminate:`/`exit(0)` and orphaning it.
+final class QuitEventHandler: NSObject {
+    private let onQuit: () -> Void
+
+    init(onQuit: @escaping () -> Void) {
+        self.onQuit = onQuit
+    }
+
+    @objc func handle(_ event: NSAppleEventDescriptor, withReply reply: NSAppleEventDescriptor) {
+        onQuit()
+    }
+}
+
+/// Pins the controller and installs the quit handler once AppKit has finished
+/// launching. `NSAppleEventManager.setEventHandler` replaces the default
+/// `kAEQuitApplication` handler, so the delegate's `onQuit` runs instead of
+/// `NSApplication.terminate(_:)`. `NSApp.delegate` is weak, so the caller pins
+/// this object for the whole event loop.
+final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
+    private let quitHandler: QuitEventHandler
+    private let onQuit: () -> Void
+
+    init(onQuit: @escaping () -> Void) {
+        self.quitHandler = QuitEventHandler(onQuit: onQuit)
+        self.onQuit = onQuit
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            quitHandler,
+            andSelector: #selector(QuitEventHandler.handle(_:withReply:)),
+            forEventClass: AEEventClass(kCoreEventClass),
+            andEventID: AEEventID(kAEQuitApplication)
+        )
+    }
+}
+
 func runServe(python: String) -> Never {
     // Install stop handlers and defer the launch BEFORE AppKit is set up, so a
     // stop that lands during startup is seen and no child is ever launched.
@@ -347,9 +399,11 @@ func runServe(python: String) -> Never {
     controller.begin()
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    // Every handler holds the controller weakly, and Swift may release a local
-    // after its last use, so pin it for the whole event loop.
-    withExtendedLifetime(controller) {
+    let delegate = HostApplicationDelegate(onQuit: { controller.handleStop() })
+    app.delegate = delegate
+    // Every handler holds the controller weakly, and AppKit's delegate is weak,
+    // so pin both for the whole event loop.
+    withExtendedLifetime((controller, delegate)) {
         app.run()
     }
     exit(0)

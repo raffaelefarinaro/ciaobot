@@ -43,9 +43,12 @@ The child is spawned with the public `posix_spawn` API, **not**
 group and session, which would take the supervisor out of launchd's job group
 and let the engine (and the provider servers it starts) survive a host crash or
 SIGKILL as orphans. With `posix_spawn` the host passes no `POSIX_SPAWN_SETPGROUP`:
-the supervisor and every descendant it starts stay in the host's process group
-and session, exactly as `ciao/os_support/processes.py`'s `dies_with_engine`
-contract expects.
+the supervisor stays in the host's process group and session, so the helpers it
+starts with `tree_spawn_options(dies_with_engine=True)` — the engine, the OpenCode
+server — do too, exactly as `ciao/os_support/processes.py`'s `dies_with_engine`
+contract expects. Not every subprocess the supervisor starts shares the group:
+independent background runs deliberately use their own new session, and those
+are not expected to die with the job.
 
 Because the host shares that one group, **it never calls `killpg` on it**:
 signalling the group would also signal the host itself.
@@ -64,12 +67,24 @@ descriptor, so the child never inherits the host's incidental open files.
 
 ## Signals and lifetime
 
-`SIGTERM` and `SIGINT` are handled through safe dispatch signal sources, never
-with Foundation work inside a POSIX signal callback. On the first stop:
+A stop reaches the host three ways, and all three forward to the supervisor the
+same way: `SIGTERM`/`SIGINT` through safe dispatch signal sources, and a graceful
+macOS **Quit Apple Event** (`kAEQuitApplication`) through a pinned
+`NSApplicationDelegate` that replaces AppKit's default handler in
+`applicationDidFinishLaunching`. Without that replacement, loginwindow's quit on
+logout, restart or shutdown — and `quit app "Ciaobot Server"` — would run
+`NSApplication.terminate(_:)` and exit `0` immediately, orphaning the supervisor.
+`SIGTERM`/`SIGINT` never use Foundation work inside a POSIX signal callback, and
+neither the signal nor the Apple Event handler performs any desktop-control
+operation; the Quit handler only calls the controller's stop path.
+
+On the first stop:
 
 1. If the child has not launched yet, nothing is launched and the host exits `0`.
    The launch waits for the first event-loop turn, so a stop delivered while
-   AppKit is still starting is handled before the launch decision.
+   AppKit is still starting is handled before the launch decision. A signal
+   landing in the tiny window before the handlers are installed still kills the
+   host, which is also safe: no child exists yet.
 2. Otherwise the host forwards `SIGTERM` to the tracked child PID exactly once
    and arms one `SIGKILL` escalation for `STOP_GRACE_SECONDS` (35 s, deliberately
    longer than the Python supervisor's own 30 s grace so the child's grace wins
@@ -80,11 +95,14 @@ with Foundation work inside a POSIX signal callback. On the first stop:
    The PID is held until its status is collected, so the kernel cannot reuse it
    and the escalation can never signal a recycled PID.
 
-The exit status is honest. A requested stop returns `0` only when the child
-exited `0` or died by the forwarded `SIGTERM`. A stalled supervisor that had to
-be SIGKILLed (`137`), a non-zero exit after the stop, or a crash (`128 + signal`)
-is preserved, so launchd and the service logs see a failed shutdown instead of a
-false success.
+The exit status is honest. A requested stop returns `0` for the codes the real
+supervisor answers a stop with: exit `0`, exit `130` (the supervisor saw the stop
+before its first launch or during its restart backoff), exit `143` (the engine it
+terminated died by the forwarded `SIGTERM`), and death by the forwarded
+`SIGTERM` itself. A stalled supervisor that had to be SIGKILLed (`137`), any
+other non-zero exit after the stop, or a crash (`128 + signal`) is preserved, so
+launchd and the service logs see a failed shutdown instead of a false success.
+Without a stop, `130`, `143` and every other code pass through unchanged.
 
 The host never restarts or relaunches itself or its child. The Python
 supervisor (`ciao/supervise.py`) still owns restart-code 75, the crash-loop
@@ -167,7 +185,9 @@ build ordering, archive safety and metadata, the `killpg`-free and
 compiles the real host and a small offline C child fixture once, then exercises
 the shipped host: fixed supervisor argv, inherited cwd/environment/stdio, the
 child's reset signal mask and dispositions, the dropped extra fd, exit and
-signal mirroring, stop forwarding and reaping, the stalled-child escalation
+signal mirroring, exit `130`/`143` treated as a clean stop (and unchanged
+without a stop), stop forwarding and reaping, the graceful Quit Apple Event
+forwarding a stop and reaping the child, the stalled-child escalation
 (`137`, then the test simulates launchd's final job-group cleanup), preserved
 non-zero and crash statuses after a stop, launch failure, and the shared
 job-group inheritance. The `request-accessibility` branch is **never executed**

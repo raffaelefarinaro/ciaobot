@@ -768,10 +768,12 @@ def test_host_forwards_stop_and_reaps(
     "action, exit_code, expected",
     [
         ("exit", 5, 5),
+        ("exit", 130, 0),
+        ("exit", 143, 0),
         ("abort", 0, 128 + signal.SIGABRT),
     ],
 )
-def test_host_preserves_nonzero_and_crash_after_stop(
+def test_host_stop_status_mapping(
     host_binary: Path,
     child_helper: Path,
     tmp_path: Path,
@@ -779,9 +781,10 @@ def test_host_preserves_nonzero_and_crash_after_stop(
     exit_code: int,
     expected: int,
 ) -> None:
-    # A stop is a clean 0 only for exit 0 or the forwarded SIGTERM. A non-zero
-    # exit or a crash after the stop is preserved, so launchd and logs see a
-    # failed shutdown instead of a false success.
+    # A stop is a clean 0 for the codes the real supervisor answers a stop with:
+    # 0, 130 (stop during backoff/start) and 143 (engine died by the forwarded
+    # TERM), plus death by the forwarded SIGTERM. Any other non-zero exit or a
+    # crash after the stop is preserved so launchd and logs see the failure.
     record = tmp_path / "child.json"
     env = _child_env(
         HOST_RECORD=record,
@@ -796,6 +799,24 @@ def test_host_preserves_nonzero_and_crash_after_stop(
         assert host.wait(timeout=30) == expected
     finally:
         _terminate_exact(host)
+
+
+@requires_macos_tools
+@pytest.mark.parametrize("exit_code", [130, 143])
+def test_host_without_stop_preserves_supervisor_codes(
+    host_binary: Path, child_helper: Path, tmp_path: Path, exit_code: int
+) -> None:
+    # Without a stop request, 130 and 143 are ordinary child exits and pass
+    # through unchanged; the clean-stop mapping must not swallow them.
+    record = tmp_path / "child.json"
+    result = subprocess.run(
+        [str(host_binary), "serve", "--python", str(child_helper)],
+        capture_output=True,
+        text=True,
+        env=_child_env(HOST_RECORD=record, HOST_MODE="report", HOST_EXIT=str(exit_code)),
+        timeout=30,
+    )
+    assert result.returncode == exit_code
 
 
 @requires_macos_tools
@@ -920,6 +941,79 @@ def test_host_launch_failure(host_binary: Path, tmp_path: Path) -> None:
     assert "could not launch supervisor" in result.stderr
 
 
+# The self-quit trigger for the graceful-quit fixture. It is inserted just
+# before the top-level entrypoint (`let operation = parseInvocation(...)`), which
+# never returns, so appending it after the source would leave it unreachable. It
+# sends this process its own `kAEQuitApplication` event — the same event
+# loginwindow sends on logout and `quit app "Ciaobot Server"` sends — which needs
+# no Automation consent because the target is this process. The struct and
+# controller source above it are unchanged.
+_QUIT_TRIGGER_SOURCE = r"""
+// --- test-only self-quit trigger (never shipped) ---
+DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
+    var psn = ProcessSerialNumber(highLongOfPSN: 0, lowLongOfPSN: UInt32(kCurrentProcess))
+    let target = NSAppleEventDescriptor(
+        descriptorType: typeProcessSerialNumber, bytes: &psn,
+        length: MemoryLayout<ProcessSerialNumber>.size
+    )
+    let event = NSAppleEventDescriptor(
+        eventClass: AEEventClass(kCoreEventClass), eventID: AEEventID(kAEQuitApplication),
+        targetDescriptor: target, returnID: AEReturnID(kAutoGenerateReturnID),
+        transactionID: AETransactionID(kAnyTransactionID)
+    )
+    _ = try? event.sendEvent(options: [.noReply], timeout: 2.0)
+}
+"""
+
+_ENTRYPOINT_MARKER = "\nlet operation = parseInvocation(CommandLine.arguments)\n"
+
+
+@pytest.fixture(scope="module")
+def quit_host_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The shipped source with the self-quit trigger injected, compiled once."""
+    if not HAS_TOOLS:
+        pytest.skip("the native host build requires macOS Command Line Tools")
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    assert source.count(_ENTRYPOINT_MARKER) == 1
+    fixture_source = source.replace(
+        _ENTRYPOINT_MARKER, _QUIT_TRIGGER_SOURCE + _ENTRYPOINT_MARKER
+    )
+    workdir = tmp_path_factory.mktemp("server-host-quit")
+    source_path = workdir / "QuitFixture.swift"
+    source_path.write_text(fixture_source, encoding="utf-8")
+    binary = workdir / "CiaobotServerHostQuitFixture"
+    completed = subprocess.run(
+        ["xcrun", "swiftc", str(source_path), "-target", _host_target(), "-O", "-o", str(binary)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return binary
+
+
+@requires_macos_tools
+def test_host_graceful_quit_forwards_stop_and_reaps(
+    quit_host_binary: Path, child_helper: Path, tmp_path: Path
+) -> None:
+    # A graceful macOS quit must forward a stop to the supervisor and mirror its
+    # status, not call NSApplication.terminate(_:) and orphan it. The fixture
+    # sends itself the Quit Apple Event the same way loginwindow does.
+    record = tmp_path / "child.json"
+    marker = tmp_path / "got-term"
+    env = _child_env(HOST_RECORD=record, HOST_MODE="term", HOST_MARKER=marker)
+    host = subprocess.Popen([str(quit_host_binary), "serve", "--python", str(child_helper)], env=env)
+    try:
+        rec = _read_json(record)
+        # The quit arrives from the fixture about a second in; a clean mirrored
+        # stop is exit 0.
+        assert host.wait(timeout=20) == 0
+        assert marker.exists(), "the quit did not forward a stop to the supervisor"
+        assert _await_dead(rec["pid"]), "the supervisor was not reaped"
+    finally:
+        _terminate_exact(host)
+
+
 def test_serve_branch_has_no_permission_api() -> None:
     source = HOST_SOURCE.read_text(encoding="utf-8")
     # The only AX call lives in the request branch's one named function.
@@ -945,6 +1039,31 @@ def test_host_protocol_revision_matches_builder() -> None:
     match = re.search(r"^let HOST_PROTOCOL_REVISION = (\d+)$", source, re.MULTILINE)
     assert match is not None
     assert int(match.group(1)) == BUILD.HOST_PROTOCOL_REVISION
+
+
+def test_host_replaces_appkit_quit_handler() -> None:
+    # A graceful macOS Quit Apple Event must reach the controller's stop path,
+    # not AppKit's default terminate/exit(0).
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    assert "NSApplicationDelegate" in source
+    assert "NSAppleEventManager.shared().setEventHandler(" in source
+    assert "kAEQuitApplication" in source
+    assert "applicationDidFinishLaunching" in source
+    # It must route to the controller's stop path, and never set a cancel/terminate.
+    assert "controller.handleStop()" in source
+    assert "terminateLater" not in source
+    assert "terminateCancel" not in source
+    assert "NSApplication.shared.terminate" not in source
+
+
+def test_host_registers_signal_source_before_ignoring_disposition() -> None:
+    # N1: resume the dispatch source before setting SIG_IGN, so a signal landing
+    # in the window is delivered rather than silently discarded.
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    region = source.split("func begin()")[1].split("DispatchQueue.main.async")[0]
+    resume = region.index("source.resume()")
+    ignore = region.index("signal(sig, SIG_IGN)")
+    assert resume < ignore
 
 
 def _source_without_comments() -> str:
