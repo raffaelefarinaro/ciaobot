@@ -4,7 +4,7 @@ This is a build tool, not an installer. It compiles the small native host at
 ``native/server-host/ServerHost.swift`` for both macOS architectures, assembles
 a ``Ciaobot Server.app`` bundle with the tracked PR119 icon, ad-hoc signs it once
 after all resources are in place, verifies the signature and universal slices,
-and writes ``caibot-server-host-macos-universal-v1.tar.gz``.
+and writes ``ciaobot-server-host-macos-universal-v1.tar.gz``.
 
 It writes only under the caller-provided new output directory. It never touches
 ``~/Applications``, launch agents, services, permissions, or a running engine,
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -28,7 +29,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 from typing import Any, Callable
 
 APP_NAME = "Ciaobot Server.app"
@@ -41,7 +41,7 @@ ARM_TARGET = f"arm64-apple-macosx{MACOS_DEPLOYMENT_TARGET}"
 INTEL_TARGET = f"x86_64-apple-macosx{MACOS_DEPLOYMENT_TARGET}"
 
 ICON_NAME = "CiaobotServer.icns"
-ARCHIVE_NAME = "caibot-server-host-macos-universal-v1.tar.gz"
+ARCHIVE_NAME = "ciaobot-server-host-macos-universal-v1.tar.gz"
 
 # The custom plist key the host-aware service contract will read (#1008 child B).
 HOST_PROTOCOL_KEY = "CiaobotServerHostProtocol"
@@ -112,17 +112,17 @@ def lipo_archs_command(binary: Path) -> list[str]:
     return ["lipo", "-archs", str(binary)]
 
 
-def lipo_thin_command(binary: Path, arch: str, output: Path) -> list[str]:
-    return ["lipo", "-thin", arch, "-output", str(output), str(binary)]
-
-
-def codesign_cdhash(path: Path, runner: Callable[..., Any]) -> str | None:
-    """The ``CDHash=`` a signature reports for ``path``, or None when absent.
+def codesign_cdhash(path: Path, arch: str, runner: Callable[..., Any]) -> str | None:
+    """The ``CDHash=`` the ``arch`` slice of ``path`` reports, or None when absent.
 
     The executable SHA-256 alone is not signature evidence; this is the signed
     code identity, printed on stderr by current macOS.
     """
-    completed = runner(["codesign", "-dv", "--verbose=4", str(path)], capture_output=True, text=True)
+    completed = runner(
+        ["codesign", "-dv", "--verbose=4", "--arch", arch, str(path)],
+        capture_output=True,
+        text=True,
+    )
     combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
     for line in combined.splitlines():
         if line.startswith("CDHash="):
@@ -151,6 +151,7 @@ def _layout(output: Path) -> dict[str, Path]:
         "info_plist": app / "Contents" / "Info.plist",
         "icon": app / "Contents" / "Resources" / ICON_NAME,
         "staging": output / ".host-build",
+        "verify": output / ".host-verify",
         "archive": output / ARCHIVE_NAME,
     }
 
@@ -163,14 +164,10 @@ def _verify_universal(executable: Path, runner: Callable[..., Any]) -> None:
         raise BuildError(f"universal binary is missing architectures: {', '.join(missing)}")
 
 
-def _per_arch_cdhashes(
-    executable: Path, staging: Path, runner: Callable[..., Any]
-) -> dict[str, str]:
+def _per_arch_cdhashes(executable: Path, runner: Callable[..., Any]) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for arch in ARCHITECTURES:
-        thin = staging / f"{EXECUTABLE_NAME}.{arch}"
-        runner(lipo_thin_command(executable, arch, thin), check=True)
-        cdhash = codesign_cdhash(thin, runner)
+        cdhash = codesign_cdhash(executable, arch, runner)
         if not cdhash:
             raise BuildError(f"no CDHash reported for the {arch} slice")
         hashes[arch] = cdhash
@@ -211,18 +208,22 @@ def _archive_app(app: Path, archive: Path) -> None:
                 add(root_path / name)
 
 
-def _re_extract_and_verify(archive: Path, runner: Callable[..., Any]) -> None:
-    """Unpack the archive into a fresh scratch dir and strict-verify the app."""
-    scratch = Path(tempfile.mkdtemp(prefix="ciaobot-server-host-verify-"))
+def _re_extract_and_verify(archive: Path, scratch: Path, runner: Callable[..., Any]) -> None:
+    """Unpack the archive into the fresh ``scratch`` dir and strict-verify the app.
+
+    The ``data`` filter refuses absolute paths, ``..`` traversal and special
+    files; links are refused outright because the archive holds none.
+    """
+    scratch.mkdir()
     try:
         with tarfile.open(archive, "r:gz") as tar:
             for member in tar.getmembers():
-                name = member.name
-                if name.startswith("/") or ".." in Path(name).parts:
-                    raise BuildError(f"archive member has an unsafe path: {name}")
                 if member.issym() or member.islnk():
-                    raise BuildError(f"archive member is a link: {name}")
-            tar.extractall(scratch, filter="fully_trusted")
+                    raise BuildError(f"archive member is a link: {member.name}")
+            try:
+                tar.extractall(scratch, filter="data")
+            except tarfile.FilterError as exc:
+                raise BuildError(f"archive member is unsafe: {exc}") from exc
         extracted = scratch / APP_NAME
         runner(["codesign", "--verify", "--strict", str(extracted)], check=True)
     finally:
@@ -271,6 +272,7 @@ def build(
         runner(commands[1], check=True)
         paths["macos"].mkdir(parents=True)
         runner(lipo_create_command(arm_path, intel_path, paths["executable"]), check=True)
+        shutil.rmtree(paths["staging"])
 
         # Bundle metadata and resources are all in place before the one signature.
         paths["resources"].mkdir()
@@ -281,12 +283,11 @@ def build(
         runner(["codesign", "--force", "--sign", "-", str(paths["app"])], check=True)
         runner(["codesign", "--verify", "--strict", str(paths["app"])], check=True)
         _verify_universal(paths["executable"], runner)
-        per_arch = _per_arch_cdhashes(paths["executable"], paths["staging"], runner)
+        per_arch = _per_arch_cdhashes(paths["executable"], runner)
 
         # Nothing changes the sealed bundle after this point.
-        shutil.rmtree(paths["staging"])
         _archive_app(paths["app"], paths["archive"])
-        _re_extract_and_verify(paths["archive"], runner)
+        _re_extract_and_verify(paths["archive"], paths["verify"], runner)
 
         executable_digest = hashlib.sha256(paths["executable"].read_bytes()).hexdigest()
         archive_bytes = paths["archive"].read_bytes()
@@ -332,8 +333,6 @@ def main(argv: list[str] | None = None) -> int:
 
     paths: dict[str, Path] = result["paths"]
     metadata: dict[str, Any] = result["metadata"]
-    import json
-
     print(f"App: {paths['app']}")
     print(f"Archive: {paths['archive']}")
     print(json.dumps(metadata, indent=2, sort_keys=True))

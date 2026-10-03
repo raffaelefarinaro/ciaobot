@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
+import select
 import shutil
 import signal
 import subprocess
@@ -56,6 +58,28 @@ HAS_TOOLS = (
 requires_macos_tools = pytest.mark.skipif(
     not HAS_TOOLS, reason="the native host build requires macOS Command Line Tools"
 )
+
+
+def _fake_runner(
+    commands: list[list[str]] | None = None, archs: str = "arm64 x86_64\n"
+) -> Any:
+    """An injected runner that fakes the compiler, lipo and codesign outputs."""
+
+    def run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if commands is not None:
+            commands.append(list(cmd))
+        if cmd[0] == "xcrun":
+            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"thin")
+        elif cmd[:2] == ["lipo", "-create"]:
+            Path(cmd[cmd.index("-output") + 1]).write_bytes(b"universal-binary")
+        elif cmd[:2] == ["lipo", "-archs"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=archs)
+        elif cmd[:2] == ["codesign", "-dv"]:
+            arch = cmd[cmd.index("--arch") + 1]
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr=f"CDHash=cd-{arch}\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    return run
 
 
 # --- identity -------------------------------------------------------------
@@ -104,27 +128,10 @@ def test_tracked_icon_matches_pinned_bytes() -> None:
 
 
 def test_icon_is_bundled_from_tracked_file(tmp_path: Path) -> None:
-    commands: list[list[str]] = []
-    fake_universal = b"universal-binary"
-
-    def fake_runner(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        commands.append(list(cmd))
-        if cmd[0] == "xcrun":
-            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"thin")
-        elif cmd[:2] == ["lipo", "-create"]:
-            Path(cmd[cmd.index("-output") + 1]).write_bytes(fake_universal)
-        elif cmd[:2] == ["lipo", "-thin"]:
-            Path(cmd[cmd.index("-output") + 1]).write_bytes(b"thin-slice")
-        elif cmd[:2] == ["lipo", "-archs"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="x86_64 arm64\n")
-        elif cmd[:2] == ["codesign", "-dv"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="CDHash=deadbeef\n")
-        return subprocess.CompletedProcess(cmd, 0)
-
     result = BUILD.build(
         tmp_path / "host",
         platform_name="darwin",
-        runner=fake_runner,
+        runner=_fake_runner(archs="x86_64 arm64\n"),
     )
     app: Path = result["paths"]["app"]
     assert (app / "Contents" / "Resources" / BUILD.ICON_NAME).read_bytes() == ICON_PATH.read_bytes()
@@ -210,26 +217,10 @@ def test_non_macos_build_fails_before_writes(tmp_path: Path) -> None:
 
 def test_injected_build_order_and_metadata(tmp_path: Path) -> None:
     commands: list[list[str]] = []
-
-    def fake_runner(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        commands.append(list(cmd))
-        if cmd[0] == "xcrun":
-            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"thin")
-        elif cmd[:2] == ["lipo", "-create"]:
-            Path(cmd[cmd.index("-output") + 1]).write_bytes(b"universal-binary")
-        elif cmd[:2] == ["lipo", "-thin"]:
-            Path(cmd[cmd.index("-output") + 1]).write_bytes(b"thin-slice")
-        elif cmd[:2] == ["lipo", "-archs"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="arm64 x86_64\n")
-        elif cmd[:2] == ["codesign", "-dv"]:
-            target = cmd[-1]
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr=f"CDHash=cd-{Path(target).name}\n")
-        return subprocess.CompletedProcess(cmd, 0)
-
     result = BUILD.build(
         tmp_path / "host",
         platform_name="darwin",
-        runner=fake_runner,
+        runner=_fake_runner(commands),
     )
 
     # Universal assembly -> metadata/resources -> one signature -> strict verify
@@ -250,13 +241,13 @@ def test_injected_build_order_and_metadata(tmp_path: Path) -> None:
     assert metadata["minimum_system_version"] == "13.0"
     assert metadata["architectures"] == ["arm64", "x86_64"]
     assert metadata["executable_sha256"] == hashlib.sha256(b"universal-binary").hexdigest()
-    assert set(metadata["per_arch_cdhashes"]) == {"arm64", "x86_64"}
+    assert metadata["per_arch_cdhashes"] == {"arm64": "cd-arm64", "x86_64": "cd-x86_64"}
     # Public metadata names no local-machine path.
     for value in (metadata["executable_sha256"], metadata["archive_sha256"]):
         assert "/" not in value and "Users" not in value
 
     archive: Path = result["paths"]["archive"]
-    assert archive.name == "caibot-server-host-macos-universal-v1.tar.gz"
+    assert archive.name == "ciaobot-server-host-macos-universal-v1.tar.gz"
     assert archive.is_file()
 
 
@@ -277,20 +268,7 @@ def test_failed_build_removes_only_its_own_output(tmp_path: Path) -> None:
 
 
 def test_archive_members_are_ordinary_and_path_safe(tmp_path: Path) -> None:
-    def fake_runner(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if cmd[0] == "xcrun":
-            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"thin")
-        elif cmd[:2] == ["lipo", "-create"]:
-            Path(cmd[cmd.index("-output") + 1]).write_bytes(b"universal-binary")
-        elif cmd[:2] == ["lipo", "-thin"]:
-            Path(cmd[cmd.index("-output") + 1]).write_bytes(b"thin-slice")
-        elif cmd[:2] == ["lipo", "-archs"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="arm64 x86_64\n")
-        elif cmd[:2] == ["codesign", "-dv"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="CDHash=abc\n")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    result = BUILD.build(tmp_path / "host", platform_name="darwin", runner=fake_runner)
+    result = BUILD.build(tmp_path / "host", platform_name="darwin", runner=_fake_runner())
     with tarfile.open(result["paths"]["archive"], "r:gz") as tar:
         members = tar.getmembers()
     for member in members:
@@ -303,6 +281,10 @@ def test_archive_members_are_ordinary_and_path_safe(tmp_path: Path) -> None:
     assert "Ciaobot Server.app/Contents/MacOS/CiaobotServerHost" in names
     # No thin staging files and no absolute paths leak into the archive.
     assert not any(n.endswith((".arm64", ".x86_64")) for n in names)
+    # Only the app ships: the staging and verify scratch dirs are gone.
+    assert sorted(p.name for p in (tmp_path / "host").iterdir()) == sorted(
+        [BUILD.APP_NAME, BUILD.ARCHIVE_NAME]
+    )
 
 
 @requires_macos_tools
@@ -339,14 +321,20 @@ def test_build_archive_preserves_strict_signature(tmp_path: Path) -> None:
     assert info["CFBundleIdentifier"] == "local.ciaobot.server"
     assert info[BUILD.HOST_PROTOCOL_KEY] == 1
 
-    # The per-arch CDHashes in the metadata are the real signed slices' hashes.
+    # The per-arch CDHashes in the metadata are the real signed slices' hashes,
+    # cross-checked against each slice thinned out of the extracted executable.
     executable = extracted_app / "Contents" / "MacOS" / BUILD.EXECUTABLE_NAME
     for arch, expected in result["metadata"]["per_arch_cdhashes"].items():
         thin = tmp_path / f"thin-{arch}"
         subprocess.run(
-            BUILD.lipo_thin_command(executable, arch, thin), check=True, capture_output=True
+            ["lipo", "-thin", arch, "-output", str(thin), str(executable)],
+            check=True,
+            capture_output=True,
         )
-        assert BUILD.codesign_cdhash(thin, subprocess.run) == expected
+        shown = subprocess.run(
+            ["codesign", "-dv", "--verbose=4", str(thin)], capture_output=True, text=True
+        )
+        assert f"CDHash={expected}" in shown.stderr.splitlines()
 
 
 # --- serve branch runtime (macOS only) ------------------------------------
@@ -525,11 +513,16 @@ def test_host_forwards_stop_and_reaps(host_binary: Path, tmp_path: Path) -> None
 
 @requires_macos_tools
 def test_host_stop_escalates_stalled_child(host_binary: Path, tmp_path: Path) -> None:
+    # The stalled child keeps a descendant in its own process group, the way the
+    # supervisor keeps the engine; the escalation must not orphan it.
+    descendant_file = tmp_path / "descendant.pid"
     child = _write_fake_child(
         tmp_path,
         "#!/bin/sh\n"
-        "echo $$ > \"" + str(tmp_path / "child.pid") + "\"\n"
         "trap '' TERM\n"
+        "sleep 600 &\n"
+        "echo $! > \"" + str(descendant_file) + "\"\n"
+        "echo $$ > \"" + str(tmp_path / "child.pid") + "\"\n"
         "while :; do sleep 0.5; done\n",
     )
     pid_file = tmp_path / "child.pid"
@@ -544,9 +537,79 @@ def test_host_stop_escalates_stalled_child(host_binary: Path, tmp_path: Path) ->
         assert host.wait(timeout=45) == 0
         assert time.time() - started < 40
         assert _wait_for(lambda: not _pid_alive(child_pid), timeout=5)
+        descendant_pid = int(descendant_file.read_text().strip())
+        assert _wait_for(lambda: not _pid_alive(descendant_pid), timeout=5)
     finally:
         _terminate_exact(host)
         _kill_exact_from_file(pid_file)
+        _kill_exact_from_file(descendant_file)
+
+
+@requires_macos_tools
+def test_host_stop_during_startup_launches_nothing(host_binary: Path, tmp_path: Path) -> None:
+    # A stop that lands after the handlers are installed but while AppKit is
+    # still starting must win: no child is launched. Launches are observed as
+    # NOTE_FORK on the host pid, so a child killed before it could record
+    # itself still counts. The stop is swept across the startup window because
+    # its timing cannot be pinned from outside; samples whose fork may have
+    # raced the stop itself are discarded.
+    pids = tmp_path / "launched.pids"
+    child = _write_fake_child(
+        tmp_path,
+        f"#!/bin/sh\necho $$ >> \"{pids}\"\ntrap 'exit 0' TERM\nwhile :; do sleep 0.1; done\n",
+    )
+    handled = 0
+    try:
+        for delay in (0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05) * 3:
+            host = subprocess.Popen([str(host_binary), "serve", "--python", str(child)])
+            queue = select.kqueue()
+            try:
+                queue.control(
+                    [
+                        select.kevent(
+                            host.pid,
+                            filter=select.KQ_FILTER_PROC,
+                            flags=select.KQ_EV_ADD,
+                            fflags=select.KQ_NOTE_FORK | select.KQ_NOTE_EXIT,
+                        )
+                    ],
+                    0,
+                )
+                time.sleep(delay)
+                forked_before = _host_forked(queue.control(None, 8, 0))
+                host.send_signal(signal.SIGTERM)
+                # A fork within a few milliseconds of the stop was already under
+                # way (spawning takes about a millisecond). A launch that ignored
+                # the stop waits for the event loop, tens of milliseconds later.
+                racing = queue.control(None, 8, 0.005)
+                forked_racing = _host_forked(racing)
+                events: list[Any] = list(racing)
+                while not any(event.fflags & select.KQ_NOTE_EXIT for event in events):
+                    batch = queue.control(None, 8, 45)
+                    assert batch, "host did not exit after a startup stop"
+                    events.extend(batch)
+                code = host.wait(timeout=5)
+            finally:
+                queue.close()
+                _terminate_exact(host)
+            if code != 0 or forked_before or forked_racing:
+                # Killed before the handlers existed, or launched before the stop.
+                continue
+            handled += 1
+            assert not _host_forked(events), f"a child was launched after a stop at {delay}s"
+    finally:
+        time.sleep(0.2)
+        if pids.exists():
+            for line in pids.read_text().split():
+                pid = int(line)
+                if _pid_alive(pid):
+                    os.kill(pid, signal.SIGKILL)
+    if handled == 0:
+        pytest.skip("no stop landed inside the startup window on this machine")
+
+
+def _host_forked(events: list[Any]) -> bool:
+    return any(event.fflags & select.KQ_NOTE_FORK for event in events)
 
 
 @requires_macos_tools
@@ -563,20 +626,29 @@ def test_host_launch_failure(host_binary: Path, tmp_path: Path) -> None:
     assert "could not launch supervisor" in result.stderr
 
 
-@requires_macos_tools
 def test_serve_branch_has_no_permission_api() -> None:
-    source = HOST_SOURCE.read_text()
+    source = HOST_SOURCE.read_text(encoding="utf-8")
     # The only AX call lives in the request branch's one named function.
-    request_region = source.split("func requestAccessibilityTrust()")[1].split("func runRequestAccessibility()")[0]
+    before_request, after_request = source.split("func requestAccessibilityTrust()")
+    request_region, after_request_fn = after_request.split("func runRequestAccessibility()")
     assert "AXIsProcessTrustedWithOptions" in request_region
 
-    serve_region = source.split("let operation = parseInvocation")[0]
-    serve_tail = serve_region.split("/// The request branch's only permission call.")[0]
-    for forbidden in ("AXIsProcessTrusted", "AXUIElement", "NSAppleScript", "osascript"):
-        assert forbidden not in serve_tail
+    # Everything outside that function, runServe included, is permission-free.
+    run_serve = "func runServe(" + after_request_fn.split("func runServe(")[1]
+    for region in (before_request, run_serve):
+        for forbidden in ("AXIsProcessTrusted", "AXUIElement", "NSAppleScript", "osascript"):
+            assert forbidden not in region
     # No shell or exec replacement anywhere.
     assert "/bin/sh" not in source
     assert "execv" not in source
+
+
+def test_host_protocol_revision_matches_builder() -> None:
+    # The Swift constant and the builder's plist key must move together.
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    match = re.search(r"^let HOST_PROTOCOL_REVISION = (\d+)$", source, re.MULTILINE)
+    assert match is not None
+    assert int(match.group(1)) == BUILD.HOST_PROTOCOL_REVISION
 
 
 # --- process helpers (exact PIDs only, never broad patterns) ----------------

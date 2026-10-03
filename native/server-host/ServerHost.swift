@@ -103,9 +103,6 @@ final class ServeController {
     private var signalSources: [DispatchSourceSignal] = []
     private var escalation: DispatchSourceTimer?
     private var stopRequested = false
-    private var stopForwarded = false
-    private var launched = false
-    private var finished = false
 
     init(python: String) {
         self.python = python
@@ -114,6 +111,13 @@ final class ServeController {
     /// Install the stop handlers and schedule the child launch on the event
     /// loop. The launch is deferred so a stop that arrives during startup is
     /// seen before any child exists.
+    ///
+    /// A signal source's handler is queued on the main queue when the signal
+    /// arrives, behind anything already queued there. A single deferred launch
+    /// is queued before AppKit starts, so it would run ahead of a stop that
+    /// arrived during AppKit setup and launch the child anyway. The launch is
+    /// therefore queued again from the first main-queue turn: by then every stop
+    /// delivered during startup is already queued ahead of it.
     func begin() {
         for sig in [SIGTERM, SIGINT] {
             signal(sig, SIG_IGN)
@@ -122,17 +126,14 @@ final class ServeController {
             source.resume()
             signalSources.append(source)
         }
-        DispatchQueue.main.async { [weak self] in self?.launchIfNeeded() }
+        DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { self?.launchIfNeeded() }
+        }
     }
 
     private func launchIfNeeded() {
-        launched = true
-        // A stop that landed during startup wins: no child is launched and the
-        // host exits cleanly.
-        if stopRequested {
-            finish(0)
-            return
-        }
+        // A stop that landed during startup has already exited the host through
+        // handleStop(), which runs on this same main queue.
         let child = Process()
         child.executableURL = URL(fileURLWithPath: python)
         child.arguments = SUPERVISOR_ARGUMENTS
@@ -148,35 +149,19 @@ final class ServeController {
                 "CiaobotServerHost: could not launch supervisor \(python): \(error)\n"
             )
             finish(EXIT_LAUNCH_FAILURE)
-            return
         }
         process = child
-        // A stop cannot have landed between the check above and this point: both
-        // run on the main queue. Forward now in case it did anyway.
-        if stopRequested {
-            forwardStop()
-        }
     }
 
     private func handleStop() {
         if stopRequested { return }
         stopRequested = true
-        if !launched {
-            // launchIfNeeded() runs next on the main queue and will see this.
-            return
-        }
-        forwardStop()
-    }
-
-    private func forwardStop() {
         guard let child = process, child.isRunning else {
-            // The child is already gone; there is nothing to forward and no
-            // stale pid to signal.
+            // Either no child was launched yet (a stop during startup: nothing is
+            // ever launched) or it is already gone; there is nothing to forward
+            // and no stale pid to signal.
             finish(0)
-            return
         }
-        if stopForwarded { return }
-        stopForwarded = true
         kill(child.processIdentifier, SIGTERM)
         armEscalation(for: child.processIdentifier)
     }
@@ -184,6 +169,11 @@ final class ServeController {
     /// Arm exactly one SIGKILL escalation for the child we forwarded to. The
     /// handler re-checks the pid and liveness, so a recycled pid is never
     /// signalled and a replaced child is never killed by a stale timer.
+    ///
+    /// Foundation.Process starts the child as the leader of its own process
+    /// group, and the supervisor keeps the engine in that group, so the kill
+    /// targets the whole group: signalling the pid alone would orphan the
+    /// engine, which launchd's cleanup of the host's group can never reach.
     private func armEscalation(for pid: pid_t) {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + STOP_GRACE_SECONDS)
@@ -191,14 +181,13 @@ final class ServeController {
             guard let self = self, let child = self.process,
                 child.processIdentifier == pid, child.isRunning
             else { return }
-            kill(pid, SIGKILL)
+            killpg(pid, SIGKILL)
         }
         timer.resume()
         escalation = timer
     }
 
     private func childExited(_ child: Process) {
-        if finished { return }
         escalation?.cancel()
         escalation = nil
         process = nil
@@ -215,9 +204,7 @@ final class ServeController {
         finish(code)
     }
 
-    private func finish(_ code: Int32) {
-        if finished { return }
-        finished = true
+    private func finish(_ code: Int32) -> Never {
         // Process reaps its child before terminationHandler runs, so the child
         // is already reaped by the time we get here.
         exit(code)

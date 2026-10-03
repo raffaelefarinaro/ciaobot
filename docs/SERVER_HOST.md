@@ -42,10 +42,14 @@ executable path.
 with Foundation work inside a POSIX signal callback. On the first stop:
 
 1. If the child has not launched yet, nothing is launched and the host exits `0`.
+   The launch waits for the first event-loop turn, so a stop delivered while
+   AppKit is still starting is handled before the launch decision.
 2. Otherwise the host forwards `SIGTERM` to the tracked child exactly once and
    arms one `SIGKILL` escalation for `STOP_GRACE_SECONDS` (35 s, deliberately
    longer than the Python supervisor's own 30 s grace so the child's grace wins
-   and the host is the outer bound).
+   and the host is the outer bound). `Foundation.Process` starts the supervisor
+   as the leader of its own process group, and the engine stays in that group,
+   so the escalation kills the whole group rather than orphaning the engine.
 3. When the child exits, the escalation is cancelled, the child is reaped, and
    the host exits `0`. The escalation handler re-checks the pid and liveness, so
    a recycled pid is never signalled and a replaced child is never killed by a
@@ -54,7 +58,10 @@ with Foundation work inside a POSIX signal callback. On the first stop:
 The host never restarts or relaunches itself or its child. The Python
 supervisor (`ciao/supervise.py`) still owns restart-code 75, the crash-loop
 backoff and the engine descendants; the host is only the outer process. launchd
-will be the final job-group owner as a later child.
+will be the final job-group owner as a later child. Because the supervisor runs
+in its own process group, launchd's cleanup of the host's group does not reach
+it: that child must give the host time to finish its own stop (an `ExitTimeOut`
+above the 35 s grace) rather than rely on launchd's group kill.
 
 ## Identity and versioning
 
@@ -96,7 +103,7 @@ The builder:
   verifies it, checks both `lipo -archs` slices, and extracts the per-arch
   CDHashes;
 - archives exactly the app subtree into
-  `caibot-server-host-macos-universal-v1.tar.gz` (ordinary files and directories
+  `ciaobot-server-host-macos-universal-v1.tar.gz` (ordinary files and directories
   only, modes preserved, uid/gid and user/group names cleared, no absolute paths,
   no thin build files), then re-extracts to a fresh scratch directory and
   strict-verifies the app without recompiling.
@@ -113,9 +120,8 @@ The host is ad-hoc signed, not signed with a paid Developer ID. Its permission
 grants are therefore tied to the exact signed bytes: any rebuild changes the
 CDHash and can require the user to reapprove the Accessibility/Automation prompt
 in System Settings. That is why ordinary engine updates must keep these bytes
-unchanged, and why a host upgrade is a separate, explicit, warned action — see
-the installer plan (`plans/permission-identity/installer-plan.md`, decision
-D-03). The builder and tests never edit TCC and never remove a grant.
+unchanged, and why a host upgrade is a separate, explicit, warned action (the
+installer work tracked in #1008). The builder and tests never edit TCC and never remove a grant.
 
 ## Tests
 
