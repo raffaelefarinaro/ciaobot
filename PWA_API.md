@@ -79,6 +79,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
+| GET | `/api/tasks?workspace=` | One workspace's board rows (`?workspace=` is required, 400 otherwise), valid tasks in board order followed by one row per file that could not be read as a task — a row carrying `code` and no task fields, so a malformed file never reads as an empty board. A row carries `id`, `title`, `status`, `project_id`, `due`, `assignee`, `review_state`, `chat_id`, `attempt_id`, `created_at`, `updated_at`, `revision` and `relative_path` |
+| POST | `/api/tasks` | File one task: `{"workspace", "title", "body", "project_id", "due"}`. `project_id` takes an id or a name and must be a project of this workspace (400 otherwise). Answers 201 with the record as stored, `body` and `revision` included |
+| PATCH | `/api/tasks/{task_id}` | Edit one task at `expected_revision` (required, 400 without it): only the fields sent change — `title`, `status`, `project_id`, `due`, `assignee`, `review_state`, and `body` replacing the description wholesale. Any other key is a 400. A stale revision is a **409** and writes nothing |
+| DELETE | `/api/tasks/{task_id}` | Remove one task record at `expected_revision` (required, 400 without it). The record is the user's own Markdown file and this unlinks it — there is no trash. A stale revision is a 409 and the file stays |
+| POST | `/api/tasks/{task_id}/complete` | Mark one task `done` at `expected_revision` (required). This is the signed-in user's own session, so completion is theirs to make here; the same operation through the agent CLI is refused `completion_requires_user`. A task linked to a live chat or attempt is refused too — the delegation service owns that |
 | GET | `/api/webhooks?workspace=` | List a workspace's webhook triggers (public records only, never secrets) |
 | POST | `/api/webhooks` | Create a webhook trigger; returns the trigger plus its one-time secret |
 | PATCH | `/api/webhooks/{trigger_id}` | Update a trigger's name, instructions, or enabled flag (revision-checked) |
@@ -424,6 +429,53 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 
 # Delete — returns {"ok": true|false}.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/projects/$PID"
+```
+
+**Task board**
+
+Every call names a *workspace*, never a directory: the server resolves the name
+to that workspace's own vault. `workspace` is required on every route, and an
+unknown name is a 400 rather than a fallback to the install root. Every task is
+one Markdown file at `<workspace vault>/Workspace/Tasks/<32-hex id>.md`, and
+every write presents the `revision` it read — the SHA-256 of that file's exact
+bytes, returned by the list and create calls and by any successful edit. A stale
+revision is a **409** and writes nothing, so re-read rather than resending it.
+Completion is the user's own decision and works over this session cookie; the
+same operation from the agent CLI (`ciao task complete`) is refused with
+`task_completion_requires_user`.
+
+```bash
+# List one workspace's board. Every row carries the `revision` a later edit has
+# to pass back; a file that is not a readable task comes back as a row carrying
+# `code` instead of task fields, so a malformed file never reads as an empty
+# board.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/tasks?workspace=personal"
+
+# File a task. `project_id` accepts an id or a name and must belong to this
+# workspace; `due` is a calendar date (YYYY-MM-DD). Answers 201 with the record
+# as stored — take its `id` and `revision` from there.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/tasks" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"personal","title":"Draft the migration runbook","body":"Steps, links, acceptance criteria.","project_id":"Home","due":"2026-10-20"}'
+
+# Edit. Only the fields sent change; `body` replaces the description wholesale.
+TID=9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c
+TREV=$(curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/tasks?workspace=personal" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["tasks"][0]["revision"])')
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\",\"title\":\"Draft the rollback runbook\"}"
+
+# Complete — the user's own session, at the revision it read.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/complete" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\"}"
+
+# Remove the record. The file is the user's own Markdown and this unlinks it:
+# there is no trash, so pass the revision you read.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\"}"
 ```
 
 Project and chat uploads are limited to 50 MB per file, 100 files per request,

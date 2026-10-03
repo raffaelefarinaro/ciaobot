@@ -750,3 +750,87 @@ def test_indented_delimiter_inside_block_scalar_survives(tmp_path: Path) -> None
     changed = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
     assert len(changed) == 1
     assert b"title:" in after[changed[0]]
+
+
+# ── Removal (#1021, child B3 of #973) ────────────────────────────────────
+#
+# `DELETE /api/tasks/{task_id}` needs a store removal, which B1 deliberately
+# left out. It is added here rather than as an unlink beside the store: removal
+# has to take the same workspace lock, the same no-follow read (so a link where
+# the file must be is refused rather than followed), the same id validation and
+# the same revision check as every other managed write.
+
+
+def test_delete_removes_the_record_and_is_then_a_not_found(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    kept = store.create(title="kept")
+    removed = store.create(title="removed")
+
+    store.delete(removed.record.id, expected_revision=removed.revision)
+
+    assert not task_path(vault, removed.record.id).exists()
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.get(removed.record.id)
+    assert excinfo.value.code == "not_found"
+    # Only this store's task went; nothing else in the directory was touched.
+    assert [document.record.id for document in store.list().tasks] == [kept.record.id]
+    assert task_path(vault, kept.record.id).exists()
+
+    with pytest.raises(TaskBoardError) as again:
+        store.delete(removed.record.id, expected_revision=removed.revision)
+    assert again.value.code == "not_found"
+
+
+def test_delete_needs_the_current_revision_and_writes_nothing_when_stale(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    clock = Clock()
+    store = make_store(vault, tmp_path / "runtime", clock)
+    created = store.create(title="about to change")
+
+    # No revision at all is refused before the file is even opened: this store
+    # never removes a task nobody read.
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.delete(created.record.id, expected_revision="")
+    assert excinfo.value.code == "invalid_task"
+    assert task_path(vault, created.record.id).exists()
+
+    store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"title": "changed since the delete was planned"},
+        actor="user",
+    )
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.delete(created.record.id, expected_revision=created.revision)
+    assert excinfo.value.code == "revision_conflict"
+    assert task_path(vault, created.record.id).exists()
+    assert store.get(created.record.id).record.title == "changed since the delete was planned"
+
+
+def test_delete_refuses_an_unsafe_id_or_a_linked_file(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    for bad_id in ("", "../escape", "a" * 31, "G" * 32, "with space"):
+        with pytest.raises(TaskBoardError) as excinfo:
+            store.delete(bad_id, expected_revision="x")
+        assert excinfo.value.code == "unsafe_path"
+
+    real = store.create(title="real")
+    outside = tmp_path / "outside.md"
+    outside.write_text("not a task\n", encoding="utf-8")
+    link_id = "4" * 32
+    tasks_dir(vault).mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(outside, task_path(vault, link_id))
+    except OSError:
+        pytest.skip("this platform could not create a symlink for the test")
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.delete(link_id, expected_revision="x")
+    assert excinfo.value.code == "unsafe_path"
+    # The link target outside the task directory is untouched: a refused
+    # removal is not a removal, and a link is never followed.
+    assert outside.read_text(encoding="utf-8") == "not a task\n"
+    assert task_path(vault, real.record.id).exists()
