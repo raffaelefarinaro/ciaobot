@@ -35,15 +35,18 @@ is:
 5. ``413`` — the body, bounded twice: once on the declared ``Content-Length``
    (a header the caller controls independently of the bytes it sends) and again
    while reading, because a chunked request declares nothing.
-6. ``202`` — a durable receipt, and nothing else.
+6. ``202`` — a durable receipt, and nothing else. The launch is *scheduled*
+   (:func:`schedule_webhook_dispatch`, #1020) rather than awaited: the response
+   is a receipt, not a launch result, and a turn may run for minutes.
 
-What a ``202`` does **not** mean: no model turn has run. Dispatch into an
-ordinary chat is A4's child (``WebhookReceiver.begin_launch`` and
-``settle_failed`` are its entry points), so this child records the event and
-answers. The response carries ``status`` — ``accepted`` — and no output, no
-chat id, and never the word "completed": the receipt journal
-(``<runtime>/webhook-receipts.jsonl``) is the record, and a sender that needs
-the outcome of the turn polls nothing yet.
+What a ``202`` does **not** mean: no model turn has run. Dispatch
+(``ciao/webhook_dispatch.py``) starts the ordinary chat in the background and
+records the outcome in the same journal — ``launched``, ``failed`` or
+``interrupted`` — so the response carries ``status`` — ``accepted`` — and no
+output, no chat id, and never the word "completed". A sender that needs the
+outcome of the turn polls nothing yet; the receipt journal
+(``<runtime>/webhook-receipts.jsonl``) is the record, and the chat the launch
+created is an ordinary one the operator opens like any other.
 """
 
 from __future__ import annotations
@@ -56,7 +59,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ciao.web.auth import _state_change_origin_allowed
+from ciao.webhook_dispatch import dispatch_receipt
 from ciao.webhooks import (
+    ACCEPTED,
     IDEMPOTENCY_CONFLICT,
     INVALID_EVENT,
     INVALID_IDEMPOTENCY_KEY,
@@ -69,11 +74,21 @@ from ciao.webhooks import (
     TOO_MANY_PENDING,
     WebhookReceiver,
     WebhookReceiverError,
+    WebhookReceipt,
     WebhookStoreError,
 )
 from ciao.web.routes_webhooks import webhook_store
 
 logger = logging.getLogger(__name__)
+
+#: Strong references to the dispatch tasks this process started, so the event
+#: loop's task GC cannot collect one mid-flight. A dispatch that is garbage
+#: collected mid-turn is a receipt stuck ``launching`` — which reads as a crash
+#: and needs an operator — so the reference is kept until the task is done and
+#: dropped there. The set is the engine's bound on concurrent launches: one
+#: entry per accepted receipt, and the receiver's ``MAX_PENDING_RECEIPTS`` (20
+#: per trigger) is what keeps the number of live entries finite.
+_DISPATCH_TASKS: set[asyncio.Task[object]] = set()
 
 #: One status per typed refusal. The codes are the contract; this table is the
 #: only place a reason becomes a status code, so adding a reason cannot
@@ -132,6 +147,50 @@ def webhook_receiver(config: Any) -> WebhookReceiver:
     the very next request.
     """
     return WebhookReceiver(webhook_store(config).path)
+
+
+def schedule_webhook_dispatch(
+    request: Request, receipt: WebhookReceipt, receiver: WebhookReceiver
+) -> None:
+    """Schedule one accepted receipt's launch; never await it.
+
+    The ``202`` is a receipt, not a launch result. A sender must not hold its
+    connection open for a turn that may run for minutes and that it has no way
+    to read progress from — the receipt *is* the answer to "did you get it", and
+    the chat the launch creates is an ordinary one the operator opens.
+
+    So the launch is a background task, and the two ways it can fail to start
+    are both logged rather than raised, because there is no longer a request to
+    fail:
+
+    * **No chat manager.** This route builds a receiver per call and never
+      needed ``app.state``; dispatch does, and an app wired without one (a
+      first-run shell, a test harness) has no chat to launch into. The receipt
+      stays ``accepted``, which is exactly the open state the startup sweep
+      reads, so nothing is lost — it is dispatched later or not at all, and the
+      journal says which.
+    * **No running loop.** Only reachable outside a request, where the receipt
+      stays ``accepted`` for the same reason.
+    """
+    config = request.app.state.config
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        logger.warning(
+            "webhook dispatch: no chat manager is wired; receipt %s stays accepted",
+            receipt.id,
+        )
+        return
+    try:
+        task = asyncio.create_task(
+            dispatch_receipt(receiver, webhook_store(config), pcm, receipt.id)
+        )
+    except RuntimeError:
+        logger.debug(
+            "webhook dispatch: no running event loop for receipt %s", receipt.id
+        )
+        return
+    _DISPATCH_TASKS.add(task)
+    task.add_done_callback(_DISPATCH_TASKS.discard)
 
 
 async def webhook_method_not_allowed(request: Request) -> Response:
@@ -200,18 +259,25 @@ async def webhook_receive(request: Request) -> JSONResponse:
             return _too_large()
         chunks.append(chunk)
     body = b"".join(chunks)
+    receiver = webhook_receiver(request.app.state.config)
     try:
         # The receiver validates the body (a JSON object carrying only `text`),
         # dedupes, bounds the trigger and appends the receipt. In a thread: it
         # takes a file lock and fsyncs, which is the event loop's time to spend.
         receipt = await asyncio.to_thread(
-            webhook_receiver(request.app.state.config).receive,
+            receiver.receive,
             trigger,
             idempotency_key=key,
             body=body,
         )
     except WebhookReceiverError as exc:
         return _receiver_error(exc)
+    # A retry answered with the receipt it already has is not a new event, and
+    # dispatch is idempotent by receipt state anyway, so this is safe either way
+    # — but there is nothing to launch for a retry, so there is nothing to
+    # schedule.
+    if receipt.status == ACCEPTED:
+        schedule_webhook_dispatch(request, receipt, receiver)
     return JSONResponse(
         {
             "receipt_id": receipt.id,

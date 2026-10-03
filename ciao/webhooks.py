@@ -43,17 +43,18 @@ Two layers, deliberately separable:
   durable before the model turn, so a crash in that window can only ever be
   ``interrupted``.
 
-  Deliberately **not** in the receiver: dispatch. ``WebhookReceiver.begin_launch``
-  and ``WebhookReceiver.fail`` exist for A4, which owns ``start_stream``; this
-  child never calls them. An accepted event therefore stays open, which is
-  exactly what ``MAX_PENDING_RECEIPTS`` bounds. The HTTP edge around it is
+  Deliberately **not** in the receiver: the launch itself.
+  ``WebhookReceiver.begin_launch``, ``settle_launched`` and ``settle_failed`` are
+  the dispatcher's entry points (``ciao/webhook_dispatch.py``, #1020) and nothing
+  in this module calls them — the receiver records what a secret caused, and
+  turning that into a chat is a different file's job. The HTTP edge around it is
   ``ciao/web/routes_hooks.py`` and it shares nothing with the browser session:
   the receiver is a machine surface, authorized only by one trigger's own
   secret.
 
 Still **not** here, because a later child owns each of them: whether the named
-workspace is registered and the named project exists (this module validates the
-*shape* of a target, never membership), dispatch into an ordinary chat, the
+workspace is registered (this module validates the *shape* of a target, never
+membership — resolving the target against live projects is dispatch's job), the
 Automations UI, and the CLI/skills/recipes that would describe all of it.
 """
 
@@ -1118,11 +1119,13 @@ def _require_current(record: _StoredTrigger, expected: int) -> None:
 # Two rules the code enforces rather than documents:
 #
 # * **Intent is durable before the side effect it describes.** ``accepted`` is on
-#   disk before any launch is attempted, and ``launched`` is on disk before the
-#   model turn. A crash in the second window is genuinely ambiguous — the turn
-#   may or may not have run — so recovery records ``interrupted`` and leaves it
-#   for a person. Replaying it would be a guess in the one direction that costs
-#   a second run nobody asked for.
+#   disk before any launch is attempted, and the ``launching`` allocation is on
+#   disk before the model turn. A crash in the second window is genuinely
+#   ambiguous — the turn may or may not have run — so recovery records
+#   ``interrupted`` and leaves it for a person. Replaying it would be a guess in
+#   the one direction that costs a second run nobody asked for. The turn that did
+#   run is settled ``launched`` separately, so a success is never mistaken for a
+#   crash.
 # * **A retry is not a new event.** ``(trigger_id, idempotency_key)`` names one
 #   attempt; the same key with the same body returns the receipt already written
 #   and appends nothing, and the same key with a *different* body is a conflict
@@ -1133,17 +1136,26 @@ RECEIPT_VERSION = 1
 RECEIPTS_NAME = "webhook-receipts.jsonl"
 
 ACCEPTED = "accepted"
+LAUNCHING = "launching"
 LAUNCHED = "launched"
 FAILED = "failed"
 INTERRUPTED = "interrupted"
 
-#: The states a receipt never leaves. ``accepted`` (recorded, not yet launched)
-#: and ``launched`` (allocation recorded, outcome unknown) are both open, which
-#: is what the pending bound counts.
-_TERMINAL_RECEIPT_STATES = frozenset({FAILED, INTERRUPTED})
+#: The states a receipt never leaves. ``launched`` is a *success* — the turn ran
+#: and its progress lives in the chat — so it is terminal here, and the pending
+#: bound does not count it.
+_TERMINAL_RECEIPT_STATES = frozenset({LAUNCHED, FAILED, INTERRUPTED})
 
-#: Receipt statuses, in the order a healthy attempt walks them.
-RECEIPT_STATUSES = (ACCEPTED, LAUNCHED, FAILED, INTERRUPTED)
+#: The states a receipt is still working in: recorded but not launched, or an
+#: allocation whose outcome is not on disk. Exactly what :func:`_pending_for`
+#: counts, and — as the complement of :data:`_TERMINAL_RECEIPT_STATES` — what a
+#: trim must never drop.
+_OPEN_RECEIPT_STATES = frozenset({ACCEPTED, LAUNCHING})
+
+#: Receipt statuses, in the order a healthy attempt walks them. ``launching`` is
+#: the pre-turn allocation and ``launched`` its outcome; a failed attempt jumps
+#: from either open state to ``failed``.
+RECEIPT_STATUSES = (ACCEPTED, LAUNCHING, LAUNCHED, FAILED, INTERRUPTED)
 
 #: Bytes of request body the receiver will read. A webhook event is a sentence
 #: and a handful of fields; 64 KiB is two orders of magnitude above a real one
@@ -1169,10 +1181,14 @@ RATE_LIMIT_PER_MINUTE = 10
 #: sender is given: the window empties a second after the last attempt in it.
 RATE_WINDOW_SECONDS = 60
 
-#: How long a pending receipt blocks its trigger before the attempt is refused.
-#: Without a dispatch path (A4) an accepted receipt never leaves ``accepted``,
-#: so this is what bounds an unattended sender rather than letting receipts
-#: accumulate forever.
+#: How many receipts a trigger may leave open before the next attempt is
+#: refused. Open means ``accepted`` or ``launching``: with dispatch (A4) a
+#: receipt normally settles in seconds, but an engine that is down, a target
+#: that cannot be resolved, or a crash in the launch window all leave receipts
+#: open, and this is what bounds an unattended sender rather than letting them
+#: accumulate forever. A settled ``launched`` receipt is history and is not
+#: counted: a trigger that fires and succeeds must not stop working after
+#: :data:`MAX_PENDING_RECEIPTS` events.
 MAX_PENDING_RECEIPTS = 20
 
 #: How long an ``(trigger_id, idempotency_key)`` pair keeps collapsing retries
@@ -1495,7 +1511,7 @@ def _trim_if_large(journal: Path) -> None:
         sizes = [len(line.encode("utf-8")) + 1 for line in lines]
         ids = [str((_safe_row(line) or {}).get("id") or "") for line in lines]
         # An id's effective status is its *last* row anywhere in the journal,
-        # not just among the lines this trim might drop: a `launched` row with
+        # not just among the lines this trim might drop: a `launching` row with
         # no terminal row can sit before any cut, so computing unsettled ids
         # from a candidate tail alone would find nothing and the trim would drop
         # it.
@@ -1939,31 +1955,71 @@ class WebhookReceiver:
         Called by the dispatcher (A4) *before* the model turn, and durable
         before it. This is the ambiguous window: once the allocation is on disk
         a crash leaves no way to know whether the turn ran, so
-        :meth:`recover_interrupted` records ``interrupted`` rather than letting
-        a retry start a second turn.
+        :meth:`recover_interrupted` records ``interrupted`` rather than letting a
+        retry start a second turn.
+
+        ``launching`` is the allocation, not the outcome. The outcome is
+        :meth:`settle_launched`, and keeping the two apart is what lets a
+        successful launch be told apart from a process that died here.
 
         Idempotent: an allocation that is already recorded returns the receipt
         as it stands, so a caller that crashed and retried does not fail on its
-        own earlier write.
+        own earlier write. Any other status is refused — including ``launched``,
+        which is a settled success and not something to allocate a second turn
+        behind.
         """
         with self._journal_locked():
             receipt = self._require_receipt(receipt_id)
+            if receipt.status == LAUNCHING:
+                return receipt
             if receipt.status != ACCEPTED:
-                if receipt.status == LAUNCHED:
-                    return receipt
                 raise WebhookReceiverError(
                     f"receipt {receipt_id} is {receipt.status} and cannot be "
                     "launched again",
                     code=INVALID_RECEIPT,
                 )
-            launched = replace(receipt, status=LAUNCHED, updated_at=self._stamp())
+            launching = replace(receipt, status=LAUNCHING, updated_at=self._stamp())
+            _append(self._journal, launching.to_row())
+        return launching
+
+    def settle_launched(self, receipt_id: str, *, chat_id: str) -> WebhookReceipt:
+        """Record the success outcome of an allocated launch, and its chat.
+
+        ``launching`` to ``launched``, and the ``detail`` carries the chat id so
+        a settled receipt answers "which chat did this event become?" without a
+        second lookup. Idempotent: a receipt already ``launched`` is returned as
+        it stands, keeping the chat it was first settled with, so a retry cannot
+        rewrite the record of a turn that ran.
+
+        Refused from any other status. Claiming a turn ran without an allocation
+        on disk would be the guess this journal exists to prevent, and ``failed``
+        and ``interrupted`` are outcomes a person has to look at.
+        """
+        with self._journal_locked():
+            receipt = self._require_receipt(receipt_id)
+            if receipt.status == LAUNCHED:
+                return receipt
+            if receipt.status != LAUNCHING:
+                raise WebhookReceiverError(
+                    f"receipt {receipt_id} is {receipt.status} and cannot be "
+                    "settled as launched",
+                    code=INVALID_RECEIPT,
+                )
+            launched = replace(
+                receipt,
+                status=LAUNCHED,
+                updated_at=self._stamp(),
+                detail=f"chat {chat_id}"[:MAX_DETAIL_CHARS],
+            )
             _append(self._journal, launched.to_row())
         return launched
 
     def settle_failed(self, receipt_id: str, *, detail: str) -> WebhookReceipt:
         """Record that a launch was attempted and did not complete.
 
-        Terminal, and deliberately not a retry: the sender's next delivery is a
+        Settles either open state — ``accepted`` (the target never resolved, so no
+        allocation was made) or ``launching`` (the turn would not start). Terminal
+        on both, and deliberately not a retry: the sender's next delivery is a
         new attempt with a new key, or the same key once the dedupe window has
         passed. A failed launch is an event that happened and failed, and
         re-running it is a decision for the operator.
@@ -1984,17 +2040,22 @@ class WebhookReceiver:
     def recover_interrupted(self) -> list[WebhookReceipt]:
         """Settle every receipt left in the ambiguous window, as ``interrupted``.
 
-        A ``launched`` receipt with no terminal row means a process died between
+        A ``launching`` receipt with no terminal row means a process died between
         the allocation and the outcome. Nothing can tell whether the model turn
         ran, so the honest record is ``interrupted`` with a detail saying so:
         it needs a person, and it must never be replayed automatically. Returns
         the receipts it settled.
+
+        Only ``launching``. A ``launched`` receipt recorded its own success, so
+        rewriting it here would turn every healthy event into "needs review" at
+        the next boot — and one that fired successfully would still occupy its
+        trigger's pending slots.
         """
         stranded: list[WebhookReceipt] = []
         with self._journal_locked():
             for row in read_rows(self._journal):
                 receipt = WebhookReceipt.from_row(row)
-                if receipt.status != LAUNCHED:
+                if receipt.status != LAUNCHING:
                     continue
                 settled = replace(
                     receipt,
@@ -2019,6 +2080,34 @@ class WebhookReceiver:
             if str(row.get("trigger_id") or "") == trigger_id
             for receipt in (WebhookReceipt.from_row(row),)
         ]
+
+    def accepted_receipts(
+        self, *, limit: int = MAX_PENDING_RECEIPTS
+    ) -> list[WebhookReceipt]:
+        """Receipts still waiting for a launch, oldest first, at most ``limit``.
+
+        Read by the dispatcher's startup sweep (``ciao/webhook_dispatch.py``): an
+        event that was accepted and never dispatched — the engine was stopped
+        first, or the scheduled dispatch did not get to run — is still exactly
+        what the sender was told had happened, so it is the one receipt a
+        restart may still act on.
+
+        Bounded on purpose. A journal that accumulated ``accepted`` rows while
+        nothing dispatched them would otherwise start one model turn per row at
+        once, which is a stampede no sender asked for; the remainder stay
+        ``accepted`` for an operator to look at, which is the same open state
+        :data:`MAX_PENDING_RECEIPTS` already bounds per trigger.
+
+        Lock-free, like every other read here: the journal is appended to, and a
+        reader that misses a row being appended concurrently sees the same
+        receipt one moment later.
+        """
+        return [
+            receipt
+            for row in read_rows(self._journal)
+            for receipt in (WebhookReceipt.from_row(row),)
+            if receipt.status == ACCEPTED
+        ][:limit]
 
     def get(self, receipt_id: str) -> WebhookReceipt:
         """One receipt by id, or raise ``invalid_receipt``."""
@@ -2124,13 +2213,16 @@ def _within_retention(created_at: str, *, now: datetime) -> bool:
 def _pending_for(rows: list[dict[str, Any]], trigger_id: str) -> int:
     """How many receipts for one trigger are still open.
 
-    Counts ``accepted`` and ``launched``: an event that was recorded but never
-    launched is still occupying the trigger, and an accepted one that a crash
-    left unsettled is exactly what must not be compounded by another arrival.
+    Counts ``accepted`` and ``launching``: an event that was recorded but never
+    launched is still occupying the trigger, and an allocated one a crash left
+    unsettled is exactly what must not be compounded by another arrival. A
+    receipt that reached its own outcome — ``launched`` included — is settled
+    history and hands its slot back, so a trigger whose events all succeed keeps
+    working.
     """
     return sum(
         1
         for row in rows
         if str(row.get("trigger_id") or "") == trigger_id
-        and str(row.get("status") or "") not in _TERMINAL_RECEIPT_STATES
+        and str(row.get("status") or "") in _OPEN_RECEIPT_STATES
     )
