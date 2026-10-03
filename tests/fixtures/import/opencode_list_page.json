@@ -1,0 +1,26 @@
+[
+  {
+    "id": "ses_7a1b2c3d4e5f60718293a4b5c6d7e8f9",
+    "title": "Release checklist",
+    "updated": 1772442938000,
+    "created": 1772442860000,
+    "projectId": "prj_synthetic_0001",
+    "directory": "/synthetic/workspace/release-checklist"
+  },
+  {
+    "id": "ses_8b2c3d4e5f60718293a4b5c6d7e8f901",
+    "title": "Checklist rollback step",
+    "updated": 1772443198000,
+    "created": 1772442860000,
+    "projectId": "prj_synthetic_0001",
+    "directory": "/synthetic/workspace/release-checklist"
+  },
+  {
+    "id": "ses_a0b1c2d3e4f5061728394a5b6c7d8e9",
+    "title": "Untitled session",
+    "updated": 1772443001000,
+    "created": 1772443001000,
+    "projectId": "prj_synthetic_0002",
+    "directory": "/synthetic/workspace/other-notes"
+  }
+]

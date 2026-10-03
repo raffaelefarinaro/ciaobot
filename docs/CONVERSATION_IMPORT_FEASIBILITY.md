@@ -50,6 +50,42 @@ session. The issue's field list is narrower than the candidate schema above, so
 decided against. Nothing under a real `~/.claude` was read to build it; the
 adapter's tests run on synthetic fixtures under `tests/fixtures/import/`.
 
+**Update — C3b landed (#1011).** `ciao/import_sources/opencode.py` is the OpenCode
+adapter, and it reads through the **V2 CLI** rather than a file, because
+OpenCode's history is in a running server's database: `read_opencode_session`
+runs `opencode session export <id>` and
+`discover_opencode_sessions` runs `opencode session list --max-count N --format
+json` with the project directory as the working directory (the listing is
+`process.cwd()`-scoped). Both go through one bounded `subprocess.run` mirroring
+`ciao/providers/opencode.py:_server_list`, and the binary and the `(2, 0, 16)`
+floor come from that module's own `resolve_opencode_binary` /
+`_server_version_error`, so an importer and the engine cannot disagree about
+which opencode is supported. Four points are settled by code rather than left as
+proposals: the export's `messages[]` are **flat objects discriminated on `type`**
+— there is no `role` field and no `{info, parts}` nesting — so role is the tag
+(`user`/`assistant`), `anchor` is `messages[].id`, and everything else in the
+union (`synthetic`, `system`, `skill`, `shell`, `compaction`, `idle`, the
+`*-switched` records) is counted as an omission; `time.created` is epoch
+milliseconds and is rendered as ISO-8601 UTC, with `None` where a message has no
+`time` and no mtime anywhere in this source; `isSettled` is applied in the adapter
+as well as relied on in the CLI, so an assistant turn with no `time.completed`
+produces no message and a counted omission rather than passing for something the
+model said; and because an export is **one** JSON object, an answer past
+`MAX_SESSION_BYTES` is never parsed — the session comes back with zero messages,
+`truncated`, and a `truncated` omission. The adapter makes no `ciaobot_own`
+decision: it hands the caller `source.provider`, `source.source_id` and
+`first_user_turn` for `import_decouple.classify_session`, and
+`discover_opencode_sessions` returns metadata only, setting `--max-count`
+explicitly to `DISCOVERY_MAX_COUNT` and logging a full page as a full page
+because `session list` has no cursor. Two corrections to this report's prose,
+both settled against the tagged source at the floor: `session export` has **no**
+`--format` flag (its parameters are the session id plus `--sanitize`, `--server`
+and `--standalone`, and it always prints JSON), and the message role comes from
+the `type` tag rather than a `role` field. `--sanitize` is never passed: it
+replaces prose with `[redacted:<kind>:<id>]` placeholders. Nothing under a real
+`~/.opencode` was read, no opencode server was started, and the adapter's tests
+run on synthetic fixtures with the bounded runner replaced.
+
 ## What this report had to settle
 
 #980 asks four questions, and the parent #975 asks the same four:
