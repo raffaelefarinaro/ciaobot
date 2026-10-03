@@ -58,7 +58,7 @@ def test_an_edited_note_is_found_under_its_new_text(
     base, vault = _install(tmp_path)
     fts_search.index_vault(conn, vault, path_base=base)
 
-    _note(vault / "Notes" / "Alpha.md", "rewritten to mention pangolin instead")
+    _note(vault / "Notes" / "Alpha.md", "rewritten to mention pangolin instead, and more text")
     fts_search.index_vault(conn, vault, path_base=base)
 
     assert _paths(conn, base, vault, "pangolin") == {
