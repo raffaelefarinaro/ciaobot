@@ -309,7 +309,7 @@ scripts/
   build-server-host.py         Build the universal, ad-hoc-signed Ciaobot Server native host archive (#1009). Compiles both architectures, assembles the app with the tracked icon, signs once, verifies and archives without installing or launching anything.
 
 native/                        Non-Python, installer-facing sources (see docs/SERVER_HOST.md).
-  server-host/ServerHost.swift The persistent macOS host: fixed `serve` (launches `[python, -I, -m, ciao.cli, supervise]` and mirrors its exit) and `request-accessibility` operations. Host protocol revision 1, 35 s stop grace, accessory app, no shell/IPC/network/arbitrary-command surface. The installer does not activate it yet (#1008 child A).
+  server-host/ServerHost.swift The persistent macOS host: fixed `serve` (spawns `[python, -I, -m, ciao.cli, supervise]` with public `posix_spawn`, keeping the child in launchd's job group, and mirrors its exit) and `request-accessibility` operations. Host protocol revision 1, 35 s stop grace, accessory app, no shell/IPC/network/arbitrary-command surface. The installer does not activate it yet (#1008 child A).
 
 tests/                         pytest suite for the Python backend.
 pyproject.toml                 Python package metadata, package-data declarations, and dev/test deps.
@@ -384,12 +384,14 @@ native host → installed `python -I -m ciao.cli supervise` → engine → provi
 tools. The host source is `native/server-host/ServerHost.swift`, built and
 archived by `scripts/build-server-host.py`, documented in
 [docs/SERVER_HOST.md](SERVER_HOST.md). It owns only two fixed operations
-(`serve` and `request-accessibility`), forwards a bounded stop to the existing
-Python supervisor and mirrors its exit, and never restarts itself or the child;
-the engine's restart/backoff loop stays in `ciao/supervise.py`. This child ships
-the host and its artifact builder only — the installer, the update/rollback
-ownership contract, release-manifest coverage, and every live launchd/TCC gate
-are later children of #1008, so nothing activates the host yet.
+(`serve` and `request-accessibility`), spawns the supervisor with public
+`posix_spawn` so it stays in launchd's job group, forwards a bounded stop to the
+tracked child and mirrors its honest exit status, and never restarts itself or
+the child; the engine's restart/backoff loop stays in `ciao/supervise.py`, and
+launchd remains the final job-group owner. This child ships the host and its
+artifact builder only — the installer, the update/rollback ownership contract,
+release-manifest coverage, and every live launchd/TCC gate are later children of
+#1008, so nothing activates the host yet.
 
 **Windows lifecycle (#696).** There is no LaunchAgent or systemd unit on
 Windows. `ciao setup --load-launchd` (the flag name is historical: on macOS

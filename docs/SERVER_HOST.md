@@ -36,6 +36,32 @@ exits `2` before AppKit is set up or any permission call is reachable. A
 symlinked or dot-alias path is resolved by the filesystem as an ordinary
 executable path.
 
+## Process group and job ownership
+
+The child is spawned with the public `posix_spawn` API, **not**
+`Foundation.Process`. `Process` makes the child the leader of a new process
+group and session, which would take the supervisor out of launchd's job group
+and let the engine (and the provider servers it starts) survive a host crash or
+SIGKILL as orphans. With `posix_spawn` the host passes no `POSIX_SPAWN_SETPGROUP`:
+the supervisor and every descendant it starts stay in the host's process group
+and session, exactly as `ciao/os_support/processes.py`'s `dies_with_engine`
+contract expects.
+
+Because the host shares that one group, **it never calls `killpg` on it**:
+signalling the group would also signal the host itself and its launchd peers.
+launchd remains the final job-group owner. When the host exits or crashes,
+launchd's own cleanup of the job group reaches the supervisor, the engine and
+the OpenCode server. The host's own escalation therefore targets only the
+tracked, still-unreaped child PID. A standalone host run outside launchd cannot
+kill the descendants after it dies — that is launchd's responsibility, not a
+gap the host can close from inside the group.
+
+`POSIX_SPAWN_SETSIGDEF` resets `SIGTERM`/`SIGINT` (which the host ignores) to
+their defaults and `POSIX_SPAWN_SETSIGMASK` clears the inherited signal mask, so
+the Python supervisor installs its own handlers normally. `POSIX_SPAWN_CLOEXEC_DEFAULT`
+plus `posix_spawn_file_actions_addinherit_np` on fds 0–2 close every other
+descriptor, so the child never inherits the host's incidental open files.
+
 ## Signals and lifetime
 
 `SIGTERM` and `SIGINT` are handled through safe dispatch signal sources, never
@@ -44,24 +70,28 @@ with Foundation work inside a POSIX signal callback. On the first stop:
 1. If the child has not launched yet, nothing is launched and the host exits `0`.
    The launch waits for the first event-loop turn, so a stop delivered while
    AppKit is still starting is handled before the launch decision.
-2. Otherwise the host forwards `SIGTERM` to the tracked child exactly once and
-   arms one `SIGKILL` escalation for `STOP_GRACE_SECONDS` (35 s, deliberately
+2. Otherwise the host forwards `SIGTERM` to the tracked child PID exactly once
+   and arms one `SIGKILL` escalation for `STOP_GRACE_SECONDS` (35 s, deliberately
    longer than the Python supervisor's own 30 s grace so the child's grace wins
-   and the host is the outer bound). `Foundation.Process` starts the supervisor
-   as the leader of its own process group, and the engine stays in that group,
-   so the escalation kills the whole group rather than orphaning the engine.
-3. When the child exits, the escalation is cancelled, the child is reaped, and
-   the host exits `0`. The escalation handler re-checks the pid and liveness, so
-   a recycled pid is never signalled and a replaced child is never killed by a
-   stale timer.
+   and the host is the outer bound). The escalation signals **only** the tracked,
+   still-unreaped child PID — never the shared group.
+3. When the child exits, the escalation is cancelled and the child is reaped
+   through a process-exit dispatch source and `waitpid` on the serial main queue.
+   The PID is held until its status is collected, so the kernel cannot reuse it
+   and the escalation can never signal a recycled PID.
+
+The exit status is honest. A requested stop returns `0` only when the child
+exited `0` or died by the forwarded `SIGTERM`. A stalled supervisor that had to
+be SIGKILLed (`137`), a non-zero exit after the stop, or a crash (`128 + signal`)
+is preserved, so launchd and the service logs see a failed shutdown instead of a
+false success.
 
 The host never restarts or relaunches itself or its child. The Python
 supervisor (`ciao/supervise.py`) still owns restart-code 75, the crash-loop
-backoff and the engine descendants; the host is only the outer process. launchd
-will be the final job-group owner as a later child. Because the supervisor runs
-in its own process group, launchd's cleanup of the host's group does not reach
-it: that child must give the host time to finish its own stop (an `ExitTimeOut`
-above the 35 s grace) rather than rely on launchd's group kill.
+backoff and the engine descendants; the host is only the outer process. Because
+launchd is the final job-group owner, the launchd job must give the host time to
+finish its own stop with an `ExitTimeOut` above the 35 s grace. That plist is
+built by the later service child (#1008 child B), not here.
 
 ## Identity and versioning
 
@@ -129,12 +159,16 @@ installer work tracked in #1008). The builder and tests never edit TCC and never
 from the PWA/retired/experiment IDs, revision independent of engine version, the
 icon digest, no Python bundled, the exact both-arch compile commands and
 deployment floor, output refusal, non-macOS refusal before writes, injected
-build ordering, archive safety and metadata). On macOS with Command Line Tools
-it compiles the real host once and exercises it against a scratch fake child:
-fixed supervisor argv, inherited cwd/environment/stdio, lifetime, exit and
-signal mirroring, stop forwarding and reaping, the stalled-child escalation, and
-launch failure. The `request-accessibility` branch is **never executed** by the
-tests.
+build ordering, archive safety and metadata, the `killpg`-free and
+`posix_spawn`-only source contract). On macOS with Command Line Tools it
+compiles the real host and a small offline C child fixture once, then exercises
+the shipped host: fixed supervisor argv, inherited cwd/environment/stdio, the
+child's reset signal mask and dispositions, the dropped extra fd, exit and
+signal mirroring, stop forwarding and reaping, the stalled-child escalation
+(`137`, then the test simulates launchd's final job-group cleanup), preserved
+non-zero and crash statuses after a stop, launch failure, and the shared
+job-group inheritance. The `request-accessibility` branch is **never executed**
+by the tests, and no live launchd, `.app`, engine or TCC is involved.
 
 ```sh
 PYTHONPATH=$PWD python -m pytest tests/test_server_host.py -q

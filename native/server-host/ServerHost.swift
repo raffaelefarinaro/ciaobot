@@ -20,6 +20,15 @@
 // desktop-control surface. The host never spawns a shell and never sets a
 // custom environment knob. The child inherits cwd, environment and stdio.
 //
+// The child is spawned with public `posix_spawn`, NOT `Foundation.Process`:
+// Process makes the child the leader of a new process group, which would take
+// the supervisor out of launchd's job group and orphan the engine (and the
+// OpenCode server) when the host dies. With `posix_spawn` the child keeps the
+// host's process group and session, so launchd's cleanup of the job group still
+// reaches every descendant. The host therefore never calls `killpg` itself: a
+// stop is forwarded to the tracked, still-unreaped child PID only, and launchd
+// is the final group owner.
+//
 // Protocol revision 1. Invalid argv exits 2 before AppKit is set up and before
 // any permission call is reachable.
 
@@ -35,7 +44,9 @@ let HOST_PROTOCOL_REVISION = 1
 /// How long the host waits after forwarding a stop before it escalates to
 /// SIGKILL, and how long the asynchronous accessibility prompt is retained.
 /// The stop grace is deliberately longer than the Python supervisor's own 30 s
-/// so the child's own grace period wins and the host is the outer bound.
+/// so the child's own grace period wins and the host is the outer bound. The
+/// launchd job's `ExitTimeOut` must be set above this (45 s) so launchd does
+/// not sweep the job group out from under the host's own stop.
 let STOP_GRACE_SECONDS = 35.0
 let REQUEST_LIFETIME_SECONDS = 5.0
 
@@ -54,6 +65,11 @@ enum Operation {
 
 func writeStderr(_ message: String) {
     FileHandle.standardError.write(Data(message.utf8))
+}
+
+func errnoMessage(_ code: Int32) -> String {
+    guard let text = strerror(code) else { return "errno \(code)" }
+    return String(cString: text)
 }
 
 func usage() -> Never {
@@ -95,14 +111,93 @@ func parseInvocation(_ arguments: [String]) -> Operation {
     return .serve(python: python)
 }
 
+/// The outcome of preparing and running `posix_spawn`.
+enum SpawnOutcome {
+    case spawned(pid_t)
+    case failed(String)
+}
+
+/// Spawn the fixed supervisor with the public `posix_spawn` API.
+///
+/// No `POSIX_SPAWN_SETPGROUP`: the child stays in the host's process group and
+/// session, so launchd's final job-group cleanup still reaches the whole tree.
+/// `POSIX_SPAWN_SETSIGDEF` resets SIGTERM/SIGINT (which the host ignores) to
+/// their defaults, `POSIX_SPAWN_SETSIGMASK` clears the inherited mask, and
+/// `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every descriptor except the explicitly
+/// re-inherited stdio. Every fallible call is checked; the spawn attributes,
+/// file actions and the C-string argv are released on every path.
+func spawnSupervisor(python: String) -> SpawnOutcome {
+    var attributes: posix_spawnattr_t? = nil
+    var fileActions: posix_spawn_file_actions_t? = nil
+    var argv: [UnsafeMutablePointer<CChar>?] = []
+    defer {
+        for pointer in argv {
+            if let pointer = pointer { free(pointer) }
+        }
+        if attributes != nil { posix_spawnattr_destroy(&attributes) }
+        if fileActions != nil { posix_spawn_file_actions_destroy(&fileActions) }
+    }
+
+    var result = posix_spawnattr_init(&attributes)
+    if result != 0 { return .failed("posix_spawnattr_init: \(errnoMessage(result))") }
+    result = posix_spawn_file_actions_init(&fileActions)
+    if result != 0 { return .failed("posix_spawn_file_actions_init: \(errnoMessage(result))") }
+
+    let flags = Int16(
+        POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT
+    )
+    result = posix_spawnattr_setflags(&attributes, flags)
+    if result != 0 { return .failed("posix_spawnattr_setflags: \(errnoMessage(result))") }
+
+    var defaultSignals = sigset_t()
+    sigemptyset(&defaultSignals)
+    sigaddset(&defaultSignals, SIGTERM)
+    sigaddset(&defaultSignals, SIGINT)
+    result = posix_spawnattr_setsigdefault(&attributes, &defaultSignals)
+    if result != 0 { return .failed("posix_spawnattr_setsigdefault: \(errnoMessage(result))") }
+
+    var clearedMask = sigset_t()
+    sigemptyset(&clearedMask)
+    result = posix_spawnattr_setsigmask(&attributes, &clearedMask)
+    if result != 0 { return .failed("posix_spawnattr_setsigmask: \(errnoMessage(result))") }
+
+    for descriptor: Int32 in [0, 1, 2] {
+        result = posix_spawn_file_actions_addinherit_np(&fileActions, descriptor)
+        if result != 0 {
+            return .failed(
+                "posix_spawn_file_actions_addinherit_np(\(descriptor)): \(errnoMessage(result))"
+            )
+        }
+    }
+
+    for part in [python] + SUPERVISOR_ARGUMENTS {
+        guard let duplicate = strdup(part) else {
+            return .failed("could not allocate the child argv")
+        }
+        argv.append(duplicate)
+    }
+    argv.append(nil)
+
+    var pid: pid_t = 0
+    result = posix_spawn(&pid, python, &fileActions, &attributes, &argv, environ)
+    if result != 0 { return .failed("posix_spawn: \(errnoMessage(result))") }
+    return .spawned(pid)
+}
+
 /// Owns the serve branch: launch the fixed child, keep the event loop
 /// responsive, forward one stop, escalate once, reap and mirror the exit.
 final class ServeController {
     private let python: String
-    private var process: Process?
+    /// The child PID, held from spawn until it has been reaped. Holding the
+    /// unreaped PID is what makes "never signal a recycled PID" true: the
+    /// kernel cannot reuse the PID while this process still owns the zombie.
+    private var childPid: pid_t?
+    private var exitSource: DispatchSourceProcess?
     private var signalSources: [DispatchSourceSignal] = []
     private var escalation: DispatchSourceTimer?
     private var stopRequested = false
+    private var stopForwarded = false
+    private var finished = false
 
     init(python: String) {
         self.python = python
@@ -127,86 +222,115 @@ final class ServeController {
             signalSources.append(source)
         }
         DispatchQueue.main.async { [weak self] in
-            DispatchQueue.main.async { self?.launchIfNeeded() }
+            DispatchQueue.main.async { self?.launch() }
         }
     }
 
-    private func launchIfNeeded() {
-        // A stop that landed during startup has already exited the host through
-        // handleStop(), which runs on this same main queue.
-        let child = Process()
-        child.executableURL = URL(fileURLWithPath: python)
-        child.arguments = SUPERVISOR_ARGUMENTS
-        // cwd, environment and stdio are deliberately left unset: the child
-        // inherits all three. Nothing is captured, buffered, rotated or deleted.
-        child.terminationHandler = { [weak self] exited in
-            DispatchQueue.main.async { self?.childExited(exited) }
+    private func launch() {
+        if finished { return }
+        if stopRequested {
+            // A stop landed during startup and already exited the host.
+            finish(0)
         }
-        do {
-            try child.run()
-        } catch {
+        switch spawnSupervisor(python: python) {
+        case .failed(let message):
             writeStderr(
-                "CiaobotServerHost: could not launch supervisor \(python): \(error)\n"
+                "CiaobotServerHost: could not launch supervisor \(python): \(message)\n"
             )
             finish(EXIT_LAUNCH_FAILURE)
+        case .spawned(let pid):
+            childPid = pid
+            let source = DispatchSource.makeProcessSource(
+                identifier: pid, eventMask: .exit, queue: .main
+            )
+            source.setEventHandler { [weak self] in self?.reap(pid, blocking: true) }
+            source.resume()
+            exitSource = source
+            // A child that exited before the source was armed is still a
+            // zombie; reap it now so a very fast exit is never missed.
+            reap(pid, blocking: false)
         }
-        process = child
+    }
+
+    /// Collect the child's status exactly once, whether the dispatch exit
+    /// source fired or an immediate `WNOHANG` check found it already gone.
+    private func reap(_ pid: pid_t, blocking: Bool) {
+        guard !finished, childPid == pid else { return }
+        var status: Int32 = 0
+        var result: pid_t
+        let options = blocking ? 0 : WNOHANG
+        repeat {
+            result = waitpid(pid, &status, options)
+        } while result == -1 && errno == EINTR
+        if result == pid {
+            collect(status: status)
+        }
     }
 
     private func handleStop() {
         if stopRequested { return }
         stopRequested = true
-        guard let child = process, child.isRunning else {
-            // Either no child was launched yet (a stop during startup: nothing is
-            // ever launched) or it is already gone; there is nothing to forward
-            // and no stale pid to signal.
+        guard let pid = childPid else {
+            // A stop during startup: no child was ever launched.
             finish(0)
         }
-        kill(child.processIdentifier, SIGTERM)
-        armEscalation(for: child.processIdentifier)
+        if stopForwarded { return }
+        stopForwarded = true
+        // Forward to the tracked, still-unreaped PID only. Never `killpg`: the
+        // host shares launchd's job group, so signalling the group here would
+        // also signal the host itself and its launchd peers.
+        _ = kill(pid, SIGTERM)
+        armEscalation(pid)
     }
 
     /// Arm exactly one SIGKILL escalation for the child we forwarded to. The
-    /// handler re-checks the pid and liveness, so a recycled pid is never
-    /// signalled and a replaced child is never killed by a stale timer.
-    ///
-    /// Foundation.Process starts the child as the leader of its own process
-    /// group, and the supervisor keeps the engine in that group, so the kill
-    /// targets the whole group: signalling the pid alone would orphan the
-    /// engine, which launchd's cleanup of the host's group can never reach.
-    private func armEscalation(for pid: pid_t) {
+    /// handler re-checks the still-unreaped PID, so the kill can never target a
+    /// recycled PID or a replaced child. It does not kill the shared group:
+    /// launchd's final job-group cleanup is what reaches the descendants after
+    /// the host exits.
+    private func armEscalation(_ pid: pid_t) {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + STOP_GRACE_SECONDS)
         timer.setEventHandler { [weak self] in
-            guard let self = self, let child = self.process,
-                child.processIdentifier == pid, child.isRunning
-            else { return }
-            killpg(pid, SIGKILL)
+            guard let self = self, !self.finished, self.childPid == pid else { return }
+            if kill(pid, SIGKILL) == 0 || errno == ESRCH {
+                self.reap(pid, blocking: true)
+            }
         }
         timer.resume()
         escalation = timer
     }
 
-    private func childExited(_ child: Process) {
+    private func collect(status: Int32) {
+        guard !finished else { return }
+        finished = true
         escalation?.cancel()
         escalation = nil
-        process = nil
-        let code: Int32
+        exitSource?.cancel()
+        exitSource = nil
+        childPid = nil
+        exit(exitCode(status))
+    }
+
+    /// The status the host exits with. A requested stop is a clean stop — 0 —
+    /// only when the child exited 0 or died by the forwarded SIGTERM. Every
+    /// other outcome (a stalled child killed by the escalation, a non-zero exit
+    /// after the stop, a crash) is preserved so launchd and logs see the failed
+    /// shutdown instead of a false success.
+    private func exitCode(_ status: Int32) -> Int32 {
+        let signalNumber = status & 0x7f
+        let exitedNormally = signalNumber == 0
+        let exitStatus = (status >> 8) & 0xff
         if stopRequested {
-            // A stop was requested and the child was terminated normally or by
-            // the signal we forwarded; report a clean service stop.
-            code = 0
-        } else if child.terminationReason == .uncaughtSignal {
-            code = 128 + child.terminationStatus
-        } else {
-            code = child.terminationStatus
+            if exitedNormally && exitStatus == 0 { return 0 }
+            if !exitedNormally && signalNumber == SIGTERM { return 0 }
         }
-        finish(code)
+        if exitedNormally { return exitStatus }
+        return 128 + signalNumber
     }
 
     private func finish(_ code: Int32) -> Never {
-        // Process reaps its child before terminationHandler runs, so the child
-        // is already reaped by the time we get here.
+        finished = true
         exit(code)
     }
 }
