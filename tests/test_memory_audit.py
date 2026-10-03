@@ -893,3 +893,103 @@ def test_a_vault_category_sets_its_own_staleness(tmp_path: Path) -> None:
     assert note_threshold_days(
         "customer", registry=entity_types.load_entity_types(vault)
     ) == STALE_NOTE_DEFAULT_DAYS
+
+
+# --- the entry excerpt and its context are prose, not source ---------------
+
+
+def _entry_verdicts(text: str, *, today: datetime.date | None = None):
+    """Every selected entry verdict for one note body."""
+    from ciao.memory_audit import note_entry_coverage
+
+    _cov, selected, _doc = note_entry_coverage(
+        text,
+        note_type="person",
+        updated="2019-01-01",
+        mtime=0.0,
+        note_path="People/Alice.md",
+        rendered="memory-vault/People/Alice.md",
+        workspace="work",
+        today=today or datetime.date(2026, 9, 30),
+    )
+    return selected
+
+
+def test_entry_excerpt_strips_markdown_markers_to_prose() -> None:
+    """A card renders the excerpt as text, so the source markers are noise.
+
+    `1. **Learn.** People…` used to reach the boxed fact exactly as written,
+    `**`, marker and all. The excerpt is what the reader sees; the entry text
+    stays the identity key, so this is display only.
+    """
+    selected = _entry_verdicts(
+        "- Lives in Porto [verified: 2026-09-28]\n"
+        "1. **Learn.** People leave each session knowing more.\n"
+    )
+    learned = next(v for v in selected if "Learn" in v.excerpt)
+    assert learned.excerpt == "Learn. People leave each session knowing more."
+    assert "**" not in learned.excerpt
+    assert not learned.excerpt.startswith("1.")
+
+
+def test_entry_excerpt_drops_backticks_link_urls_and_stays_capped() -> None:
+    selected = _entry_verdicts(
+        "- See [the docs](https://example.dev/deep/path) for `timeout_s`.\n"
+        "- " + "word " * 80 + "\n"
+    )
+    linked = next(v for v in selected if "docs" in v.excerpt)
+    assert linked.excerpt == "See the docs for timeouts."
+    long = next(v for v in selected if v.excerpt.startswith("word"))
+    assert long.excerpt.endswith(" …")
+
+
+def test_entry_identity_and_fingerprint_ignore_the_excerpt_strip() -> None:
+    """The strip is display only: the same source text mints the same identity."""
+    from ciao import note_entries as ne
+
+    source = "1. **Learn.** People leave each session knowing more.\n"
+    selected = _entry_verdicts(source)
+    entry = ne.parse_note_entries(
+        source, note_path="People/Alice.md", workspace="work"
+    ).entries[0]
+    assert selected[0].identity == entry.identity
+    assert selected[0].fingerprint == entry.fingerprint
+
+
+def test_sibling_bullets_are_not_reprinted_as_context() -> None:
+    """A dense list has no prose between bullets, so a neighbour is the next fact.
+
+    Reprinting it in grey made one fact read as two or three claims; the walk
+    now skips any line inside another entry's span and stops at the prose above.
+    """
+    text = (
+        "# Address\n"
+        "\n"
+        "Intro line.\n"
+        "\n"
+        "- First fact [verified: 2020-01-01]\n"
+        "- Second fact [verified: 2020-01-01]\n"
+        "- Third fact [verified: 2020-01-01]\n"
+    )
+    selected = _entry_verdicts(text)
+    assert len(selected) == 3
+    excerpts = {v.excerpt for v in selected}
+    for verdict in selected:
+        assert all(line not in excerpts for line in verdict.context)
+    assert all(verdict.context == ("Intro line.",) for verdict in selected)
+
+
+def test_prose_and_a_heading_neighbour_still_show_as_context() -> None:
+    """Skipping siblings must not empty the context of a fact that has real prose."""
+    text = (
+        "# Address\n"
+        "\n"
+        "## Landlord\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "\n"
+        "Verified with the agency.\n"
+    )
+    verdict = _entry_verdicts(text)[0]
+    assert "## Landlord" in verdict.context
+    assert "Verified with the agency." in verdict.context

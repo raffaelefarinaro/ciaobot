@@ -27,7 +27,7 @@ from ciao.memory_audit import (
     NoteVerification,
     note_verification,
 )
-from ciao.note_entries import EntryDocument
+from ciao.note_entries import EntryDocument, strip_markdown_noise
 from ciao.vault_index import build_filename_index, canonical_type, scan_vault, temp_prefix
 from ciao.vault_lint import is_template_stem, run_validation
 
@@ -144,11 +144,8 @@ EXCERPT_CHARS = 280
 _FRONTMATTER_RE = re.compile(r"\A﻿?---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 _HEADING_RE = re.compile(r"\A#{1,6}[ \t]+[^\n]*\n")
 # The excerpt renders as plain text in a queue row, not as markdown, so the
-# syntax itself is noise there: a preview that reads "Copy this folder into
-# `memory-vault/...`. ## Methodology" spends its budget on punctuation. Links
-# keep their label and drop the URL, which is the half a human reads.
-_MD_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
-_MD_NOISE_RE = re.compile(r"(?m)^[ \t]*(?:#{1,6}[ \t]+|[-*+][ \t]+|>[ \t]?)|[*_`]{1,2}")
+# syntax itself is noise there; `strip_markdown_noise` is the one strip this and
+# the entry excerpt share, so the two previews cannot disagree.
 _CANDIDATE_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 _QUEUE_LOCKS: dict[tuple[Path, str], threading.Lock] = {}
 _QUEUE_LOCKS_GUARD = threading.Lock()
@@ -745,8 +742,7 @@ def _excerpt(text: str, limit: int = EXCERPT_CHARS) -> str:
     """
     body = _FRONTMATTER_RE.sub("", text, count=1).lstrip()
     body = _HEADING_RE.sub("", body, count=1).lstrip()
-    body = _MD_LINK_RE.sub(r"\1", body)
-    body = _MD_NOISE_RE.sub("", body)
+    body = strip_markdown_noise(body)
     flat = " ".join(body.split())
     if len(flat) <= limit:
         return flat

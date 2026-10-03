@@ -196,6 +196,35 @@ _LIST_ITEM_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-*+]|\d{1,9}[.)])(?=[ \t]|$)"
 )
 
+# ── Markdown display ──────────────────────────────────────────────────────
+#
+# A preview that is rendered as plain text spends its budget on syntax: a row
+# reading "**Learn.** People…" or "- item" shows the markers instead of the
+# fact. One shared strip keeps the note-row preview and the entry excerpt from
+# disagreeing, which they did while only the row stripped.
+_MD_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
+# A leading heading or list marker, or any 1–2 char emphasis run. The ordered
+# marker is separate from the unordered one and guarded by trailing whitespace
+# so a decimal like "3.14" is prose, not a list item.
+_MD_NOISE_RE = re.compile(
+    r"(?m)^[ \t]*(?:#{1,6}[ \t]+|\d{1,9}[.)][ \t]+|[-*+][ \t]+|>[ \t]?)"
+    r"|[*_`]{1,2}"
+)
+
+
+def strip_markdown_noise(text: str) -> str:
+    """Plain text for a preview that is *shown*, not parsed.
+
+    Emphasis and backticks come off, a link keeps its label and drops the URL,
+    and a leading heading or list marker (unordered or ordered) is removed.
+    Nothing else is normalized here — a caller decides whether to collapse
+    whitespace and how far to truncate — and the input is never mutated, so
+    identity, fingerprints and coverage still read the source text.
+    """
+    body = _MD_LINK_RE.sub(r"\1", text)
+    return _MD_NOISE_RE.sub("", body)
+
+
 # Internal block kinds. Not part of the public vocabulary: a caller reports on
 # entries and coverage, not on how the line walk classified a line.
 _BLOCK_BLANK = "blank"

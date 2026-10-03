@@ -131,7 +131,22 @@ _MIN_SUBJECT_CHARS = 4
 
 
 def _excerpt(entry: str) -> str:
-    return entry[:EXCERPT_CHARS]
+    """One fact as readable prose, capped for a card.
+
+    Display only: the markers (`**`, a leading `-`/`1.`, backticks, a link's
+    URL) are stripped and the text is collapsed to a single line, but identity,
+    fingerprint and coverage are computed from the entry's source text and never
+    from this. The cut is on a word boundary when one is near the cap, so a card
+    does not stop mid-word for the sake of eight characters.
+    """
+    flat = " ".join(ne.strip_markdown_noise(entry).split())
+    if len(flat) <= EXCERPT_CHARS:
+        return flat
+    head = flat[:EXCERPT_CHARS]
+    space = head.rfind(" ")
+    if space > EXCERPT_CHARS - 40:
+        head = head[:space]
+    return f"{head.rstrip()} …"
 
 
 def find_event_shaped(region: str, entries: list[str]) -> list[dict[str, Any]]:
@@ -847,29 +862,57 @@ def _excerpt_line(value: str) -> str:
     return text[:_CONTEXT_LINE_CHARS]
 
 
-def _context_for(text: str, entry: ne.NoteEntry) -> tuple[str, ...]:
-    """The physical lines either side of one entry, and nothing else.
+def _lines_with_offsets(text: str) -> list[tuple[int, int, str]]:
+    """Every physical line as ``(start, end, body)``, excluding ``\\n``.
+
+    The offsets are what let :func:`_context_for` tell a neighbour that is prose
+    from one that falls inside another entry's span, which is the difference
+    between context and a repeated fact.
+    """
+    lines: list[tuple[int, int, str]] = []
+    offset = 0
+    for raw in text.split("\n"):
+        lines.append((offset, offset + len(raw), raw))
+        offset += len(raw) + 1
+    return lines
+
+
+def _context_for(
+    text: str, entry: ne.NoteEntry, document: ne.EntryDocument
+) -> tuple[str, ...]:
+    """The nearest physical lines either side that are not sibling facts.
 
     Deliberately the file's own lines rather than the neighbouring *entries*: a
     reader deciding whether a bullet is current needs the prose around it — a
     heading that says which address this is, a stray sentence explaining the
-    move — and a context made of sibling bullets would hide exactly the case
-    that matters. Blank lines are dropped, because a gap is not context.
+    move. But a dense list has no prose between its bullets, so the line beside a
+    fact is very often the next fact, and reprinting that in grey reads as the
+    same claim made twice. A line that lies inside any entry's span is therefore
+    skipped and the walk continues outward; a heading or a prose line is not an
+    entry and is still shown. Blank lines are dropped, because a gap is context
+    of nothing.
     """
-    before = text[: entry.start].rstrip("\n").split("\n")
-    after = text[entry.end :].lstrip("\n").split("\n")
-    found: list[str] = []
-    for line in reversed(before):
-        shown = _excerpt_line(line)
-        if shown:
-            found.append(shown)
-            break
-    for line in after:
-        shown = _excerpt_line(line)
-        if shown:
-            found.append(shown)
-            break
-    return tuple(found)
+    spans = [(other.start, other.end) for other in document.entries]
+
+    def is_fact_line(line_start: int, line_end: int) -> bool:
+        return any(
+            line_start < span_end and line_end > span_start
+            for span_start, span_end in spans
+        )
+
+    def first(lines: list[tuple[int, int, str]]) -> str:
+        for line_start, line_end, line in lines:
+            if is_fact_line(line_start, line_end):
+                continue
+            shown = _excerpt_line(line)
+            if shown:
+                return shown
+        return ""
+
+    lines = _lines_with_offsets(text)
+    before = [line for line in reversed(lines) if line[1] <= entry.start]
+    after = [line for line in lines if line[0] >= entry.end]
+    return tuple(line for line in (first(before), first(after)) if line)
 
 
 def _normalized_section(section: str) -> str:
@@ -1352,7 +1395,7 @@ def _verdict_for(
         fingerprint=entry.fingerprint,
         revision=revision,
         excerpt=_excerpt(entry.text),
-        context=_context_for(text, entry),
+        context=_context_for(text, entry, document),
         last_verified=dated,
         own_date=own_date,
         age_days=age,
