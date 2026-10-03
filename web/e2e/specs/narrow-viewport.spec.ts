@@ -54,12 +54,11 @@ test.describe('narrow viewport', () => {
     ).toBeLessThanOrEqual(0)
   })
 
-  test('a selected reply keeps its whole action footer on screen at 390px', async ({ page }) => {
+  test('selecting a reply does not move the transcript at 390px', async ({ page }) => {
     // Selecting a message grows it: the action footer is not in the layout a
-    // moment earlier. On the last turn of a phone-sized transcript the new
-    // footer lands under the composer, so the panel scrolls it back into view.
-    // jsdom cannot see this — every rect there is 0x0 — which is what makes
-    // this a browser test.
+    // moment earlier. The reader's place is kept — selection must not scroll
+    // the transcript to reveal the footer. jsdom cannot see this (every rect
+    // there is 0x0), which is what makes it a browser test.
     // The transcript is opt-in and per-session (see the fixture), so the chat
     // is reloaded once the fixture is holding the turns this test selects.
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
@@ -68,32 +67,67 @@ test.describe('narrow viewport', () => {
     await page.waitForSelector('.message-wrap.assistant .message-row')
     await page.waitForSelector(COMPOSER)
 
-    await page.locator('.message-wrap.assistant .message-row').last().click()
-    await page.waitForSelector('.message-wrap--selected .message-actions')
-
-    // Wait for the reveal scroll to settle rather than sleeping.
-    await page.waitForFunction(() => {
+    // Click via a dispatched event: Playwright's own click scrolls the target
+    // into view first, which would move the transcript before selection even
+    // runs and make the assertion meaningless.
+    const scrollBefore = await page.evaluate(() => {
       const root = document.querySelector('.messages')!
-      const prev = (root as { __top?: number }).__top
-      if (prev !== undefined && prev === root.scrollTop) return true
-      ;(root as { __top?: number }).__top = root.scrollTop
-      return false
-    }, undefined, { polling: 120, timeout: 5000 })
+      root.scrollTop = root.scrollHeight
+      return root.scrollTop
+    })
+    await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('.message-wrap.assistant .message-row')]
+      rows[rows.length - 1].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await page.waitForSelector('.message-wrap--selected .message-actions')
 
     const measured = await page.evaluate(() => {
       const root = document.querySelector('.messages')!
-      const viewportBottom = root.getBoundingClientRect().top + root.clientHeight
-      const card = document.querySelector('.message-wrap--selected .message-row')!
       const controls = [...document.querySelectorAll('.message-wrap--selected .message-action-btn')]
       return {
-        cardBottom: Math.round(card.getBoundingClientRect().bottom - viewportBottom),
-        clipped: controls.filter((el) => el.getBoundingClientRect().bottom > viewportBottom + 0.5).length,
+        scrollAfter: root.scrollTop,
+        controls: controls.length,
         heights: controls.map((el) => Math.round(el.getBoundingClientRect().height)),
       }
     })
-    expect(measured.cardBottom, 'the selected card is still below the transcript').toBeLessThanOrEqual(0)
-    expect(measured.clipped, 'action controls clipped by the composer').toBe(0)
+    expect(measured.scrollAfter, 'selecting moved the transcript').toBe(scrollBefore)
+    expect(measured.controls, 'no action controls rendered').toBeGreaterThan(0)
     for (const h of measured.heights) expect(h).toBeGreaterThanOrEqual(44)
+  })
+
+  test('a selected reply does not overlap the comment card below it at 390px', async ({ page }) => {
+    // The sent comment-reference card sits in the turn right under the reply it
+    // annotates. Selecting that reply grows it by its action footer, and the
+    // selected card's accent outline used to bleed past the transcript's turn
+    // gap and draw over the reference card. Only a real layout engine can show
+    // the collision (#968).
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.evaluate(() => fetch('/__fixture__/transcript', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ shape: 'comment' }),
+    }))
+    await page.reload()
+    await page.waitForSelector('.message-wrap.assistant .message-row')
+    await page.waitForSelector('user-comment-reference')
+    await page.waitForSelector(COMPOSER)
+
+    await page.locator('.message-wrap.assistant .message-row').click()
+    await page.waitForSelector('.message-wrap--selected .message-actions')
+
+    const measured = await page.evaluate(() => {
+      const row = document.querySelector('.message-wrap--selected .message-row')!
+      // The collision is with the next TURN's box (the `.message-wrap` that
+      // carries the reference card), not the inner `user-comment-reference`
+      // quote card, which sits inside that turn's padding. Measuring the inner
+      // card gives false confidence: the outline crosses the turn boundary
+      // before it ever reaches the quote.
+      const selectedWrap = document.querySelector('.message-wrap--selected')!
+      const next = selectedWrap.nextElementSibling as HTMLElement
+      // The 1px outline sits on the row's border box.
+      return { outlineBottom: row.getBoundingClientRect().bottom + 1, nextTop: next.getBoundingClientRect().top }
+    })
+    expect(measured.outlineBottom - measured.nextTop, 'the selected outline crosses the next turn').toBeLessThanOrEqual(0)
   })
 
   test('icon-only controls still hit the 44px touch minimum', async ({ page }) => {
