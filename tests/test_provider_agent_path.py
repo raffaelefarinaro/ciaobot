@@ -7,10 +7,13 @@ and nothing promoted the engine's own executable directory. These tests pin the
 engine-first PATH on the one chat-turn env builder (which reaches Claude,
 opencode and the agent CLI transport) and on the one-shot env builder.
 
-The engine directory is ``Path(sys.executable).parent``, deliberately not
-``.resolve()``: a venv's ``bin/python`` symlinks to the base interpreter, and
-resolving it names the base interpreter's bin dir — where no ``ciao`` entry
-point lives. ``ciao/cli.py`` documents the same rule.
+The engine directory is ``sysconfig.get_path("scripts")``, deliberately not the
+resolved interpreter path: a venv's ``bin/python`` symlinks to the base
+interpreter, and resolving it names the base interpreter's bin dir — where no
+``ciao`` entry point lives. It is also not always ``Path(sys.executable).parent``:
+on a global Windows install the interpreter sits in ``...\\x64\\`` while the
+console script is written to the sibling ``...\\Scripts\\``. ``ciao/cli.py``
+documents the same rule.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -60,22 +64,38 @@ def _chat_extra_env(tmp_path: Path, monkeypatch, *, provider: str = "claude") ->
 # ── the helper ────────────────────────────────────────────────────────────
 
 
-def test_engine_bin_dir_is_the_interpreter_side_not_the_resolved_base() -> None:
-    """Guard the venv-symlink trap the plan's literal ``.resolve()`` would trip.
+def test_engine_bin_dir_is_the_script_dir_not_the_resolved_base() -> None:
+    """Guard the venv-symlink trap and the global-Windows split.
 
-    On a venv install ``bin/python`` is a symlink to the base interpreter, so
-    ``Path(sys.executable).resolve().parent`` is the base interpreter's bin dir,
-    which holds no ``ciao`` entry point. ``engine_bin_dir()`` must stay on the
-    interpreter's own side. On CI (``actions/setup-python`` + ``pip install -e``)
-    the two coincide, so this assertion is exercised most sharply on a dev venv.
+    The directory is the scripts dir, not ``Path(sys.executable).parent``: a
+    global Windows install keeps the interpreter in ``...\\x64\\`` and writes the
+    ``ciao`` console script to the sibling ``...\\Scripts\\``. And it is not the
+    ``.resolve()``d base interpreter's dir either: a venv's ``bin/python``
+    symlinks to the base interpreter, and that base dir holds no ``ciao`` entry
+    point. ``sysconfig.get_path("scripts")`` is venv-aware and does not resolve
+    symlinks, so both rules hold at once.
     """
-    exe = Path(sys.executable)
     engine = Path(engine_bin_dir())
-    assert engine == exe.parent
-    # If the interpreter is a symlink (a venv), the resolved base is a different
-    # directory — and it is the wrong one to put on the agent's PATH.
-    if exe.parent != exe.resolve().parent:
-        assert engine != exe.resolve().parent
+    assert engine == Path(sysconfig.get_path("scripts"))
+    # A venv's bin/python symlinks to the base interpreter; the engine dir must
+    # stay on the venv's own side, never the resolved base's, where no `ciao`
+    # entry point lives.
+    exe_dir = Path(sys.executable).parent
+    if exe_dir != Path(sys.executable).resolve().parent:
+        assert engine != Path(sys.executable).resolve().parent
+
+
+def test_the_engine_bin_dir_holds_the_entry_point_when_it_exists() -> None:
+    """The scripts dir names the ``ciao`` entry point wherever it was written.
+
+    On a venv it always does; under a global install with no shim beside the
+    interpreter this skips rather than asserting a shape the machine does not
+    have, which is the very case the CI background test now covers.
+    """
+    engine_ciao = Path(engine_bin_dir()) / ("ciao.exe" if sys.platform == "win32" else "ciao")
+    if not engine_ciao.exists():
+        pytest.skip("no ciao entry point beside the test interpreter")
+    assert shutil.which("ciao", path=engine_bin_dir()) is not None
 
 
 def test_prepend_engine_path_puts_the_engine_first_and_keeps_the_rest(

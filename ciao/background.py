@@ -50,6 +50,7 @@ from typing import Any, Callable
 from ciao import job_runs
 from ciao.jsonio import read_json_dict
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
+from ciao.tool_path import prepend_engine_path
 
 logger = logging.getLogger(__name__)
 
@@ -270,11 +271,17 @@ def resolve_executable(argv0: str, cwd: Path, workspace_root: Path) -> str:
     ``PATH`` override in ``env`` then cannot redirect which binary actually
     runs, only what the command itself looks up later.
 
+    A bare name is looked up on the engine-first PATH, not the raw process PATH,
+    so a background ``ciao <command>`` runs the engine that launched the run
+    rather than a stale install (for example an older uv-tool ``ciao``) earlier
+    on the user's PATH. The engine-first PATH is still the *server's* choice,
+    not the caller's ``env``, so the resolve-before-overrides property holds.
+
     Three shapes are accepted, and the resolved target must exist and be
     executable in all three — a failed launch should be a clear validation
     error at the tool boundary, not a run that dies one line into its log:
 
-    * a bare program name (``pytest``), looked up on PATH;
+    * a bare program name (``pytest``), looked up on the engine-first PATH;
     * a relative path (``./build.sh``, ``scripts/x.py``), resolved inside the
       run directory and confined to the workspace root, exactly like ``cwd``;
     * an absolute path (``/usr/bin/python3``). Not confined, because PATH
@@ -300,7 +307,7 @@ def resolve_executable(argv0: str, cwd: Path, workspace_root: Path) -> str:
                 "cmd_forbidden", "cmd[0] resolves outside the workspace root."
             )
     else:
-        found = shutil.which(argv0)
+        found = shutil.which(argv0, path=prepend_engine_path())
         if not found:
             raise BackgroundRunError("cmd_not_found", f"'{argv0}' was not found on PATH.")
         return found

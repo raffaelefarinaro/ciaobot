@@ -63,6 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import threading
 from pathlib import Path
 from typing import Iterable
@@ -131,14 +132,18 @@ def _join_path_sources(values: Iterable[str]) -> str:
 def engine_bin_dir() -> str:
     """The directory holding the ``ciao`` entry point of the running engine.
 
-    Deliberately ``Path(sys.executable).parent`` and NOT ``.resolve()``: a venv's
-    ``bin/python`` is a symlink to the base interpreter, so resolving it reports
-    the base interpreter's bin dir — which has no ``ciao`` — instead of the
-    venv's own ``bin/`` where the console script actually lives. ``ciao/cli.py``
-    documents the same rule for its PATH hint. On Windows the interpreter itself
-    is what was spawned, so its own directory is where the ``ciao`` shim sits.
+    ``sysconfig.get_path("scripts")``, deliberately not the resolved interpreter
+    path and not the interpreter's own directory. On a venv the interpreter's
+    directory *is* the scripts directory, but a **global** install keeps them
+    apart: ``pip`` writes the console script to a sibling ``Scripts`` on Windows
+    (``...\\Python\\3.12\\x64\\python.exe`` vs ``...\\Python\\3.12\\Scripts\\ciao.exe``),
+    so ``Path(sys.executable).parent`` holds no ``ciao`` there and the
+    engine-first PATH this feeds (:func:`prepend_engine_path`) would be inert.
+    ``get_path`` is venv-aware and does not resolve symlinks, so on POSIX both a
+    venv and a global install still yield the interpreter's own ``bin/``, never
+    the venv's resolved base interpreter — where no ``ciao`` entry point lives.
     """
-    return str(Path(sys.executable).parent)
+    return str(Path(sysconfig.get_path("scripts")))
 
 
 def prepend_engine_path(path: str | None = None) -> str:
