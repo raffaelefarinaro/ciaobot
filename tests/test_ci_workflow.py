@@ -168,12 +168,13 @@ def test_release_smoke_only_runs_with_a_published_version() -> None:
     assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
 
 
-def test_publish_attaches_only_the_six_engine_assets() -> None:
-    # #653: the release carries the engine and nothing else. Exactly six
-    # assets - the macOS installer under both names, the Windows installer, the
-    # wheel, and the manifest with its signature - each pinned here so a
-    # re-added app asset is a failing test rather than a surprise in a published
-    # release.
+def test_publish_attaches_only_the_seven_engine_assets() -> None:
+    # #653: the release carries the engine and nothing else. #1022 adds one
+    # prebuilt universal server host archive the signed manifest authenticates.
+    # Exactly seven assets - the macOS installer under both names, the Windows
+    # installer, the wheel, the manifest with its signature, and the host -
+    # each pinned here so a re-added app asset is a failing test rather than a
+    # surprise in a published release.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
     ).read_text(encoding="utf-8")
@@ -186,10 +187,11 @@ def test_publish_attaches_only_the_six_engine_assets() -> None:
             dist/ciaobot-*.whl \\
             ciaobot-engine-manifest.json \\
             ciaobot-engine-manifest.json.sig \\
+            "$host_archive" \\
             --clobber
 """
     assert attached in workflow, (
-        "publish.yml no longer attaches exactly the six engine assets"
+        "publish.yml no longer attaches exactly the seven engine assets"
     )
 
     # Every name is attached and proven present on the release where the tag is
@@ -202,6 +204,50 @@ def test_publish_attaches_only_the_six_engine_assets() -> None:
     assert "grep -qx install.sh" in workflow
     assert "grep -qx install-engine.sh" in workflow
     assert "grep -qx install.ps1" in workflow
+    assert "grep -qx ciaobot-server-host-macos-universal-v1.tar.gz" in workflow
+
+
+def test_publish_host_asset_is_built_and_signed_in_manifest() -> None:
+    # #1022: the signed manifest authenticates one prebuilt universal macOS host
+    # archive. The builder runs before the manifest is written, the manifest
+    # names the exact archive, and the release attaches that same archive as the
+    # seventh asset - proven present where the tag is still known.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
+    ).read_text(encoding="utf-8")
+
+    # The builder is the clean-environment Python the wheel was verified with,
+    # and it writes to a scratch directory outside the repo so the signed app is
+    # never modified and no build output lands in the checkout.
+    assert "scripts/build-server-host.py" in workflow
+    assert '--output "$RUNNER_TEMP/server-host-build"' in workflow
+    assert workflow.index("Build universal server host") < workflow.index(
+        "Write and sign engine manifest"
+    )
+    assert workflow.index("Write and sign engine manifest") < workflow.index(
+        "Attach release assets"
+    )
+
+    # The manifest step passes the exact fixed archive through --server-host,
+    # and the archive it names is the one the release uploads.
+    assert (
+        "ciaobot-server-host-macos-universal-v1.tar.gz"
+        in workflow
+    )
+    assert "--server-host \"$host_archive\"" in workflow
+    assert '"$host_archive" \\' in workflow
+
+    # The builder is invoked with the same Python that verifies the wheel, not a
+    # system interpreter that might predate tarfile's data filter.
+    assert '"$RUNNER_TEMP/engine-check/bin/python" scripts/build-server-host.py' in workflow
+
+    # The manifest step and the upload step each define the archive path; both
+    # must be the builder's --output directory plus the fixed archive name, so
+    # the bytes uploaded are the bytes the signed manifest digested.
+    archive_paths = re.findall(r'^\s*host_archive="([^"]+)"$', workflow, re.MULTILINE)
+    assert archive_paths == [
+        "$RUNNER_TEMP/server-host-build/ciaobot-server-host-macos-universal-v1.tar.gz"
+    ] * 2
 
 
 def test_windows_job_checks_the_install_ps1_advisorily() -> None:
