@@ -122,6 +122,25 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
   }
 
   /**
+   * Whether the rows on screen are still `workspace`'s.
+   *
+   * Every write is made for the workspace the pane was drawing when it started,
+   * and `1`–`9` can move the pane to another one while the request is in flight:
+   * a status move or a Save is out, and the user presses a digit. The answer is a
+   * record of the workspace the write was *made for*, and the rows on screen are
+   * the other one's — so adopting it would draw another workspace's task id and
+   * revision under the new name, and a write from that card would present those
+   * ids to a workspace that has never heard of them. This is the same guard
+   * {@link get} takes, for the same reason.
+   *
+   * The write itself did land on disk, so nothing is lost by dropping its answer:
+   * the next reload of the right workspace shows it.
+   */
+  function drawingWorkspace(workspace: string): boolean {
+    return loadedWorkspace.value === workspace
+  }
+
+  /**
    * Adopt the record a write answered with.
    *
    * Normalised through `taskDetailFrom` rather than trusted: a 200 whose body is
@@ -129,6 +148,9 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * every one of these fields back. A record with no id adopts nothing — there is
    * no row it could honestly replace, and inventing an empty one would be a card
    * with no title sitting in a real column.
+   *
+   * Called only once the caller has checked {@link drawingWorkspace}, so a row it
+   * pushes is a row of the board the user is looking at.
    */
   function adopt(payload: unknown): TaskDetail {
     const task = taskDetailFrom(payload)
@@ -184,7 +206,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     if (!workspace || !taskId) return null
     const seq = ++descriptionSeq
     /** Whether this answer is still one the board it was asked for can use. */
-    const current = () => seq === descriptionSeq && loadedWorkspace.value === workspace
+    const current = () => seq === descriptionSeq && drawingWorkspace(workspace)
     try {
       const data = await api.get<{ task?: unknown }>(
         `${taskUrl(taskId)}?workspace=${encodeURIComponent(workspace)}`,
@@ -216,7 +238,13 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     }
   }
 
-  /** File a task. Returns the record as stored, or `null` with `error` set. */
+  /**
+   * File a task. Returns the record as stored, or `null` with `error` set.
+   *
+   * `null` also means the board stopped drawing this workspace while the POST was
+   * in flight: the task was filed, and its answer is dropped rather than drawn on
+   * the workspace that replaced this one — see {@link drawingWorkspace}.
+   */
   async function create(workspace: string, input: TaskCreateInput): Promise<TaskDetail | null> {
     if (!workspace || !input.title.trim()) return null
     // This write's answer is about to be the newest record the board holds.
@@ -231,6 +259,10 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
         ...(input.project_id ? { project_id: input.project_id } : {}),
         ...(input.due ? { due: input.due } : {}),
       })
+      // The board moved to another workspace while this filed. The record belongs
+      // to the one that was left, and `adopt` would push it — and the description
+      // with it — onto a board that never listed it.
+      if (!drawingWorkspace(workspace)) return null
       const task = adopt(data?.task)
       // A create answers with the record as stored, body included, so this one
       // read saves the dialog a round trip for the task just filed.
@@ -250,6 +282,10 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * `body` is sent only when there is one: the route treats a present-and-empty
    * body as "replace the description with nothing", which is right for an editor
    * that cleared it and wrong for a status move that never touched it.
+   *
+   * `null` comes back from a refusal *and* from a workspace switch made while the
+   * PATCH was in flight; the second drops the answer instead of adopting it onto
+   * the board that replaced this one. See {@link drawingWorkspace}.
    */
   async function update(
     workspace: string,
@@ -271,6 +307,10 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
         ...changes,
         ...(body === undefined ? {} : { body }),
       })
+      // The board moved to another workspace while this saved. The write landed
+      // in the one that was left; its answer is not a row on the one now drawn,
+      // and handing it back would let the caller draw it there.
+      if (!drawingWorkspace(workspace)) return null
       const task = adopt(data?.task)
       if (task.id && described.value?.id === task.id) described.value = task
       return task
@@ -288,6 +328,9 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * A distinct gesture rather than `update({ status: 'done' })` because the store
    * enforces completion as the user's own act, and it refuses a task linked to a
    * live chat or attempt — refusals the board surfaces rather than swallows.
+   *
+   * `null` comes back from a refusal *and* from a workspace switch made while the
+   * POST was in flight; see {@link drawingWorkspace}.
    */
   async function complete(
     workspace: string,
@@ -303,6 +346,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
         workspace,
         expected_revision: expectedRevision,
       })
+      // The board moved to another workspace while this completed.
+      if (!drawingWorkspace(workspace)) return null
       const task = adopt(data?.task)
       if (task.id && described.value?.id === task.id) described.value = task
       return task
@@ -320,6 +365,11 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * The request carries a body because the route requires it — `api.del` takes
    * one for exactly this case. A refusal (a stale revision, a file that is
    * already gone) leaves the rows alone and puts the server's sentence in `error`.
+   *
+   * `false` also comes back from a workspace switch made while the DELETE was in
+   * flight. The rows on screen are then the other workspace's, and a slug that
+   * collides across them means a late filter would drop a real row there without
+   * deleting anything. See {@link drawingWorkspace}.
    */
   async function remove(workspace: string, taskId: string, expectedRevision: string): Promise<boolean> {
     if (!workspace || !taskId) return false
@@ -330,6 +380,11 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     error.value = ''
     try {
       await api.del(taskUrl(taskId), { workspace, expected_revision: expectedRevision })
+      // The board moved to another workspace while this deleted. Slugs collide
+      // across workspaces, so a real row of the new board can answer to the same
+      // id: dropping it here would delete nothing on disk and hide a task the
+      // user is looking at.
+      if (!drawingWorkspace(workspace)) return false
       rows.value = rows.value.filter((row) => isUnreadable(row) || row.id !== taskId)
       if (described.value?.id === taskId) described.value = null
       return true
