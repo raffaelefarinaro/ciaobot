@@ -27,6 +27,29 @@ fetched during this work. Anything not observed is labelled **unverified** or
 Nothing in this report describes private data. No transcript, session file,
 credential, `Downloads` folder, or provider account was read.
 
+**Update — C3a landed (#1003).** The "Normalized source contract" section below
+is now implemented, and this report remains authoritative for the design;
+nothing in it was rewritten. `ciao/import_sources/contract.py` holds the frozen
+records (`SourceRef`, `NormalizedMessage`, `NormalizedSession`, `Omission`) with
+`to_json`/`from_json` and closed provider/role/omission vocabularies, and
+`ciao/import_sources/claude_code.py` is the Claude Code adapter
+(`read_claude_code_session`, `discover_claude_code_sessions`). Three points are
+settled by code rather than left as proposals: no timestamp is read, so
+`timestamp` is `None` for every Claude Code message (a file's mtime is when the
+engine looked, not when the conversation happened); `project_hint` is the lossy
+slug, held as a hint and never presented as a path; and every entry that
+produced no message is counted by reason — sidechain, team, meta, non-message
+type, the branch branch-selection did not take, non-text content blocks, an
+unreadable line — so an omission cannot be silent. Branch selection follows
+`transcripts.get_session_messages_full`: the latest-indexed non-`isSidechain` /
+`teamName` / `isMeta` leaf, walked through `parentUuid` **or**
+`logicalParentUuid`, which is what returns the pre-compaction half of a
+session. The issue's field list is narrower than the candidate schema above, so
+`source_kind`, `discovered_via`, `observed_at`, `engine_host` and the per-message
+`content_digest`/`omissions` are **not** in the contract yet — omitted, not
+decided against. Nothing under a real `~/.claude` was read to build it; the
+adapter's tests run on synthetic fixtures under `tests/fixtures/import/`.
+
 ## What this report had to settle
 
 #980 asks four questions, and the parent #975 asks the same four:
