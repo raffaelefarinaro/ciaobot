@@ -6,9 +6,9 @@ registered in a public or loopback-only allowlist and neither has an origin
 exception of its own):
 
 * ``GET /api/import/sources?workspace=`` — discovery. Metadata only: source ids,
-  hints, paths, the excluded rows with their reasons, the sources that could not
-  be listed at all, and whether a listing cap was reached. No conversation is
-  opened and no character of one is returned.
+  hints, the excluded rows with their reasons, the sources that could not be
+  listed at all, and whether a listing cap was reached. No absolute path is sent
+  to the browser, no conversation is opened and no character of one is returned.
 * ``POST /api/import/preview`` — the confirmation payload for the **selected**
   refs: per-conversation counts, the source's own first date when it has one,
   what the reader omitted, the effective provider and model, an input-volume
@@ -24,8 +24,10 @@ conversation it is asking about.
 **The selection names a source, not a location.** A request body carries
 ``{"provider", "source_id"}`` pairs; every path is rebuilt from the workspace's
 configured root inside :mod:`ciao.import_discover`, and a session id that is not
-a plain file name is refused. There is no route parameter through which a caller
-could hand this module a path of its own.
+a plain file name is refused. An OpenCode id must additionally be one this
+workspace's own ``session list`` named, because the CLI resolves ids across
+projects. There is no route parameter through which a caller could hand this
+module a path of its own.
 
 Discovery and preview both run in a worker thread: the Claude Code listing is a
 directory read and the OpenCode one shells out to the V2 CLI under a 60s timeout,
@@ -62,6 +64,10 @@ async def import_sources(request: Request) -> JSONResponse:
     ones with their reasons, the sources that could not be listed, and the
     per-source ``truncated`` flags.
 
+    Each ref is sent as an id and its hint, **without its absolute path**: the
+    panel never shows one, and the browser gains nothing from being told where a
+    conversation lives inside the user's home directory.
+
     An unregistered or empty ``workspace`` is a 400 rather than the install root:
     a discovery listing answers "what can be imported *into this workspace*", and
     answering for a different one would offer the wrong history on the wrong vault.
@@ -88,7 +94,7 @@ async def import_sources(request: Request) -> JSONResponse:
             "from this listing. Nothing was scanned.",
             500,
         )
-    payload = result.to_json()
+    payload = _without_paths(result.to_json())
     return JSONResponse({"workspace": workspace, "sources": payload})
 
 
@@ -97,8 +103,9 @@ async def import_preview(request: Request) -> JSONResponse:
 
     Body: ``{"workspace": "<name>", "sources": [{"provider", "source_id"}, ...]}``.
     The pairs are ids, not locations: :func:`ciao.import_discover.preview_selected`
-    rebuilds every path from the workspace's configured root and refuses a session
-    id that is not a plain file name.
+    rebuilds every path from the workspace's configured root, refuses a session id
+    that is not a plain file name, and requires an OpenCode id to be one this
+    workspace's own listing named.
 
     Answers ``{"preview": {...}}`` with one row per requested ref — including the
     ones that are refused, each with its reason, because a selection screen has to
@@ -143,6 +150,25 @@ async def import_preview(request: Request) -> JSONResponse:
 
 class _BadSelection(ValueError):
     """One requested source is not a ``{provider, source_id}`` pair."""
+
+
+def _without_paths(payload: dict[str, Any]) -> dict[str, Any]:
+    """The listing with every ref's absolute path dropped.
+
+    :meth:`ciao.import_sources.contract.SourceRef.to_json` carries ``path``
+    because an engine-side snapshot needs it — but the browser is not an engine
+    side. Discovery resolves paths itself, the panel shows an id and a hint, and
+    the one thing the path adds to a listing crossing into a browser is the
+    user's home directory.
+
+    The shape still comes from ``to_json``; this only removes one key, so the
+    two cannot drift into describing different listings.
+    """
+    for ref in payload["available"]:
+        ref.pop("path", None)
+    for row in payload["excluded"]:
+        row["ref"].pop("path", None)
+    return payload
 
 
 def _selected_ref(item: Any) -> SourceRef:

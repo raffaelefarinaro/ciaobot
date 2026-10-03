@@ -63,8 +63,15 @@ def _session_body() -> str:
     )
 
 
-def _fake_opencode(monkeypatch: pytest.MonkeyPatch, *, rows: Any = None) -> None:
-    """Replace the OpenCode adapter's bounded calls. Nothing is executed."""
+def _fake_opencode(monkeypatch: pytest.MonkeyPatch, *, rows: Any = None) -> list[tuple[str, ...]]:
+    """Replace the OpenCode adapter's bounded calls; return each JSON command's argv.
+
+    Nothing is executed: the binary resolution, the version check and the JSON
+    command are all replaced, so no server is started and no session database is
+    reachable. A test can therefore assert both what was asked for (``session
+    list`` versus ``session export``) and what came back.
+    """
+    calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         "ciao.import_sources.opencode._resolve_binary", lambda binary: SYNTHETIC_BINARY
     )
@@ -74,9 +81,11 @@ def _fake_opencode(monkeypatch: pytest.MonkeyPatch, *, rows: Any = None) -> None
     )
 
     def _run(binary: str, args: Sequence[str], timeout: float, **_: object) -> Any:
+        calls.append(tuple(args))
         return rows
 
     monkeypatch.setattr("ciao.import_sources.opencode._run_opencode_json", _run)
+    return calls
 
 
 def _world(
@@ -359,6 +368,74 @@ def test_a_selection_names_a_source_and_never_a_path(
     assert set(rows) == {str(secret), "../../outside"}
     assert all(row["state"] == "unreadable" for row in rows.values())
     assert rows[str(secret)]["message_count"] == 0
+
+
+def test_an_opencode_id_this_workspace_does_not_list_is_refused_without_an_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, cookies, _config = _world(tmp_path, monkeypatch, ["sess-a"])
+    # The listing names one session. `opencode session export <id>` resolves ids
+    # across every project on the machine, so an id a caller posts is not
+    # evidence that the session belongs to this workspace — and the export must
+    # not run to find out.
+    calls = _fake_opencode(monkeypatch, rows=[{"id": "ses_mine", "directory": str(tmp_path)}])
+
+    response = client.post(
+        "/api/import/preview",
+        json={
+            "workspace": "personal",
+            "sources": [{"provider": "opencode", "source_id": "ses_other_project"}],
+        },
+        cookies=cookies,
+    )
+
+    assert response.status_code == 200, response.text
+    row = response.json()["preview"]["conversations"][0]
+    assert row["state"] == "unreadable"
+    assert row["reason"] == "unreadable"
+    assert "this workspace" in row["message"]
+    assert row["message_count"] == 0
+    # Listed, never exported: the check happens before the content is read.
+    assert [args[:2] for args in calls] == [("session", "list")]
+
+
+def test_an_opencode_session_this_workspace_lists_is_still_exported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, cookies, _config = _world(tmp_path, monkeypatch, ["sess-a"])
+    calls = _fake_opencode(monkeypatch, rows=[{"id": "ses_mine", "directory": str(tmp_path)}])
+
+    response = client.post(
+        "/api/import/preview",
+        json={
+            "workspace": "personal",
+            "sources": [{"provider": "opencode", "source_id": "ses_mine"}],
+        },
+        cookies=cookies,
+    )
+
+    # The export answers this fake with the listing's own shape, which is not a
+    # session; the point is only that it was asked for the listed id.
+    assert [args[:2] for args in calls] == [("session", "list"), ("session", "export")]
+    assert calls[-1][2] == "ses_mine"
+
+
+def test_the_listing_carries_no_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, cookies, _config = _world(tmp_path, monkeypatch, ["sess-a"])
+    _fake_opencode(monkeypatch, rows=[])
+
+    response = client.get("/api/import/sources?workspace=personal", cookies=cookies)
+
+    assert response.status_code == 200
+    sources = response.json()["sources"]
+    refs = sources["available"] + [row["ref"] for row in sources["excluded"]]
+    assert refs, "the fixture listed nothing, so this asserts nothing"
+    assert all("path" not in ref for ref in refs)
+    assert set(refs[0]) == {"provider", "source_id", "project_hint"}
+    # Nothing of the user's home directory crosses into the browser.
+    assert str(tmp_path) not in response.text
 
 
 def test_a_source_that_could_not_be_listed_is_a_row_in_the_answer(

@@ -34,7 +34,9 @@ vi.mock('../../lib/api', () => ({
 }))
 
 function source(id: string, provider = 'claude_code'): Record<string, unknown> {
-  return { provider, source_id: id, project_hint: '-tmp-workspace', path: `/home/u/.claude/projects/-tmp-workspace/${id}.jsonl` }
+  // No `path`: the engine does not send one to the browser (nothing here shows
+  // it), so a row is an id and its weakest locator.
+  return { provider, source_id: id, project_hint: '-tmp-workspace' }
 }
 
 function listing(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -228,6 +230,41 @@ describe('ImportSources', () => {
     await flushPromises()
 
     expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0)
+  })
+
+  it('keeps the controls reachable after a long listing', async () => {
+    // 60 rows is an ordinary listing (the engine's cap is 500) and it is what
+    // made the panel unusable when it was a card on the map: the list pushed
+    // Review and Cancel thousands of pixels down a pane that does not scroll.
+    // jsdom has no layout engine, so what it can establish is that the markup is
+    // complete — every row rendered, and the controls still there and enabled
+    // after a selection — and the pane that scrolls is pinned in
+    // MemoryMapView.test.ts. The geometry is pinned by the browser spec
+    // (e2e/specs/import-list.spec.ts), the only place a rect is real.
+    const rows = Array.from({ length: 60 }, (_, index) => source(`sess-${index}`))
+    apiGet.mockResolvedValue({ workspace: 'personal', sources: listing({ available: rows }) })
+    const wrapper = await mountPanel()
+    await find(wrapper)
+
+    // The offered list, not the two disclosure lists below it.
+expect(wrapper.findAll('ul.import-list')[0]!.findAll('.import-row')).toHaveLength(60)
+
+    await wrapper.findAll('.import-check input[type="checkbox"]')[59].setValue(true)
+    await flushPromises()
+    const review = wrapper.get('.import-actions button.btn-primary')
+    expect(review.text()).toBe('Review 1 selected')
+    expect(review.attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('.import-actions button.btn-quiet, .import-actions .import-quiet').exists()).toBe(true)
+
+    await review.trigger('click')
+    await flushPromises()
+    // The confirmation the reader has to reach is rendered, with the row that
+    // was ticked at the end of the list.
+    expect(wrapper.text()).toContain('Before anything runs')
+    expect(apiPost).toHaveBeenCalledWith('/api/import/preview', {
+      workspace: 'personal',
+      sources: [{ provider: 'claude_code', source_id: 'sess-59' }],
+    })
   })
 
   it('keeps every control native and on the shared 44px touch floor', async () => {

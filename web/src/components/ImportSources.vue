@@ -1,5 +1,8 @@
 <template>
-  <!-- Import conversations: the Memory entry point for #1029 (C5).
+  <!-- Import conversations: the Memory → Import section for #1029 (C5).
+       It is its own scrolling page rather than a card on the map: the listing
+       can be hundreds of rows long, and the controls below it — Review,
+       Cancel, and everything the confirmation states — have to stay reachable.
        The scan is engine-host and opt-in — nothing is listed until the reader
        presses Find, and the panel says so rather than discovering on mount.
        Ciaobot's own and unreadable rows are drawn, disabled, and never
@@ -158,7 +161,6 @@ interface ImportSource {
   provider: string
   source_id: string
   project_hint?: string
-  path?: string
 }
 interface ExcludedRow {
   ref: ImportSource
@@ -222,7 +224,7 @@ const refused = computed(() => preview.value?.conversations.filter(c => c.state 
 const truncatedNotes = computed(() =>
   Object.entries(rows.value.truncated)
     .filter(([, capped]) => capped)
-    .map(([provider]) => `${provider} lists one page of conversations, so older ones are not shown.`),
+    .map(([provider]) => `${provider} lists one page of conversations, so some are not shown.`),
 )
 
 function keyOf(source: ImportSource): string {
@@ -321,7 +323,7 @@ watch(workspace, () => {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin: 0 var(--space-3) var(--space-3);
+  margin: 0;
   padding: var(--space-3);
 }
 .import-head {

@@ -4,9 +4,24 @@
          header only names where you are: no mode switch, no tab row. -->
     <PaneHeader :page-tag="`Memory · ${SECTION_LABELS[mm.section]}`" @open-sidebar="emit('open-sidebar')" />
 
+    <!-- Import conversations (#1029, C5) is a section of its own, not a card
+         above the graph: a listing can be hundreds of rows long and the
+         controls a person has to reach — Review, Cancel, and everything the
+         confirmation states — sit below them. A page scrolls; the map's pane
+         does not. One column, like Categories: there is nothing for a rail to
+         hold here. The scan inside is opt-in — nothing is listed until the
+         reader presses Find. -->
+    <div v-if="mm.section === 'import'" class="mm-review-wrap">
+      <div class="page-grid page-grid--single mm-review-grid">
+        <div class="page-main">
+          <ImportSources />
+        </div>
+      </div>
+    </div>
+
     <!-- Categories is configuration, not a queue: no always-loaded budget rail
          beside it, and one column for the whole list and its drawer. -->
-    <div v-if="mm.section === 'categories'" class="mm-review-wrap">
+    <div v-else-if="mm.section === 'categories'" class="mm-review-wrap">
       <div class="page-grid page-grid--single mm-review-grid">
         <div class="page-main">
           <MemoryCategoriesPanel />
@@ -68,12 +83,6 @@
          sorted by links). -->
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }">
       <div class="mm-surface">
-        <!-- Import conversations (#1029, C5). It sits on the Map section because
-             that is where the vault's contents are explored, and it is here
-             rather than behind an onboarding step so it is reachable at any
-             time. The scan inside is opt-in: nothing is listed until the reader
-             presses Find. -->
-        <ImportSources />
         <div v-if="!mm.loading && !mm.loadError" class="mm-toolbar">
           <div class="mm-seg mm-seg--sm" role="group" aria-label="View">
             <button
@@ -1340,6 +1349,7 @@ const SECTION_LABELS: Record<MemorySection, string> = {
   review: 'To decide',
   map: 'Map',
   categories: 'Categories',
+  import: 'Import',
   retired: 'Retired',
   history: 'History',
 }

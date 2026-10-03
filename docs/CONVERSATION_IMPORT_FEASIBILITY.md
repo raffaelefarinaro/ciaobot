@@ -933,15 +933,17 @@ discovery. Blocks C6.
 
 **C5 landed (#1029).** `ciao/import_discover.py` and `ciao/web/routes_import.py`,
 with `GET /api/import/sources?workspace=` and `POST /api/import/preview` on the
-ordinary session cookie, and an **Import conversations** panel in Memory → Map.
+ordinary session cookie, and an **Import conversations** panel at Memory →
+Import — its own section, because the controls a person has to reach sit below
+the rows and a listing of hundreds does not fit a pane that does not scroll.
 Three things the design above pinned down, as built:
 
 * **Discovery is metadata only, and resolves one root per source from config
   alone** — Claude Code through `agent_paths.claude_projects_dir(agent_root_for(
   config, workspace))`, OpenCode through `discover_opencode_sessions` on that same
   agent root. It scans nothing above either one, follows no link, refuses a
-  non-regular file or one over `MAX_SESSION_BYTES`, and returns ids, hints and
-  paths.
+  non-regular file or one over `MAX_SESSION_BYTES`, and returns ids and hints —
+  the browser is sent no absolute path.
 * **A listed row is *undecided*, never `external`.** The classification rule
   needs the session's own opening turn, and discovery reads no content, so
   `classify_for_import` with no turn answers `ambiguous` — the direction that
@@ -955,6 +957,11 @@ Three things the design above pinned down, as built:
   `MAX_SESSIONS_PER_SOURCE` or OpenCode's own `DISCOVERY_MAX_COUNT` sets the
   per-provider `truncated` flag; an OpenCode below the V2 floor lands in
   `unsupported` with the adapter's reason rather than as an empty list.
+* **An OpenCode id is checked against this workspace's own listing before it is
+  exported.** `opencode session export <id>` resolves ids across projects, so an
+  id the request body carries is not evidence of ownership; the preview lists
+  this workspace once and refuses anything that listing did not name, without
+  running the export.
 
 No extraction (C7), no batch store (C6), no model call, and no transcript text in
 either answer — the rows carry counts, the source's own first date when it has

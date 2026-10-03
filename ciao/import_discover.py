@@ -22,7 +22,9 @@ the question:
   first function here that opens a conversation. It reads **only the refs a
   person selected**, resolves each one from the configured root rather than from
   anything a caller supplied, and answers with counts, dates and omission kinds
-  — never the text.
+  — never the text. An OpenCode id is checked against this workspace's own
+  listing before anything is exported, because ``session export`` resolves ids
+  across projects and an id a caller posts is not evidence of ownership.
 
 **Nothing here is claimed to be `external`.** A session is external only once its
 own opening turn has been read and carries no Ciaobot marker — the rule
@@ -50,10 +52,12 @@ screen can say *Unsupported version, export a file instead* instead of showing a
 empty list that looks like "you have no conversations".
 
 Reads Ciaobot's own two state files (through
-:func:`ciao.import_decouple.ciaobot_own_session_ids`) and the selected source
-files. It writes nothing, starts no model turn, no engine and no server of its
-own, and never reads ``~/.claude``, ``~/.opencode``, a Downloads folder or an
-account export anywhere but through the two configured roots above.
+:func:`ciao.import_decouple.ciaobot_own_session_ids`), the selected source
+files, and — once per preview, and only when an OpenCode ref is selected — that
+workspace's own OpenCode session listing. It writes nothing, starts no model
+turn, no engine and no server of its own, and never reads ``~/.claude``,
+``~/.opencode``, a Downloads folder or an account export anywhere but through
+the two configured roots above.
 """
 
 from __future__ import annotations
@@ -390,7 +394,7 @@ def _list_claude_code(root: Path) -> tuple[list[SourceRef], bool]:
         return found, False
     logger.warning(
         "import discovery: %s holds %d Claude Code sessions, past the %d cap; "
-        "older ones were not listed.",
+        "some are not listed (the page is by session id, not by recency).",
         directory,
         len(found),
         MAX_SESSIONS_PER_SOURCE,
@@ -578,6 +582,12 @@ def preview_selected(
     caller supplied, and is re-checked with the same link, type and size rules
     :func:`_refusal` applies — the selection carries an id, not a location.
 
+    An OpenCode id is additionally required to be one this workspace's own
+    listing named, because ``opencode session export <id>`` resolves ids across
+    projects: without that check a hand-built POST could name another project's
+    conversation and have it summarized as though it belonged here. The listing
+    runs **once** per preview, and not at all when no OpenCode ref is selected.
+
     A row is summarized only when it is ``external``. Ciaobot's own sessions are
     refused before the file is opened (their recorded ids decide it), and one
     whose own opening turn makes it Ciaobot's own or unreadable is refused after,
@@ -589,18 +599,21 @@ def preview_selected(
         raise UnknownWorkspace(
             f"unknown workspace {workspace!r}: expected a registered workspace name"
         )
-    if len(refs) > MAX_SELECTION:
+    selected = tuple(refs)
+    if len(selected) > MAX_SELECTION:
         raise ValueError(
-            f"a preview covers at most {MAX_SELECTION} conversations, got {len(refs)}"
+            f"a preview covers at most {MAX_SELECTION} conversations, got {len(selected)}"
         )
     root = agent_root_for(config, name)
     # One read of Ciaobot's own records for the whole listing: the exclusion set
     # is the same answer for every row, and a slug directory can hold hundreds.
     known_own = ciaobot_own_session_ids(config, name)
+    # ...and one OpenCode listing for the whole preview, for the same reason.
+    opencode_ids = _opencode_membership(selected, root)
 
     summaries: list[ConversationSummary] = []
-    for ref in refs:
-        summaries.append(_summarize(ref, root, known_own))
+    for ref in selected:
+        summaries.append(_summarize(ref, root, known_own, opencode_ids))
 
     ready = [row for row in summaries if row.state == STATE_READY]
     provider = config.default_provider_for_workspace(name)
@@ -616,7 +629,10 @@ def preview_selected(
 
 
 def _summarize(
-    ref: SourceRef, root: Path, known_own: Collection[tuple[str, str]]
+    ref: SourceRef,
+    root: Path,
+    known_own: Collection[tuple[str, str]],
+    opencode_ids: frozenset[str] | SourceError,
 ) -> ConversationSummary:
     """One selected conversation, described; every refusal becomes a row."""
     # Ciaobot's own, before the file is opened: a recorded id is the one answer
@@ -634,13 +650,37 @@ def _summarize(
     if ref.provider == PROVIDER_CLAUDE_CODE:
         return _summarize_claude_code(ref, root, known_own)
     if ref.provider == PROVIDER_OPENCODE:
-        return _summarize_opencode(ref, known_own)
+        return _summarize_opencode(ref, known_own, opencode_ids)
     return ConversationSummary(
         ref=ref,
         state=STATE_EXCLUDED,
         reason=REASON_NO_ADAPTER,
         message=f"{ref.provider} has no reader yet.",
     )
+
+
+def _opencode_membership(
+    selected: Sequence[SourceRef], root: Path
+) -> frozenset[str] | SourceError:
+    """Which OpenCode sessions this workspace's own listing names for a preview.
+
+    One bounded ``session list`` for the whole selection, and **none at all**
+    when no OpenCode ref was selected — a Claude Code preview has nothing to
+    check, so it does not spend a subprocess on the question.
+
+    A listing that could not be fetched returns the adapter's
+    :class:`~ciao.import_sources.opencode.SourceError` instead of an empty set,
+    so the caller can refuse with the reason it was refused rather than with a
+    claim that the session does not exist: "OpenCode could not be listed" and
+    "this is not one of your sessions" are different facts.
+    """
+    if not any(ref.provider == PROVIDER_OPENCODE for ref in selected):
+        return frozenset()
+    try:
+        return frozenset(ref.source_id for ref in discover_opencode_sessions(root))
+    except SourceError as exc:
+        logger.info("import preview: opencode listing refused (%s)", exc.reason)
+        return exc
 
 
 def _summarize_claude_code(
@@ -655,9 +695,34 @@ def _summarize_claude_code(
 
 
 def _summarize_opencode(
-    ref: SourceRef, known_own: Collection[tuple[str, str]]
+    ref: SourceRef,
+    known_own: Collection[tuple[str, str]],
+    workspace_ids: frozenset[str] | SourceError,
 ) -> ConversationSummary:
-    """One OpenCode session, exported through the supported V2 CLI."""
+    """One OpenCode session, exported through the supported V2 CLI.
+
+    Only an id this workspace's own listing named is exported.
+    ``opencode session export <id>`` resolves ids across every project on the
+    machine, so an id a caller posts proves nothing about whose conversation it
+    is — the listing is the evidence, and it is checked *before* the export, so
+    another project's session is never read in order to refuse it. A listing
+    that could not be fetched refuses every row with the adapter's own reason,
+    because a check that did not run cannot pass.
+    """
+    if isinstance(workspace_ids, SourceError):
+        return ConversationSummary(
+            ref=ref,
+            state=STATE_UNREADABLE,
+            reason=workspace_ids.reason,
+            message=str(workspace_ids),
+        )
+    if ref.source_id not in workspace_ids:
+        return ConversationSummary(
+            ref=ref,
+            state=STATE_UNREADABLE,
+            reason=REASON_UNREADABLE,
+            message="Not one of this workspace's OpenCode sessions, so it is not read.",
+        )
     try:
         session = read_opencode_session(ref.source_id)
     except SourceError as exc:

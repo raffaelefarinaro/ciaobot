@@ -553,6 +553,85 @@ def test_the_preview_states_the_provider_model_volume_and_cap(
     assert preview.destination.endswith("memory-vault/personal")
 
 
+def test_an_opencode_id_from_another_project_is_refused_before_the_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _world(tmp_path, monkeypatch)
+    _write_session(_slug_dir(config), "sess-a")
+    # This workspace's own listing names one session. `opencode session export
+    # <id>` resolves ids across every project on the machine, so an id a caller
+    # hands the preview is not evidence that the session belongs here.
+    calls = _fake_opencode(monkeypatch, rows=[{"id": "ses_mine", "directory": str(tmp_path)}])
+
+    preview = preview_selected(
+        config, "personal", [SourceRef(PROVIDER_OPENCODE, "ses_other_project")]
+    )
+
+    row = preview.conversations[0]
+    assert row.state == STATE_UNREADABLE
+    assert row.reason == REASON_UNREADABLE
+    assert "this workspace" in row.message
+    assert preview.estimated_messages == 0
+    # Listed once, exported never: the refusal must not need the content.
+    assert [args[:2] for args in calls] == [("session", "list")]
+
+
+def test_the_preview_lists_opencode_once_for_the_whole_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _world(tmp_path, monkeypatch)
+    _write_session(_slug_dir(config), "sess-a")
+    calls = _fake_opencode(
+        monkeypatch,
+        rows=[{"id": "ses_one", "directory": str(tmp_path)}, {"id": "ses_two", "directory": str(tmp_path)}],
+    )
+
+    preview = preview_selected(
+        config,
+        "personal",
+        [
+            SourceRef(PROVIDER_OPENCODE, "ses_one"),
+            SourceRef(PROVIDER_OPENCODE, "ses_two"),
+            SourceRef(PROVIDER_CLAUDE_CODE, "sess-a"),
+        ],
+    )
+
+    # One `session list` for two OpenCode rows, and one export per listed row:
+    # the membership answer is a fact about the workspace, not about each ref.
+    assert [args[:2] for args in calls] == [
+        ("session", "list"),
+        ("session", "export"),
+        ("session", "export"),
+    ]
+
+
+def test_a_preview_without_an_opencode_ref_never_lists_opencode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _world(tmp_path, monkeypatch)
+    _write_session(_slug_dir(config), "sess-a")
+    calls = _fake_opencode(monkeypatch, rows=[])
+
+    preview_selected(config, "personal", [SourceRef(PROVIDER_CLAUDE_CODE, "sess-a")])
+
+    assert calls == []
+
+
+def test_an_opencode_listing_that_fails_refuses_rather_than_exports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _world(tmp_path, monkeypatch)
+    _write_session(_slug_dir(config), "sess-a")
+    calls = _fake_opencode(monkeypatch, rows=None, refused="unsupported_version")
+
+    preview = preview_selected(config, "personal", [SourceRef(PROVIDER_OPENCODE, "ses_mine")])
+
+    # A check that did not run cannot pass: the row carries the adapter's own
+    # reason, and nothing was exported.
+    assert preview.conversations[0].reason == "unsupported_version"
+    assert [args[:2] for args in calls] == [("session", "list")]
+
+
 def test_a_selection_wider_than_the_bound_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
