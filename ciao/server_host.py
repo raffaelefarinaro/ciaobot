@@ -33,9 +33,9 @@ it vouches for would be circular, and one written into the bundle would change
 the very digest the next read compares. It holds no engine version, workspace or
 credential — only the host's own immutable identity and bytes. The reader never
 runs a native command, coerces a value or writes a file. The inspector runs only
-the three public, read-only probes ``codesign --verify``, ``codesign -dv`` and
-``lipo -archs``: no signing, launch, ``open``, ``launchctl`` or AX call, and
-every subprocess is bounded and shell-free.
+the public, read-only ``/usr/bin/codesign --verify`` and ``/usr/bin/codesign -dv``
+probes: no signing, launch, ``open``, ``launchctl`` or AX call, and every
+subprocess is bounded and shell-free.
 """
 
 from __future__ import annotations
@@ -50,7 +50,8 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Literal
 
 __all__ = [
@@ -101,9 +102,15 @@ EXIT_TIMEOUT_SECONDS = 45
 #: The on-disk ownership record schema this module reads.
 SCHEMA_VERSION = 1
 
-#: Every native probe is bounded and shell-free. ``codesign``/``lipo`` are local
-#: and fast; ten seconds is a hang, not a slow machine.
+#: Every native probe is bounded and shell-free. ``codesign`` is local and fast;
+#: ten seconds is a hang, not a slow machine.
 NATIVE_TIMEOUT_SECONDS = 10
+
+#: The one native tool, by absolute path. ``codesign`` is a real system binary,
+#: so neither the service's ``PATH`` nor ``DEVELOPER_DIR`` can substitute it, and
+#: it needs no Command Line Tools. (``/usr/bin/lipo`` is an xcode-select shim
+#: that does both, so the slices are read from ``codesign``'s ``Format=`` line.)
+CODESIGN = "/usr/bin/codesign"
 
 #: Where the host bundle and its ownership record live by default. Hardcoded
 #: constants, not environment variables: a path that could be redirected by the
@@ -127,22 +134,23 @@ NOT_OWNED = "not_owned"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CDHASH_RE = re.compile(r"^[0-9a-f]{40}$")
-_PYTHON_RE = re.compile(r"^python3(?:\.\d+)?$")
+_PYTHON_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
 
 _PLIST_REL = "Contents/Info.plist"
 _EXECUTABLE_REL = f"Contents/MacOS/{EXECUTABLE_NAME}"
 _ICON_REL = f"Contents/Resources/{ICON_NAME}"
 _CODESIGN_REL = "Contents/_CodeSignature/CodeResources"
 
-#: The four files every host bundle must seal. The record's mapping must name
-#: all of them; every other file it names must be a real sealed file too.
+#: Exactly the files ``scripts/build-server-host.py`` seals into a host bundle.
+#: An inspected bundle and a record's mapping must both name this set and
+#: nothing else: any other file is a thin staging product, a stray config,
+#: bundled Python or tampering. A new resource is a new host revision.
 REQUIRED_BUNDLE_FILES = frozenset(
     {_PLIST_REL, _EXECUTABLE_REL, _ICON_REL, _CODESIGN_REL}
 )
 
-#: Directories a host bundle may contain. Anything else is a thin staging file,
-#: a stray config, bundled Python or tampering, and is refused rather than
-#: recorded.
+#: The directories a host bundle contains: the bundle root, ``Contents`` and the
+#: parents of the sealed files. Any other directory is refused.
 _ALLOWED_DIRECTORIES = frozenset(
     {
         ".",
@@ -152,7 +160,6 @@ _ALLOWED_DIRECTORIES = frozenset(
         "Contents/_CodeSignature",
     }
 )
-_ALLOWED_EXTRA_PREFIX = "Contents/_CodeSignature/"
 
 _RECORD_FIELDS = frozenset(
     {
@@ -219,13 +226,9 @@ def _absolute_posix(value: object, *, what: str, code: str) -> str:
     return value
 
 
-def _is_python_basename(name: str) -> bool:
-    return name == "python3" or bool(_PYTHON_RE.fullmatch(name))
-
-
 def _parse_direct(program: str, argv: tuple[str, ...]) -> ServiceCommand:
     base = PurePosixPath(program).name
-    if base == "python" or _is_python_basename(base):
+    if _PYTHON_RE.fullmatch(base):
         rest = list(argv[1:])
         if rest and rest[0] == "-I":
             rest = rest[1:]
@@ -303,7 +306,7 @@ def parse_service_command(arguments: object) -> ServiceCommand:
     return _parse_direct(program, argv)
 
 
-def host_service_argv(bundle_path: Path, python: Path) -> tuple[str, ...]:
+def host_service_argv(bundle_path: PurePath, python: PurePath) -> tuple[str, ...]:
     """Render the exact hosted command for an installed host bundle.
 
     Strictly syntax and rendering: both arguments must be absolute POSIX paths
@@ -336,7 +339,9 @@ class HostOwnership:
     Returned by :func:`inspect_host_bundle` (an unproven snapshot) and by
     :func:`verify_owned_host` (proven against an existing private record). The
     same shape serves both so a consumer can render from a verified value
-    without a second type; only the second call answers "is it ours".
+    without a second type; only the second call answers "is it ours". The two
+    mappings are read-only copies, so a returned snapshot cannot be edited
+    after it was proven.
     """
 
     schema: int
@@ -348,12 +353,16 @@ class HostOwnership:
     per_arch_cdhashes: Mapping[str, str]
     bundle_files: Mapping[str, str]
 
+    def __post_init__(self) -> None:
+        for name in ("per_arch_cdhashes", "bundle_files"):
+            object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
+
     def to_record(self) -> dict[str, Any]:
         """The record document this snapshot serializes to.
 
         Pure: it returns a dict and writes nothing. Persisting it owner-only,
         outside the bundle and only after a verified installation, is the
-        installer's later job (B2), not this module's.
+        installer's later job (#1008 child E), not this module's.
         """
         return {
             "schema": self.schema,
@@ -365,29 +374,6 @@ class HostOwnership:
             "per_arch_cdhashes": dict(self.per_arch_cdhashes),
             "bundle_files": dict(self.bundle_files),
         }
-
-
-def _safe_relative_name(name: object, *, what: str) -> str:
-    """Require a canonical, relative, POSIX file name inside the bundle."""
-    if not isinstance(name, str) or name == "":
-        raise ServerHostError(
-            f"{what} must be a non-empty relative path", code=INVALID_OWNERSHIP
-        )
-    if name.startswith("/") or "\\" in name or "\x00" in name:
-        raise ServerHostError(
-            f"{what} must be a relative POSIX path without a backslash: {name!r}",
-            code=INVALID_OWNERSHIP,
-        )
-    if str(PurePosixPath(name)) != name:
-        raise ServerHostError(
-            f"{what} is not canonical (a dot, doubled slash or trailing slash): {name!r}",
-            code=INVALID_OWNERSHIP,
-        )
-    if any(part in ("", ".", "..") for part in PurePosixPath(name).parts):
-        raise ServerHostError(
-            f"{what} must not traverse: {name!r}", code=INVALID_OWNERSHIP
-        )
-    return name
 
 
 def _require_sha256(value: object, *, what: str) -> str:
@@ -505,33 +491,19 @@ def _decode_record(raw: str, *, path: Path) -> HostOwnership:
         for arch in ARCHITECTURES
     }
 
+    # Exactly the sealed set: an absolute, traversing, backslashed or otherwise
+    # unexpected name is simply not one of these four.
     files = document["bundle_files"]
-    if not isinstance(files, dict) or not files:
+    if not isinstance(files, dict) or set(files) != REQUIRED_BUNDLE_FILES:
         raise ServerHostError(
-            f"the ownership record at {path.name} has no bundle file mapping",
+            f"the ownership record at {path.name} must map exactly "
+            f"{sorted(REQUIRED_BUNDLE_FILES)}",
             code=INVALID_OWNERSHIP,
         )
-    bundle_files: dict[str, str] = {}
-    for name, digest in files.items():
-        safe = _safe_relative_name(name, what="a recorded bundle file name")
-        bundle_files[safe] = _require_sha256(digest, what=f"the digest of {safe}")
-    absent = sorted(REQUIRED_BUNDLE_FILES - set(bundle_files))
-    if absent:
-        raise ServerHostError(
-            f"the ownership record at {path.name} does not seal {absent}",
-            code=INVALID_OWNERSHIP,
-        )
-
-    # The record must not live inside the bundle it vouches for. Compare as
-    # POSIX: both are macOS paths when this matters, and a Windows record path
-    # simply cannot be a prefix of an absolute POSIX bundle path.
-    record_posix = PurePosixPath(os.fspath(path))
-    bundle_posix = PurePosixPath(bundle_path)
-    if record_posix == bundle_posix or bundle_posix in record_posix.parents:
-        raise ServerHostError(
-            "the ownership record must live outside the bundle it describes",
-            code=INVALID_OWNERSHIP,
-        )
+    bundle_files = {
+        name: _require_sha256(files[name], what=f"the digest of {name}")
+        for name in sorted(REQUIRED_BUNDLE_FILES)
+    }
 
     return HostOwnership(
         schema=SCHEMA_VERSION,
@@ -550,9 +522,9 @@ def read_host_ownership(path: Path) -> HostOwnership:
 
     Strict throughout: missing file, symlink, non-regular file, malformed JSON,
     a duplicate key, an unknown schema, a wrong identity or revision, a bad hash,
-    a traversing or backslashed file name, a missing sealed file and a record
-    living inside the bundle it describes are all refusals. Values are never
-    coerced and no file is written. On macOS the record's owner must be this uid
+    a file mapping other than exactly the sealed set and a record living inside
+    the bundle it describes (both paths resolved) are all refusals. Values are
+    never coerced and no file is written. On macOS the record's owner must be this uid
     and its mode must grant nothing to group or other.
     """
     record = Path(path)
@@ -591,21 +563,40 @@ def read_host_ownership(path: Path) -> HostOwnership:
             f"the host ownership record at {record} is unreadable",
             code=INVALID_OWNERSHIP,
         ) from exc
-    return _decode_record(raw, path=record)
+    ownership = _decode_record(raw, path=record)
+    # The record must not live inside the bundle it vouches for. Both sides are
+    # resolved, so a symlinked ancestor on either path cannot hide the overlap.
+    if Path(os.path.realpath(record)).is_relative_to(
+        os.path.realpath(ownership.bundle_path)
+    ):
+        raise ServerHostError(
+            "the ownership record must live outside the bundle it describes",
+            code=INVALID_OWNERSHIP,
+        )
+    return ownership
 
 
 # ── Identity: inspecting the installed bundle ───────────────────────────────
 
 
 def _run_native(runner: Runner, argv: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run one bounded, shell-free native probe with a fixed argv."""
-    completed: subprocess.CompletedProcess[str] = runner(
-        list(argv),
-        capture_output=True,
-        text=True,
-        timeout=NATIVE_TIMEOUT_SECONDS,
-        check=False,
-    )
+    """Run one bounded, shell-free native probe with a fixed argv.
+
+    A probe that cannot start or does not finish is a refusal, not a crash.
+    """
+    try:
+        completed: subprocess.CompletedProcess[str] = runner(
+            list(argv),
+            capture_output=True,
+            text=True,
+            timeout=NATIVE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ServerHostError(
+            f"the host bundle could not be inspected ({' '.join(argv[:2])}): {exc}",
+            code=INSPECTION_FAILED,
+        ) from exc
     return completed
 
 
@@ -613,14 +604,21 @@ def _relative_name(root: Path, entry: Path) -> str:
     return entry.relative_to(root).as_posix()
 
 
+def _refuse_unreadable(error: OSError) -> None:
+    """``os.walk`` skips a directory it cannot list; a skipped one is unchecked."""
+    raise ServerHostError(
+        f"the host bundle cannot be read: {error}", code=INSPECTION_FAILED
+    ) from error
+
+
 def _collect_sealed_files(bundle: Path) -> dict[str, str]:
-    """Digest every regular file, refusing a symlink, special file or stray dir."""
+    """Digest every regular file, refusing a symlink, special file or stray entry."""
     files: dict[str, str] = {}
-    for current, dirs, names in os.walk(bundle, followlinks=False):
+    for current, dirs, names in os.walk(
+        bundle, onerror=_refuse_unreadable, followlinks=False
+    ):
         current_path = Path(current)
         relative_dir = current_path.relative_to(bundle).as_posix()
-        if relative_dir == ".":
-            relative_dir = "."
         for name in list(dirs):
             entry = current_path / name
             if entry.is_symlink():
@@ -637,28 +635,31 @@ def _collect_sealed_files(bundle: Path) -> dict[str, str]:
             )
         for name in sorted(names):
             entry = current_path / name
-            info = os.lstat(entry)
-            if stat.S_ISLNK(info.st_mode):
-                raise ServerHostError(
-                    f"the host bundle contains a symlink: "
-                    f"{_relative_name(bundle, entry)}",
-                    code=INSPECTION_FAILED,
-                )
-            if not stat.S_ISREG(info.st_mode):
-                raise ServerHostError(
-                    f"the host bundle contains a special file: "
-                    f"{_relative_name(bundle, entry)}",
-                    code=INSPECTION_FAILED,
-                )
             relative = _relative_name(bundle, entry)
-            if relative not in REQUIRED_BUNDLE_FILES and not relative.startswith(
-                _ALLOWED_EXTRA_PREFIX
-            ):
+            if relative not in REQUIRED_BUNDLE_FILES:
                 raise ServerHostError(
                     f"the host bundle contains an unexpected file: {relative}",
                     code=INSPECTION_FAILED,
                 )
-            files[relative] = hashlib.sha256(entry.read_bytes()).hexdigest()
+            try:
+                mode = os.lstat(entry).st_mode
+                if stat.S_ISREG(mode):
+                    files[relative] = hashlib.sha256(entry.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise ServerHostError(
+                    f"the host bundle file {relative} cannot be read: {exc}",
+                    code=INSPECTION_FAILED,
+                ) from exc
+            if stat.S_ISLNK(mode):
+                raise ServerHostError(
+                    f"the host bundle contains a symlink: {relative}",
+                    code=INSPECTION_FAILED,
+                )
+            if not stat.S_ISREG(mode):
+                raise ServerHostError(
+                    f"the host bundle contains a special file: {relative}",
+                    code=INSPECTION_FAILED,
+                )
     absent = sorted(REQUIRED_BUNDLE_FILES - set(files))
     if absent:
         raise ServerHostError(
@@ -689,7 +690,8 @@ def _read_bundle_plist(bundle: Path) -> dict[str, Any]:
             f"the host bundle's executable is not {EXECUTABLE_NAME!r}",
             code=INSPECTION_FAILED,
         )
-    if info.get(HOST_PROTOCOL_KEY) != HOST_PROTOCOL:
+    protocol = info.get(HOST_PROTOCOL_KEY)
+    if not _strict_int(protocol) or protocol != HOST_PROTOCOL:
         raise ServerHostError(
             f"the host bundle is not protocol {HOST_PROTOCOL}", code=INSPECTION_FAILED
         )
@@ -710,40 +712,47 @@ def _read_bundle_plist(bundle: Path) -> dict[str, Any]:
     return info
 
 
-def _cdhash_from_output(text: str) -> str | None:
+def _display_value(text: str, key: str) -> str | None:
+    """The value of the first ``key=`` line ``codesign -dv`` printed, if any."""
+    prefix = f"{key}="
     for line in text.splitlines():
-        if line.startswith("CDHash="):
-            return line.split("=", 1)[1].strip()
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip()
     return None
 
 
-def _require_ad_hoc_signature(bundle: Path, runner: Runner) -> None:
+def _display(target: Path, runner: Runner, *extra: str) -> str | None:
+    """``codesign -dv --verbose=4`` output (it prints on stderr), or None on failure."""
     completed = _run_native(
-        runner, ["codesign", "-dv", "--verbose=4", os.fspath(bundle)]
+        runner, [CODESIGN, "-dv", "--verbose=4", *extra, os.fspath(target)]
     )
-    combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
     if completed.returncode != 0:
+        return None
+    return f"{completed.stdout or ''}\n{completed.stderr or ''}"
+
+
+def _require_signed_universal(bundle: Path, runner: Runner) -> None:
+    """An ad-hoc signature for this bundle id over exactly the two slices."""
+    shown = _display(bundle, runner)
+    if shown is None:
         raise ServerHostError(
             f"the host bundle's signature cannot be read: {bundle}",
             code=INSPECTION_FAILED,
         )
-    if "Signature=adhoc" not in combined.splitlines():
+    if _display_value(shown, "Signature") != "adhoc":
         raise ServerHostError(
             "the host bundle is not ad-hoc signed", code=INSPECTION_FAILED
         )
-
-
-def _require_universal_slices(executable: Path, runner: Runner) -> None:
-    completed = _run_native(runner, ["lipo", "-archs", os.fspath(executable)])
-    if completed.returncode != 0:
+    if _display_value(shown, "Identifier") != BUNDLE_ID:
         raise ServerHostError(
-            f"the host executable's architectures cannot be read: {executable}",
-            code=INSPECTION_FAILED,
+            f"the host bundle is not signed as {BUNDLE_ID!r}", code=INSPECTION_FAILED
         )
-    archs = set((completed.stdout or "").split())
-    if archs != set(ARCHITECTURES):
+    shape = _display_value(shown, "Format") or ""
+    match = re.fullmatch(r"app bundle with Mach-O universal \(([^()]*)\)", shape)
+    archs = match.group(1).split() if match else []
+    if sorted(archs) != sorted(ARCHITECTURES):
         raise ServerHostError(
-            f"the host executable is not universal; it has {sorted(archs)}",
+            f"the host executable is not exactly {sorted(ARCHITECTURES)}: {shape!r}",
             code=INSPECTION_FAILED,
         )
 
@@ -751,12 +760,8 @@ def _require_universal_slices(executable: Path, runner: Runner) -> None:
 def _per_arch_cdhashes(executable: Path, runner: Runner) -> dict[str, str]:
     hashes: dict[str, str] = {}
     for arch in ARCHITECTURES:
-        completed = _run_native(
-            runner,
-            ["codesign", "-dv", "--verbose=4", "--arch", arch, os.fspath(executable)],
-        )
-        combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
-        cdhash = _cdhash_from_output(combined) if completed.returncode == 0 else None
+        shown = _display(executable, runner, "--arch", arch)
+        cdhash = None if shown is None else _display_value(shown, "CDHash")
         if cdhash is None:
             raise ServerHostError(
                 f"the {arch} slice reports no CDHash", code=INSPECTION_FAILED
@@ -777,10 +782,11 @@ def inspect_host_bundle(
     exists so offline tests can prove the exact probe order, the ten-second bound
     and the shell-free, fixed argv without a real host.
 
-    It refuses a symlinked bundle, a symlinked or special file, a missing sealed
-    file, a stray directory or file (a thin build product, a config, bundled
-    Python), a wrong identity, a non-ad-hoc or invalid signature, a missing
-    architecture and a malformed CDHash. What it returns is a well-formed host —
+    It refuses a bundle not named ``Ciaobot Server.app``, a symlinked bundle, a
+    symlinked, special or unreadable file, a missing sealed file, a stray
+    directory or file (a thin build product, a config, bundled Python), a wrong
+    identity, a non-ad-hoc or invalid signature, a slice set other than exactly
+    ``arm64``/``x86_64``, a malformed CDHash and a probe that fails or hangs. What it returns is a well-formed host —
     **not** proof that this machine installed it. Only :func:`verify_owned_host`
     answers that, against an existing private record.
     """
@@ -793,6 +799,11 @@ def inspect_host_bundle(
     if not supplied.is_absolute():
         raise ServerHostError(
             f"the host bundle path must be absolute: {supplied}", code=INSPECTION_FAILED
+        )
+    if supplied.name != APP_NAME:
+        raise ServerHostError(
+            f"the host bundle must be named {APP_NAME!r}: {supplied}",
+            code=INSPECTION_FAILED,
         )
     if supplied.is_symlink():
         raise ServerHostError(
@@ -814,16 +825,14 @@ def inspect_host_bundle(
     files = _collect_sealed_files(bundle)
     _read_bundle_plist(bundle)
 
-    verify = _run_native(
-        runner, ["codesign", "--verify", "--strict", os.fspath(bundle)]
-    )
+    # Verification covers every architecture of a universal binary by default.
+    verify = _run_native(runner, [CODESIGN, "--verify", "--strict", os.fspath(bundle)])
     if verify.returncode != 0:
         raise ServerHostError(
             f"the host bundle fails strict signature verification: {bundle}",
             code=INSPECTION_FAILED,
         )
-    _require_ad_hoc_signature(bundle, runner)
-    _require_universal_slices(executable, runner)
+    _require_signed_universal(bundle, runner)
     cdhashes = _per_arch_cdhashes(executable, runner)
 
     executable_sha256 = _require_sha256(

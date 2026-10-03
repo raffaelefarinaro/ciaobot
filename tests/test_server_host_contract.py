@@ -4,7 +4,7 @@ The pure checks — command parsing, argv rendering, the constant contract and t
 strict ownership-record decoder — run on every platform, using ``PurePosixPath``
 macOS argv and Windows-safe temp record paths. The bundle inspector and the
 ownership verifier run under an injected runner and a mocked ``sys.platform``
-(so the ``codesign``/``lipo`` probes are proved without a real host), and the
+(so the ``codesign`` probes are proved without a real host), and the
 macOS-only integration builds the real universal host into a fresh tmpdir and
 verifies it. Nothing here installs a bundle, touches ``~/Applications``, an
 engine, ``launchctl``, Login Items or TCC, or opens a permission prompt.
@@ -16,8 +16,9 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
@@ -37,7 +38,6 @@ from ciao.server_host import (
     HOST_PROTOCOL_KEY,
     HOST_REVISION,
     ICON_NAME,
-    MINIMUM_SYSTEM_VERSION,
     SCHEMA_VERSION,
     HostOwnership,
     ServerHostError,
@@ -49,6 +49,10 @@ from ciao.server_host import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+# A macOS bundle path as a plain POSIX string, so record and argv fixtures mean
+# the same thing on Windows (where ``str(Path("/Users/..."))`` has backslashes).
+POSIX_BUNDLE = f"/Users/x/Applications/{APP_NAME}"
+
 BUILD_SCRIPT = ROOT / "scripts" / "build-server-host.py"
 HOST_SOURCE = ROOT / "native" / "server-host" / "ServerHost.swift"
 
@@ -70,11 +74,13 @@ requires_posix_uid = pytest.mark.skipif(
     sys.platform == "win32", reason="mocking darwin needs a POSIX uid"
 )
 
+# The builder needs the Command Line Tools (xcrun swiftc, lipo); the inspector
+# itself needs only /usr/bin/codesign.
 HAS_TOOLS = (
     sys.platform == "darwin"
     and shutil.which("xcrun") is not None
-    and shutil.which("codesign") is not None
     and shutil.which("lipo") is not None
+    and os.path.exists(server_host.CODESIGN)
 )
 requires_macos_tools = pytest.mark.skipif(
     not HAS_TOOLS, reason="the native host build requires macOS Command Line Tools"
@@ -103,8 +109,6 @@ def test_constants_match_the_real_builder() -> None:
 
 
 def test_constants_agree_with_the_swift_host() -> None:
-    import re
-
     source = HOST_SOURCE.read_text(encoding="utf-8")
     match = re.search(r"^let HOST_PROTOCOL_REVISION = (\d+)$", source, re.MULTILINE)
     assert match is not None
@@ -112,6 +116,33 @@ def test_constants_agree_with_the_swift_host() -> None:
     match = re.search(r"^let STOP_GRACE_SECONDS = ([0-9.]+)$", source, re.MULTILINE)
     assert match is not None
     assert float(match.group(1)) == server_host.STOP_GRACE_SECONDS
+
+
+def test_the_hosted_child_is_an_accepted_direct_supervise_command() -> None:
+    # The Swift host appends its fixed SUPERVISOR_ARGUMENTS to --python. Bind
+    # to that source rather than a copy here: the child it launches must be a
+    # direct shape this parser accepts and a subcommand ciao.cli really has.
+    from ciao import cli
+
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    match = re.search(r"^let SUPERVISOR_ARGUMENTS = \[(.*)\]$", source, re.MULTILINE)
+    assert match is not None
+    arguments = re.findall(r'"([^"]*)"', match.group(1))
+    child = parse_service_command(["/usr/bin/python3", *arguments])
+    assert child.mode == "direct"
+    assert child.argv[-3:] == ("-m", "ciao.cli", "supervise")
+    assert cli.build_parser().parse_args(list(child.argv[-1:])).command == "supervise"
+
+
+def test_the_sealed_file_set_is_the_builder_layout() -> None:
+    layout = BUILD._layout(PurePosixPath("/out"))
+    built = {
+        PurePosixPath(layout[key]).relative_to(PurePosixPath(layout["app"])).as_posix()
+        for key in ("info_plist", "executable", "icon")
+    }
+    assert server_host.REQUIRED_BUNDLE_FILES == built | {
+        "Contents/_CodeSignature/CodeResources"
+    }
 
 
 def test_exit_timeout_outlasts_stop_grace_which_outlasts_supervisor() -> None:
@@ -177,7 +208,7 @@ def test_parse_direct_shapes(argv: list[str], program: str, python: str) -> None
 
 
 def test_parse_hosted_shape() -> None:
-    host = f"/Users/x/Applications/{APP_NAME}/Contents/MacOS/{EXECUTABLE_NAME}"
+    host = f"{POSIX_BUNDLE}/Contents/MacOS/{EXECUTABLE_NAME}"
     parsed = parse_service_command([host, "serve", "--python", "/usr/bin/python3"])
     assert parsed.mode == "hosted"
     assert parsed.program == host
@@ -278,10 +309,10 @@ def test_parse_rejects_invalid_hosted_shapes(bad: object) -> None:
 
 def test_host_service_argv_round_trips_through_the_parser() -> None:
     argv = host_service_argv(
-        Path(f"/Users/x/Applications/{APP_NAME}"), Path("/usr/bin/python3")
+        PurePosixPath(POSIX_BUNDLE), PurePosixPath("/usr/bin/python3")
     )
     assert argv == (
-        f"/Users/x/Applications/{APP_NAME}/Contents/MacOS/{EXECUTABLE_NAME}",
+        f"{POSIX_BUNDLE}/Contents/MacOS/{EXECUTABLE_NAME}",
         "serve",
         "--python",
         "/usr/bin/python3",
@@ -294,28 +325,28 @@ def test_host_service_argv_round_trips_through_the_parser() -> None:
 @pytest.mark.parametrize(
     "bundle, python",
     [
-        (Path("Applications/" + APP_NAME), Path("/usr/bin/python3")),
-        (Path(f"/Users/x/{APP_NAME}"), Path("python3")),
-        (Path(f"/Users/x/{APP_NAME}"), Path("/usr/bin/python3\x00")),
-        (Path("/Users/x/Other.app"), Path("/usr/bin/python3")),
-        (Path(f"/Users/x/{APP_NAME}"), Path("C:\\Python\\python.exe")),
+        ("Applications/" + APP_NAME, "/usr/bin/python3"),
+        (POSIX_BUNDLE, "python3"),
+        (POSIX_BUNDLE, "/usr/bin/python3\x00"),
+        ("/Users/x/Other.app", "/usr/bin/python3"),
+        (POSIX_BUNDLE, "C:\\Python\\python.exe"),
     ],
 )
 def test_host_service_argv_rejects_strict_absent_inputs(
-    bundle: Path, python: Path
+    bundle: str, python: str
 ) -> None:
     with pytest.raises(ServerHostError) as caught:
-        host_service_argv(bundle, python)
+        host_service_argv(PurePosixPath(bundle), PurePosixPath(python))
     assert caught.value.code == server_host.INVALID_COMMAND
 
 
 # ── ownership: the strict record decoder ─────────────────────────────────────
 
 
-def _record(bundle: Path | None = None) -> dict[str, Any]:
+def _record(bundle: str = POSIX_BUNDLE) -> dict[str, Any]:
     return {
         "schema": SCHEMA_VERSION,
-        "bundle_path": str(bundle or Path(f"/Users/x/Applications/{APP_NAME}")),
+        "bundle_path": bundle,
         "bundle_id": BUNDLE_ID,
         "host_revision": HOST_REVISION,
         "host_protocol": HOST_PROTOCOL,
@@ -339,18 +370,26 @@ def _write_record(path: Path, document: object, *, private: bool = True) -> Path
 
 
 def test_read_record_round_trips(tmp_path: Path) -> None:
-    bundle = tmp_path / APP_NAME
-    bundle.mkdir()
-    record = _write_record(tmp_path / "record.json", _record(bundle))
+    record = _write_record(tmp_path / "record.json", _record())
     parsed = read_host_ownership(record)
-    assert parsed.bundle_path == str(bundle)
+    assert parsed.bundle_path == POSIX_BUNDLE
     assert parsed.bundle_id == BUNDLE_ID
     assert parsed.host_revision == HOST_REVISION
     assert parsed.host_protocol == HOST_PROTOCOL
     assert parsed.executable_sha256 == _HASH_A
     assert dict(parsed.per_arch_cdhashes) == _CDHASH
-    assert set(parsed.bundle_files) == set(_record(bundle)["bundle_files"])
-    assert parsed.to_record() == _record(bundle)
+    assert set(parsed.bundle_files) == set(_record()["bundle_files"])
+    assert parsed.to_record() == _record()
+
+
+def test_a_snapshot_cannot_be_edited_after_it_is_read(tmp_path: Path) -> None:
+    parsed = read_host_ownership(_write_record(tmp_path / "record.json", _record()))
+    with pytest.raises(TypeError):
+        parsed.bundle_files["Contents/Info.plist"] = _HASH_B  # type: ignore[index]
+    with pytest.raises(TypeError):
+        parsed.per_arch_cdhashes["arm64"] = "0" * 40  # type: ignore[index]
+    # to_record hands out plain copies a writer can serialize.
+    assert isinstance(parsed.to_record()["bundle_files"], dict)
 
 
 def test_read_record_missing_file(tmp_path: Path) -> None:
@@ -460,6 +499,7 @@ def test_read_record_rejects_identity_and_shape(tmp_path: Path, mutate: Any) -> 
         "Contents/MacOS/./x",
         "Contents//Info.plist",
         "Contents/MacOS/trailing/",
+        "Contents/Resources/extra.txt",
     ],
 )
 def test_read_record_rejects_unsafe_file_names(tmp_path: Path, name: str) -> None:
@@ -480,15 +520,24 @@ def test_read_record_rejects_missing_required_sealed_file(tmp_path: Path) -> Non
     assert caught.value.code == server_host.INVALID_OWNERSHIP
 
 
-def test_read_record_rejects_record_inside_the_bundle(tmp_path: Path) -> None:
-    bundle = tmp_path / APP_NAME
-    bundle.mkdir()
-    record = bundle / "Contents" / "server-host.json"
-    record.parent.mkdir(parents=True, exist_ok=True)
-    _write_record(record, _record(bundle))
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX bundle paths")
+@pytest.mark.parametrize("via", ["direct", "record_alias", "bundle_alias"])
+def test_read_record_rejects_record_inside_the_bundle(tmp_path: Path, via: str) -> None:
+    real = Path(os.path.realpath(tmp_path)) / "real"
+    bundle = real / APP_NAME
+    (bundle / "Contents").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    # A symlinked ancestor on either path must not hide the overlap.
+    record_dir = (alias if via == "record_alias" else real) / APP_NAME / "Contents"
+    recorded = (alias if via == "bundle_alias" else real) / APP_NAME
+    record = _write_record(
+        record_dir / "server-host.json", _record(recorded.as_posix())
+    )
     with pytest.raises(ServerHostError) as caught:
         read_host_ownership(record)
     assert caught.value.code == server_host.INVALID_OWNERSHIP
+    assert "outside the bundle" in str(caught.value)
 
 
 def test_read_record_rejects_a_symlink(tmp_path: Path) -> None:
@@ -528,22 +577,6 @@ _ICON_REL = f"Contents/Resources/{ICON_NAME}"
 _CODESIGN_REL = "Contents/_CodeSignature/CodeResources"
 
 
-def _production_plist() -> dict[str, Any]:
-    return {
-        "CFBundleName": "Ciaobot Server",
-        "CFBundleDisplayName": "Ciaobot Server",
-        "CFBundleIdentifier": BUNDLE_ID,
-        "CFBundleExecutable": EXECUTABLE_NAME,
-        "CFBundlePackageType": "APPL",
-        "CFBundleIconFile": ICON_NAME,
-        "CFBundleVersion": str(HOST_REVISION),
-        "CFBundleShortVersionString": str(HOST_REVISION),
-        HOST_PROTOCOL_KEY: HOST_PROTOCOL,
-        "LSMinimumSystemVersion": MINIMUM_SYSTEM_VERSION,
-        "LSUIElement": True,
-    }
-
-
 def _make_bundle(root: Path, *, name: str = APP_NAME) -> Path:
     bundle = root / name
     (bundle / "Contents" / "MacOS").mkdir(parents=True)
@@ -553,51 +586,63 @@ def _make_bundle(root: Path, *, name: str = APP_NAME) -> Path:
     (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
     (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
     with (bundle / _PLIST_REL).open("wb") as handle:
-        plistlib.dump(_production_plist(), handle)
+        plistlib.dump(BUILD.bundle_info(), handle)
     return bundle
 
 
+_CODESIGN = server_host.CODESIGN
+
+
 class _FakeRunner:
-    """Records every native probe and answers the fixed codesign/lipo outputs."""
+    """Records every native probe and answers the fixed ``codesign`` outputs.
+
+    The bundle display mirrors real ``codesign -dv --verbose=4`` output from a
+    built host: ``Identifier=``, ``Format=app bundle with Mach-O universal (...)``
+    and ``Signature=adhoc`` on stderr.
+    """
 
     def __init__(
         self,
         *,
         verify_rc: int = 0,
         adhoc: bool = True,
-        archs: str = "arm64 x86_64\n",
+        identifier: str = BUNDLE_ID,
+        archs: str = "x86_64 arm64",
         arch_rc: int = 0,
         cdhashes: dict[str, str] | None = None,
+        raises: BaseException | None = None,
     ) -> None:
         self.commands: list[list[str]] = []
         self.kwargs: list[dict[str, Any]] = []
         self.verify_rc = verify_rc
         self.adhoc = adhoc
-        self.archs = archs
+        self.identifier = identifier
+        self.format = f"app bundle with Mach-O universal ({archs})"
         self.arch_rc = arch_rc
         self.cdhashes = dict(cdhashes or _CDHASH)
+        self.raises = raises
 
     def __call__(
         self, argv: list[str], **kwargs: Any
     ) -> subprocess.CompletedProcess[str]:
         self.commands.append(list(argv))
         self.kwargs.append(dict(kwargs))
+        if self.raises is not None:
+            raise self.raises
         args = list(argv)
-        if args[:2] == ["codesign", "--verify"]:
+        if args[:2] == [_CODESIGN, "--verify"]:
             return subprocess.CompletedProcess(args, self.verify_rc, "", "")
-        if args[:2] == ["codesign", "-dv"]:
+        if args[:2] == [_CODESIGN, "-dv"]:
             if "--arch" in args:
                 arch = args[args.index("--arch") + 1]
                 if self.arch_rc != 0:
                     return subprocess.CompletedProcess(args, self.arch_rc, "", "")
                 stderr = f"CDHash={self.cdhashes[arch]}\n"
                 return subprocess.CompletedProcess(args, 0, "", stderr)
-            stderr = "Format=bundle\n"
+            stderr = f"Identifier={self.identifier}\nFormat={self.format}\n"
             if self.adhoc:
                 stderr += "Signature=adhoc\n"
             return subprocess.CompletedProcess(args, 0, "", stderr)
-        if args[:2] == ["lipo", "-archs"]:
-            return subprocess.CompletedProcess(args, 0, self.archs, "")
         raise AssertionError(f"unexpected native probe: {args}")
 
 
@@ -636,11 +681,10 @@ def test_inspect_bundle_snapshot_and_probe_contract(
     executable = os.fspath(Path(os.path.realpath(bundle)) / _EXE_REL)
     canonical_bundle = os.fspath(Path(os.path.realpath(bundle)))
     assert runner.commands == [
-        ["codesign", "--verify", "--strict", canonical_bundle],
-        ["codesign", "-dv", "--verbose=4", canonical_bundle],
-        ["lipo", "-archs", executable],
-        ["codesign", "-dv", "--verbose=4", "--arch", "arm64", executable],
-        ["codesign", "-dv", "--verbose=4", "--arch", "x86_64", executable],
+        [_CODESIGN, "--verify", "--strict", canonical_bundle],
+        [_CODESIGN, "-dv", "--verbose=4", canonical_bundle],
+        [_CODESIGN, "-dv", "--verbose=4", "--arch", "arm64", executable],
+        [_CODESIGN, "-dv", "--verbose=4", "--arch", "x86_64", executable],
     ]
     for kwargs in runner.kwargs:
         assert "shell" not in kwargs
@@ -731,6 +775,9 @@ def test_inspect_rejects_a_special_file(
         ),
         (lambda b: _rewrite_plist(b, revision=2), server_host.INSPECTION_FAILED),
         (lambda b: _rewrite_plist(b, protocol=2), server_host.INSPECTION_FAILED),
+        # A plist <true/> is not protocol 1, although True == 1 in Python.
+        (lambda b: _rewrite_plist(b, protocol=True), server_host.INSPECTION_FAILED),
+        (lambda b: _rewrite_plist(b, protocol="1"), server_host.INSPECTION_FAILED),
         (lambda b: _rewrite_plist(b, minimum="12.0"), server_host.INSPECTION_FAILED),
         (lambda b: (b / _ICON_REL).unlink(), server_host.INSPECTION_FAILED),
         (
@@ -739,6 +786,12 @@ def test_inspect_rejects_a_special_file(
         ),
         (
             lambda b: (b / "Contents" / "Frameworks").mkdir(),
+            server_host.INSPECTION_FAILED,
+        ),
+        (
+            lambda b: (b / "Contents" / "_CodeSignature" / "CodeSignature").write_text(
+                "x"
+            ),
             server_host.INSPECTION_FAILED,
         ),
     ],
@@ -754,15 +807,51 @@ def test_inspect_rejects_broken_bundles(
     assert caught.value.code == code
 
 
+def test_inspect_rejects_a_bundle_with_another_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # host_service_argv only renders a bundle named APP_NAME, so the inspector
+    # must not prove one under another name.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_bundle(tmp_path, name="Other.app")
+    runner = _FakeRunner()
+    with pytest.raises(ServerHostError) as caught:
+        inspect_host_bundle(bundle, runner=runner)
+    assert caught.value.code == server_host.INSPECTION_FAILED
+    assert runner.commands == []
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or getattr(os, "geteuid", lambda: 0)() == 0,
+    reason="POSIX permissions, not as root",
+)
+def test_inspect_refuses_an_unlistable_stray_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # os.walk silently skips a directory it cannot list, so without an onerror
+    # refusal an unreadable stray directory would never be checked.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_bundle(tmp_path)
+    hidden = bundle / "Contents" / "Hidden"
+    hidden.mkdir()
+    hidden.chmod(0)
+    try:
+        with pytest.raises(ServerHostError) as caught:
+            inspect_host_bundle(bundle, runner=_FakeRunner())
+    finally:
+        hidden.chmod(0o700)
+    assert caught.value.code == server_host.INSPECTION_FAILED
+
+
 def _rewrite_plist(
     bundle: Path,
     *,
     bundle_id: str | None = None,
     revision: int | None = None,
-    protocol: int | None = None,
+    protocol: object = None,
     minimum: str | None = None,
 ) -> None:
-    document = _production_plist()
+    document = BUILD.bundle_info()
     if bundle_id is not None:
         document["CFBundleIdentifier"] = bundle_id
     if revision is not None:
@@ -782,8 +871,18 @@ def _rewrite_plist(
     [
         (_FakeRunner(verify_rc=1), server_host.INSPECTION_FAILED),
         (_FakeRunner(adhoc=False), server_host.INSPECTION_FAILED),
-        (_FakeRunner(archs="arm64\n"), server_host.INSPECTION_FAILED),
-        (_FakeRunner(archs="arm64 x86_64 arm64e\n"), server_host.INSPECTION_FAILED),
+        (_FakeRunner(identifier="local.other"), server_host.INSPECTION_FAILED),
+        (_FakeRunner(archs="arm64"), server_host.INSPECTION_FAILED),
+        (_FakeRunner(archs="x86_64 arm64 arm64e"), server_host.INSPECTION_FAILED),
+        (_FakeRunner(archs="x86_64 x86_64"), server_host.INSPECTION_FAILED),
+        (
+            _FakeRunner(raises=subprocess.TimeoutExpired(_CODESIGN, 10)),
+            server_host.INSPECTION_FAILED,
+        ),
+        (
+            _FakeRunner(raises=FileNotFoundError(_CODESIGN)),
+            server_host.INSPECTION_FAILED,
+        ),
         (_FakeRunner(arch_rc=1), server_host.INSPECTION_FAILED),
         (
             _FakeRunner(cdhashes={"arm64": "nothex", "x86_64": _CDHASH["x86_64"]}),
@@ -917,7 +1016,8 @@ def test_verify_owned_host_never_writes_or_signs(
     after = sorted(p.as_posix() for p in tmp_path.rglob("*"))
     assert before == after
     for command in runner.commands:
-        assert command[1] in ("--verify", "-dv", "-archs")
+        assert command[0] == _CODESIGN
+        assert command[1] in ("--verify", "-dv")
         assert "--sign" not in command
 
 
@@ -928,40 +1028,41 @@ def test_verify_owned_host_never_writes_or_signs(
 def test_real_build_snapshot_record_and_reverify(tmp_path: Path) -> None:
     """Build the real host into scratch, record it privately, verify it.
 
-    The record lives outside the bundle in the same scratch dir; a change to the
-    archive sidecar (outside the sealed app) does not disturb verification, and a
-    tampered copy of the app is refused. No installed app, engine, launchd or
-    permission surface is touched.
+    The record lives outside the bundle in the same scratch dir. A change beside
+    the sealed app (the archive, an engine-side sidecar) does not disturb
+    verification; a tampered resource is refused by the signature check, and the
+    same tampered bundle re-signed ad hoc in scratch is a well-formed stranger
+    that only the record refuses. No installed app, engine, launchd or
+    permission surface is touched; only the scratch copy is ever re-signed.
     """
     result = BUILD.build(tmp_path / "build")
     app: Path = result["paths"]["app"]
     archive: Path = result["paths"]["archive"]
 
     snapshot = inspect_host_bundle(app)
-    assert set(snapshot.bundle_files) >= {
-        _PLIST_REL,
-        _EXE_REL,
-        _ICON_REL,
-        _CODESIGN_REL,
-    }
-    assert set(snapshot.per_arch_cdhashes) == set(ARCHITECTURES)
+    assert set(snapshot.bundle_files) == server_host.REQUIRED_BUNDLE_FILES
     assert snapshot.executable_sha256 == result["metadata"]["executable_sha256"]
     assert dict(snapshot.per_arch_cdhashes) == result["metadata"]["per_arch_cdhashes"]
 
     record = _install_record(tmp_path / "server-host.json", snapshot)
-    assert record.is_file()
-
-    # An engine-sidecar file outside the sealed app may change; the host has not.
-    archive.write_bytes(archive.read_bytes() + b"sidecar-change")
-    verified = verify_owned_host(app, ownership_path=record)
-    assert verified == snapshot
-
-    # A tampered copy of the same app is refused.
-    tampered = tmp_path / "Tampered.app"
-    shutil.copytree(app, tampered, symlinks=True)
-    (tampered / _ICON_REL).write_bytes(b"tampered")
-    with pytest.raises(ServerHostError):
-        verify_owned_host(tampered, ownership_path=record)
-
-    # Never installed anywhere near the real app path, and nothing signed.
     assert stat.S_IMODE(record.stat().st_mode) == 0o600
+
+    archive.write_bytes(archive.read_bytes() + b"sidecar-change")
+    (app.parent / "engine-sidecar.json").write_text('{"engine": "changed"}')
+    assert verify_owned_host(app, ownership_path=record) == snapshot
+
+    (app / _ICON_REL).write_bytes(b"tampered")
+    with pytest.raises(ServerHostError) as caught:
+        verify_owned_host(app, ownership_path=record)
+    assert caught.value.code == server_host.INSPECTION_FAILED
+
+    subprocess.run(
+        [_CODESIGN, "--force", "--sign", "-", os.fspath(app)],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    assert inspect_host_bundle(app).bundle_files != snapshot.bundle_files
+    with pytest.raises(ServerHostError) as caught:
+        verify_owned_host(app, ownership_path=record)
+    assert caught.value.code == server_host.NOT_OWNED
