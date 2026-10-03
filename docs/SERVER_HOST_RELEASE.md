@@ -30,11 +30,12 @@ engine version:
 | `host_protocol` | `1` |
 
 `host_revision` and `host_protocol` are the host's own revision, never the
-engine release version: the same archive authenticates every engine release
-until a deliberate host upgrade replaces it. `sha256` and `size` are computed
-from the archive bytes the release serves. A host entry is valid only when the
-platform, arch, filename, bundle id, revision, protocol and positive size all
-match exactly; `host_revision`/`host_protocol` reject a boolean, so `True`
+engine release version. `publish.yml` currently rebuilds the archive on every
+release, so its `sha256` and `size` (computed from the bytes that release
+serves) and the host's CDHash can differ between releases that share revision
+`1`; whether to reuse one archive across releases is still open. The selector
+accepts a host entry only when the platform, arch, filename, bundle id,
+revision, protocol and positive size all match exactly; `host_revision`/`host_protocol` reject a boolean, so `True`
 cannot stand in for revision `1`.
 
 ## Wheel-only releases remain supported
@@ -55,11 +56,13 @@ The selector validates the entry's shape and supported identity, but it does
 first (`verify_manifest`, or `verify_signature` over the same bytes); the
 selector trusts those bytes and must never be the only check.
 
-A manifest is refused when the host is ambiguous: a second `server-host` entry,
-or the host filename reused under another kind. Both `verify_manifest` and the
-selector apply this check. Which bytes a consumer stages must follow from the
-signed identity, not from list order. Entries that do not involve the host keep
-the wheel-only rules unchanged.
+The selector refuses a host that is ambiguous: a second `server-host` entry, or
+the host filename reused under another kind. Which bytes a consumer stages must
+follow from the signed identity, not from list order. `verify_manifest` applies
+only the generic per-entry rules and never pins the host identity or its
+uniqueness: the engine updater verifies every manifest through it and only takes
+the wheel, so a later host revision must not refuse the wheel update on engines
+that predate it.
 
 ## Build the manifest
 

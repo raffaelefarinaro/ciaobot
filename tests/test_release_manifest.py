@@ -420,7 +420,34 @@ def test_server_host_metadata_rejected(field: str, value: object) -> None:
     raw = json.dumps(document).encode()
 
     with pytest.raises(ValueError):
-        verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+        select_server_host_artifact(
+            verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+        )
+
+
+def test_verify_manifest_accepts_an_unsupported_host_beside_the_wheel() -> None:
+    # The engine updater verifies every manifest with verify_manifest and only
+    # picks the wheel. A later host revision, or two hosts during a transition,
+    # must not refuse the wheel update on engines that predate them; only the
+    # selector, which a host consumer calls, pins the supported identity.
+    priv, public_key, key_id = _keypair()
+    future_host = _host_entry(
+        filename="ciaobot-server-host-macos-universal-v2.tar.gz",
+        host_revision=2,
+        host_protocol=2,
+    )
+    document = build_manifest(
+        "1.2.3",
+        [_entry(), _host_entry(), future_host],
+        created="2026-09-25T10:00:00+00:00",
+    )
+    raw = json.dumps(document).encode()
+
+    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+
+    assert [a for a in verified["artifacts"] if a["kind"] == "wheel"] == [_entry()]
+    with pytest.raises(ValueError, match="more than one server host"):
+        select_server_host_artifact(verified)
 
 
 def test_server_host_selection_requires_unique_supported_asset() -> None:
@@ -442,8 +469,9 @@ def test_server_host_selection_requires_unique_supported_asset() -> None:
         created="2026-09-25T10:00:00+00:00",
     )
     raw = json.dumps(duplicate).encode()
+    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
     with pytest.raises(ValueError, match="more than one server host"):
-        verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+        select_server_host_artifact(verified)
 
     # The host filename reused under another kind is ambiguous.
     cross_kind = build_manifest(
@@ -452,8 +480,9 @@ def test_server_host_selection_requires_unique_supported_asset() -> None:
         created="2026-09-25T10:00:00+00:00",
     )
     raw = json.dumps(cross_kind).encode()
+    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
     with pytest.raises(ValueError, match="reuses the server host filename"):
-        verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+        select_server_host_artifact(verified)
 
 
 def test_server_host_selection_rejects_unsupported_entry() -> None:

@@ -18,10 +18,10 @@ MANIFEST_NAME = "ciaobot-engine-manifest.json"
 SIGNATURE_NAME = MANIFEST_NAME + ".sig"
 SCHEMA_VERSION = 1
 # The prebuilt universal macOS server host (#1022, child D of #1008). Its
-# metadata is fixed and independent of the engine version: the same archive
-# authenticates every engine release and is only replaced by a deliberate host
-# upgrade. The fields are exact because a consumer that trusts the manifest also
-# trusts them to pick and stage the one host it will run.
+# identity metadata is fixed and independent of the engine version; only a
+# deliberate host upgrade changes it. The fields are exact because a consumer
+# that trusts the manifest also trusts them to pick and stage the one host it
+# will run.
 SERVER_HOST_KIND = "server-host"
 SERVER_HOST_PLATFORM = "macos"
 SERVER_HOST_ARCH = "universal"
@@ -221,8 +221,6 @@ def _check_artifact(entry: Any) -> None:
     # `True` would pass as a size of 1 and a float would pass as a size.
     if type(entry.get("size")) is not int or entry["size"] < 0:
         raise ValueError("manifest artifact is malformed")
-    if kind == SERVER_HOST_KIND:
-        _check_server_host_artifact(entry)
 
 
 def _check_server_host_artifact(entry: dict[str, Any]) -> None:
@@ -286,9 +284,12 @@ def verify_manifest(
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise ValueError("manifest lists no artifacts")
+    # The host's identity and uniqueness are checked by the selector, not here:
+    # the engine updater verifies every manifest through this function, so a
+    # future host revision pinned here would refuse the wheel update on every
+    # installed engine, including platforms that never run the host.
     for entry in artifacts:
         _check_artifact(entry)
-    _check_artifact_ambiguity(artifacts)
     return manifest
 
 
@@ -298,8 +299,8 @@ def _check_artifact_ambiguity(artifacts: list[Any]) -> None:
     A consumer selects the host by kind or filename, so a second ``server-host``
     entry, or the host filename reused under another kind, makes the choice
     ambiguous: which bytes it stages would depend on list order rather than on
-    the signed identity. A wheel-only manifest keeps exactly its old behaviour;
-    this is only about the host the selector resolves.
+    the signed identity. Only the selector runs this: it is about the host it
+    resolves, and a manifest the wheel updater reads is never refused for it.
     """
     host_entries = [e for e in artifacts if e.get("kind") == SERVER_HOST_KIND]
     if len(host_entries) > 1:
@@ -329,9 +330,9 @@ def select_server_host_artifact(manifest: dict[str, Any]) -> dict[str, Any]:
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise ValueError("manifest lists no artifacts")
-    # The same per-entry and ambiguity checks verify_manifest runs, so a
-    # non-object entry is a ValueError rather than an AttributeError, and a
-    # second host or the host filename under another kind is refused here too.
+    # The same per-entry checks verify_manifest runs, so a non-object entry is
+    # a ValueError rather than an AttributeError; the ambiguity and host
+    # identity checks live only here, where a host is actually wanted.
     for artifact in artifacts:
         _check_artifact(artifact)
     _check_artifact_ambiguity(artifacts)
@@ -339,6 +340,7 @@ def select_server_host_artifact(manifest: dict[str, Any]) -> dict[str, Any]:
     if not hosts:
         raise ValueError("manifest has no server host artifact")
     entry: dict[str, Any] = hosts[0]
+    _check_server_host_artifact(entry)
     return entry
 
 

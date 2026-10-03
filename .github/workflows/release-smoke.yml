@@ -78,9 +78,10 @@ jobs:
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          # This release publishes the engine and nothing else (#653): no app
-          # archive, no latest.json feed, no native verifier, no bundled
-          # runtime. What it has to carry is the installer, under both names.
+          # This release publishes the engine plus the server host archive its
+          # manifest authenticates (#653, #1022): no app archive, no latest.json
+          # feed, no native verifier, no bundled runtime. What this step checks
+          # is the installer, under both names.
           gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot \
             --pattern install.sh --pattern install-engine.sh
           # install.sh is the engine installer (#651). The placeholder belongs to
