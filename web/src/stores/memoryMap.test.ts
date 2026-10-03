@@ -130,11 +130,19 @@ describe('sections', () => {
   })
 
   test('the two queues are one section, narrowed by a filter in the address', () => {
-    expect(MEMORY_SECTIONS).toEqual(['review', 'map', 'categories', 'retired', 'history'])
+    expect(MEMORY_SECTIONS).toEqual(['review', 'map', 'categories', 'import', 'retired', 'history'])
     expect(reviewPath()).toBe('/memory/review')
     expect(reviewPath('revisit')).toBe('/memory/review?show=revisit')
     expect(isReviewFilter('suggested')).toBe(true)
     expect(isReviewFilter('map')).toBe(false)
+  })
+
+  test('Import is a section, and its listing is not a card on the map', () => {
+    // #1029: the panel used to sit above the graph, where an unbounded listing
+    // pushed the controls a person has to reach off the pane. It is a page now,
+    // so the six-item list is what that fix looks like.
+    expect(isMemorySection('import')).toBe(true)
+    expect(memorySectionPath('import')).toBe('/memory/import')
   })
 
   test('the map returns to whichever drawing was on screen', () => {
