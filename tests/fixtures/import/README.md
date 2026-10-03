@@ -1,12 +1,13 @@
 # Import fixtures (synthetic)
 
 Fixtures for `tests/test_import_sources_contract.py`,
-`tests/test_import_sources_claude_code.py` and
-`tests/test_import_sources_opencode.py`. **Every byte here is synthetic**: the
-uuids, the session ids, the paths and the conversation text were written for
-these tests. There is no real conversation, no real person's history, no real
-project and nothing that could be a credential in this directory — a test must be
-able to read all of it without reading anybody's data.
+`tests/test_import_sources_claude_code.py`,
+`tests/test_import_sources_opencode.py` and `tests/test_import_extract.py`.
+**Every byte here is synthetic**: the uuids, the session ids, the paths and the
+conversation text were written for these tests. There is no real conversation,
+no real person's history, no real project and nothing that could be a credential
+in this directory — a test must be able to read all of it without reading
+anybody's data.
 
 The Claude Code adapter reads real history at
 `~/.claude/projects/<slug>/<sid>.jsonl` (see
@@ -31,6 +32,28 @@ session ids are `ses_…`, as OpenCode mints them.
 | `opencode_export_tool_and_compaction.json` | An assistant turn carrying a `text` part, a `reasoning` part and a `tool` part whose `state` holds both an input and an output; a `shell` record with its output; a `compaction` record with a summary; and a `user` turn with a `files` attachment. Five things that are not prose and must each be counted — three `non_text_content`, two `other_entry_type`. |
 | `opencode_export_unsettled.json` | Two settled turns and one assistant turn with no `time.completed`, which `isSettled` in `packages/core/src/session/transfer.ts` would have filtered. The CLI normally drops it entirely, so this fixture is how the adapter's own application of the rule is pinned: no message, one counted omission. |
 | `opencode_list_page.json` | What `opencode session list --format json` prints: three rows, one project holding two of them. Metadata only, so discovery has nothing to leak into a test. |
+
+## Extraction replies (model output, not source data)
+
+`tests/test_import_extract.py` patches `run_oneshot`, so these three files are
+the **replies** the patched model returns — hand-written arrays in the shape the
+system prompt asks for, never captured from a provider. Their anchors
+(`msg_0002`, `msg_9001`, …) are keys into the `NormalizedSession` each test
+builds in the test file.
+
+| Fixture | What it is for |
+|---|---|
+| `extraction_reply_valid.json` | Three well-formed rows: a `[memory]` fact, a `[memory]` fact whose source message carries a real date, and a `[profile]` fact. One filed row per accepted proposal. |
+| `extraction_reply_injection.json` | The reply a model produced after reading `import_injection_transcript.txt`: three rows that turned the injected instructions into "facts" (a command to run, a region that must be rewritten, a fact attributed to a Ciaobot chat id with a forged `_(from: …)_` tag in its text), two rows whose `destination` is not a destination at all (a region name, a filesystem path), one row the transcript tried to date, and one ordinary fact. Every row is a proposal or nothing — see the test. |
+| `extraction_reply_malformed.json` | A partially usable array: one good row, a row whose `text` is a number, a row that is a bare string, a row with no `text` at all, an unknown destination, and an anchor the session never carried. Five dropped, one filed, nothing raised. |
+
+`import_injection_transcript.txt` is the untrusted side: a synthetic transcript
+whose text tells the model to ignore its instructions, write to `AGENTS.md`,
+promote to `ciao:memory`, run a command, mail somebody, delegate to another chat
+and call an MCP server — and to date a fact `2026-01-01`. Nothing here is a
+working command, a reachable host or a real address. `CHAT_ID` in the forged row
+of `extraction_reply_injection.json` is the same synthetic chat id the test file
+builds its sessions and refusals from; no Ciaobot chat was ever involved.
 
 ## The oversized cases are generated, not stored
 

@@ -1,0 +1,35 @@
+[
+  {
+    "text": "Deploys happen only on Fridays.",
+    "destination": "memory",
+    "payload": "",
+    "source_anchor": "msg_0002",
+    "as_of": null
+  },
+  {
+    "text": 42,
+    "destination": "memory",
+    "payload": "",
+    "source_anchor": "msg_0003",
+    "as_of": null
+  },
+  "not an object at all",
+  {
+    "destination": "memory",
+    "source_anchor": "msg_0003"
+  },
+  {
+    "text": "An unknown destination is not a proposal.",
+    "destination": "archive",
+    "payload": "",
+    "source_anchor": "msg_0004",
+    "as_of": null
+  },
+  {
+    "text": "Cites a message this session never carried.",
+    "destination": "memory",
+    "payload": "",
+    "source_anchor": "msg_9999",
+    "as_of": null
+  }
+]
