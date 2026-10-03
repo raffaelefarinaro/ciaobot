@@ -157,9 +157,12 @@ and only that call's temp is cleaned up afterwards. If creating, writing or
 replacing fails, the previous document stands and the call raises — a freshly
 minted secret is never handed back as usable when it was not stored.
 
-The store path and the lock path are both refused if they are links, contain a
-`.` or `..` component, or name no file, and the open itself does not follow a
-link (`O_NOFOLLOW` on POSIX, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows).
+The store file and the lock file are both refused if the file itself is a link, if
+the path contains a `.` or `..` component, or if it names no file, and the open
+itself does not follow a link (`O_NOFOLLOW` on POSIX,
+`FILE_FLAG_OPEN_REPARSE_POINT` on Windows). Only the final component is checked
+for being a link: a link in a parent directory is a layout choice, not a
+threat to this store — macOS resolves `/var` to `/private/var` on every install.
 
 ## Errors
 

@@ -366,9 +366,14 @@ def test_validation_rejects_invalid_schema_fields(path: Path, clock: _Clock) -> 
         ("workspace", ""),
         ("workspace", "../elsewhere"),
         ("workspace", "personal/other"),
+        # A trailing newline is a different name, not the same one with a
+        # newline: accepted, it would be filed under a key `revoke_workspace`
+        # can never match.
+        ("workspace", "personal\n"),
         ("workspace", 3),
         ("project_id", ""),
         ("project_id", "proj/../secret"),
+        ("project_id", "proj-1\n"),
         ("project_id", 12),
         ("instructions", "x" * (webhooks.MAX_INSTRUCTIONS_LENGTH + 1)),
         ("instructions", ["do", "it"]),
@@ -427,6 +432,8 @@ def test_validation_rejects_invalid_schema_fields(path: Path, clock: _Clock) -> 
         ("workspace", ""),
         ("name", ""),
         ("project_id", "proj/../x"),
+        ("workspace", "personal\n"),
+        ("project_id", "proj-1\n"),
         ("instructions", "x" * (webhooks.MAX_INSTRUCTIONS_LENGTH + 1)),
         ("revision", 0),
         ("revision", True),
@@ -517,6 +524,38 @@ def test_corrupt_or_unreadable_existing_store_is_not_reset(
                     "schema": 1,
                     "triggers": {
                         "a" * 32: {"trigger": stored_trigger, "secret_sha256": "zz"}
+                    },
+                }
+            ),
+            webhooks.CORRUPT_STORE,
+        ),
+        # A digest that is correct except for a trailing newline. Read as a
+        # prefix it would verify a secret that was never issued.
+        (
+            json.dumps(
+                {
+                    "schema": 1,
+                    "triggers": {
+                        "a" * 32: {
+                            "trigger": stored_trigger,
+                            "secret_sha256": "b" * 64 + "\n",
+                        }
+                    },
+                }
+            ),
+            webhooks.CORRUPT_STORE,
+        ),
+        # An id this store did not mint, with the record agreeing with it: the
+        # trailing newline is the whole defect, not a key/record disagreement.
+        (
+            json.dumps(
+                {
+                    "schema": 1,
+                    "triggers": {
+                        "a" * 32 + "\n": {
+                            "trigger": {**stored_trigger, "trigger_id": "a" * 32 + "\n"},
+                            "secret_sha256": "b" * 64,
+                        }
                     },
                 }
             ),

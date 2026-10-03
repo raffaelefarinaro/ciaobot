@@ -109,6 +109,10 @@ ERROR_CODES = (
     UNSAFE_PATH,
 )
 
+# These four are always applied with ``fullmatch``, never ``match``: ``$`` also
+# matches just before a trailing newline, so ``match("personal\n")`` would accept
+# a name that is then filed under a different key than the one a caller revokes.
+#
 # ``uuid4().hex``, exactly: the id is opaque, carries nothing about the target,
 # and is compared as a string everywhere.
 _TRIGGER_ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -282,7 +286,7 @@ def _validated_workspace(value: Any, *, code: str) -> str:
     store own workspace lifecycle.
     """
     workspace = _text(value, field_name="trigger workspace", code=code)
-    if not _IDENTIFIER_RE.match(workspace):
+    if not _IDENTIFIER_RE.fullmatch(workspace):
         raise WebhookStoreError(
             "trigger workspace must be a registered-style name (letters, digits, "
             "dashes or underscores, up to 64 characters)",
@@ -296,7 +300,7 @@ def _validated_project_id(value: Any, *, code: str) -> str | None:
     if value is None:
         return None
     project_id = _text(value, field_name="trigger project_id", code=code)
-    if not _IDENTIFIER_RE.match(project_id):
+    if not _IDENTIFIER_RE.fullmatch(project_id):
         raise WebhookStoreError(
             "trigger project_id must look like a project id (letters, digits, "
             "dashes or underscores, up to 64 characters)",
@@ -370,7 +374,7 @@ def _validated_revision(value: Any, *, code: str) -> int:
 def _validated_stored_verifier(value: Any, *, code: str) -> str:
     """A stored verifier: SHA-256 hex, or empty for a revoked record."""
     verifier = _text(value, field_name="secret_sha256", code=code)
-    if verifier and not _VERIFIER_RE.match(verifier):
+    if verifier and not _VERIFIER_RE.fullmatch(verifier):
         raise WebhookStoreError(
             "secret_sha256 must be a lowercase SHA-256 hex digest, or empty for "
             "a revoked trigger",
@@ -477,7 +481,7 @@ def _stored_revision(value: Any, *, path: Path, trigger_id: str) -> int:
 
 def _decode_entry(trigger_id: Any, entry: Any, *, path: Path) -> _StoredTrigger:
     """Parse one ``{"trigger": ..., "secret_sha256": ...}`` entry."""
-    if not isinstance(trigger_id, str) or not _TRIGGER_ID_RE.match(trigger_id):
+    if not isinstance(trigger_id, str) or not _TRIGGER_ID_RE.fullmatch(trigger_id):
         raise WebhookStoreError(
             f"{path.name} holds a trigger under an id this store did not mint",
             code=CORRUPT_STORE,
@@ -505,7 +509,10 @@ def _decode(raw: str, *, path: Path) -> dict[str, _StoredTrigger]:
     """
     try:
         document: Any = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # `RecursionError` is not a `ValueError`: a document nested deeply
+        # enough to exhaust the parser's stack fails this way, and it is
+        # corruption like any other rather than a crash.
         raise WebhookStoreError(
             f"the webhook store at {path.name} is not valid JSON", code=CORRUPT_STORE
         ) from None
@@ -568,12 +575,16 @@ class WebhookStore:
         """Refuse a store or lock path this store must not write through.
 
         Three refusals: a ``.``/``..`` component (the path names a directory's
-        current contents rather than a file), a path component that is a link,
-        and a path that names no file at all. The link refusal is duplicated at
-        the open — ``O_NOFOLLOW`` on POSIX, ``FILE_FLAG_OPEN_REPARSE_POINT`` on
-        Windows — so there is no window between this check and the open; this
-        one exists to make the refusal a named, testable error instead of an
-        ``OSError`` from deep inside a write.
+        current contents rather than a file), a store or lock file that is
+        itself a link, and a path that names no file at all. Only the final
+        component is checked for being a link: parent directories are ordinary
+        on any platform a person installs on, and a link there is a layout
+        choice (macOS resolves ``/var`` to ``/private/var``), not an attack on
+        this store. The link refusal is duplicated at the open — ``O_NOFOLLOW``
+        on POSIX, ``FILE_FLAG_OPEN_REPARSE_POINT`` on Windows — so there is no
+        window between this check and the open; this one exists to make the
+        refusal a named, testable error instead of an ``OSError`` from deep
+        inside a write.
         """
         for candidate, role in (
             (self._path, "webhook store"),
@@ -685,9 +696,12 @@ class WebhookStore:
         try:
             with os.fdopen(descriptor, "r", encoding="utf-8", newline="") as handle:
                 raw = handle.read()
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError):
+            # A fixed message, not `{exc}`: the `UnicodeDecodeError` this branch
+            # usually catches renders the offending byte, and this is the one
+            # refusal whose cause could quote the file's own contents back out.
             raise WebhookStoreError(
-                f"the webhook store at {self._path.name} cannot be decoded: {exc}",
+                f"the webhook store at {self._path.name} is not valid UTF-8",
                 code=CORRUPT_STORE,
             ) from None
         return _decode(raw, path=self._path)
@@ -986,7 +1000,7 @@ class WebhookStore:
             or not isinstance(secret, str)
             or not secret
             or len(secret) > MAX_SECRET_LENGTH
-            or not _SECRET_RE.match(secret)
+            or not _SECRET_RE.fullmatch(secret)
         ):
             return None
         record = self._read().get(trigger_id)
