@@ -71,8 +71,9 @@ A stop reaches the host three ways, and all three forward to the supervisor the
 same way: `SIGTERM`/`SIGINT` through safe dispatch signal sources, and a graceful
 macOS **Quit Apple Event** (`kAEQuitApplication`) through a pinned
 `NSApplicationDelegate` that replaces AppKit's default handler in
-`applicationDidFinishLaunching`. Without that replacement, loginwindow's quit on
-logout, restart or shutdown — and `quit app "Ciaobot Server"` — would run
+`applicationWillFinishLaunching`, before the deferred child launch can run.
+Without that replacement, loginwindow's quit on logout, restart or shutdown —
+and `quit app "Ciaobot Server"` — would run
 `NSApplication.terminate(_:)` and exit `0` immediately, orphaning the supervisor.
 `SIGTERM`/`SIGINT` never use Foundation work inside a POSIX signal callback, and
 neither the signal nor the Apple Event handler performs any desktop-control

@@ -217,11 +217,13 @@ final class ServeController {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler { [weak self] in self?.handleStop() }
             source.resume()
-            // Register the source BEFORE ignoring the signal's disposition: the
-            // kqueue source records the arrival, so a signal landing in this
-            // window is delivered to the handler instead of being silently
-            // discarded. Ignoring the disposition stops the default action
-            // (terminate) from racing the handler.
+            // Register the source BEFORE ignoring the signal's disposition, so
+            // the signal is never both ignored and unobserved. Until SIG_IGN a
+            // signal takes the default action and ends the host, which is safe
+            // because no child exists yet; from SIG_IGN on, the kqueue source
+            // records the arrival even though the disposition is ignore.
+            // Ignoring the disposition stops the default action (terminate)
+            // from racing the handler.
             signal(sig, SIG_IGN)
             signalSources.append(source)
         }
@@ -368,21 +370,23 @@ final class QuitEventHandler: NSObject {
     }
 }
 
-/// Pins the controller and installs the quit handler once AppKit has finished
-/// launching. `NSAppleEventManager.setEventHandler` replaces the default
-/// `kAEQuitApplication` handler, so the delegate's `onQuit` runs instead of
-/// `NSApplication.terminate(_:)`. `NSApp.delegate` is weak, so the caller pins
-/// this object for the whole event loop.
+/// Pins the quit handler and installs it while AppKit is still launching.
+/// `NSAppleEventManager.setEventHandler` replaces the default
+/// `kAEQuitApplication` handler, so `onQuit` runs instead of
+/// `NSApplication.terminate(_:)`. It is installed in `willFinishLaunching`, not
+/// `didFinishLaunching`: the deferred child launch can run on the main queue
+/// before `didFinishLaunching` is delivered, and a quit in that gap would hit
+/// AppKit's default handler and exit without forwarding the stop.
+/// `NSApp.delegate` is weak, so the caller pins this object for the whole
+/// event loop.
 final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     private let quitHandler: QuitEventHandler
-    private let onQuit: () -> Void
 
     init(onQuit: @escaping () -> Void) {
         self.quitHandler = QuitEventHandler(onQuit: onQuit)
-        self.onQuit = onQuit
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    func applicationWillFinishLaunching(_ notification: Notification) {
         NSAppleEventManager.shared().setEventHandler(
             quitHandler,
             andSelector: #selector(QuitEventHandler.handle(_:withReply:)),

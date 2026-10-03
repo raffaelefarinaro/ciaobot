@@ -240,7 +240,6 @@ def build(
     *,
     platform_name: str | None = None,
     runner: Callable[..., Any] = subprocess.run,
-    icon_loader: Callable[[], bytes] | None = None,
 ) -> dict[str, Any]:
     """Compile, sign, archive and re-verify the host under a new ``output`` dir.
 
@@ -264,10 +263,7 @@ def build(
     paths = _layout(output)
     paths["output"].mkdir(parents=True, exist_ok=False)
     try:
-        if icon_loader is None:
-            icon = ICON_SOURCE.read_bytes()
-        else:
-            icon = icon_loader()
+        icon = ICON_SOURCE.read_bytes()
         if not icon:
             raise BuildError(f"tracked icon is empty: {ICON_SOURCE}")
 

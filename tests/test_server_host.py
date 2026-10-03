@@ -276,7 +276,7 @@ def test_icon_is_bundled_from_tracked_file(tmp_path: Path) -> None:
 
     # No Python, config or sidecar content ships inside the sealed bundle.
     shipped = sorted(
-        str(p.relative_to(app)) for p in app.rglob("*") if p.is_file()
+        p.relative_to(app).as_posix() for p in app.rglob("*") if p.is_file()
     )
     assert shipped == [
         "Contents/Info.plist",
@@ -1048,7 +1048,9 @@ def test_host_replaces_appkit_quit_handler() -> None:
     assert "NSApplicationDelegate" in source
     assert "NSAppleEventManager.shared().setEventHandler(" in source
     assert "kAEQuitApplication" in source
-    assert "applicationDidFinishLaunching" in source
+    # Installed before the deferred launch can run, not after didFinishLaunching.
+    assert "applicationWillFinishLaunching" in source
+    assert "applicationDidFinishLaunching" not in _source_without_comments()
     # It must route to the controller's stop path, and never set a cancel/terminate.
     assert "controller.handleStop()" in source
     assert "terminateLater" not in source
@@ -1056,9 +1058,21 @@ def test_host_replaces_appkit_quit_handler() -> None:
     assert "NSApplication.shared.terminate" not in source
 
 
+def test_host_stop_grace_outlasts_supervisor_grace() -> None:
+    # The host is the outer bound: its escalation must fire after the Python
+    # supervisor's own grace, or it would SIGKILL a supervisor that is still
+    # stopping the engine cleanly.
+    from ciao import supervise
+
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    match = re.search(r"^let STOP_GRACE_SECONDS = ([0-9.]+)$", source, re.MULTILINE)
+    assert match is not None
+    assert float(match.group(1)) > supervise.STOP_GRACE_S
+
+
 def test_host_registers_signal_source_before_ignoring_disposition() -> None:
-    # N1: resume the dispatch source before setting SIG_IGN, so a signal landing
-    # in the window is delivered rather than silently discarded.
+    # N1: resume the dispatch source before setting SIG_IGN, so a stop signal is
+    # never both ignored and unobserved during startup.
     source = HOST_SOURCE.read_text(encoding="utf-8")
     region = source.split("func begin()")[1].split("DispatchQueue.main.async")[0]
     resume = region.index("source.resume()")
