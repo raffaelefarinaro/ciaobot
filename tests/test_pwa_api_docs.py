@@ -46,6 +46,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/webhooks": "browser Settings/Automations UI; webhook trigger creation",
     "/api/webhooks/{trigger_id}": "browser Settings/Automations UI; webhook trigger update and delete",
     "/api/webhooks/{trigger_id}/rotate": "browser Settings/Automations UI; webhook trigger secret rotation",
+    "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",
 }
 
 

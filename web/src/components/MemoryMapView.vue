@@ -68,6 +68,12 @@
          sorted by links). -->
     <div v-else class="mm-body" :class="{ 'mm-body--detail-open': !!mm.selectedNode, 'mm-body--dragging-detail': isDraggingDetail }">
       <div class="mm-surface">
+        <!-- Import conversations (#1029, C5). It sits on the Map section because
+             that is where the vault's contents are explored, and it is here
+             rather than behind an onboarding step so it is reachable at any
+             time. The scan inside is opt-in: nothing is listed until the reader
+             presses Find. -->
+        <ImportSources />
         <div v-if="!mm.loading && !mm.loadError" class="mm-toolbar">
           <div class="mm-seg mm-seg--sm" role="group" aria-label="View">
             <button
@@ -381,6 +387,7 @@ import MemoryGuideBudget from './MemoryGuideBudget.vue'
 import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import ProposalReviewPanel from './ProposalReviewPanel.vue'
 import VaultReviewPanel from './VaultReviewPanel.vue'
+import ImportSources from './ImportSources.vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useProjectStore } from '../stores/projects'

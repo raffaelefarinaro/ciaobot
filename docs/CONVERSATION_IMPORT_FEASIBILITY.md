@@ -931,6 +931,37 @@ single-page cap** have to be solved.
 Depends on: **C3 merged**. Consumes C3's adapter module; must not reimplement
 discovery. Blocks C6.
 
+**C5 landed (#1029).** `ciao/import_discover.py` and `ciao/web/routes_import.py`,
+with `GET /api/import/sources?workspace=` and `POST /api/import/preview` on the
+ordinary session cookie, and an **Import conversations** panel in Memory → Map.
+Three things the design above pinned down, as built:
+
+* **Discovery is metadata only, and resolves one root per source from config
+  alone** — Claude Code through `agent_paths.claude_projects_dir(agent_root_for(
+  config, workspace))`, OpenCode through `discover_opencode_sessions` on that same
+  agent root. It scans nothing above either one, follows no link, refuses a
+  non-regular file or one over `MAX_SESSION_BYTES`, and returns ids, hints and
+  paths.
+* **A listed row is *undecided*, never `external`.** The classification rule
+  needs the session's own opening turn, and discovery reads no content, so
+  `classify_for_import` with no turn answers `ambiguous` — the direction that
+  refuses. What metadata *can* decide is Ciaobot's own usage, and those rows are
+  excluded before the file is opened; `preview_selected` then reads the selected
+  refs, classifies again with the turn it read, and reports anything that is not
+  `external` as an excluded row with its reason. So the "never guessed as
+  external" rule holds while the selection screen still has something to offer,
+  and Ciaobot's own sessions are never read at all.
+* **A listing is a page, and a source that cannot be listed is a row.** Reaching
+  `MAX_SESSIONS_PER_SOURCE` or OpenCode's own `DISCOVERY_MAX_COUNT` sets the
+  per-provider `truncated` flag; an OpenCode below the V2 floor lands in
+  `unsupported` with the adapter's reason rather than as an empty list.
+
+No extraction (C7), no batch store (C6), no model call, and no transcript text in
+either answer — the rows carry counts, the source's own first date when it has
+one, the reader's omission record, the effective provider/model, an input-volume
+estimate and `batch_cap`. `already_imported` is in the payload and is C6's to
+fill.
+
 ### C6 — private batch store, dedupe, provenance and progress
 
 Resumable, cancellable, serialized per workspace. Private runtime state, never
