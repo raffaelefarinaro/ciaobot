@@ -50,6 +50,11 @@ function task(overrides: Partial<Task> = {}): Task {
     // server never issued.
     revision: 'a'.repeat(64),
     relative_path: 'Tasks/a.md',
+    // The delegation facts. Empty by default, which is what "never delegated"
+    // looks like; each test that exercises one sets it explicitly.
+    attempt_state: '',
+    live_attempt_id: '',
+    changed_since_delegated: false,
     ...overrides,
   }
 }
