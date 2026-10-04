@@ -8,7 +8,15 @@
  */
 
 import { apiErrorMessage, errorPayload } from './errorMessage'
-import type { Task, TaskDetail, TaskInvalidRow, TaskRow, TaskStatus } from './types'
+import type {
+  Task,
+  TaskAttempt,
+  TaskAttemptState,
+  TaskDetail,
+  TaskInvalidRow,
+  TaskRow,
+  TaskStatus,
+} from './types'
 
 /** The board's four fixed columns, in board order. */
 export const TASK_COLUMNS: ReadonlyArray<{ status: TaskStatus; label: string }> = [
@@ -64,6 +72,56 @@ function asStatus(value: unknown): TaskStatus {
  * because rounding it into a number would send back a revision the server never
  * issued.
  */
+/**
+ * The attempt states, as `ciao/task_attempts.py::ATTEMPT_STATES` defines them.
+ *
+ * Listed rather than inferred from what is live, because the two are different
+ * questions: `needs_you` and `ready_for_review` are live states a card draws
+ * differently, and a build that has never heard of a state must read it as "this
+ * task is not running" rather than as a state with no label.
+ */
+export const TASK_ATTEMPT_STATES: ReadonlyArray<TaskAttemptState> = [
+  'running',
+  'needs_you',
+  'failed',
+  'interrupted',
+  'ready_for_review',
+  'stopped',
+]
+
+/** The badge wording for each attempt state, or the state itself when unknown. */
+export const TASK_ATTEMPT_LABELS: Record<string, string> = {
+  running: 'Running',
+  needs_you: 'Needs you',
+  failed: 'Failed',
+  interrupted: 'Interrupted',
+  ready_for_review: 'Review ready',
+  stopped: 'Stopped',
+}
+
+export function taskAttemptLabel(state: string): string {
+  if (!state) return ''
+  return TASK_ATTEMPT_LABELS[state] ?? state
+}
+
+/**
+ * Whether an attempt state means a turn is still in flight.
+ *
+ * The server sends `live_attempt_id` alongside the state rather than expecting the
+ * client to re-derive this, but the pane needs the same question for the states it
+ * offers gestures on, and duplicating the vocabulary in one place beats deriving it
+ * twice from a different list.
+ */
+export function isLiveAttemptState(state: string): boolean {
+  return state === 'running' || state === 'needs_you' || state === 'ready_for_review'
+}
+
+function asAttemptState(value: unknown): TaskAttemptState | '' {
+  return TASK_ATTEMPT_STATES.includes(value as TaskAttemptState)
+    ? (value as TaskAttemptState)
+    : ''
+}
+
 function taskFrom(raw: Partial<Task> | null | undefined): Task {
   const row = raw ?? {}
   return {
@@ -80,6 +138,12 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     updated_at: asString(row.updated_at),
     revision: asString(row.revision),
     relative_path: asString(row.relative_path),
+    // A payload with no attempt fields — a row from a build predating delegation,
+    // or a record the service answered without them — reads as "not delegated",
+    // which is the honest reading of a field that was never set.
+    attempt_state: asAttemptState(row.attempt_state),
+    live_attempt_id: asString(row.live_attempt_id),
+    changed_since_delegated: row.changed_since_delegated === true,
   }
 }
 
@@ -165,6 +229,35 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     updated_at: detail.updated_at,
     revision: detail.revision,
     relative_path: detail.relative_path,
+    attempt_state: detail.attempt_state,
+    live_attempt_id: detail.live_attempt_id,
+    changed_since_delegated: detail.changed_since_delegated,
+  }
+}
+
+/**
+ * One attempt, every field defaulted — the same drift argument as `taskFrom`.
+ *
+ * A payload that is not an attempt reads as an empty record, and callers check
+ * `attempt_id` before drawing anything: an attempt with no id is one no gesture
+ * could act on, so a badge built from it would be a control that cannot be pressed.
+ */
+export function taskAttemptFrom(raw: unknown): TaskAttempt {
+  const row = (raw ?? {}) as Partial<TaskAttempt>
+  return {
+    attempt_id: asString(row.attempt_id),
+    task_id: asString(row.task_id),
+    task_revision: asString(row.task_revision),
+    chat_id: asString(row.chat_id),
+    state: asAttemptState(row.state) || 'interrupted',
+    created_at: asString(row.created_at),
+    updated_at: asString(row.updated_at),
+    ended_at: asString(row.ended_at),
+    detail: asString(row.detail),
+    // Carried rather than re-derived, and only trusted when the server said so: a
+    // client that computed this from the state would be a second definition free to
+    // disagree with the one every gesture actually depends on.
+    live: row.live === true,
   }
 }
 

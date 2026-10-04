@@ -53,6 +53,16 @@ from ciao.schedules import (
     stamp_fallback_project,
     wall_clock_time_error,
 )
+from ciao.task_attempts import (
+    LIVE_STATES,
+    RESUMABLE_STATES,
+    TaskAttempt,
+    TaskAttemptError,
+    TaskAttemptStore,
+    build_prompt,
+    build_resume_prompt,
+    task_delegation_helper,
+)
 from ciao.task_board import Actor, TaskBoardError, TaskBoardStore, TaskDocument
 from ciao.workspace_guide import guide_path
 
@@ -208,11 +218,94 @@ _TASK_ERROR_CODES: dict[str, tuple[str, bool]] = {
     "read_failed": ("task_read_failed", True),
 }
 
+#: The same translation for the delegation child's attempt store. Kept as its own
+#: table rather than merged into the one above because the codes are different
+#: facts: a ``TaskBoardError`` is about a record on disk, a ``TaskAttemptError``
+#: is about a turn this engine launched.
+_ATTEMPT_ERROR_CODES: dict[str, tuple[str, bool]] = {
+    "not_found": ("task_attempt_not_found", False),
+    "invalid_attempt": ("task_invalid", False),
+    "read_failed": ("task_read_failed", True),
+}
+
 
 def _task_error(exc: TaskBoardError) -> ControlPlaneError:
     """Re-raise one store refusal as the control plane's typed error."""
     code, retryable = _TASK_ERROR_CODES.get(exc.code, ("task_read_failed", True))
     return ControlPlaneError(code, str(exc), retryable=retryable)
+
+
+def _attempt_error(exc: TaskAttemptError) -> ControlPlaneError:
+    """Re-raise one attempt-store refusal as the control plane's typed error."""
+    code, retryable = _ATTEMPT_ERROR_CODES.get(exc.code, ("task_read_failed", True))
+    return ControlPlaneError(code, str(exc), retryable=retryable)
+
+
+def _chat_needs_user(chat: Any) -> bool:
+    """Whether a chat is waiting on the user rather than finished.
+
+    A question and a permission card are both an ordinary turn that has paused
+    for an answer, so the attempt settles ``needs_you`` instead of
+    ``ready_for_review``: the result is not there yet, and the board's badge
+    should say so rather than ask the user to review nothing. A chat the store
+    cannot answer is not a finished one either — it is unknown, which the caller
+    turns into ``interrupted``.
+    """
+    if chat is None:
+        return False
+    return bool(
+        getattr(chat, "pending_question", "") or getattr(chat, "pending_permission", "")
+    )
+
+
+def _task_row_with_attempt(
+    document: TaskDocument,
+    live: TaskAttempt | None,
+    current: TaskAttempt | None,
+) -> dict[str, Any]:
+    """One task as a board row, plus the three delegation facts it draws.
+
+    A free function taking the two attempt lookups separately, because the board
+    reads them once for a whole workspace and the single-task path reads them for
+    one row — the derivation must be one thing, or a card's badge would depend on
+    which read produced it.
+
+    ``attempt_state`` is the badge, and it reports the current attempt rather
+    than the live one: ``failed``, ``stopped`` and ``interrupted`` are settled
+    states the user has to see, and a board showing only live attempts would go
+    blank the moment a turn ended. ``live_attempt_id`` is non-empty only while an
+    attempt actually holds the task, which is what tells the board whether stop and
+    detach are available. ``changed_since_delegated`` compares the revision the
+    attempt was handed against the record now — the attempt was rebound to the
+    revision the hand-off left behind, so only a *later* edit trips this.
+
+    An unlinked task never reports it, and that guard is not cosmetic: a
+    ``detach`` clears the linkage and *that* moves the revision, so comparing
+    unconditionally would make the gesture the user just performed read as "the
+    result was reached against an older description" on the very card that has no
+    longer delegated anything.
+    """
+    payload = _task_payload(document)
+    linked = document.record.attempt_id is not None
+    payload["attempt_state"] = current.state if current is not None else ""
+    payload["live_attempt_id"] = live.attempt_id if live is not None else ""
+    payload["changed_since_delegated"] = bool(
+        linked and current is not None and current.task_revision != document.revision
+    )
+    return payload
+
+
+def _attempt_payload(attempt: TaskAttempt, task: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One attempt as a transport payload, with the task row it belongs to.
+
+    The task is included rather than looked up again by the caller: the board
+    draws a badge and a link from one answer, and a second read could be of a
+    task that moved on between the two.
+    """
+    payload: dict[str, Any] = {"attempt": attempt.to_dict(), "chat_id": attempt.chat_id}
+    if task is not None:
+        payload["task"] = task
+    return payload
 
 
 def _utc_now() -> datetime:
@@ -2307,9 +2400,26 @@ class CiaoControlPlane:
         A file that is not a readable task is never dropped: it comes back as a
         row carrying ``code`` (and no task fields), so a malformed file cannot
         masquerade as an empty or healthy board.
+
+        Every readable row carries the same attempt facts a single read does, so a
+        board draws a delegation badge from one request per workspace rather than
+        one per card. The attempts are one document, read once here.
         """
         result = self._task_call(workspace, lambda store: store.list())
-        return [_task_payload(document) for document in result.tasks] + [
+        live: dict[str, TaskAttempt] = self._attempt_call(
+            workspace, lambda store: store.live_by_task()
+        )
+        current: dict[str, TaskAttempt] = self._attempt_call(
+            workspace, lambda store: store.newest_by_task()
+        )
+        return [
+            _task_row_with_attempt(
+                document,
+                live.get(document.record.id),
+                current.get(document.record.id),
+            )
+            for document in result.tasks
+        ] + [
             {
                 "id": entry.relative_path.rsplit("/", 1)[-1].removesuffix(".md"),
                 "path": entry.relative_path,
@@ -2320,9 +2430,15 @@ class CiaoControlPlane:
         ]
 
     def workspace_task_get(self, workspace: str, task_id: str) -> dict[str, Any]:
-        """One task as source currently reads it, body included."""
+        """One task as source currently reads it, body and attempt facts included.
+
+        The attempt fields are on the read as well as the list because the
+        board's editor is where a delegated task's badge and link belong: a card
+        that could only be decorated from the list would show a delegated task as
+        an ordinary one for as long as the dialog was open.
+        """
         document = self._task_call(workspace, lambda store: store.get(str(task_id or "").strip()))
-        return _task_payload(document, include_body=True)
+        return self._task_with_attempt(workspace, document, include_body=True)
 
     def workspace_task_create(
         self,
@@ -2362,6 +2478,10 @@ class CiaoControlPlane:
         shapes are legal, and the rule that only a user may mark a task done.
         This layer adds the one thing a pure file store cannot know: that a
         ``project_id`` names a live project in this same workspace.
+
+        The answer carries the attempt facts, because an edit is exactly what can
+        make a delegated task ``changed_since_delegated``: the user editing a task
+        the agent is working on is the case that flag exists for.
         """
         planned: dict[str, object] = {}
         for key, value in dict(changes or {}).items():
@@ -2382,7 +2502,7 @@ class CiaoControlPlane:
                 actor=actor,
             ),
         )
-        return _task_payload(document, include_body=True)
+        return self._task_with_attempt(workspace, document, include_body=True)
 
     def workspace_task_action(
         self,
@@ -2451,6 +2571,728 @@ class CiaoControlPlane:
             ),
         )
         return {"id": clean, "deleted": True}
+
+    # ---- delegation (#1033, child B5 of #973) -------------------------
+    #
+    # Four rules this block exists to hold, and each is a refusal somebody could
+    # otherwise have taken:
+    #
+    # * **No implicit bypass.** The turn is launched through
+    #   ``pcm.start_stream(chat_id, prompt)`` with the *default*
+    #   ``unattended=False``, exactly as A4's webhook dispatch does.
+    #   ``_effective_mode_for_chat`` turns that flag into ``bypass``, so an
+    #   approval card raised here is an ordinary Needs-you card answered in the
+    #   ordinary chat. The board is a user action, but the constraint is the same:
+    #   nobody asked this turn to run unwatched.
+    # * **One live attempt per task, and exactly one chat.** ``start`` holds the
+    #   attempt store's workspace lock across its read-then-write, so a double
+    #   click, a second tab and an agent/UI race all answer with the same attempt
+    #   and this method creates no second chat. ``created`` in the reply says which
+    #   of the two happened, because only the creating call may start a turn.
+    # * **Durable before the side effect.** The attempt and the task's
+    #   ``chat_id``/``attempt_id`` linkage are both written before
+    #   ``start_stream``. A crash in that window leaves a record naming a chat
+    #   nobody ran, which the store derives as ``interrupted`` and never replays;
+    #   the other order would leave an orphan chat with nothing pointing at it.
+    # * **A finished turn is not a finished task.** The watcher settles
+    #   ``ready_for_review``, and it is the *user's* gesture that moves the card
+    #   to Done. ``task_board`` still refuses an agent completion, so no path
+    #   through this block can close a task on the agent's own authority.
+
+    def _attempt_store(self, workspace: str) -> TaskAttemptStore:
+        """One workspace's attempt store, beside the board's lock in the runtime dir."""
+        return TaskAttemptStore(
+            workspace=workspace,
+            runtime_dir=Path(self.config.state_path).parent,
+            clock=_utc_now,
+        )
+
+    def _attempt_call(self, workspace: str, call: Callable[[TaskAttemptStore], Any]) -> Any:
+        """One attempt-store call for *workspace*, its refusal translated into ours.
+
+        The single boundary for ``TaskAttemptError``, exactly as
+        :meth:`_task_call` is for ``TaskBoardError``.
+        """
+        try:
+            return call(self._attempt_store(workspace))
+        except TaskAttemptError as exc:
+            raise _attempt_error(exc) from exc
+
+    def _attempt_live(self, workspace: str, task_id: str) -> TaskAttempt | None:
+        """The live attempt on one task, or ``None``."""
+        live: TaskAttempt | None = self._attempt_call(
+            workspace, lambda store: store.get_live(task_id)
+        )
+        return live
+
+    def _attempt_current(self, workspace: str, task_id: str) -> TaskAttempt | None:
+        """One task's current attempt, live or settled, or ``None``.
+
+        The badge's read. A settled attempt no longer holds the task, but its state
+        is what the card has to say — ``failed``, ``stopped`` and ``interrupted``
+        are precisely the three a user needs to look at — so this is the newest
+        attempt rather than the live one.
+        """
+        rows = self._attempt_call(
+            workspace, lambda store: store.list_for_task(task_id)
+        )
+        return rows[0] if rows else None
+
+    def _delegation_project(
+        self, workspace: str, requested: str | None, task_project: str | None
+    ) -> tuple[str, str]:
+        """The project a delegation runs in, and why it is that one.
+
+        A caller may name a project (an id or a name in *this* workspace, resolved
+        by the same helper every other task surface uses, so a project in another
+        workspace reads exactly like a nonexistent one). Otherwise the task's own
+        ``project_id`` decides, and a task with none goes to the workspace's
+        General — the same host the browser's own buttons use, so a delegated chat
+        lands where the user would have put it.
+
+        Refuses rather than falls back: a named project that is gone or foreign
+        must not silently run the work in General, because the one thing a user
+        must be able to trust is that deleting a project stops work arriving in it.
+        """
+        if requested:
+            return self._task_project(workspace, requested), "requested"
+        if task_project:
+            return self._task_project(workspace, task_project), "task"
+        for project in self.pcm.list_projects(workspace):
+            if getattr(project, "name", "") == "General":
+                return str(project.project_id), "general"
+        raise ControlPlaneError(
+            "project_not_found",
+            f"workspace {workspace!r} has no General project to run a delegated task in.",
+        )
+
+    def _task_with_attempt(
+        self, workspace: str, document: TaskDocument, *, include_body: bool = False
+    ) -> dict[str, Any]:
+        """One task payload carrying the attempt facts a board draws.
+
+        See :func:`_task_row_with_attempt`, which is the whole of the derivation;
+        this is that function with the store read done for one task.
+        """
+        payload = _task_row_with_attempt(
+            document,
+            self._attempt_live(workspace, document.record.id),
+            self._attempt_current(workspace, document.record.id),
+        )
+        if include_body:
+            payload["body"] = document.body
+        return payload
+
+    def workspace_task_delegate(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        project_id: str | None = None,
+        actor: Actor = "user",
+    ) -> dict[str, Any]:
+        """Hand one task to the agent as an ordinary chat, exactly once.
+
+        The whole sequence, and the order is the contract:
+
+        1. Read the task at ``expected_revision``. A stale one is a
+           ``task_revision_conflict`` with nothing started — the plan was made
+           against a description that has moved.
+        2. If a live attempt already exists, hand it back and **stop**. No chat is
+           created and no turn is started: a second delegation of a delegated task
+           is a race, not a request for two turns.
+        3. Resolve the project (see :meth:`_delegation_project`) and build the
+           prompt from the task's own fields. There is no caller-supplied prompt.
+        4. Create **one ordinary chat** in that project, titled for the task and
+           stamped with a ``task_delegation`` helper naming the task, its revision
+           and the attempt — the provenance that lets the board link back to it
+           after a reload or a restart.
+        5. Persist the attempt **and** the task's linkage, before the turn. The
+           attempt store's ``start`` is what makes step 2 atomic; the board's
+           ``link`` is revision-checked at the revision this call just read.
+        6. ``start_stream(chat_id, prompt)`` with **no** ``unattended``.
+
+        Anything that refuses at or after step 4 settles the attempt
+        ``interrupted`` and raises, because from here on this engine cannot say
+        what the turn did — a chat exists and nothing will report its outcome. That
+        is the state a crash in this window leaves too, and it is never replayed
+        without a person asking.
+
+        ``actor`` is recorded for the caller, not used to weaken anything: the
+        store refuses an agent completion either way, and this method never
+        completes a task.
+        """
+        clean = str(task_id or "").strip()
+        document = self._task_call(workspace, lambda store: store.get(clean))
+        revision = document.revision
+        if str(expected_revision or "").strip() != revision:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "the task changed since this delegation was planned; nothing was started",
+                retryable=True,
+            )
+        existing = self._attempt_live(workspace, clean)
+        if existing is not None:
+            # The one-live-attempt rule answered with the attempt that already
+            # exists. Nothing is created and nothing is sent: the second caller
+            # asked for a delegation and got the delegation that is already
+            # running, which is what a double click meant. The revision check
+            # above already ran, so a stale board is refused before this.
+            return {
+                **_attempt_payload(
+                    existing, self._task_with_attempt(workspace, document)
+                ),
+                "created": False,
+                "project_id": document.record.project_id or "",
+                "changed_since_delegated": bool(
+                    existing.task_revision != document.revision
+                ),
+            }
+        record = document.record
+        project, origin = self._delegation_project(workspace, project_id, record.project_id)
+        prompt = build_prompt(
+            title=record.title,
+            status=record.status,
+            due=record.due or "",
+            project_id=record.project_id or "",
+            task_id=record.id,
+            task_revision=revision,
+            relative_path=document.relative_path,
+            body=document.body,
+        )
+        attempt_id = ""
+        try:
+            chat = self.pcm.create_chat(
+                project,
+                title=record.title,
+                helper=task_delegation_helper(
+                    task_id=record.id, task_revision=revision, attempt_id="0" * 32
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — a refusal is an outcome, not a crash
+            raise ControlPlaneError(
+                "chat_create_failed",
+                f"the delegated chat could not be created ({exc})",
+                retryable=True,
+            ) from exc
+        started = self._attempt_call(
+            workspace,
+            lambda store: store.start(
+                task_id=record.id,
+                task_revision=revision,
+                chat_id=chat.chat_id,
+                state="running",
+            ),
+        )
+        attempt = started.attempt
+        if not started.created:
+            # A live attempt appeared between the read above and this write, so
+            # `start` answered with the attempt that already owns the task. The
+            # chat made above is then an orphan nothing points at: it is left
+            # empty rather than given a turn, and the caller is handed the
+            # attempt that is actually running.
+            return {
+                **_attempt_payload(
+                    attempt, self._task_with_attempt(workspace, document)
+                ),
+                "created": False,
+                "project_id": document.record.project_id or "",
+                "changed_since_delegated": bool(
+                    attempt.task_revision != document.revision
+                ),
+            }
+        # The stamp names the attempt id, which does not exist until `start` has
+        # run, so the chat is created with the linkage it does have and the exact
+        # provenance is written immediately after. One ordinary update, and a
+        # refusal is logged rather than raised: a chat with the task id and
+        # revision on it is still findable by the board.
+        try:
+            self.pcm.update_chat(
+                chat.chat_id,
+                helper=task_delegation_helper(
+                    task_id=record.id, task_revision=revision, attempt_id=attempt.attempt_id
+                ),
+            )
+        except Exception:  # noqa: BLE001 — a partial stamp beats none
+            logger.exception(
+                "delegation: could not stamp attempt %s on chat %s",
+                attempt.attempt_id,
+                chat.chat_id,
+            )
+        try:
+            linked = self._task_call(
+                workspace,
+                lambda store: store.link(
+                    record.id,
+                    expected_revision=revision,
+                    chat_id=chat.chat_id,
+                    attempt_id=attempt.attempt_id,
+                ),
+            )
+        except ControlPlaneError:
+            # The linkage is what tells the board an attempt owns this task, and
+            # without it a settled attempt would be invisible. The attempt stays
+            # as history; the chat is left empty rather than run.
+            self._settle_interrupted(
+                workspace, attempt.attempt_id, "the task could not be linked to the attempt"
+            )
+            raise
+        # The linkage write moved the task's revision, so the attempt is rebound
+        # to the revision the record now stands at. Without this the attempt would
+        # read as "changed since delegated" the instant it was made, and the flag
+        # would carry no information at all. What the hand-off changed — status,
+        # assignee, linkage — is not what that flag is about; the body and title
+        # the agent was handed are untouched by it.
+        bound = self._attempt_call(
+            workspace,
+            lambda store: store.bind_revision(attempt.attempt_id, linked.revision),
+        )
+        stream, refusal = self._launch_turn(chat.chat_id, prompt)
+        if stream is None:
+            self._settle_interrupted(
+                workspace,
+                attempt.attempt_id,
+                f"the turn could not be started ({refusal})",
+            )
+            raise ControlPlaneError(
+                "task_launch_failed",
+                f"the delegated chat exists but its turn could not be started ({refusal}); "
+                "open the chat to see it, and resume or retry the attempt.",
+                retryable=True,
+            )
+        self._watch_turn(workspace, attempt.attempt_id, record.id, chat.chat_id, stream)
+        return {
+            # `bound`, not `attempt`: the reply must carry the revision the record
+            # now stands at, or a caller that stored this payload would compare it
+            # against the task and read "changed since delegated" on an attempt that
+            # was made a moment ago.
+            **_attempt_payload(bound, self._task_with_attempt(workspace, linked)),
+            "project_id": project,
+            "project_origin": origin,
+            "created": True,
+        }
+
+    def _launch_turn(self, chat_id: str, prompt: str) -> tuple[Any, str]:
+        """``start_stream`` with the default attendance: the stream, or ``(None, why)``.
+
+        The single call site for a delegated turn, and the reason this block is
+        small: ``unattended`` is never named here, so
+        ``ProjectChatManager._effective_mode_for_chat`` cannot force ``bypass`` and
+        an approval card raised by the turn surfaces as an ordinary Needs-you card.
+        The recording fake in ``tests/test_task_delegation.py`` asserts the kwargs
+        are empty, so a later "just this once" cannot add the flag quietly.
+
+        The refusal's own text is returned rather than swallowed, because it is what
+        the ``interrupted`` record's detail has to carry: "the turn could not be
+        started" on its own tells the operator nothing about which turn or why.
+        """
+        try:
+            return self.pcm.start_stream(chat_id, prompt), ""
+        except Exception as exc:  # noqa: BLE001 — a failed launch is an outcome
+            logger.exception("delegation: could not start the turn in chat %s", chat_id)
+            return None, str(exc) or type(exc).__name__
+
+    def _settle_interrupted(self, workspace: str, attempt_id: str, detail: str) -> None:
+        """Record one attempt ``interrupted``, never raising.
+
+        Called on the paths where the turn's outcome is already lost. Settling
+        must not turn one recorded failure into an exception the caller sees as a
+        different failure, so a store refusal here is logged and the interrupted
+        state is left to the derivation the next read applies anyway.
+        """
+        try:
+            self._attempt_call(
+                workspace, lambda store: store.finish(attempt_id, "interrupted", detail=detail)
+            )
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: attempt %s could not be recorded as interrupted", attempt_id
+            )
+
+    def _watch_turn(
+        self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
+    ) -> None:
+        """Settle one attempt when its turn ends, and nothing else.
+
+        A long task must not hold a file lock, and a settling write that failed
+        while the user is reading their board is not worth a retry loop. So the
+        watcher runs as a background asyncio task: it awaits the stream, then
+        writes once. A crash before that write leaves ``running``, which the store
+        derives as ``interrupted`` at the next read — the honest answer for a turn
+        whose outcome nobody recorded.
+
+        Four outcomes, and only one of them is a success the user has to see:
+        ``ready_for_review`` when the turn ended with an answer,
+        ``needs_you`` when it ended waiting on a question or an approval card,
+        ``failed`` when the provider ended it in an error, and ``stopped`` when
+        the user pressed Stop. None of them is ``done`` — that is the user's
+        gesture through the same completion route as any other task.
+        """
+        try:
+            self._schedule_watch(workspace, attempt_id, task_id, chat_id, stream)
+        except Exception:  # noqa: BLE001 — a watcher that never ran is recoverable
+            logger.exception(
+                "delegation: could not watch the turn for attempt %s", attempt_id
+            )
+
+    def _schedule_watch(
+        self,
+        workspace: str,
+        attempt_id: str,
+        task_id: str,
+        chat_id: str,
+        stream: Any,
+    ) -> None:
+        """Attach the settling coroutine to the running loop, or settle inline.
+
+        There is one event loop in this engine, and this method is called from it
+        (``start_stream`` creates an asyncio task and is only legal there), so the
+        watcher is a sibling task on that loop. A test that calls the service
+        outside a loop gets the settlement applied synchronously instead, which is
+        the same state change without an await point.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop, so nothing can watch the turn. Settle it here rather than
+            # leave it `running`: an attempt nobody is watching has no turn whose
+            # outcome this engine is still waiting for, and the derivation would
+            # say `interrupted` on the next read anyway.
+            self._settle_interrupted(
+                workspace, attempt_id, "no running loop to watch the turn"
+            )
+            return
+        loop.create_task(
+            self._await_turn(workspace, attempt_id, task_id, chat_id, stream),
+            name=f"task-attempt-{attempt_id[:8]}",
+        )
+
+    async def _await_turn(
+        self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
+    ) -> None:
+        """Consume the turn's stream and settle the attempt once it ends."""
+        result: dict[str, Any] = {}
+        try:
+            async for event in stream.subscribe():
+                if event.get("type") == "result":
+                    result = dict(event)
+        except asyncio.CancelledError:
+            # Shutdown. Left `running`, which the next process reads as
+            # `interrupted`: the turn's fate is genuinely unknown and a
+            # cancellation is not an outcome.
+            raise
+        except Exception:  # noqa: BLE001 — an unknown outcome is `interrupted`
+            logger.exception("delegation: the turn for attempt %s failed to stream", attempt_id)
+            self._settle_interrupted(workspace, attempt_id, "the turn's outcome is unknown")
+            return
+        self._settle_from_result(workspace, attempt_id, task_id, chat_id, stream, result)
+
+    def _settle_from_result(
+        self,
+        workspace: str,
+        attempt_id: str,
+        task_id: str,
+        chat_id: str,
+        stream: Any,
+        result: Mapping[str, Any],
+    ) -> None:
+        """Write the attempt's end state from the turn's own result event."""
+        try:
+            stopped = bool(result.get("stopped"))
+            errored = bool(result.get("is_error"))
+            text = str(result.get("text") or "")
+        except Exception:  # noqa: BLE001 — a malformed event is still just an outcome
+            stopped, errored, text = False, False, ""
+        try:
+            chat = self.pcm.get_chat(chat_id)
+        except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
+            logger.exception("delegation: could not read chat %s after the turn", chat_id)
+            chat = None
+        if stopped:
+            state, detail = "stopped", "the turn was stopped"
+        elif errored:
+            state, detail = "failed", text[:400] or "the turn ended in an error"
+        elif _chat_needs_user(chat):
+            state, detail = "needs_you", ""
+        else:
+            state, detail = "ready_for_review", ""
+        try:
+            self._attempt_call(
+                workspace,
+                lambda store: store.finish(attempt_id, state, detail=detail),
+            )
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: attempt %s ended as %s but could not be recorded",
+                attempt_id,
+                state,
+            )
+        # A finished turn puts the task in front of the user for review, which is
+        # `review_state: ready` — a badge, not a column, and only ever for an
+        # agent-assigned task in progress, which is what `link` wrote.
+        if state in ("ready_for_review", "needs_you"):
+            self._mark_review_ready(workspace, task_id, attempt_id)
+
+    def _mark_review_ready(self, workspace: str, task_id: str, attempt_id: str) -> None:
+        """Flag the task's result as waiting to be reviewed.
+
+        Best effort by design: a write that fails here must not turn a finished
+        turn into an error, and the attempt's own state already says the result is
+        waiting. The badge is a convenience the board draws from the task record;
+        the truth is the attempt. A task the user edited out from under the turn
+        is simply not flagged — the store refuses the edit shape and the log says
+        why, rather than the watcher's failure becoming the user's error.
+        """
+        try:
+            document = self._task_call(workspace, lambda store: store.get(task_id))
+            self._task_call(
+                workspace,
+                lambda store: store.update(
+                    task_id,
+                    expected_revision=document.revision,
+                    changes={"review_state": "ready"},
+                    actor="user",
+                ),
+            )
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: could not flag task %s for review after attempt %s",
+                task_id,
+                attempt_id,
+            )
+
+    def workspace_task_attempts(self, workspace: str, task_id: str) -> dict[str, Any]:
+        """One task's whole attempt history, live attempt first.
+
+        The live attempt plus every settled one, because a retry is a new row and
+        the row before it is the record of what was tried.
+        """
+        clean = str(task_id or "").strip()
+        document = self._task_call(workspace, lambda store: store.get(clean))
+        history = self._attempt_call(
+            workspace, lambda store: store.list_for_task(clean)
+        )
+        return {
+            "task": self._task_with_attempt(workspace, document, include_body=True),
+            "attempts": [attempt.to_dict() for attempt in history],
+        }
+
+    def workspace_task_attempt_action(
+        self,
+        workspace: str,
+        attempt_id: str,
+        action: str,
+        *,
+        actor: Actor = "user",
+    ) -> dict[str, Any]:
+        """One lifecycle gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
+
+        - ``stop`` ends the running turn. ``pcm.stop_chat`` is the manager's own
+          Stop; the attempt settles ``stopped`` and the task keeps its linkage, so
+          completion and reassignment stay refused until the user detaches. A Stop
+          is not undoable, which is why this whole operation is annotated
+          ``_DESTRUCTIVE`` on the agent surface.
+        - ``resume`` continues the *same* chat with the *same* attempt: the
+          attempt is recorded ``running`` before the turn, exactly as a delegation
+          is, so a crash in this window is ``interrupted`` again rather than a
+          duplicate turn. Only a settled attempt that did not finish is resumable —
+          a ``ready_for_review`` result is waiting for the user's decision, and
+          continuing it is the reviewer's call, not a retry.
+        - ``retry`` starts a **new** attempt: a new attempt id, a new chat, the
+          task re-linked, and the previous attempt left as history. That is the
+          difference the pair exists to make — ``resume`` continues one chat,
+          ``retry`` starts another attempt, and neither re-runs the first.
+        - ``detach`` releases the task: the turn is stopped if it is running, the
+          linkage is cleared, and the attempt settles ``stopped``. The attempt
+          stays in history; only the task stops belonging to it.
+
+        ``actor`` is the caller, and nothing here completes a task: ``detach`` is
+        what makes completion possible again, and only the user can take it.
+        """
+        verb = str(action or "").strip()
+        clean = str(attempt_id or "").strip()
+        attempt = self._attempt_call(workspace, lambda store: store.get(clean))
+        if verb == "stop":
+            return self._attempt_stop(workspace, attempt, actor=actor)
+        if verb == "resume":
+            return self._attempt_resume(workspace, attempt, actor=actor)
+        if verb == "retry":
+            return self._attempt_retry(workspace, attempt, actor=actor)
+        if verb == "detach":
+            return self._attempt_detach(workspace, attempt, actor=actor)
+        raise ControlPlaneError(
+            "invalid_action", "action must be stop, resume, retry, or detach."
+        )
+
+    def _attempt_task(self, workspace: str, attempt: TaskAttempt) -> TaskDocument:
+        """The task record one attempt belongs to, or a typed not-found.
+
+        An attempt whose task file was deleted is ``task_not_found``, not a
+        success: there is no card left to stop, resume or detach, and reporting
+        otherwise would draw a badge on a task that is not there.
+        """
+        document: TaskDocument = self._task_call(
+            workspace, lambda store: store.get(attempt.task_id)
+        )
+        return document
+
+    def _attempt_stop(
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Stop the running turn and settle the attempt ``stopped``."""
+        if attempt.state not in LIVE_STATES:
+            raise ControlPlaneError(
+                "invalid_action",
+                f"attempt {attempt.attempt_id} is already {attempt.state!r}; there is "
+                "nothing running to stop.",
+            )
+        if attempt.state == "running":
+            stop = getattr(self.pcm, "stop_chat", None)
+            if callable(stop):
+                stop(attempt.chat_id)
+        settled = self._attempt_call(
+            workspace,
+            lambda store: store.finish(
+                attempt.attempt_id, "stopped", detail=f"stopped by the {actor}"
+            ),
+        )
+        return _attempt_payload(settled)
+
+    def _attempt_resume(
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Continue the same chat under the same attempt."""
+        if attempt.state not in RESUMABLE_STATES:
+            raise ControlPlaneError(
+                "invalid_action",
+                f"attempt {attempt.attempt_id} is {attempt.state!r}; only an attempt "
+                "that did not finish can be resumed.",
+            )
+        document = self._attempt_task(workspace, attempt)
+        if document.record.attempt_id != attempt.attempt_id:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "the task is linked to a different attempt now; retry it instead.",
+                retryable=True,
+            )
+        prompt = build_resume_prompt(
+            title=document.record.title, state=attempt.state, detail=attempt.detail
+        )
+        running = self._attempt_call(
+            workspace, lambda store: store.reopen(attempt.attempt_id)
+        )
+        stream, refusal = self._launch_turn(attempt.chat_id, prompt)
+        if stream is None:
+            self._settle_interrupted(
+                workspace,
+                attempt.attempt_id,
+                f"the resumed turn could not be started ({refusal})",
+            )
+            raise ControlPlaneError(
+                "task_launch_failed",
+                f"the resumed turn could not be started ({refusal}); the attempt is "
+                "recorded as interrupted.",
+                retryable=True,
+            )
+        self._watch_turn(
+            workspace, running.attempt_id, document.record.id, attempt.chat_id, stream
+        )
+        return {
+            **_attempt_payload(
+                running, self._task_with_attempt(workspace, document)
+            ),
+            "resumed": True,
+        }
+
+    def _attempt_retry(
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Start a new attempt for the same task, in a fresh chat.
+
+        Delegation again, from the task's *current* revision: the previous
+        attempt stays as history and its chat is left exactly as it is. That is
+        the difference from :meth:`_attempt_resume`, which continues one chat.
+        """
+        if attempt.state in LIVE_STATES:
+            raise ControlPlaneError(
+                "invalid_action",
+                f"attempt {attempt.attempt_id} is {attempt.state!r}; stop or detach it "
+                "before starting another.",
+            )
+        document = self._attempt_task(workspace, attempt)
+        outcome = self.workspace_task_delegate(
+            workspace,
+            document.record.id,
+            expected_revision=document.revision,
+            project_id=None,
+            actor=actor,
+        )
+        return {**outcome, "retried": True}
+
+    def _attempt_detach(
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+    ) -> dict[str, Any]:
+        """Release the task from the attempt, stopping the turn first if needed."""
+        document = self._attempt_task(workspace, attempt)
+        if attempt.state in LIVE_STATES:
+            if attempt.state == "running":
+                stop = getattr(self.pcm, "stop_chat", None)
+                if callable(stop):
+                    stop(attempt.chat_id)
+            self._attempt_call(
+                workspace,
+                lambda store: store.finish(
+                    attempt.attempt_id, "stopped", detail=f"detached by the {actor}"
+                ),
+            )
+        if document.record.attempt_id == attempt.attempt_id:
+            document = self._task_call(
+                workspace,
+                lambda store: store.unlink(
+                    document.record.id, expected_revision=document.revision
+                ),
+            )
+        return _attempt_payload(
+            self._attempt_call(workspace, lambda store: store.get(attempt.attempt_id)),
+            self._task_with_attempt(workspace, document),
+        )
+
+    # ---- agent wrappers for delegation --------------------------------
+
+    def task_delegate(
+        self,
+        principal: AgentPrincipal,
+        task_id: str,
+        *,
+        expected_revision: str,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Hand a task in the calling chat's workspace to the agent.
+
+        The agent may delegate a task it was asked to work on, but the turn it
+        creates is an ordinary attended chat: approval cards surface as Needs-you
+        and the task is completed by the user, never here.
+        """
+        return _ok(
+            self.workspace_task_delegate(
+                self._workspace(principal),
+                task_id,
+                expected_revision=expected_revision,
+                project_id=project_id,
+                actor="agent",
+            )
+        )
+
+    def task_attempt_action(
+        self, principal: AgentPrincipal, attempt_id: str, action: str
+    ) -> dict[str, Any]:
+        """Stop, resume, retry or detach one delegation attempt in this workspace."""
+        return _ok(
+            self.workspace_task_attempt_action(
+                self._workspace(principal), attempt_id, action, actor="agent"
+            )
+        )
 
     def task_list(self, principal: AgentPrincipal) -> list[dict[str, Any]]:
         """Every task in the calling chat's workspace.

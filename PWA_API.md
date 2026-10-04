@@ -85,7 +85,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/tasks` | File one task: `{"workspace", "title", "body", "project_id", "due"}`. `project_id` takes an id or a name and must be a project of this workspace (400 otherwise). Answers 201 with the record as stored, `body` and `revision` included |
 | PATCH | `/api/tasks/{task_id}` | Edit one task at `expected_revision` (required, 400 without it): only the fields sent change — `title`, `status`, `project_id`, `due`, `assignee`, `review_state`, and `body` replacing the description wholesale. Any other key is a 400. A stale revision is a **409** and writes nothing |
 | DELETE | `/api/tasks/{task_id}` | Remove one task record at `expected_revision` (required, 400 without it). The record is the user's own Markdown file and this unlinks it — there is no trash. A stale revision is a 409 and the file stays |
-| POST | `/api/tasks/{task_id}/complete` | Mark one task `done` at `expected_revision` (required). This is the signed-in user's own session, so completion is theirs to make here; the same operation through the agent CLI is refused `completion_requires_user`. A task linked to a live chat or attempt is refused too — the delegation service owns that |
+| POST | `/api/tasks/{task_id}/complete` | Mark one task `done` at `expected_revision` (required). This is the signed-in user's own session, so completion is theirs to make here; the same operation through the agent CLI is refused `completion_requires_user`. A task linked to a live chat or attempt is refused too — detach it first |
+| POST | `/api/tasks/{task_id}/delegate` | Hand one task to the agent as **one ordinary chat**, at `expected_revision` (required): `{"workspace", "expected_revision", "project_id"}` and nothing else — there is no body key for prompt text, because the prompt is built server-side from the record's own fields. `project_id` takes an id or a name in this workspace and overrides where the chat is hosted; omit it to use the task's own project, or the workspace's General. The turn runs with the **default** attendance — never `unattended`, so an approval card it raises is an ordinary Needs-you card. Answers 200 with `{workspace, created, attempt, chat_id, project_id, project_origin, task, changed_since_delegated}`; `created: false` means a live attempt already existed and nothing was created or sent |
+| GET | `/api/tasks/{task_id}/attempts?workspace=` | One task's whole attempt history, the live attempt first. A row is `{attempt_id, task_id, task_revision, chat_id, state, created_at, updated_at, ended_at, detail, live}`; `state` is one of `running`, `needs_you`, `failed`, `interrupted`, `ready_for_review`, `stopped` |
+| POST | `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` | One lifecycle gesture on one attempt; `{"workspace"}` is the only body key, because the gesture acts on an attempt rather than editing a record (there is no field to present a revision at). `action` is `stop` (ends the turn irreversibly; the task keeps its linkage and stays uncompletable), `resume` (continues the **same** chat under the **same** attempt; only an attempt that did not finish is resumable), `retry` (starts a **new** attempt in a new chat, leaving the previous one as history) or `detach` (stops the turn if running and clears the linkage, which is what makes the task completable again). An unknown verb is a 400 `invalid_action`; an unknown attempt id is a 404 |
 | GET | `/api/webhooks?workspace=` | List a workspace's webhook triggers (public records only, never secrets) |
 | POST | `/api/webhooks` | Create a webhook trigger; returns the trigger plus its one-time secret |
 | PATCH | `/api/webhooks/{trigger_id}` | Update a trigger's name, instructions, or enabled flag (revision-checked) |
@@ -475,7 +478,8 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/tasks
   -H 'content-type: application/json' \
   -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\",\"title\":\"Draft the rollback runbook\"}"
 
-# Complete — the user's own session, at the revision it read.
+# Complete — the user's own session, at the revision it read. A task with a live
+# delegation is refused: detach it first (below).
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/complete" \
   -H 'content-type: application/json' \
   -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\"}"
@@ -485,6 +489,58 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/tasks/
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID" \
   -H 'content-type: application/json' \
   -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\"}"
+```
+
+**Delegation** hands a task to the agent as one ordinary chat, with no attendance
+bypass and no request-supplied prompt. Delegating twice returns the attempt that
+already exists (`created: false`) rather than starting a second turn, and a
+finished turn settles the attempt `ready_for_review` — never `done`, which stays
+the user's own gesture.
+
+```bash
+# Delegate. `project_id` is optional (id or name, this workspace): omit it and the
+# chat goes to the task's own project, or to General. Take the attempt id and the
+# new revision from the answer — the task moved to in_progress and is now linked,
+# so the next write presents *that* revision.
+DREV=$(curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/delegate" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\"}")
+AID=$(printf '%s' "$DREV" | python3 -c 'import json,sys; print(json.load(sys.stdin)["attempt"]["attempt_id"])')
+DREV=$(printf '%s' "$DREV" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task"]["revision"])')
+
+# The board row now carries the attempt facts a card draws: `attempt_state` (the
+# badge), `live_attempt_id` (non-empty while an attempt holds the task) and
+# `changed_since_delegated` (the task was edited after the handoff).
+curl -sS -b /tmp/ciao.jar \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID?workspace=personal"
+
+# The whole history, live attempt first. A retry adds a row rather than rewriting
+# the last, so "what did we try" stays answerable.
+curl -sS -b /tmp/ciao.jar \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempts?workspace=personal"
+
+# Stop the running turn. Irreversible, and the task keeps its linkage — so it stays
+# uncompletable until it is detached.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/stop" \
+  -H 'content-type: application/json' -d '{"workspace":"personal"}'
+
+# Resume continues the SAME chat under the SAME attempt; retry starts a NEW one in a
+# new chat. Only an attempt that did not finish is resumable — a `ready_for_review`
+# result is waiting for the user's decision.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/resume" \
+  -H 'content-type: application/json' -d '{"workspace":"personal"}'
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/retry" \
+  -H 'content-type: application/json' -d '{"workspace":"personal"}'
+
+# Detach releases the task: the turn is stopped if running, the linkage is cleared,
+# and the attempt stays as history. This is what makes completion possible again.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/detach" \
+  -H 'content-type: application/json' -d '{"workspace":"personal"}'
 ```
 
 Project and chat uploads are limited to 50 MB per file, 100 files per request,

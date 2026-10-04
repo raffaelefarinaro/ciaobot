@@ -222,19 +222,27 @@ def test_task_operations_register_as_two_reads_and_three_writes(tmp_path: Path) 
     a `_READ` entry on a write would let a plan-mode chat file a task. And
     `task_action` is `_WRITE`, not `_DESTRUCTIVE`: the store refuses an agent's
     completion outright, so it carries no reachable destructive effect.
+    `task_attempt_action` is the exception among the delegation pair and *is*
+    `_DESTRUCTIVE`, because its `stop` ends a turn irreversibly — the same reason
+    `chat_stop` is ask-class.
     """
     from ciao import mcp_server
 
     service = _task_service(tmp_path)
     assert {
         "task_list", "task_get", "task_create", "task_update", "task_action",
+        "task_delegate", "task_attempt_action",
     } <= set(service.operation_table)
     for name in ("task_list", "task_get"):
         assert mcp_server.OPERATIONS_BY_NAME[name].annotations == mcp_server._READ
-    for name in ("task_create", "task_update", "task_action"):
+    for name in ("task_create", "task_update", "task_action", "task_delegate"):
         annotations = mcp_server.OPERATIONS_BY_NAME[name].annotations
         assert annotations == mcp_server._WRITE, name
         assert annotations.readOnlyHint is False
+    assert (
+        mcp_server.OPERATIONS_BY_NAME["task_attempt_action"].annotations
+        == mcp_server._DESTRUCTIVE
+    )
 
 
 def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path) -> None:
@@ -433,6 +441,8 @@ def test_every_documented_command_parses() -> None:
         "task get": ["a" * 32], "task update": ["a" * 32, "--revision", "r"],
         "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
         "task complete": ["a" * 32, "--revision", "r"],
+        "task delegate": ["a" * 32, "--revision", "r"],
+        "task attempt": ["a" * 32, "stop"],
         "schedule update": ["s"], "schedule pause": ["s"],
         "schedule resume": ["s"], "schedule run": ["s"], "schedule delete": ["s"],
         "run start": ["--", "true"], "run status": ["r"], "run cancel": ["r"],
@@ -568,7 +578,14 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     # it to have come from. The revision discipline and the completion refusal
     # have to travel with the verbs, or the first thing it does is overwrite a
     # task nobody read. Pay for the line, and keep the ceiling honest.
-    assert len(cli) < 10300
+    # Raised again to 10600 for task delegation (#1033, B5), the same trade for two
+    # more: without `task delegate`/`task attempt` an agent handed "work on the
+    # board task" reaches for `task update` and edits the record by hand, which
+    # produces no chat, no attempt and no review — the three things that make a
+    # delegation a delegation. Two lines of prose had to come with them, because
+    # "attended, not bypassing" and "a finished turn waits for review" are the two
+    # properties a model cannot infer from a verb list.
+    assert len(cli) < 10600
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(

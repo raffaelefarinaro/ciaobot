@@ -1099,6 +1099,72 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
     )
 
 
+async def _op_task_delegate(service: CiaoMcpService, task_id: str,
+                            expected_revision: str,
+                            project_id: str | None = None) -> dict[str, Any]:
+    """Hand this task to the agent as an ordinary chat, in the task's project.
+
+    The task's description is quoted into a chat in the resolved project (the
+    `project_id` you pass, else the task's own project, else the workspace's
+    General) and the turn runs there with **no** attendance bypass: an approval
+    card it raises is an ordinary Needs-you card in that chat, exactly as one from
+    a wake turn is. Delegating is not completing — the turn's result puts the task
+    in front of the user for review, and only they may mark it done.
+
+    Args:
+        task_id: The task's 32-hex id, from `task_list` or `task_get`.
+        expected_revision: The `revision` you read. A stale one is a
+            `task_revision_conflict` with nothing started.
+        project_id: Override the project the chat is created in. Omit to use the
+            task's own project, or General when it has none.
+
+    One live attempt per task: calling this twice returns the attempt that is
+    already running and creates no second chat (`created: false`). A finished
+    turn leaves the task `ready_for_review`; use `task_attempt_action` with
+    `stop`, `resume`, `retry` or `detach` on the attempt it names.
+    """
+    return await service._invoke(
+        "task_delegate",
+        lambda cp, p: cp.task_delegate(
+            p, task_id, expected_revision=expected_revision, project_id=project_id
+        ),
+        mutating=True,
+    )
+
+
+async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
+                                 action: str) -> dict[str, Any]:
+    """One lifecycle gesture on a delegation attempt.
+
+    action:
+        "stop"   — end the running turn. Not undoable, and the task keeps its
+            linkage, so it stays uncompletable until it is detached.
+        "resume" — continue the **same** chat under the **same** attempt. Only an
+            attempt that did not finish is resumable; a `ready_for_review` result
+            is waiting for the user's decision.
+        "retry"  — start a **new** attempt: a new attempt id, a new chat, the
+            previous attempt left as history. This is the difference from
+            `resume`, which continues one chat.
+        "detach" — release the task: stop the turn if running, clear the linkage,
+            leave the attempt as history. This is what makes the task completable
+            again, and only the user may complete it.
+    """
+    dispatch = {
+        "stop": lambda cp, p: cp.task_attempt_action(p, attempt_id, "stop"),
+        "resume": lambda cp, p: cp.task_attempt_action(p, attempt_id, "resume"),
+        "retry": lambda cp, p: cp.task_attempt_action(p, attempt_id, "retry"),
+        "detach": lambda cp, p: cp.task_attempt_action(p, attempt_id, "detach"),
+    }
+    op = dispatch.get(action)
+    if op is None:
+        raise ControlPlaneError(
+            "invalid_action", "action must be stop, resume, retry, or detach."
+        )
+    # `_DESTRUCTIVE`: `stop` ends a turn that cannot be resumed, so the whole
+    # operation is ask-class rather than allow-class.
+    return await service._invoke("task_attempt_action", op, mutating=True)
+
+
 async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
                           expected_revision: str, status: str | None = None,
                           assignee: str | None = None, project_id: str | None = None,
@@ -1187,6 +1253,10 @@ OPERATIONS: tuple[Operation, ...] = (
     # completion and refuses it, so this operation carries no reachable
     # destructive effect for an agent caller.
     Operation("task_action", _WRITE, _op_task_action.__doc__ or "", _op_task_action),
+    Operation("task_delegate", _WRITE, _op_task_delegate.__doc__ or "", _op_task_delegate),
+    # `_DESTRUCTIVE`, because `stop` ends a turn irreversibly: an ask-class
+    # operation, where every other task write is allow-class.
+    Operation("task_attempt_action", _DESTRUCTIVE, _op_task_attempt_action.__doc__ or "", _op_task_attempt_action),
     Operation("file_surface", _READ, _op_file_surface.__doc__ or "", _op_file_surface),
 )
 

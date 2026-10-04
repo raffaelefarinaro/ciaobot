@@ -53,6 +53,12 @@ _STATUS_BY_CODE = {
     # malformed request: the request was well formed and its content moved on.
     "task_revision_conflict": 409,
     "task_completion_requires_user": 403,
+    # A delegated chat the manager would not create, or a turn it would not
+    # start: a server fault with a way forward, and retryable because the reply
+    # names the attempt to resume or retry.
+    "chat_create_failed": 500,
+    "task_launch_failed": 500,
+    "task_attempt_not_found": 404,
     "task_read_failed": 500,
 }
 
@@ -62,6 +68,12 @@ _PATCHABLE = ("title", "status", "project_id", "due", "assignee", "review_state"
 
 #: Body keys every write may carry beyond the patchable fields.
 _WRITE_KEYS = ("workspace", "expected_revision", "body")
+
+#: Body keys ``POST /delegate`` may carry. Deliberately its own set rather than
+#: ``_WRITE_KEYS``: a delegation carries no editable task fields at all. The
+#: prompt is built server-side from the record, so there is no body key through
+#: which a request could hand the agent work nobody filed.
+_DELEGATE_KEYS = ("workspace", "expected_revision", "project_id")
 
 
 def _control_plane(request: Request) -> Any | None:
@@ -258,6 +270,112 @@ async def task_update(request: Request) -> JSONResponse:
     except ControlPlaneError as exc:
         return _error(exc)
     return JSONResponse({"workspace": workspace, "task": task})
+
+
+async def task_delegate(request: Request) -> JSONResponse:
+    """Hand one task to the agent: ``{"workspace", "expected_revision", "project_id"}``.
+
+    200 with the attempt, the chat it runs in and the task as it now stands.
+    ``created: false`` means a live attempt already existed and **nothing** was
+    created or sent — a double click or a race with the agent gets the attempt
+    that is already running, never a second chat. ``changed_since_delegated``
+    says the task was edited after this attempt was handed over, which is a fact
+    the reviewer has to see rather than something the route resolves.
+
+    Deliberately not ``asyncio.to_thread``: ``start_stream`` creates an asyncio
+    task and is only legal on the event loop, exactly as ``start_update_task``
+    notes. The store writes it makes are short, locked file operations.
+    """
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    body = await _body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    revision = _revision(body)
+    if isinstance(revision, JSONResponse):
+        return revision
+    workspace = _workspace(request.app.state.config, body.get("workspace"))
+    if workspace is None:
+        return _workspace_required()
+    unknown = sorted(key for key in body if key not in _DELEGATE_KEYS)
+    if unknown:
+        return _refusal(
+            "invalid_task_field",
+            f"Not part of a delegation: {', '.join(unknown)}.",
+            400,
+        )
+    try:
+        outcome = plane.workspace_task_delegate(
+            workspace,
+            str(request.path_params.get("task_id") or ""),
+            expected_revision=revision,
+            project_id=str(body.get("project_id")) if body.get("project_id") else None,
+            actor="user",
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, **outcome})
+
+
+async def task_attempt_action(request: Request) -> JSONResponse:
+    """One gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
+
+    ``{"workspace"}`` is the only body key. The action is in the path, so a typo
+    is a 404 from the router rather than a refusal the surface invented, and the
+    service maps the four real verbs.
+
+    ``stop`` is irreversible and is answered like any other write here: it settles
+    the attempt and leaves the task linked, so completion stays refused until the
+    user detaches it. ``resume`` continues the same chat under the same attempt;
+    ``retry`` starts a new one in a new chat. Neither completes a task, and this
+    is the user's session so ``detach`` is what makes completion possible at all.
+    """
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    body = await _body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    workspace = _workspace(request.app.state.config, body.get("workspace"))
+    if workspace is None:
+        return _workspace_required()
+    try:
+        outcome = plane.workspace_task_attempt_action(
+            workspace,
+            str(request.path_params.get("attempt_id") or ""),
+            str(request.path_params.get("action") or ""),
+            actor="user",
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, **outcome})
+
+
+async def task_attempts(request: Request) -> JSONResponse:
+    """One task's whole attempt history, the live attempt first.
+
+    The board draws a badge from the live attempt alone, which the task rows
+    already carry. This is the read behind "what did we try", so a retry is
+    visibly a second attempt rather than the first one running again.
+    """
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    workspace = _workspace(
+        request.app.state.config, request.query_params.get("workspace", "")
+    )
+    if workspace is None:
+        return _workspace_required()
+    try:
+        history = await asyncio.to_thread(
+            plane.workspace_task_attempts,
+            workspace,
+            str(request.path_params.get("task_id") or ""),
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, **history})
 
 
 async def task_complete(request: Request) -> JSONResponse:

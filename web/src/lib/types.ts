@@ -1063,13 +1063,108 @@ export interface Task {
   due: string
   assignee: TaskAssignee
   review_state: TaskReviewState
+  /** The chat an attempt is working in, empty when nothing is delegated. */
   chat_id: string
+  /** The attempt holding the task, empty when nothing is delegated. */
   attempt_id: string
   created_at: string
   updated_at: string
   /** SHA-256 of the file's exact bytes, hex. Every write presents the one it read. */
   revision: string
   relative_path: string
+  /**
+   * The current attempt's state (`ciao/task_attempts.py::ATTEMPT_STATES`), or `''`
+   * when the task has never been delegated.
+   *
+   * The badge's field, and deliberately not "the live attempt's state": `failed`,
+   * `interrupted` and `stopped` are settled states a user has to see, so a board
+   * reading only live attempts would go blank the moment a turn ended.
+   */
+  attempt_state: TaskAttemptState | ''
+  /**
+   * Non-empty only while an attempt actually holds the task.
+   *
+   * That is what tells the board whether Stop and Detach are available: a
+   * `ready_for_review` attempt is live (the task stays linked) while a `stopped`
+   * one is not, and the badge alone cannot say which.
+   */
+  live_attempt_id: string
+  /**
+   * The task was edited after the current attempt was handed over.
+   *
+   * The result the agent is about to produce was reached against a description
+   * the user has since changed. Nothing resolves this for the reviewer — the board
+   * says it and lets them decide.
+   */
+  changed_since_delegated: boolean
+}
+
+/**
+ * One delegation attempt's state, as `ciao/task_attempts.py::ATTEMPT_STATES`.
+ *
+ * `running` and `needs_you` mean a turn is in flight; `ready_for_review` means the
+ * provider turn ended and the result waits for the user; `failed`, `interrupted`
+ * and `stopped` are settled. None of them is a board column — `ready_for_review` is
+ * a badge in *In progress*, and only the user moves a card to *Done*.
+ */
+export type TaskAttemptState =
+  | 'running'
+  | 'needs_you'
+  | 'failed'
+  | 'interrupted'
+  | 'ready_for_review'
+  | 'stopped'
+
+/**
+ * One attempt, as `POST /delegate` and the gesture routes answer with it.
+ *
+ * `live` is carried rather than derived, so a client cannot disagree with the
+ * server about which states hold a task.
+ */
+export interface TaskAttempt {
+  attempt_id: string
+  task_id: string
+  /** The task revision this attempt was handed, rebound after the linkage write. */
+  task_revision: string
+  chat_id: string
+  state: TaskAttemptState
+  created_at: string
+  updated_at: string
+  /** Empty while the attempt is live; stamped when it settles. */
+  ended_at: string
+  /** A bounded sentence about the engine's own outcome, never user prose. */
+  detail: string
+  live: boolean
+}
+
+/** One task's whole attempt history: the live attempt first, live and settled alike. */
+export interface TaskAttemptsResponse {
+  workspace: string
+  task: TaskDetail
+  attempts: TaskAttempt[]
+}
+
+/** What `POST /delegate` answers with. `created: false` means nothing was started. */
+export interface TaskDelegateResponse {
+  workspace: string
+  created: boolean
+  attempt: TaskAttempt
+  chat_id: string
+  /** Where the chat was hosted, and whether a project, the task or General chose it. */
+  project_id: string
+  project_origin: 'requested' | 'task' | 'general' | ''
+  task: TaskDetail
+  changed_since_delegated: boolean
+}
+
+/** What an attempt gesture answers with. `resume`/`retry` add their own flags. */
+export interface TaskAttemptActionResponse {
+  workspace: string
+  attempt: TaskAttempt
+  chat_id: string
+  task?: TaskDetail
+  resumed?: boolean
+  retried?: boolean
 }
 
 /**

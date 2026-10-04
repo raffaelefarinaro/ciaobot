@@ -186,8 +186,11 @@ from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
 from ciao.web.routes_import import import_preview, import_sources
 from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.routes_tasks import (
+    task_attempt_action,
+    task_attempts,
     task_complete,
     task_create,
+    task_delegate,
     task_delete,
     task_get,
     task_list,
@@ -338,6 +341,18 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Literal `complete` precedes the `{task_id}` pattern so it is not
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+        # Delegation (B5). `delegate` hands the task to the agent as one ordinary
+        # chat with no attendance bypass and returns the attempt; the attempt
+        # routes act on it (stop/resume/retry/detach), and `attempts` is the
+        # history behind a retry. The literal verbs come before the `{action}`
+        # pattern so they are not read as an action name.
+        Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
+        Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
+        Route(
+            "/api/tasks/{task_id}/attempt/{attempt_id}/{action}",
+            task_attempt_action,
+            methods=["POST"],
+        ),
         # Same path, three handlers: a GET reads one task with its description
         # (the list carries none), a PATCH edits the record, a DELETE removes
         # it, and both writes present the revision they read.
