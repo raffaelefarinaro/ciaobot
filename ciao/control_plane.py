@@ -54,7 +54,6 @@ from ciao.schedules import (
     wall_clock_time_error,
 )
 from ciao.task_attempts import (
-    LIVE_STATES,
     RESUMABLE_STATES,
     TaskAttempt,
     TaskAttemptError,
@@ -2594,10 +2593,28 @@ class CiaoControlPlane:
         ``ready_for_review`` is not "still writing": the turn ended, the result is
         there, and the user is looking at it and deciding. Forcing that decision
         through Detach first is a gesture that reads as "discard the attempt": it
-        settles the reviewed attempt as ``stopped`` and loses how the turn ended.
-        So approving Done *is* the release — a revision-checked ``unlink`` and then
-        the completion, one gesture — and the attempt stays in history as the
+        loses how the turn ended. So approving Done *is* the release — a
+        revision-checked ``unlink``, the completion, and then the attempt marked
+        released, one gesture — and the attempt stays in history as the
         ``ready_for_review`` it was.
+
+        Three writes, in that order, and the order is the contract:
+
+        1. ``unlink`` at the revision the caller read. A stale one is refused
+           before anything is written, which is why this is not a race with the
+           review badge the watcher may have written after the board was drawn.
+        2. The completion itself. A refusal here for any other reason (a project
+           that has since been deleted, say) would leave a task unlinked and
+           *not* done — released from its attempt with nothing having happened —
+           so the linkage is put back before the refusal is raised. The record
+           goes back as it was, including the status and assignee the linkage
+           found, and a re-link that cannot be applied is logged rather than
+           swallowed over.
+        3. ``release`` on the attempt, which is what frees the task to be
+           delegated again. It cannot fail on its own facts, and it is last
+           because it is the only step that may not be undone: a completed task
+           is the user's decision, and re-opening it behind their back would be a
+           worse answer than a stale marker.
 
         Only for ``actor="user"``: the store's own
         ``completion_requires_user`` rule stands, and an agent approving a review
@@ -2621,19 +2638,89 @@ class CiaoControlPlane:
         attempt: TaskAttempt = self._attempt_call(
             workspace, lambda store: store.get(linked)
         )
-        if attempt.state != "ready_for_review":
+        if attempt.state != "ready_for_review" or not attempt.is_live:
             return None
         released = self._task_call(
             workspace,
             lambda store: store.unlink(clean, expected_revision=expected_revision),
         )
-        return self.workspace_task_update(
-            workspace,
-            clean,
-            expected_revision=released.revision,
-            changes=changes,
-            actor=actor,
-        )
+        try:
+            self.workspace_task_update(
+                workspace,
+                clean,
+                expected_revision=released.revision,
+                changes=changes,
+                actor=actor,
+            )
+        except ControlPlaneError:
+            # The unlink landed and the completion did not, so the task is free of
+            # its attempt and still open: a card nothing owns, with a result the
+            # user was looking at. Put the linkage back rather than hand that out.
+            self._relink_after_refusal(
+                workspace, released, attempt, document.record.status, document.record.assignee
+            )
+            raise
+        self._release_attempt(workspace, attempt.attempt_id)
+        # Read again rather than returning the completion's own row: the reply is
+        # what a board paints, and a completed card still naming a live attempt
+        # would keep drawing Stop and Detach over a task with no chat to open.
+        done: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
+        return self._task_with_attempt(workspace, done, include_body=True)
+
+    def _relink_after_refusal(
+        self,
+        workspace: str,
+        released: TaskDocument,
+        attempt: TaskAttempt,
+        status: str,
+        assignee: str,
+    ) -> None:
+        """Restore the linkage a refused completion took away, never raising.
+
+        The record goes back as :meth:`TaskBoardStore.link` found it — the status
+        and assignee the linkage write itself had made — so a retry sees the same
+        live task it would have seen without the refused gesture.
+
+        The attempt is rebound to the revision the re-link left behind, for the same
+        reason the review badge is followed by a rebind: the write moved the task's
+        revision, and an attempt left pointing at the older one would report "changed
+        since delegated" on a description nobody edited. Best effort, like the badge's.
+
+        Best effort for the refusal itself too: it is being raised to the caller
+        either way, and a second failure here must not replace the one that explains
+        what the user did. It is logged, and the record it cannot restore is a task
+        with no attempt behind it — which the user can still complete, reassign or
+        delegate.
+        """
+        try:
+            relinked: TaskDocument = self._task_call(
+                workspace,
+                lambda store: store.link(
+                    released.record.id,
+                    expected_revision=released.revision,
+                    chat_id=attempt.chat_id,
+                    attempt_id=attempt.attempt_id,
+                    status=status,
+                    assignee=assignee,
+                ),
+            )
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: task %s could not be re-linked to attempt %s after a "
+                "refused completion",
+                released.record.id,
+                attempt.attempt_id,
+            )
+            return
+        try:
+            self._attempt_call(
+                workspace, lambda store: store.bind_revision(attempt.attempt_id, relinked.revision)
+            )
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: attempt %s could not be rebound after a re-linked task",
+                attempt.attempt_id,
+            )
 
     def workspace_task_delete(
         self, workspace: str, task_id: str, *, expected_revision: str
@@ -2856,6 +2943,15 @@ class CiaoControlPlane:
             body=document.body,
         )
         attempt_id = uuid.uuid4().hex
+        # Two revisions are in play from here, and they are not the same one. The
+        # chat's helper stamp is written at `create_chat` below, so it can only
+        # carry `revision` — the revision this call read and built the prompt from,
+        # which is the revision the agent is *handed*. The attempt itself is
+        # rebound to `linked.revision` after the linkage write, because that is the
+        # revision the record now stands at. Deliberate, not an oversight: the
+        # stamp says which revision was delegated, and the attempt's binding says
+        # which revision it is judged against, and the two answer different
+        # questions.
         try:
             chat = self.pcm.create_chat(
                 project,
@@ -3335,7 +3431,7 @@ class CiaoControlPlane:
         self, workspace: str, attempt: TaskAttempt, *, actor: Actor
     ) -> dict[str, Any]:
         """Stop the running turn and settle the attempt ``stopped``."""
-        if attempt.state not in LIVE_STATES:
+        if not attempt.is_live:
             raise ControlPlaneError(
                 "invalid_action",
                 f"attempt {attempt.attempt_id} is already {attempt.state!r}; there is "
@@ -3411,8 +3507,14 @@ class CiaoControlPlane:
         Delegation again, from the task's *current* revision: the previous
         attempt stays as history and its chat is left exactly as it is. That is
         the difference from :meth:`_attempt_resume`, which continues one chat.
+
+        Refused while the attempt still holds the task, which is what an attempt
+        that has not been released is: starting another one under a card an agent
+        is still working on would be a second turn nobody asked for. A released
+        attempt holds nothing, so retrying it is the ordinary delegation of a free
+        task and goes through the same path.
         """
-        if attempt.state in LIVE_STATES:
+        if attempt.is_live:
             raise ControlPlaneError(
                 "invalid_action",
                 f"attempt {attempt.attempt_id} is {attempt.state!r}; stop or detach it "
@@ -3428,6 +3530,28 @@ class CiaoControlPlane:
         )
         return {**outcome, "retried": True}
 
+    def _release_attempt(self, workspace: str, attempt_id: str) -> TaskAttempt | None:
+        """Mark one attempt released, or ``None`` if the store could not.
+
+        Best effort, and never raising: both callers reach this *after* the task
+        has been released on its own record — a detach the user performed, or a
+        completion they approved — and reporting a failure for a write the gesture
+        had already made would tell them the opposite of what happened. A store
+        refusal is logged and the attempt keeps reading as live until the next
+        read, which is recoverable; a gesture reported as failed that actually
+        succeeded is not.
+        """
+        try:
+            freed: TaskAttempt = self._attempt_call(
+                workspace, lambda store: store.release(attempt_id)
+            )
+            return freed
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: attempt %s could not be recorded as released", attempt_id
+            )
+            return None
+
     async def _attempt_detach(
         self, workspace: str, attempt: TaskAttempt, *, actor: Actor
     ) -> dict[str, Any]:
@@ -3440,6 +3564,20 @@ class CiaoControlPlane:
         the card rather than because the turn failed. A settled attempt was never
         rewritten either: it does not hold the task, so there is nothing to stop
         and nothing to say.
+
+        What a released attempt *is* marked with is the release itself, and it has
+        to be: ``ready_for_review`` is a live state, so an attempt that keeps
+        reading as one after the task is unlinked still answers ``get_live``, and
+        the task it no longer belongs to can then never be delegated again. So a
+        ``ready_for_review`` attempt is marked released once the unlink has landed
+        — the order matters, because a release that failed to unlink would leave a
+        live attempt nothing holds, and a live attempt nothing holds is the stuck
+        state this exists to end.
+
+        The card's review badge goes with it. ``review_state: ready`` on a task
+        with no attempt behind it asks the user to review a result they have
+        already released, and the badge is a claim about the task rather than about
+        the attempt, so it is cleared here and nowhere else.
         """
         document = self._attempt_task(workspace, attempt)
         if attempt.state == "running":
@@ -3463,10 +3601,26 @@ class CiaoControlPlane:
                     document.record.id, expected_revision=document.revision
                 ),
             )
-        return _attempt_payload(
-            self._attempt_call(workspace, lambda store: store.get(attempt.attempt_id)),
-            self._task_with_attempt(workspace, document),
-        )
+            if document.record.review_state == "ready":
+                document = self._task_call(
+                    workspace,
+                    lambda store: store.update(
+                        document.record.id,
+                        expected_revision=document.revision,
+                        changes={"review_state": "none"},
+                        actor="user",
+                    ),
+                )
+        settled = self._attempt_call(workspace, lambda store: store.get(attempt.attempt_id))
+        if settled.is_live:
+            # Re-read rather than judged on the attempt passed in: `running` and
+            # `needs_you` were just settled to `stopped`, so only a finished result
+            # is left holding the task, and asking the store is what keeps the two
+            # from disagreeing.
+            freed = self._release_attempt(workspace, attempt.attempt_id)
+            if freed is not None:
+                settled = freed
+        return _attempt_payload(settled, self._task_with_attempt(workspace, document))
 
     # ---- agent wrappers for delegation --------------------------------
 

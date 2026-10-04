@@ -195,6 +195,7 @@ describe('taskBoard store', () => {
       updated_at: '2026-03-02T09:00:00+00:00',
       ended_at: '',
       detail: '',
+      released: false,
       live: true,
       ...overrides,
     }

@@ -1401,7 +1401,10 @@ async def test_detaching_a_reviewed_attempt_leaves_the_review_alone(
     assert detached["attempt"]["state"] == "ready_for_review"
     assert detached["attempt"]["detail"] == "", "no stop was invented for it"
     assert detached["task"]["chat_id"] is None
-    assert detached["task"]["review_state"] == "ready"
+    # The badge goes with the attempt it was about: `review_state: ready` with no
+    # attempt behind it asks the user to review a result they have just released.
+    assert detached["task"]["review_state"] == "none"
+    assert detached["task"]["live_attempt_id"] == ""
     # And it did not stop a turn that had already ended.
     assert pcm.stop_awaited == 0
 
@@ -1423,6 +1426,169 @@ async def test_stopping_a_settled_attempt_is_refused_rather_than_a_no_op(
 
     assert excinfo.value.code == "invalid_action"
     assert "stopped" in str(excinfo.value), "the refusal must name the state it found"
+
+
+async def test_a_reviewed_attempt_released_by_detach_can_be_delegated_again(
+    tmp_path: Path,
+) -> None:
+    """The defect: releasing a ``ready_for_review`` card left the attempt live.
+
+    ``ready_for_review`` is a live state, so an attempt that keeps it after the task
+    is unlinked still answers ``get_live``: delegating again came back
+    ``created: false`` with the old attempt id and started no turn, and the card —
+    which now has no chat to open — offered Stop and Detach and no Delegate. The
+    only way out was a Stop over a result the user had already reviewed.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Reviewed, then released")
+    first = _delegate(plane, task)
+    first_attempt = first["attempt"]["attempt_id"]
+    await _end_turns(pcm)
+
+    await _act(plane, first_attempt, "detach")
+    second = _delegate(plane, _get_task(plane, task["id"]))
+
+    assert second["created"] is True
+    assert second["attempt"]["attempt_id"] != first_attempt
+    # A new attempt means a new chat: the released one is left as it was.
+    assert second["chat_id"] == "chat-2"
+    assert len(_creates(pcm)) == 2
+    assert len(_starts(pcm)) == 2, "the second delegation started no turn before"
+    assert _attempt_store(plane).get(first_attempt).state == "ready_for_review"
+    assert _attempt_store(plane).get(second["attempt"]["attempt_id"]).state == "running"
+
+
+async def test_approving_done_releases_the_attempt_and_frees_the_task_for_another(
+    tmp_path: Path,
+) -> None:
+    """The same release through the review gesture, which is the one that closes the
+    card: a completed task keeps its history, and moving it back to *Backlog* is the
+    user's own move out of *Done*."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Reviewed and approved")
+    first = _delegate(plane, task)
+    first_attempt = first["attempt"]["attempt_id"]
+    await _end_turns(pcm)
+    reviewed = _get_task(plane, task["id"])
+
+    done = plane.workspace_task_action(
+        "personal",
+        "complete",
+        task["id"],
+        expected_revision=reviewed["revision"],
+        actor="user",
+    )
+
+    assert done["status"] == "done"
+    assert done["live_attempt_id"] == "", "a done card holds no live attempt"
+    assert done["attempt_state"] == "ready_for_review"
+    assert _attempt_store(plane).get(first_attempt).state == "ready_for_review"
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+    reopened = plane.workspace_task_action(
+        "personal",
+        "move",
+        task["id"],
+        expected_revision=done["revision"],
+        status="backlog",
+        actor="user",
+    )
+    second = _delegate(plane, reopened)
+
+    assert second["created"] is True
+    assert second["attempt"]["attempt_id"] != first_attempt
+    assert second["chat_id"] == "chat-2"
+    # The reviewed turn is still the record of how the first one ended.
+    history = plane.workspace_task_attempts("personal", task["id"])["attempts"]
+    assert [row["state"] for row in history] == ["running", "ready_for_review"]
+    assert history[1]["released"] is True
+    assert history[1]["live"] is False
+
+
+async def test_the_released_attempts_history_row_still_reads_as_the_review(
+    tmp_path: Path,
+) -> None:
+    """The release is a marker, not a rewrite: the row has to keep saying the turn
+    ended ready for review, because that is the only record of what the agent did."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="What the agent did")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    await _end_turns(pcm)
+
+    detached = await _act(plane, attempt_id, "detach")
+
+    assert detached["attempt"]["state"] == "ready_for_review"
+    assert detached["attempt"]["released"] is True
+    assert detached["attempt"]["live"] is False
+    history = plane.workspace_task_attempts("personal", task["id"])["attempts"]
+    assert [(row["attempt_id"], row["state"]) for row in history] == [
+        (attempt_id, "ready_for_review")
+    ]
+
+
+async def test_a_refused_completion_leaves_the_review_ready_card_linked(
+    tmp_path: Path,
+) -> None:
+    """The unlink and the completion are two writes, and the second one can be
+    refused for a reason that has nothing to do with revisions — a project deleted
+    between the preview and the click, say. Re-linking keeps the gesture atomic
+    from the user's side: a refused Done must not leave a task released from its
+    attempt and still open, with a reviewed result behind it and no card to
+    complete it from."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Approve, with a project that is gone")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    await _end_turns(pcm)
+    reviewed = _get_task(plane, task["id"])
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_action(
+            "personal",
+            "complete",
+            task["id"],
+            expected_revision=reviewed["revision"],
+            status="done",
+            project_id="nope-bogus",
+            actor="user",
+        )
+
+    assert excinfo.value.code == "project_not_found"
+    row = _get_task(plane, task["id"])
+    assert row["status"] == "in_progress", "the task was not completed"
+    assert row["attempt_id"] == attempt_id, "the linkage was put back"
+    assert row["chat_id"] == outcome["chat_id"]
+    assert row["review_state"] == "ready"
+    assert row["live_attempt_id"] == attempt_id
+    assert row["changed_since_delegated"] is False, (
+        "the re-link is not an edit the user made"
+    )
+    # And it holds the task: a second approval is the same gesture, not a refusal
+    # about a released attempt.
+    assert _attempt_store(plane).get(attempt_id).released is False
+    assert _attempt_store(plane).get_live(task["id"]) is not None
+
+
+async def test_stopping_a_released_attempt_is_refused_rather_than_rewriting_it(
+    tmp_path: Path,
+) -> None:
+    """A released attempt holds nothing, so there is nothing running to stop — and
+    stopping it would rewrite the review the user released, which is the one thing
+    the release exists to preserve."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Reviewed, then released")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    await _end_turns(pcm)
+    await _act(plane, attempt_id, "detach")
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        await _act(plane, attempt_id, "stop")
+
+    assert excinfo.value.code == "invalid_action"
+    assert _attempt_store(plane).get(attempt_id).state == "ready_for_review"
+    assert pcm.stop_awaited == 0
 
 
 # ── Resume vs retry ─────────────────────────────────────────────────────
@@ -1519,6 +1685,26 @@ async def test_a_live_attempt_must_be_stopped_before_a_retry(tmp_path: Path) -> 
         await _act(plane, outcome["attempt"]["attempt_id"], "retry")
 
     assert excinfo.value.code == "invalid_action"
+
+
+async def test_a_released_attempt_can_be_retried_rather_than_only_delegated(
+    tmp_path: Path,
+) -> None:
+    """A retry is delegation of a free task, so a released attempt — which holds
+    nothing — is no longer refused as a live one."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Reviewed then released")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    await _end_turns(pcm)
+    await _act(plane, attempt_id, "detach")
+
+    retried = await _act(plane, attempt_id, "retry")
+
+    assert retried["created"] is True
+    assert retried["attempt"]["attempt_id"] != attempt_id
+    assert retried["chat_id"] != outcome["chat_id"]
+    assert len(_creates(pcm)) == 2
 
 
 async def test_the_attempt_history_puts_the_live_attempt_first(tmp_path: Path) -> None:

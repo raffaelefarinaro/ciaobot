@@ -254,9 +254,10 @@ export function taskAttemptFrom(raw: unknown): TaskAttempt {
     updated_at: asString(row.updated_at),
     ended_at: asString(row.ended_at),
     detail: asString(row.detail),
-    // Carried rather than re-derived, and only trusted when the server said so: a
-    // client that computed this from the state would be a second definition free to
-    // disagree with the one every gesture actually depends on.
+    // Both markers are carried rather than re-derived, and only trusted when the
+    // server said so: a client that computed either from the state would be a
+    // second definition free to disagree with the one every gesture depends on.
+    released: row.released === true,
     live: row.live === true,
   }
 }

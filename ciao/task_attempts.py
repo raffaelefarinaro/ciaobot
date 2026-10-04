@@ -20,6 +20,16 @@ Five rules, and each of them is a refusal somebody could otherwise have taken:
   ``ready_for_review`` are :data:`LIVE_STATES` — the task is delegated and the
   linkage holds. ``failed``, ``interrupted`` and ``stopped`` are settled: the
   attempt is history, and it is what a retry or a resume reads.
+* **A reviewed attempt is released, not rewritten.** The turn ending
+  ``ready_for_review`` leaves the linkage in place on purpose: the result is
+  waiting for the user's decision, and that decision is the user's gesture.
+  Approving it or detaching it takes the task back without touching how the turn
+  ended — :meth:`TaskAttemptStore.release` marks the record released, which is
+  what takes it out of the live set (:attr:`TaskAttempt.is_live`) while the
+  history row still reads ``ready_for_review``. The alternative — rewriting the
+  state to say the release — would record "stopped" for a turn that finished, and
+  a released attempt that still counted as live would hold a task nobody could
+  ever delegate again.
 * **Intent is durable before the side effect.** The attempt and its ``chat_id``
   are written before ``start_stream`` is called, so a crash in that window leaves
   a record naming a chat nobody ran. :meth:`recover_interrupted` (and every read,
@@ -97,6 +107,10 @@ LIVE_STATES = frozenset({"running", "needs_you", "ready_for_review"})
 task that has one returns it rather than minting a second. They are also exactly
 the states a derived ``interrupted`` replaces, because a live attempt written by
 another process cannot have a turn running in this one.
+
+A *released* record is not live whatever state it is in — see
+:attr:`TaskAttempt.released` and :attr:`TaskAttempt.is_live`, which is the whole
+of what this module branches on rather than this set alone.
 """
 
 SETTLED_STATES = frozenset(ATTEMPT_STATES) - LIVE_STATES
@@ -180,6 +194,15 @@ class TaskAttempt:
     task's current revision means somebody edited the task after the agent was
     handed it.
 
+    ``released`` is the marker that says the task no longer belongs to this
+    attempt, set by :meth:`TaskAttemptStore.release` when the user approves a
+    reviewed result or detaches the card. It is a marker and not a state on
+    purpose: what the turn ended as is the record, and a release must not rewrite
+    it — only say that nothing owns the task any more. :attr:`is_live` is what
+    every read and write branches on, so a released ``ready_for_review`` attempt
+    stops holding its task while its history row still reads as the review the
+    user actually looked at.
+
     ``owner`` is the process token of whoever wrote the record; see
     :data:`_PROCESS_TOKEN`. It is bookkeeping for the crash derivation and is
     never shown to a user.
@@ -195,13 +218,27 @@ class TaskAttempt:
     ended_at: str = ""
     detail: str = ""
     owner: str = ""
+    released: bool = False
+
+    @property
+    def is_live(self) -> bool:
+        """Whether this attempt still owns its task's linkage.
+
+        The one question every read here asks, and it is *not* ``state in
+        LIVE_STATES``: a released attempt does not own its task whatever it ended
+        as, and answering "still live" for a ``ready_for_review`` record whose
+        card has moved on is what would leave a task undelegatable forever.
+        """
+        return self.state in LIVE_STATES and not self.released
 
     def to_dict(self) -> dict[str, Any]:
         """The record as a transport payload, ``owner`` excluded.
 
         The owner token is a process fact, not a user fact: it says which boot
         wrote this row so a later boot can tell a crash from a running turn, and
-        there is nothing a caller could do with it.
+        there is nothing a caller could do with it. ``live`` is :attr:`is_live`
+        rather than a set membership, so a released attempt is reported the way
+        every read sees it.
         """
         return {
             "attempt_id": self.attempt_id,
@@ -213,7 +250,8 @@ class TaskAttempt:
             "updated_at": self.updated_at,
             "ended_at": self.ended_at,
             "detail": self.detail,
-            "live": self.state in LIVE_STATES,
+            "released": self.released,
+            "live": self.is_live,
         }
 
 
@@ -543,7 +581,7 @@ class TaskAttemptStore:
         """
         derived: dict[str, TaskAttempt] = {}
         for attempt_id, record in records.items():
-            if record.state in LIVE_STATES and record.owner != _PROCESS_TOKEN:
+            if record.is_live and record.owner != _PROCESS_TOKEN:
                 record = _interrupted(record)
             derived[attempt_id] = record
         return derived
@@ -567,7 +605,7 @@ class TaskAttemptStore:
             ):
                 if count <= MAX_ATTEMPTS_PER_TASK:
                     break
-                if attempt.state in LIVE_STATES:
+                if attempt.is_live:
                     continue
                 kept.pop(attempt.attempt_id, None)
                 count -= 1
@@ -575,10 +613,10 @@ class TaskAttemptStore:
             live = {
                 record.attempt_id: record
                 for record in kept.values()
-                if record.state in LIVE_STATES
+                if record.is_live
             }
             settled = sorted(
-                (record for record in kept.values() if record.state not in LIVE_STATES),
+                (record for record in kept.values() if not record.is_live),
                 key=_age_key,
                 reverse=True,
             )
@@ -620,13 +658,16 @@ class TaskAttemptStore:
 
         ``None`` is the ordinary answer for a task nobody delegated, and it is
         also the answer for one whose last attempt settled — a second delegation
-        is a new attempt then, and the previous one stays as history.
+        is a new attempt then, and the previous one stays as history. A
+        *released* attempt answers it too: the user took the card back, so the
+        task is delegatable again even though the attempt it delegated says
+        ``ready_for_review``.
         """
         clean = _check_task_id(task_id)
         live = [
             record
             for record in self._read().values()
-            if record.task_id == clean and record.state in LIVE_STATES
+            if record.task_id == clean and record.is_live
         ]
         return _newest(live)
 
@@ -654,7 +695,7 @@ class TaskAttemptStore:
     def _by_task(self, *, live_only: bool) -> dict[str, TaskAttempt]:
         grouped: dict[str, list[TaskAttempt]] = {}
         for record in self._read().values():
-            if live_only and record.state not in LIVE_STATES:
+            if live_only and not record.is_live:
                 continue
             grouped.setdefault(record.task_id, []).append(record)
         found: dict[str, TaskAttempt] = {}
@@ -669,7 +710,9 @@ class TaskAttemptStore:
 
         The history, not the live one: a retry is a new row and the row before it
         is the record of what was tried. Live attempts sort first so the first
-        row is always the one a gesture would act on.
+        row is always the one a gesture would act on — and a released attempt is
+        history, so it sorts with the rest rather than leading a card nobody owns
+        any more.
         """
         clean = _check_task_id(task_id)
         rows = [record for record in self._read().values() if record.task_id == clean]
@@ -677,7 +720,7 @@ class TaskAttemptStore:
         # when it is the *older* of the two, and a single `reverse=True` over
         # (settled, age) would put settled rows ahead of the running one.
         rows.sort(key=_age_key, reverse=True)
-        rows.sort(key=lambda record: record.state not in LIVE_STATES)
+        rows.sort(key=lambda record: not record.is_live)
         return tuple(rows)
 
     def recover_interrupted(self) -> tuple[TaskAttempt, ...]:
@@ -691,7 +734,7 @@ class TaskAttemptStore:
         stranded = [
             record
             for record in self._read_raw().values()
-            if record.state in LIVE_STATES and record.owner != _PROCESS_TOKEN
+            if record.is_live and record.owner != _PROCESS_TOKEN
         ]
         if not stranded:
             return ()
@@ -747,7 +790,7 @@ class TaskAttemptStore:
                 [
                     record
                     for record in records.values()
-                    if record.task_id == clean_task and record.state in LIVE_STATES
+                    if record.task_id == clean_task and record.is_live
                 ]
             )
             if live is not None:
@@ -814,6 +857,10 @@ class TaskAttemptStore:
                 ended_at=record.ended_at,
                 detail=record.detail,
                 owner=record.owner,
+                # Re-stamping a revision says nothing about ownership, so the
+                # marker is carried: a released attempt rebinding would otherwise
+                # be silently handed back to the live set.
+                released=record.released,
             )
             records[record.attempt_id] = rebound
             rebound_attempts.append(rebound)
@@ -860,6 +907,10 @@ class TaskAttemptStore:
                 ended_at="",
                 detail=note,
                 owner=_PROCESS_TOKEN,
+                # Only a settled state gets here, and a released record is always a
+                # live one, so this is the store's own invariant rather than a
+                # guess: reopening is how an attempt holds its task again.
+                released=False,
             )
             records[record.attempt_id] = reopened
             reopened_attempts.append(reopened)
@@ -922,6 +973,7 @@ class TaskAttemptStore:
                 ended_at=moved.ended_at or now,
                 detail=moved.detail,
                 owner=moved.owner,
+                released=moved.released,
             )
             records[record.attempt_id] = closed
             settled.append(closed)
@@ -929,6 +981,59 @@ class TaskAttemptStore:
 
         self._mutate(change)
         return settled[0]
+
+    def release(self, attempt_id: str) -> TaskAttempt:
+        """Take one live attempt out of the live set, without rewriting it.
+
+        The release gesture: the user approved the result or took the card back,
+        so the task no longer belongs to this attempt. Only the marker moves —
+        ``state`` stays whatever the turn ended as, because that is the record of
+        what happened and the release is a fact about the *task*, not about the
+        turn. A released ``ready_for_review`` attempt therefore stays in history
+        as the review it was while :attr:`TaskAttempt.is_live` answers False, so
+        the task can be delegated again.
+
+        The other door out of a live state is :meth:`finish`, and the difference
+        is the whole point: finishing says the turn ended, releasing says it did
+        not change. A released attempt cannot be reopened (only
+        :data:`RESUMABLE_STATES` may be, and a reviewed result never is), so the
+        marker cannot be a way back into a live state either.
+
+        Refuses an attempt that was not holding its task: a settled one never was,
+        and a release that finds nothing to release is a caller reading a stale
+        attempt rather than a release anybody asked for.
+        """
+        now = self._now()
+        freed: list[TaskAttempt] = []
+
+        def change(records: dict[str, TaskAttempt]) -> dict[str, TaskAttempt]:
+            record = _require(records, attempt_id)
+            if not record.is_live:
+                raise TaskAttemptError(
+                    "invalid_attempt",
+                    f"attempt {record.attempt_id} is {record.state!r}"
+                    + (" and already released" if record.released else "")
+                    + "; it does not hold its task, so there is nothing to release",
+                )
+            freed_attempt = TaskAttempt(
+                attempt_id=record.attempt_id,
+                task_id=record.task_id,
+                task_revision=record.task_revision,
+                chat_id=record.chat_id,
+                state=record.state,
+                created_at=record.created_at,
+                updated_at=now,
+                ended_at=record.ended_at,
+                detail=record.detail,
+                owner=record.owner,
+                released=True,
+            )
+            records[record.attempt_id] = freed_attempt
+            freed.append(freed_attempt)
+            return records
+
+        self._mutate(change)
+        return freed[0]
 
 
 # ── Record helpers ─────────────────────────────────────────────────────
@@ -946,6 +1051,7 @@ def _encode(record: TaskAttempt) -> dict[str, Any]:
         "ended_at": record.ended_at,
         "detail": record.detail,
         "owner": record.owner,
+        "released": record.released,
     }
 
 
@@ -990,6 +1096,10 @@ def _decode_entry(attempt_id: Any, entry: Any, *, path_name: str) -> TaskAttempt
     ended_at = entry.get("ended_at")
     detail = entry.get("detail")
     owner = entry.get("owner")
+    # `released` is read as the literal `True` it is written as, so a row that
+    # does not carry the marker is an attempt that was never released — which is
+    # exactly what it says, rather than a guess at what a missing field meant.
+    released = entry.get("released") is True
     return TaskAttempt(
         attempt_id=str(attempt_id),
         task_id=clean_task,
@@ -1001,6 +1111,7 @@ def _decode_entry(attempt_id: Any, entry: Any, *, path_name: str) -> TaskAttempt
         ended_at=str(ended_at) if isinstance(ended_at, str) else "",
         detail=str(detail) if isinstance(detail, str) else "",
         owner=str(owner) if isinstance(owner, str) else "",
+        released=released,
     )
 
 
@@ -1024,6 +1135,7 @@ def _interrupted(record: TaskAttempt) -> TaskAttempt:
         ended_at=record.ended_at or record.updated_at,
         detail=record.detail or "the engine restarted while this attempt was running",
         owner=record.owner,
+        released=record.released,
     )
 
 
@@ -1056,6 +1168,9 @@ def _with_state(
         ended_at=record.ended_at,
         detail=detail or record.detail,
         owner=_PROCESS_TOKEN if state in LIVE_STATES else record.owner,
+        # Carried, never cleared: a state change is a fact about the turn, and
+        # nothing here may hand a released attempt back to the live set.
+        released=record.released,
     )
 
 
@@ -1071,10 +1186,10 @@ def _require(records: dict[str, TaskAttempt], attempt_id: Any) -> TaskAttempt:
 
 
 def _newest(records: list[TaskAttempt]) -> TaskAttempt | None:
-    """The newest of *records*, or ``None``. Live state outranks age."""
+    """The newest of *records*, or ``None``. Holding the task outranks age."""
     if not records:
         return None
-    return max(records, key=lambda record: (record.state in LIVE_STATES, _age_key(record)))
+    return max(records, key=lambda record: (record.is_live, _age_key(record)))
 
 
 def _age_key(record: TaskAttempt) -> tuple[str, str]:

@@ -1147,8 +1147,10 @@ export interface Task {
    * Non-empty only while an attempt actually holds the task.
    *
    * That is what tells the board whether Stop and Detach are available: a
-   * `ready_for_review` attempt is live (the task stays linked) while a `stopped`
-   * one is not, and the badge alone cannot say which.
+   * `ready_for_review` attempt is live while the task stays linked, a `stopped`
+   * one is not, and a released one — approved or detached — is not either even
+   * though its `attempt_state` still reads `ready_for_review`. The badge alone
+   * cannot say which, which is why the server sends this beside it.
    */
   live_attempt_id: string
   /**
@@ -1181,7 +1183,7 @@ export type TaskAttemptState =
  * One attempt, as `POST /delegate` and the gesture routes answer with it.
  *
  * `live` is carried rather than derived, so a client cannot disagree with the
- * server about which states hold a task.
+ * server about which attempts hold a task.
  */
 export interface TaskAttempt {
   attempt_id: string
@@ -1196,6 +1198,15 @@ export interface TaskAttempt {
   ended_at: string
   /** A bounded sentence about the engine's own outcome, never user prose. */
   detail: string
+  /**
+   * The user approved this result or detached the card, so the task is free again.
+   *
+   * A marker and not a state: `state` stays what the turn ended as, which is the
+   * record of what the agent did. What it changes is `live`, and a released
+   * `ready_for_review` attempt is not live — which is what lets the card be
+   * delegated again.
+   */
+  released: boolean
   live: boolean
 }
 

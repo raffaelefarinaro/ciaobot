@@ -14,6 +14,10 @@ and cannot re-derive:
 - **A crash is derived, not remembered.** An attempt written by another process is
   ``interrupted`` on the next read, so a restart never replays a turn nobody
   confirmed.
+- **A release frees the task without rewriting the turn.** Approving a reviewed
+  result or detaching the card marks the attempt released, which takes it out of
+  the live set — so the task can be delegated again — while its history row still
+  reads ``ready_for_review``.
 - **Stop/detach settle rather than erase**, and the store itself never completes a
   task: it holds no board at all, so completion stays the board's refusal.
 
@@ -476,6 +480,120 @@ def test_needs_you_settles_as_live_because_the_turn_is_waiting(tmp_path: Path) -
     assert store.get_live(TASK_ID).attempt_id == attempt.attempt_id
 
 
+# ── Release ─────────────────────────────────────────────────────────────
+
+
+def test_a_release_takes_a_reviewed_attempt_out_of_the_live_set(tmp_path: Path) -> None:
+    """The defect this exists for: `ready_for_review` is a live state, so releasing
+    the card without rewriting it left the attempt holding a task nothing owns —
+    and a task held by a live attempt can never be delegated again.
+
+    The marker moves, the record does not: the history row still says the turn
+    ended ready for review, which is the only record of how it ended.
+    """
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    reviewed = store.finish(attempt.attempt_id, "ready_for_review")
+    assert store.get_live(TASK_ID) is not None, "a reviewed result still holds the task"
+
+    released = store.release(attempt.attempt_id)
+
+    assert released.state == "ready_for_review", "the outcome the user reviewed"
+    assert released.released is True
+    assert released.is_live is False
+    assert released.detail == "", "a release is not an outcome note"
+    # Every read answers the same way, which is what the service branches on.
+    assert store.get_live(TASK_ID) is None
+    assert store.live_by_task() == {}
+    assert store.get(attempt.attempt_id) == released
+    # The badge read is history rather than the live one, so it still leads.
+    assert store.newest_by_task()[TASK_ID] == released
+    payload = released.to_dict()
+    assert payload["released"] is True
+    assert payload["live"] is False
+
+
+def test_a_task_whose_attempt_was_released_can_be_delegated_again(tmp_path: Path) -> None:
+    """The user takes the card back, so a second hand-over is a new attempt — not
+    the old one handed back with `created: false` and no turn started."""
+    clock = _Clock()
+    store = _store(tmp_path, clock=clock)
+    first = _start(store).attempt
+    store.release(store.finish(first.attempt_id, "ready_for_review").attempt_id)
+    clock.advance(60)
+
+    second = _start(store, chat_id="chat-2")
+
+    assert second.created is True
+    assert second.attempt.attempt_id != first.attempt_id
+    assert second.attempt.chat_id == "chat-2"
+    # Both rows are kept: the release is history, not a deletion.
+    assert [row.attempt_id for row in store.list_for_task(TASK_ID)] == [
+        second.attempt.attempt_id,
+        first.attempt_id,
+    ]
+    assert store.list_for_task(TASK_ID)[0].is_live, "the new attempt holds the task"
+
+
+def test_a_release_is_refused_for_an_attempt_that_holds_nothing(tmp_path: Path) -> None:
+    """A settled attempt was never holding its task, and a released one is already
+    out of the live set. Refusing both keeps a caller that read a stale attempt from
+    writing a marker over a record it did not read."""
+    store = _store(tmp_path)
+    settled = _start(store).attempt
+    store.finish(settled.attempt_id, "stopped")
+
+    with pytest.raises(TaskAttemptError) as excinfo:
+        store.release(settled.attempt_id)
+    assert excinfo.value.code == "invalid_attempt"
+    assert "nothing to release" in str(excinfo.value)
+    assert store.get(settled.attempt_id).released is False
+
+    live = _start(store, task_id=OTHER_TASK_ID).attempt
+    store.release(live.attempt_id)
+    with pytest.raises(TaskAttemptError) as excinfo:
+        store.release(live.attempt_id)
+    assert excinfo.value.code == "invalid_attempt"
+    assert "already released" in str(excinfo.value)
+    assert store.get(live.attempt_id).released is True
+
+
+def test_a_released_attempt_is_never_derived_as_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The crash derivation asks whether a turn can be running in this process. A
+    released attempt already answered that: the user took the task back, so a
+    restart must leave the reviewed result exactly as the user left it."""
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    store.release(store.finish(attempt.attempt_id, "ready_for_review").attempt_id)
+
+    monkeypatch.setattr("ciao.task_attempts._PROCESS_TOKEN", "99999-restarted")
+    restarted = _store(tmp_path)
+
+    row = restarted.get(attempt.attempt_id)
+    assert row.state == "ready_for_review"
+    assert row.released is True
+    assert restarted.get_live(TASK_ID) is None
+    assert restarted.recover_interrupted() == ()
+
+
+def test_the_history_bound_may_drop_a_released_attempt(tmp_path: Path) -> None:
+    """The bound protects turns in flight, not history: a released attempt is not in
+    flight, so it is the oldest of the settled rows and is dropped first."""
+    clock = _Clock()
+    store = _store(tmp_path, clock=clock)
+    first = _start(store).attempt
+    store.release(store.finish(first.attempt_id, "ready_for_review").attempt_id)
+    for index in range(MAX_ATTEMPTS_PER_TASK + 10):
+        attempt = _start(store, chat_id=f"chat-{index}").attempt
+        store.finish(attempt.attempt_id, "failed", detail=f"attempt {index}")
+        clock.advance(1)
+
+    assert first.attempt_id not in {row.attempt_id for row in store.list_for_task(TASK_ID)}
+    assert len(store.list_for_task(TASK_ID)) == MAX_ATTEMPTS_PER_TASK
+
+
 def test_the_store_holds_no_board_and_never_completes_a_task(tmp_path: Path) -> None:
     """The store's surface has no completion and no column. That is not an
     oversight: completion belongs to `task_board`, which refuses an agent for it,
@@ -498,6 +616,7 @@ def test_the_store_holds_no_board_and_never_completes_a_task(tmp_path: Path) -> 
         "reopen",
         "update_state",
         "finish",
+        "release",
     }
 
 

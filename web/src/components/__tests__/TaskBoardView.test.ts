@@ -1267,6 +1267,40 @@ describe('TaskBoardView', () => {
       wrapper.unmount()
     })
 
+  it('offers a released review a delegation, never the live controls', async () => {
+    // The user approved the result or detached the card, so the attempt is out of
+    // the live set while its badge still reads `ready_for_review`. Drawn from the
+    // badge this card would show Stop and Detach over a task with no chat to open
+    // and no way to hand it over again — `live_attempt_id` is what says otherwise.
+    const released = task({
+      id: 'released',
+      title: 'Reviewed, then released',
+      status: 'in_progress',
+      assignee: 'agent',
+      chat_id: '',
+      attempt_id: '',
+      attempt_state: 'ready_for_review',
+      live_attempt_id: '',
+      revision: NEXT_REVISION,
+    })
+    const wrapper = await mountWithBody([released])
+
+    const labels = card(wrapper, 'Reviewed, then released')
+      .findAll('.task-chip').map((c) => c.text())
+    expect(labels).toEqual(['Delegate', 'Done'])
+    expect(labels).not.toContain('Stop')
+    expect(labels).not.toContain('Detach')
+
+    // And the editor agrees: the preview opens as a first hand-over.
+    await card(wrapper, 'Reviewed, then released').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    const control = wrapper.findAll('.task-delegate-actions .btn-chip')
+      .find((c) => c.text() === 'Delegate')
+    expect(control, 'no Delegate control for a released attempt').toBeTruthy()
+    wrapper.unmount()
+  })
+
   it('offers Resume and Retry separately for a settled attempt still linked',
     async () => {
       const wrapper = await mountWithBody([settledTask()])
