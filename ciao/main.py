@@ -1024,6 +1024,16 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
                 len(orphaned), ", ".join(run.run_id for run in orphaned),
             )
 
+        # Import batch retention (C6, #1032): drop terminal batches past the
+        # 30-day snapshot window, keeping accepted fact evidence. Once per
+        # boot is plenty for a 30-day window, and the sweep is fail-soft
+        # (a prune error is logged inside, never blocks startup).
+        from ciao.import_store import sweep_import_batches
+
+        pruned_imports = sweep_import_batches(config)
+        if pruned_imports:
+            logger.info("Pruned %d expired import batch(es)", pruned_imports)
+
         # Wake chats whose CLI-owned tasks (Monitor / background Bash) were
         # still running when the old server died: no completion watcher
         # survives a restart, so the wake must be armed here.

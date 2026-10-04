@@ -124,6 +124,30 @@ takes, so **C7 still owes `ciao/fact_candidates.py` the structured field**. The
 judgment gap (Q4) is unchanged and still open — nothing in #1012 claims to have
 closed it.
 
+**Update — C6 landed (#1032).** The batch store this report's C6 section
+proposes is now `ciao/import_store.py`, and the C6 section below remains
+authoritative for the design; nothing in it was rewritten. One batch is one
+import run over a selection: the selection, per-source content digests,
+progress (`queued → running → done | failed | cancelled | partial`),
+cancellation, and per-fact `provider:source_id:anchor` provenance. It is
+private runtime state at `<runtime>/import/import-batches.json` — never the
+vault's public ledger — owner-private (`mkstemp_private`, `make_private_dir`),
+atomically replaced, mutated under `keyed_lock` plus an owner-private
+advisory sibling lock, and failing closed on corruption rather than silently
+resetting. Creation refuses a Ciaobot-own session against `import_decouple`
+and re-selecting a conversation a live batch already covers under the
+`(provider, source_id, content_digest, destination, extraction_revision)` key;
+one batch at a time per workspace. Cancellation keeps recorded progress and
+provenance and cannot unsend provider input; `prune_expired` drops terminal
+batches past `IMPORT_SNAPSHOT_RETENTION_DAYS` (30 days, a named constant)
+while retaining accepted fact evidence, and `forget` drops only the batch
+record — filed proposals stay queued and accepted facts stay in the vault.
+The routes are `POST /api/import/batches` (create), `GET
+/api/import/batches?workspace=` (list with progress), `POST
+/api/import/batches/{id}/cancel` and `DELETE /api/import/batches/{id}`,
+session-authenticated and workspace-scoped, with no provider call and no
+model call. No extraction lives here: C7 consumes the store.
+
 
 ## What this report had to settle
 
