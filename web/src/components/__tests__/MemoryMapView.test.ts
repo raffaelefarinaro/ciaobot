@@ -698,8 +698,16 @@ describe('MemoryMapView sections', () => {
     expect(wrapper.find('.mm-body').exists()).toBe(false)
     expect(wrapper.find('.mm-toolbar').exists()).toBe(false)
     expect(wrapper.find('.mm-review-rail').exists()).toBe(false)
-    // Discovery is opt-in: mounting the section scans nothing.
-    expect(apiGet.mock.calls.some(([url]) => String(url).includes('/api/import/'))).toBe(false)
+    // Discovery is opt-in: mounting the section scans nothing. The two routes
+    // that read a conversation — the scan and the preview — are named
+    // explicitly rather than caught by a prefix, because since #1041 the section
+    // also reads Ciaobot's *own* private batch store on mount (the run list, so a
+    // returning user sees an import they left running instead of an empty list).
+    // That read is metadata only and opens no conversation, so it is not what
+    // this assertion is about; it is pinned in ImportSources.test.ts.
+    const imported = apiGet.mock.calls.map(([url]) => String(url))
+    expect(imported.some((url) => url.startsWith('/api/import/sources'))).toBe(false)
+    expect(imported.some((url) => url.startsWith('/api/import/preview'))).toBe(false)
     wrapper.unmount()
 
     const map = await mountSection('map')

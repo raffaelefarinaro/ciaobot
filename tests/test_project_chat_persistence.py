@@ -186,8 +186,17 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
         # Undo is offered where the receipt is, and only as long as the note is
         # still as the pass left it — a note edited since is refused.
         assert "undo it while the note is still as the pass left it" in welcome
-        # No promise that past conversations are read, imported or filed.
-        assert "import" not in welcome.lower()
+        # No promise that past conversations are read, imported or filed. Since
+        # #1041 the welcome names the opt-in affordance, so this is no longer
+        # "the word import may not appear": C1's property was that nothing is
+        # filed on its own, and the welcome now carries that as a disclaimer —
+        # past conversations are not imported automatically, and nothing is read
+        # until the reader chooses. The pointer itself is pinned here too, so a
+        # welcome that dropped it (or one that promised an import had run) fails.
+        lowered = welcome.lower()
+        assert "[Import conversations](/memory/import)" in welcome
+        assert "are not imported automatically" in lowered
+        assert "nothing is read until you choose" in lowered
         # The interview still opens the chat, and memory comes before it.
         assert "What is your name" in welcome
         assert welcome.index("memory is organized") < welcome.index("What is your name")

@@ -148,6 +148,54 @@ The routes are `POST /api/import/batches` (create), `GET
 session-authenticated and workspace-scoped, with no provider call and no
 model call. No extraction lives here: C7 consumes the store.
 
+**Update — C8 landed (#1041). The journey ships; #975 closes.** Everything the
+Design section below asked #975 to prove — a person can pick their own past
+conversations, see exactly what would be read and sent, and end up with nothing
+saved until they accept it — is now one flow with one entry point, and it added
+no store, adapter, extraction policy or route family of its own. What shipped:
+
+* **One flow, reachable twice.** `web/src/components/ImportSources.vue` (the
+  scan, the selection and the consent screen) plus `web/src/components/
+  ImportRuns.vue` (the filed batches, their progress, the cancel, the provenance
+  each run recorded and the retention) over `web/src/stores/import.ts`, drawn on
+  the **existing** Memory → Import section. The split is by lifetime, not by
+  feature: the listing and the selection do not survive the page, a filed batch
+  does. First-run reaches the same page — the setup wizard names it in the tour
+  and the seeded welcome links to it (`project_chats._create_onboarding_chat`) —
+  so there is no second implementation to keep in step.
+* **The onboarding entry reads Ciaobot's own state and nothing else.** The
+  wizard tile is static copy (that screen runs before login, so no route is
+  called), and the welcome names the page without running an import: no
+  provider history is read pre-auth, and the seeded chat still cannot claim that
+  past conversations were imported.
+* **The journey's states are separate, never merged.** Discovery, the selection,
+  the run list and the provenance under each run each keep a first load, a
+  first-load failure, a failed refresh over rows already on screen (kept, marked
+  stale), a genuine empty list and a filter that hid everything. A failed read
+  must never read as "there is nothing here", and a filter that matched nothing
+  is not a list that is empty.
+* **Cancel says both halves.** It stops the conversations not yet started, keeps
+  every proposal already filed, and says that text already sent to the configured
+  provider cannot be unsent — the third clause is the one a UI usually drops.
+* **Retention is the engine's own number.** `GET /api/import/batches` now answers
+  `retention_days`, read from `import_store.IMPORT_SNAPSHOT_RETENTION_DAYS`, so
+  the panel states the window the once-per-boot sweep prunes on instead of
+  carrying a second copy of the number in the PWA. The same paragraph says the
+  two things a user has to be told: an accepted fact keeps its provenance after
+  the snapshot is gone, and removing an import removes neither a queued proposal
+  nor an accepted memory.
+* **The consent screen no longer promises the preview's model.** C7's leftover
+  is closed on the UI side: the confirmation says each conversation is read by
+  the model Ciaobot uses for its own insights on *that conversation's provider*,
+  which can differ from the workspace default listed beside it. The preview still
+  reports the workspace's effective provider and model — the honest answer for
+  the workspace's own provider — and the screen no longer presents either as the
+  model that will read each selection.
+
+Still open, unchanged by this child: the judgment gap (**Q4** — is this already
+in a note, does this supersede it, is this person new) and the **Q1** export
+sample that keeps the Claude account adapter unfiled.
+
 
 ## What this report had to settle
 
@@ -1111,6 +1159,24 @@ predicted:
   `docs/ARCHITECTURE.md`, and `ciao/stock/skills/ciao-cli/SKILL.md` if a CLI
   verb is added
 * Depends on: C5, C7 merged, and #979 (education) for the onboarding placement
+
+#### C8 landed (#1041)
+
+Shipped as the PWA journey and the docs — no new backend module, and the two
+planned touches that turned out not to be needed were left undone on purpose:
+**no CLI verb** (the journey is consent-gated and browser-shaped; a `ciao …`
+import would have to reproduce the whole consent screen in a terminal) and **no
+`docs/MEMORY_DESIGN.md` section** (the design lives in `DESIGN.md`'s onboarding
+principle and in the Capability catalog, which is where a user reads it). What
+did ship: `ImportSources.vue` + `ImportRuns.vue` + `web/src/stores/import.ts` +
+`importSources.css`, the first-run entry, the `retention_days` field on the
+existing list route, `PWA_API.md`, `ARCHITECTURE.md`, `DESIGN.md` and
+`ciao-capabilities`. The shipped shape is in the C8 update at the top of this
+document; the points worth keeping from the plan below are that the entry is one
+page and not two, that no control describes a flow that is not implemented
+(an unsupported source says *Unsupported version, export a file instead*), and
+that the browser walk covered the five load states, keyboard focus, 200% zoom,
+44px targets and light/dark.
 
 ### Explicitly not a child
 

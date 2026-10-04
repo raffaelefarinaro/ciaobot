@@ -1,15 +1,23 @@
 <template>
-  <!-- Import conversations: the Memory → Import section for #1029 (C5).
-       It is its own scrolling page rather than a card on the map: the listing
-       can be hundreds of rows long, and the controls below it — Review,
-       Cancel, and everything the confirmation states — have to stay reachable.
-       The scan is engine-host and opt-in — nothing is listed until the reader
-       presses Find, and the panel says so rather than discovering on mount.
-       Ciaobot's own and unreadable rows are drawn, disabled, and never
-       selectable; selection is client-side and never auto-filled. The
-       confirmation below it is the whole point of the panel: exactly what would
-       be processed, which provider and model would receive it, an estimate, and
-       the batch cap, all before anything runs. -->
+  <!-- Import conversations: the Memory → Import section (#1029, C5; completed
+       as one journey by #1041, C8). It is its own scrolling page rather than a
+       card on the map: the listing can be hundreds of rows long, and the
+       controls below it — Review, Cancel, and everything the confirmation states
+       — have to stay reachable. The scan is engine-host and opt-in — nothing is
+       listed until the reader presses Find, and the panel says so rather than
+       discovering on mount. Ciaobot's own and unreadable rows are drawn,
+       disabled, and never selectable; selection is client-side and never
+       auto-filled.
+
+       The confirmation below the list is the whole point of this half: exactly
+       what would be processed, which provider and model would receive it, an
+       estimate, and the batch cap, all before anything runs. From there the
+       panel files a batch (C6) and `<ImportRuns>` owns everything after it — the
+       run (C7), its progress, its cancel, the proposals it filed and the
+       retention the store enforces. One journey, two components: the consent
+       screen and the runs list, sharing the listing's row rules and its touch
+       floor. Both are reachable from here in the app and from the first-run
+       welcome, which is the same page rather than a second flow. -->
   <section class="import-sources card" aria-labelledby="import-sources-title">
     <div class="import-head">
       <h2 id="import-sources-title" class="import-title">Import conversations</h2>
@@ -120,8 +128,10 @@
       </div>
       <p v-if="previewError" class="import-status import-error" role="alert">{{ previewError }}</p>
 
-      <!-- Everything a person is told before the first model call. Extraction
-           is C7 and the batch store is C6: there is no Start here on purpose. -->
+      <!-- Everything a person is told before the first model call. The batch is
+           filed from here (C6) and the extraction is started from the runs list
+           below (C7), because those are two different writes and the second one
+           is the only route in this journey that reads a conversation. -->
       <section v-if="preview" class="import-confirm" aria-labelledby="import-confirm-title">
         <h3 id="import-confirm-title" class="import-confirm-title">Before anything runs</h3>
         <p class="import-confirm-line">
@@ -145,17 +155,47 @@
           <strong>{{ preview.estimated_chars.toLocaleString() }}</strong> characters across
           <strong>{{ preview.estimated_messages.toLocaleString() }}</strong> turns.
           At most <strong>{{ preview.batch_cap }}</strong> conversations per batch.
-          Extraction files proposals for a person to review; it writes nothing itself.
         </p>
+        <!-- The workspace default above is the workspace's own provider's model.
+             The run reads each conversation with the model Ciaobot is configured
+             to use for its own insights on that conversation's provider, so say
+             that rather than let the screen promise one model and run another. -->
+        <p class="import-confirm-line">
+          Each conversation is read by the model Ciaobot uses for its own insights on that
+          conversation's provider, which can differ from the workspace default above. Every
+          fact it finds waits for you in <strong>To decide</strong>; the import writes nothing
+          into your memory by itself.
+        </p>
+        <div class="import-confirm-actions">
+          <button
+            type="button"
+            class="btn-primary btn-small"
+            :disabled="!processable.length || filing"
+            @click="fileBatch"
+          >{{ filing ? 'Filing…' : `File an import of ${processable.length} conversation${processable.length === 1 ? '' : 's'}` }}</button>
+          <button
+            type="button"
+            class="btn-small import-quiet"
+            @click="clearSelection"
+          >Cancel</button>
+        </div>
+        <p v-if="fileError" class="import-status import-error" role="alert">{{ fileError }}</p>
       </section>
     </template>
+
+    <!-- The filed batches, their progress, the cancel and the retention: the rest
+         of the same journey, and the half that outlives the selection. It reads
+         Ciaobot's own state only — a filed batch, never provider history. -->
+    <ImportRuns />
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { api } from '../lib/api'
+import { useImportStore } from '../stores/import'
 import { useProjectStore } from '../stores/projects'
+import ImportRuns from './ImportRuns.vue'
 
 interface ImportSource {
   provider: string
@@ -202,6 +242,10 @@ interface PreviewPayload {
 
 const store = useProjectStore()
 const workspace = computed(() => store.activeWorkspace || '')
+/** The filed batches. Only the run list's writes go through it from here: this
+ *  panel owns the listing, the selection and the consent, and the store owns
+ *  everything that outlives the page. */
+const runs = useImportStore()
 
 /** `listed` is "a listing is on screen", not "a listing was requested". */
 const listed = ref(false)
@@ -214,6 +258,11 @@ const selected = ref<string[]>([])
 const previewing = ref(false)
 const previewError = ref('')
 const preview = ref<PreviewPayload | null>(null)
+/** Filing a batch is the panel's one write, so it gets its own busy flag and its
+ *  own error slot: the preview's refusal and the file's are different answers,
+ *  and a failed create must not be read as "the preview failed". */
+const filing = ref(false)
+const fileError = ref('')
 
 const candidates = computed(() => rows.value.available)
 const excluded = computed(() => rows.value.excluded)
@@ -269,6 +318,46 @@ function clearSelection() {
   selected.value = []
   preview.value = null
   previewError.value = ''
+  fileError.value = ''
+}
+
+/**
+ * File a batch over the previewed, processable rows (C6).
+ *
+ * Only the ids of the rows the preview called `ready` go on the wire: a refused
+ * row has already said why it will not be processed, and asking the store to
+ * file it would only earn the same refusal. Nothing is read and no model is
+ * called by this — the batch is a filed *intent*, and the run below it is the
+ * first thing in the journey that opens a conversation.
+ *
+ * The selection is cleared afterwards on success so the consent screen cannot be
+ * pressed twice: a second create would be refused by C6 anyway (one open batch
+ * per workspace), and a refusal the reader has to interpret is worse than a
+ * screen that has moved on to the run they just filed. The filed batch is on
+ * screen the moment the POST answers — it is adopted onto the runs list, oldest
+ * first — so nothing is re-read here.
+ */
+async function fileBatch() {
+  if (!workspace.value || !processable.value.length || filing.value) return
+  filing.value = true
+  fileError.value = ''
+  const sources = processable.value.map(row => ({
+    provider: row.source.provider,
+    source_id: row.source.source_id,
+  }))
+  try {
+    const batch = await runs.file(workspace.value, sources)
+    if (!batch) {
+      // The sentence belongs beside the button that was pressed, so it is
+      // moved here and cleared from the runs list rather than printed twice.
+      fileError.value = runs.error || 'The import could not be filed.'
+      runs.clearError()
+      return
+    }
+    clearSelection()
+  } finally {
+    filing.value = false
+  }
 }
 
 async function load() {
@@ -318,6 +407,7 @@ watch(workspace, () => {
 })
 </script>
 
+<style scoped src="./importSources.css"></style>
 <style scoped>
 .import-sources {
   display: flex;
@@ -326,37 +416,9 @@ watch(workspace, () => {
   margin: 0;
   padding: var(--space-3);
 }
-.import-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
 .import-title { margin: 0; font-size: var(--text-base); font-weight: 650; }
-.import-head-actions, .import-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
-.import-quiet { min-height: var(--touch); }
-.import-status { margin: 0; color: var(--fg2); font-size: var(--text-sm); display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
-.import-error { color: var(--error); }
-.import-warn { color: var(--warning); }
-.import-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
-.import-row { border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.import-row--off { opacity: 0.75; }
-/* The whole row is the hit target: a checkbox alone is under the 44px floor. */
-.import-check {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  min-height: var(--touch);
-  padding: var(--space-2);
-  cursor: pointer;
-}
-.import-row-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.import-row-title { font-size: var(--text-sm); }
-.import-row-meta { font-size: var(--text-xs); color: var(--fg3); overflow-wrap: anywhere; }
-.import-aside { margin-top: var(--space-1); }
-.import-aside-title { cursor: pointer; min-height: var(--touch); display: flex; align-items: center; font-size: var(--text-sm); color: var(--fg2); }
 .import-confirm { border-top: 1px solid var(--border); padding-top: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2); }
+.import-confirm-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 .import-confirm-title { margin: 0; font-size: var(--text-sm); font-weight: 650; }
 .import-confirm-line { margin: 0; font-size: var(--text-sm); color: var(--fg2); }
 .import-confirm-list { margin: 0; padding-left: 1.2em; font-size: var(--text-sm); color: var(--fg2); display: flex; flex-direction: column; gap: 2px; }
