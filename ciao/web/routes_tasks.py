@@ -47,6 +47,10 @@ _STATUS_BY_CODE = {
     "project_ambiguous": 400,
     "invalid_action": 400,
     "task_not_found": 404,
+    # A well-formed request asking for something the record cannot do — editing a
+    # value the store does not hold, delegating a task that is already in Done.
+    # A 400: the request was understood and refused on its own terms.
+    "invalid_task": 400,
     "task_invalid": 400,
     "task_unsupported_schema": 400,
     # A stale revision is a conflict the caller resolves by re-reading, not a
@@ -285,6 +289,10 @@ async def task_delegate(request: Request) -> JSONResponse:
     Deliberately not ``asyncio.to_thread``: ``start_stream`` creates an asyncio
     task and is only legal on the event loop, exactly as ``start_update_task``
     notes. The store writes it makes are short, locked file operations.
+
+    A task already in *Done* is ``invalid_task`` — a 400. Delegation hands a task
+    over as ``in_progress``/``agent``, so delegating a finished one would reopen
+    the card behind the user's back; moving it out of *Done* is their gesture.
     """
     plane = _control_plane(request)
     if plane is None:
@@ -330,6 +338,16 @@ async def task_attempt_action(request: Request) -> JSONResponse:
     user detaches it. ``resume`` continues the same chat under the same attempt;
     ``retry`` starts a new one in a new chat. Neither completes a task, and this
     is the user's session so ``detach`` is what makes completion possible at all.
+
+    ``task_id`` is passed to the service rather than read here: the attempt id is
+    the only thing this surface would otherwise act on, so a URL naming task A with
+    task B's attempt would stop B's turn. The service answers a mismatch with
+    ``task_attempt_not_found`` — a 404 — because from this URL there is no such
+    attempt.
+
+    Awaited, not run in a thread: ``stop`` and ``detach`` call the chat manager's
+    ``async`` ``stop_chat``, which is only legal on the loop, exactly as
+    ``task_delegate``'s ``start_stream`` is.
     """
     plane = _control_plane(request)
     if plane is None:
@@ -341,10 +359,11 @@ async def task_attempt_action(request: Request) -> JSONResponse:
     if workspace is None:
         return _workspace_required()
     try:
-        outcome = plane.workspace_task_attempt_action(
+        outcome = await plane.workspace_task_attempt_action(
             workspace,
             str(request.path_params.get("attempt_id") or ""),
             str(request.path_params.get("action") or ""),
+            task_id=str(request.path_params.get("task_id") or ""),
             actor="user",
         )
     except ControlPlaneError as exc:
@@ -382,9 +401,11 @@ async def task_complete(request: Request) -> JSONResponse:
     """Mark one task done, at ``expected_revision``.
 
     Reachable here because this is the signed-in user's own session; the same
-    operation through the agent CLI is refused by the store. A task linked to a
-    live chat or attempt is still refused — the delegation service's
-    stop/detach workflow owns that, not a column.
+    operation through the agent CLI is refused by the store. A task whose turn is
+    still in flight is refused too — stop or detach it first. A task whose attempt
+    has a result waiting for review is the exception the delegation block handles
+    itself: approving Done releases the linkage and closes the task in one
+    gesture, leaving the attempt as the ``ready_for_review`` record it is.
     """
     plane = _control_plane(request)
     if plane is None:

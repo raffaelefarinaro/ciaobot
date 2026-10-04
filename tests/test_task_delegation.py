@@ -66,19 +66,26 @@ class _RecordingStream:
             yield event
 
 
-async def _end_turns(pcm: _RecordingPcm) -> None:
-    """End every running fake turn and let the service's watchers drain.
+async def _end_turns(pcm: _RecordingPcm, *, index: int | None = None) -> None:
+    """End running fake turns and let the service's watchers drain.
 
     The watcher is a background task on the loop, so a test that wants the settled
     state opens the gate and yields until the tasks are done rather than sleeping
     for a guess. Yielding is enough because the watcher does no real I/O beyond the
     store write, which is synchronous.
+
+    ``index`` ends one turn and leaves the rest running, which is how a test asks
+    "what does the *old* watcher do now" without also settling the attempt that
+    replaced it. ``streams`` is only cleared when every turn was ended, so an
+    indexed call leaves the list an addressable record of which turn is which.
     """
-    for stream in pcm.streams:
+    streams = pcm.streams if index is None else [pcm.streams[index]]
+    for stream in streams:
         stream.finish.set()
     for _ in range(50):
         await asyncio.sleep(0)
-    pcm.streams.clear()
+    if index is None:
+        pcm.streams.clear()
 
 
 class _RecordingPcm:
@@ -113,6 +120,9 @@ class _RecordingPcm:
         ]
         self.raise_on_start: Exception | None = None
         self.raise_on_create: Exception | None = None
+        #: How many times ``stop_chat`` was actually awaited. Zero after a stop
+        #: means the coroutine was built and dropped, which is the bug.
+        self.stop_awaited = 0
         #: Snapshots taken inside ``start_stream``, in call order.
         self.at_start: list[dict[str, Any]] = []
         self._next_chat = 0
@@ -163,19 +173,56 @@ class _RecordingPcm:
         )
         return chat
 
-    def update_chat(self, chat_id, **fields):
-        chat = self.chats[chat_id]
-        for key, value in fields.items():
+    def update_chat(
+        self,
+        chat_id,
+        *,
+        title=None,
+        model=None,
+        provider=None,
+        mode=None,
+        project_id=None,
+        thinking_level=None,
+    ):
+        """The real manager's keyword-only signature, field for field.
+
+        The service never calls this — the provenance stamp goes in at
+        ``create_chat``, because the real ``update_chat`` has no ``helper``
+        parameter and a call naming one raises ``TypeError``. A fake taking
+        ``**fields`` would have swallowed that and hidden it: every delegated chat
+        carried ``attempt_id: "000…0"``, linking back to nothing. The signature is
+        pinned here so the next caller of a parameter that does not exist fails in
+        this fake rather than in production.
+        """
+        chat = self.chats.get(chat_id)
+        if chat is None:
+            return None
+        for key, value in (
+            ("title", title),
+            ("mode", mode),
+            ("project_id", project_id),
+        ):
             if value is not None:
                 setattr(chat, key, value)
-        self.calls.append(("update_chat", (chat_id,), fields))
+        self.calls.append(
+            ("update_chat", (chat_id,), {"title": title, "mode": mode, "project_id": project_id})
+        )
         return chat
 
     def get_chat(self, chat_id):
         return self.chats.get(chat_id)
 
-    def stop_chat(self, chat_id):
+    async def stop_chat(self, chat_id):
+        """The manager's Stop, which is ``async`` — as the real one is.
+
+        The flag is set only *inside* the coroutine, so a caller that built one and
+        never awaited it leaves :attr:`stop_awaited` false. That is the assertion
+        that matters: an un-awaited ``stop_chat`` returns a coroutine nobody runs, so
+        the provider turn keeps running while the attempt is recorded ``stopped``
+        over it, and a synchronous fake cannot see that at all.
+        """
         self.calls.append(("stop_chat", (chat_id,), {}))
+        self.stop_awaited += 1
         return True
 
     def start_stream(self, chat_id, prompt, *args, **kwargs):
@@ -278,6 +325,15 @@ def _delegate(
     )
 
 
+async def _act(
+    plane: CiaoControlPlane, attempt_id: str, action: str, **fields: Any
+) -> dict[str, Any]:
+    """One attempt gesture, awaited — ``stop`` and ``detach`` call an async Stop."""
+    return await plane.workspace_task_attempt_action(
+        "personal", attempt_id, action, **fields
+    )
+
+
 def _get_task(
     plane: CiaoControlPlane, task_id: str, workspace: str = "personal"
 ) -> dict[str, Any]:
@@ -371,6 +427,105 @@ async def test_the_chat_carries_provenance_naming_the_task_and_the_attempt(
     assert stamp["task_id"] == task["id"]
     assert stamp["task_revision"] == task["revision"]
     assert stamp["attempt_id"] == outcome["attempt"]["attempt_id"]
+    # A real attempt id, not a placeholder: the store mints one for the chat and
+    # records *that same* one, so the stamp names something a reader can look up.
+    assert stamp["attempt_id"] == _attempt_store(plane).get(
+        stamp["attempt_id"]
+    ).attempt_id
+
+
+async def test_the_provenance_is_stamped_once_at_creation_and_never_restamped(
+    tmp_path: Path,
+) -> None:
+    """The stamp is exact or the chat does not exist.
+
+    The real ``ProjectChatManager.update_chat`` has no ``helper`` parameter, so the
+    old "create with a placeholder, restamp afterwards" wrote
+    ``attempt_id: "000…0"`` on every delegated chat and swallowed the ``TypeError``
+    that told it so. The id is now minted before the chat is created, so the stamp
+    and the attempt store can only ever agree — and nothing writes it twice.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Stamped once")
+
+    _delegate(plane, task)
+
+    assert [call for call in pcm.calls if call[0] == "update_chat"] == [], (
+        "the provenance was written by a second call rather than at creation"
+    )
+    created = [call for call in pcm.calls if call[0] == "create_chat"][0]
+    assert created[2]["helper"]["attempt_id"] != "0" * 32
+
+
+async def test_a_done_task_cannot_be_delegated(tmp_path: Path) -> None:
+    """Delegation hands the task over as ``in_progress``/``agent``, so delegating a
+    finished one would reopen it — and an agent could undo a completion the user
+    made by hand. Reopening is the user's own move out of *Done*."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Shipped")
+    done = plane.workspace_task_action(
+        "personal",
+        "complete",
+        task["id"],
+        expected_revision=task["revision"],
+        actor="user",
+    )
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _delegate(plane, done)
+
+    assert excinfo.value.code == "invalid_task"
+    assert "Done" in str(excinfo.value), "the refusal must say what to do about it"
+    assert _creates(pcm) == []
+    assert _starts(pcm) == []
+    assert _attempt_store(plane).live_by_task() == {}
+    assert _get_task(plane, task["id"])["status"] == "done"
+
+
+async def test_an_agent_cannot_reopen_a_done_task_by_delegating_it(
+    tmp_path: Path,
+) -> None:
+    """The same refusal over MCP, where there is no user session to catch it."""
+    plane, _pcm = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Shipped")["data"]
+    done = plane.workspace_task_action(
+        "personal",
+        "complete",
+        created["id"],
+        expected_revision=created["revision"],
+        actor="user",
+    )
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_delegate(principal, created["id"], expected_revision=done["revision"])
+
+    assert excinfo.value.code == "invalid_task"
+    assert _get_task(plane, created["id"])["status"] == "done"
+    assert _attempt_store(plane).live_by_task() == {}
+
+
+async def test_a_done_task_is_delegatable_again_once_moved_out_of_done(
+    tmp_path: Path,
+) -> None:
+    """The refusal is about the column, not a one-way door: moving it back is the
+    user's own gesture and delegation works from there."""
+    plane, _pcm = _world(tmp_path)
+    task = _create(plane, title="Revisit")
+    done = plane.workspace_task_action(
+        "personal", "complete", task["id"], expected_revision=task["revision"], actor="user"
+    )
+    reopened = plane.workspace_task_update(
+        "personal",
+        task["id"],
+        expected_revision=done["revision"],
+        changes={"status": "backlog"},
+        actor="user",
+    )
+
+    outcome = _delegate(plane, reopened)
+
+    assert outcome["created"] is True
 
 
 async def test_the_tasks_own_project_is_the_host_when_it_has_one(tmp_path: Path) -> None:
@@ -620,18 +775,14 @@ async def test_an_interrupted_attempt_is_resumable_in_its_own_chat(
     # itself live, so a second delegation would correctly return it rather than
     # start anything, and the test would never reach the dead launch it is about.
     first = _delegate(plane, task)
-    plane.workspace_task_attempt_action(
-        "personal", first["attempt"]["attempt_id"], "stop"
-    )
+    await _act(plane, first["attempt"]["attempt_id"], "stop")
     pcm.raise_on_start = RuntimeError("provider unreachable")
     with pytest.raises(ControlPlaneError):
         _delegate(plane, _get_task(plane, task["id"]))
     pcm.raise_on_start = None
 
     attempt = _attempt_store(plane).list_for_task(task["id"])[0]
-    outcome = plane.workspace_task_attempt_action(
-        "personal", attempt.attempt_id, "resume"
-    )
+    outcome = await _act(plane, attempt.attempt_id, "resume")
 
     assert outcome["resumed"] is True
     assert outcome["attempt"]["attempt_id"] == attempt.attempt_id
@@ -656,11 +807,11 @@ async def test_an_unknown_attempt_is_not_found_and_an_unknown_verb_is_invalid(
     attempt_id = outcome["attempt"]["attempt_id"]
 
     with pytest.raises(ControlPlaneError) as excinfo:
-        plane.workspace_task_attempt_action("personal", "f" * 32, "stop")
+        await _act(plane, "f" * 32, "stop")
     assert excinfo.value.code == "task_attempt_not_found"
 
     with pytest.raises(ControlPlaneError) as excinfo:
-        plane.workspace_task_attempt_action("personal", attempt_id, "cancel")
+        await _act(plane, attempt_id, "cancel")
     assert excinfo.value.code == "invalid_action"
 
 
@@ -716,9 +867,7 @@ async def test_a_re_delegation_after_an_edit_reports_no_change(tmp_path: Path) -
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Second time")
     first = _delegate(plane, task)
-    plane.workspace_task_attempt_action(
-        "personal", first["attempt"]["attempt_id"], "stop"
-    )
+    await _act(plane, first["attempt"]["attempt_id"], "stop")
     pcm.raise_on_start = RuntimeError("provider unreachable")
     with pytest.raises(ControlPlaneError):
         _delegate(plane, _get_task(plane, task["id"]))
@@ -781,6 +930,118 @@ async def test_a_turn_waiting_on_an_approval_card_settles_needs_you(
     row = _get_task(plane, task["id"])
     assert row["attempt_state"] == "needs_you"
     assert row["status"] != "done"
+    # And no Review badge: there is no result yet, so there is nothing to review.
+    assert row["review_state"] == "none"
+
+
+async def test_a_stream_with_no_result_is_interrupted_not_a_review(
+    tmp_path: Path,
+) -> None:
+    """A turn whose stream ends without a result has no answer to show.
+
+    ``ready_for_review`` on an empty result would put nothing in front of the user
+    dressed as a finished piece of work, and the only way to tell it from a real one
+    afterwards is to open the chat — which is the one thing the badge exists to save
+    them from. ``interrupted`` is the honest word, and it is resumable.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="The stream just ended")
+    pcm.next_events = [{"type": "text", "text": "half an answer"}]
+    _delegate(plane, task)
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "interrupted"
+    assert row["review_state"] == "none"
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    # Which is also what makes it resumable: the user can continue that chat.
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+
+async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
+    tmp_path: Path,
+) -> None:
+    """The flag means the user edited the task under the agent, and nothing else.
+
+    The watcher's own review badge is a write to the task, so it moves the
+    revision. Without rebinding the attempt to the revision that write left behind,
+    *every* finished turn read "changed since delegated" — a warning that would
+    appear on every card and mean nothing.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Reviewed cleanly", body="The original scope.")
+    _delegate(plane, task)
+
+    await _end_turns(pcm)
+
+    settled = _get_task(plane, task["id"])
+    assert settled["review_state"] == "ready", "the badge is what moves the revision"
+    assert settled["changed_since_delegated"] is False
+    # And only a real edit trips it.
+    edited = plane.workspace_task_update(
+        "personal",
+        task["id"],
+        expected_revision=settled["revision"],
+        changes={},
+        body="A different scope.",
+        actor="user",
+    )
+    assert edited["changed_since_delegated"] is True
+
+
+async def test_a_detached_watcher_may_not_flag_a_task_it_no_longer_holds(
+    tmp_path: Path,
+) -> None:
+    """Detach releases the task, and the provider turn ends afterwards anyway.
+
+    The watcher is still holding that stream when it does, so it settles as if
+    nothing happened: the task would end up carrying a Review badge for an attempt
+    that no longer holds it, over work the user has already taken back.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Taken back")
+    outcome = _delegate(plane, task)
+
+    await _act(plane, outcome["attempt"]["attempt_id"], "detach")
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["review_state"] == "none"
+    assert row["chat_id"] is None
+    assert row["attempt_id"] is None
+    # The attempt keeps what the user's gesture said about it, not what a late
+    # stream event said afterwards.
+    assert row["attempt_state"] == "stopped"
+    assert _attempt_store(plane).get(outcome["attempt"]["attempt_id"]).state == "stopped"
+
+
+async def test_a_superseded_watcher_may_not_flag_the_attempt_that_replaced_it(
+    tmp_path: Path,
+) -> None:
+    """The same race through Retry, which is the likelier one.
+
+    Stop the first turn, retry into a new one, and only then let the old stream
+    end: the old watcher settles an attempt that is already settled (so it records
+    nothing), and it must not reach round to flag the task the *new* attempt now
+    owns — that would put a finished result on a task with a turn still running.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Tried once, then again")
+    first = _delegate(plane, task)
+    await _act(plane, first["attempt"]["attempt_id"], "stop")
+    retried = await _act(plane, first["attempt"]["attempt_id"], "retry")
+
+    # Only the first turn's stream ends; the retry's is still in flight.
+    await _end_turns(pcm, index=0)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "running"
+    assert row["review_state"] == "none"
+    assert row["attempt_id"] == retried["attempt"]["attempt_id"]
+    assert _attempt_store(plane).get(first["attempt"]["attempt_id"]).state == "stopped"
 
 
 async def test_a_turn_that_ended_in_an_error_settles_failed(tmp_path: Path) -> None:
@@ -885,7 +1146,7 @@ async def test_a_detached_task_can_be_completed_by_the_user(tmp_path: Path) -> N
     outcome = _delegate(plane, task)
     attempt_id = outcome["attempt"]["attempt_id"]
 
-    detached = plane.workspace_task_attempt_action("personal", attempt_id, "detach")
+    detached = await _act(plane, attempt_id, "detach")
 
     assert detached["task"]["chat_id"] is None
     assert detached["task"]["attempt_id"] is None
@@ -919,17 +1180,82 @@ async def test_detaching_a_running_turn_stops_it_before_releasing_the_task(
     # The fake turn is still gated shut, so the attempt is live.
     assert _attempt_store(plane).get_live(task["id"]).state == "running"
 
-    plane.workspace_task_attempt_action(
-        "personal", outcome["attempt"]["attempt_id"], "detach"
-    )
+    await _act(plane, outcome["attempt"]["attempt_id"], "detach")
     await _end_turns(pcm)
 
-    assert [call for call in pcm.calls if call[0] == "stop_chat"], (
-        "a detach of a running turn did not stop it"
-    )
+    assert pcm.stop_awaited == 1, "a detach of a running turn did not stop it"
     row = _get_task(plane, task["id"])
     assert row["chat_id"] is None
     assert _attempt_store(plane).get(outcome["attempt"]["attempt_id"]).state == "stopped"
+
+
+async def test_a_stop_awaits_the_chat_managers_stop(tmp_path: Path) -> None:
+    """``ProjectChatManager.stop_chat`` is ``async``, and that is the whole of it.
+
+    It waits for the provider to acknowledge the interrupt before force-closing.
+    Called without awaiting, the coroutine is built and never run: the turn keeps
+    going while the attempt is recorded ``stopped`` over it, which is precisely the
+    state a user pressing Stop is trying to leave. The fake counts *awaits*, so a
+    stop that is called without one fails here.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Stop it properly")
+    outcome = _delegate(plane, task)
+    assert pcm.stop_awaited == 0
+
+    await _act(plane, outcome["attempt"]["attempt_id"], "stop")
+
+    assert pcm.stop_awaited == 1
+    assert [call for call in pcm.calls if call[0] == "stop_chat"] == [
+        ("stop_chat", ("chat-1",), {})
+    ]
+
+
+async def test_a_stop_that_cannot_reach_the_manager_still_settles_the_attempt(
+    tmp_path: Path,
+) -> None:
+    """A refused Stop is not a failed gesture.
+
+    Losing the chat manager would be the wrong trade for the record: the user asked
+    for the turn to end and the attempt has to stop claiming the turn is running,
+    so the settlement goes ahead and the failure is logged.
+    """
+
+    async def _refusing_stop(chat_id: str) -> bool:
+        raise RuntimeError("the provider is gone")
+
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="The manager refuses")
+    outcome = _delegate(plane, task)
+    pcm.stop_chat = _refusing_stop  # type: ignore[method-assign]
+
+    stopped = await _act(plane, outcome["attempt"]["attempt_id"], "stop")
+
+    assert stopped["attempt"]["state"] == "stopped"
+    # The linkage is untouched, so the card still points at the attempt that ran it.
+    assert stopped["task"]["live_attempt_id"] == ""
+    assert stopped["task"]["attempt_id"] == outcome["attempt"]["attempt_id"]
+    assert stopped["task"]["attempt_state"] == "stopped"
+
+
+async def test_the_stop_reply_carries_the_task_so_the_card_updates(tmp_path: Path) -> None:
+    """A Stop leaves the linkage in place but still moves the record.
+
+    The board draws the badge, Stop and Detach off that record, and the store adopts
+    the row from the reply's ``task`` — so a reply without it left a card reading
+    "Running" over a turn the user had just ended until they reloaded by hand.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Stop refreshes the card")
+    outcome = _delegate(plane, task)
+
+    stopped = await _act(plane, outcome["attempt"]["attempt_id"], "stop")
+
+    assert stopped["task"]["id"] == task["id"]
+    assert stopped["task"]["attempt_state"] == "stopped"
+    # No live attempt: Stop released the turn, and the badge has to say so.
+    assert stopped["task"]["live_attempt_id"] == ""
+    assert stopped["task"]["chat_id"] == "chat-1"
 
 
 async def test_stopping_keeps_the_linkage_so_completion_stays_refused(
@@ -942,10 +1268,10 @@ async def test_stopping_keeps_the_linkage_so_completion_stays_refused(
     outcome = _delegate(plane, task)
     attempt_id = outcome["attempt"]["attempt_id"]
 
-    stopped = plane.workspace_task_attempt_action("personal", attempt_id, "stop")
+    stopped = await _act(plane, attempt_id, "stop")
 
     assert stopped["attempt"]["state"] == "stopped"
-    assert [call for call in pcm.calls if call[0] == "stop_chat"]
+    assert pcm.stop_awaited == 1
     row = _get_task(plane, task["id"])
     assert row["chat_id"] == "chat-1"
     with pytest.raises(ControlPlaneError):
@@ -958,6 +1284,128 @@ async def test_stopping_keeps_the_linkage_so_completion_stays_refused(
         )
 
 
+async def test_the_user_approves_done_on_a_review_ready_card_in_one_gesture(
+    tmp_path: Path,
+) -> None:
+    """The review is the case the issue describes, and it has to be one click.
+
+    ``ready_for_review`` is a *live* attempt, so the store refuses a completion over
+    a live linkage — right in general, and wrong for a result that is already there
+    waiting for a decision. Routing that through Detach first reads as "discard the
+    attempt": it settles the reviewed attempt as ``stopped`` and loses how the turn
+    ended. So approving Done releases the linkage and completes in one gesture, and
+    the attempt stays as the ``ready_for_review`` record of what the agent did.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Ready for the user")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    await _end_turns(pcm)
+    settled = _get_task(plane, task["id"])
+    assert settled["review_state"] == "ready"
+    assert settled["attempt_state"] == "ready_for_review"
+
+    done = plane.workspace_task_action(
+        "personal",
+        "complete",
+        task["id"],
+        expected_revision=settled["revision"],
+        actor="user",
+    )
+
+    assert done["status"] == "done"
+    assert done["chat_id"] is None, "the linkage was released"
+    assert done["attempt_id"] is None
+    # The attempt keeps the outcome the user actually reviewed.
+    assert _attempt_store(plane).get(attempt_id).state == "ready_for_review"
+    # And the agent still cannot complete anything, on this one or any other.
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_action(_principal(), "complete", task["id"], expected_revision=done["revision"])
+    assert excinfo.value.code == "task_completion_requires_user"
+
+
+async def test_done_on_a_review_ready_card_at_a_stale_revision_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """The two writes are held together by one revision check.
+
+    A board drawn before the review badge was written holds the older revision, so
+    approving Done from it is refused before either write — rather than releasing
+    the linkage and then failing to close the card it just unlinked.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Reviewed, then edited")
+    outcome = _delegate(plane, task)
+    # A board drawn before the turn ended: it holds the pre-badge revision.
+    before = _get_task(plane, task["id"])
+    await _end_turns(pcm)
+    assert _get_task(plane, task["id"])["revision"] != before["revision"], (
+        "the review badge did not move the revision, so nothing is being tested"
+    )
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_action(
+            "personal",
+            "complete",
+            task["id"],
+            expected_revision=before["revision"],
+            actor="user",
+        )
+
+    assert excinfo.value.code == "task_revision_conflict"
+    row = _get_task(plane, task["id"])
+    assert row["status"] == "in_progress", "nothing was released"
+    assert row["attempt_id"] == outcome["attempt"]["attempt_id"]
+
+
+async def test_a_live_attempt_still_needs_stop_or_detach_before_done(
+    tmp_path: Path,
+) -> None:
+    """The review gesture is narrow on purpose.
+
+    A turn still writing, or paused on a question, has no result to review — so
+    closing it is not approving anything, and the old refusal stands for both.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Still running")
+    outcome = _delegate(plane, task)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_action(
+            "personal",
+            "complete",
+            task["id"],
+            expected_revision=_get_task(plane, task["id"])["revision"],
+            actor="user",
+        )
+
+    assert excinfo.value.code == "task_invalid"
+    assert _get_task(plane, task["id"])["status"] == "in_progress"
+    assert _attempt_store(plane).get(outcome["attempt"]["attempt_id"]).state == "running"
+
+
+async def test_detaching_a_reviewed_attempt_leaves_the_review_alone(
+    tmp_path: Path,
+) -> None:
+    """Detach says the task no longer belongs to this attempt, not that the attempt
+    did not get there. Rewriting a reviewed result to ``stopped`` threw away the one
+    record of how the turn ended, because the user released the card."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Reviewed then released")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    await _end_turns(pcm)
+
+    detached = await _act(plane, attempt_id, "detach")
+
+    assert detached["attempt"]["state"] == "ready_for_review"
+    assert detached["attempt"]["detail"] == "", "no stop was invented for it"
+    assert detached["task"]["chat_id"] is None
+    assert detached["task"]["review_state"] == "ready"
+    # And it did not stop a turn that had already ended.
+    assert pcm.stop_awaited == 0
+
+
 async def test_stopping_a_settled_attempt_is_refused_rather_than_a_no_op(
     tmp_path: Path,
 ) -> None:
@@ -967,11 +1415,11 @@ async def test_stopping_a_settled_attempt_is_refused_rather_than_a_no_op(
     attempt_id = outcome["attempt"]["attempt_id"]
     # `ready_for_review` is itself a live state — the task is still linked and still
     # waiting for the user — so stopping once is a real gesture and settles it.
-    first_stop = plane.workspace_task_attempt_action("personal", attempt_id, "stop")
+    first_stop = await _act(plane, attempt_id, "stop")
     assert first_stop["attempt"]["state"] == "stopped"
 
     with pytest.raises(ControlPlaneError) as excinfo:
-        plane.workspace_task_attempt_action("personal", attempt_id, "stop")
+        await _act(plane, attempt_id, "stop")
 
     assert excinfo.value.code == "invalid_action"
     assert "stopped" in str(excinfo.value), "the refusal must name the state it found"
@@ -986,18 +1434,14 @@ async def test_resume_continues_the_same_chat_under_the_same_attempt(
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Pick it up again")
     first = _delegate(plane, task)
-    plane.workspace_task_attempt_action(
-        "personal", first["attempt"]["attempt_id"], "stop"
-    )
+    await _act(plane, first["attempt"]["attempt_id"], "stop")
     pcm.raise_on_start = RuntimeError("provider unreachable")
     with pytest.raises(ControlPlaneError):
         _delegate(plane, _get_task(plane, task["id"]))
     pcm.raise_on_start = None
 
     interrupted = _attempt_store(plane).list_for_task(task["id"])[0]
-    resumed = plane.workspace_task_attempt_action(
-        "personal", interrupted.attempt_id, "resume"
-    )
+    resumed = await _act(plane, interrupted.attempt_id, "resume")
 
     # The same attempt and the same chat — that is what `resume` means, and it is
     # the whole difference from `retry`.
@@ -1020,9 +1464,7 @@ async def test_a_ready_for_review_attempt_is_not_resumable(tmp_path: Path) -> No
     await _end_turns(pcm)
 
     with pytest.raises(ControlPlaneError) as excinfo:
-        plane.workspace_task_attempt_action(
-            "personal", outcome["attempt"]["attempt_id"], "resume"
-        )
+        await _act(plane, outcome["attempt"]["attempt_id"], "resume")
 
     assert excinfo.value.code == "invalid_action"
     assert "ready_for_review" in str(excinfo.value)
@@ -1036,18 +1478,14 @@ async def test_retry_starts_a_new_attempt_in_a_new_chat_and_keeps_the_old_one(
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Try it again")
     first = _delegate(plane, task)
-    plane.workspace_task_attempt_action(
-        "personal", first["attempt"]["attempt_id"], "stop"
-    )
+    await _act(plane, first["attempt"]["attempt_id"], "stop")
     pcm.raise_on_start = RuntimeError("provider unreachable")
     with pytest.raises(ControlPlaneError):
         _delegate(plane, _get_task(plane, task["id"]))
     pcm.raise_on_start = None
 
     interrupted = _attempt_store(plane).list_for_task(task["id"])[0]
-    outcome = plane.workspace_task_attempt_action(
-        "personal", interrupted.attempt_id, "retry"
-    )
+    outcome = await _act(plane, interrupted.attempt_id, "retry")
 
     assert outcome["retried"] is True
     assert outcome["created"] is True
@@ -1078,9 +1516,7 @@ async def test_a_live_attempt_must_be_stopped_before_a_retry(tmp_path: Path) -> 
     outcome = _delegate(plane, task)
 
     with pytest.raises(ControlPlaneError) as excinfo:
-        plane.workspace_task_attempt_action(
-            "personal", outcome["attempt"]["attempt_id"], "retry"
-        )
+        await _act(plane, outcome["attempt"]["attempt_id"], "retry")
 
     assert excinfo.value.code == "invalid_action"
 
@@ -1089,9 +1525,7 @@ async def test_the_attempt_history_puts_the_live_attempt_first(tmp_path: Path) -
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="History")
     first = _delegate(plane, task)
-    plane.workspace_task_attempt_action(
-        "personal", first["attempt"]["attempt_id"], "stop"
-    )
+    await _act(plane, first["attempt"]["attempt_id"], "stop")
     pcm.raise_on_start = RuntimeError("provider unreachable")
     with pytest.raises(ControlPlaneError):
         _delegate(plane, _get_task(plane, task["id"]))
@@ -1144,7 +1578,7 @@ async def test_the_agent_envelopes_are_the_shape_the_cli_prints(tmp_path: Path) 
     assert delegated["ok"] is True
     attempt_id = delegated["data"]["attempt"]["attempt_id"]
 
-    acted = plane.task_attempt_action(principal, attempt_id, "detach")
+    acted = await plane.task_attempt_action(principal, attempt_id, "detach")
 
     assert acted["ok"] is True
     assert acted["data"]["attempt"]["attempt_id"] == attempt_id

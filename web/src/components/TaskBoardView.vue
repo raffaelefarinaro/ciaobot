@@ -12,9 +12,9 @@
  * instead of overwriting what is on disk now.
  *
  * **Delegation** adds a card action, an attempt badge, a link to the chat an
- * attempt ran in, and the gestures that own a running turn — stop and detach, with
- * resume and retry reached from the preview. Four things this pane is careful not to
- * imply:
+ * attempt ran in, and the gestures that own a turn — Stop and Detach for a live
+ * one, Resume and Retry for a settled one, both reached from the preview as well
+ * as the card. Four things this pane is careful not to imply:
  *
  * - A finished turn is a **badge**, never *Done*. `ready_for_review` draws in
  *   *In progress* and only the user's own Done moves the card.
@@ -162,7 +162,11 @@ onMounted(load)
 watch(workspace, () => {
   closeCreate()
   closeDetail()
-  closeDelegate()
+  // Not `closeDelegate`: a gesture already in flight makes that one refuse, which
+  // would leave the sheet marked open with nothing drawn and the focus trap still
+  // holding. `resetDelegate` closes it either way, and the late answer is dropped
+  // by the store's own `drawingWorkspace` guard.
+  resetDelegate()
   load()
 })
 
@@ -343,11 +347,12 @@ function attemptBadgeClass(task: Task): string {
 // older read gets the server's 409 with the rows intact rather than delegating a
 // description that has moved on.
 
+type DelegateMode = 'delegate' | 'resume' | 'retry' | 'open_chat'
+
 const delegateOpen = ref(false)
 const delegateEl = ref<HTMLElement | null>(null)
 const delegateBusy = ref(false)
 const delegateTaskId = ref('')
-const delegateAttempt = ref<TaskAttempt | null>(null)
 /**
  * The description this preview will quote, read by `openDelegate`.
  *
@@ -358,10 +363,24 @@ const delegateAttempt = ref<TaskAttempt | null>(null)
  * sharing it here would let the preview show one task's prose under another's title.
  */
 const delegateBody = ref('')
+/**
+ * The revision the description on screen was read at.
+ *
+ * `read.revision` from the same `board.get`, held for the length of the sheet. The
+ * confirm presents *this* rather than whatever `revisionOf` says at the time it is
+ * pressed, because those are two different facts: a reload, an adopted write or a
+ * move from another tab can put a newer revision on the row while the sheet is
+ * open, and the user has read the body at the older one. Sending the row's
+ * revision would let a turn be launched from a description nobody saw, defeating
+ * the 409 guard — so a body that has moved on is refused and the preview re-reads.
+ */
+const delegateRevision = ref('')
 /** The description read is in flight, or failed and wants a retry. */
 const delegateBodyState = ref<'idle' | 'loading' | 'failed'>('idle')
 /** Ticket for the newest preview read; older answers are dropped. */
 let delegateSeq = 0
+/** What the sheet's confirm does, chosen when the sheet opens. */
+const delegateMode = ref<DelegateMode>('delegate')
 
 /** The task the preview is for, or undefined once it is gone. */
 const delegateTask = computed(
@@ -381,17 +400,13 @@ const delegateTask = computed(
 const delegatePreview = computed(() => {
   const task = delegateTask.value
   if (!task) return null
-  const alreadyLive = Boolean(task.live_attempt_id)
   return {
     project: projectName(task.project_id),
-    project_is_tasks_own: Boolean(task.project_id),
     provider: 'Your workspace default',
     model: 'Your workspace default',
     // Named as the fact it is, since the client cannot read the chat's mode before
     // the chat exists.
     attendance: 'Attended — approval cards ask you in the chat',
-    already_live: alreadyLive,
-    will_start_turn: !alreadyLive,
   }
 })
 
@@ -400,17 +415,58 @@ const delegateFocusActive = computed(
 )
 
 /**
+ * The mode a sheet opens in, from the row alone.
+ *
+ * The four cases are four different things a card can need, and the old single
+ * branch got two of them wrong. A **live** attempt (`running`, `needs_you`,
+ * `ready_for_review`) is never resumable — the server refuses `resume` for every
+ * live state — so offering "Continue this chat" was a button that always
+ * errored; what a live attempt needs is to be *read*, in the chat it is running
+ * in. A **settled** attempt still linked to the task (`failed`, `interrupted`,
+ * `stopped`) is the only resumable case, and it is the one that had no UI at all:
+ * the card showed a plain Delegate, which starts a new attempt in a new chat
+ * rather than continuing the one that failed. So resume and retry are separate,
+ * labelled gestures there, and neither is a second delegation.
+ */
+function delegateModeFor(task: Task): DelegateMode {
+  if (task.live_attempt_id) return 'open_chat'
+  if (isSettledLinked(task)) return 'resume'
+  return 'delegate'
+}
+
+/**
+ * Whether this row's attempt settled and is still linked: the resumable case.
+ *
+ * `attempt_id` names the attempt the gestures act on, and its state says whether it
+ * is still live. The server sends `live_attempt_id` alongside as its own answer to
+ * "does an attempt hold this task", and the two always agree — this reads the
+ * state through the one place the vocabulary is written down rather than
+ * re-deriving it here.
+ */
+function isSettledLinked(task: Task): boolean {
+  return Boolean(task.attempt_id) && !isLiveAttemptState(task.attempt_state)
+}
+
+/**
  * What the confirm button says, which is the whole of the already-delegated case.
  *
- * A task with a live attempt is not delegated twice — the server would return the
- * existing attempt without starting anything, which is correct but reads as a
- * no-op the user cannot explain — so the same button offers the gesture that
- * actually does something: continuing that chat. Naming it is what keeps the
- * dialog honest about what pressing it will do.
+ * Each mode names the gesture it will perform rather than a generic "Continue":
+ * "Open chat" starts nothing, "Resume" continues one attempt's chat, "Start a new
+ * attempt" mints another one, and "Delegate" is a first hand-over. A button whose
+ * label could mean two of those is a button the user has to guess at.
  */
 const delegateButtonLabel = computed(() => {
   if (delegateBusy.value) return 'Working…'
-  return delegatePreview.value?.already_live ? 'Continue this chat' : 'Delegate'
+  switch (delegateMode.value) {
+    case 'open_chat':
+      return 'Open chat'
+    case 'resume':
+      return 'Resume'
+    case 'retry':
+      return 'Start a new attempt'
+    default:
+      return 'Delegate'
+  }
 })
 
 /**
@@ -425,7 +481,7 @@ const delegateBodyPreview = computed(() => renderUserMarkdown(delegateBody.value
 /** Re-read the description without closing the preview. */
 function retryDelegateBody() {
   const task = delegateTask.value
-  if (task) void openDelegate(task)
+  if (task) void openDelegate(task, delegateMode.value)
 }
 
 useModalFocus(delegateEl, delegateFocusActive, {
@@ -441,12 +497,16 @@ useModalFocus(delegateEl, delegateFocusActive, {
  * read is answered only while this dialog is still the one that asked, by the same
  * rule the detail dialog uses, so a read that lands after the user has moved on
  * writes nothing.
+ *
+ * Its revision is kept for the confirm rather than read from the row then: see
+ * {@link delegateRevision}.
  */
-async function openDelegate(task: Task) {
+async function openDelegate(task: Task, mode?: DelegateMode) {
   board.clearError()
   delegateTaskId.value = task.id
-  delegateAttempt.value = null
+  delegateMode.value = mode ?? delegateModeFor(task)
   delegateBody.value = ''
+  delegateRevision.value = ''
   delegateBodyState.value = 'loading'
   delegateOpen.value = true
   const seq = ++delegateSeq
@@ -459,50 +519,72 @@ async function openDelegate(task: Task) {
   // read or a write that landed in between, and neither may put stale prose in the
   // sheet the user is about to confirm.
   delegateBody.value = read ? read.body : ''
+  delegateRevision.value = read ? read.revision : ''
 }
 
 function closeDelegate() {
   if (delegateBusy.value) return
+  resetDelegate()
+}
+
+/**
+ * Put the preview back to its closed state, ignoring an in-flight gesture.
+ *
+ * {@link closeDelegate} refuses while a gesture is running, which is right for a
+ * user pressing Cancel and wrong for a workspace switch: the watch that drops the
+ * old rows would then leave the sheet marked open with nothing drawn and the focus
+ * trap still holding. A gesture that lands after this is dropped by the store's own
+ * `drawingWorkspace` guard, so closing early loses nothing but a stale answer.
+ */
+function resetDelegate() {
   delegateOpen.value = false
   delegateTaskId.value = ''
-  delegateAttempt.value = null
   delegateBody.value = ''
+  delegateRevision.value = ''
   delegateBodyState.value = 'idle'
+  delegateMode.value = 'delegate'
   // Invalidate any read still in flight, so its answer cannot fill a later dialog.
   delegateSeq++
   board.clearError()
 }
 
 /**
- * Confirm the delegation, or act on the attempt that already holds the task.
+ * Confirm the sheet, which is four gestures rather than one.
  *
- * A task with a live attempt is not delegated twice — the server would return the
- * existing attempt without starting anything, which is right but reads as a
- * no-op — so the same button offers the gestures instead, and says which one it
- * will do. Detach is on the card too, because releasing a task is a decision
- * about the card rather than about starting work on it.
+ * `open_chat` starts nothing and opens the chat the attempt is running in — the
+ * honest action for a live attempt, which cannot be resumed and must not be
+ * delegated a second time. `resume` continues that attempt's own chat under its own
+ * id. `retry` is a fresh delegation, and `delegate` is the first hand-over; both
+ * present the revision the description on screen was read at.
  */
 async function submitDelegate() {
   const task = delegateTask.value
   if (delegateBusy.value || !task) return
-  const revision = board.revisionOf(task.id)
-  if (!revision) {
-    closeDelegate()
+  // The revision the *previewed description* was read at, not the row's newest: a
+  // body that moved while the sheet was open must be refused, not delegated.
+  const revision = delegateRevision.value
+  if (delegateMode.value !== 'open_chat' && !revision) {
+    resetDelegate()
     return
   }
   board.clearError()
   delegateBusy.value = true
   let outcome: TaskAttempt | null = null
-  if (task.live_attempt_id) {
+  if (delegateMode.value === 'open_chat') {
+    delegateBusy.value = false
+    openAttemptChat(task)
+    resetDelegate()
+    return
+  }
+  if (delegateMode.value === 'resume' && task.attempt_id) {
     outcome = await board.attemptAction(
-      workspace.value, task.id, task.live_attempt_id, 'resume',
+      workspace.value, task.id, task.attempt_id, 'resume',
     )
   } else {
     outcome = await board.delegate(workspace.value, task.id, revision)
   }
   delegateBusy.value = false
   if (!outcome) return
-  delegateAttempt.value = outcome
   board.clearError()
   // The turn is running; the badge now says so, and there is nothing left to
   // confirm. Closing is the honest end of the gesture.
@@ -510,8 +592,13 @@ async function submitDelegate() {
 }
 
 /** One lifecycle gesture on a card's attempt. */
-async function actOnAttempt(task: Task, action: 'stop' | 'detach') {
-  const attemptId = task.live_attempt_id
+async function actOnAttempt(
+  task: Task,
+  action: 'stop' | 'detach' | 'resume' | 'retry',
+) {
+  // A settled attempt still linked to its task is acted on through its own id,
+  // which is the one `live_attempt_id` deliberately does not carry.
+  const attemptId = task.live_attempt_id || task.attempt_id
   if (!attemptId || busyTaskId.value === task.id) return
   board.clearError()
   busyTaskId.value = task.id
@@ -645,10 +732,26 @@ const detailAttemptState = computed(() => detailTask.value?.attempt_state ?? '')
 const detailAttemptBadgeClass = computed(() =>
   detailTask.value ? attemptBadgeClass(detailTask.value) : 'badge--muted',
 )
-/** A live attempt is continued, not delegated again: the button names which. */
-const detailDelegateLabel = computed(() =>
-  detailTask.value?.live_attempt_id ? 'Continue this chat' : 'Delegate',
-)
+/**
+ * What the editor's delegation control offers, from the row it is editing.
+ *
+ * The same four cases the preview's confirm reads, named the same way: a live
+ * attempt is read in its chat rather than continued (the server refuses `resume`
+ * for every live state), a settled attempt is continued or retried, and a task
+ * nobody delegated is handed over.
+ */
+const detailDelegateLabel = computed(() => {
+  const task = detailTask.value
+  if (!task) return 'Delegate'
+  switch (delegateModeFor(task)) {
+    case 'open_chat':
+      return 'Open chat'
+    case 'resume':
+      return 'Resume'
+    default:
+      return 'Delegate'
+  }
+})
 
 /**
  * Read the description the list never carries, then fill the dialog from it.
@@ -1046,13 +1149,35 @@ const today = localDateKey()
                       @click.stop="openAttemptChat(task)"
                     >Chat</button>
                     <button
-                      v-if="!task.live_attempt_id"
+                      v-if="!task.live_attempt_id && !isSettledLinked(task)"
                       type="button"
                       class="btn-chip task-chip"
                       :disabled="busyTaskId === task.id"
                       :aria-label="`Delegate ${task.title} to the agent`"
                       @click.stop="openDelegate(task)"
                     >Delegate</button>
+                    <!-- A settled attempt still holds the task, and it is the only
+                         case the server will resume. Resume continues that chat
+                         under the same attempt; Retry mints a new one. They are
+                         two labelled gestures rather than one button, because
+                         "Delegate" here would start a second attempt and quietly
+                         abandon the one that failed. -->
+                    <template v-else-if="isSettledLinked(task)">
+                      <button
+                        type="button"
+                        class="btn-chip task-chip"
+                        :disabled="busyTaskId === task.id"
+                        :aria-label="`Resume the attempt on ${task.title} in its own chat`"
+                        @click.stop="actOnAttempt(task, 'resume')"
+                      >Resume</button>
+                      <button
+                        type="button"
+                        class="btn-chip task-chip"
+                        :disabled="busyTaskId === task.id"
+                        :aria-label="`Start a new attempt at ${task.title}`"
+                        @click.stop="actOnAttempt(task, 'retry')"
+                      >Retry</button>
+                    </template>
                     <template v-else>
                       <button
                         type="button"
@@ -1223,9 +1348,17 @@ const today = localDateKey()
             </details>
           </template>
 
-          <p v-if="delegatePreview?.already_live" class="hint">
-            This task already has a running attempt. Confirming continues that chat
-            rather than starting a second turn.
+          <p v-if="delegateMode === 'open_chat'" class="hint">
+            This task's attempt is still live. Confirming opens the chat it is
+            running in rather than starting a second turn.
+          </p>
+          <p v-else-if="delegateMode === 'resume'" class="hint">
+            This task's last attempt ended. Resuming continues that attempt in its
+            own chat; starting a new attempt leaves it as history.
+          </p>
+          <p v-else-if="delegateMode === 'retry'" class="hint">
+            This starts a new attempt in a new chat. The previous attempt stays as
+            history and is not re-run.
           </p>
 
           <p v-if="board.error" class="task-action-error" role="alert">
@@ -1240,6 +1373,16 @@ const today = localDateKey()
               :disabled="delegateBusy"
               @click="submitDelegate"
             >{{ delegateButtonLabel }}</button>
+            <!-- Both ways out of a settled attempt, named separately: one
+                 continues the chat that failed, the other starts a different one.
+                 A single control here would have to be one of the two. -->
+            <button
+              v-if="delegateMode === 'resume'"
+              type="button"
+              class="btn-small"
+              :disabled="delegateBusy"
+              @click="openDelegate(delegateTask!, 'retry')"
+            >Start a new attempt</button>
             <button type="button" class="btn-small" :disabled="delegateBusy" @click="closeDelegate">
               Cancel
             </button>
@@ -1267,7 +1410,8 @@ const today = localDateKey()
              completion — and a delegation is not that: it starts a turn elsewhere
              and the card's own fields are untouched. It is also the gesture that
              needs a *preview*, and a sheet is where a preview belongs. One place
-             carries the whole lifecycle: delegate, continue, stop, detach. -->
+             carries the whole lifecycle: delegate, open the chat, resume, retry,
+             stop, detach. -->
         <div class="task-delegate">
           <p v-if="detailAttemptState" class="task-delegate-state">
             <span class="badge" :class="detailAttemptBadgeClass">{{
@@ -1291,6 +1435,11 @@ const today = localDateKey()
               :disabled="detailSaving || board.saving || !detailTask"
               @click="openDelegate(detailTask!)"
             >{{ detailDelegateLabel }}</button>
+            <!-- Deliberately not a second Resume/Retry pair here: this control
+                 already opens the preview in the mode the row calls for, and the
+                 preview names both ways out. A duplicate that opened a sheet and a
+                 duplicate that acted immediately would be the same label on two
+                 different gestures. The card's own foot carries the direct pair. -->
             <button
               v-if="detailTask?.live_attempt_id"
               type="button"

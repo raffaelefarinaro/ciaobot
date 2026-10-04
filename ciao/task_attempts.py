@@ -269,6 +269,21 @@ def _check_state(state: str) -> str:
     return state
 
 
+def _check_attempt_id(attempt_id: str) -> str:
+    """A validated attempt id (32 lowercase hex), before it is used as a key.
+
+    Same rule the decoder applies to a stored row's key, and for the same reason:
+    an attempt id that is not one of these would be a key nothing else in this
+    module can match, so the record it names could never be read back.
+    """
+    if not isinstance(attempt_id, str) or not _ATTEMPT_ID_RE.fullmatch(attempt_id):
+        raise TaskAttemptError(
+            "invalid_attempt",
+            f"not an attempt id (32 lowercase hex): {attempt_id!r}",
+        )
+    return attempt_id
+
+
 def _detail(value: str) -> str:
     """An outcome note, trimmed to :data:`MAX_DETAIL_CHARS`."""
     return str(value or "").strip()[:MAX_DETAIL_CHARS]
@@ -691,6 +706,7 @@ class TaskAttemptStore:
         task_id: str,
         task_revision: str,
         chat_id: str,
+        attempt_id: str = "",
         state: str = "running",
     ) -> AttemptStart:
         """Begin one attempt, or hand back the live one this task already has.
@@ -706,11 +722,20 @@ class TaskAttemptStore:
         reconstructing history. ``chat_id`` is required: an attempt with no chat
         has nothing a ``resume`` could continue, so storing one would manufacture
         a record that no gesture can act on.
+
+        ``attempt_id`` is the caller's own id, and it exists because the chat is
+        created *before* this store writes: the provenance stamp on the chat names
+        the attempt, so the id has to exist first rather than be learned here and
+        patched in afterwards. Minted with :func:`uuid.uuid4` when the caller names
+        none, which is the only caller that can. A call that loses the one-live-
+        attempt race mints nothing and its proposed id is discarded with the rest
+        of its write, exactly as the chat it made is left empty.
         """
         clean_task = _check_task_id(task_id)
         clean_revision = _check_revision(task_revision)
         clean_chat = _check_chat_id(chat_id)
         clean_state = _check_state(state)
+        minted_id = _check_attempt_id(attempt_id) if str(attempt_id or "").strip() else uuid.uuid4().hex
         now = self._now()
         # Captured inside the mutation rather than inferred afterwards: "did this
         # call mint the attempt" is a fact about the write, and inferring it from
@@ -728,7 +753,7 @@ class TaskAttemptStore:
             if live is not None:
                 return records
             attempt = TaskAttempt(
-                attempt_id=uuid.uuid4().hex,
+                attempt_id=minted_id,
                 task_id=clean_task,
                 task_revision=clean_revision,
                 chat_id=clean_chat,

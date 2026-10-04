@@ -950,6 +950,10 @@ class CiaoControlPlane:
         # Optional: the BackgroundRunner backing the background_run_* tools.
         # Unset on legacy-only instances and in most tests.
         self.background = background_runner
+        #: The turn watchers this process is waiting on, held strongly.
+        #: See :meth:`_schedule_watch` — the loop keeps only a weak reference, and
+        #: a collected watcher would never settle its attempt.
+        self._watchers: set[asyncio.Task[None]] = set()
 
     def _defer_until_chat_idle(
         self,
@@ -2523,6 +2527,12 @@ class CiaoControlPlane:
         is refused by the store (``completion_requires_user``) exactly as it is
         through ``task_update``; the gesture exists so the surface has a verb for
         "mark this done" rather than a free-text status the caller must know.
+
+        A ``complete`` on a task whose attempt has a **result waiting for review**
+        is the one gesture that reaches past the linkage, and only for a user: see
+        :meth:`workspace_task_complete_reviewed`. A turn still in flight is not
+        reviewable, so a live ``running``/``needs_you`` attempt is still refused
+        here and has to be stopped or detached first.
         """
         verb = str(action or "").strip()
         if verb == "move":
@@ -2545,10 +2555,82 @@ class CiaoControlPlane:
             changes["project_id"] = project_id
         if due is not None:
             changes["due"] = due
+        if verb == "complete":
+            reviewed = self.workspace_task_complete_reviewed(
+                workspace,
+                task_id,
+                expected_revision=expected_revision,
+                changes=changes,
+                actor=actor,
+            )
+            if reviewed is not None:
+                return reviewed
         return self.workspace_task_update(
             workspace,
             task_id,
             expected_revision=expected_revision,
+            changes=changes,
+            actor=actor,
+        )
+
+    def workspace_task_complete_reviewed(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        changes: dict[str, object],
+        actor: Actor,
+    ) -> dict[str, Any] | None:
+        """Close a task whose delegated turn has a result waiting, in one gesture.
+
+        ``None`` means "this task is not in that situation" and the caller should
+        complete it the ordinary way; a refusal raises, exactly as the ordinary
+        completion does.
+
+        The case is the review. A ``ready_for_review`` attempt is still *live*, so
+        the store refuses a completion over a live linkage — correct in general,
+        since a turn still writing is not one to close behind its back. But
+        ``ready_for_review`` is not "still writing": the turn ended, the result is
+        there, and the user is looking at it and deciding. Forcing that decision
+        through Detach first is a gesture that reads as "discard the attempt": it
+        settles the reviewed attempt as ``stopped`` and loses how the turn ended.
+        So approving Done *is* the release — a revision-checked ``unlink`` and then
+        the completion, one gesture — and the attempt stays in history as the
+        ``ready_for_review`` it was.
+
+        Only for ``actor="user"``: the store's own
+        ``completion_requires_user`` rule stands, and an agent approving a review
+        is refused there rather than reaching this at all. And only for a
+        *review-ready* attempt: ``running`` and ``needs_you`` have no result yet, so
+        those still need Stop or Detach first.
+
+        ``changes`` is the caller's own edit dict, passed through rather than
+        rebuilt: a completion that also carried a project or a due date must still
+        apply it, and this path is not a second, narrower completion.
+        """
+        if actor != "user":
+            return None
+        clean = str(task_id or "").strip()
+        document: TaskDocument = self._task_call(
+            workspace, lambda store: store.get(clean)
+        )
+        linked = document.record.attempt_id
+        if linked is None:
+            return None
+        attempt: TaskAttempt = self._attempt_call(
+            workspace, lambda store: store.get(linked)
+        )
+        if attempt.state != "ready_for_review":
+            return None
+        released = self._task_call(
+            workspace,
+            lambda store: store.unlink(clean, expected_revision=expected_revision),
+        )
+        return self.workspace_task_update(
+            workspace,
+            clean,
+            expected_revision=released.revision,
             changes=changes,
             actor=actor,
         )
@@ -2698,7 +2780,8 @@ class CiaoControlPlane:
 
         1. Read the task at ``expected_revision``. A stale one is a
            ``task_revision_conflict`` with nothing started — the plan was made
-           against a description that has moved.
+           against a description that has moved — and a task in *Done* is an
+           ``invalid_task``, because delegating it would reopen it.
         2. If a live attempt already exists, hand it back and **stop**. No chat is
            created and no turn is started: a second delegation of a delegated task
            is a race, not a request for two turns.
@@ -2722,6 +2805,12 @@ class CiaoControlPlane:
         ``actor`` is recorded for the caller, not used to weaken anything: the
         store refuses an agent completion either way, and this method never
         completes a task.
+
+        A ``done`` task is refused with ``invalid_task``. ``link`` hands the task
+        over as ``in_progress``/``agent``, so delegating a finished one would
+        silently reopen it — and an agent delegating over MCP could undo a
+        completion the user made by hand. Reopening is the user's own move out of
+        *Done*, never a side effect of asking for work.
         """
         clean = str(task_id or "").strip()
         document = self._task_call(workspace, lambda store: store.get(clean))
@@ -2731,6 +2820,11 @@ class CiaoControlPlane:
                 "task_revision_conflict",
                 "the task changed since this delegation was planned; nothing was started",
                 retryable=True,
+            )
+        if document.record.status == "done":
+            raise ControlPlaneError(
+                "invalid_task",
+                "a task in Done cannot be delegated: move it out of Done first.",
             )
         existing = self._attempt_live(workspace, clean)
         if existing is not None:
@@ -2761,13 +2855,13 @@ class CiaoControlPlane:
             relative_path=document.relative_path,
             body=document.body,
         )
-        attempt_id = ""
+        attempt_id = uuid.uuid4().hex
         try:
             chat = self.pcm.create_chat(
                 project,
                 title=record.title,
                 helper=task_delegation_helper(
-                    task_id=record.id, task_revision=revision, attempt_id="0" * 32
+                    task_id=record.id, task_revision=revision, attempt_id=attempt_id
                 ),
             )
         except Exception as exc:  # noqa: BLE001 — a refusal is an outcome, not a crash
@@ -2782,6 +2876,7 @@ class CiaoControlPlane:
                 task_id=record.id,
                 task_revision=revision,
                 chat_id=chat.chat_id,
+                attempt_id=attempt_id,
                 state="running",
             ),
         )
@@ -2802,24 +2897,12 @@ class CiaoControlPlane:
                     attempt.task_revision != document.revision
                 ),
             }
-        # The stamp names the attempt id, which does not exist until `start` has
-        # run, so the chat is created with the linkage it does have and the exact
-        # provenance is written immediately after. One ordinary update, and a
-        # refusal is logged rather than raised: a chat with the task id and
-        # revision on it is still findable by the board.
-        try:
-            self.pcm.update_chat(
-                chat.chat_id,
-                helper=task_delegation_helper(
-                    task_id=record.id, task_revision=revision, attempt_id=attempt.attempt_id
-                ),
-            )
-        except Exception:  # noqa: BLE001 — a partial stamp beats none
-            logger.exception(
-                "delegation: could not stamp attempt %s on chat %s",
-                attempt.attempt_id,
-                chat.chat_id,
-            )
+        # The chat's provenance was stamped at creation with the attempt id minted
+        # above, so it names the attempt that ended up owning it — there is no
+        # second write to restamp it, and `ProjectChatManager.update_chat` has no
+        # `helper` parameter to restamp it with. The stamp is exact or the chat
+        # creation failed, and the store's `start` records the same id or answers
+        # with the attempt that already owns the task (leaving this chat empty).
         try:
             linked = self._task_call(
                 workspace,
@@ -2963,20 +3046,30 @@ class CiaoControlPlane:
                 workspace, attempt_id, "no running loop to watch the turn"
             )
             return
-        loop.create_task(
+        watcher = loop.create_task(
             self._await_turn(workspace, attempt_id, task_id, chat_id, stream),
             name=f"task-attempt-{attempt_id[:8]}",
         )
+        # A strong reference, as the asyncio docs advise: the loop only keeps a
+        # weak one, and a watcher that is garbage-collected mid-flight would drop
+        # the coroutine that settles the attempt — leaving a turn that finished
+        # recorded as `running`. The set is pruned on completion, so it holds the
+        # watcher a turn is actually waiting on rather than every turn this process
+        # ever delegated.
+        self._watchers.add(watcher)
+        watcher.add_done_callback(self._watchers.discard)
 
     async def _await_turn(
         self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
     ) -> None:
         """Consume the turn's stream and settle the attempt once it ends."""
         result: dict[str, Any] = {}
+        seen_result = False
         try:
             async for event in stream.subscribe():
                 if event.get("type") == "result":
                     result = dict(event)
+                    seen_result = True
         except asyncio.CancelledError:
             # Shutdown. Left `running`, which the next process reads as
             # `interrupted`: the turn's fate is genuinely unknown and a
@@ -2985,6 +3078,17 @@ class CiaoControlPlane:
         except Exception:  # noqa: BLE001 — an unknown outcome is `interrupted`
             logger.exception("delegation: the turn for attempt %s failed to stream", attempt_id)
             self._settle_interrupted(workspace, attempt_id, "the turn's outcome is unknown")
+            return
+        if not seen_result:
+            # The stream ended without a result event. Whatever the turn did — a
+            # provider drop, a cancel the manager swallowed, a subscription that
+            # closed early — this engine never saw an answer, so there is nothing
+            # to review. `ready_for_review` here would put an empty result in front
+            # of the user as a finished one, which is the one reading that cannot
+            # be recovered from by looking at the chat.
+            self._settle_interrupted(
+                workspace, attempt_id, "the turn ended without a result"
+            )
             return
         self._settle_from_result(workspace, attempt_id, task_id, chat_id, stream, result)
 
@@ -2997,7 +3101,16 @@ class CiaoControlPlane:
         stream: Any,
         result: Mapping[str, Any],
     ) -> None:
-        """Write the attempt's end state from the turn's own result event."""
+        """Write the attempt's end state from the turn's own result event.
+
+        A watcher can outlive the attempt it watches. The user can detach the task,
+        stop the turn, or retry it while the provider is still winding down, and
+        the stream this coroutine is reading ends afterwards either way — so every
+        write here is conditional on this attempt still being the one that holds
+        the task. A watcher that settled a task another attempt now owns would
+        flag somebody else's work for review, and one that settled a detached task
+        would put a badge on a card nobody delegated any more.
+        """
         try:
             stopped = bool(result.get("stopped"))
             errored = bool(result.get("is_error"))
@@ -3018,7 +3131,7 @@ class CiaoControlPlane:
         else:
             state, detail = "ready_for_review", ""
         try:
-            self._attempt_call(
+            settled = self._attempt_call(
                 workspace,
                 lambda store: store.finish(attempt_id, state, detail=detail),
             )
@@ -3028,25 +3141,49 @@ class CiaoControlPlane:
                 attempt_id,
                 state,
             )
+            return
         # A finished turn puts the task in front of the user for review, which is
-        # `review_state: ready` — a badge, not a column, and only ever for an
-        # agent-assigned task in progress, which is what `link` wrote.
-        if state in ("ready_for_review", "needs_you"):
-            self._mark_review_ready(workspace, task_id, attempt_id)
+        # `review_state: ready` — a badge, not a column. Only for a turn that
+        # actually produced something to review: a `needs_you` attempt has no
+        # result yet, so "review" on it would ask the user to review nothing.
+        if settled.state != "ready_for_review":
+            return
+        self._mark_review_ready(workspace, task_id, attempt_id)
 
     def _mark_review_ready(self, workspace: str, task_id: str, attempt_id: str) -> None:
-        """Flag the task's result as waiting to be reviewed.
+        """Flag the task's result as waiting to be reviewed, and rebind the attempt.
+
+        Two refusals this method is built around, and neither is cosmetic:
+
+        * **The task must still belong to this attempt.** ``review_state`` is on
+          the task record, so a watcher whose attempt has been detached or
+          superseded would be writing to a card it no longer owns — flagging the
+          new attempt's work for review, or a task nobody delegated any more.
+        * **The badge write moves the task's revision, and the attempt has to
+          follow it.** ``changed_since_delegated`` compares the revision the
+          attempt was handed against the record now, so a review flag the watcher
+          wrote itself would otherwise make *every* finished turn read "changed
+          since delegated" — which is a warning that must mean the user edited the
+          task under the agent, and there is no edit here.
 
         Best effort by design: a write that fails here must not turn a finished
         turn into an error, and the attempt's own state already says the result is
-        waiting. The badge is a convenience the board draws from the task record;
-        the truth is the attempt. A task the user edited out from under the turn
-        is simply not flagged — the store refuses the edit shape and the log says
-        why, rather than the watcher's failure becoming the user's error.
+        waiting. A task the user edited out from under the turn is simply not
+        flagged — the store refuses the edit shape and the log says why, rather
+        than the watcher's failure becoming the user's error.
         """
         try:
             document = self._task_call(workspace, lambda store: store.get(task_id))
-            self._task_call(
+            if document.record.attempt_id != attempt_id:
+                logger.info(
+                    "delegation: task %s is linked to %s now, so attempt %s does not "
+                    "flag it for review",
+                    task_id,
+                    document.record.attempt_id or "nothing",
+                    attempt_id,
+                )
+                return
+            flagged = self._task_call(
                 workspace,
                 lambda store: store.update(
                     task_id,
@@ -3059,6 +3196,18 @@ class CiaoControlPlane:
             logger.exception(
                 "delegation: could not flag task %s for review after attempt %s",
                 task_id,
+                attempt_id,
+            )
+            return
+        try:
+            self._attempt_call(
+                workspace,
+                lambda store: store.bind_revision(attempt_id, flagged.revision),
+            )
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: could not rebind attempt %s to the revision its review "
+                "flag left behind",
                 attempt_id,
             )
 
@@ -3078,21 +3227,30 @@ class CiaoControlPlane:
             "attempts": [attempt.to_dict() for attempt in history],
         }
 
-    def workspace_task_attempt_action(
+    async def workspace_task_attempt_action(
         self,
         workspace: str,
         attempt_id: str,
         action: str,
         *,
+        task_id: str = "",
         actor: Actor = "user",
     ) -> dict[str, Any]:
         """One lifecycle gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
 
+        ``task_id`` is the route's own path segment, and it is checked rather than
+        ignored: the attempt id is 32 hex of the user's own, so a URL naming task A
+        with task B's attempt would otherwise stop B's turn. A mismatch is
+        ``task_attempt_not_found`` — the same answer as an id nobody has, because
+        from this URL there is no such attempt.
+
         - ``stop`` ends the running turn. ``pcm.stop_chat`` is the manager's own
-          Stop; the attempt settles ``stopped`` and the task keeps its linkage, so
-          completion and reassignment stay refused until the user detaches. A Stop
-          is not undoable, which is why this whole operation is annotated
-          ``_DESTRUCTIVE`` on the agent surface.
+          Stop, and it is ``async``, so it is awaited: an un-awaited call would
+          return a coroutine nobody runs, the provider turn would keep going, and
+          the attempt would be recorded ``stopped`` over a turn still writing. The
+          task keeps its linkage, so completion and reassignment stay refused until
+          the user detaches. A Stop is not undoable, which is why this whole
+          operation is annotated ``_DESTRUCTIVE`` on the agent surface.
         - ``resume`` continues the *same* chat with the *same* attempt: the
           attempt is recorded ``running`` before the turn, exactly as a delegation
           is, so a crash in this window is ``interrupted`` again rather than a
@@ -3104,23 +3262,37 @@ class CiaoControlPlane:
           difference the pair exists to make — ``resume`` continues one chat,
           ``retry`` starts another attempt, and neither re-runs the first.
         - ``detach`` releases the task: the turn is stopped if it is running, the
-          linkage is cleared, and the attempt settles ``stopped``. The attempt
-          stays in history; only the task stops belonging to it.
+          linkage is cleared, and a live attempt with nothing finished settles
+          ``stopped``. An attempt that *has* finished — a ``ready_for_review``
+          result — keeps the state it finished as: the release is about the task
+          no longer belonging to it, not about how the turn ended, and rewriting
+          the review the user is looking at to ``stopped`` would lose it. The
+          attempt stays in history either way.
 
-        ``actor`` is the caller, and nothing here completes a task: ``detach`` is
-        what makes completion possible again, and only the user can take it.
+        ``actor`` is the caller, and nothing here completes a task: the user's own
+        completion (see :meth:`workspace_task_complete_reviewed`) is what that
+        gesture makes possible, and only a user can take it.
         """
         verb = str(action or "").strip()
         clean = str(attempt_id or "").strip()
         attempt = self._attempt_call(workspace, lambda store: store.get(clean))
+        named_task = str(task_id or "").strip()
+        if named_task and attempt.task_id != named_task:
+            # The two ids disagree, so this URL names no attempt: answered like a
+            # nonexistent one rather than acting on the attempt the caller named
+            # under somebody else's card.
+            raise ControlPlaneError(
+                "task_attempt_not_found",
+                f"no delegation attempt {clean} on task {named_task}",
+            )
         if verb == "stop":
-            return self._attempt_stop(workspace, attempt, actor=actor)
+            return await self._attempt_stop(workspace, attempt, actor=actor)
         if verb == "resume":
             return self._attempt_resume(workspace, attempt, actor=actor)
         if verb == "retry":
             return self._attempt_retry(workspace, attempt, actor=actor)
         if verb == "detach":
-            return self._attempt_detach(workspace, attempt, actor=actor)
+            return await self._attempt_detach(workspace, attempt, actor=actor)
         raise ControlPlaneError(
             "invalid_action", "action must be stop, resume, retry, or detach."
         )
@@ -3137,7 +3309,29 @@ class CiaoControlPlane:
         )
         return document
 
-    def _attempt_stop(
+    async def _stop_turn(self, chat_id: str) -> None:
+        """Stop one chat's turn, awaiting the manager's own Stop, or noting its absence.
+
+        ``ProjectChatManager.stop_chat`` is ``async``: it waits for the provider to
+        acknowledge the interrupt before force-closing, and that wait is the whole
+        of what makes a Stop a Stop. Called without awaiting it, the coroutine is
+        never run and the turn keeps running while the attempt is recorded
+        ``stopped`` over it.
+
+        A manager with no ``stop_chat`` is not a refusal: the attempt still settles,
+        and the turn's own end settles it again. Losing the manager would be the
+        wrong trade for the record, so this is logged rather than raised.
+        """
+        stop = getattr(self.pcm, "stop_chat", None)
+        if not callable(stop):
+            logger.warning("delegation: the chat manager cannot stop chat %s", chat_id)
+            return
+        try:
+            await stop(chat_id)
+        except Exception:  # noqa: BLE001 — a failed stop is not a failed gesture
+            logger.exception("delegation: could not stop the turn in chat %s", chat_id)
+
+    async def _attempt_stop(
         self, workspace: str, attempt: TaskAttempt, *, actor: Actor
     ) -> dict[str, Any]:
         """Stop the running turn and settle the attempt ``stopped``."""
@@ -3147,17 +3341,21 @@ class CiaoControlPlane:
                 f"attempt {attempt.attempt_id} is already {attempt.state!r}; there is "
                 "nothing running to stop.",
             )
+        document = self._attempt_task(workspace, attempt)
         if attempt.state == "running":
-            stop = getattr(self.pcm, "stop_chat", None)
-            if callable(stop):
-                stop(attempt.chat_id)
+            await self._stop_turn(attempt.chat_id)
         settled = self._attempt_call(
             workspace,
             lambda store: store.finish(
                 attempt.attempt_id, "stopped", detail=f"stopped by the {actor}"
             ),
         )
-        return _attempt_payload(settled)
+        # The task comes back with the attempt, as it does for detach and resume.
+        # A Stop leaves the linkage in place but still moves the record (the attempt
+        # is settled), and the board draws the badge, Stop and Detach from that
+        # record — so a reply without it would leave a card reading "Running" over
+        # a turn the user just ended until they reloaded by hand.
+        return _attempt_payload(settled, self._task_with_attempt(workspace, document))
 
     def _attempt_resume(
         self, workspace: str, attempt: TaskAttempt, *, actor: Actor
@@ -3230,16 +3428,28 @@ class CiaoControlPlane:
         )
         return {**outcome, "retried": True}
 
-    def _attempt_detach(
+    async def _attempt_detach(
         self, workspace: str, attempt: TaskAttempt, *, actor: Actor
     ) -> dict[str, Any]:
-        """Release the task from the attempt, stopping the turn first if needed."""
+        """Release the task from the attempt, stopping the turn first if needed.
+
+        A finished attempt is left exactly as it finished. ``ready_for_review`` is
+        the review the user is looking at, and rewriting it to ``stopped`` — as
+        this used to, because ``ready_for_review`` is a live state — would throw
+        away the one record saying how that turn ended, because the user released
+        the card rather than because the turn failed. A settled attempt was never
+        rewritten either: it does not hold the task, so there is nothing to stop
+        and nothing to say.
+        """
         document = self._attempt_task(workspace, attempt)
-        if attempt.state in LIVE_STATES:
-            if attempt.state == "running":
-                stop = getattr(self.pcm, "stop_chat", None)
-                if callable(stop):
-                    stop(attempt.chat_id)
+        if attempt.state == "running":
+            await self._stop_turn(attempt.chat_id)
+        # Only a live state is rewritten, and `ready_for_review` is not one of the
+        # states a detach may overwrite: it is the review the user is looking at.
+        # `running` and `needs_you` have nothing finished to lose, so a detach
+        # settles them; a result that already arrived is left as the record of how
+        # the turn ended.
+        if attempt.state in ("running", "needs_you"):
             self._attempt_call(
                 workspace,
                 lambda store: store.finish(
@@ -3284,12 +3494,18 @@ class CiaoControlPlane:
             )
         )
 
-    def task_attempt_action(
+    async def task_attempt_action(
         self, principal: AgentPrincipal, attempt_id: str, action: str
     ) -> dict[str, Any]:
-        """Stop, resume, retry or detach one delegation attempt in this workspace."""
+        """Stop, resume, retry or detach one delegation attempt in this workspace.
+
+        ``async`` because ``stop`` and ``detach`` stop a real turn, and the chat
+        manager's own Stop is a coroutine — awaiting it is the difference between
+        ending a turn and dropping an un-run coroutine. ``_invoke`` awaits an
+        awaitable result, so the envelope is unchanged for every caller.
+        """
         return _ok(
-            self.workspace_task_attempt_action(
+            await self.workspace_task_attempt_action(
                 self._workspace(principal), attempt_id, action, actor="agent"
             )
         )

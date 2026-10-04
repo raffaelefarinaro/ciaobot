@@ -16,6 +16,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import TaskBoardView from '../TaskBoardView.vue'
 import { useProjectStore } from '../../stores/projects'
+import { useTaskBoardStore } from '../../stores/taskBoard'
 import type { Task, TaskRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -1011,6 +1012,7 @@ describe('TaskBoardView', () => {
   // `tests/test_task_delegation.py` and cannot be decided from a DOM at all.
 
   const LIVE_ID = 'a'.repeat(32)
+  const SETTLED_ID = 'd'.repeat(32)
 
   /** A card with a live attempt: in progress, for the agent, linked to a chat. */
   function liveTask(overrides: Partial<Task> = {}): Task {
@@ -1023,6 +1025,25 @@ describe('TaskBoardView', () => {
       attempt_id: LIVE_ID,
       attempt_state: 'running',
       live_attempt_id: LIVE_ID,
+      revision: NEXT_REVISION,
+      ...overrides,
+    })
+  }
+
+  /**
+   * A card whose attempt settled and is still linked: the only resumable case, and
+   * the one `live_attempt_id` deliberately does not name.
+   */
+  function settledTask(overrides: Partial<Task> = {}): Task {
+    return task({
+      id: 'broke',
+      title: 'Broke halfway',
+      status: 'in_progress',
+      assignee: 'agent',
+      chat_id: 'chat-7',
+      attempt_id: SETTLED_ID,
+      attempt_state: 'interrupted',
+      live_attempt_id: '',
       revision: NEXT_REVISION,
       ...overrides,
     })
@@ -1075,13 +1096,18 @@ describe('TaskBoardView', () => {
    *
    * The description read is wired here rather than after the mount, because
    * `openDelegate` reads it as soon as the card is clicked: a mock set afterwards
-   * would answer the wrong question.
+   * would answer the wrong question. The read answers at `bodyRevision`, which
+   * defaults to the row's own — the case where the board and the sheet agree.
    */
-  async function mountWithBody(rows: TaskRow[], body = 'Wire the store.') {
+  async function mountWithBody(
+    rows: Task[],
+    body = 'Wire the store.',
+    bodyRevision?: string,
+  ) {
     apiGet.mockImplementation((url: string) => Promise.resolve(
       url.includes('/api/tasks?')
         ? { workspace: 'personal', tasks: rows }
-        : { workspace: 'personal', task: { ...rows[0], body } },
+        : { workspace: 'personal', task: { ...rows[0], body, revision: bodyRevision ?? rows[0]!.revision } },
     ))
     const wrapper = mount(TaskBoardView, { attachTo: document.body })
     await flushPromises()
@@ -1092,6 +1118,18 @@ describe('TaskBoardView', () => {
   /** The card chip with this exact label. */
   function chip(wrapper: ReturnType<typeof mount>, title: string, label: string) {
     return card(wrapper, title).findAll('.task-chip').find((c) => c.text() === label)!
+  }
+
+  /**
+   * The delegation preview sheet.
+   *
+   * Not just the first `.task-sheet`: the detail dialog is one too, and both can be
+   * open at once — the preview is opened *from* the editor. Found by its own
+   * heading, which is what distinguishes them. Returns `undefined` once closed, so
+   * a test can ask whether it is still there.
+   */
+  function delegateSheet(wrapper: ReturnType<typeof mount>) {
+    return wrapper.findAll('.task-sheet').find((s) => s.find('#task-delegate-title').exists())
   }
 
   /** Open the delegation preview on a card. */
@@ -1229,41 +1267,166 @@ describe('TaskBoardView', () => {
       wrapper.unmount()
     })
 
-  it('continues the live attempt rather than starting a second turn', async () => {
-    const holder = liveTask({ attempt_state: 'ready_for_review' })
+  it('offers Resume and Retry separately for a settled attempt still linked',
+    async () => {
+      const wrapper = await mountWithBody([settledTask()])
+
+      // The only case the server will resume, and it had no control at all before:
+      // a plain "Delegate" here starts a *second* attempt in a new chat and
+      // abandons the one that failed. Resume and Retry are the two real answers,
+      // so they are two labelled controls rather than one that has to guess.
+      expect(card(wrapper, 'Broke halfway').findAll('.task-chip').map((c) => c.text()))
+        .toEqual(['Chat', 'Resume', 'Retry', 'Done'])
+
+      await chip(wrapper, 'Broke halfway', 'Resume').trigger('click')
+      await flushPromises()
+      expect(apiPost).toHaveBeenCalledWith(
+        `/api/tasks/broke/attempt/${SETTLED_ID}/resume`,
+        { workspace: 'personal' },
+      )
+
+      await chip(wrapper, 'Broke halfway', 'Retry').trigger('click')
+      await flushPromises()
+      expect(apiPost).toHaveBeenCalledWith(
+        `/api/tasks/broke/attempt/${SETTLED_ID}/retry`,
+        { workspace: 'personal' },
+      )
+      wrapper.unmount()
+    })
+
+  it('offers a live attempt its chat to read, never a resume', async () => {
+    // Every live state — `running`, `needs_you`, `ready_for_review` — is refused by
+    // the server's `resume`, so "Continue this chat" was a control that always
+    // errored. What a live attempt needs is to be read where it is running.
+    for (const state of ['running', 'needs_you', 'ready_for_review'] as const) {
+      const wrapper = await mountWithBody([liveTask({ attempt_state: state })])
+      await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
+      await flushPromises()
+      await nextTick()
+
+      const controls = wrapper.findAll('.task-delegate-actions .btn-chip').map((c) => c.text())
+      expect(controls[0], state).toBe('Open chat')
+      expect(controls, state).not.toContain('Resume')
+      expect(controls, state).not.toContain('Retry')
+      expect(wrapper.findAll('.btn-chip').map((c) => c.text()), state)
+        .not.toContain('Continue this chat')
+      wrapper.unmount()
+    }
+  })
+
+  it('opens the live attempt chat from the editor rather than resuming it',
+    async () => {
+      const wrapper = await mountWithBody([liveTask()])
+      const switchChat = vi.fn()
+      useProjectStore().switchChat = switchChat
+
+      await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
+      await flushPromises()
+      await nextTick()
+      await wrapper.findAll('.btn-chip').find((c) => c.text() === 'Open chat')!
+        .trigger('click')
+      await flushPromises()
+      await nextTick()
+
+      // The preview explains why there is nothing to confirm, and nothing was sent.
+      expect(delegateSheet(wrapper)!.text()).toContain('still live')
+      expect(apiPost).not.toHaveBeenCalled()
+      await delegateSheet(wrapper)!.get('.btn-primary').trigger('click')
+      await flushPromises()
+      expect(switchChat).toHaveBeenCalledWith('chat-7')
+      // And it closed rather than sitting there with a spent confirmation.
+      expect(delegateSheet(wrapper)).toBeUndefined()
+      wrapper.unmount()
+    })
+
+  it('names both ways on a settled attempt in the preview', async () => {
     apiPost.mockResolvedValue({
       workspace: 'personal',
-      attempt: { ...delegateAnswer().attempt, attempt_id: LIVE_ID, chat_id: 'chat-7', state: 'running' },
+      attempt: { ...delegateAnswer().attempt, attempt_id: SETTLED_ID, chat_id: 'chat-7', state: 'running' },
       chat_id: 'chat-7',
-      task: { ...holder, body: '' },
       resumed: true,
     })
-    const wrapper = await mountWithBody([holder])
+    const wrapper = await mountWithBody([settledTask()])
 
-    // The card's own controls are the ones that change a card, and a delegation is
-    // not that; the lifecycle lives in the editor, which the card's title opens.
-    expect(
-      card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text()),
-    ).not.toContain('Delegate')
-    await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
+    await card(wrapper, 'Broke halfway').get('.task-open').trigger('click')
     await flushPromises()
     await nextTick()
-    const resume = wrapper.findAll('.btn-chip')
-      .find((c) => c.text() === 'Continue this chat')
-    expect(resume, 'no Continue control for a live attempt').toBeTruthy()
-    await resume!.trigger('click')
+    // The editor's control opens the preview in the mode the row calls for — the
+    // one place that names what will happen, and the one place that does it.
+    const control = wrapper.findAll('.task-delegate-actions .btn-chip')
+      .find((c) => c.text() === 'Resume')
+    expect(control, 'no Resume control for a settled attempt').toBeTruthy()
+    await control!.trigger('click')
     await flushPromises()
     await nextTick()
-    // The editor's control opens the preview, and the preview's confirm is what
-    // sends: one place names what will happen, one place does it.
-    expect(wrapper.get('.task-sheet').text()).toContain('already has a running attempt')
-    expect(wrapper.get('.task-sheet .btn-primary').text()).toBe('Continue this chat')
+
+    const sheet = delegateSheet(wrapper)!
+    // The confirm continues that attempt's own chat under its own id — no revision,
+    // because the gesture acts on an attempt rather than editing a record.
+    expect(sheet.get('.btn-primary').text()).toBe('Resume')
+    expect(sheet.text()).toContain('Resuming continues that attempt in its own chat')
+    // And the other way out is named in the same place, so neither has to be found.
+    expect(sheet.findAll('.btn-small').map((b) => b.text()))
+      .toEqual(['Start a new attempt', 'Cancel'])
+    await sheet.get('.btn-primary').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith(
+      `/api/tasks/broke/attempt/${SETTLED_ID}/resume`,
+      { workspace: 'personal' },
+    )
+    wrapper.unmount()
+  })
+
+  it('starts a new attempt from the preview as a separate labelled gesture',
+    async () => {
+      apiPost.mockResolvedValue(delegateAnswer())
+      const wrapper = await mountWithBody([settledTask()])
+
+      await card(wrapper, 'Broke halfway').get('.task-open').trigger('click')
+      await flushPromises()
+      await nextTick()
+      await wrapper.findAll('.task-delegate-actions .btn-chip')
+        .find((c) => c.text() === 'Resume')!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      await wrapper.findAll('.btn-small').find((b) => b.text() === 'Start a new attempt')!
+        .trigger('click')
+      await flushPromises()
+      await nextTick()
+
+      const sheet = delegateSheet(wrapper)!
+      expect(sheet.get('.btn-primary').text()).toBe('Start a new attempt')
+      expect(sheet.text()).toContain('The previous attempt stays as history')
+      await sheet.get('.btn-primary').trigger('click')
+      await flushPromises()
+      // A fresh delegation: a new attempt, not the old one continued.
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/tasks/broke/delegate',
+        { workspace: 'personal', expected_revision: NEXT_REVISION },
+      )
+      wrapper.unmount()
+    })
+
+  it('confirms at the revision the previewed description was read at', async () => {
+    // A reload, an adopted write, or another tab can put a newer revision on the row
+    // while the sheet is open. The user has read the body at the *old* one, so the
+    // confirm presents that — a body that moved on is a 409 the preview re-reads,
+    // not a turn launched from a description nobody saw.
+    apiPost.mockResolvedValue(delegateAnswer())
+    const wrapper = await mountWithBody([plainTask({ project_id: 'p1' })], 'The scope.', REVISION)
+
+    await openPreview(wrapper, 'Draft the runbook')
+    expect(wrapper.get('.task-sheet').text()).toContain('The scope.')
+    // The row moves on under the open sheet.
+    const store = useTaskBoardStore()
+    store.$patch({ rows: [plainTask({ project_id: 'p1', revision: THIRD_REVISION })] })
+
     await wrapper.get('.task-sheet .btn-primary').trigger('click')
     await flushPromises()
 
     expect(apiPost).toHaveBeenCalledWith(
-      `/api/tasks/doing/attempt/${LIVE_ID}/resume`,
-      { workspace: 'personal' },
+      '/api/tasks/fresh/delegate',
+      { workspace: 'personal', expected_revision: REVISION },
     )
     wrapper.unmount()
   })
@@ -1282,13 +1445,85 @@ describe('TaskBoardView', () => {
       `/api/tasks/doing/attempt/${LIVE_ID}/stop`,
       { workspace: 'personal' },
     )
+    wrapper.unmount()
 
-    await chip(wrapper, 'Wire the store', 'Detach').trigger('click')
+    // Detach is a gesture on a *live* attempt, so it is read on a card that still
+    // has one — a stopped attempt has nothing running to stop before releasing.
+    const releasing = await mountWithBody([liveTask()])
+    await chip(releasing, 'Wire the store', 'Detach').trigger('click')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith(
       `/api/tasks/doing/attempt/${LIVE_ID}/detach`,
       { workspace: 'personal' },
     )
+    releasing.unmount()
+  })
+
+  it('updates the card from the stop reply rather than leaving it running',
+    async () => {
+      // A Stop leaves the linkage in place but still moves the record, and the store
+      // adopts the row from the reply's `task`. A reply without it would leave the
+      // card reading "Running" over a turn the user has just ended — which is
+      // exactly what `actOnAttempt` used to leave behind, since it only reloaded
+      // on an error.
+      apiPost.mockResolvedValue({
+        workspace: 'personal',
+        attempt: { ...delegateAnswer().attempt, attempt_id: LIVE_ID, chat_id: 'chat-7', state: 'stopped', live: false },
+        chat_id: 'chat-7',
+        task: {
+          ...liveTask(),
+          attempt_state: 'stopped',
+          live_attempt_id: '',
+          revision: THIRD_REVISION,
+        },
+      })
+      const wrapper = await mountWithBody([liveTask()])
+
+      await chip(wrapper, 'Wire the store', 'Stop').trigger('click')
+      await flushPromises()
+
+      expect(card(wrapper, 'Wire the store').get('.badge').text()).toBe('Stopped')
+      expect(card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text()))
+        .toEqual(['Chat', 'Resume', 'Retry', 'Done'])
+      wrapper.unmount()
+    })
+
+  it('closes a review-ready card with Done, in one gesture', async () => {
+    // The review is the case the issue describes, and Done is the button for it.
+    // The service releases the linkage and completes together, so the card needs
+    // no Detach first — and the attempt stays as review-ready history.
+    const reviewed = liveTask({
+      attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+    })
+    apiPost.mockResolvedValue({
+      workspace: 'personal',
+      task: {
+        ...reviewed,
+        status: 'done',
+        chat_id: '',
+        attempt_id: '',
+        review_state: 'none',
+        attempt_state: 'ready_for_review',
+        live_attempt_id: '',
+        revision: NEXT_REVISION,
+      },
+    })
+    const wrapper = await mountWithBody([reviewed])
+
+    await chip(wrapper, 'Wire the store', 'Done').trigger('click')
+    await flushPromises()
+
+    // One request, the completion route — no attempt gesture in between.
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/doing/complete', {
+      workspace: 'personal',
+      expected_revision: THIRD_REVISION,
+    })
+    // And the card moved, which is the whole point of the gesture.
+    expect(
+      wrapper.findAll('.task-lane').find((l) => l.text().includes('Done'))!
+        .findAll('.task-card').map((c) => c.text()),
+    ).toEqual([expect.stringContaining('Wire the store')])
     wrapper.unmount()
   })
 

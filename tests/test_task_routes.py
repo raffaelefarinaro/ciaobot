@@ -132,7 +132,15 @@ class _Pcm:
     def get_active_stream(self, _chat_id: str):
         return None
 
-    def stop_chat(self, chat_id: str):
+    async def stop_chat(self, chat_id: str):
+        """The manager's Stop, which is `async` as the real one is.
+
+        The recording happens inside the coroutine, so `stopped` is empty unless the
+        caller awaited it — which is the assertion that matters at this boundary. An
+        un-awaited `stop_chat` builds a coroutine nobody runs, so the turn keeps going
+        while the attempt is recorded `stopped` over it, and a synchronous fake
+        cannot see that at all.
+        """
         self.stopped.append(chat_id)
         return True
 
@@ -622,19 +630,31 @@ def _delegate(
     return response
 
 
-async def _settle(pcm: _Pcm) -> None:
-    """End every fake turn and let the service's watchers write the outcome.
+def _settle(client: TestClient, cookies: dict[str, str], pcm: _Pcm, task_id: str) -> dict:
+    """End every fake turn and return the task row once the watcher has settled it.
 
     A test calls this only when it wants a *finished* turn. A test about a running
     one deliberately does not: the attempt's `running` state, the badge and the
     refusals that depend on a live linkage are all the state a delegation is in
     between a start and its end.
+
+    The watcher is a task on the **app's** event loop, which `TestClient` runs in
+    another thread — so the test's own `asyncio.sleep` would never drive it. Opening
+    the gates and then re-reading the row does: each request is submitted to that
+    loop, so the watcher is already scheduled ahead of the read that waits on it.
+    The read is repeated a bounded number of times rather than assumed, so a
+    refusal here is a real failure instead of a timing accident.
     """
     for stream in pcm.streams:
         stream.finish.set()
     for _ in range(50):
-        await asyncio.sleep(0)
-    pcm.streams.clear()
+        row = client.get(
+            f"/api/tasks/{task_id}?workspace=personal", cookies=cookies
+        ).json()["task"]
+        if row["attempt_state"] not in ("", "running"):
+            pcm.streams.clear()
+            return row
+    raise AssertionError(f"the turn for {task_id} never settled")
 
 
 async def test_delegation_launches_one_attended_chat_and_no_prompt_body(
@@ -808,7 +828,13 @@ async def test_the_attempt_gestures_are_reachable_and_needs_no_revision(
     )
     assert stopped.status_code == 200, stopped.text
     assert stopped.json()["attempt"]["state"] == "stopped"
+    # `stopped` is only appended from inside the coroutine, so this is the stop
+    # having been *awaited* and not merely built.
     assert pcm.stopped == ["chat-1"]
+    # The stop reply carries the task, so the board's row updates from one answer
+    # rather than reading "Running" over a turn that has ended.
+    assert stopped.json()["task"]["attempt_state"] == "stopped"
+    assert stopped.json()["task"]["live_attempt_id"] == ""
 
     detached = client.post(
         f"/api/tasks/{task['id']}/attempt/{attempt_id}/detach",
@@ -863,6 +889,113 @@ async def test_an_unknown_attempt_verb_or_id_is_refused(world) -> None:
     )
     assert unscoped.status_code == 400
     assert unscoped.json()["error"]["code"] == "workspace_required"
+
+
+def test_the_attempt_route_will_not_act_on_another_tasks_attempt(world) -> None:
+    """`task_id` is the route's own path segment, and it is checked.
+
+    An attempt id is 32 hex the user never sees, so a URL naming one task with
+    another's attempt id would otherwise stop a turn on a card nobody was looking
+    at. The mismatch is `task_attempt_not_found` — a 404 — because from that URL
+    there is no such attempt.
+    """
+    client, cookies, _config, _pcm = world
+    mine = _create(client, cookies, title="My task")
+    theirs = _create(client, cookies, title="Someone else's")
+    attempt_id = _delegate(client, cookies, mine, _pcm).json()["attempt"]["attempt_id"]
+
+    response = client.post(
+        f"/api/tasks/{theirs['id']}/attempt/{attempt_id}/stop",
+        json={"workspace": "personal"},
+        cookies=cookies,
+    )
+
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["code"] == "task_attempt_not_found"
+    # Nothing happened on either side: my attempt is still running.
+    assert (
+        client.get(f"/api/tasks/{mine['id']}?workspace=personal", cookies=cookies)
+        .json()["task"]["attempt_state"]
+        == "running"
+    )
+
+
+def test_a_done_task_is_refused_by_the_delegate_route(world) -> None:
+    """The refusal reaches the browser too, rather than reopening the card."""
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Shipped")
+    done = client.post(
+        f"/api/tasks/{task['id']}/complete",
+        json={"workspace": "personal", "expected_revision": task["revision"]},
+        cookies=cookies,
+    ).json()["task"]
+
+    response = client.post(
+        f"/api/tasks/{task['id']}/delegate",
+        json={"workspace": "personal", "expected_revision": done["revision"]},
+        cookies=cookies,
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task"
+    assert pcm.create_chat_calls == []
+    after = client.get(f"/api/tasks/{task['id']}?workspace=personal", cookies=cookies).json()
+    assert after["task"]["status"] == "done"
+
+
+def test_the_complete_route_approves_a_review_ready_result(world) -> None:
+    """The review, over HTTP, as one POST — the gesture the Done button makes.
+
+    The attempt is still *live* at this point, so this is the one case where
+    `complete` reaches past the linkage. Routing it through detach first would
+    settle the reviewed attempt as `stopped` and lose the result, so the route
+    releases and closes in one revision-checked gesture and the attempt stays as
+    `ready_for_review` history.
+    """
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Ready for review")
+    attempt_id = _delegate(client, cookies, task, pcm).json()["attempt"]["attempt_id"]
+    before = _settle(client, cookies, pcm, task["id"])
+    assert before["review_state"] == "ready"
+
+    done = client.post(
+        f"/api/tasks/{task['id']}/complete",
+        json={"workspace": "personal", "expected_revision": before["revision"]},
+        cookies=cookies,
+    )
+
+    assert done.status_code == 200, done.text
+    body = done.json()["task"]
+    assert body["status"] == "done"
+    assert body["chat_id"] is None
+    assert body["attempt_id"] is None
+    history = client.get(
+        f"/api/tasks/{task['id']}/attempts?workspace=personal", cookies=cookies
+    ).json()["attempts"]
+    assert [row["attempt_id"] for row in history] == [attempt_id]
+    assert [row["state"] for row in history] == ["ready_for_review"]
+
+
+def test_the_complete_route_still_refuses_a_turn_still_running(world) -> None:
+    """The narrowness is the point: a turn in flight has no result to approve."""
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Still running")
+    _delegate(client, cookies, task, pcm)
+    running = client.get(
+        f"/api/tasks/{task['id']}?workspace=personal", cookies=cookies
+    ).json()["task"]
+
+    refused = client.post(
+        f"/api/tasks/{task['id']}/complete",
+        json={"workspace": "personal", "expected_revision": running["revision"]},
+        cookies=cookies,
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"]["code"] == "task_invalid"
+    assert client.get(
+        f"/api/tasks/{task['id']}?workspace=personal", cookies=cookies
+    ).json()["task"]["status"] == "in_progress"
 
 
 async def test_the_attempt_history_reads_the_whole_story(world) -> None:

@@ -107,6 +107,38 @@ finished turn sets `review_state: ready` — a badge in *In progress* — and on
 the user's own completion action moves the card to `Done`. The store's
 `completion_requires_user` rule is unchanged by any of this.
 
+The review badge moves the task's revision, so the watcher rebinds the attempt to
+the revision that write left behind (`bind_revision`). Without that, *every*
+finished turn would read `changed_since_delegated`, which is a warning about the
+user editing a task under the agent and would then mean nothing.
+
+**Reviewing is one gesture.** `POST /api/tasks/{id}/complete` from the user's own
+session releases the linkage and closes the card when the task's attempt is
+`ready_for_review` — a revision-checked `unlink` and then the completion, so the
+attempt stays as `ready_for_review` history. Routing that through `detach` first
+would settle the reviewed attempt as `stopped` and lose the result. A task with a
+turn still in flight (`running`, `needs_you`) has no result to approve, so that
+completion is still refused and needs `stop` or `detach` first, as does an agent
+completion of any kind.
+
+`detach` never rewrites a finished attempt: it releases the task and leaves the
+state the turn actually ended in.
+
+### Known limitations
+
+- **Answering in the chat after `needs_you` does not move the attempt.** The
+  watcher settles the attempt when the turn it launched ends; an answer the user
+  types in that chat afterwards starts a *new* turn that nothing is watching, so
+  the attempt keeps reading `needs_you` indefinitely. The badge is honest about
+  the attempt it is — the turn it launched really did end waiting — but it does
+  not follow the conversation. Re-attaching a watcher when the chat's next stream
+  starts is the fix; it is tracked as a follow-up rather than done here.
+- **A pending permission card does not end the turn, so the attempt reads
+  `running`.** `needs_you` is derived from the chat's pending question or
+  permission *after* the stream ends, so while the card is actually up and the
+  user has not answered it, the badge still says Running. The Needs-you badge
+  appears once the turn has ended waiting, not while it waits.
+
 Four rules the store holds:
 
 - **One live attempt per task.** `start` takes the workspace lock across its
@@ -133,11 +165,33 @@ filed. `build_prompt` quotes the record's body inside a fixed
 `<task-board-task>` fence with the tag escaped inside the text, so a hand-edited
 body cannot close its own frame. `task_delegation_helper` stamps the chat with
 the task id, its revision and the attempt id, which is what makes the chat
-findable again after a reload or a restart.
+findable again after a reload or a restart. The attempt id is minted **before**
+the chat is created and passed to `start(..., attempt_id=...)`, so the stamp and
+the store can only ever name the same attempt — `update_chat` has no `helper`
+parameter, so a stamp written after the fact would raise and be swallowed.
 
 Linkage mutation is the one thing `ciao/task_board.py` delegates to this child:
 `chat_id`/`attempt_id` are refused as ordinary patch fields and get their own
 revision-checked `link()`/`unlink()` door instead.
+
+Delegating a task that is already in *Done* is refused with `invalid_task`.
+`link()` hands the task over as `in_progress`/`agent`, so delegating a finished
+one would reopen it — and an agent delegating over MCP could undo a completion
+the user made by hand. Moving the task out of *Done* is the user's own gesture.
+
+The watcher only writes to a task its own attempt still holds. It refuses to
+settle an attempt that has already settled (the store refuses the transition) and
+checks `task.attempt_id == attempt_id` before flagging a task for review, so a
+watcher left over from a detached or retried attempt cannot put a Review badge on
+a card another attempt now owns. A stream that ends without a `result` event
+settles `interrupted`, not `ready_for_review`: there is no answer to review, and
+an empty result dressed as a finished one is the one reading the user cannot
+recover from without opening the chat.
+
+The gesture routes (`stop`, `detach`) await `ProjectChatManager.stop_chat`, which
+is `async`. `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` checks `task_id`
+against the attempt and answers `task_attempt_not_found` on a mismatch, so an
+attempt id sent under another task's URL acts on nothing.
 
 ## API
 

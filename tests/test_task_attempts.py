@@ -113,6 +113,58 @@ def test_a_second_start_returns_the_same_attempt_and_mints_nothing(tmp_path: Pat
     assert store.get_live(TASK_ID) == first.attempt
 
 
+def test_a_caller_may_name_the_attempt_id_it_is_about_to_stamp(tmp_path: Path) -> None:
+    """The chat is created before this store writes, so the id has to exist first.
+
+    The provenance stamp on the chat names the attempt, and a stamp cannot be
+    patched in afterwards: the real `update_chat` has no `helper` parameter. So the
+    caller mints the id, hands it here, and stamps the same one on the chat. The
+    store still mints one itself when given none, which is every other caller.
+    """
+    store = _store(tmp_path)
+    chosen = "a" * 32
+
+    started = _start(store, attempt_id=chosen)
+
+    assert started.created is True
+    assert started.attempt.attempt_id == chosen
+    assert store.get(chosen) == started.attempt
+
+
+def test_a_named_attempt_id_that_is_not_an_id_is_refused(tmp_path: Path) -> None:
+    """Same rule the decoder applies to a stored row's key, for the same reason: an
+    id this module could not match would name a record nothing could read back."""
+    store = _store(tmp_path)
+
+    for bad in ("not-an-id", "A" * 32, "a" * 31, "../../etc/passwd"):
+        with pytest.raises(TaskAttemptError) as excinfo:
+            _start(store, attempt_id=bad)
+        assert excinfo.value.code == "invalid_attempt", bad
+
+    assert store.list_for_task(TASK_ID) == ()
+
+
+def test_a_start_that_loses_the_one_live_attempt_discards_its_own_id(
+    tmp_path: Path,
+) -> None:
+    """The proposed id is minted nothing when the task already has a live attempt.
+
+    The caller has by then created a chat stamped with it, and that chat is left
+    empty rather than given a turn — so the id it proposed must not land in the
+    document either, or the history would name an attempt that never ran.
+    """
+    store = _store(tmp_path)
+    first = _start(store)
+
+    second = _start(store, chat_id="chat-2", attempt_id="b" * 32)
+
+    assert second.created is False
+    assert second.attempt.attempt_id == first.attempt.attempt_id
+    assert [row.attempt_id for row in store.list_for_task(TASK_ID)] == [
+        first.attempt.attempt_id
+    ]
+
+
 def test_a_start_after_a_settled_attempt_is_a_new_attempt(tmp_path: Path) -> None:
     store = _store(tmp_path, clock=_Clock())
     first = _start(store)
