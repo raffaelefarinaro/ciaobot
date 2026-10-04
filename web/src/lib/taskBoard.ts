@@ -11,6 +11,7 @@ import { apiErrorMessage, errorPayload } from './errorMessage'
 import type {
   Task,
   TaskAttempt,
+  TaskAttemptOutcome,
   TaskAttemptState,
   TaskDetail,
   TaskInvalidRow,
@@ -99,8 +100,28 @@ export const TASK_ATTEMPT_LABELS: Record<string, string> = {
   stopped: 'Stopped',
 }
 
-export function taskAttemptLabel(state: string): string {
+/** What the agent's own report is called (#1064). */
+export const TASK_OUTCOME_LABELS: Record<string, string> = {
+  done: 'Agent says done',
+  blocked: 'Blocked',
+  needs_input: 'Needs input',
+}
+
+/**
+ * What an attempt is called on its badge: the engine's settled facts first, then
+ * the agent's own report, then the state.
+ *
+ * The same rule as `ciao/task_log.py::attempt_label`, so the badge and the log in
+ * the task file never disagree. A turn that crashed after saying "done" did not
+ * finish, and a turn that ended with no report is *Unfinished*, not for review.
+ */
+export function taskAttemptLabel(state: string, outcome = '', detail = ''): string {
   if (!state) return ''
+  if (state === 'failed' || state === 'interrupted' || state === 'stopped' || state === 'running') {
+    return TASK_ATTEMPT_LABELS[state]!
+  }
+  if (outcome && TASK_OUTCOME_LABELS[outcome]) return TASK_OUTCOME_LABELS[outcome]!
+  if (state === 'needs_you' && detail) return 'Unfinished'
   return TASK_ATTEMPT_LABELS[state] ?? state
 }
 
@@ -114,6 +135,10 @@ export function taskAttemptLabel(state: string): string {
  */
 export function isLiveAttemptState(state: string): boolean {
   return state === 'running' || state === 'needs_you' || state === 'ready_for_review'
+}
+
+function asOutcome(value: unknown): TaskAttemptOutcome | '' {
+  return value === 'done' || value === 'blocked' || value === 'needs_input' ? value : ''
 }
 
 function asAttemptState(value: unknown): TaskAttemptState | '' {
@@ -142,6 +167,9 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     // or a record the service answered without them — reads as "not delegated",
     // which is the honest reading of a field that was never set.
     attempt_state: asAttemptState(row.attempt_state),
+    attempt_outcome: asOutcome(row.attempt_outcome),
+    attempt_summary: asString(row.attempt_summary),
+    attempt_detail: asString(row.attempt_detail),
     live_attempt_id: asString(row.live_attempt_id),
     changed_since_delegated: row.changed_since_delegated === true,
   }
@@ -230,6 +258,9 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     revision: detail.revision,
     relative_path: detail.relative_path,
     attempt_state: detail.attempt_state,
+    attempt_outcome: detail.attempt_outcome,
+    attempt_summary: detail.attempt_summary,
+    attempt_detail: detail.attempt_detail,
     live_attempt_id: detail.live_attempt_id,
     changed_since_delegated: detail.changed_since_delegated,
   }
@@ -254,6 +285,8 @@ export function taskAttemptFrom(raw: unknown): TaskAttempt {
     updated_at: asString(row.updated_at),
     ended_at: asString(row.ended_at),
     detail: asString(row.detail),
+    outcome: asOutcome(row.outcome),
+    summary: asString(row.summary),
     // Both markers are carried rather than re-derived, and only trusted when the
     // server said so: a client that computed either from the state would be a
     // second definition free to disagree with the one every gesture depends on.
@@ -413,7 +446,7 @@ export function taskAttemptWhen(attempt: TaskAttempt): string {
  * is in the chat the row links.
  */
 export function taskAttemptSummary(attempt: TaskAttempt): string {
-  const state = taskAttemptLabel(attempt.state)
+  const state = taskAttemptLabel(attempt.state, attempt.outcome, attempt.detail)
   const when = taskAttemptWhen(attempt)
   const head = when ? `${state} · ${when}` : state
   return attempt.detail ? `${head} — ${attempt.detail}` : head
@@ -638,4 +671,64 @@ export function taskApiErrorMessage(error: unknown, fallback: string): string {
     if (typeof code === 'string' && code) return code
   }
   return apiErrorMessage(error, fallback)
+}
+// ── Links in a title ──────────────────────────────────────────────────────
+
+/** One run of a task title: plain text, or a link with a short label. */
+export interface TitleSegment {
+  text: string
+  href?: string
+}
+
+const TITLE_URL = /\bhttps?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?]/g
+
+/**
+ * A title split into text and links, so a URL pasted into a title opens.
+ *
+ * Only `http(s)` URLs, and the label drops the scheme, a leading `www.` and a
+ * trailing slash, then truncates: the card has room for the place a link points
+ * to, not for its query string. The full URL is the `href`.
+ */
+export function titleSegments(title: string): TitleSegment[] {
+  const out: TitleSegment[] = []
+  let last = 0
+  for (const match of title.matchAll(TITLE_URL)) {
+    const at = match.index ?? 0
+    if (at > last) out.push({ text: title.slice(last, at) })
+    out.push({ text: shortUrl(match[0]), href: match[0] })
+    last = at + match[0].length
+  }
+  if (last < title.length) out.push({ text: title.slice(last) })
+  return out
+}
+
+function shortUrl(url: string): string {
+  const bare = url.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '')
+  return bare.length > 42 ? `${bare.slice(0, 41)}…` : bare
+}
+
+// ── The engine's delegation log inside a body (#1064) ─────────────────────
+
+const TASK_LOG_SECTION = /\n*<!-- ciao:task-log -->[\s\S]*?<!-- \/ciao:task-log -->\n?/
+
+/**
+ * A task body split into the description the user writes and the delegation log
+ * the engine keeps at its end (`ciao/task_log.py`).
+ *
+ * The editor shows and edits the description alone — the log is the engine's,
+ * listed properly in the Agent section — and puts the log back on save with
+ * {@link joinTaskLog}, so an edit to the description never drops the record.
+ */
+export function splitTaskLog(body: string): { description: string; log: string } {
+  const match = TASK_LOG_SECTION.exec(body)
+  if (!match) return { description: body, log: '' }
+  const description = (body.slice(0, match.index) + body.slice(match.index + match[0].length)).trimEnd()
+  return { description: description ? `${description}\n` : '', log: match[0].trim() }
+}
+
+/** The body a save writes: the edited description with the engine's log after it. */
+export function joinTaskLog(description: string, log: string): string {
+  if (!log) return description
+  const head = description.trimEnd()
+  return head ? `${head}\n\n${log}\n` : `${log}\n`
 }

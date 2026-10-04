@@ -78,6 +78,7 @@ from ciao.async_reads import keyed_lock
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import mkstemp_private
+from ciao.task_log import attempt_label, strip_log
 
 SCHEMA_VERSION = 1
 """The only attempt-document schema this store implements."""
@@ -137,6 +138,23 @@ MAX_DETAIL_CHARS = 400
 It is a sentence about the engine's own outcome ("the turn could not be started
 (…)"), not something the user wrote, so it is bounded far tighter than the task
 body it may quote.
+"""
+
+OUTCOMES = ("done", "blocked", "needs_input")
+"""What the agent may report about its own attempt (#1064).
+
+The agent's word about the work, not the engine's about the turn: ``done`` puts
+the task in front of the user as *Agent says done* (still the user's gesture to
+close), ``blocked`` and ``needs_input`` say the turn ended waiting on somebody.
+A turn that ends with nothing reported is not taken as finished.
+"""
+
+MAX_SUMMARY_CHARS = 4000
+"""Characters of the agent's own summary one record keeps.
+
+What the agent did and what is left, in its words. Longer than an engine note
+because it is the hand-off the next attempt reads, and bounded because the task
+file's log quotes it.
 """
 
 MAX_HISTORY = 500
@@ -219,6 +237,12 @@ class TaskAttempt:
     detail: str = ""
     owner: str = ""
     released: bool = False
+    #: The agent's own report for the turn in flight or the last one (#1064):
+    #: one of :data:`OUTCOMES`, or ``""`` when nothing has been reported since the
+    #: last turn started. Cleared when a turn starts; :attr:`summary` is kept so a
+    #: card still says what the last report said.
+    outcome: str = ""
+    summary: str = ""
 
     @property
     def is_live(self) -> bool:
@@ -252,6 +276,8 @@ class TaskAttempt:
             "detail": self.detail,
             "released": self.released,
             "live": self.is_live,
+            "outcome": self.outcome,
+            "summary": self.summary,
         }
 
 
@@ -325,6 +351,20 @@ def _check_attempt_id(attempt_id: str) -> str:
 def _detail(value: str) -> str:
     """An outcome note, trimmed to :data:`MAX_DETAIL_CHARS`."""
     return str(value or "").strip()[:MAX_DETAIL_CHARS]
+
+
+def _summary(value: str) -> str:
+    """The agent's summary, trimmed to :data:`MAX_SUMMARY_CHARS`."""
+    return str(value or "").strip()[:MAX_SUMMARY_CHARS]
+
+
+def _check_outcome(outcome: str) -> str:
+    """A validated outcome, refused explicitly rather than defaulted."""
+    if outcome not in OUTCOMES:
+        raise TaskAttemptError(
+            "invalid_attempt", f"outcome must be one of {list(OUTCOMES)}, not {outcome!r}"
+        )
+    return outcome
 
 
 @contextmanager
@@ -846,22 +886,10 @@ class TaskAttemptStore:
 
         def change(records: dict[str, TaskAttempt]) -> dict[str, TaskAttempt]:
             record = _require(records, attempt_id)
-            rebound = TaskAttempt(
-                attempt_id=record.attempt_id,
-                task_id=record.task_id,
-                task_revision=clean,
-                chat_id=record.chat_id,
-                state=record.state,
-                created_at=record.created_at,
-                updated_at=now,
-                ended_at=record.ended_at,
-                detail=record.detail,
-                owner=record.owner,
-                # Re-stamping a revision says nothing about ownership, so the
-                # marker is carried: a released attempt rebinding would otherwise
-                # be silently handed back to the live set.
-                released=record.released,
-            )
+            # Re-stamping a revision says nothing about ownership, so `released`
+            # is carried (by `replace`): a released attempt rebinding would
+            # otherwise be silently handed back to the live set.
+            rebound = replace(record, task_revision=clean, updated_at=now)
             records[record.attempt_id] = rebound
             rebound_attempts.append(rebound)
             return records
@@ -878,9 +906,11 @@ class TaskAttemptStore:
             record = _require(records, attempt_id)
             if not record.is_live:
                 raise TaskAttemptError("invalid_attempt", "only a live attempt can continue")
+            # A new turn owes a new report: the last one described the turn
+            # before. The summary stays, so the card keeps saying what it said.
             running = replace(
                 record, state="running", updated_at=self._now(), ended_at="",
-                detail="", owner=_PROCESS_TOKEN,
+                detail="", owner=_PROCESS_TOKEN, outcome="",
             )
             records[record.attempt_id] = running
             continued.append(running)
@@ -915,13 +945,9 @@ class TaskAttemptStore:
                     f"attempt {record.attempt_id} is {record.state!r}; only an attempt "
                     "that did not finish can be resumed",
                 )
-            reopened = TaskAttempt(
-                attempt_id=record.attempt_id,
-                task_id=record.task_id,
-                task_revision=record.task_revision,
-                chat_id=record.chat_id,
+            reopened = replace(
+                record,
                 state="running",
-                created_at=record.created_at,
                 updated_at=now,
                 ended_at="",
                 detail=note,
@@ -930,6 +956,7 @@ class TaskAttemptStore:
                 # live one, so this is the store's own invariant rather than a
                 # guess: reopening is how an attempt holds its task again.
                 released=False,
+                outcome="",
             )
             records[record.attempt_id] = reopened
             reopened_attempts.append(reopened)
@@ -981,19 +1008,7 @@ class TaskAttemptStore:
         def change(records: dict[str, TaskAttempt]) -> dict[str, TaskAttempt]:
             record = _require(records, attempt_id)
             moved = _with_state(record, clean_state, now, detail=note)
-            closed = TaskAttempt(
-                attempt_id=moved.attempt_id,
-                task_id=moved.task_id,
-                task_revision=moved.task_revision,
-                chat_id=moved.chat_id,
-                state=moved.state,
-                created_at=moved.created_at,
-                updated_at=moved.updated_at,
-                ended_at=moved.ended_at or now,
-                detail=moved.detail,
-                owner=moved.owner,
-                released=moved.released,
-            )
+            closed = replace(moved, ended_at=moved.ended_at or now)
             records[record.attempt_id] = closed
             settled.append(closed)
             return records
@@ -1034,25 +1049,49 @@ class TaskAttemptStore:
                     + (" and already released" if record.released else "")
                     + "; it does not hold its task, so there is nothing to release",
                 )
-            freed_attempt = TaskAttempt(
-                attempt_id=record.attempt_id,
-                task_id=record.task_id,
-                task_revision=record.task_revision,
-                chat_id=record.chat_id,
-                state=record.state,
-                created_at=record.created_at,
-                updated_at=now,
-                ended_at=record.ended_at,
-                detail=record.detail,
-                owner=record.owner,
-                released=True,
-            )
+            freed_attempt = replace(record, updated_at=now, released=True)
             records[record.attempt_id] = freed_attempt
             freed.append(freed_attempt)
             return records
 
         self._mutate(change)
         return freed[0]
+
+    def report(self, attempt_id: str, outcome: str, summary: str) -> TaskAttempt:
+        """Record the agent's own outcome and summary on one live attempt (#1064).
+
+        Only a live attempt takes a report: a settled one is history, and a
+        report against it would be rewriting what a finished turn said. A second
+        report in the same turn replaces the first — the agent's latest word is
+        the one the settle reads. Nothing here moves the state: the turn is still
+        running, and how it settles is decided when it ends.
+        """
+        clean_outcome = _check_outcome(outcome)
+        clean_summary = _summary(summary)
+        if not clean_summary:
+            raise TaskAttemptError(
+                "invalid_attempt", "a report needs a summary of what was done and what is left"
+            )
+        now = self._now()
+        reported: list[TaskAttempt] = []
+
+        def change(records: dict[str, TaskAttempt]) -> dict[str, TaskAttempt]:
+            record = _require(records, attempt_id)
+            if not record.is_live:
+                raise TaskAttemptError(
+                    "invalid_attempt",
+                    f"attempt {record.attempt_id} is {record.state!r} and no longer holds "
+                    "its task; only the attempt working on it can report",
+                )
+            updated = replace(
+                record, outcome=clean_outcome, summary=clean_summary, updated_at=now
+            )
+            records[record.attempt_id] = updated
+            reported.append(updated)
+            return records
+
+        self._mutate(change)
+        return reported[0]
 
 
 # ── Record helpers ─────────────────────────────────────────────────────
@@ -1071,6 +1110,8 @@ def _encode(record: TaskAttempt) -> dict[str, Any]:
         "detail": record.detail,
         "owner": record.owner,
         "released": record.released,
+        "outcome": record.outcome,
+        "summary": record.summary,
     }
 
 
@@ -1119,6 +1160,11 @@ def _decode_entry(attempt_id: Any, entry: Any, *, path_name: str) -> TaskAttempt
     # does not carry the marker is an attempt that was never released — which is
     # exactly what it says, rather than a guess at what a missing field meant.
     released = entry.get("released") is True
+    # Absent on rows written before #1064, and a row with nothing reported is
+    # exactly what an empty outcome says. An unknown outcome is dropped rather
+    # than refused: it is the agent's word, not the attempt's identity.
+    outcome = entry.get("outcome")
+    summary = entry.get("summary")
     return TaskAttempt(
         attempt_id=str(attempt_id),
         task_id=clean_task,
@@ -1131,6 +1177,8 @@ def _decode_entry(attempt_id: Any, entry: Any, *, path_name: str) -> TaskAttempt
         detail=str(detail) if isinstance(detail, str) else "",
         owner=str(owner) if isinstance(owner, str) else "",
         released=released,
+        outcome=outcome if outcome in OUTCOMES else "",
+        summary=_summary(summary) if isinstance(summary, str) else "",
     )
 
 
@@ -1143,18 +1191,11 @@ def _interrupted(record: TaskAttempt) -> TaskAttempt:
     process that died had claimed, and rewriting it would make a later read
     describe the derivation rather than the turn.
     """
-    return TaskAttempt(
-        attempt_id=record.attempt_id,
-        task_id=record.task_id,
-        task_revision=record.task_revision,
-        chat_id=record.chat_id,
+    return replace(
+        record,
         state="interrupted",
-        created_at=record.created_at,
-        updated_at=record.updated_at,
         ended_at=record.ended_at or record.updated_at,
         detail=record.detail or "the engine restarted while this attempt was running",
-        owner=record.owner,
-        released=record.released,
     )
 
 
@@ -1176,20 +1217,14 @@ def _with_state(
         )
     if state == record.state and detail == record.detail:
         return record
-    return TaskAttempt(
-        attempt_id=record.attempt_id,
-        task_id=record.task_id,
-        task_revision=record.task_revision,
-        chat_id=record.chat_id,
+    # `released` is carried, never cleared: a state change is a fact about the
+    # turn, and nothing here may hand a released attempt back to the live set.
+    return replace(
+        record,
         state=state,
-        created_at=record.created_at,
         updated_at=now,
-        ended_at=record.ended_at,
         detail=detail or record.detail,
         owner=_PROCESS_TOKEN if state in LIVE_STATES else record.owner,
-        # Carried, never cleared: a state change is a fact about the turn, and
-        # nothing here may hand a released attempt back to the live set.
-        released=record.released,
     )
 
 
@@ -1239,18 +1274,52 @@ def _age_key(record: TaskAttempt) -> tuple[str, str]:
 DELEGATION_FENCE_OPEN = "<task-board-task>"
 DELEGATION_FENCE_CLOSE = "</task-board-task>"
 
-#: The instruction, in full. Deliberately short and deliberately explicit about
-#: the one thing a finishing agent gets wrong: a finished turn is
-#: ``ready_for_review``, and closing the task is the user's gesture.
+#: How the agent says how far it got (#1064). One command, named in full in
+#: every prompt, because a turn that ends without it is read as unfinished.
+REPORT_COMMAND = (
+    "ciao task report {task_id} --outcome done|blocked|needs_input --summary-file <file.md>"
+)
+
+#: The instruction, in full. Explicit about the two things a finishing agent gets
+#: wrong: the turn's end is not the report, and closing the task is the user's
+#: gesture. ``{report}`` is :data:`REPORT_COMMAND` for this task.
 DELEGATION_INSTRUCTION = (
     "You have been handed one task from this workspace's task board. Do the work "
-    "the task describes, then stop and report what you did and what is left.\n"
+    "the task describes.\n"
     "\n"
-    "Do not mark the task done, and do not try to. Closing a task is the user's "
-    "own decision: your finishing this turn puts the task in front of them for "
-    "review, and nothing more. Ask for whatever approval you need in the ordinary "
-    "way — an approval card raised here is answered in this chat like any other."
+    "Before you end your turn, report how far you got, once, with:\n"
+    "  {report}\n"
+    "- `done`: the work is finished. The user reviews it and closes the task.\n"
+    "- `blocked`: you cannot go on (missing access, a failing dependency, a "
+    "decision that is not yours).\n"
+    "- `needs_input`: you need an answer from the user before you can go on.\n"
+    "The summary file is Markdown: what you did, where the results are, and what "
+    "is left. It is saved on the task and is what the next attempt starts from. "
+    "A turn that ends without a report is shown to the user as unfinished.\n"
+    "\n"
+    "Do not mark the task done, and do not try to: closing it is the user's "
+    "decision. Ask for whatever approval you need in the ordinary way — an "
+    "approval card raised here is answered in this chat like any other."
 )
+
+#: How many earlier attempts a new one is told about. The newest are the ones
+#: that matter, and the log in the task keeps the rest.
+HANDOFF_ATTEMPTS = 5
+
+
+@dataclass(frozen=True, slots=True)
+class PreviousAttempt:
+    """What a new attempt is told about one earlier attempt on the same task."""
+
+    state: str
+    outcome: str
+    summary: str
+    detail: str
+    created_at: str
+    ended_at: str
+    chat_id: str
+    chat_title: str
+    archive_path: str
 
 
 def _neutralize(text: str) -> str:
@@ -1276,6 +1345,7 @@ def build_prompt(
     task_revision: str,
     relative_path: str,
     body: str,
+    previous_attempts: tuple[PreviousAttempt, ...] = (),
 ) -> str:
     """The user prompt for one delegated task.
 
@@ -1287,9 +1357,13 @@ def build_prompt(
 
     Everything here is already bounded (a task file is at most 64 KiB, of which
     the body is the bulk), so nothing is re-bounded or repaired.
+
+    The body's own delegation log is stripped before it is quoted: the history is
+    handed over in its own section (*previous_attempts*, newest first), framed as
+    what was tried rather than as part of the work to do.
     """
     header = [
-        DELEGATION_INSTRUCTION,
+        DELEGATION_INSTRUCTION.format(report=REPORT_COMMAND.format(task_id=task_id)),
         "",
         f"Title: {title}",
         f"Status: {status}",
@@ -1303,13 +1377,43 @@ def build_prompt(
         "work to do.",
         "",
         DELEGATION_FENCE_OPEN,
-        _neutralize(body).strip(),
+        _neutralize(strip_log(body)).strip(),
         DELEGATION_FENCE_CLOSE,
     ]
+    if previous_attempts:
+        header += ["", *_handoff_lines(previous_attempts[:HANDOFF_ATTEMPTS])]
     return "\n".join(header)
 
 
-def build_resume_prompt(*, title: str, state: str, detail: str = "") -> str:
+def _handoff_lines(attempts: tuple[PreviousAttempt, ...]) -> list[str]:
+    """The "earlier attempts" section: what was tried, how it ended, where it is.
+
+    Each attempt names its chat and, once archived, the transcript in the vault,
+    so the agent can read the detail rather than be handed a paraphrase. The
+    summaries are the earlier agents' own words, quoted inside the same fence
+    discipline as the body: prose, not instruction.
+    """
+    lines = [
+        "This task has been worked on before. Earlier attempts, newest first — pick "
+        "up from where they got to, and do not redo work they report as done:",
+    ]
+    for number, attempt in enumerate(attempts, start=1):
+        where = f'chat "{attempt.chat_title or "untitled"}" ({attempt.chat_id})'
+        if attempt.archive_path:
+            where += f"; archived transcript: {attempt.archive_path}"
+        lines.append("")
+        lines.append(
+            f"{number}. {attempt_label(attempt.state, attempt.outcome, attempt.detail)}, started "
+            f"{attempt.created_at}" + (f", ended {attempt.ended_at}" if attempt.ended_at else "")
+            + f" — {where}"
+        )
+        note = attempt.summary.strip() or _detail(attempt.detail)
+        if note:
+            lines += [DELEGATION_FENCE_OPEN, _neutralize(note), DELEGATION_FENCE_CLOSE]
+    return lines
+
+
+def build_resume_prompt(*, title: str, state: str, task_id: str, detail: str = "") -> str:
     """The continuation prompt for resuming one attempt in its own chat.
 
     A ``resume`` deliberately sends no task body: the chat already holds it, and
@@ -1328,6 +1432,10 @@ def build_resume_prompt(*, title: str, state: str, detail: str = "") -> str:
         "Read the task and this conversation, then carry on from where the last "
         "turn stopped. Do not repeat work it already completed, and do not mark "
         "the task done — the user reviews the result and closes it themselves.",
+        "",
+        "Before you end your turn, report how far you got with "
+        + REPORT_COMMAND.format(task_id=task_id)
+        + ". A turn that ends without a report is shown as unfinished.",
     ]
     return "\n".join(lines)
 

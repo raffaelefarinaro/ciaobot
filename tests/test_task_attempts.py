@@ -37,6 +37,7 @@ import pytest
 from ciao.task_attempts import (
     LIVE_STATES,
     MAX_ATTEMPTS_PER_TASK,
+    PreviousAttempt,
     RESUMABLE_STATES,
     SETTLED_STATES,
     TaskAttempt,
@@ -618,6 +619,7 @@ def test_the_store_holds_no_board_and_never_completes_a_task(tmp_path: Path) -> 
         "update_state",
         "finish",
         "release",
+        "report",
     }
 
 
@@ -735,6 +737,7 @@ def test_a_resume_prompt_names_the_state_and_never_re_quotes_the_task(tmp_path: 
     prompt = build_resume_prompt(
         title="Draft the migration runbook",
         state="interrupted",
+        task_id="a" * 32,
         detail="the engine restarted",
     )
     assert "Draft the migration runbook" in prompt
@@ -785,3 +788,88 @@ def test_the_payload_carries_everything_a_badge_draws(tmp_path: Path) -> None:
 
     settled = store.finish(attempt.attempt_id, "stopped").to_dict()
     assert settled["live"] is False
+
+
+# ── The agent's own report (#1064) ──────────────────────────────────────
+
+
+def test_a_live_attempt_takes_the_agents_report_and_keeps_it_across_reads(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    reported = store.report(attempt.attempt_id, "blocked", "  Need the API key.  ")
+    assert (reported.outcome, reported.summary) == ("blocked", "Need the API key.")
+    assert reported.state == "running"  # a report never settles the turn
+    reread = _store(tmp_path).get(attempt.attempt_id)
+    assert (reread.outcome, reread.summary) == ("blocked", "Need the API key.")
+    assert reread.to_dict()["outcome"] == "blocked"
+    # The latest word wins.
+    assert store.report(attempt.attempt_id, "done", "Shipped.").outcome == "done"
+
+
+def test_a_report_needs_a_known_outcome_a_summary_and_a_live_attempt(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    with pytest.raises(TaskAttemptError, match="outcome must be one of"):
+        store.report(attempt.attempt_id, "finished", "x")
+    with pytest.raises(TaskAttemptError, match="needs a summary"):
+        store.report(attempt.attempt_id, "done", "   ")
+    store.finish(attempt.attempt_id, "failed", detail="boom")
+    with pytest.raises(TaskAttemptError, match="no longer holds"):
+        store.report(attempt.attempt_id, "done", "x")
+
+
+def test_a_new_turn_owes_a_new_report_but_keeps_the_last_summary(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    store.report(attempt.attempt_id, "needs_input", "Which region?")
+    store.finish(attempt.attempt_id, "needs_you")
+    continued = store.continue_turn(attempt.attempt_id)
+    assert continued.outcome == ""
+    assert continued.summary == "Which region?"
+    # Every other transition carries both fields rather than dropping them.
+    store.report(attempt.attempt_id, "done", "All set.")
+    rebound = store.bind_revision(attempt.attempt_id, OTHER_REVISION)
+    assert (rebound.outcome, rebound.summary) == ("done", "All set.")
+    settled = store.finish(attempt.attempt_id, "ready_for_review")
+    assert settled.outcome == "done"
+    assert store.release(attempt.attempt_id).summary == "All set."
+
+
+def test_a_row_written_before_reports_existed_reads_as_nothing_reported(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    document = json.loads(store.path.read_text(encoding="utf-8"))
+    for key in ("outcome", "summary"):
+        document["attempts"][attempt.attempt_id].pop(key)
+    store.path.write_text(json.dumps(document), encoding="utf-8")
+    reread = store.get(attempt.attempt_id)
+    assert (reread.outcome, reread.summary) == ("", "")
+
+
+def test_the_prompt_asks_for_a_report_strips_the_log_and_hands_over_earlier_attempts() -> None:
+    body = (
+        "Do the thing.\n\n<!-- ciao:task-log -->\n## Delegation log\n\n"
+        "- old line <!-- attempt:" + "e" * 32 + " -->\n<!-- /ciao:task-log -->\n"
+    )
+    earlier = PreviousAttempt(
+        state="needs_you", outcome="blocked", summary="Got halfway; need the key.",
+        detail="", created_at="2026-10-01T09:00:00+00:00", ended_at="2026-10-01T09:30:00+00:00",
+        chat_id="chat-9", chat_title="First try", archive_path="memory-vault/x/chat.md",
+    )
+    prompt = build_prompt(
+        title="T", status="backlog", due="", project_id="", task_id=TASK_ID,
+        task_revision=REVISION, relative_path="Workspace/Tasks/t.md", body=body,
+        previous_attempts=(earlier,),
+    )
+    assert f"ciao task report {TASK_ID} --outcome done|blocked|needs_input" in prompt
+    assert "old line" not in prompt
+    assert "Do the thing." in prompt
+    assert "Earlier attempts" in prompt
+    assert "Blocked" in prompt and "Got halfway; need the key." in prompt
+    assert "memory-vault/x/chat.md" in prompt and "chat-9" in prompt
+    # No history, no section.
+    plain = build_prompt(
+        title="T", status="backlog", due="", project_id="", task_id=TASK_ID,
+        task_revision=REVISION, relative_path="x", body="b",
+    )
+    assert "Earlier attempts" not in plain

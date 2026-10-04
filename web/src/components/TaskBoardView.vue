@@ -63,14 +63,16 @@ import {
   openTaskCount,
   readableTasks,
   statusCounts,
-  taskAssigneeLabel,
   taskAttemptLabel,
-  taskAttemptSummary,
+  taskAttemptWhen,
   taskLanes,
   taskReconcileBadgeClass,
   taskReconcileLabel,
   taskReconcileNotes,
   taskStatusLabel,
+  titleSegments,
+  splitTaskLog,
+  joinTaskLog,
   type TaskDueFilter,
   type TaskReconcileNote,
 } from '../lib/taskBoard'
@@ -182,7 +184,6 @@ onMounted(load)
 watch(workspace, () => {
   closeCreate()
   void closeDetail({ discard: true })
-  closeHistory()
   // Not `closeDelegate`: a gesture already in flight makes that one refuse, which
   // would leave the sheet marked open with nothing drawn and the focus trap still
   // holding. `resetDelegate` closes it either way, and the late answer is dropped
@@ -527,7 +528,8 @@ const delegateFocusActive = computed(
  */
 function delegateModeFor(task: Task): DelegateMode {
   if (task.live_attempt_id) return 'open_chat'
-  if (isSettledLinked(task)) return 'resume'
+  // An archived chat cannot be resumed; a new one is handed what it did.
+  if (isSettledLinked(task)) return chatArchived(task.chat_id) ? 'retry' : 'resume'
   return 'delegate'
 }
 
@@ -620,7 +622,8 @@ async function openDelegate(task: Task, mode?: DelegateMode) {
   // Only the prose the board actually read. A `null` answer means either a refused
   // read or a write that landed in between, and neither may put stale prose in the
   // sheet the user is about to confirm.
-  delegateBody.value = read ? read.body : ''
+  // The description alone: the history is handed over in its own section.
+  delegateBody.value = read ? splitTaskLog(read.body).description : ''
   delegateRevision.value = read ? read.revision : ''
 }
 
@@ -779,60 +782,44 @@ function heldAttempts(task: Task): TaskAttempt[] {
   return board.attemptsTaskId === task.id ? board.attempts : []
 }
 
-/**
- * How the current attempt ended, once History has been read for this card.
- *
- * Empty before that, which the card states as a pointer to the chat rather than
- * as a summary: the board holds no copy of the agent's answer, and paraphrasing
- * one it has not read is the one reading a reviewer cannot check.
- */
-function reviewEnded(task: Task): string {
-  const attempt = heldAttempts(task)[0]
-  return attempt ? taskAttemptSummary(attempt) : ''
-}
+// ── Attempts, inline in the editor ───────────────────────────────────────
+//
+// Every attempt at the open task, newest first, read when the editor opens on a
+// task that was ever delegated (#1064). Lazy for the reason it always was: a
+// board of fifty retried tasks must not read fifty histories nobody opened.
 
-// ── Attempt history ───────────────────────────────────────────────────────
-
-const historyOpen = ref(false)
-const historyEl = ref<HTMLElement | null>(null)
-const historyTaskId = ref('')
-
-/** The card History was opened on, or `null` once it is gone. */
-const historyTask = computed(
-  () => tasks.value.find((task) => task.id === historyTaskId.value) ?? null,
+const detailAttempts = computed<TaskAttempt[]>(() =>
+  detailTask.value ? heldAttempts(detailTask.value) : [],
 )
 
-/** Its attempts, live one first — a retry does not erase what it replaced. */
-const historyAttempts = computed<TaskAttempt[]>(() =>
-  historyTask.value ? heldAttempts(historyTask.value) : [],
-)
-
-useModalFocus(historyEl, historyOpen, { onEscape: () => closeHistory() })
-
-/**
- * Open one task's attempt history, reading it the first time.
- *
- * Lazy on purpose: the list rows carry the current attempt's badge and nothing
- * else, and a workspace where fifty tasks have been retried would otherwise read
- * fifty histories nobody looked at. The read is the proposal queue's History
- * pattern rather than a new timeline store — loaded once, invalidated by a
- * gesture, re-read on the next open.
- */
-async function openHistory(task: Task) {
-  board.clearError()
-  historyTaskId.value = task.id
-  historyOpen.value = true
-  await board.ensureAttempts(workspace.value, task.id)
-}
-
-function closeHistory() {
-  historyOpen.value = false
-  historyTaskId.value = ''
-}
-
-/** Re-read a history that failed, without closing the sheet. */
+/** Re-read the open task's attempts after a failed read. */
 function retryHistory() {
-  if (historyTaskId.value) void board.ensureAttempts(workspace.value, historyTaskId.value)
+  if (detailId.value) void board.ensureAttempts(workspace.value, detailId.value)
+}
+
+/**
+ * Whether this attempt's chat is archived.
+ *
+ * An archived chat still opens, read-only, from its vault transcript, but no
+ * turn can run in it: Resume is not offered, and the way on is a new chat that
+ * is handed what this one did.
+ */
+function chatArchived(chatId: string): boolean {
+  return Boolean(chatId) && projectStore.chats.some((chat) => chat.chat_id === chatId && chat.archived)
+}
+
+/** Whether a card title carries a link, which the reader must be able to reach. */
+function titleHasLinks(task: Task): boolean {
+  return titleSegments(task.title).some((segment) => segment.href)
+}
+
+/**
+ * What the card says under its badge: the agent's own summary, or, when it gave
+ * none, the engine's note on why the attempt stopped where it did.
+ */
+function attemptNote(task: Task): string {
+  if (!task.attempt_state) return ''
+  return task.attempt_summary || (task.attempt_state === 'running' ? '' : task.attempt_detail)
 }
 
 // ── Send update ───────────────────────────────────────────────────────────
@@ -992,7 +979,6 @@ const detailForm = reactive({
   title: '',
   status: 'backlog' as TaskStatus,
   due: '',
-  assignee: 'user' as 'user' | 'agent',
   project_id: '',
   body: '',
 })
@@ -1057,6 +1043,8 @@ const detailDelegateLabel = computed(() => {
       return 'Open chat'
     case 'resume':
       return 'Resume'
+    case 'retry':
+      return 'Continue in a new chat'
     default:
       return 'Delegate to agent'
   }
@@ -1081,7 +1069,7 @@ async function loadDescription(taskId: string) {
   if (seq !== descriptionSeq || !detailOpen.value || detailId.value !== taskId) return
   if (read) {
     descriptionState.value = 'idle'
-    detailForm.body = read.body
+    detailForm.body = splitTaskLog(read.body).description
     return
   }
   // No answer: either the read was refused, or the board was told something newer
@@ -1115,13 +1103,17 @@ function openDetail(task: Task) {
   detailForm.title = task.title
   detailForm.status = task.status
   detailForm.due = task.due
-  detailForm.assignee = task.assignee
   detailForm.project_id = ownProject(task.project_id)
-  detailForm.body = held?.body ?? ''
+  detailForm.body = held ? splitTaskLog(held.body).description : ''
   savedAt.value = 0
   editingBody.value = false
   detailOpen.value = true
   void loadDescription(task.id)
+  if (task.attempt_state) {
+    // Re-read on every open: a turn may have reported since the last read.
+    board.invalidateAttempts()
+    void board.ensureAttempts(workspace.value, task.id)
+  }
 }
 
 /**
@@ -1211,7 +1203,6 @@ function detailChanges(task: Task): TaskChanges {
   if (title !== task.title) changes.title = title
   const due = detailForm.due || null
   if ((due ?? '') !== (task.due || '')) changes.due = due
-  if (detailForm.assignee !== task.assignee) changes.assignee = detailForm.assignee
   const project = detailForm.project_id || null
   if ((project ?? '') !== ownProject(task.project_id)) changes.project_id = project
   return changes
@@ -1252,13 +1243,21 @@ function scheduleAutosave() {
   }, AUTOSAVE_DELAY_MS)
 }
 
+/**
+ * The body a save would write: the edited description with the engine's log,
+ * as the record holds it, put back after it.
+ */
+function composedBody(stored: string): string {
+  return joinTaskLog(detailForm.body, splitTaskLog(stored).log)
+}
+
 /** Whether the editor holds anything the record does not. */
 function hasUnsavedEdits(): boolean {
   const task = detailTask.value
   if (!task) return false
   if (Object.keys(detailChanges(task)).length) return true
   const held = heldDescription(task)
-  return Boolean(held) && held!.body !== detailForm.body
+  return Boolean(held) && held!.body !== composedBody(held!.body)
 }
 
 /**
@@ -1281,7 +1280,7 @@ watch(
   () => scheduleAutosave(),
 )
 watch(
-  () => [detailForm.due, detailForm.assignee, detailForm.project_id],
+  () => [detailForm.due, detailForm.project_id],
   () => { if (detailOpen.value) void flushDetail() },
 )
 onBeforeUnmount(() => {
@@ -1314,8 +1313,8 @@ async function saveDetail(): Promise<boolean> {
   // means no 409 stands in the way), an unread one is omitted rather than sent
   // empty, and an unedited one needs no write at all.
   const held = heldDescription(task)
-  const body = held && held.revision === revision && held.body !== detailForm.body
-    ? detailForm.body
+  const body = held && held.revision === revision && held.body !== composedBody(held.body)
+    ? composedBody(held.body)
     : undefined
   if (!Object.keys(changes).length && body === undefined) return true
   autosaving.value = true
@@ -1545,6 +1544,24 @@ const today = localDateKey()
                     <span v-else-if="task.status === 'done'" class="task-check task-check--done" aria-hidden="true">
                       <svg viewBox="0 0 16 16"><path d="M4 8.5l2.5 2.5L12 5.5" /></svg>
                     </span>
+                    <!-- The title as it reads, with any URL in it a real link. The
+                         button that opens the card is the keyboard's way in (and
+                         the drag's), kept out of sight: a link cannot live inside
+                         a button, and the card's own click opens it for a pointer. -->
+                    <p class="task-title" :aria-hidden="titleHasLinks(task) ? undefined : 'true'">
+                      <template v-for="(segment, i) in titleSegments(task.title)" :key="i">
+                        <a
+                          v-if="segment.href"
+                          :href="segment.href"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          :title="segment.href"
+                          draggable="false"
+                          @click.stop
+                        >{{ segment.text }}</a>
+                        <template v-else>{{ segment.text }}</template>
+                      </template>
+                    </p>
                     <button
                       type="button"
                       class="task-open"
@@ -1558,21 +1575,20 @@ const today = localDateKey()
                        most cards are, and saying so on each one buries the rest. The
                        mixed list has no column to say a card's status, so it does. -->
                   <p
-                    v-if="!lane.status || task.attempt_state || ownProject(task.project_id) || formatTaskDue(task.due) || task.assignee !== 'user'"
+                    v-if="!lane.status || task.attempt_state || ownProject(task.project_id) || formatTaskDue(task.due)"
                     class="task-meta"
                   >
                     <span
                       v-if="task.attempt_state"
                       class="badge"
                       :class="attemptBadgeClass(task)"
-                    >{{ taskAttemptLabel(task.attempt_state) }}</span>
+                    >{{ taskAttemptLabel(task.attempt_state, task.attempt_outcome, task.attempt_detail) }}</span>
                     <span v-if="task.review_state === 'ready'" class="badge badge--accent2">Review</span>
                     <span v-if="!lane.status" class="badge badge--muted task-status-badge">{{ taskStatusLabel(task.status) }}</span>
                     <span v-if="ownProject(task.project_id)" class="task-project">{{ projectName(task.project_id) }}</span>
                     <span v-if="formatTaskDue(task.due)" class="badge" :class="isOverdue(task, today) ? 'badge--error' : 'badge--muted'">
                       {{ isOverdue(task, today) ? 'Overdue · ' : 'Due ' }}{{ formatTaskDue(task.due) }}
                     </span>
-                    <span v-if="task.assignee !== 'user'" class="task-assignee">{{ taskAssigneeLabel(task.assignee) }}</span>
                   </p>
                   <p v-if="task.changed_since_delegated" class="task-changed">
                     Changed since delegated — the result was reached against an older
@@ -1589,13 +1605,12 @@ const today = localDateKey()
                   <!-- Where the answer is, and when it ended. Never a summary of it:
                        the board holds no copy of the agent's reply, so it names the
                        chat to read and the approval that closes the card. -->
-                  <p v-if="isReviewReady(task)" class="task-review">
-                    <span class="task-review-lead">Ready for review.</span>
-                    <span v-if="reviewEnded(task)" class="task-review-when">
-                      {{ reviewEnded(task) }}.
-                    </span>
-                    The result is in the linked chat — read it there, then approve
-                    Done to close the card.
+                  <!-- The agent's own words on where it got to, or the engine's
+                       note when it said nothing. Clamped: the editor has the rest. -->
+                  <p v-if="attemptNote(task)" class="task-agent-note">{{ attemptNote(task) }}</p>
+                  <p v-if="task.chat_id && chatArchived(task.chat_id) && !isReviewReady(task)" class="task-changed">
+                    The chat was archived. Continue in a new chat — it is handed what
+                    this one did.
                   </p>
                   <!-- Inconsistency, said rather than repaired: the board may report
                        that a row disagrees with itself, never quietly rewrite it. -->
@@ -1662,6 +1677,7 @@ const today = localDateKey()
                          abandon the one that failed. -->
                     <template v-else-if="isSettledLinked(task)">
                       <button
+                        v-if="!chatArchived(task.chat_id)"
                         type="button"
                         class="btn-chip task-chip"
                         :disabled="busyTaskId === task.id"
@@ -1674,7 +1690,7 @@ const today = localDateKey()
                         :disabled="busyTaskId === task.id"
                         :aria-label="`Start a new attempt at ${task.title}`"
                         @click.stop="actOnAttempt(task, 'retry')"
-                      >Retry</button>
+                      >{{ chatArchived(task.chat_id) ? 'Continue in new chat' : 'Retry' }}</button>
                     </template>
                     <template v-else-if="task.live_attempt_id">
                       <button
@@ -1902,70 +1918,6 @@ const today = localDateKey()
       </div>
     </div>
 
-    <!-- Attempt history -->
-    <div v-if="historyOpen && historyTask" class="modal-backdrop" @click.self="closeHistory">
-      <div
-        ref="historyEl"
-        class="modal-sheet task-sheet"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="task-history-title"
-      >
-        <header class="task-sheet-head">
-          <h3 id="task-history-title">Attempt history</h3>
-          <button type="button" class="btn-icon" aria-label="Close" @click="closeHistory">×</button>
-        </header>
-
-        <div class="task-form">
-          <p class="hint">
-            Every attempt at &ldquo;{{ historyTask.title }}&rdquo;, newest first. A
-            retry does not erase the one it replaced, and a stopped attempt is a
-            record of what was tried.
-          </p>
-
-          <p v-if="board.attemptsLoading" class="hint" role="status">Loading history…</p>
-          <p v-else-if="board.attemptsError" class="task-action-error" role="alert">
-            {{ board.attemptsError }}
-            <button type="button" class="btn-chip task-chip" @click="retryHistory">Retry</button>
-          </p>
-          <p v-else-if="!historyAttempts.length" class="hint">
-            No attempt has been delegated for this task.
-          </p>
-          <ul v-else class="task-history">
-            <li
-              v-for="attempt in historyAttempts"
-              :key="attempt.attempt_id"
-              class="task-history-row"
-            >
-              <div class="task-card-head">
-                <span class="task-history-state">
-                  <span class="badge" :class="attemptStateBadgeClass(attempt.state)">
-                    {{ taskAttemptLabel(attempt.state) }}
-                  </span>
-                  <span v-if="attempt.live" class="badge badge--accent2">Holding the task</span>
-                </span>
-                <!-- The chat each attempt ran in, so a stopped one is still
-                     reachable: the current row's linkage is gone by the time a retry
-                     exists, and this is where the old turn's answer lives. -->
-                <button
-                  v-if="attempt.chat_id"
-                  type="button"
-                  class="btn-chip task-chip"
-                  :aria-label="`Open the chat attempt ${attempt.attempt_id} ran in`"
-                  @click="openAttemptChat({ ...historyTask!, chat_id: attempt.chat_id })"
-                >Chat</button>
-              </div>
-              <p class="task-history-summary">{{ taskAttemptSummary(attempt) }}</p>
-            </li>
-          </ul>
-
-          <div class="form-actions">
-            <button type="button" class="btn-small" @click="closeHistory">Close</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- Detail -->
     <div v-if="detailOpen" class="modal-backdrop" @click.self="closeDetail()">
       <div
@@ -2035,13 +1987,6 @@ const today = localDateKey()
                 type="date"
               />
             </div>
-            <div class="form-group">
-              <label for="task-detail-assignee">Assignee</label>
-              <select id="task-detail-assignee" v-model="detailForm.assignee">
-                <option value="user">For me</option>
-                <option value="agent">For the agent</option>
-              </select>
-            </div>
           </div>
           <!-- The description. A list row carries none, so it is read by id: the editor
                shows the prose it will write back, and while the read is in flight
@@ -2095,13 +2040,10 @@ const today = localDateKey()
             </p>
             <p v-if="detailAttemptState" class="task-delegate-state">
               <span class="badge" :class="detailAttemptBadgeClass">{{
-                taskAttemptLabel(detailAttemptState)
+                taskAttemptLabel(detailAttemptState, detailTask?.attempt_outcome, detailTask?.attempt_detail)
               }}</span>
-              <span v-if="detailTask?.chat_id" class="hint">
-                Working in
-                <button type="button" class="btn-chip task-chip" @click="openAttemptChat(detailTask)">
-                  the chat
-                </button>
+              <span v-if="detailTask?.chat_id && chatArchived(detailTask.chat_id)" class="hint">
+                The chat is archived; it opens read-only from the list below.
               </span>
             </p>
             <p v-if="detailTask?.changed_since_delegated" class="task-changed">
@@ -2109,12 +2051,9 @@ const today = localDateKey()
               description.
             </p>
             <p v-if="detailTask && isReviewReady(detailTask)" class="task-review">
-              <span class="task-review-lead">Ready for review.</span>
-              <span v-if="reviewEnded(detailTask)" class="task-review-when">
-                {{ reviewEnded(detailTask) }}.
-              </span>
-              The result is in the linked chat — read it there, then approve Done to
-              close the card.
+              <span class="task-review-lead">The agent says this is done.</span>
+              Check its summary below and the chat, then approve Done to close the
+              card.
             </p>
             <div
               v-if="detailTask && reconcile(detailTask).length"
@@ -2156,13 +2095,6 @@ const today = localDateKey()
                 :disabled="detailSaving || board.saving"
                 @click="openDelegate(detailTask!, 'update')"
               >Send update</button>
-              <button
-                v-if="detailTask?.attempt_state"
-                type="button"
-                class="btn-chip task-chip"
-                :disabled="detailSaving || board.saving"
-                @click="openHistory(detailTask!)"
-              >History</button>
               <!-- Deliberately not a second Resume/Retry pair here: this control
                    already opens the preview in the mode the row calls for, and the
                    preview names both ways out. A duplicate that opened a sheet and a
@@ -2183,6 +2115,44 @@ const today = localDateKey()
                 @click="actOnAttempt(detailTask!, 'detach')"
               >Detach</button>
             </div>
+            <!-- Every attempt at this task, newest first (#1064): which chat it
+                 ran in, how it ended, and what the agent said it did. Replaces
+                 the History sheet, so the record is where the decision is made. -->
+            <template v-if="detailTask?.attempt_state">
+              <p v-if="board.attemptsLoading && !detailAttempts.length" class="hint" role="status">Loading attempts…</p>
+              <p v-else-if="board.attemptsError" class="task-action-error" role="alert">
+                {{ board.attemptsError }}
+                <button type="button" class="btn-chip task-chip" @click="retryHistory">Retry</button>
+              </p>
+              <ol v-else-if="detailAttempts.length" class="task-history" aria-label="Attempts, newest first">
+                <li
+                  v-for="attempt in detailAttempts"
+                  :key="attempt.attempt_id"
+                  class="task-history-row"
+                >
+                  <div class="task-history-head">
+                    <span class="badge" :class="attemptStateBadgeClass(attempt.state)">
+                      {{ taskAttemptLabel(attempt.state, attempt.outcome, attempt.detail) }}
+                    </span>
+                    <span class="task-history-when">{{ taskAttemptWhen(attempt) }}</span>
+                    <button
+                      v-if="attempt.chat_id"
+                      type="button"
+                      class="btn-chip task-chip"
+                      :aria-label="`Open the chat attempt ${attempt.attempt_id} ran in`"
+                      @click="openAttemptChat({ ...detailTask!, chat_id: attempt.chat_id })"
+                    >{{ chatArchived(attempt.chat_id) ? 'Archived chat' : 'Chat' }}</button>
+                  </div>
+                  <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+                  <div
+                    v-if="attempt.summary"
+                    class="task-history-summary markdown"
+                    v-html="renderUserMarkdown(attempt.summary)"
+                  ></div>
+                  <p v-else-if="attempt.detail" class="task-history-summary">{{ attempt.detail }}</p>
+                </li>
+              </ol>
+            </template>
           </section>
 
           <p v-if="board.error" class="task-action-error" role="alert">
@@ -2277,7 +2247,9 @@ const today = localDateKey()
     padding: 2px var(--space-1);
   }
   .task-chips::-webkit-scrollbar { display: none; }
-  .task-chips .task-chip { flex: 0 0 auto; }
+  /* Grow to fill the row when they fit; never shrink, so a narrow phone
+     scrolls the row instead of squeezing the labels. */
+  .task-chips .task-chip { flex: 1 0 auto; justify-content: center; }
   .task-selects { flex-wrap: nowrap; }
   .task-selects .task-filter { flex: 1 1 0; }
   .task-selects .task-chip { flex: 0 0 auto; }
@@ -2430,6 +2402,7 @@ const today = localDateKey()
 }
 
 .task-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -2443,7 +2416,7 @@ const today = localDateKey()
 .task-card:hover { border-color: var(--border-strong); }
 .task-lanes--columns .task-card[draggable='true'] { cursor: grab; }
 .task-card--dragging { opacity: 0.4; }
-.task-card--done .task-open { color: var(--fg2); }
+.task-card--done .task-title { color: var(--fg2); }
 /* The card's Done. A round box rather than a square one: it reads as "tick
    this off", not as a form field. The hit area is the full touch target; the
    drawn ring sits inside it. */
@@ -2489,28 +2462,58 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   gap: var(--space-2);
   min-width: 0;
 }
-/* The whole card is clickable, and this is the reachable control inside it: a
-   pointer-only card is not acceptable, so the title is a real button that carries
-   the card's one job. */
-.task-open {
+/* The title as it reads. Links in it open in a new tab; the rest of the card
+   opens the editor. */
+.task-title {
   flex: 1 1 auto;
   min-width: 0;
-  /* A one-line title is ~20px of text. The reachable control gets a real box so
-     it is not a 20px-tall hit area the card's own click handler was quietly
-     carrying; the card is still clickable, this is what makes it operable. */
-  min-height: var(--touch);
-  padding: 0;
-  border: 0;
-  background: none;
+  margin: 0;
+  padding: 10px 0;
   color: var(--fg);
-  font: inherit;
   font-weight: 600;
-  text-align: left;
-  cursor: pointer;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
-.task-open:hover { color: var(--accent); }
-.task-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.task-title a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  font-weight: 500;
+}
+.task-title a:hover { text-decoration-thickness: 2px; }
+.task-title a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+/* The card's keyboard control: out of sight, never out of reach. Its focus is
+   drawn on the card, which is what it opens. */
+.task-open {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.task-card:has(.task-open:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The agent's own words under the badge, clamped: the editor has the rest. */
+.task-agent-note {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
 /* "Changed since delegated" is a warning about the *result*, not about the card, so
    it reads as a caption on it rather than as one of its voices. */
 .task-changed {
@@ -2581,7 +2584,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 }
 
 .task-project { overflow-wrap: anywhere; }
-.task-assignee { color: var(--fg3); }
 .task-card-foot {
   display: flex;
   flex-wrap: wrap;
@@ -2726,6 +2728,9 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 }
 .task-status-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .task-status-opt:disabled { cursor: progress; }
+@media (max-width: 420px) {
+  .task-status-opt { padding-inline: 2px; font-size: var(--text-xs); }
+}
 /* The description as it reads. */
 .task-body {
   max-height: 18rem;
@@ -2839,14 +2844,18 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
-.task-history-row .task-card-head { align-items: center; }
-.task-history-state {
+.task-history-head {
   display: flex;
-  flex: 1 1 auto;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
 }
+.task-history-head .task-chip { margin-left: auto; }
+.task-history-when { color: var(--fg3); font-size: var(--text-xs); }
+.task-history-summary :deep(ul),
+.task-history-summary :deep(ol) { margin: 0.3em 0; padding-left: 1.3em; }
+.task-history-summary :deep(p) { margin: 0 0 0.4em; }
+.task-history-summary :deep(p:last-child) { margin-bottom: 0; }
 .task-history-summary {
   margin: 0;
   color: var(--fg2);

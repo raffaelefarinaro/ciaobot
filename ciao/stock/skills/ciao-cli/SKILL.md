@@ -141,6 +141,7 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 | `task move TASK_ID --to STATUS --revision REV` | Set the column: `backlog`, `in_progress`, `on_hold`, `done`. | Same revision guard. `--to done` is refused exactly like `complete` — see below. |
 | `task complete TASK_ID --revision REV` | Ask to mark a task done. | **Always refused to you** with `task_completion_requires_user`: the user closes their own tasks. Report the finished work and let them complete it; never look for another route to the same status. |
 | `task delegate TASK_ID --revision REV [--project P]` | Hand a task to the agent as one ordinary chat. The chat runs in `--project` (or the task's own project, else General) and the prompt is the task's own description — there is no prompt argument. | The turn is **attended**: an approval card it raises is an ordinary Needs-you card in that chat, answered the ordinary way. One live attempt per task: a second call returns the attempt already running and starts nothing. Delegating is not completing — a finished turn puts the task in front of the user for review. |
+| `task report TASK_ID --outcome done\|blocked\|needs_input --summary-file FILE.md` | **When you were delegated a task**, say how far you got, once, before your turn ends. `done`: finished, for the user to review. `blocked`: you cannot go on. `needs_input`: you need the user's answer. The summary (Markdown: what you did, where the results are, what is left) is saved on the task and handed to any later attempt. | Only the chat holding the task's live attempt may report (`task_report_not_holder` otherwise). It never moves or completes the task. A turn that ends **without** a report is shown to the user as *Unfinished*, not as a result to review. |
 | `task attempt ATTEMPT_ID ACTION` | `stop` (ends the running turn; irreversible), `resume` (continues the **same** chat under the **same** attempt), `retry` (starts a **new** attempt in a new chat, leaving the old one as history) or `detach` (stops the turn and clears the linkage, which is what makes the task completable again). | `stop` is destructive and is asked for like one. `resume` only works on an attempt that did not finish — a `ready_for_review` result is waiting for the user's decision, so continuing it is their call. None of these completes a task. |
 
 There is no `task delete` on this surface: a task record is the user's own
@@ -158,12 +159,15 @@ which are the user's decision rather than yours to resolve:
   current description into that same chat as one ordinary message. Do **not**
   re-delegate to "fix" it: a second `task delegate` mints a new attempt in a new
   chat and leaves the attempt under review looking abandoned.
-- **A finished turn is not a finished task.** A `ready_for_review` attempt means
-  the result is waiting for the user. Report it, name the task, and stop — the
+- **A finished turn is not a finished task.** Only a turn you ended with
+  `task report … --outcome done` becomes `ready_for_review`, which means the
+  result is waiting for the user. Report it, name the task, and stop — the
   `Approve Done` in the board is the only completion, and `task complete` is
   refused to you whatever the reason.
 - **`task attempt … resume`** continues the same chat under the same attempt and
-  is refused for a `ready_for_review` one. Do not reach for `retry` to keep going
+  is refused for a `ready_for_review` one, and for an attempt whose chat was
+  archived or deleted (`attempt_chat_archived`): `retry` then starts a new chat
+  that is handed the earlier attempts' reports and transcript paths. Do not reach for `retry` to keep going
   on a review: retrying is the user's call, made next to the result they have not
   read yet.
 

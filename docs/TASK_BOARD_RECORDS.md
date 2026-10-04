@@ -76,6 +76,33 @@ See [the runbook outline](https://example.test/runbook).
 - [ ] Result recorded below
 ```
 
+## The agent's report and the delegation log (#1064)
+
+A delegated agent reports how far it got with `ciao task report <id> --outcome
+done|blocked|needs_input --summary-file <file.md>` (MCP `task_report`), accepted
+only from the chat that holds the task's live attempt. The report is stored on
+the attempt (`outcome`, `summary`) and decides how a cleanly ended turn settles:
+`done` is `ready_for_review` (the card reads *Agent says done*, the user still
+approves it), `blocked` and `needs_input` are `needs_you`, and a turn with no
+report is `needs_you` with the note "the turn ended without a report from the
+agent" (*Unfinished*). A new turn clears the outcome and keeps the summary.
+
+The task's own body carries the durable record: one item per attempt inside
+`<!-- ciao:task-log -->` … `<!-- /ciao:task-log -->` at the end, written when an
+attempt starts, settles, reports, or its chat is archived. The engine rewrites
+only the item marked with its attempt id and rebinds the attempt to the new
+revision only when it was bound to the revision it read, so a log line never
+reads as "changed since delegated" and never hides an edit that does. The log is
+stripped from the description quoted into a delegation prompt; a new attempt is
+instead handed the last five settled attempts (outcome, summary, chat, archived
+transcript path).
+
+Archiving or deleting a delegated chat settles an attempt still working or
+waiting there as `interrupted` ("the chat was archived"), keeping the linkage so
+the card offers **Continue in a new chat** (a retry with the hand-off). `resume`
+refuses such a chat with `attempt_chat_archived`. A result the agent reported
+done is left for the user to approve.
+
 ## Delegation attempts (#1033, child B5 of #973)
 
 A task record says what is wanted. An **attempt** says whether an agent is

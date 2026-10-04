@@ -54,7 +54,9 @@ from ciao.schedules import (
     wall_clock_time_error,
 )
 from ciao.task_attempts import (
+    HANDOFF_ATTEMPTS,
     RESUMABLE_STATES,
+    PreviousAttempt,
     TaskAttempt,
     TaskAttemptError,
     TaskAttemptStore,
@@ -63,6 +65,7 @@ from ciao.task_attempts import (
     task_delegation_helper,
 )
 from ciao.task_board import Actor, TaskBoardError, TaskBoardStore, TaskDocument
+from ciao.task_log import render_item, upsert_item
 from ciao.web.routes_webhooks import webhook_store
 from ciao.webhooks import (
     WebhookStore,
@@ -293,6 +296,11 @@ def _task_row_with_attempt(
     payload = _task_payload(document)
     linked = document.record.attempt_id is not None
     payload["attempt_state"] = current.state if current is not None else ""
+    # The agent's own word on the current attempt (#1064), and the engine's note
+    # when it gave none: what the card says under its badge.
+    payload["attempt_outcome"] = current.outcome if current is not None else ""
+    payload["attempt_summary"] = current.summary if current is not None else ""
+    payload["attempt_detail"] = current.detail if current is not None else ""
     payload["live_attempt_id"] = live.attempt_id if live is not None else ""
     payload["changed_since_delegated"] = bool(
         linked and current is not None and current.task_revision != document.revision
@@ -1022,6 +1030,7 @@ class CiaoControlPlane:
         #: per turn, and the paths that start one may announce it too.
         self._watching: dict[tuple[str, str], tuple[Any, str]] = {}
         self._subscribe_turn_watch()
+        self._subscribe_chat_ended()
 
     def _defer_until_chat_idle(
         self,
@@ -3010,6 +3019,7 @@ class CiaoControlPlane:
             task_revision=revision,
             relative_path=document.relative_path,
             body=document.body,
+            previous_attempts=self._previous_attempts(workspace, record.id),
         )
         attempt_id = uuid.uuid4().hex
         # Two revisions are in play from here, and they are not the same one. The
@@ -3110,6 +3120,12 @@ class CiaoControlPlane:
                 retryable=True,
             )
         self._watch_turn(workspace, attempt.attempt_id, record.id, chat.chat_id, stream)
+        # The attempt's line in the task's own log, so the vault records it from
+        # the first moment. Its write moves the revision again, so the reply is
+        # built from what it left behind.
+        logged = self._record_log(workspace, attempt.attempt_id)
+        if logged is not None:
+            linked, bound = logged
         return {
             # `bound`, not `attempt`: the reply must carry the revision the record
             # now stands at, or a caller that stored this payload would compare it
@@ -3120,6 +3136,187 @@ class CiaoControlPlane:
             "project_origin": origin,
             "created": True,
         }
+
+    # ---- the agent's report and the task's own log (#1064) -------------
+
+    def _chat_facts(self, chat_id: str, chat: Any = None) -> tuple[str, str]:
+        """``(title, archive_path)`` for a chat, or empty strings for one gone."""
+        if chat is None:
+            try:
+                chat = self.pcm.get_chat(chat_id)
+            except Exception:  # noqa: BLE001 — an unreadable chat is just untitled
+                chat = None
+        if chat is None:
+            return ("", "")
+        return (
+            str(getattr(chat, "title", "") or ""),
+            str(getattr(chat, "archive_path", "") or "") if getattr(chat, "archived", False) else "",
+        )
+
+    def _previous_attempts(self, workspace: str, task_id: str) -> tuple[PreviousAttempt, ...]:
+        """The settled attempts a new one is told about, newest first. Never raises."""
+        try:
+            rows = self._attempt_call(workspace, lambda store: store.list_for_task(task_id))
+        except ControlPlaneError:
+            logger.exception("delegation: could not read the history of task %s", task_id)
+            return ()
+        handed: list[PreviousAttempt] = []
+        for row in rows:
+            if row.is_live:
+                continue
+            title, archive_path = self._chat_facts(row.chat_id)
+            handed.append(
+                PreviousAttempt(
+                    state=row.state,
+                    outcome=row.outcome,
+                    summary=row.summary,
+                    detail=row.detail,
+                    created_at=row.created_at,
+                    ended_at=row.ended_at,
+                    chat_id=row.chat_id,
+                    chat_title=title,
+                    archive_path=archive_path,
+                )
+            )
+            if len(handed) >= HANDOFF_ATTEMPTS:
+                break
+        return tuple(handed)
+
+    def _record_log(
+        self, workspace: str, attempt_id: str, *, chat: Any = None
+    ) -> tuple[TaskDocument, TaskAttempt] | None:
+        """Write one attempt's line into its task's log. Best effort; never raises.
+
+        The write is the engine's, made as ``user`` the way the review flag is,
+        and it moves the task's revision. The attempt follows that revision only
+        when it was bound to the one this write read: a log line is not an edit to
+        the task, but an edit the user made before it still is, and rebinding over
+        it would erase "changed since delegated". One retry on a conflict, because
+        the user saving the description at the same moment is the likely cause.
+        """
+        for _ in range(2):
+            try:
+                attempt = self._attempt_call(workspace, lambda store: store.get(attempt_id))
+                document = self._task_call(workspace, lambda store: store.get(attempt.task_id))
+                title, archive_path = self._chat_facts(attempt.chat_id, chat)
+                item = render_item(
+                    attempt_id=attempt.attempt_id,
+                    state=attempt.state,
+                    outcome=attempt.outcome,
+                    summary=attempt.summary,
+                    detail=attempt.detail,
+                    created_at=attempt.created_at,
+                    ended_at=attempt.ended_at,
+                    chat_id=attempt.chat_id,
+                    chat_title=title,
+                    archive_path=archive_path,
+                )
+                body = upsert_item(document.body, attempt.attempt_id, item)
+                if body == document.body:
+                    return (document, attempt)
+                written = self._task_call(
+                    workspace,
+                    lambda store: store.update(
+                        attempt.task_id,
+                        expected_revision=document.revision,
+                        changes={},
+                        body=body,
+                        actor="user",
+                    ),
+                )
+                if attempt.task_revision == document.revision:
+                    attempt = self._attempt_call(
+                        workspace,
+                        lambda store: store.bind_revision(attempt.attempt_id, written.revision),
+                    )
+                return (written, attempt)
+            except ControlPlaneError as exc:
+                if exc.code == "task_revision_conflict":
+                    continue
+                logger.exception("delegation: could not log attempt %s in its task", attempt_id)
+                return None
+        logger.warning("delegation: attempt %s was not logged; the task kept changing", attempt_id)
+        return None
+
+    def workspace_task_report(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        outcome: str,
+        summary: str,
+        chat_id: str,
+    ) -> dict[str, Any]:
+        """Record the agent's report on the attempt that holds *task_id*.
+
+        Only the chat working on the task may report on it: the report is that
+        agent's word about its own work, and a report from any other chat would
+        be one agent speaking for another. It never moves the task — how the card
+        reads is decided when the turn ends — and it never completes it.
+        """
+        clean = str(task_id or "").strip()
+        live = self._attempt_live(workspace, clean)
+        if live is None or live.chat_id != chat_id:
+            raise ControlPlaneError(
+                "task_report_not_holder",
+                "only the chat working on this task can report on it; this chat does "
+                "not hold a live attempt for it.",
+            )
+        reported = self._attempt_call(
+            workspace, lambda store: store.report(live.attempt_id, outcome, summary)
+        )
+        logged = self._record_log(workspace, reported.attempt_id)
+        document = logged[0] if logged is not None else self._task_call(
+            workspace, lambda store: store.get(clean)
+        )
+        if logged is not None:
+            reported = logged[1]
+        return _attempt_payload(reported, self._task_with_attempt(workspace, document))
+
+    def _subscribe_chat_ended(self) -> None:
+        """Follow archived and deleted chats, so a task is not left pointing at one."""
+        subscribe = getattr(self.pcm, "on_chat_ended", None)
+        if not callable(subscribe):
+            return
+        try:
+            subscribe(self._on_chat_ended)
+        except Exception:  # noqa: BLE001 — a missing hook is not a broken engine
+            logger.exception("delegation: could not subscribe to archived chats")
+
+    def _on_chat_ended(self, chat_id: str, chat: Any, how: str) -> None:
+        """A delegated chat was archived or deleted: settle what it was holding.
+
+        A result the agent called done is left for the user to approve — the
+        transcript is in the vault and the chat opens read-only. Anything else the
+        chat was holding cannot go on in it, so the attempt is settled
+        ``interrupted`` with the reason; it keeps the task linked, and the card
+        offers to continue in a new chat that is handed what this one did. Either
+        way the task's log records where the transcript went. Never raises.
+        """
+        try:
+            helper = getattr(chat, "helper", None)
+            if not isinstance(helper, dict) or helper.get("kind") != "task_delegation":
+                return
+            project = self.pcm.get_project(str(getattr(chat, "project_id", "") or ""))
+            workspace = str(getattr(project, "workspace", "") or "")
+            task_id = str(helper.get("task_id") or "")
+            if not workspace or not task_id:
+                return
+            live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
+            if live is None or live.chat_id != chat_id:
+                return
+            if live.state != "ready_for_review":
+                self._attempt_call(
+                    workspace,
+                    lambda store: store.finish(
+                        live.attempt_id, "interrupted", detail=f"the chat was {how}"
+                    ),
+                )
+            self._record_log(workspace, live.attempt_id, chat=chat)
+        except ControlPlaneError as exc:
+            logger.info("delegation: %s chat %s left nothing to settle (%s)", how, chat_id, exc)
+        except Exception:  # noqa: BLE001 — an archive must never fail on this
+            logger.exception("delegation: could not settle the attempt for %s chat %s", how, chat_id)
 
     def _launch_turn(self, chat_id: str, prompt: str) -> tuple[Any, str]:
         """``start_stream`` with the default attendance: the stream, or ``(None, why)``.
@@ -3157,6 +3354,8 @@ class CiaoControlPlane:
             logger.exception(
                 "delegation: attempt %s could not be recorded as interrupted", attempt_id
             )
+            return
+        self._record_log(workspace, attempt_id)
 
     def _watch_turn(
         self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
@@ -3419,18 +3618,30 @@ class CiaoControlPlane:
         except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
             logger.exception("delegation: could not read chat %s after the turn", chat_id)
             chat = None
+        try:
+            live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
+            if live is None or live.attempt_id != attempt_id or live.chat_id != chat_id:
+                return
+        except ControlPlaneError:
+            logger.exception("delegation: could not read attempt %s to settle it", attempt_id)
+            return
+        # The agent's own report decides what a turn that ended cleanly means
+        # (#1064): only "done" is a result to review. A turn that ended with
+        # nothing reported is not taken as finished — it waits on the user, and
+        # the card calls it unfinished.
         if stopped:
             state, detail = "stopped", "the turn was stopped"
         elif errored:
             state, detail = "failed", text[:400] or "the turn ended in an error"
         elif _chat_needs_user(chat):
             state, detail = "needs_you", ""
-        else:
+        elif live.outcome == "done":
             state, detail = "ready_for_review", ""
+        elif live.outcome in ("blocked", "needs_input"):
+            state, detail = "needs_you", ""
+        else:
+            state, detail = "needs_you", "the turn ended without a report from the agent"
         try:
-            live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
-            if live is None or live.attempt_id != attempt_id or live.chat_id != chat_id:
-                return
             settled = self._attempt_call(
                 workspace,
                 lambda store: store.finish(attempt_id, state, detail=detail),
@@ -3446,9 +3657,9 @@ class CiaoControlPlane:
         # `review_state: ready` — a badge, not a column. Only for a turn that
         # actually produced something to review: a `needs_you` attempt has no
         # result yet, so "review" on it would ask the user to review nothing.
-        if settled.state != "ready_for_review":
-            return
-        self._mark_review_ready(workspace, task_id, attempt_id)
+        if settled.state == "ready_for_review":
+            self._mark_review_ready(workspace, task_id, attempt_id)
+        self._record_log(workspace, attempt_id)
 
     def _mark_review_ready(self, workspace: str, task_id: str, attempt_id: str) -> None:
         """Flag the task's result as waiting to be reviewed, and rebind the attempt.
@@ -3808,8 +4019,22 @@ class CiaoControlPlane:
                 "the task is linked to a different attempt now; retry it instead.",
                 retryable=True,
             )
+        chat = self.pcm.get_chat(attempt.chat_id)
+        if chat is None or getattr(chat, "archived", False):
+            # An archived chat's provider session has been reclaimed and a deleted
+            # one is gone: there is no conversation left to continue. A new attempt
+            # in a new chat, handed what this one did, is the way on.
+            raise ControlPlaneError(
+                "attempt_chat_archived",
+                "this attempt's chat is "
+                + ("deleted" if chat is None else "archived")
+                + "; continue in a new chat instead (retry), which is handed what it did.",
+            )
         prompt = build_resume_prompt(
-            title=document.record.title, state=attempt.state, detail=attempt.detail
+            title=document.record.title,
+            state=attempt.state,
+            task_id=document.record.id,
+            detail=attempt.detail,
         )
         running = self._attempt_call(
             workspace, lambda store: store.reopen(attempt.attempt_id)
@@ -3999,6 +4224,20 @@ class CiaoControlPlane:
         return _ok(
             await self.workspace_task_attempt_action(
                 self._workspace(principal), attempt_id, action, actor="agent"
+            )
+        )
+
+    def task_report(
+        self, principal: AgentPrincipal, task_id: str, *, outcome: str, summary: str
+    ) -> dict[str, Any]:
+        """Report how far this chat got on the task it was handed (#1064)."""
+        return _ok(
+            self.workspace_task_report(
+                self._workspace(principal),
+                task_id,
+                outcome=outcome,
+                summary=summary,
+                chat_id=principal.chat_id,
             )
         )
 
