@@ -110,74 +110,162 @@
         <button type="button" class="btn-small" @click="store.clearError()">Dismiss</button>
       </div>
 
+      <!-- One wrapper per trigger, because a row and the history it opens are one
+           thing: the history has to sit directly under its own row, and the row
+           must keep its place in the hairline list either way. -->
       <div
         v-for="t in store.triggers"
         :key="t.trigger_id"
-        class="ov-item wh-row"
-        :class="{ 'ov-item--paused': !t.enabled }"
+        class="wh-block"
       >
-        <span class="ov-main">
-          <!-- `title` on the name: `.ov-title` ellipsizes in a narrow pane, and
-               a trigger's name is the one thing a row cannot be read without. -->
-          <span class="ov-title" :title="t.name">{{ t.name }}</span>
-          <span class="ov-sub">{{ rowSummary(t) }}</span>
-        </span>
-        <!-- The state badge and the controls share one right-hand group, so they
-             wrap together to a second line instead of leaving the badge stranded
-             on the first. The badge is its own flex item rather than sitting
-             inside the title, where an ellipsized span would swallow it exactly
-             at the widths where the state is hardest to read. -->
-        <span class="wh-row-side">
-          <span class="badge wh-state" :class="t.enabled ? 'badge--success' : 'badge--muted'">
-            {{ t.enabled ? 'Enabled' : 'Disabled' }}
+        <div class="ov-item wh-row" :class="{ 'ov-item--paused': !t.enabled }">
+          <span class="ov-main">
+            <!-- `title` on the name: `.ov-title` ellipsizes in a narrow pane, and
+                 a trigger's name is the one thing a row cannot be read without. -->
+            <span class="ov-title" :title="t.name">{{ t.name }}</span>
+            <span class="ov-sub">{{ rowSummary(t) }}</span>
           </span>
-          <span class="wh-row-actions">
-            <button
-              type="button"
-              class="btn-small"
-              :disabled="store.saving"
-              @click="toggleEnabled(t)"
-            >{{ pendingId === t.trigger_id ? 'Saving…' : (t.enabled ? 'Disable' : 'Enable') }}</button>
-            <button
-              type="button"
-              class="btn-small"
-              @click="toggleRecipe(t)"
-            >{{ recipeLabelFor(t.trigger_id) }}</button>
-            <button
-              type="button"
-              class="btn-small"
-              :disabled="store.saving"
-              :title="`Replace the secret ${t.name} uses. Senders must update theirs.`"
-              @click="rotate(t)"
-            >{{ pendingId === t.trigger_id ? 'Rotating…' : 'Rotate' }}</button>
-            <!-- Delete is destructive and rare, so it is behind the row's menu
-                 rather than a red control on every row. -->
-            <DropdownMenuRoot :modal="false">
-              <DropdownMenuTrigger as-child>
-                <button
-                  type="button"
-                  class="btn-icon wh-overflow"
-                  :aria-label="`More actions for ${t.name}`"
-                >
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                    <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
-                  </svg>
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuPortal>
-                <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
-                  <div class="wh-menu">
-                    <DropdownMenuItem as-child>
-                      <button type="button" class="wh-menu-item danger" @click="remove(t)">
-                        Delete trigger…
-                      </button>
-                    </DropdownMenuItem>
-                  </div>
-                </DropdownMenuContent>
-              </DropdownMenuPortal>
-            </DropdownMenuRoot>
+          <!-- The state badge and the controls share one right-hand group, so they
+               wrap together to a second line instead of leaving the badge stranded
+               on the first. The badge is its own flex item rather than sitting
+               inside the title, where an ellipsized span would swallow it exactly
+               at the widths where the state is hardest to read. -->
+          <span class="wh-row-side">
+            <span class="badge wh-state" :class="t.enabled ? 'badge--success' : 'badge--muted'">
+              {{ t.enabled ? 'Enabled' : 'Disabled' }}
+            </span>
+            <span class="wh-row-actions">
+              <!-- One control that toggles rather than an open-only one, so the
+                   row that opened the history can close it again without hunting
+                   for a dismiss. `aria-expanded`/`aria-controls` are what tell a
+                   screen reader the panel is there before it is. -->
+              <button
+                type="button"
+                class="btn-small"
+                :aria-expanded="historyId === t.trigger_id"
+                :aria-controls="historyId === t.trigger_id ? historyPanelId(t) : undefined"
+                @click="toggleHistory(t)"
+              >{{ historyLabelFor(t.trigger_id) }}</button>
+              <button
+                type="button"
+                class="btn-small"
+                :disabled="store.saving"
+                @click="toggleEnabled(t)"
+              >{{ pendingId === t.trigger_id ? 'Saving…' : (t.enabled ? 'Disable' : 'Enable') }}</button>
+              <button
+                type="button"
+                class="btn-small"
+                @click="toggleRecipe(t)"
+              >{{ recipeLabelFor(t.trigger_id) }}</button>
+              <button
+                type="button"
+                class="btn-small"
+                :disabled="store.saving"
+                :title="`Replace the secret ${t.name} uses. Senders must update theirs.`"
+                @click="rotate(t)"
+              >{{ pendingId === t.trigger_id ? 'Rotating…' : 'Rotate' }}</button>
+              <!-- Delete is destructive and rare, so it is behind the row's menu
+                   rather than a red control on every row. -->
+              <DropdownMenuRoot :modal="false">
+                <DropdownMenuTrigger as-child>
+                  <button
+                    type="button"
+                    class="btn-icon wh-overflow"
+                    :aria-label="`More actions for ${t.name}`"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
+                    </svg>
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuPortal>
+                  <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
+                    <div class="wh-menu">
+                      <DropdownMenuItem as-child>
+                        <button type="button" class="wh-menu-item danger" @click="remove(t)">
+                          Delete trigger…
+                        </button>
+                      </DropdownMenuItem>
+                    </div>
+                  </DropdownMenuContent>
+                </DropdownMenuPortal>
+              </DropdownMenuRoot>
+            </span>
           </span>
-        </span>
+        </div>
+
+        <!-- The receipt history (#1044): what this trigger received and which chat
+             each event became. A panel rather than a dialog because it belongs to
+             its row — a modal would hide the trigger it is about — and because
+             nothing here is a credential, so closing it loses nothing.
+
+             The five states mirror the list above on purpose: a read in flight is
+             a pending question, a failed first read is not an empty answer (an
+             empty history would claim the trigger received nothing), a failed
+             refresh keeps the rows it has, and a genuinely empty history says so
+             with the reason a sender would want to hear. -->
+        <div v-if="historyId === t.trigger_id" :id="historyPanelId(t)" class="wh-history">
+          <p v-if="historyPending && !historyLoaded" class="wh-hint wh-history-status" role="status">
+            Loading received events…
+          </p>
+
+          <div v-else-if="historyError && !historyLoaded" class="wh-error" role="alert">
+            <p>Could not load received events. {{ historyError }}</p>
+            <button type="button" class="btn-small" :disabled="historyPending" @click="loadHistory(t)">
+              {{ historyPending ? 'Retrying…' : 'Retry' }}
+            </button>
+          </div>
+
+          <!-- The two first-load states above *replace* the panel: there is nothing
+               to keep, and an empty history beside them would claim the trigger
+               received nothing. A failed refresh is the exception and a sibling of
+               the rows rather than an alternative to them — the rows on screen are
+               older than the answer that failed, and throwing them away would turn
+               a moment of staleness into a claim. -->
+          <template v-else>
+            <div v-if="historyError" class="wh-stale" role="status">
+              <span>Could not refresh received events. {{ historyError }} Showing the last successful load.</span>
+              <button type="button" class="btn-small" :disabled="historyPending" @click="loadHistory(t)">
+                {{ historyPending ? 'Retrying…' : 'Retry' }}
+              </button>
+            </div>
+
+            <p v-if="!historyRows.length" class="wh-hint wh-history-status">
+              No events yet. A sender's accepted event appears here the moment it
+              arrives, with the chat it becomes once the launch starts.
+            </p>
+
+            <template v-else>
+              <p class="wh-hint wh-history-status">{{ historyCaption }}</p>
+              <ul class="wh-receipts">
+                <li v-for="r in historyRows" :key="r.receipt_id" class="wh-receipt">
+                  <span class="badge wh-outcome" :class="outcomeClass(r)">
+                    {{ outcomeLabel(r.status) }}
+                  </span>
+                  <!-- The sender's own text, ellipsized with the full event on the
+                       title: it is what tells one event from another, and it is
+                       bounded but long. The same for the line under it, where the
+                       engine's own reason is what an `interrupted` row has to say. -->
+                  <span class="ov-main">
+                    <span class="ov-title wh-event" :title="r.event_text">{{ r.event_text }}</span>
+                    <span class="ov-sub" :title="receiptSub(r)">{{ receiptSub(r) }}</span>
+                  </span>
+                  <span class="wh-when">{{ formatRelative(r.created_at) || r.created_at }}</span>
+                  <!-- Only where a chat exists. An `interrupted` or `failed` row has
+                       none, and a button that cannot open anything is worse than no
+                       button. -->
+                  <button
+                    v-if="r.chat_id"
+                    type="button"
+                    class="btn-small"
+                    aria-label="Open the chat this event became"
+                    @click="openChat(r.chat_id)"
+                  >Open chat</button>
+                </li>
+              </ul>
+            </template>
+          </template>
+        </div>
       </div>
 
       <p v-if="!store.triggers.length" class="ov-empty">
@@ -310,7 +398,7 @@ import { writeClipboard } from '../lib/codeCopy'
 import { askConfirm } from '../lib/confirm'
 import { formatRelative } from '../lib/time'
 import { webhookModeHint, webhookModeLabel, webhookRecipe } from '../lib/webhooks'
-import type { WebhookMode, WebhookTrigger } from '../lib/types'
+import type { WebhookMode, WebhookReceipt, WebhookReceiptStatus, WebhookTrigger } from '../lib/types'
 
 /** The store's `WEBHOOK_MODES`, with the labels the create form shows. */
 const MODE_OPTIONS: { value: WebhookMode; label: string }[] = [
@@ -350,6 +438,15 @@ const pendingId = ref('')
 /** `trigger_id` of the trigger whose recipe is open, or `''` for none. */
 const recipeId = ref('')
 /**
+ * `trigger_id` of the trigger whose receipt history is open, or `''` for none.
+ *
+ * One at a time on purpose. Two open histories would mean two reads of the same
+ * journal for one question, and a panel that opened while another was open would
+ * have to render whose rows it is holding — which is how a receipt ends up drawn
+ * under the wrong trigger.
+ */
+const historyId = ref('')
+/**
  * The copy confirmation, as a key and whether it worked.
  *
  * One slot for both dialogs rather than two, because they are never open at the
@@ -387,12 +484,13 @@ onMounted(() => {
 
 // A `1`–`9` shortcut can move the pane to another workspace while a read is in
 // flight. The store drops a late answer that is not the workspace it was asked
-// for; this closes the form and the dialogs too, so nothing survives holding a
-// destination that belongs to the workspace just left.
+// for; this closes the form, the dialogs and the history too, so nothing
+// survives holding a destination that belongs to the workspace just left.
 watch(workspace, () => {
   showForm.value = false
   closeRecipe()
   closeSecret()
+  closeHistory()
   void store.ensureLoaded(workspace.value)
 })
 
@@ -439,6 +537,130 @@ async function submitCreate() {
   if (!created) return
   showForm.value = false
   reveal(created.secret, created.trigger.name, false)
+}
+
+// ── The receipt history (#1044) ────────────────────────────────────────────
+
+/**
+ * The open trigger's rows, its load states and the cap they were read with.
+ *
+ * All derived from `historyId`, so there is one open history and the panel can
+ * only ever be about that trigger. `historyLoaded` is separate from
+ * "has rows" for the reason it is on the list too: a history nobody has read is
+ * a pending question, and an empty answer drawn in its place would claim the
+ * trigger had received nothing.
+ */
+const historyRows = computed(() => (historyId.value ? store.receiptsFor(historyId.value) : []))
+const historyLoaded = computed(() => historyId.value !== '' && store.receiptsLoadedFor(historyId.value))
+const historyPending = computed(() => store.receiptsLoading)
+const historyError = computed(() => store.receiptsError)
+
+/**
+ * What the panel says above its rows: the newest N, and that the journal is
+ * larger than that.
+ *
+ * The cap is stated rather than implied, because a history that filled its read
+ * and stopped is otherwise indistinguishable from a trigger that received exactly
+ * fifty events ever.
+ */
+const historyCaption = computed(() => {
+  const limit = store.receiptsLimit
+  const shown = historyRows.value.length
+  if (limit > 0 && shown >= limit) {
+     return `Showing up to ${limit} recent events; older retained events are not shown.`
+  }
+  return `${shown} event${shown === 1 ? '' : 's'}, newest first.`
+})
+
+/**
+ * The panel's element id, so the row's `aria-controls` can name it.
+ *
+ * Derived from the trigger id rather than a counter: a counter would hand the
+ * same id to two different panels across two renders, and an `aria-controls`
+ * pointing at the wrong element is worse than none.
+ */
+function historyPanelId(t: WebhookTrigger): string {
+  return `wh-history-${t.trigger_id}`
+}
+
+function historyLabelFor(triggerId: string): string {
+  return historyId.value === triggerId ? 'Hide history' : 'History'
+}
+
+/**
+ * Open this trigger's history, or close the one already open.
+ *
+ * Opening always reads: events arrive while a person is looking at a trigger, so
+ * a history drawn once would be a record of the moment it was opened rather than
+ * of what arrived. The read is the store's, with the same workspace and ticket
+ * guards the list has.
+ */
+async function toggleHistory(t: WebhookTrigger) {
+  if (historyId.value === t.trigger_id) {
+    closeHistory()
+    return
+  }
+  store.clearError()
+  historyId.value = t.trigger_id
+  await loadHistory(t)
+}
+
+function closeHistory() {
+  historyId.value = ''
+}
+
+function loadHistory(t: WebhookTrigger) {
+  void store.loadReceipts(workspace.value, t.trigger_id)
+}
+
+/**
+ * An outcome in words, not a colour.
+ *
+ * `launched` is the success outcome — the turn ran and its progress lives in the
+ * chat — so it is the only state labelled as done. `interrupted` is the one a
+ * person has to look at, and it says so rather than hiding behind a neutral
+ * word: a process died inside the launch window and nobody can tell whether the
+ * turn ran.
+ */
+function outcomeLabel(status: WebhookReceiptStatus): string {
+  if (status === 'launched') return 'Launched'
+  if (status === 'failed') return 'Failed'
+  if (status === 'interrupted') return 'Interrupted'
+  if (status === 'launching') return 'Launching'
+  return 'Accepted'
+}
+
+function outcomeClass(r: WebhookReceipt): string {
+  if (r.status === 'launched') return 'badge--success'
+  if (r.status === 'failed') return 'badge--error'
+  if (r.status === 'interrupted') return 'badge--warn'
+  return 'badge--muted'
+}
+
+/**
+ * The line under the event: when it arrived, and why it looks the way it does.
+ *
+ * The engine's own `detail` is carried because on a failed or interrupted row it
+ * is the only sentence there is. On a launched one it just repeats the chat
+ * button, so it is dropped there rather than saying the same thing twice.
+ */
+function receiptSub(r: WebhookReceipt): string {
+  const when = `received ${formatRelative(r.created_at) || r.created_at}`
+  if (r.status === 'launched') return `${when} · chat ${r.chat_id ?? 'unknown'}`
+  return r.detail ? `${when} · ${r.detail}` : when
+}
+
+/**
+ * Open the chat a launched event became.
+ *
+ * The router, not a chat id in a URL the pane builds itself: `/chat/{chat_id}`
+ * is the app's own deep link and `openChatFromDeepLink` is what resolves it to a
+ * workspace and a transcript. Imported lazily like every other route hop.
+ */
+async function openChat(chatId: string) {
+  if (!chatId) return
+  const { router } = await import('../router')
+  await router.push(`/chat/${chatId}`)
 }
 
 // ── Row writes ──────────────────────────────────────────────────────────────
@@ -647,7 +869,7 @@ const secretCopyLabel = computed(() => copyLabel('secret', 'Copy secret'))
 .wh-stale { color: var(--fg3); }
 /* The row wraps rather than squeezing its name.
  *
- * A trigger's name is what identifies it, and four controls plus a state badge
+ * A trigger's name is what identifies it, and five controls plus a state badge
  * are a lot to hold beside one. `.ov-title` ellipsizes inside whatever flex
  * space it is given, so a row that refuses to wrap shows `New issue fro…` at
  * exactly the pane widths where the name matters most. `flex-basis` on the text
@@ -655,15 +877,24 @@ const secretCopyLabel = computed(() => copyLabel('secret', 'Copy secret'))
  * actions drop to their own full-width line once they would cost the name more
  * than its floor, and stay inline when there is room for both.
  */
+.wh-block { display: block; }
+/* The shared `.ov-head + .ov-item` top rule cannot reach the first row any more:
+   the row now sits inside its own block, so the rule is restated for the block
+   that directly follows the heading — otherwise the section loses the hairline
+   that says "the list starts here". */
+.ov-head + .wh-block > .ov-item { border-top: 1px solid var(--border); }
 .wh-row {
   flex-wrap: wrap;
   row-gap: var(--space-2);
 }
 .wh-row > .ov-main { flex: 1 1 16rem; }
-/* The right-hand group: badge, then controls, wrapping as one unit. */
+/* Keep both nested groups within the pane: even the longer disclosure labels
+   must wrap controls rather than push Rotate or the overflow menu off screen. */
 .wh-row-side {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
@@ -672,14 +903,48 @@ const secretCopyLabel = computed(() => copyLabel('secret', 'Copy secret'))
 }
 .wh-row-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-2);
 }
 .wh-overflow { color: var(--fg2); }
 /* The state badge is a compact tag, not a count: the tight radius reserved for
    squared tags that must not be mistaken for a badge count. */
 .wh-state { flex: none; border-radius: var(--radius-xs); align-self: center; }
+
+/* The receipt history, under its own row.
+ *
+ * A hairline panel rather than a card: it belongs to the row above it, and a
+ * boxed surface would claim to be a section of its own. Inset from the left so a
+ * long event text lines up under the trigger's name instead of under the badge.
+ */
+.wh-history {
+  padding: var(--space-2) 2px var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
+}
+.wh-history-status { margin: 0 0 var(--space-2); }
+.wh-receipts { display: flex; flex-direction: column; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+/* One receipt per line, wrapping the same way `.wh-row` does: the outcome and the
+ * time are what must survive a narrow pane, and the text ellipsizes between them.
+ * `min-height` is the row's own 44px floor, so a touch target is a row here too. */
+.wh-receipt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: 4px 0;
+}
+.wh-receipt > .ov-main { flex: 1 1 12rem; }
+.wh-event { font-weight: 500; }
+.wh-when { flex: none; color: var(--fg2); font-size: var(--text-sm); white-space: nowrap; }
+/* The outcome is a tag, like the row's own state badge — a colour alone would
+ * leave "which of these failed?" to anyone who cannot see red. */
+.wh-outcome { flex: none; border-radius: var(--radius-xs); }
 
 /* Create form: the shared page form rhythm, capped to the column. */
 .wh-form {

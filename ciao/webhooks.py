@@ -1157,6 +1157,13 @@ _OPEN_RECEIPT_STATES = frozenset({ACCEPTED, LAUNCHING})
 #: from either open state to ``failed``.
 RECEIPT_STATUSES = (ACCEPTED, LAUNCHING, LAUNCHED, FAILED, INTERRUPTED)
 
+#: How a ``launched`` receipt's ``detail`` names its chat. A prefix rather than a
+#: stored field because ``detail`` is the engine's own sentence about the
+#: outcome — "chat c-123" reads as well in a journal an operator greps by hand as
+#: it does in the API, and :attr:`WebhookReceipt.chat_id` is the one place that
+#: knows how to take the id back out of it.
+_CHAT_DETAIL_PREFIX = "chat "
+
 #: Bytes of request body the receiver will read. A webhook event is a sentence
 #: and a handful of fields; 64 KiB is two orders of magnitude above a real one
 #: and low enough that an unauthenticated flood cannot become a disk problem.
@@ -1201,6 +1208,23 @@ DEDUPE_RETENTION_DAYS = 7
 #: a few thousand large rows clear the byte cap long before the row count.
 RECEIPTS_MAX_BYTES = 4 * 1024 * 1024
 RECEIPTS_KEEP_ROWS = 4000
+
+#: Rows one history read returns (#1044): the newest receipts for one trigger (or
+#: one workspace), newest first. A read surface, so it is bounded where the trim
+#: is not — the trim keeps what the file still owes a person, and a person
+#: reading "what arrived?" wants the recent tail, not the whole journal walked
+#: into memory to throw most of it away. Fifty is about four screens of rows and
+#: well past the :data:`RATE_LIMIT_PER_MINUTE` a single trigger may fire in two
+#: minutes, so the busiest honest trigger never reaches it and the rows behind
+#: the cap are settled history rather than an open event.
+RECEIPTS_HISTORY_LIMIT = 50
+
+#: Bytes one backward window reads. A receipt row is bounded by
+#: :data:`MAX_EVENT_TEXT_CHARS` plus its own bookkeeping, so a window holds
+#: several of them; the bound is on the *work* one call does, not on the file it
+#: is reading, and a history read stops as soon as it has its cap however far
+#: into the file that took it.
+_REVERSE_WINDOW_BYTES = 64 * 1024
 
 # Stable error codes, matching the store's convention: a route matches on the
 # code, not on the exception class, so adding a reason does not add a class the
@@ -1388,6 +1412,138 @@ def read_rows(journal: Path) -> list[dict[str, Any]]:
             order.append(rid)
         folded[rid] = row
     return [folded[rid] for rid in order]
+
+
+def _iter_rows_newest_first(journal: Path) -> Iterator[dict[str, Any]]:
+    """Every usable journal row, newest first, without reading the whole file.
+
+    The counterpart to :func:`read_rows` for a read that may stop early. A dedupe
+    decision genuinely has to see every row — that is what the fold in
+    :func:`read_rows` is for — but a *history* read wants the newest N and owes
+    the rest of the file nothing, so this walks the file backwards in
+    :data:`_REVERSE_WINDOW_BYTES` windows and hands each row over as it finishes
+    it. The journal is bounded by :func:`_trim_if_large` either way; the point is
+    that reading fifty rows costs fifty rows of memory, not four megabytes of it.
+
+    Three details that are load-bearing rather than incidental:
+
+    * **A window boundary is not a line boundary.** The fragment at the left edge
+      of a window is carried into the next one, or a receipt whose row straddles
+      two windows is emitted twice as two unparsable halves and lost.
+    * **Newest-first folding is free in this direction.** :func:`read_rows` has to
+      read the whole file before it knows which row for an id is the last one
+      written; walking backwards, the first row seen for an id *is* the last one
+      written, so a caller can stop on its cap without leaving a receipt showing
+      an outcome that was later overwritten.
+    * **An unparsable line is skipped, exactly as :func:`read_rows` skips it.** A
+      torn tail is expected after a crash, and a reader that failed on it would
+      make the last recorded receipt unreadable — which is the one row a person
+      most needs.
+
+    Lock-free like every other read here: the journal is appended to, and a
+    reader that misses a row being appended sees the same receipt a moment later.
+    """
+    try:
+        descriptor = open_fd(journal, os.O_RDONLY, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ReceiptUnavailable(
+            f"the webhook receipt journal cannot be read: {exc.strerror or exc}"
+        ) from None
+    try:
+        # ``pending`` is the unread head of a line that reached left of the last
+        # window read; it belongs to the next window, not to the rows below.
+        pending = b""
+        position = os.fstat(descriptor).st_size
+        while position > 0:
+            start = max(0, position - _REVERSE_WINDOW_BYTES)
+            try:
+                window = _read_window(descriptor, start, position - start)
+            except OSError as exc:
+                raise ReceiptUnavailable(
+                    "the webhook receipt journal cannot be read: "
+                    f"{exc.strerror or exc}"
+                ) from None
+            if not window:
+                break
+            # The whole window or nothing: `_read_window` does not return early, so
+            # the unread head of the journal is now exactly `start`.
+            position = start
+            parts = (window + pending).split(b"\n")
+            # ``parts[0]`` starts at ``start``. Unless this window reached the head
+            # of the file it is a fragment of a longer line, so it waits for the
+            # window to its left.
+            pending = parts[0]
+            for chunk in reversed(parts[1:]):
+                row = _safe_row(chunk.decode("utf-8", errors="replace"))
+                if row is not None:
+                    yield row
+            if position == 0:
+                row = _safe_row(pending.decode("utf-8", errors="replace"))
+                if row is not None:
+                    yield row
+    finally:
+        os.close(descriptor)
+
+
+def _read_window(descriptor: int, start: int, count: int) -> bytes:
+    """``count`` bytes at ``start``, however many reads it takes to get them.
+
+    :func:`_iter_rows_newest_first` walks the journal by fixed-size windows, so
+    a window has to be exactly the window or the byte arithmetic that reassembles
+    the lines across a boundary is wrong — and a short read is not a hypothetical
+    one: Windows does not promise a full count from a file, and treating the
+    bytes that did arrive as the whole window would re-read them forever (or skip
+    the rest of one). Same reasoning as :func:`_write_all`, on the reading side.
+    """
+    os.lseek(descriptor, start, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = count
+    while remaining > 0:
+        block = os.read(descriptor, remaining)
+        if not block:
+            break  # end of file: the window is what there is
+        chunks.append(block)
+        remaining -= len(block)
+    return b"".join(chunks)
+
+
+def read_recent_rows(
+    journal: Path, *, keep: Callable[[dict[str, Any]], bool], limit: int
+) -> list[dict[str, Any]]:
+    """The newest row of the newest ``limit`` receipts ``keep`` accepts.
+
+    Bounded on purpose, and the three rules are what make the bound honest:
+
+    * **Newest first, and stopped at the cap.** Read from
+      :func:`_iter_rows_newest_first`, so the caller pays for the rows it asked
+      for rather than for the journal.
+    * **One row per receipt id.** The first row seen for an id is that receipt's
+      effective state, so an id's older rows are dropped rather than counted
+      against the cap — otherwise one receipt that walked
+      ``accepted → launching → launched`` would take three of the caller's fifty
+      slots.
+    * **A ``limit`` below 1 returns nothing.** A caller that computed a nonsense
+      cap gets an empty history rather than the whole journal.
+
+    ``keep`` is the caller's filter (one trigger, one workspace). It sees raw
+    rows because that is what the journal holds, and a row this code cannot
+    decode as a receipt is still a row the filter may reasonably skip.
+    """
+    if limit < 1:
+        return []
+    newest: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in _iter_rows_newest_first(journal):
+        receipt_id = str(row.get("id") or "")
+        if not receipt_id or receipt_id in seen or not keep(row):
+            continue
+        seen.add(receipt_id)
+        newest.append(row)
+        if len(newest) >= limit:
+            break
+    return newest
 
 
 def _ends_mid_line(descriptor: int) -> bool:
@@ -1726,6 +1882,22 @@ class WebhookReceipt:
     #: Why a receipt failed or was interrupted. Empty otherwise.
     detail: str = ""
 
+    @property
+    def chat_id(self) -> str | None:
+        """The chat this event became, or ``None`` while it has not become one.
+
+        Read out of ``detail`` rather than carried beside it: the chat id is the
+        engine's own outcome text, and a second copy of it in the row would be a
+        second thing to keep consistent with the write that recorded it. Only a
+        ``launched`` receipt names a chat — a ``failed`` detail says why the
+        launch did not happen and an ``interrupted`` one says why nobody can
+        tell, and neither has a chat to offer.
+        """
+        if self.status != LAUNCHED or not self.detail.startswith(_CHAT_DETAIL_PREFIX):
+            return None
+        chat_id = self.detail[len(_CHAT_DETAIL_PREFIX) :].strip()
+        return chat_id or None
+
     def to_row(self) -> dict[str, Any]:
         """The journal row for this receipt.
 
@@ -1743,6 +1915,34 @@ class WebhookReceipt:
             "idempotency_key": self.idempotency_key,
             "status": self.status,
             "body_digest": self.body_digest,
+            "event_text": self.event_text,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "detail": self.detail,
+        }
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """This receipt as an API row, for the history read (#1044).
+
+        A projection and not :meth:`to_row`, on purpose. The journal row is the
+        whole record — it has to be, because the dedupe window compares the body
+        digest — and two of its fields have no business in an operator-facing
+        answer: the sender's ``idempotency_key`` and the ``body_digest`` are the
+        machinery that collapses a retry, and neither is what "what arrived?"
+        asks for. Everything kept here is what a person looking at a trigger has
+        to act on: which event, what happened to it, which chat it became, when.
+
+        ``chat_id`` is the one field that is *derived* on the way out, so a caller
+        never parses a chat id out of an engine's own prose. ``detail`` stays
+        beside it because on a ``failed`` or ``interrupted`` row it is the only
+        sentence explaining what happened.
+        """
+        return {
+            "receipt_id": self.id,
+            "trigger_id": self.trigger_id,
+            "trigger_name": self.trigger_name,
+            "status": self.status,
+            "chat_id": self.chat_id,
             "event_text": self.event_text,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -2009,7 +2209,7 @@ class WebhookReceiver:
                 receipt,
                 status=LAUNCHED,
                 updated_at=self._stamp(),
-                detail=f"chat {chat_id}"[:MAX_DETAIL_CHARS],
+                detail=f"{_CHAT_DETAIL_PREFIX}{chat_id}"[:MAX_DETAIL_CHARS],
             )
             _append(self._journal, launched.to_row())
         return launched
@@ -2078,6 +2278,56 @@ class WebhookReceiver:
             receipt
             for row in read_rows(self._journal)
             if str(row.get("trigger_id") or "") == trigger_id
+            for receipt in (WebhookReceipt.from_row(row),)
+        ]
+
+    def recent_receipts_for(
+        self, trigger_id: str, *, limit: int = RECEIPTS_HISTORY_LIMIT
+    ) -> list[WebhookReceipt]:
+        """One trigger's newest ``limit`` receipts, newest first (#1044).
+
+        The read behind the history surface, and deliberately not
+        :meth:`receipts_for`: that one folds the whole journal because a dedupe
+        decision must know about every row, while this one is a question — "what
+        has this trigger received?" — answered from the tail and stopped at the
+        cap. The rows behind the cap are still in the journal, still trimmed only
+        by the journal's own bounds, and still readable by a caller that asks for
+        them; they are simply not what a person opening a history wants to read.
+
+        Lock-free like every other read here.
+        """
+        return [
+            receipt
+            for row in read_recent_rows(
+                self._journal,
+                keep=lambda row: str(row.get("trigger_id") or "") == trigger_id,
+                limit=limit,
+            )
+            for receipt in (WebhookReceipt.from_row(row),)
+        ]
+
+    def recent_receipts(
+        self, workspace: str, *, limit: int = RECEIPTS_HISTORY_LIMIT
+    ) -> list[WebhookReceipt]:
+        """A workspace's newest ``limit`` receipts across every trigger, newest first.
+
+        The workspace-wide companion to :meth:`recent_receipts_for`, and it reads
+        the receipt's own ``workspace`` field rather than asking the store which
+        triggers currently exist. That is what makes a receipt survive its
+        trigger: a deleted trigger leaves its history exactly where it was, which
+        is the whole reason to read the journal rather than the store.
+
+        The filter is the row's workspace and nothing else, so a trigger renamed,
+        retargeted or deleted between accepting an event and settling it cannot
+        move a receipt out of the workspace that received it.
+        """
+        return [
+            receipt
+            for row in read_recent_rows(
+                self._journal,
+                keep=lambda row: str(row.get("workspace") or "") == workspace,
+                limit=limit,
+            )
             for receipt in (WebhookReceipt.from_row(row),)
         ]
 

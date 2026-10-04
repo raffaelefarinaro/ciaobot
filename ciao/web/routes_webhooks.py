@@ -1,16 +1,23 @@
 """Session-authenticated webhook trigger management routes (#1001, child A2 of #974).
 
-Management routes only: list, create, update, rotate and delete over
-``WebhookStore``. The ingress receiver is ``routes_hooks.py``, which takes a
-bearer secret and an idempotency key; nothing here authorizes a machine sender
-or carries a request recipe. Every route reads the session cookie through the
-shared ``AuthMiddleware`` like every other ``/api/*`` route; a raw secret appears
-only in the create and rotate responses, exactly once, and never in a list, an
-error, or a log.
+Management routes only, plus the receipt-history reads over the same journal
+(#1044): list, create, update, rotate and delete over ``WebhookStore``, and
+``GET …/receipts`` over ``WebhookReceiver``. The ingress receiver is
+``routes_hooks.py``, which takes a bearer secret and an idempotency key; nothing
+here authorizes a machine sender or carries a request recipe. Every route reads
+the session cookie through the shared ``AuthMiddleware`` like every other
+``/api/*`` route; a raw secret appears only in the create and rotate responses,
+exactly once, and never in a list, an error, a receipt row or a log.
+
+The two receipt reads are the one place here that touches the ingress journal,
+and they are reads only: no second journal, no write, and nothing that changes
+what a sender's next delivery does. Both are workspace-scoped the way the writes
+are — a trigger that belongs to another workspace is the same 404 as one that is
+not there, so the history is never a way to probe for another workspace's ids.
 
 ``project_id`` is shape-checked here and nowhere else: the store validates its
-form, not that the workspace has such a project. Binding it to a real project
-is the dispatch service's job (A4), which must check it before a trigger runs.
+form, not that the workspace has such a project. Binding it to a real project is
+the dispatch service's job (A4), which must check it before a trigger runs.
 """
 
 from __future__ import annotations
@@ -23,9 +30,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ciao.webhooks import (
+    INVALID_RECEIPT,
     INVALID_TRIGGER,
     NOT_FOUND,
+    RECEIPTS_HISTORY_LIMIT,
+    RECEIPT_UNAVAILABLE,
     REVISION_CONFLICT,
+    WebhookReceiver,
+    WebhookReceiverError,
     WebhookStore,
     WebhookStoreError,
 )
@@ -43,6 +55,30 @@ def webhook_store(config: Any) -> WebhookStore:
     wiring is needed.
     """
     return WebhookStore(Path(config.state_path).parent / "webhooks.json")
+
+
+def webhook_receiver(config: Any) -> WebhookReceiver:
+    """The engine's receiver, with its journal beside the trigger store.
+
+    Here rather than in ``routes_hooks.py`` because it is built from the store's
+    path, and :func:`webhook_store` is what knows that: the ingress route and the
+    history reads must not be free to drift onto two different journals. Built
+    per call, like the store it reads, so a rotated or revoked secret is visible
+    to the very next request.
+    """
+    return WebhookReceiver(webhook_store(config).path)
+
+
+#: One status per typed receiver refusal a *read* can raise. The same
+#: code-to-status discipline as the ingress route's table, and deliberately its
+#: own: a journal that cannot be read is a 503 the caller may retry, and a row
+#: this code cannot decode is a 500 rather than a history that quietly omits it.
+#: Anything unmapped is a 500 — a refusal this route does not understand is a
+#: bug, not a request it may answer.
+_RECEIPT_READ_STATUS = {
+    RECEIPT_UNAVAILABLE: 503,
+    INVALID_RECEIPT: 500,
+}
 
 
 def _store(request: Request) -> WebhookStore:
@@ -67,6 +103,12 @@ def _require_registered_workspace(config: Any, workspace: Any) -> str | None:
     if not name or config.workspace(name) is None:
         return "unknown workspace: expected a registered workspace name"
     return None
+
+
+def _receipt_error(exc: WebhookReceiverError) -> JSONResponse:
+    """Map a typed receiver refusal onto its status. See `_RECEIPT_READ_STATUS`."""
+    status = _RECEIPT_READ_STATUS.get(exc.code, 500)
+    return JSONResponse({"error": str(exc)}, status_code=status)
 
 
 async def _read_dict_body(request: Request) -> dict[str, Any] | JSONResponse:
@@ -181,3 +223,99 @@ async def webhook_delete(request: Request) -> Response:
     except WebhookStoreError as exc:
         return _store_error(exc)
     return Response(status_code=204)
+
+
+# ── The receipt history (#1044) ────────────────────────────────────────────
+#
+# A read surface over the journal the receiver already writes, so a person can
+# see what a trigger received and which chat each event became — including the
+# one stuck `interrupted`, which nothing else will ever report. Two rules hold
+# across both routes and are the reason they are shaped like the management
+# routes rather than like the ingress one:
+#
+# * **The session decides the workspace, and only then is the journal read.**
+#   An unregistered or absent `?workspace=` is a 400 before anything else
+#   happens; a trigger that is not that workspace's is the same 404 as one that
+#   is not there at all. Which of those two it was would otherwise be a way to
+#   ask this engine whether an id it did not give you exists anywhere.
+# * **A receipt row is a projection.** `WebhookReceipt.to_public_dict` is the only
+#   shape that leaves the engine, and it carries no verifier, no idempotency key
+#   and no body digest.
+
+
+def _requested_workspace(request: Request) -> tuple[str, JSONResponse | None]:
+    """The validated `?workspace=`, or the 400 to answer with instead."""
+    error = _require_registered_workspace(
+        request.app.state.config, request.query_params.get("workspace", "")
+    )
+    if error is not None:
+        return "", JSONResponse({"error": error}, status_code=400)
+    return str(request.query_params.get("workspace", "")).strip(), None
+
+
+async def webhook_trigger_receipts(request: Request) -> JSONResponse:
+    """List one trigger's recorded events, newest first, capped (#1044).
+
+    `launched` is the success outcome and its `chat_id` is the chat the event
+    became, so a caller can link the receipt to an ordinary chat rather than
+    searching for one whose title says "New Chat". A receipt that has not
+    settled yet is listed as it stands (`accepted` or `launching`), because
+    "recorded but not launched" is exactly what an operator has to be able to
+    see.
+    """
+    workspace, refusal = _requested_workspace(request)
+    if refusal is not None:
+        return refusal
+    trigger_id = str(request.path_params.get("trigger_id", ""))
+    try:
+        trigger = await asyncio.to_thread(_store(request).get, trigger_id)
+    except WebhookStoreError as exc:
+        return _store_error(exc)
+    if trigger.workspace != workspace:
+        # The same sentence, and the same status, as an unknown id: the session is
+        # scoped to one workspace and this route does not confirm what another
+        # workspace has configured.
+        return JSONResponse(
+            {"error": f"no webhook trigger {trigger_id!r} is configured"},
+            status_code=404,
+        )
+    try:
+        receipts = await asyncio.to_thread(
+            webhook_receiver(request.app.state.config).recent_receipts_for, trigger_id
+        )
+    except WebhookReceiverError as exc:
+        return _receipt_error(exc)
+    return JSONResponse(
+        {
+            "trigger_id": trigger.trigger_id,
+            "trigger_name": trigger.name,
+            "limit": RECEIPTS_HISTORY_LIMIT,
+            "receipts": [receipt.to_public_dict() for receipt in receipts],
+        }
+    )
+
+
+async def webhook_receipts(request: Request) -> JSONResponse:
+    """List a workspace's recorded events across every trigger, newest first (#1044).
+
+    The workspace-wide companion to :func:`webhook_trigger_receipts`, and it
+    filters on each receipt's own `workspace` rather than on the triggers that
+    exist now — so a receipt whose trigger has since been deleted or retargeted
+    is still listed under the workspace that received it.
+    """
+    workspace, refusal = _requested_workspace(request)
+    if refusal is not None:
+        return refusal
+    try:
+        receipts = await asyncio.to_thread(
+            webhook_receiver(request.app.state.config).recent_receipts, workspace
+        )
+    except WebhookReceiverError as exc:
+        return _receipt_error(exc)
+    return JSONResponse(
+        {
+            "workspace": workspace,
+            "limit": RECEIPTS_HISTORY_LIMIT,
+            "receipts": [receipt.to_public_dict() for receipt in receipts],
+        }
+    )
