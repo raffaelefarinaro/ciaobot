@@ -158,7 +158,8 @@ describe('TaskBoardView', () => {
     store.activeWorkspace = 'personal'
     store.projects = [
       { project_id: 'p1', name: 'Website', workspace: 'personal', context: '', created_at: '2026-03-01', order: 0, vault_folder: '', is_auto: false },
-      { project_id: 'general', name: 'General', workspace: 'personal', context: '', created_at: '2026-03-01', order: 1, vault_folder: '', is_auto: false },
+      { project_id: 'general', name: 'General', workspace: 'personal', context: '', created_at: '2026-03-01', order: 1, vault_folder: '', is_auto: true },
+      { project_id: 'p2', name: 'Docs', workspace: 'personal', context: '', created_at: '2026-03-01', order: 2, vault_folder: '', is_auto: false },
     ]
   })
 
@@ -378,9 +379,9 @@ describe('TaskBoardView', () => {
 
   it('offers a way back from a filter that hides everything, without calling it empty', async () => {
     const wrapper = await mountBoard()
-    // No task on this board is filed under General, so the filter hides the
+    // No task on this board is filed under Docs, so the filter hides the
     // whole set while the board itself is not empty.
-    await wrapper.get('#task-filter-project').setValue('general')
+    await wrapper.get('#task-filter-project').setValue('p2')
     await nextTick()
 
     expect(wrapper.find('.task-filtered-empty').exists()).toBe(true)
@@ -666,6 +667,101 @@ describe('TaskBoardView', () => {
     const textarea = await bodyField(wrapper)
     expect(textarea.element.value).toContain('<b>not html</b>')
     expect(wrapper.get('.task-sheet').text()).not.toContain('could not read')
+    wrapper.unmount()
+  })
+
+  it('calls one place General: no "No project", no second General', async () => {
+    const wrapper = await mountBoard([
+      task(),
+      task({ id: 'gen', title: 'Filed under the auto General', project_id: 'general' }),
+      task({ id: 'web', title: 'Website work', project_id: 'p1' }),
+    ])
+    const labels = (selector: string) =>
+      wrapper.get(selector).findAll('option').map((o) => o.text().trim())
+    expect(labels('#task-filter-project')).toEqual(['All projects', 'General', 'Website', 'Docs'])
+
+    // Both kinds of General answer to the one filter entry.
+    await wrapper.get('#task-filter-project').setValue('no-project')
+    await nextTick()
+    expect(wrapper.findAll('.task-card').map((c) => c.get('.task-open').text()))
+      .toEqual(expect.arrayContaining(['Ship the board', 'Filed under the auto General']))
+    expect(wrapper.text()).not.toContain('Website work')
+    // And neither card spells it out: General is the default.
+    expect(card(wrapper, 'Filed under the auto General').find('.task-project').exists()).toBe(false)
+
+    apiGet.mockResolvedValue(detailAnswer(task({ id: 'gen', project_id: 'general' }), ''))
+    await card(wrapper, 'Filed under the auto General').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(labels('#task-detail-project')).toEqual(['General', 'Website', 'Docs'])
+    // Opening it shows General selected and writes nothing.
+    expect((wrapper.get('#task-detail-project').element as HTMLSelectElement).value).toBe('')
+    expect(apiPatch).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('saves the editor as it changes, with no Save button', async () => {
+    const wrapper = await mountBoard()
+    apiGet.mockResolvedValue(detailAnswer(task(), ''))
+    apiPatch.mockImplementation((_path: string, sent: Record<string, unknown>) => Promise.resolve({
+      workspace: 'personal',
+      task: { ...task(), ...sent, revision: THIRD_REVISION, body: '' },
+    }))
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    const sheet = wrapper.get('.task-sheet')
+    expect(sheet.findAll('button').map((b) => b.text())).not.toContain('Save')
+    expect(sheet.findAll('button').map((b) => b.text())).not.toContain('Cancel')
+
+    // A select writes the moment it changes.
+    await wrapper.get('#task-detail-project').setValue('p1')
+    await flushPromises()
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(apiPatch.mock.calls[0]![1]).toMatchObject({ project_id: 'p1', expected_revision: NEXT_REVISION })
+
+    // Typing waits for a pause; leaving the field writes it now, at the revision
+    // the previous write returned.
+    await wrapper.get('#task-detail-name').setValue('Ship the board today')
+    await nextTick()
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('.task-saved').text()).toBe('Saving…')
+    await wrapper.get('#task-detail-name').trigger('blur')
+    await flushPromises()
+    expect(apiPatch).toHaveBeenCalledTimes(2)
+    expect(apiPatch.mock.calls[1]![1]).toMatchObject({ title: 'Ship the board today', expected_revision: THIRD_REVISION })
+    expect(apiPatch.mock.calls[1]![1]).not.toHaveProperty('project_id')
+    await nextTick()
+    expect(wrapper.get('.task-saved').text()).toBe('Saved')
+    wrapper.unmount()
+  })
+
+  it('writes a pending edit on close, and stays open when the write is refused', async () => {
+    const wrapper = await mountBoard()
+    apiGet.mockResolvedValue(detailAnswer(task(), ''))
+    apiPatch.mockRejectedValueOnce(Object.assign(new Error('HTTP 409'), {
+      payload: { error: { code: 'task_revision_conflict', message: 'that task changed on disk', retryable: true } },
+    }))
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    await wrapper.get('#task-detail-name').setValue('Renamed')
+    await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.task-sheet').exists()).toBe(true)
+    expect(wrapper.get('.task-sheet').text()).toContain('that task changed on disk')
+
+    apiPatch.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...task({ title: 'Renamed' }), revision: THIRD_REVISION, body: '' },
+    })
+    await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
     wrapper.unmount()
   })
 

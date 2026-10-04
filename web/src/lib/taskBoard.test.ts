@@ -288,6 +288,9 @@ describe('matchesProjectFilter', () => {
     expect(matchesProjectFilter(task({ project_id: '' }), '')).toBe(true)
     expect(matchesProjectFilter(task({ project_id: '' }), TASK_NO_PROJECT)).toBe(true)
     expect(matchesProjectFilter(task({ project_id: 'p1' }), TASK_NO_PROJECT)).toBe(false)
+    // The auto-managed General project is the same General.
+    expect(matchesProjectFilter(task({ project_id: 'gen' }), TASK_NO_PROJECT, 'gen')).toBe(true)
+    expect(matchesProjectFilter(task({ project_id: 'p1' }), TASK_NO_PROJECT, 'gen')).toBe(false)
     expect(matchesProjectFilter(task({ project_id: 'p1' }), 'p1')).toBe(true)
     expect(matchesProjectFilter(task({ project_id: 'p2' }), 'p1')).toBe(false)
   })
