@@ -284,7 +284,7 @@ ciao context get
 - **`task_completion_requires_user`** — the user, not you, marks a task done. Do not retry, do not reach for `task move --to done`, and do not edit the file: say which task is finished and let them close it.
 - **`task_not_found`** — a task id that is well formed but absent *from this workspace*. Another workspace's task is answered exactly this way, so this is also the answer when you reached for an id from the wrong vault.
 - **`webhook_revision_conflict`** — the trigger changed since you read it (`webhook list`). Nothing was written: re-read and re-plan instead of resending the same `--revision`.
-- **`webhook_not_found`** — no trigger with that id **in this workspace**. A trigger belonging to another workspace answers exactly this way, so do not go looking for it elsewhere; the sender has to ask the operator for its own workspace.
+- **`webhook_not_found`** — no trigger with that id **in this workspace**. A trigger belonging to another workspace answers exactly this way, so do not look for it in another workspace; report the id back and let the operator reconcile it.
 - **`webhook_invalid`** — the store refused one field: a blank name, an unknown `--mode` (only `normal`, `auto`, `plan`), or a `--revision` that is not a number. Enabling a revoked trigger is also refused this way: rotate its secret first.
 - **`unauthorized` on the sender's POST** — the trigger's secret does not authorize right now. Missing, disabled, revoked and wrong are one answer; if the secret was rotated, the old one is dead by design and the sender needs the new one, which `webhook create`/`webhook rotate` showed once.
 

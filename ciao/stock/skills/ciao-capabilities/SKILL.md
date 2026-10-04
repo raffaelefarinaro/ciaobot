@@ -75,7 +75,7 @@ Automations run because a time arrived. A **webhook trigger** runs because
 something outside called a URL: a CI provider, a monitoring agent, a
 home-automation box. Configure them on the Automations page or in chat with
 `ciao webhook list|create|update|rotate|delete` (`ciao help` for the flags), and
-the sender's own call is a two-line `curl` recipe in `PWA_API.md`.
+the sender's own call is a short `curl` recipe in `PWA_API.md`.
 
 - **Each trigger has its own revocable secret**, shown once when it is created
   or rotated and never readable again (only a hash is kept). Create one,
