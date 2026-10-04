@@ -156,7 +156,11 @@ test.describe('memory import listing', () => {
     // it sits below the list too.
     await review.click()
     await expect(page.getByText('Before anything runs')).toBeVisible()
-    await expect(page.getByText('claude / sonnet would receive this text')).toBeVisible()
+    // The provider and model it names are the workspace default, said as such
+    // (63b61705): each conversation is read by its own provider's model.
+    await expect(page.getByText("This workspace's default is")).toContainText(
+      'claude / sonnet',
+    )
 
     // Cancel is on the same block of controls, so it is reachable as well.
     await expect(page.locator('.import-actions').getByRole('button', { name: 'Cancel' })).toBeInViewport()
