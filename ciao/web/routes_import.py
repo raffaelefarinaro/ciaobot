@@ -72,6 +72,7 @@ from ciao.import_discover import (
 from ciao.import_sources import KNOWN_PROVIDERS, SourceRef
 from ciao.import_store import (
     CONFLICT,
+    IMPORT_SNAPSHOT_RETENTION_DAYS,
     INVALID_BATCH,
     NOT_FOUND,
     RUNNING,
@@ -341,7 +342,14 @@ async def import_batches_create(request: Request) -> JSONResponse:
 
 
 async def import_batches_list(request: Request) -> JSONResponse:
-    """Every batch filed for ``?workspace=``, oldest first, with progress."""
+    """Every batch filed for ``?workspace=``, oldest first, with progress.
+
+    The answer also carries ``retention_days`` — C6's own
+    ``IMPORT_SNAPSHOT_RETENTION_DAYS`` — so the panel states the window it
+    actually enforces instead of a second copy of the number that could drift
+    from the sweep. It is the constant read here, not a literal, which is what
+    makes the sentence on screen and the sweep the same fact.
+    """
     config = request.app.state.config
     error = _require_registered_workspace(
         config, request.query_params.get("workspace", "")
@@ -358,7 +366,11 @@ async def import_batches_list(request: Request) -> JSONResponse:
     except ImportStoreError as exc:
         return _batch_error(exc)
     return JSONResponse(
-        {"workspace": workspace, "batches": [batch.to_json() for batch in batches]}
+        {
+            "workspace": workspace,
+            "batches": [batch.to_json() for batch in batches],
+            "retention_days": IMPORT_SNAPSHOT_RETENTION_DAYS,
+        }
     )
 
 

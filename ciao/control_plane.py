@@ -63,6 +63,12 @@ from ciao.task_attempts import (
     task_delegation_helper,
 )
 from ciao.task_board import Actor, TaskBoardError, TaskBoardStore, TaskDocument
+from ciao.web.routes_webhooks import webhook_store
+from ciao.webhooks import (
+    WebhookStore,
+    WebhookStoreError,
+    WebhookTrigger,
+)
 from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
@@ -310,6 +316,63 @@ def _attempt_payload(attempt: TaskAttempt, task: dict[str, Any] | None = None) -
 def _utc_now() -> datetime:
     """The store's clock: an aware UTC moment, never a naive one."""
     return datetime.now(UTC)
+
+
+# ---- Webhook triggers (#1039, child A6 of #974) ---------------------------
+#
+# ``ciao/webhooks.py`` owns the trigger store: a typed error with a ``code``, a
+# one-time secret returned only by ``create``/``rotate_secret``, and an
+# optimistic ``expected_revision`` on every edit. This block is the application
+# layer over it — workspace resolution and the transport-visible error codes.
+
+
+#: One store refusal becomes one application error code, as ``_TASK_ERROR_CODES``
+#: does for the task store. A store code with no row here surfaces as
+#: ``webhook_store_unreadable`` rather than a silent default, because every code
+#: in this table is one the agent CLI's ``error.code`` and a session route's
+#: status mapping can already act on.
+_WEBHOOK_ERROR_CODES: dict[str, tuple[str, bool]] = {
+    # WebhookStoreError.code -> (ControlPlaneError code, retryable)
+    "not_found": ("webhook_not_found", False),
+    # Stale means re-read and re-plan, never resend the same revision: retryable
+    # in the sense that reading again makes the edit succeed.
+    "revision_conflict": ("webhook_revision_conflict", True),
+    "invalid_trigger": ("webhook_invalid", False),
+    "unsafe_path": ("webhook_invalid", False),
+    "unsupported_schema": ("webhook_unsupported_schema", False),
+    "corrupt_store": ("webhook_store_unreadable", False),
+}
+
+
+def _webhook_error(exc: WebhookStoreError) -> ControlPlaneError:
+    """Re-raise one store refusal as the control plane's typed error."""
+    code, retryable = _WEBHOOK_ERROR_CODES.get(
+        exc.code, ("webhook_store_unreadable", False)
+    )
+    return ControlPlaneError(code, str(exc), retryable=retryable)
+
+
+def _webhook_revision(value: Any) -> int:
+    """The revision the caller read, as the integer the store checks against.
+
+    The CLI and the MCP schema both carry a revision as a string (a task's
+    revision is a file digest, so its surface never had an integer), and the
+    store refuses anything that is not a real ``int`` of at least 1. Parsing it
+    here means a non-numeric revision answers ``webhook_invalid`` — the same
+    answer an out-of-range one gets — instead of leaking a ``ValueError`` into
+    the generic ``invalid_request`` envelope.
+    """
+    if isinstance(value, bool):
+        raise ControlPlaneError(
+            "webhook_invalid", "expected_revision must be an integer of at least 1."
+        )
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ControlPlaneError(
+            "webhook_invalid",
+            "expected_revision must be an integer of at least 1.",
+        ) from exc
 
 
 def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict[str, Any]:
@@ -3742,6 +3805,265 @@ class CiaoControlPlane:
                 project_id=project_id,
                 due=due,
                 actor="agent",
+            )
+        )
+
+    # ---- webhook triggers -------------------------------------------------
+    #
+    # Child A6 of #974: the management half of the webhook feature on the agent
+    # surface. The store, the receiver and the dispatcher are A1–A4's
+    # (``ciao/webhooks.py``, ``ciao/web/routes_hooks.py``,
+    # ``ciao/webhook_dispatch.py``) and the session routes in
+    # ``ciao/web/routes_webhooks.py`` are A2's; this block adds no store, route
+    # or dispatch logic of its own. It is the same shape as the task block
+    # above: ``workspace_webhook_*`` carries the workspace name a session route
+    # would pass, and the ``webhook_*`` wrappers below scope it to the calling
+    # chat's own workspace for the agent operations.
+    #
+    # Two properties this layer owns and the store does not. **The workspace is
+    # resolved, not trusted**: an unregistered name is refused here, and a
+    # trigger found by id has to belong to that workspace, so a trigger in
+    # another workspace answers exactly like one that does not exist — the same
+    # non-oracle the task surface keeps. And **the one-time secret is returned to
+    # the caller that asked for it and nothing else**: the agent is the operator
+    # acting through a shell, so the value belongs in the envelope, and it is
+    # never written to a log, an error message or a ``repr``. The receiver is
+    # the only other thing that ever sees it.
+
+    def _registered_workspace(self, workspace: str) -> str:
+        """One registered workspace's name, or ``workspace_not_found``.
+
+        The same rule ``_require_registered_workspace`` applies in the session
+        routes: the store validates the *shape* of a workspace name and nothing
+        else, so refusing an unregistered one here is what keeps a trigger from
+        being configured for a name that would never resolve to a live target.
+        """
+        name = str(workspace or "").strip()
+        if not name or self.config.workspace(name) is None:
+            raise ControlPlaneError(
+                "workspace_not_found", f"Workspace '{name}' was not found."
+            )
+        return name
+
+    def _webhook_store(self) -> WebhookStore:
+        """The engine's trigger store, over the one place that builds the path.
+
+        ``webhook_store`` is the routes' own constructor, imported rather than
+        re-spelled: the archive hook, the receiver and this block must all be
+        reading and revoking the same file.
+        """
+        return webhook_store(self.config)
+
+    def _webhook_call(self, call: Callable[[WebhookStore], Any]) -> Any:
+        """One store call, its typed refusal translated into ours.
+
+        The single boundary, as ``_task_call`` is for the task store: no
+        ``WebhookStoreError.code`` reaches a transport that
+        ``_WEBHOOK_ERROR_CODES`` does not name.
+        """
+        try:
+            return call(self._webhook_store())
+        except WebhookStoreError as exc:
+            raise _webhook_error(exc) from exc
+
+    def _webhook_of(self, workspace: str, trigger_id: str) -> WebhookTrigger:
+        """One trigger that belongs to *workspace*, or ``webhook_not_found``.
+
+        A trigger in another workspace reads exactly like a nonexistent one:
+        the id would otherwise be an existence oracle over other workspaces'
+        triggers, and a managed chat could point at a foreign configuration.
+        """
+        clean = str(trigger_id or "").strip()
+        trigger: WebhookTrigger = self._webhook_call(lambda store: store.get(clean))
+        if trigger.workspace != workspace:
+            raise ControlPlaneError(
+                "webhook_not_found", f"Webhook trigger '{clean}' was not found."
+            )
+        return trigger
+
+    def workspace_webhook_list(self, workspace: str) -> list[dict[str, Any]]:
+        """One workspace's triggers, public records only.
+
+        Never a verifier and never a secret: a stored record has no field that
+        could carry one.
+        """
+        scope = self._registered_workspace(workspace)
+        rows = self._webhook_call(lambda store: store.list(scope))
+        return [row.to_dict() for row in rows]
+
+    def workspace_webhook_create(
+        self,
+        workspace: str,
+        *,
+        name: str,
+        instructions: str,
+        project_id: str | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Store a new trigger in one workspace and return it with its secret.
+
+        The trigger is stored **disabled**: configuring one is not making it
+        callable, so an agent that creates a trigger for the user has not handed
+        a stranger a working credential until ``workspace_webhook_update``
+        enables it on purpose. ``project_id`` is stored as given — the store
+        checks its shape and dispatch is what resolves it against the workspace
+        — and ``mode`` is the trigger's own permission mode for the turn it
+        launches, never a sender's choice. Which modes are legal is the store's
+        rule, not this layer's: ``normal``, ``auto`` and ``plan``, anything else
+        ``webhook_invalid``.
+        """
+        scope = self._registered_workspace(workspace)
+        arguments: dict[str, Any] = {
+            "name": str(name or ""),
+            "workspace": scope,
+            "instructions": str(instructions or ""),
+        }
+        if project_id is not None:
+            arguments["project_id"] = project_id
+        if mode is not None:
+            arguments["mode"] = mode
+        trigger, secret = self._webhook_call(
+            lambda store: store.create(**arguments)
+        )
+        return {"trigger": trigger.to_dict(), "secret": secret}
+
+    def workspace_webhook_update(
+        self,
+        workspace: str,
+        trigger_id: str,
+        *,
+        expected_revision: str,
+        name: str | None = None,
+        instructions: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        """Edit one trigger of one workspace at the revision the caller read.
+
+        Only the three fields the store can change are parameters: the target
+        and the mode are not, because retargeting a trigger or changing the mode
+        its events run under is a trust change rather than an edit. Omitting a
+        field leaves it alone; ``enabled`` is the operator's off switch and it
+        reaches an event already in the receipt journal too.
+        """
+        scope = self._registered_workspace(workspace)
+        clean = self._webhook_of(scope, trigger_id)
+        updated: WebhookTrigger = self._webhook_call(
+            lambda store: store.update(
+                clean.trigger_id,
+                expected_revision=_webhook_revision(expected_revision),
+                name=name,
+                instructions=instructions,
+                enabled=enabled,
+            )
+        )
+        return updated.to_dict()
+
+    def workspace_webhook_rotate(
+        self, workspace: str, trigger_id: str, *, expected_revision: str
+    ) -> dict[str, Any]:
+        """Replace one trigger's secret and return it with the new one.
+
+        Rotation **revokes on rotate**: the previous secret stops authorizing
+        the moment this succeeds, so whoever else held it is refused from the
+        next request on. It is the recovery for a lost or exposed secret, and it
+        preserves ``enabled`` in both directions — rotating is not a way to
+        enable a disabled trigger, and a secret is not consent to run anything.
+        """
+        scope = self._registered_workspace(workspace)
+        clean = self._webhook_of(scope, trigger_id)
+        trigger, secret = self._webhook_call(
+            lambda store: store.rotate_secret(
+                clean.trigger_id,
+                expected_revision=_webhook_revision(expected_revision),
+            )
+        )
+        return {"trigger": trigger.to_dict(), "secret": secret}
+
+    def workspace_webhook_delete(
+        self, workspace: str, trigger_id: str, *, expected_revision: str
+    ) -> dict[str, Any]:
+        """Delete one trigger of one workspace and destroy its verifier."""
+        scope = self._registered_workspace(workspace)
+        clean = self._webhook_of(scope, trigger_id)
+        self._webhook_call(
+            lambda store: store.delete(
+                clean.trigger_id,
+                expected_revision=_webhook_revision(expected_revision),
+            )
+        )
+        return {"trigger_id": clean.trigger_id, "deleted": True}
+
+    def webhook_list(self, principal: AgentPrincipal) -> list[dict[str, Any]]:
+        """Every webhook trigger in the calling chat's workspace.
+
+        A list rather than an envelope, as ``task_list`` is: ``_invoke`` wraps a
+        non-dict result as ``{"ok": true, "data": …}``.
+        """
+        return self.workspace_webhook_list(self._workspace(principal))
+
+    def webhook_create(
+        self,
+        principal: AgentPrincipal,
+        *,
+        name: str,
+        instructions: str,
+        project_id: str | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
+        """Configure a trigger in the calling chat's workspace; created disabled."""
+        return _ok(
+            self.workspace_webhook_create(
+                self._workspace(principal),
+                name=name,
+                instructions=instructions,
+                project_id=project_id,
+                mode=mode,
+            )
+        )
+
+    def webhook_update(
+        self,
+        principal: AgentPrincipal,
+        trigger_id: str,
+        *,
+        expected_revision: str,
+        name: str | None = None,
+        instructions: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        """Edit one trigger at the revision it was read at."""
+        return _ok(
+            self.workspace_webhook_update(
+                self._workspace(principal),
+                trigger_id,
+                expected_revision=expected_revision,
+                name=name,
+                instructions=instructions,
+                enabled=enabled,
+            )
+        )
+
+    def webhook_rotate(
+        self, principal: AgentPrincipal, trigger_id: str, *, expected_revision: str
+    ) -> dict[str, Any]:
+        """Replace one trigger's secret; the old one stops working at once."""
+        return _ok(
+            self.workspace_webhook_rotate(
+                self._workspace(principal),
+                trigger_id,
+                expected_revision=expected_revision,
+            )
+        )
+
+    def webhook_delete(
+        self, principal: AgentPrincipal, trigger_id: str, *, expected_revision: str
+    ) -> dict[str, Any]:
+        """Delete one trigger and its verifier, revision-checked."""
+        return _ok(
+            self.workspace_webhook_delete(
+                self._workspace(principal),
+                trigger_id,
+                expected_revision=expected_revision,
             )
         )
 

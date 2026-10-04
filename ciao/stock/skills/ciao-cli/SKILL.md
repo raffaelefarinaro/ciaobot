@@ -1,6 +1,6 @@
 ---
 name: ciao-cli
-description: The `ciao` command-line surface for Ciaobot's own state — memory, vault, files, chats, projects, tasks, schedules, and background runs. Use whenever a chat needs to read or change Ciaobot state itself, not the user's workspace files: checking or editing bounded memory, searching or reviewing the vault, surfacing a file in the pinned panel, listing/creating/sending to/archiving chats, managing projects, filing and moving the workspace task board, creating or running schedules, or starting/checking/cancelling a tracked background command.
+description: The `ciao` command-line surface for Ciaobot's own state — memory, vault, files, chats, projects, tasks, schedules, webhook triggers, and background runs. Use whenever a chat needs to read or change Ciaobot state itself, not the user's workspace files: checking or editing bounded memory, searching or reviewing the vault, surfacing a file in the pinned panel, listing/creating/sending to/archiving chats, managing projects, filing and moving the workspace task board, creating or running schedules, configuring webhook triggers an external sender can call, or starting/checking/cancelling a tracked background command.
 ---
 
 # ciao CLI
@@ -10,7 +10,7 @@ One `ciao <noun> <verb>` command per Ciaobot operation, callable from the shell.
 ## When to use / when not to
 
 Use it for:
-- Reading or changing Ciaobot's own state: bounded memory, the vault, chats, projects, the task board, schedules, background runs.
+- Reading or changing Ciaobot's own state: bounded memory, the vault, chats, projects, the task board, schedules, webhook triggers, background runs.
 - Surfacing a file you produced in the user's pinned preview panel.
 
 Not for:
@@ -27,7 +27,7 @@ Not for:
 - `--chat ID` is optional on every chat-scoped command and defaults to the calling chat. Pointing it at another chat in the same workspace is allowed; pointing it at a chat in a different workspace returns `workspace_forbidden`.
 - Ids are not the only accepted form. `--project` (and a positional project argument) takes a project **name**, and `--chat` takes a chat **title**, matched case-insensitively and exactly, inside the calling chat's workspace only. A title has to name exactly one non-archived chat: two matches, none, or a match in another workspace all return `chat_not_found`, an unknown project returns `project_not_found`, and a name two projects in the workspace share returns `project_ambiguous` (pass the id). Resolution never widens scope, so a name can only ever reach something the id would have reached.
 - A plan-mode chat gets `plan_mode_read_only` back from any mutating command — plan mode is read-only by design, not a permission you can flag past.
-- Destructive commands (`chat delete`, `chat stop`, `project complete`, `project delete`, `schedule pause|resume|run|delete`, `run start`, `run cancel`, and every `vault review` mutation) can return `approval_required` outside auto/bypass mode. That is not a failure to retry — it means a human has to approve the action first.
+- Destructive commands (`chat delete`, `chat stop`, `project complete`, `project delete`, `schedule pause|resume|run|delete`, `webhook delete`, `run start`, `run cancel`, and every `vault review` mutation) can return `approval_required` outside auto/bypass mode. That is not a failure to retry — it means a human has to approve the action first.
 - Structured input is the exception, not the rule: only `chat handover --messages @file.json` and `run start -- <cmd> [args...]` take it. Everywhere else, arguments are scalar flags or a constrained enum value. For `run start`, everything after `--` is the literal argv passed to the subprocess — no shell, so `run start -- bash -lc "a && b"` is how you get shell features, and you own that choice.
 
 ## Commands
@@ -182,6 +182,29 @@ which are the user's decision rather than yours to resolve:
 
 Shared `...flags` for `schedule create/update/preview`: `--prompt --daily-time --timezone --frequency {daily,weekly,monthly,manual,once,interval} --interval-minutes --days-of-week mon,tue --day-of-month --run-at-date --project --title --description --provider --model --archive-policy {manual,auto}`. There is no `--chat` binding flag — schedules bind to a project and workspace, never to one chat.
 
+### Webhook triggers
+
+A trigger is a URL an external sender POSTs to. Ciaobot answers the event with a
+durable receipt and launches an ordinary chat in the trigger's own project — the
+sender never chooses a chat, a model, a mode or a workspace, and the turn is not
+unattended, so an approval it raises is an ordinary approval card.
+
+| Command | Purpose | Guard |
+|---|---|---|
+| `webhook list` | List this workspace's triggers as public records. | Read-only. Never a secret: only a hash of it is stored. |
+| `webhook create --name NAME [--instructions-file FILE] [--project P] [--mode normal\|auto\|plan]` | Configure a trigger and mint its secret. | Returns the trigger **and its secret, shown once**: hand it to the sender now, because only its hash is kept and it cannot be read back. Created **disabled** — nothing authorizes until `webhook update --enable`. |
+| `webhook update ID --revision REV [--name N] [--instructions-file FILE] [--enable\|--disable]` | Edit one trigger; only the fields you pass change. `--enable`/`--disable` is the off switch, and it reaches an event accepted a moment earlier. | `webhook_revision_conflict` (retryable) means the trigger moved: re-read and re-plan. The target and the mode are not editable — delete and recreate instead. |
+| `webhook rotate ID --revision REV` | Replace the trigger's secret and return the new one, shown once. | **Revokes on rotate**: the old secret stops authorizing immediately. Keeps `enabled` as it was; rotating is not a way to enable a disabled trigger. |
+| `webhook delete ID --revision REV` | Delete the trigger and destroy its verifier. | Destructive and irreversible: the sender needs a new trigger. Recorded receipts for past events are kept. |
+
+The sender side is not this CLI: an external system calls
+`POST /hooks/v1/<trigger_id>` with `Authorization: Bearer <that secret>` and an
+`Idempotency-Key`, and a body of exactly `{"text": "..."}`. `202` means the event
+is **recorded**, not that a turn finished. Both recipes are in `PWA_API.md`.
+
+Instructions are operator prose that the launched turn reads as its own, so
+they travel as a file (`--instructions-file`) rather than as a shell argument.
+
 ### Background runs
 
 | Command | Purpose | Guard |
@@ -249,6 +272,14 @@ ciao schedule create --prompt "Check open PRs" --frequency daily --daily-time 09
 {"ok": true, "data": {"schedule_id": "sch_4471", "next_run": "2026-09-22T09:00:00+02:00"}}
 ```
 
+Webhook triggers:
+```bash
+ciao webhook create --name "CI failure" --instructions-file @webhook.md --project Engineering
+```
+```json
+{"ok": true, "data": {"trigger": {"trigger_id": "5b1f…", "enabled": false, "revision": 1}, "secret": "kQ8…(shown once)"}}
+```
+
 Background runs:
 ```bash
 ciao run start --label "adoption report" --timeout-s 900 -- ./scripts/report.sh --full
@@ -275,6 +306,10 @@ ciao context get
 - **`task_revision_conflict`** — the task file changed since you read it. Nothing was written. Run `task get` (or `task list`) again, re-plan your edit against what is there now, and send the new `revision`; resending the old one is the same refusal.
 - **`task_completion_requires_user`** — the user, not you, marks a task done. Do not retry, do not reach for `task move --to done`, and do not edit the file: say which task is finished and let them close it.
 - **`task_not_found`** — a task id that is well formed but absent *from this workspace*. Another workspace's task is answered exactly this way, so this is also the answer when you reached for an id from the wrong vault.
+- **`webhook_revision_conflict`** — the trigger changed since you read it (`webhook list`). Nothing was written: re-read and re-plan instead of resending the same `--revision`.
+- **`webhook_not_found`** — no trigger with that id **in this workspace**. A trigger belonging to another workspace answers exactly this way, so do not look for it in another workspace; report the id back and let the operator reconcile it.
+- **`webhook_invalid`** — the store refused one field: a blank name, an unknown `--mode` (only `normal`, `auto`, `plan`), or a `--revision` that is not a number. Enabling a revoked trigger is also refused this way: rotate its secret first.
+- **`unauthorized` on the sender's POST** — the trigger's secret does not authorize right now. Missing, disabled, revoked and wrong are one answer; if the secret was rotated, the old one is dead by design and the sender needs the new one, which `webhook create`/`webhook rotate` showed once.
 
 ## Operation names for telemetry
 
@@ -325,6 +360,11 @@ ciao context get
   "schedule resume": "schedule_action",
   "schedule run": "schedule_action",
   "schedule delete": "schedule_action",
+  "webhook list": "webhook_list",
+  "webhook create": "webhook_create",
+  "webhook update": "webhook_update",
+  "webhook rotate": "webhook_rotate",
+  "webhook delete": "webhook_delete",
   "run start": "background_run_start",
   "run status": "background_run_status",
   "run cancel": "background_run_cancel",
