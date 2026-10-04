@@ -75,6 +75,17 @@ def _verified_host(bundle_path: str | None = None) -> HostOwnership:
 #: A POSIX engine interpreter, so the hosted argv renders on every runner.
 _ENGINE_PYTHON = "/opt/ciaobot/tool/bin/python"
 
+#: Tests that build a macOS-shaped ``Ciaobot Server.app`` under ``tmp_path`` and
+#: render its hosted argv. On Windows ``tmp_path`` is a backslash path, which
+#: ``host_service_argv`` refuses by design (the same string names a different
+#: file on POSIX and Windows), so these model a macOS launchd definition that
+#: cannot exist on Windows and are skipped there. The platform-neutral
+#: recognition, direct-shape and refusal tests keep running everywhere.
+macos_host_shape_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="builds a macOS-shaped host bundle and renders its hosted argv",
+)
+
 
 @pytest.fixture(autouse=True)
 def _darwin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,6 +172,7 @@ def test_setup_with_verified_host_and_explicit_python_serves_that_python(
     assert data["ExitTimeOut"] == 45
 
 
+@macos_host_shape_only
 def test_setup_rerun_on_a_live_hosted_workspace_stays_hosted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -202,6 +214,7 @@ def test_setup_rerun_on_a_live_hosted_workspace_stays_hosted(
     assert _load_plist(plist)["ExitTimeOut"] == 45
 
 
+@macos_host_shape_only
 def test_setup_rerun_on_a_dead_hosted_workspace_writes_the_direct_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -370,6 +383,7 @@ def test_existing_hosted_definition_recognition_never_raises(
     assert cli._existing_hosted_definition_serves(agents, workspace) is False
 
 
+@macos_host_shape_only
 def test_existing_hosted_definition_is_preserved_only_while_its_host_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
