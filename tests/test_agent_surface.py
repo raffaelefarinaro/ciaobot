@@ -376,6 +376,25 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["schedule", "resume", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "resume"})),
         (["schedule", "run", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "run"})),
         (["schedule", "delete", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "delete"})),
+        (["webhook", "list"], ("webhook_list", {})),
+        # The prose travels as a file; only `--name` is required.
+        (["webhook", "create", "--name", "CI push"], ("webhook_create", {"name": "CI push"})),
+        (
+            ["webhook", "update", "a" * 32, "--revision", "3", "--name", "CI", "--disable"],
+            ("webhook_update", {"trigger_id": "a" * 32, "expected_revision": "3", "name": "CI", "enabled": False}),
+        ),
+        (
+            ["webhook", "update", "a" * 32, "--revision", "3", "--enable"],
+            ("webhook_update", {"trigger_id": "a" * 32, "expected_revision": "3", "enabled": True}),
+        ),
+        (
+            ["webhook", "rotate", "a" * 32, "--revision", "3"],
+            ("webhook_rotate", {"trigger_id": "a" * 32, "expected_revision": "3"}),
+        ),
+        (
+            ["webhook", "delete", "a" * 32, "--revision", "3"],
+            ("webhook_delete", {"trigger_id": "a" * 32, "expected_revision": "3"}),
+        ),
         (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
         (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
         (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),
@@ -445,6 +464,9 @@ def test_every_documented_command_parses() -> None:
         "task attempt": ["a" * 32, "stop"],
         "schedule update": ["s"], "schedule pause": ["s"],
         "schedule resume": ["s"], "schedule run": ["s"], "schedule delete": ["s"],
+        "webhook create": ["--name", "n"], "webhook update": ["a" * 32, "--revision", "1"],
+        "webhook rotate": ["a" * 32, "--revision", "1"],
+        "webhook delete": ["a" * 32, "--revision", "1"],
         "run start": ["--", "true"], "run status": ["r"], "run cancel": ["r"],
     }
     for command, operation in table.items():
@@ -585,7 +607,14 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     # delegation a delegation. Two lines of prose had to come with them, because
     # "attended, not bypassing" and "a finished turn waits for review" are the two
     # properties a model cannot infer from a verb list.
-    assert len(cli) < 10600
+    # Raised again to 11000 for webhook triggers (#1039, A6), the same trade for five
+    # commands: the shown-once secret and the created-disabled rule are the two facts
+    # that keep an agent from pasting a credential into a note or enabling a trigger
+    # nobody asked to enable, and neither survives being left to `ciao help`.
+    # B5 (#1033) and A6 (#1039) added their lines on divergent branches and meet
+    # here, so this is 11400 rather than either's 10600/11000: both sets of prose
+    # have to travel or one feature's guarantee silently disappears.
+    assert len(cli) < 11400
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(

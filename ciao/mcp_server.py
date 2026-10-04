@@ -1194,6 +1194,134 @@ async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
     )
 
 
+async def _op_webhook_list(service: CiaoMcpService) -> dict[str, Any]:
+    """List this workspace's webhook triggers, as public records.
+
+    Every row carries its `revision`, which every later edit has to present
+    back. Nothing here is or can be a secret: the store keeps only a SHA-256
+    verifier, in a record separate from the one this returns, so a list is safe
+    to print, log or paste anywhere.
+    """
+    return await service._invoke("webhook_list", lambda cp, p: cp.webhook_list(p))
+
+
+async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: str = "",
+                             project_id: str | None = None,
+                             mode: str | None = None) -> dict[str, Any]:
+    """Configure a webhook trigger in this workspace.
+
+    Args:
+        name: 1-120 characters after trimming. Also the title of the chat each
+            accepted event opens.
+        instructions: What the launched turn should do with an event, at most
+            16,000 characters. Prose belongs in a file
+            (`--instructions-file`), not in a shell argument. Empty means the
+            turn reports the event and nothing else.
+        project_id: Project id the events run in. Omit for the workspace's
+            General project. Stored as given — a project that no longer exists
+            or belongs to another workspace fails the event's launch rather than
+            quietly running it somewhere else.
+        mode: `normal`, `auto` (the default) or `plan`: the permission mode the
+            launched turn runs under. A sender can never choose it.
+
+    The reply is the trigger **plus its secret, shown once**: only a hash of it
+    is kept, so it cannot be read back — hand it to the sender now, or rotate and
+    take the new one. The trigger is created **disabled**, so the secret
+    authorizes nothing until you `webhook_update --enable` it at its revision.
+    That is deliberate: being configured is not being callable.
+    """
+    return await service._invoke(
+        "webhook_create",
+        lambda cp, p: cp.webhook_create(
+            p,
+            name=name,
+            instructions=instructions,
+            project_id=project_id,
+            mode=mode,
+        ),
+        mutating=True,
+    )
+
+
+async def _op_webhook_update(service: CiaoMcpService, trigger_id: str,
+                             expected_revision: str, name: str | None = None,
+                             instructions: str | None = None,
+                             enabled: bool | None = None) -> dict[str, Any]:
+    """Edit one webhook trigger at the revision you read.
+
+    Args:
+        trigger_id: The trigger's 32-hex id, from `webhook_list`.
+        expected_revision: The `revision` you read. A stale one is a
+            `webhook_revision_conflict` with nothing written — re-read and
+            re-plan rather than resending the same revision.
+        name, instructions, enabled: Only the fields you pass change; omit one
+            to leave it alone.
+        enabled: `true` makes the trigger callable, `false` stops it. The off
+            switch reaches an event that was accepted a moment earlier: it
+            launches only while its trigger is still enabled.
+
+    The target (workspace, project) and the mode are deliberately not
+    editable — retargeting a trigger, or changing the permissions its events
+    run under, is a trust change rather than an edit. Delete and recreate it
+    instead, which is why `webhook_create` takes both.
+    """
+    return await service._invoke(
+        "webhook_update",
+        lambda cp, p: cp.webhook_update(
+            p, trigger_id, expected_revision=expected_revision, name=name,
+            instructions=instructions, enabled=enabled,
+        ),
+        mutating=True,
+    )
+
+
+async def _op_webhook_rotate(service: CiaoMcpService, trigger_id: str,
+                             expected_revision: str) -> dict[str, Any]:
+    """Replace one trigger's secret and return the new one, shown once.
+
+    Args:
+        expected_revision: The `revision` you read; a stale one is
+            `webhook_revision_conflict` with nothing written.
+
+    **Rotation revokes on rotate**: the previous secret stops authorizing this
+    trigger immediately, so whoever else held it is refused from the next
+    request on. It is the recovery for a lost or exposed secret, and it keeps
+    `enabled` exactly as it was — rotating a disabled trigger does not enable it.
+    Only a hash of the old secret was ever stored, so it cannot be recovered:
+    if it is lost, rotate.
+    """
+    return await service._invoke(
+        "webhook_rotate",
+        lambda cp, p: cp.webhook_rotate(
+            p, trigger_id, expected_revision=expected_revision
+        ),
+        mutating=True,
+    )
+
+
+async def _op_webhook_delete(service: CiaoMcpService, trigger_id: str,
+                             expected_revision: str) -> dict[str, Any]:
+    """Delete one webhook trigger and destroy its verifier.
+
+    Args:
+        expected_revision: The `revision` you read; a stale one is
+            `webhook_revision_conflict` with nothing written.
+
+    Irreversible, and the reason the secret dies: once the verifier is gone the
+    trigger cannot authenticate again even if the same id came back, so the
+    sender has to be given a new trigger (`webhook_create`). Receipts already
+    recorded for past events are kept — deleting a trigger stops future events,
+    it does not rewrite history.
+    """
+    return await service._invoke(
+        "webhook_delete",
+        lambda cp, p: cp.webhook_delete(
+            p, trigger_id, expected_revision=expected_revision
+        ),
+        mutating=True,
+    )
+
+
 async def _op_file_surface(service: CiaoMcpService, path: str) -> dict[str, Any]:
     """Deliberately open a workspace file in the user's pinned preview panel.
 
@@ -1257,6 +1385,13 @@ OPERATIONS: tuple[Operation, ...] = (
     # `_DESTRUCTIVE`, because `stop` ends a turn irreversibly: an ask-class
     # operation, where every other task write is allow-class.
     Operation("task_attempt_action", _DESTRUCTIVE, _op_task_attempt_action.__doc__ or "", _op_task_attempt_action),
+    Operation("webhook_list", _READ, _op_webhook_list.__doc__ or "", _op_webhook_list),
+    Operation("webhook_create", _WRITE, _op_webhook_create.__doc__ or "", _op_webhook_create),
+    Operation("webhook_update", _WRITE, _op_webhook_update.__doc__ or "", _op_webhook_update),
+    Operation("webhook_rotate", _WRITE, _op_webhook_rotate.__doc__ or "", _op_webhook_rotate),
+    # `_DESTRUCTIVE`, not `_WRITE`: this one destroys a credential's verifier,
+    # which cannot be undone by editing anything back.
+    Operation("webhook_delete", _DESTRUCTIVE, _op_webhook_delete.__doc__ or "", _op_webhook_delete),
     Operation("file_surface", _READ, _op_file_surface.__doc__ or "", _op_file_surface),
 )
 
