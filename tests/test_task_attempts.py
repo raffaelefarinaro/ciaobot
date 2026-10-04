@@ -613,6 +613,7 @@ def test_the_store_holds_no_board_and_never_completes_a_task(tmp_path: Path) -> 
         "list_for_task",
         "recover_interrupted",
         "bind_revision",
+        "continue_turn",
         "reopen",
         "update_state",
         "finish",
@@ -621,6 +622,32 @@ def test_the_store_holds_no_board_and_never_completes_a_task(tmp_path: Path) -> 
 
 
 # ── Bounded history ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("state", ["ready_for_review", "needs_you"])
+def test_continuing_a_live_attempt_clears_its_old_ending(tmp_path: Path, state: str) -> None:
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    store.finish(attempt.attempt_id, state, detail="Old ending")
+    running = store.continue_turn(attempt.attempt_id)
+    assert running.state == "running"
+    assert running.ended_at == ""
+    assert running.detail == ""
+    assert running.task_revision == attempt.task_revision
+    assert len(store.list_for_task(TASK_ID)) == 1
+    assert store.finish(attempt.attempt_id, "failed").state == "failed"
+
+
+@pytest.mark.parametrize("released", [False, True])
+def test_a_continuation_cannot_revive_a_dead_attempt(tmp_path: Path, released: bool) -> None:
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    if released:
+        store.release(attempt.attempt_id)
+    else:
+        store.finish(attempt.attempt_id, "failed")
+    with pytest.raises(TaskAttemptError):
+        store.continue_turn(attempt.attempt_id)
 
 
 def test_a_task_retried_forever_keeps_a_bounded_history(tmp_path: Path) -> None:

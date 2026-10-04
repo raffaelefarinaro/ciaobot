@@ -651,6 +651,14 @@ class ProjectChatManager:
         # service workers can dismiss already-delivered OS notifications for
         # that chat.
         self.clear_notifications_cb: Optional[Callable[[str], None]] = None
+        # `on_turn_started(chat_id, stream)` fires once per turn a person asked
+        # for: a delegated task's answer, a Send update, an approval the user
+        # answered in the composer, an ordinary message. The delegation service
+        # subscribes so a turn in a delegated chat is settled by *that* turn
+        # rather than only by the one it launched — the same injection point as
+        # the callbacks above, and for the same reason: the manager must not
+        # depend on the task board to know what a turn is.
+        self._turn_started: list[Callable[[str, "ChatStream"], None]] = []
         # Per-chat pending push tasks. Pushes are scheduled with a short
         # delay (30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
@@ -5426,6 +5434,34 @@ class ProjectChatManager:
         if not flat:
             return False
         return any(p.search(flat) for p in _INTERIM_SUBAGENT_PATTERNS)
+
+    def on_turn_started(
+        self, callback: Callable[[str, "ChatStream"], None]
+    ) -> None:
+        """Subscribe to "a turn a person is present for has begun".
+
+        Fired from :meth:`ChatStreaming.start_drive`, which is the one place a
+        turn begins — so it covers every route to the model (this manager's
+        ``start_stream``, the composer's WebSocket, an approval the user answered
+        in the chat) rather than the subset a caller happens to know about.
+
+        Only *attended* turns are announced. A background drain and an
+        unattended dispatch are the engine talking to itself in a chat, and
+        treating them as the user's continuation of a conversation would settle a
+        delegated attempt on work nobody asked for.
+
+        A callback that raises is logged and skipped: an observer cannot be
+        allowed to fail the turn it is watching.
+        """
+        self._turn_started.append(callback)
+
+    def notify_turn_started(self, chat_id: str, stream: ChatStream) -> None:
+        """Tell every subscriber a turn began here. Never raises."""
+        for callback in tuple(self._turn_started):
+            try:
+                callback(chat_id, stream)
+            except Exception:
+                logger.exception("A turn-start subscriber failed for chat %s", chat_id)
 
     def start_stream(
         self,

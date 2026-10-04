@@ -58,6 +58,10 @@ class _RecordingStream:
         self.events = events
         self.subscribed = 0
         self.finish = asyncio.Event()
+        #: Messages the fake was handed to queue into this still-running turn, in
+        #: order. The real manager hands these to the drive loop as the turn's own
+        #: follow-ups and ends the stream only after they have run.
+        self.queued: list[str] = []
 
     async def subscribe(self):
         self.subscribed += 1
@@ -125,6 +129,9 @@ class _RecordingPcm:
         self.stop_awaited = 0
         #: Snapshots taken inside ``start_stream``, in call order.
         self.at_start: list[dict[str, Any]] = []
+        #: Subscribers to "a turn a person started has begun", as the real manager
+        #: keeps them. The control plane registers one in its constructor.
+        self.turn_started: list[Any] = []
         self._next_chat = 0
 
     # -- workspace resolution and projects ----------------------------
@@ -212,6 +219,30 @@ class _RecordingPcm:
     def get_chat(self, chat_id):
         return self.chats.get(chat_id)
 
+    def get_active_stream(self, chat_id):
+        """The turn still running in this chat, or ``None``.
+
+        A stream whose gate the test opened has ended, which is the same answer the
+        real broker gives once a stream is gone from it.
+        """
+        for stream in reversed(self.streams):
+            if not stream.finish.is_set():
+                return stream
+        return None
+
+    def queue_message(self, chat_id, text, images=None, entry_id=None):
+        """Park a message into the running turn, as the composer's WebSocket does.
+
+        ``False`` when no turn is running, which is the manager's own signal to
+        start one instead — the branch a **Send update** takes after a finished
+        turn.
+        """
+        stream = self.get_active_stream(chat_id)
+        if stream is None:
+            return False
+        stream.queued.append(text)
+        return True
+
     async def stop_chat(self, chat_id):
         """The manager's Stop, which is ``async`` — as the real one is.
 
@@ -235,7 +266,28 @@ class _RecordingPcm:
             raise self.raise_on_start
         stream = _RecordingStream(self.next_events)
         self.streams.append(stream)
+        # `ChatStreaming.start_drive` announces every attended turn, this one
+        # included: the real manager makes no distinction between the turns the
+        # board starts and the ones a keystroke in a chat does.
+        self.notify_turn_started(chat_id, stream)
         return stream
+
+    # -- the turn-start announcement ------------------------------------
+
+    def on_turn_started(self, callback):
+        self.turn_started.append(callback)
+
+    def answer_in_chat(self, chat_id: str, text: str) -> _RecordingStream:
+        """Start a turn the way the composer does: the same call, nothing more.
+
+        Named apart from `start_stream` so a test says *whose* turn this is — the
+        board never starts this one, and would otherwise never learn of it.
+        """
+        return self.start_stream(chat_id, text)
+
+    def notify_turn_started(self, chat_id: str, stream: _RecordingStream) -> None:
+        for callback in tuple(self.turn_started):
+            callback(chat_id, stream)
 
     # -- the assertion helper ----------------------------------------
 
@@ -990,6 +1042,353 @@ async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
         actor="user",
     )
     assert edited["changed_since_delegated"] is True
+
+
+# ── Send update: rebind and re-attach (#1047) ────────────────────────────
+#
+# An edit made under a running turn is answered by one ordinary message in the
+# attempt's own chat. Two things have to follow from it, and neither is a
+# composer send's business: the attempt is rebound to the revision the update was
+# made at, so `changed_since_delegated` stops being true and the button retires;
+# and the turn that message causes is watched, so the agent's answer advances the
+# card. The order is the contract — a refused send rebinds nothing.
+
+
+def _update(
+    plane: CiaoControlPlane, task: dict[str, Any], attempt: dict[str, Any], text: str
+) -> dict[str, Any]:
+    """One **Send update**, at the revision the preview was read at."""
+    return plane.workspace_task_send_update(
+        "personal",
+        task["id"],
+        attempt["attempt_id"],
+        expected_revision=task["revision"],
+        message=text,
+    )
+
+
+async def test_a_send_update_rebinds_the_attempt_and_retires_the_flag(
+    tmp_path: Path,
+) -> None:
+    """The flag means "the agent is holding a description you have since changed",
+    and the update is the gesture that says it now holds this one."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Wire the store", body="Original scope.")
+    outcome = _delegate(plane, task)
+    await _end_turns(pcm)
+    edited = plane.workspace_task_update(
+        "personal",
+        task["id"],
+        expected_revision=_get_task(plane, task["id"])["revision"],
+        changes={},
+        body="A different scope.",
+    )
+    assert edited["changed_since_delegated"] is True
+
+    answer = _update(plane, edited, outcome["attempt"], "The task now reads differently.")
+
+    assert answer["updated"] is True
+    assert answer["chat_id"] == "chat-1"
+    assert answer["task"]["changed_since_delegated"] is False, (
+        "the rebind is what retires the flag; without it the button is offered for ever"
+    )
+    # The binding is the record's own revision, not the row's — the same stamp the
+    # delegation path leaves after its linkage write.
+    bound = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert bound.task_revision == answer["task"]["revision"]
+    # And still one attempt on the task: an update continues the delegation, it does
+    # not mint a second one.
+    assert _attempt_store(plane).get_live(task["id"]) is not None
+    assert len(_attempt_store(plane).list_for_task(task["id"])) == 1
+
+
+async def test_a_send_update_is_one_ordinary_attended_message_and_not_a_delegation(
+    tmp_path: Path,
+) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Wire the store", body="Original scope.")
+    outcome = _delegate(plane, task)
+    await _end_turns(pcm)
+    edited = plane.workspace_task_update(
+        "personal",
+        task["id"],
+        expected_revision=_get_task(plane, task["id"])["revision"],
+        changes={},
+        body="A different scope.",
+    )
+
+    _update(plane, edited, outcome["attempt"], "The task now reads differently.")
+
+    # One more `start_stream`, carrying the message the user approved, in the
+    # attempt's own chat — with no keyword arguments at all, so an approval card it
+    # raises is still an ordinary Needs-you card.
+    assert pcm.start_stream_kwargs[-1] == {"args": ()}, pcm.start_stream_kwargs
+    assert _starts(pcm)[-1] == ("chat-1", "The task now reads differently.")
+    # No second chat and no second attempt: this is the gesture the card's own words
+    # rule out, and the counts are what say it did not happen.
+    assert len(_creates(pcm)) == 1
+    assert len(_attempt_store(plane).list_for_task(task["id"])) == 1
+
+
+async def test_a_turn_started_by_an_update_settles_the_attempt(tmp_path: Path) -> None:
+    """The re-attach, on the update path: the answer comes back into the attempt's
+    own chat, so the attempt is what carries it."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Wire the store")
+    outcome = _delegate(plane, task)
+    await _end_turns(pcm)
+    edited = plane.workspace_task_update(
+        "personal",
+        task["id"],
+        expected_revision=_get_task(plane, task["id"])["revision"],
+        changes={},
+        body="A different scope.",
+    )
+
+    _update(plane, edited, outcome["attempt"], "Work from this instead.")
+    update_turn = pcm.streams[-1]
+
+    await _end_turns(pcm)
+
+    settled = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert settled.state == "ready_for_review"
+    row = _get_task(plane, task["id"])
+    assert row["review_state"] == "ready"
+    assert row["changed_since_delegated"] is False, (
+        "the watcher's own review flag moves the revision, so the rebind has to follow it"
+    )
+    # Exactly one watcher on the update turn, not two: the chat manager announces it
+    # and the update path attaches it, and the second has to be the no-op it is
+    # documented as.
+    assert update_turn.subscribed == 1
+
+
+async def test_a_send_update_while_the_turn_runs_is_queued_into_it(
+    tmp_path: Path,
+) -> None:
+    """The ordinary case, not an edge: an edit made *under* a running agent is what
+    this gesture exists for, so the message is queued into that turn rather than
+    dropped. `start_stream` hands back a turn already running instead of queueing,
+    which would leave the rebind claiming an update nobody received."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Wire the store", body="Original scope.")
+    outcome = _delegate(plane, task)
+    edited = plane.workspace_task_update(
+        "personal",
+        task["id"],
+        expected_revision=_get_task(plane, task["id"])["revision"],
+        changes={},
+        body="A different scope.",
+    )
+
+    answer = _update(plane, edited, outcome["attempt"], "The task now reads differently.")
+
+    assert answer["queued"] is True
+    assert pcm.streams[0].queued == ["The task now reads differently."]
+    # No second turn: the running one runs the update as its own follow-up and ends
+    # afterwards, and that is what settles the attempt.
+    assert len(pcm.streams) == 1
+    assert answer["task"]["changed_since_delegated"] is False
+
+
+async def test_a_refused_send_leaves_the_flag_and_the_binding_alone(
+    tmp_path: Path,
+) -> None:
+    """A rebind only ever follows a send that was accepted.
+
+    Each refusal below sends nothing and clears nothing, so the card still reads
+    "changed since delegated" and the button is still there — the user can try
+    again rather than being told their update landed.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Wire the store")
+    outcome = _delegate(plane, task)
+    await _end_turns(pcm)
+    edited = plane.workspace_task_update(
+        "personal",
+        task["id"],
+        expected_revision=_get_task(plane, task["id"])["revision"],
+        changes={},
+        body="A different scope.",
+    )
+    attempt = outcome["attempt"]
+    # The attempt's binding as it stands now — the delegation reply's own stamp is
+    # older than the review flag's rebind, and it is the current one an update must
+    # leave alone.
+    bound_before = _attempt_store(plane).get(attempt["attempt_id"]).task_revision
+    turns_before = len(pcm.streams)
+
+    # A chat that would not start the turn.
+    pcm.raise_on_start = RuntimeError("provider unreachable")
+    with pytest.raises(ControlPlaneError) as refused:
+        _update(plane, edited, attempt, "The task now reads differently.")
+    assert refused.value.code == "task_launch_failed"
+    assert len(pcm.streams) == turns_before
+    assert _get_task(plane, task["id"])["changed_since_delegated"] is True
+    assert _attempt_store(plane).get(attempt["attempt_id"]).task_revision == bound_before
+
+    # A revision the preview was not read at.
+    with pytest.raises(ControlPlaneError) as stale:
+        _update(plane, {**edited, "revision": "0" * 64}, attempt, "Too late.")
+    assert stale.value.code == "task_revision_conflict"
+    assert len(pcm.streams) == turns_before
+    assert _get_task(plane, task["id"])["changed_since_delegated"] is True
+
+    # An attempt that no longer holds the task: continuing a dead turn is `resume`.
+    pcm.raise_on_start = None
+    await _act(plane, attempt["attempt_id"], "stop")
+    with pytest.raises(ControlPlaneError) as settled:
+        _update(plane, edited, attempt, "Too late.")
+    assert settled.value.code == "invalid_action"
+    assert len(pcm.streams) == turns_before
+
+    # An attempt id sent under another task's URL acts on nothing.
+    other = _create(plane, title="Some other task")
+    with pytest.raises(ControlPlaneError) as foreign:
+        _update(plane, other, attempt, "Not yours.")
+    assert foreign.value.code == "task_attempt_not_found"
+    assert len(pcm.streams) == turns_before
+
+
+async def test_a_send_update_needs_a_message(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Wire the store")
+    outcome = _delegate(plane, task)
+    turns_before = len(pcm.streams)
+
+    with pytest.raises(ControlPlaneError) as empty:
+        _update(plane, _get_task(plane, task["id"]), outcome["attempt"], "   ")
+
+    assert empty.value.code == "invalid_task"
+    assert len(pcm.streams) == turns_before
+
+
+async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
+    tmp_path: Path,
+) -> None:
+    """The re-attach, on the path the board did not start.
+
+    The turn ends waiting on an approval card, so the attempt settles `needs_you`.
+    The user answers in that chat — a different turn in the same conversation, which
+    the watcher that settled the first one knows nothing about. The attempt must
+    follow it, or the badge describes a moment the conversation has moved past.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Needs an approval")
+    outcome = _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_permission = "Write /notes.md"
+    await _end_turns(pcm)
+    assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
+
+    # The manager announces every turn a person starts; this is the one the user
+    # started by answering in the composer, which is also what answers the card.
+    pcm.get_chat("chat-1").pending_permission = ""
+    pcm.answer_in_chat("chat-1", "Yes, write it.")
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "ready_for_review", (
+        "the answer's own turn settles the attempt; nothing was watching it before"
+    )
+    assert row["review_state"] == "ready"
+    assert _attempt_store(plane).get(outcome["attempt"]["attempt_id"]).state == "ready_for_review"
+
+
+@pytest.mark.parametrize("path", ["update", "answer"])
+async def test_a_live_continuation_records_its_error(tmp_path: Path, path: str) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Continue the same attempt")
+    outcome = _delegate(plane, task)
+    if path == "answer":
+        pcm.get_chat("chat-1").pending_permission = "Allow write"
+    await _end_turns(pcm)
+    before = _get_task(plane, task["id"])
+    assert before["attempt_state"] == ("needs_you" if path == "answer" else "ready_for_review")
+    pcm.get_chat("chat-1").pending_permission = ""
+    pcm.next_events = [{"type": "result", "text": "provider failed", "is_error": True}]
+    if path == "update":
+        edited = plane.workspace_task_update(
+            "personal", task["id"], expected_revision=before["revision"],
+            changes={}, body="Use the revised description",
+        )
+        _update(plane, edited, outcome["attempt"], "Use the revised description")
+    else:
+        pcm.answer_in_chat("chat-1", "Approved")
+    running = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert running.state == "running"
+    assert running.ended_at == ""
+    assert running.detail == ""
+    assert _get_task(plane, task["id"])["review_state"] == "none"
+    assert _get_task(plane, task["id"])["changed_since_delegated"] is False
+    await _end_turns(pcm)
+    assert _get_task(plane, task["id"])["attempt_state"] == "failed"
+    assert _attempt_store(plane).get(running.attempt_id).detail == "provider failed"
+    assert len(_attempt_store(plane).list_for_task(task["id"])) == 1
+
+
+@pytest.mark.parametrize("old_result", [True, False])
+async def test_finished_stream_cannot_settle_the_next_stream(
+    tmp_path: Path, old_result: bool,
+) -> None:
+    from ciao.web.chat_broker import ChatStream
+
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Back to back turns")
+    outcome = _delegate(plane, task)
+    await _end_turns(pcm)
+    first, second = ChatStream(), ChatStream()
+    plane._on_chat_turn_started("chat-1", first)
+    await asyncio.sleep(0)
+    assert first.subscriber_count == 1
+    if old_result:
+        first.publish({"type": "result", "text": "old answer"})
+    first.finish()
+    # No loop drain: the broker has finished A, but its watcher still exists.
+    plane._on_chat_turn_started("chat-1", second)
+    plane._watch_turn("personal", outcome["attempt"]["attempt_id"], task["id"], "chat-1", second)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert second.subscriber_count == 1
+    assert _get_task(plane, task["id"])["attempt_state"] == "running"
+    assert _get_task(plane, task["id"])["review_state"] == "none"
+    second.publish({"type": "result", "is_error": True, "text": "new failure"})
+    second.finish()
+    await asyncio.gather(*plane._watchers)
+    assert _get_task(plane, task["id"])["attempt_state"] == "failed"
+    assert _get_task(plane, task["id"])["review_state"] == "none"
+
+
+async def test_a_turn_in_an_ordinary_chat_re_attaches_nothing(tmp_path: Path) -> None:
+    """Every turn announces itself, so the announcement has to be free for the chats
+    that have no delegation behind them — and a task nothing is delegated to must not
+    grow an attempt out of a conversation."""
+    plane, pcm = _world(tmp_path)
+    _delegate(plane, _create(plane, title="Delegated"))
+    other = _create(plane, title="An ordinary task")
+
+    pcm.answer_in_chat("chat-1", "And one more thing.")
+    await _end_turns(pcm)
+
+    assert _attempt_store(plane).list_for_task(other["id"]) == ()
+
+
+async def test_a_settled_attempt_is_not_re_attached_by_its_own_chat(
+    tmp_path: Path,
+) -> None:
+    """Continuing a turn that did not finish is `resume`, and replacing it is `retry`.
+
+    A keystroke in the chat is neither, so a settled attempt is left exactly as it
+    settled even though its own chat is still perfectly usable.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Dead turn")
+    outcome = _delegate(plane, task)
+    await _act(plane, outcome["attempt"]["attempt_id"], "stop")
+
+    pcm.answer_in_chat("chat-1", "Never mind, carry on.")
+    await _end_turns(pcm)
+
+    assert _get_task(plane, task["id"])["attempt_state"] == "stopped"
 
 
 async def test_a_detached_watcher_may_not_flag_a_task_it_no_longer_holds(

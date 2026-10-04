@@ -69,7 +69,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -869,6 +869,25 @@ class TaskAttemptStore:
         rebound_attempts: list[TaskAttempt] = []
         self._mutate(change)
         return rebound_attempts[0]
+
+    def continue_turn(self, attempt_id: str) -> TaskAttempt:
+        """Record a new turn on a still-live conversation, not a new attempt."""
+        continued: list[TaskAttempt] = []
+
+        def change(records: dict[str, TaskAttempt]) -> dict[str, TaskAttempt]:
+            record = _require(records, attempt_id)
+            if not record.is_live:
+                raise TaskAttemptError("invalid_attempt", "only a live attempt can continue")
+            running = replace(
+                record, state="running", updated_at=self._now(), ended_at="",
+                detail="", owner=_PROCESS_TOKEN,
+            )
+            records[record.attempt_id] = running
+            continued.append(running)
+            return records
+
+        self._mutate(change)
+        return continued[0]
 
     def reopen(self, attempt_id: str, *, detail: str = "") -> TaskAttempt:
         """Put one settled attempt back to ``running``, in its own chat.

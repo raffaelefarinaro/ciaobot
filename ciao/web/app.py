@@ -202,6 +202,7 @@ from ciao.web.routes_tasks import (
     task_delete,
     task_get,
     task_list,
+    task_send_update,
     task_update,
 )
 from ciao.web.routes_webhooks import (
@@ -356,6 +357,14 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # pattern so they are not read as an action name.
         Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
         Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
+        # Send update: one ordinary message into the attempt's own chat, then the
+        # attempt is rebound to the revision it was made at. Literal `update` before
+        # the `{action}` pattern, like `complete`, so it is not read as an action name.
+        Route(
+            "/api/tasks/{task_id}/attempt/{attempt_id}/update",
+            task_send_update,
+            methods=["POST"],
+        ),
         Route(
             "/api/tasks/{task_id}/attempt/{attempt_id}/{action}",
             task_attempt_action,

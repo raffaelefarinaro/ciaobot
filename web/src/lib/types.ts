@@ -1241,6 +1241,24 @@ export interface TaskAttemptActionResponse {
 }
 
 /**
+ * What a **Send update** answers with.
+ *
+ * The attempt comes back rebound to the revision the update was made at, so
+ * `task.changed_since_delegated` is `false` in this same answer — which is what
+ * retires the control. `queued` says which of the two it was: the message was
+ * accepted either way, but a queued one is still waiting behind a turn already
+ * running in that chat.
+ */
+export interface TaskSendUpdateResponse {
+  workspace: string
+  attempt: TaskAttempt
+  chat_id: string
+  task: TaskDetail
+  updated: boolean
+  queued: boolean
+}
+
+/**
  * A file the server could not read as a task.
  *
  * `GET /api/tasks` appends one of these per unreadable file rather than dropping
