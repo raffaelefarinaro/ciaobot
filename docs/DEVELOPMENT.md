@@ -218,9 +218,12 @@ inspects the staged `Ciaobot Server.app` with the B1 contract (plist identity an
 the read-only `/usr/bin/codesign` probes), renames it atomically to
 `~/Applications/Ciaobot Server.app`, writes the owner-only record at
 `~/.local/state/ciaobot/server-host.json` (`0600` in a `0700` directory) and
-re-verifies with `verify_owned_host`. An existing verified host is a no-op, a
-foreign or tampered one is refused and left untouched, and a failure after the
-rename removes what the run placed. The host is **not activated**: no launchd, no
+re-verifies with `verify_owned_host`. It runs after the read-only preflight and
+never on a `--migrate --as-client` Mac. An existing verified host is a no-op; a
+bundle at the target the module cannot prove it owns is left untouched with a
+warning (module exit 3) and the engine install continues, while an archive that
+fails verification stops the run; a failure after the rename removes the bundle
+and record the run placed. The host is **not activated**: no launchd, no
 plist, no service change, no permission prompt — activation is a later child.
 A wheel-only manifest (every historical release) prints nothing from the selector
 and installs the engine exactly as before, and so does an explicit `--version`

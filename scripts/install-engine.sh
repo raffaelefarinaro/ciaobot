@@ -1213,65 +1213,9 @@ actual_sha=$(shasum -a 256 "$wheel" | awk '{print $1}')
 actual_size=$(wc -c < "$wheel" | tr -d ' ')
 [ "$actual_size" = "$wheel_size" ] || fail "downloaded wheel does not match the signed manifest"
 
-# --- the optional universal server host ------------------------------------
-#
-# A release may authenticate one prebuilt universal macOS server host beside
-# the wheel (#1050, child E1 of #1008). The signed entry is read through the
-# verified wheel's own module - the same "run the wheel's code" pattern
-# classify_install uses - so the selector and the manifest checks that guard it
-# are the canonical ones, not a second copy in shell.
-#
-# The module only exists on an engine that shipped with the host work. An older
-# wheel (an explicit `--version`, or a release cut between the manifest change
-# and this one) has no host entry to honor, and importing it here would turn a
-# wheel-only install into "No module named". So the module is probed first: an
-# engine that predates the host installs the engine exactly as it did before the
-# host existed, and a `server-host` entry cannot arrive on a wheel that has no
-# way to read it.
-#
-# Acquiring the host runs the B1 inspector's native codesign probes, so it only
-# happens once the signed archive's digest and size are known to be the manifest
-# key it already trusts. Installation is inert: no launchd, no plist and no
-# service change - activation is a later child.
-host_entry=
-if "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
-    python -I -c 'import ciao.server_host_install' >/dev/null 2>&1; then
-    host_entry=$("$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
-        python -I -m ciao.server_host_install select \
-        "$tmp/ciaobot-engine-manifest.json" "$tmp/ciaobot-engine-manifest.json.sig" \
-        --public-key "$RELEASE_PUBLIC_KEY") \
-        || fail "the signed manifest's server host entry could not be read"
-fi
-if [ -n "$host_entry" ]; then
-    set -- $host_entry
-    host_name=${1:-}
-    host_sha=${2:-}
-    host_size=${3:-}
-    if [ -z "$host_name" ] || [ -z "$host_sha" ] || [ -z "$host_size" ]; then
-        fail "the signed manifest's server host entry is malformed"
-    fi
-    host="$tmp/$host_name"
-    download "$base/$host_name" "$host" || fail "could not download $host_name"
-    actual_sha=$(shasum -a 256 "$host" | awk '{print $1}')
-    [ "$actual_sha" = "$host_sha" ] || fail "downloaded server host does not match the signed manifest"
-    actual_size=$(wc -c < "$host" | tr -d ' ')
-    [ "$actual_size" = "$host_size" ] || fail "downloaded server host does not match the signed manifest"
-    # The module re-checks the digest and size, inspects the extracted bundle,
-    # installs it atomically under ~/Applications and writes the owner-only
-    # record. A refusal leaves nothing installed.
-    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
-        python -I -m ciao.server_host_install install \
-        --manifest "$tmp/ciaobot-engine-manifest.json" \
-        --signature "$tmp/ciaobot-engine-manifest.json.sig" \
-        --archive "$host" \
-        --public-key "$RELEASE_PUBLIC_KEY" >/dev/null \
-        || fail "the signed server host could not be installed"
-    echo "Ciaobot Server host installed and recorded."
-fi
-
 # Past this point the release bytes are known to be the ones the maintainer
-# signed. The one thing this run has already written is the optional inert host
-# bundle above; the engine install below may now change the rest of this Mac.
+# signed, and not one byte of this Mac has been touched yet. Everything below
+# may change the install; everything above may not.
 if [ "$migrate" -ne 0 ]; then
     # An override the user typed is checked before the receipt is read and before
     # anything is touched: a client path taken with an address that opens nothing
@@ -1326,11 +1270,81 @@ if [ -f "$install_receipt" ]; then
     previous_executable=$(awk -F'"' '/^[[:space:]]*"executable":/ {print $4; exit}' "$install_receipt" 2>/dev/null || true)
 fi
 
+# --- the optional universal server host ------------------------------------
+#
+# A release may authenticate one prebuilt universal macOS server host beside
+# the wheel (#1050, child E1 of #1008). The signed entry is read through the
+# verified wheel's own module - the same "run the wheel's code" pattern
+# classify_install uses - so the selector and the manifest checks that guard it
+# are the canonical ones, not a second copy in shell.
+#
+# The module only exists on an engine that shipped with the host work. An older
+# wheel (an explicit `--version`, or a release cut between the manifest change
+# and this one) has no host entry to honor, and importing it here would turn a
+# wheel-only install into "No module named". So the module is probed first: an
+# engine that predates the host installs the engine exactly as it did before the
+# host existed, and a `server-host` entry cannot arrive on a wheel that has no
+# way to read it.
+#
+# Acquiring the host runs the B1 inspector's native codesign probes, so it only
+# happens once the signed archive's digest and size are known to be the manifest
+# key it already trusts. It runs after the read-only preflight, so a refusal
+# there still leaves this Mac untouched, and never on a client, which runs no
+# engine to host. Installation is inert: no launchd, no plist and no service
+# change - activation is a later child.
+host_entry=
+if [ "$migrate_path" != client ] &&
+    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+    python -I -c 'import ciao.server_host_install' >/dev/null 2>&1; then
+    host_entry=$("$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+        python -I -m ciao.server_host_install select \
+        "$tmp/ciaobot-engine-manifest.json" "$tmp/ciaobot-engine-manifest.json.sig" \
+        --public-key "$RELEASE_PUBLIC_KEY") \
+        || fail "the signed manifest's server host entry could not be read"
+fi
+if [ -n "$host_entry" ]; then
+    set -- $host_entry
+    host_name=${1:-}
+    host_sha=${2:-}
+    host_size=${3:-}
+    if [ -z "$host_name" ] || [ -z "$host_sha" ] || [ -z "$host_size" ]; then
+        fail "the signed manifest's server host entry is malformed"
+    fi
+    host="$tmp/$host_name"
+    download "$base/$host_name" "$host" || fail "could not download $host_name"
+    actual_sha=$(shasum -a 256 "$host" | awk '{print $1}')
+    [ "$actual_sha" = "$host_sha" ] || fail "downloaded server host does not match the signed manifest"
+    actual_size=$(wc -c < "$host" | tr -d ' ')
+    [ "$actual_size" = "$host_size" ] || fail "downloaded server host does not match the signed manifest"
+    # The module re-checks the digest and size, inspects the extracted bundle,
+    # installs it atomically under ~/Applications and writes the owner-only
+    # record. A refusal leaves nothing installed. Exit 3 is the one refusal that
+    # is not about the release: something is already at the target that the
+    # module cannot prove is ours (a bundle left without its record by a killed
+    # run, a copied or edited one). It is left exactly as it is and the engine
+    # install carries on - an inert, optional host must not block every later
+    # engine update until the user deletes it by hand. Any other failure is a
+    # release that did not verify, and stops the run.
+    host_rc=0
+    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+        python -I -m ciao.server_host_install install \
+        --manifest "$tmp/ciaobot-engine-manifest.json" \
+        --signature "$tmp/ciaobot-engine-manifest.json.sig" \
+        --archive "$host" \
+        --public-key "$RELEASE_PUBLIC_KEY" >/dev/null || host_rc=$?
+    case "$host_rc" in
+        0) echo "Ciaobot Server host installed and recorded." ;;
+        3) echo "warning: the existing Ciaobot Server host was left untouched (see above); the engine install continues" >&2 ;;
+        *) fail "the signed server host could not be installed" ;;
+    esac
+fi
+
 # --- the migration --------------------------------------------------------
 #
 # From `migration_active=1` on, this run may have changed the install, so every
 # failure after this point has to undo it and a signal has to say so in the
-# receipt. Before it, nothing has been touched and a refusal is free.
+# receipt. Before it, nothing of the engine has been touched and a refusal is
+# free; the one thing that may already be written is the inert host above.
 if [ "$migrate" -ne 0 ]; then
     case "$migrate_path" in
         host|client)

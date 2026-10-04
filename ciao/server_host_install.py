@@ -17,8 +17,8 @@ The steps are deliberately ordered so a refusal leaves nothing installed:
    target, refusing a link or a special member before the extraction;
 3. the extracted ``Ciaobot Server.app`` passes :func:`ciao.server_host.inspect_host_bundle`
    — the plist identity and the native ``/usr/bin/codesign`` probes, not the
-   manifest constants alone — while the staging directory is still outside
-   ``~/Applications``;
+   manifest constants alone — while it is still in the dotted staging directory
+   beside the target, not at the target path;
 4. the staging directory is fsynced and renamed onto the target, which must not
    already exist as a symlink, and an existing verified host is a no-op rather
    than something to overwrite;
@@ -28,7 +28,8 @@ The steps are deliberately ordered so a refusal leaves nothing installed:
 
 A foreign, tampered or mismatched archive is refused at step 1-3, before the
 target is touched; a failure at step 5 removes the bundle this run just renamed
-into place, so a partial install does not survive as a bundle without a record.
+into place and any record it wrote, so a partial install survives neither as a
+bundle without a record nor as a record without a bundle.
 There is no fallback that trusts an unverified archive, and the record path is
 :func:`ciao.server_host.default_ownership_path` with no Ciaobot-specific
 environment override.
@@ -75,6 +76,7 @@ from ciao.server_host import (
 __all__ = [
     "ARCHIVE_MISMATCH",
     "ARCHIVE_UNSAFE",
+    "EXISTING_HOST_EXIT",
     "HOST_EXISTS",
     "INSTALL_FAILED",
     "STAGING_PREFIX",
@@ -99,6 +101,14 @@ TARGET_UNSAFE = "target_unsafe"
 #: ``~/Applications`` during a run shows it as scratch, and unique so two runs
 #: cannot collide.
 STAGING_PREFIX = ".ciaobot-host-stage."
+
+#: ``install``'s exit status when the target already holds something this
+#: installer cannot prove it owns (``host_exists``) or must not follow
+#: (``target_unsafe``). It is left untouched, and the shell installer warns and
+#: carries on with the engine: a host that is optional and inert must not turn
+#: every later engine install into a failure until the user deletes it by hand.
+#: Every other refusal - a mismatched, unsafe or foreign archive - is exit 1.
+EXISTING_HOST_EXIT = 3
 
 _CHUNK = 1 << 20
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -455,6 +465,7 @@ def install_server_host(
         ) from exc
 
     renamed = False
+    recorded = False
     try:
         staged_app = extract_host_archive(path, stage)
         # Prove the bytes before they reach ~/Applications. This runs the plist
@@ -469,21 +480,34 @@ def install_server_host(
                 code=HOST_EXISTS,
             )
         _fsync_tree(staged_app)
-        os.rename(staged_app, bundle)
+        try:
+            os.rename(staged_app, bundle)
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the staged host could not be moved to {bundle}: {exc}",
+                code=INSTALL_FAILED,
+            ) from exc
         renamed = True
         _fsync_dir(parent)
 
         installed = inspect_host_bundle(bundle, runner=runner)
+        recorded = True
         _write_ownership_record(installed, record_path)
         return verify_owned_host(bundle, ownership_path=record_path, runner=runner)
     except BaseException:
         # Nothing of this run survives a failure: the staging directory is
         # removed either way, and a bundle that was renamed into place is taken
-        # away again so a recordless host is never left behind. A bundle that was
-        # already there is never touched - `renamed` is the fact that separates
-        # "this run put it there" from "this run found it".
+        # away again so a recordless host is never left behind, together with a
+        # record this run may have written for it. A bundle that was already
+        # there is never touched - `renamed` is the fact that separates "this
+        # run put it there" from "this run found it".
         if renamed:
             shutil.rmtree(bundle, ignore_errors=True)
+        if recorded:
+            try:
+                record_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -500,7 +524,9 @@ def main(argv: list[str] | None = None) -> int:
 
     ``install`` re-verifies the manifest and its selected host entry (the shell
     installer has already read the same bytes, and re-verifying here closes the
-    gap between the two reads) and installs the archive.
+    gap between the two reads) and installs the archive. A target it leaves
+    untouched because it cannot prove it owns it is :data:`EXISTING_HOST_EXIT`,
+    not 1, so the shell installer can tell it from a refused archive.
     """
     parser = argparse.ArgumentParser(
         prog="python -m ciao.server_host_install", description=__doc__
@@ -567,12 +593,18 @@ def main(argv: list[str] | None = None) -> int:
             print(entry["filename"], entry["sha256"], entry["size"])
             return 0
         entry = select_server_host_artifact(manifest)
-        snapshot = install_server_host(
-            args.archive,
-            entry,
-            bundle_path=args.bundle_path,
-            ownership_path=args.ownership_path,
-        )
+        try:
+            snapshot = install_server_host(
+                args.archive,
+                entry,
+                bundle_path=args.bundle_path,
+                ownership_path=args.ownership_path,
+            )
+        except ServerHostInstallError as exc:
+            if exc.code not in (HOST_EXISTS, TARGET_UNSAFE):
+                raise
+            print(f"warning: {exc}", file=sys.stderr)
+            return EXISTING_HOST_EXIT
     except (ServerHostError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

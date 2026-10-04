@@ -620,7 +620,7 @@ def test_install_refuses_a_non_macos_platform_before_anything(
 
 
 @requires_posix_uid
-def test_a_matching_record_survives_a_failed_record_write(
+def test_a_failed_record_write_leaves_no_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A record write that fails after the rename removes the bundle this run
@@ -638,6 +638,35 @@ def test_a_matching_record_survives_a_failed_record_write(
     monkeypatch.setattr(server_host_install, "_write_ownership_record", refuse_record)
 
     with pytest.raises(server_host_install.ServerHostInstallError):
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert not target.exists()
+    assert not record.exists()
+
+
+@requires_posix_uid
+def test_a_failed_final_verification_leaves_neither_bundle_nor_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The record is written, then the re-verification refuses: the bundle this
+    # run placed and the record it wrote for it are both taken away, so no
+    # record survives naming a bundle that is gone.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+
+    def refuse(*_args: Any, **_kwargs: Any) -> HostOwnership:
+        raise server_host.ServerHostError("mismatch", code="not_owned")
+
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse)
+
+    with pytest.raises(server_host.ServerHostError):
         server_host_install.install_server_host(
             archive,
             entry,
@@ -866,6 +895,79 @@ def test_install_cli_installs_the_host(
     assert capsys.readouterr().out.strip() == os.path.realpath(target)
     assert read_host_ownership(record).bundle_path == os.path.realpath(target)
     assert target.is_dir()
+
+
+@requires_posix_uid
+def test_install_cli_exits_3_for_a_host_it_cannot_prove_it_owns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A bundle already at the target without a matching record is left alone,
+    # and the CLI says so with its own status so the shell installer can carry
+    # on with the engine instead of failing every later update.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    manifest, signature = _signed_manifest(tmp_path, entry)
+    public_key = (tmp_path / "public-key.txt").read_text(encoding="utf-8")
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    (target / "foreign").write_text("not ours", encoding="utf-8")
+    record = tmp_path / "record.json"
+
+    status = server_host_install.main(
+        [
+            "install",
+            "--manifest",
+            str(manifest),
+            "--signature",
+            str(signature),
+            "--archive",
+            str(archive),
+            "--public-key",
+            public_key,
+            "--bundle-path",
+            str(target),
+            "--ownership-path",
+            str(record),
+        ]
+    )
+
+    assert status == server_host_install.EXISTING_HOST_EXIT == 3
+    assert "warning:" in capsys.readouterr().err
+    assert (target / "foreign").read_text(encoding="utf-8") == "not ours"
+    assert not record.exists()
+
+
+@requires_posix_uid
+def test_install_cli_exits_1_for_an_archive_that_does_not_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    manifest, signature = _signed_manifest(tmp_path, entry)
+    public_key = (tmp_path / "public-key.txt").read_text(encoding="utf-8")
+    archive.write_bytes(b"nobody signed this")
+    target = _target(tmp_path)
+
+    status = server_host_install.main(
+        [
+            "install",
+            "--manifest",
+            str(manifest),
+            "--signature",
+            str(signature),
+            "--archive",
+            str(archive),
+            "--public-key",
+            public_key,
+            "--bundle-path",
+            str(target),
+            "--ownership-path",
+            str(tmp_path / "record.json"),
+        ]
+    )
+
+    assert status == 1
+    assert not os.path.lexists(target)
 
 
 # ── macOS-only integration: the real universal host ──────────────────────────
