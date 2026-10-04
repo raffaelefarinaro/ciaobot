@@ -27,6 +27,9 @@ import {
   taskApiErrorMessage,
   taskDetailFrom,
   taskLanes,
+  taskReconcileBadgeClass,
+  taskReconcileLabel,
+  taskReconcileNotes,
   taskRowsFrom,
   toTaskListRow,
 } from './taskBoard'
@@ -315,5 +318,43 @@ describe('taskApiErrorMessage', () => {
   it('falls back to the message, and then to its own sentence', () => {
     expect(taskApiErrorMessage(new Error('network down'), 'fallback')).toBe('network down')
     expect(taskApiErrorMessage({}, 'fallback')).toBe('fallback')
+  })
+})
+describe('taskReconcileNotes', () => {
+  it('does not flag a released ready_for_review with no Review badge', () => {
+    // What a card looks like immediately after the user approved Done or detached
+    // it: the attempt keeps `ready_for_review` as its recorded outcome, the badge
+    // is gone and nothing is live. That used to raise a false
+    // `result_without_review`.
+    const released = task({
+      status: 'done',
+      assignee: 'agent',
+      attempt_state: 'ready_for_review',
+      review_state: 'none',
+      live_attempt_id: '',
+    })
+    expect(taskReconcileNotes(released)).toEqual([])
+  })
+
+  it('still flags a live ready_for_review whose Review badge is missing', () => {
+    const live = task({
+      status: 'in_progress',
+      assignee: 'agent',
+      attempt_state: 'ready_for_review',
+      review_state: 'none',
+      live_attempt_id: 'b'.repeat(32),
+    })
+    const codes = taskReconcileNotes(live).map((n) => n.code)
+    expect(codes).toContain('result_without_review')
+  })
+
+  it('labels every code in plain words and mutes the resting-state one', () => {
+    // The card never prints the raw machine code; the code travels as a data-
+    // attribute instead. The settled-attempt note is the normal resting state and
+    // must not wear the error colour.
+    expect(taskReconcileLabel('settled_attempt_holds_task')).toBe('Out of step')
+    expect(taskReconcileLabel('done_while_live')).toBe('Done but running')
+    expect(taskReconcileBadgeClass('settled_attempt_holds_task')).toBe('badge--muted')
+    expect(taskReconcileBadgeClass('chat_not_visible')).toBe('badge--error')
   })
 })

@@ -146,6 +146,27 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 There is no `task delete` on this surface: a task record is the user's own
 Markdown file, and removing one is their decision, made in the PWA.
 
+Three things about the board you cannot see from a single `task get`, all of
+which are the user's decision rather than yours to resolve:
+
+- **`changed_since_delegated`** in `task list` / `task get` is `true` when the
+  record has been edited since the current attempt was handed it — the result you
+  are reading was reached against an older description. It is `false` right after
+  a clean settle, because the engine rebinds the attempt to the revision its own
+  review flag leaves behind. When it is `true`, say so in your report and let the
+  user judge the result; the PWA offers them **Send update**, which puts the
+  current description into that same chat as one ordinary message. Do **not**
+  re-delegate to "fix" it: a second `task delegate` mints a new attempt in a new
+  chat and leaves the attempt under review looking abandoned.
+- **A finished turn is not a finished task.** A `ready_for_review` attempt means
+  the result is waiting for the user. Report it, name the task, and stop — the
+  `Approve Done` in the board is the only completion, and `task complete` is
+  refused to you whatever the reason.
+- **`task attempt … resume`** continues the same chat under the same attempt and
+  is refused for a `ready_for_review` one. Do not reach for `retry` to keep going
+  on a review: retrying is the user's call, made next to the result they have not
+  read yet.
+
 ### Schedules
 
 | Command | Purpose | Guard |

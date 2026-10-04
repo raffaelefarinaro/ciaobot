@@ -262,6 +262,198 @@ export function taskAttemptFrom(raw: unknown): TaskAttempt {
   }
 }
 
+// ── Reconciling a row that disagrees with itself ──────────────────────────
+
+/** One way a card's own fields can contradict each other. */
+export type TaskReconcileCode =
+  /** The card reads In progress for the agent while its attempt has ended. */
+  | 'settled_attempt_holds_task'
+  /** A Review badge with no delegation holding a result to review. */
+  | 'review_without_result'
+  /** A result waiting for review with no Review badge to say so. */
+  | 'result_without_review'
+  /** The card is Done while an attempt still holds it. */
+  | 'done_while_live'
+  /** The card names a chat this browser cannot see. */
+  | 'chat_not_visible'
+
+/**
+ * One inconsistency, in the two halves a card needs to draw it.
+ *
+ * `text` says what disagrees and `actions` names the controls that resolve it,
+ * because a flag the user cannot act on is the same dead end as silently
+ * rewriting the row. Nothing here writes: the board is the one place that may
+ * *say* a record disagrees with itself, and repairing it is the user's gesture.
+ */
+export interface TaskReconcileNote {
+  code: TaskReconcileCode
+  text: string
+  actions: string
+}
+
+/** A short human label for a reconcile code; the code itself is a `data-` attribute. */
+export function taskReconcileLabel(code: TaskReconcileCode | string): string {
+  switch (code) {
+    case 'settled_attempt_holds_task':
+      return 'Out of step'
+    case 'review_without_result':
+      return 'No result to review'
+    case 'result_without_review':
+      return 'Result not flagged'
+    case 'done_while_live':
+      return 'Done but running'
+    case 'chat_not_visible':
+      return 'Chat not here'
+    default:
+      return 'Out of step'
+  }
+}
+
+/**
+ * The colour a reconcile note wears.
+ *
+ * `settled_attempt_holds_task` is the normal B5 resting state — a failed,
+ * interrupted or stopped attempt whose card still reads In progress for the
+ * agent, with Resume and Retry right there. It is worth saying, but it is not an
+ * error, and a red banner on every such card would read as one. Everything else
+ * is a genuine contradiction, which does get the error colour.
+ */
+export function taskReconcileBadgeClass(code: TaskReconcileCode | string): string {
+  return code === 'settled_attempt_holds_task' ? 'badge--muted' : 'badge--error'
+}
+
+/**
+ * What is inconsistent about one row, in the order a card should say it.
+ *
+ * Every case is decidable from the row plus one external set, so the card and
+ * this function cannot disagree about what the badge means. Two things are
+ * deliberately *not* flagged:
+ *
+ * - A released `ready_for_review` (no `live_attempt_id`) is what an approved or
+ *   detached card looks like, not a contradiction — that is the state the
+ *   approval gesture leaves behind.
+ * - A `chat_id` is only reported as unseeable when the caller passes a
+ *   non-empty set. An empty set means "this browser has not loaded its chats",
+ *   which is true on a fresh mount and on a workspace that holds none, and
+ *   flagging every card's chat on that is the kind of lie this section exists
+ *   to prevent.
+ */
+export function taskReconcileNotes(
+  task: Task,
+  options: { knownChatIds?: ReadonlySet<string> } = {},
+): TaskReconcileNote[] {
+  const notes: TaskReconcileNote[] = []
+  const linked = Boolean(task.attempt_id) || Boolean(task.live_attempt_id)
+  const settled = Boolean(task.attempt_state) && !isLiveAttemptState(task.attempt_state)
+  if (linked && settled && task.status === 'in_progress' && task.assignee === 'agent') {
+    notes.push({
+      code: 'settled_attempt_holds_task',
+      text:
+        `This card is In progress for the agent, but its last attempt ended `
+        + `${taskAttemptLabel(task.attempt_state).toLowerCase()}.`,
+      actions: 'Resume continues that attempt, Retry starts a new one, Detach releases the card.',
+    })
+  }
+  if (task.review_state === 'ready' && task.attempt_state !== 'ready_for_review') {
+    notes.push({
+      code: 'review_without_result',
+      text: 'The Review badge is set, but no attempt has a result waiting to be reviewed.',
+      actions: 'Delegate hands the task to the agent again; nothing is rewritten for you.',
+    })
+  }
+  // A released attempt keeps `attempt_state: ready_for_review` forever, so the
+  // `live_attempt_id` guard is what separates "waiting for you" from "you already
+  // approved it": without it every approved or detached card raised this flag the
+  // moment the gesture cleared its live attempt.
+  if (
+    task.live_attempt_id
+    && task.attempt_state === 'ready_for_review'
+    && task.review_state !== 'ready'
+  ) {
+    notes.push({
+      code: 'result_without_review',
+      text: 'An attempt has a result waiting, but this card carries no Review badge.',
+      actions: 'Open the chat to read it, then Approve Done to close the card.',
+    })
+  }
+  if (task.status === 'done' && task.live_attempt_id) {
+    notes.push({
+      code: 'done_while_live',
+      text: 'This card is in Done while an attempt still holds it.',
+      actions: 'Detach releases the card without rewriting the attempt history.',
+    })
+  }
+  const known = options.knownChatIds
+  if (task.chat_id && known && known.size > 0 && !known.has(task.chat_id)) {
+    notes.push({
+      code: 'chat_not_visible',
+      text:
+        'The chat this card names is not in this browser\'s chat list — it may have '
+        + 'been archived or deleted.',
+      actions: 'Open chat still tries it; Detach releases the card either way.',
+    })
+  }
+  return notes
+}
+
+/** When an attempt ended as a card reads it; empty when the stamp is unusable. */
+export function taskAttemptWhen(attempt: TaskAttempt): string {
+  const date = new Date(attempt.ended_at || attempt.updated_at)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  })
+}
+
+/**
+ * One attempt as its history row reads it: what happened, when, and why.
+ *
+ * The `detail` is the engine's own bounded sentence about the outcome, not the
+ * agent's answer — a history row says how the turn ended, and the answer itself
+ * is in the chat the row links.
+ */
+export function taskAttemptSummary(attempt: TaskAttempt): string {
+  const state = taskAttemptLabel(attempt.state)
+  const when = taskAttemptWhen(attempt)
+  const head = when ? `${state} · ${when}` : state
+  return attempt.detail ? `${head} — ${attempt.detail}` : head
+}
+
+/**
+ * The message a **Send update** hands to the delegated chat.
+ *
+ * `chat_send`-shaped rather than a second delegation, and that is the whole
+ * contract: it is one ordinary turn inside the attempt's own chat, so the answer
+ * that comes back belongs to the attempt already on the card and the linkage,
+ * the revision binding and the history all stay exactly as they are. Delegating
+ * again instead would mint a second attempt, re-quote the description from
+ * scratch and leave the first one's result looking abandoned — the silent
+ * re-delegation the card's own words rule out.
+ *
+ * It carries the task as it stands now — title, column, project, date and the
+ * current description — because the agent is holding an older one, and a message
+ * that said only "this changed" would leave it to guess what.
+ */
+export function buildTaskUpdateMessage(task: Task, body: string): string {
+  const facts = [
+    `Title: ${task.title}`,
+    `Column: ${taskStatusLabel(task.status)}`,
+    task.project_id ? `Project: ${task.project_id}` : '',
+    formatTaskDue(task.due) ? `Due: ${formatTaskDue(task.due)}` : '',
+  ].filter(Boolean)
+  const prose = body.trim()
+  return [
+    `The task "${task.title}" changed after you were handed it. Work from this, not`
+    + ' from the version you were given.',
+    '',
+    ...facts,
+    '',
+    prose || '(the description is now empty)',
+    '',
+    'Carry on with the same work in this chat rather than starting over.',
+  ].join('\n')
+}
+
 // ── Filters ───────────────────────────────────────────────────────────────
 
 export const TASK_DUE_FILTERS = [
