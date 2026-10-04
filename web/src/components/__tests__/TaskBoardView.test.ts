@@ -1166,11 +1166,14 @@ describe('TaskBoardView', () => {
       expect(badge('Dead turn').text()).toBe('Failed')
       expect(badge('Dead turn').classes()).toContain('badge--error')
       // And a finished turn is a badge beside Review, never a Done the board moved
-      // on its own.
+      // on its own. Scoped to the badge row: this card is also *inconsistent* (it
+      // sits in Done while its attempt still holds it), and that finding carries
+      // its own badge — which is the next test's subject, not this one's.
       expect(badge('Finished').text()).toBe('Review ready')
-      expect(card(wrapper, 'Finished').findAll('.badge')).toHaveLength(2)
+      expect(card(wrapper, 'Finished').findAll('.task-card-badges .badge')).toHaveLength(2)
       // A task nobody delegated has no badge at all.
-      expect(card(wrapper, 'Never delegated').findAll('.badge')).toHaveLength(0)
+      expect(card(wrapper, 'Never delegated').findAll('.task-card-badges .badge'))
+        .toHaveLength(0)
       wrapper.unmount()
     })
 
@@ -1260,7 +1263,7 @@ describe('TaskBoardView', () => {
 
       const labels = (title: string) =>
         card(wrapper, title).findAll('.task-chip').map((c) => c.text())
-      expect(labels('Wire the store')).toEqual(['Chat', 'Stop', 'Detach', 'Done'])
+      expect(labels('Wire the store')).toEqual(['Chat', 'Stop', 'Detach', 'History', 'Done'])
       // A task with nothing delegated offers the one gesture that starts work, and
       // no Chat control: the board only links a chat it was told about.
       expect(labels('Never delegated')).toEqual(['Delegate', 'Done'])
@@ -1287,7 +1290,9 @@ describe('TaskBoardView', () => {
 
     const labels = card(wrapper, 'Reviewed, then released')
       .findAll('.task-chip').map((c) => c.text())
-    expect(labels).toEqual(['Delegate', 'Done'])
+    // History is here because the attempt is: a released review is a record, and
+    // a plain Done is right because there is nothing left to approve.
+    expect(labels).toEqual(['Delegate', 'History', 'Done'])
     expect(labels).not.toContain('Stop')
     expect(labels).not.toContain('Detach')
 
@@ -1310,7 +1315,7 @@ describe('TaskBoardView', () => {
       // abandons the one that failed. Resume and Retry are the two real answers,
       // so they are two labelled controls rather than one that has to guess.
       expect(card(wrapper, 'Broke halfway').findAll('.task-chip').map((c) => c.text()))
-        .toEqual(['Chat', 'Resume', 'Retry', 'Done'])
+        .toEqual(['Chat', 'Resume', 'Retry', 'History', 'Done'])
 
       await chip(wrapper, 'Broke halfway', 'Resume').trigger('click')
       await flushPromises()
@@ -1518,46 +1523,266 @@ describe('TaskBoardView', () => {
 
       expect(card(wrapper, 'Wire the store').get('.badge').text()).toBe('Stopped')
       expect(card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text()))
-        .toEqual(['Chat', 'Resume', 'Retry', 'Done'])
+        .toEqual(['Chat', 'Resume', 'Retry', 'History', 'Done'])
       wrapper.unmount()
     })
 
-  it('closes a review-ready card with Done, in one gesture', async () => {
-    // The review is the case the issue describes, and Done is the button for it.
-    // The service releases the linkage and completes together, so the card needs
-    // no Detach first — and the attempt stays as review-ready history.
-    const reviewed = liveTask({
-      attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+  it('approves a reviewed result into Done in one gesture, and keeps the attempt',
+    async () => {
+      // The review is the case the issue describes, and Approve Done is the button
+      // for it: one request, no Detach first, and the service releases the linkage
+      // and completes together so the attempt stays as review-ready history rather
+      // than settling as `stopped` and losing the result.
+      const reviewed = liveTask({
+        attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+      })
+      apiPost.mockResolvedValue({
+        workspace: 'personal',
+        task: {
+          ...reviewed,
+          status: 'done',
+          chat_id: '',
+          attempt_id: '',
+          review_state: 'none',
+          attempt_state: 'ready_for_review',
+          live_attempt_id: '',
+          revision: NEXT_REVISION,
+        },
+      })
+      const wrapper = await mountWithBody([reviewed])
+
+      // No Stop and no Detach on a card whose turn has ended: there is nothing
+      // running to stop, and Detach-then-Done is the workaround this replaces.
+      const labels = card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text())
+      expect(labels).toEqual(['Chat', 'Approve Done', 'History'])
+
+      await chip(wrapper, 'Wire the store', 'Approve Done').trigger('click')
+      await flushPromises()
+
+      // One request, the completion route — no attempt gesture in between.
+      expect(apiPost).toHaveBeenCalledTimes(1)
+      expect(apiPost).toHaveBeenCalledWith('/api/tasks/doing/complete', {
+        workspace: 'personal',
+        expected_revision: THIRD_REVISION,
+      })
+      // And the card moved, which is the whole point of the gesture.
+      expect(
+        wrapper.findAll('.task-lane').find((l) => l.text().includes('Done'))!
+          .findAll('.task-card').map((c) => c.text()),
+      ).toEqual([expect.stringContaining('Wire the store')])
+      wrapper.unmount()
     })
-    apiPost.mockResolvedValue({
-      workspace: 'personal',
-      task: {
-        ...reviewed,
-        status: 'done',
-        chat_id: '',
-        attempt_id: '',
-        review_state: 'none',
+
+  it('points a review-ready card at the result and approves it from the editor too',
+    async () => {
+      const reviewed = liveTask({
+        attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+      })
+      apiPost.mockResolvedValue({
+        workspace: 'personal',
+        task: { ...reviewed, status: 'done', revision: NEXT_REVISION },
+      })
+      const wrapper = await mountWithBody([reviewed])
+
+      // Where the answer is, named rather than summarised: the board holds no copy
+      // of the agent's reply, so it says the chat is where to read it.
+      const shown = card(wrapper, 'Wire the store')
+      expect(shown.get('.task-review').text()).toContain('Ready for review')
+      expect(shown.get('.task-review').text()).toContain('linked chat')
+
+      await shown.get('.task-open').trigger('click')
+      await flushPromises()
+      await nextTick()
+      const control = wrapper.findAll('.task-delegate-actions .btn-chip')
+        .find((c) => c.text() === 'Approve Done')
+      expect(control, 'Approve Done in the editor').toBeTruthy()
+      await control!.trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/tasks/doing/complete', {
+        workspace: 'personal',
+        expected_revision: THIRD_REVISION,
+      })
+      wrapper.unmount()
+    })
+
+  it('offers Send update for an edit made under the agent, and sends it as one message',
+    async () => {
+      const edited = liveTask({
+        changed_since_delegated: true,
         attempt_state: 'ready_for_review',
-        live_attempt_id: '',
-        revision: NEXT_REVISION,
-      },
-    })
-    const wrapper = await mountWithBody([reviewed])
+        review_state: 'ready',
+        revision: THIRD_REVISION,
+      })
+      const sendMessage = vi.fn((_chatId: string, _text: string) => true)
+      useProjectStore().sendMessage = sendMessage as never
+      const wrapper = await mountWithBody([edited], 'Wire the store with the new owner.')
 
-    await chip(wrapper, 'Wire the store', 'Done').trigger('click')
+      await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
+      await flushPromises()
+      await nextTick()
+
+      const sheet = wrapper.get('.task-sheet')
+      expect(sheet.text()).toContain('does not delegate again')
+      // The exact text, before it is sent: the user is putting words into a chat
+      // they may not have open.
+      expect(sheet.get('.task-update-text').text()).toContain('Wire the store with the new owner.')
+      expect(sheet.get('.btn-primary').text()).toBe('Send update')
+
+      await sheet.get('.btn-primary').trigger('click')
+      await flushPromises()
+
+      // One ordinary message into the attempt's own chat — not a second
+      // delegation, and not a task write of any kind.
+      expect(sendMessage).toHaveBeenCalledTimes(1)
+      const [chatId, text] = sendMessage.mock.calls[0] as [string, string]
+      expect(chatId).toBe('chat-7')
+      expect(text).toContain('Wire the store with the new owner.')
+      expect(apiPost).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+  it('does not offer Send update until the edit is real', async () => {
+      // A clean settle reads `changed_since_delegated: false`, because the watcher
+    // rebinds the attempt to the revision its own review flag left behind. A card
+    // with no warning has no update to send, and a button that would re-send an
+    // unchanged description is the silent re-delegation the board rules out.
+    const wrapper = await mountWithBody([
+      liveTask({ attempt_state: 'ready_for_review', review_state: 'ready' }),
+    ])
+
+    const labels = card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text())
+    expect(labels).not.toContain('Send update')
+    expect(card(wrapper, 'Wire the store').find('.task-changed').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('reads a task\'s attempts as history, with each one\'s chat and ending',
+    async () => {
+      const reviewed = liveTask({
+        attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+      })
+      const attemptsAnswer = {
+        workspace: 'personal',
+        task: { ...reviewed, body: 'Wire the store.' },
+        attempts: [
+          {
+            attempt_id: LIVE_ID, task_id: 'doing', task_revision: THIRD_REVISION,
+            chat_id: 'chat-7', state: 'ready_for_review',
+            created_at: '2026-03-02T09:00:00+00:00',
+            updated_at: '2026-03-02T09:04:00+00:00',
+            ended_at: '2026-03-02T09:04:00+00:00', detail: '', live: true,
+          },
+          {
+            attempt_id: SETTLED_ID, task_id: 'doing', task_revision: NEXT_REVISION,
+            chat_id: 'chat-3', state: 'failed',
+            created_at: '2026-03-01T09:00:00+00:00',
+            updated_at: '2026-03-01T09:02:00+00:00',
+            ended_at: '2026-03-01T09:02:00+00:00',
+            detail: 'the turn ended in an error', live: false,
+          },
+        ],
+      }
+      apiGet.mockImplementation((url: string) => {
+        if (url.includes('/attempts')) return Promise.resolve(attemptsAnswer)
+        if (url.includes('/api/tasks?')) return Promise.resolve({ workspace: 'personal', tasks: [reviewed] })
+        return Promise.resolve({ workspace: 'personal', task: { ...reviewed, body: 'Wire the store.' } })
+      })
+      const wrapper = mount(TaskBoardView, { attachTo: document.body })
+      await flushPromises()
+      await nextTick()
+
+      // Nothing has asked for it yet: a workspace of retried tasks must not pay
+      // for a history nobody opened.
+      expect(apiGet).not.toHaveBeenCalledWith(expect.stringContaining('/attempts'))
+
+      const switchChat = vi.fn()
+      useProjectStore().switchChat = switchChat
+      await chip(wrapper, 'Wire the store', 'History').trigger('click')
+      await flushPromises()
+      await nextTick()
+
+      expect(apiGet).toHaveBeenCalledWith('/api/tasks/doing/attempts?workspace=personal')
+      const sheet = wrapper.get('.task-sheet')
+      const rows = sheet.findAll('.task-history-row')
+      expect(rows).toHaveLength(2)
+      // Live one first, and each attempt keeps its own chat: a retry that replaced
+      // this one has not erased where the old turn's answer lives.
+      expect(rows[0]!.text()).toContain('Review ready')
+      expect(rows[1]!.text()).toContain('Failed')
+      expect(rows[1]!.text()).toContain('the turn ended in an error')
+      await rows[1]!.get('button').trigger('click')
+      expect(switchChat).toHaveBeenCalledWith('chat-3')
+
+      // Re-opening the same card does not re-read it: loaded once, like the
+      // proposal queue's ledger.
+      await sheet.get('.btn-small').trigger('click')
+      await chip(wrapper, 'Wire the store', 'History').trigger('click')
+      await flushPromises()
+      expect(apiGet.mock.calls.filter((c) => String(c[0]).includes('/attempts'))).toHaveLength(1)
+      wrapper.unmount()
+    })
+
+  it('flags a row that disagrees with itself instead of rewriting it', async () => {
+    // A card whose attempt ended while it still reads In progress for the agent.
+    // The board says so and names the controls; it never settles the attempt or
+    // moves the card on the user's behalf.
+    const wrapper = await mountWithBody([settledTask()])
+
+    const notes = card(wrapper, 'Broke halfway').findAll('.task-reconcile-note')
+    expect(notes).toHaveLength(1)
+    expect(notes[0]!.text()).toContain('its last attempt ended interrupted')
+    expect(notes[0]!.text()).toContain('Resume continues that attempt')
+    // And nothing was written to "fix" it.
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(apiPatch).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('flags a chat the browser cannot see, and stays quiet before it has looked',
+    async () => {
+      const store = useProjectStore()
+      // No chats loaded: the board knows nothing, and a flag on that basis would
+      // be a guess about every card.
+      const wrapper = await mountWithBody([liveTask()])
+      expect(card(wrapper, 'Wire the store').find('.task-reconcile').exists()).toBe(false)
+      wrapper.unmount()
+
+      // Once the sidebar has the list, a card naming a chat that is not in it is
+      // a real thing to say — and it says it as what it can see, not as a verdict.
+      store.chats = [{ chat_id: 'chat-other', project_id: 'p1' } as never]
+      const named = await mountWithBody([liveTask()])
+      const notes = card(named, 'Wire the store').findAll('.task-reconcile-note')
+      expect(notes).toHaveLength(1)
+      expect(notes[0]!.text()).toContain('not in this browser')
+      expect(notes[0]!.text()).toContain('Detach releases the card')
+      named.unmount()
+    })
+
+  it('closes the workspace\'s history when the user switches away', async () => {
+    const store = useProjectStore()
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('workspace=work')) return Promise.resolve({ workspace: 'work', tasks: [] })
+      if (url.includes('/api/tasks?')) {
+        return Promise.resolve({ workspace: 'personal', tasks: [liveTask()] })
+      }
+      return Promise.resolve({ workspace: 'personal', task: { ...liveTask(), body: 'Wire the store.' } })
+    })
+    const wrapper = mount(TaskBoardView, { attachTo: document.body })
     await flushPromises()
+    await nextTick()
 
-    // One request, the completion route — no attempt gesture in between.
-    expect(apiPost).toHaveBeenCalledTimes(1)
-    expect(apiPost).toHaveBeenCalledWith('/api/tasks/doing/complete', {
-      workspace: 'personal',
-      expected_revision: THIRD_REVISION,
-    })
-    // And the card moved, which is the whole point of the gesture.
-    expect(
-      wrapper.findAll('.task-lane').find((l) => l.text().includes('Done'))!
-        .findAll('.task-card').map((c) => c.text()),
-    ).toEqual([expect.stringContaining('Wire the store')])
+    await chip(wrapper, 'Wire the store', 'History').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.findAll('.task-sheet').length).toBeGreaterThan(0)
+
+    store.activeWorkspace = 'work'
+    await flushPromises()
+    await nextTick()
+    // The attempts held belonged to the workspace the user left; leaving the sheet
+    // open would offer them as this one's.
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
     wrapper.unmount()
   })
 

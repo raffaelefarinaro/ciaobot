@@ -18,6 +18,30 @@ def _field(value: str, *, limit: int = 1200) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+#: The one bounded line that tells an agent the task board exists.
+#:
+#: A recipe, never the board. #973's plan is explicit that an agent fetches "the
+#: relevant tasks on request or during a delegated task, not the entire board on
+#: every turn", and a task record is the user's own Markdown: pushing titles,
+#: dates and bodies into a capsule every provider sees would spend context on
+#: work nobody asked for and put bookkeeping prose into the one surface #1002
+#: keeps out of recall. So this names where the board is read from and stops.
+#:
+#: It is a constant, which is why it carries no ``_field`` limit of its own and
+#: why ``context_digest`` does not see it: routing facts decide whether the
+#: stable block is re-sent, and this line is the same in every workspace of every
+#: install. It rides with the stable facts because it is stable, so a provider
+#: session reads it on its first turn and not again.
+TASK_BOARD_HINT = (
+    'task_board="ciao task list | ciao task get TASK_ID | ciao task delegate '
+    'TASK_ID --revision REV" — this workspace\'s task board, one Markdown record '
+    'per task. Fetch the tasks this turn needs, or the one you were delegated; '
+    'never the whole board. Delegating hands a task to the agent as one ordinary '
+    'attended chat, and a finished turn waits for the user — only they mark a '
+    'task done.'
+)
+
+
 def build_context_capsule(
     *,
     workspace: str = "",
@@ -38,7 +62,12 @@ def build_context_capsule(
     Stable project facts can be omitted after the first turn of a provider
     session. The date, the unattended marker and handover data are sent on
     every turn.
+
+    The task-board hint is neither: it is a constant line rather than a routing
+    fact, so it rides with the stable block and costs the same in every
+    workspace. See ``TASK_BOARD_HINT``.
     """
+
     stable: list[str] = []
     if workspace:
         stable.append(f"workspace={_field(workspace, limit=120)}")
@@ -58,6 +87,7 @@ def build_context_capsule(
         stable.append(f"project_context={_field(project_context)}")
     if canonical_doc:
         stable.append(f"canonical_doc={_field(canonical_doc, limit=300)}")
+    stable.append(_field(TASK_BOARD_HINT, limit=400))
 
     dynamic: list[str] = [f"today={datetime.now(UTC).date().isoformat()}"]
     if unattended:

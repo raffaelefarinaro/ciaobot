@@ -12,6 +12,7 @@ import {
 import type {
   TaskAttempt,
   TaskAttemptActionResponse,
+  TaskAttemptsResponse,
   TaskDelegateResponse,
   TaskDetail,
   TaskListResponse,
@@ -95,6 +96,92 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    */
   let descriptionSeq = 0
 
+  // ── Attempt history ─────────────────────────────────────────────────────
+  //
+  // One task's attempts at a time, read on demand, on the proposal queue's
+  // History pattern (`proposals.ts`: lazily loaded, invalidated by a mutation,
+  // scoped so a workspace switch refetches rather than showing the previous
+  // workspace's ledger) — not a second timeline store, and not part of the list
+  // read: the board draws a badge from the live attempt alone, and a workspace
+  // with fifty retried tasks would pay for fifty histories nobody opened.
+
+  /** The attempts held, live one first, for {@link attemptsTaskId} only. */
+  const attempts = ref<TaskAttempt[]>([])
+  /** Whose attempts {@link attempts} are; `''` when none has been read. */
+  const attemptsTaskId = ref('')
+  const attemptsLoading = ref(false)
+  const attemptsLoaded = ref(false)
+  /** History failures get their own slot: `error` belongs to a write. */
+  const attemptsError = ref('')
+  /** Ticket for the newest history read; older answers are dropped. */
+  let attemptsSeq = 0
+
+  /**
+   * Read one task's attempts, once.
+   *
+   * Dropped on a workspace switch for the reason every other slot here is: task
+   * ids are minted per workspace, so a history held for the workspace the user
+   * left is not the history of the task with that id on the one they moved to.
+   *
+   * The answer also carries the task, so a history read is a fresh record: the
+   * row adopts its revision, which is what keeps the next write from being a 409
+   * against a board that had not noticed the move.
+   */
+  async function ensureAttempts(workspace: string, taskId: string): Promise<void> {
+    if (!workspace || !taskId) return
+    if (attemptsLoaded.value && attemptsTaskId.value === taskId) return
+    if (attemptsTaskId.value && attemptsTaskId.value !== taskId) attempts.value = []
+    const seq = ++attemptsSeq
+    attemptsTaskId.value = taskId
+    attemptsLoading.value = true
+    attemptsError.value = ''
+    try {
+      const data = await api.get<TaskAttemptsResponse>(
+        `${taskUrl(taskId)}/attempts?workspace=${encodeURIComponent(workspace)}`,
+      )
+      if (seq !== attemptsSeq || attemptsTaskId.value !== taskId) return
+      // The rows on screen may belong to a workspace the user has since moved to;
+      // adopting this record there would draw another workspace's task on it.
+      if (drawingWorkspace(workspace)) {
+        const task = taskDetailFrom(data?.task)
+        if (task.id) {
+          adopt(task)
+          if (described.value?.id === task.id) described.value = task
+        }
+      }
+      attempts.value = (Array.isArray(data?.attempts) ? data.attempts : [])
+        .map((raw) => taskAttemptFrom(raw))
+        .filter((attempt) => attempt.attempt_id)
+      attemptsLoaded.value = true
+    } catch (e) {
+      if (seq !== attemptsSeq) return
+      attemptsError.value = taskApiErrorMessage(e, 'Could not load the delegation history')
+    } finally {
+      if (seq === attemptsSeq) attemptsLoading.value = false
+    }
+  }
+
+  /**
+   * Mark the held history stale, after a gesture that settles or replaces one.
+   *
+   * A clear without a refetch: the History sheet re-reads when it is next shown,
+   * the same reason the proposal queue only refetches when something is already
+   * displaying its ledger.
+   */
+  function invalidateAttempts(): void {
+    attemptsLoaded.value = false
+    attemptsSeq++
+    attemptsLoading.value = false
+  }
+
+  /** Drop the held history outright: a workspace switch, or a deleted task. */
+  function resetAttempts(): void {
+    invalidateAttempts()
+    attempts.value = []
+    attemptsTaskId.value = ''
+    attemptsError.value = ''
+  }
+
   /**
    * Read the board for `workspace`, always.
    *
@@ -118,6 +205,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       // Task slugs can collide across workspaces, so a description held for one
       // workspace is not a description of the other's task with the same id.
       described.value = null
+      // The same collision applies to an attempt history, one task at a time.
+      resetAttempts()
     }
     const seq = ++requestSeq
     descriptionSeq++
@@ -361,6 +450,10 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
         workspace,
         expected_revision: expectedRevision,
       })
+      // Approving a reviewed result releases the linkage and closes the card, so
+      // whatever history was held is about an attempt that no longer holds this
+      // task.
+      invalidateAttempts()
       // The board moved to another workspace while this completed.
       if (!drawingWorkspace(workspace)) return null
       const task = adopt(data?.task)
@@ -395,6 +488,9 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     error.value = ''
     try {
       await api.del(taskUrl(taskId), { workspace, expected_revision: expectedRevision })
+      // The record the held history belongs to is gone.
+      if (described.value?.id === taskId) described.value = null
+      if (attemptsTaskId.value === taskId) resetAttempts()
       // The board moved to another workspace while this deleted. Slugs collide
       // across workspaces, so a real row of the new board can answer to the same
       // id: dropping it here would delete nothing on disk and hide a task the
@@ -449,6 +545,9 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       // belongs to the one that was left; adopting it would draw this workspace's
       // chat and revision under the new name.
       if (!drawingWorkspace(workspace)) return null
+      // A new attempt is the newest row of this task's history, and the attempt it
+      // replaced — if any — is still in it.
+      invalidateAttempts()
       if (data?.task) {
         const task = adopt(data.task)
         if (task.id && described.value?.id === task.id) described.value = task
@@ -495,6 +594,9 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       // rows on screen are the other one's, and a late detach would filter this
       // workspace's row out of it. See {@link drawingWorkspace}.
       if (!drawingWorkspace(workspace)) return null
+      // Every one of the four verbs settles an attempt, and `retry` mints another,
+      // so the history a reader would draw is out of date the moment this lands.
+      invalidateAttempts()
       if (data?.task) {
         const task = adopt(data.task)
         if (task.id && described.value?.id === task.id) described.value = task
@@ -516,8 +618,10 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
 
   return {
     rows, loadedWorkspace, loading, loadError, error, saving, described,
+    attempts, attemptsTaskId, attemptsLoading, attemptsLoaded, attemptsError,
     reload, revisionOf, get,
     create, update, complete, remove, clearError,
     delegate, attemptAction,
+    ensureAttempts, invalidateAttempts, resetAttempts,
   }
 })

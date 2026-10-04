@@ -4,9 +4,10 @@ Storage contract for the shared workspace task board (issue #978, part of
 #973). This document describes the file format, the `ciao.task_board` API,
 and the rules its callers must honor. The production callers are the
 session-authenticated `/api/tasks*` routes and the `ciao task …` agent CLI
-(#1021), both over the workspace-scoped service in `ciao/control_plane.py`;
-there is still no board UI. The contract is stated in one place so
-integration cannot invent a second source of truth.
+(#1021), both over the workspace-scoped service in `ciao/control_plane.py`, and
+the PWA board itself (`web/src/components/TaskBoardView.vue`, #1028 for the
+columns and #1040 for the delegation review surface). The contract is stated in
+one place so integration cannot invent a second source of truth.
 
 ## Layout
 
@@ -35,7 +36,7 @@ nullable ones take `null` (absent reads as `null` for those four only).
 | `id`           | 32 lowercase hex string    | Must equal the filename stem.                                |
 | `title`        | string, 1–200 chars trimmed| Stored trimmed; surrounding whitespace is not significant.   |
 | `status`       | `backlog` \| `in_progress` \| `on_hold` \| `done` |                     |
-| `project_id`   | string \| null             | Opaque to this store; see "Future obligations".              |
+| `project_id`   | string \| null             | Opaque to this store; see "Obligations, resolved".          |
 | `due`          | calendar date \| null       | `YYYY-MM-DD`, a real calendar day.                           |
 | `assignee`     | `user` \| `agent`          |                                                              |
 | `review_state` | `none` \| `ready`          |                                                              |
@@ -96,6 +97,16 @@ workspace. The vocabulary is deliberately **not** the board's:
 | `interrupted` | the outcome is unknown — a dead launch or a crash | no |
 | `stopped` | the user ended it, or detached it | no |
 
+None of these is a column and none of them is a completion. `running`,
+`needs_you` and `ready_for_review` are live — the attempt holds the task's
+linkage, which is exactly what makes completion and reassignment refused — and
+`failed`, `interrupted` and `stopped` are settled: the turn is over and the
+attempt is history. A card's badge reports the **current** attempt, live or
+settled, because `failed`, `stopped` and `interrupted` are the three states a
+user most needs to look at; `live_attempt_id` beside it says whether an attempt
+still *holds* the card, which is the difference between a result still awaiting
+review and one the user has already approved or detached.
+
 `LIVE_STATES` is what holds the task's linkage and what a second `start`
 returns instead of minting a second attempt; `RESUMABLE_STATES`
 (`failed`/`interrupted`/`stopped`) is what `resume` may continue in the same
@@ -111,6 +122,17 @@ The review badge moves the task's revision, so the watcher rebinds the attempt t
 the revision that write left behind (`bind_revision`). Without that, *every*
 finished turn would read `changed_since_delegated`, which is a warning about the
 user editing a task under the agent and would then mean nothing.
+
+**The changed-since rule.** `changed_since_delegated` compares the revision the
+attempt is bound to against the record now, and it is true only for a **real
+user edit** after the hand-over. It is `false` right after a clean settle —
+`link()` writes linkage and rebinds the attempt, and the review badge write
+rebinds it again — and it is `true` once the user changes anything the record
+holds, whether that is the description, the title or a move. It is also `false`
+for a task nothing is delegated to any more, because a `detach` clears the
+linkage and the flag is only derived for a linked task. The flag is a *fact about
+revisions*, not a judgement: nothing in the board decides whether the result is
+still good, and only the reviewer does.
 
 **Reviewing is one gesture.** `POST /api/tasks/{id}/complete` from the user's own
 session releases the linkage and closes the card when the task's attempt is
@@ -192,6 +214,72 @@ The gesture routes (`stop`, `detach`) await `ProjectChatManager.stop_chat`, whic
 is `async`. `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` checks `task_id`
 against the attempt and answers `task_attempt_not_found` on a mismatch, so an
 attempt id sent under another task's URL acts on nothing.
+
+## The review surface (#1040, child B6 of #973)
+
+B5 shipped the lifecycle. This is the human loop around it, and it is a **surface
+and a contract**: no new store, no new route, and no change to the attempt store.
+Four things a card has to be able to say, and what each one is allowed to do.
+
+**Where the result is, and how it is closed.** A `ready_for_review` card names the
+linked chat and carries one **Approve Done**. It does not carry Stop — there is no
+turn running to stop — and it does not require a Detach first, because that is the
+workaround whose whole cost is the result: detaching a finished attempt settles it
+`stopped`. Approve Done is `POST /complete` at the revision the card was drawn at,
+which is `workspace_task_complete_reviewed`'s revision-checked `unlink` followed by
+the completion, so the attempt survives as `ready_for_review` history. A card whose
+review has already been released (`live_attempt_id` empty) is not review-ready
+whatever its badge says, and offers a plain Done — otherwise one result would have
+two completion gestures.
+
+**History.** `GET /api/tasks/{id}/attempts` is the whole read: every attempt,
+live one first, with its `chat_id`, `state`, `ended_at` and the engine's
+`detail`. The board loads it per card on demand, on the proposal queue's History
+pattern (loaded once, invalidated by a gesture, refetched on a workspace switch)
+rather than as a new timeline store, because the list rows carry the current
+attempt's badge and nothing else — a workspace with fifty retried tasks would
+otherwise read fifty histories nobody opened. Each row keeps **its own** chat
+link: by the time a retry exists the task's own linkage names the new attempt,
+so the old attempt's chat is reachable only from here.
+
+**Send update.** An edit made under a running or finished turn trips
+`changed_since_delegated`, and the answer is one ordinary message into the
+attempt's own chat carrying the task as it stands now — the PWA's `sendMessage`,
+the same call the composer makes. It is deliberately **not** a second delegation:
+`POST /delegate` would mint a new attempt id, re-quote the description from
+scratch, re-link the card and leave the attempt whose result is under review
+looking abandoned. It is not a task write either, so it presents no revision and
+writes nothing — the write that raised the flag is the user's own edit. The
+preview shows the exact text before it is sent, and refuses to send at all when
+the description read failed, because "the description is now empty" is a fact
+nobody checked.
+
+**Reconciled visibly.** A row whose fields contradict each other is flagged on the
+card with what disagrees *and* the controls that resolve it, never silently
+rewritten. Five derivations, all decidable from the row the service already sends:
+a settled attempt while the card still reads *In progress* for the agent; a
+`review_state: ready` badge with no result waiting; a result waiting with no
+badge; a card in *Done* while an attempt still holds it; and a `chat_id` the
+browser's own chat list does not contain. The last one is the only one that needs
+anything outside the row, and it is deliberately worded as what the browser can
+see — an empty chat list means the board knows nothing, and a flag on that basis
+would be a guess about every card.
+
+### What Send update does not do
+
+- **The turn it starts is not watched.** A **Send update** sends a new turn in the
+  attempt's own chat, and the watcher that would settle it belonged to the turn
+  that had already ended — so the attempt keeps whatever state it settled as, and
+  a task whose description was edited keeps reading `changed_since_delegated` after
+  the update has been answered. The flag stays a statement about revisions, which
+  is all it ever was: nothing rebinds the attempt to the revision a message
+  produced. The badge and the flag are both honest about the attempt they
+  describe, and the review still happens in the chat. Re-attaching a watcher when
+  the chat's next stream starts is the fix — the same gap as the `needs_you` case
+  above, and tracked as a follow-up rather than done here.
+- **It is not a way to restart a failed turn.** A settled attempt stays settled;
+  continuing it is `resume` (same chat, same attempt) or `retry` (a new one), and
+  the card's own foot names both rather than borrowing the update's label.
 
 ## API
 
@@ -324,15 +412,31 @@ The rule is keyed on the *directory pair* `Workspace/Tasks`, not on the name
 `Tasks`: a user's own folder called `Tasks` anywhere else
 (`Other/Tasks/x.md`) is ordinary note content and stays indexed and scannable.
 
-## Future obligations
+## Obligations, resolved
 
-- Live project membership and completion validation is a later
+- Live project membership and completion validation was a later
   application-service obligation: this store keeps the `project_id`
   string without judging it and invents no project registry. (#1033 resolves
   membership in the delegation service before it picks a chat's host, and
   refuses rather than falling back when a named project is gone or foreign.)
-- Linkage mutation (`chat_id`/`attempt_id`) belongs to the delegation child,
-  which now ships: `link()`/`unlink()` above are that child's door, and this
-  store still never creates a live chat or attempt.
-- No board UI is shipped in this document's scope; the PWA board is #1028 and
-  the delegation gestures on it are #1033. #973 stays open for what is left.
+- Linkage mutation (`chat_id`/`attempt_id`) belonged to the delegation child, and
+  it ships: `link()`/`unlink()` above are that child's door, and this store still
+  never creates a live chat or attempt. The fields are delegated-run-owned — the
+  attempt and the chat it names are the record of what the engine ran, and a
+  caller naming its own chat would be claiming a delegation it never made.
+- The board UI ships: #1028 for the four columns, the filters and the detail
+  editor, #1033 for the delegation gestures on it, and #1040 for the review
+  surface — result review, the linked chat, attempt history, Send update and the
+  visible reconciliation of a row that disagrees with itself. There is no
+  remaining surface owed by this document.
+
+## Still open
+
+- Nothing here is finished beyond the above. Two behaviours are recorded as known
+  gaps rather than obligations, both in "Known limitations" above and both about
+  the **watcher** rather than this store: answering a delegated chat in the
+  browser does not move the attempt, and a **Send update**'s turn is not watched
+  either. Re-attaching a watcher when the chat's next stream starts fixes both and
+  is a follow-up, deliberately not a change to the attempt store here.
+- Drag, priorities, recurring tasks, deadline reminders, multi-user boards and any
+  unattended delegation remain out of scope for #973.
