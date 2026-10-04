@@ -99,6 +99,29 @@ function card(wrapper: ReturnType<typeof mount>, title: string) {
   return wrapper.findAll('.task-card').find((c) => c.text().includes(title))!
 }
 
+/**
+ * The description's editor. A described task opens rendered, so this presses
+ * Edit first when the textarea is not already up.
+ */
+async function bodyField(wrapper: ReturnType<typeof mount>) {
+  if (!wrapper.find('#task-detail-body').exists()) {
+    await wrapper.findAll('.task-field-head .task-chip').find((c) => c.text() === 'Edit')!.trigger('click')
+    await nextTick()
+  }
+  return wrapper.get<HTMLTextAreaElement>('#task-detail-body')
+}
+
+/** Drag a card onto one of the four columns, as the browser's events arrive. */
+async function dragCard(wrapper: ReturnType<typeof mount>, title: string, laneIndex: number) {
+  const lane = lanes(wrapper)[laneIndex]!
+  await card(wrapper, title).trigger('dragstart')
+  await lane.trigger('dragover')
+  await lane.trigger('drop')
+  await card(wrapper, title).trigger('dragend')
+  await flushPromises()
+  await nextTick()
+}
+
 describe('TaskBoardView', () => {
   /** Reports the pane's inline size, which is what `NARROW_PANE_PX` reads. */
   let reportPaneWidth = (_width: number) => {}
@@ -188,11 +211,24 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
-  it('reads a task with no project as General, and says no date rather than a blank', async () => {
+  it('says nothing for the defaults: General, For me and no date leave no meta line', async () => {
     const wrapper = await mountBoard([task()])
     const shown = card(wrapper, 'Ship the board')
-    expect(shown.get('.task-project').text()).toBe('General')
-    expect(shown.find('.task-meta .badge').exists()).toBe(false)
+    expect(shown.find('.task-meta').exists()).toBe(false)
+    // And an undelegated card has no foot: its Done is the checkbox.
+    expect(shown.find('.task-card-foot').exists()).toBe(false)
+    expect(shown.find('select').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('names the status on a card in the mixed narrow list, where no column does', async () => {
+    const wrapper = await mountBoard()
+    reportPaneWidth(390)
+    await nextTick()
+    expect(lanes(wrapper)).toHaveLength(1)
+    expect(card(wrapper, 'Wait on a key').get('.task-status-badge').text()).toBe('On hold')
+    // Nothing to drag between in a list.
+    expect(card(wrapper, 'Wait on a key').attributes('draggable')).toBe('false')
     wrapper.unmount()
   })
 
@@ -200,9 +236,7 @@ describe('TaskBoardView', () => {
     const wrapper = await mountBoard()
     apiPatch.mockResolvedValue({ workspace: 'personal', task: { ...task({ status: 'in_progress' }), revision: NEXT_REVISION, body: '' } })
 
-    await card(wrapper, 'Ship the board').get('select.task-status').setValue('in_progress')
-    await flushPromises()
-    await nextTick()
+    await dragCard(wrapper, 'Ship the board', 1)
 
     expect(apiPatch).toHaveBeenCalledTimes(1)
     const [path, sent] = apiPatch.mock.calls[0]! as [string, Record<string, unknown>]
@@ -215,7 +249,45 @@ describe('TaskBoardView', () => {
     // And the card adopts the revision the write returned, so the next write
     // from the same card is not stale against its own edit.
     expect(card(wrapper, 'Ship the board').element.closest('.task-lane')!.getAttribute('aria-label')).toBe('In progress')
-    expect(card(wrapper, 'Ship the board').get('select.task-status').element.getAttribute('value')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('ignores a drop on the column the card is already in', async () => {
+    const wrapper = await mountBoard()
+    await dragCard(wrapper, 'Ship the board', 0)
+    expect(apiPatch).not.toHaveBeenCalled()
+    expect(apiPost).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('completes a card dropped on Done through the completion gesture', async () => {
+    const wrapper = await mountBoard()
+    apiPost.mockResolvedValue({ workspace: 'personal', task: { ...task({ status: 'done' }), revision: NEXT_REVISION, body: '' } })
+    await dragCard(wrapper, 'Ship the board', 3)
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
+      workspace: 'personal',
+      expected_revision: REVISION,
+    })
+    expect(apiPatch).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('moves a focused card one column over with Shift+Arrow, and not with Option+Arrow', async () => {
+    const wrapper = await mountBoard()
+    apiPatch.mockResolvedValue({ workspace: 'personal', task: { ...task({ status: 'in_progress' }), revision: NEXT_REVISION, body: '' } })
+    const title = card(wrapper, 'Ship the board').get('.task-open')
+    // Option+Arrow is the app's section switch; the card leaves it alone.
+    await title.trigger('keydown', { key: 'ArrowRight', altKey: true })
+    expect(apiPatch).not.toHaveBeenCalled()
+    // Leftmost already: nothing to the left.
+    await title.trigger('keydown', { key: 'ArrowLeft', shiftKey: true })
+    expect(apiPatch).not.toHaveBeenCalled()
+    await title.trigger('keydown', { key: 'ArrowRight', shiftKey: true })
+    await flushPromises()
+    await nextTick()
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect((apiPatch.mock.calls[0]![1] as Record<string, unknown>).status).toBe('in_progress')
+    expect(card(wrapper, 'Ship the board').element.closest('.task-lane')!.getAttribute('aria-label')).toBe('In progress')
     wrapper.unmount()
   })
 
@@ -241,9 +313,7 @@ describe('TaskBoardView', () => {
       payload: { error: { code: 'task_revision_conflict', message: 'that task changed on disk', retryable: true } },
     }))
 
-    await card(wrapper, 'Ship the board').get('select.task-status').setValue('in_progress')
-    await flushPromises()
-    await nextTick()
+    await dragCard(wrapper, 'Ship the board', 1)
 
     // The server's own words, not a generic failure and not `[object Object]`:
     // this surface nests its message inside the envelope.
@@ -252,9 +322,6 @@ describe('TaskBoardView', () => {
     // write must not cost the user the card.
     expect(lanes(wrapper)[0]!.text()).toContain('Ship the board')
     expect(lanes(wrapper)[1]!.text()).not.toContain('Ship the board')
-    // And the select does not sit claiming a column the write never reached.
-    expect((card(wrapper, 'Ship the board').get('select.task-status').element as HTMLSelectElement).value)
-      .toBe('backlog')
     wrapper.unmount()
   })
 
@@ -477,14 +544,17 @@ describe('TaskBoardView', () => {
     await flushPromises()
     await nextTick()
 
-    const textarea = wrapper.get<HTMLTextAreaElement>('#task-detail-body')
-    expect(textarea.element.value).toContain('<b>not html</b>')
+    // It opens as it reads: rendered, and the raw tag shown as typed rather than
+    // parsed. No second copy of it under a textarea.
+    expect(wrapper.find('#task-detail-body').exists()).toBe(false)
+    expect(wrapper.find('.task-preview').exists()).toBe(false)
+    expect(wrapper.get('.task-body').html()).toContain('&lt;b&gt;not html&lt;/b&gt;')
+    expect(wrapper.get('.task-body').element.querySelector('b')).toBeNull()
 
-    await wrapper.get('.task-preview summary').trigger('click')
-    await nextTick()
-    // Rendered, and the raw tag shown as typed rather than parsed.
-    expect(wrapper.get('.task-preview-body').html()).toContain('&lt;b&gt;not html&lt;/b&gt;')
-    expect(wrapper.get('.task-preview-body').element.querySelector('b')).toBeNull()
+    // Edit swaps the rendered text for the source.
+    const textarea = await bodyField(wrapper)
+    expect(textarea.element.value).toContain('<b>not html</b>')
+    expect(wrapper.find('.task-body').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -498,7 +568,7 @@ describe('TaskBoardView', () => {
     await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
     await flushPromises()
     await nextTick()
-    expect(wrapper.get<HTMLTextAreaElement>('#task-detail-body').element.value).toBe('OLD')
+    expect(wrapper.get('.task-body').text()).toBe('OLD')
     await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
     await nextTick()
 
@@ -523,7 +593,7 @@ describe('TaskBoardView', () => {
     await nextTick()
 
     // What the dialog shows is what they wrote.
-    const textarea = wrapper.get<HTMLTextAreaElement>('#task-detail-body')
+    const textarea = await bodyField(wrapper)
     expect(textarea.element.value).toBe('THEIR PROSE')
 
     apiPatch.mockResolvedValue({
@@ -593,7 +663,7 @@ describe('TaskBoardView', () => {
     releaseRead(detailAnswer(task({ id: 'new', title: 'First task' }), '# Notes\n\n<b>not html</b>'))
     await flushPromises()
     await nextTick()
-    const textarea = wrapper.get<HTMLTextAreaElement>('#task-detail-body')
+    const textarea = await bodyField(wrapper)
     expect(textarea.element.value).toContain('<b>not html</b>')
     expect(wrapper.get('.task-sheet').text()).not.toContain('could not read')
     wrapper.unmount()
@@ -610,7 +680,7 @@ describe('TaskBoardView', () => {
     await flushPromises()
     await nextTick()
 
-    await wrapper.get('#task-detail-status').setValue('on_hold')
+    await wrapper.get('[data-status="on_hold"]').trigger('click')
     await flushPromises()
     await nextTick()
 
@@ -622,9 +692,10 @@ describe('TaskBoardView', () => {
     expect(path).toBe('/api/tasks/ship')
     expect(sent.status).toBe('on_hold')
     expect(sent.expected_revision).toBe(NEXT_REVISION)
-    // And the select follows the stored record rather than snapping back to the
+    // And the control follows the stored record rather than snapping back to the
     // status the dialog was opened on.
-    expect((wrapper.get('#task-detail-status').element as HTMLSelectElement).value).toBe('on_hold')
+    expect(wrapper.get('[data-status="on_hold"]').attributes('aria-checked')).toBe('true')
+    expect(wrapper.get('[data-status="backlog"]').attributes('aria-checked')).toBe('false')
     expect(lanes(wrapper)[2]!.text()).toContain('Ship the board')
     wrapper.unmount()
   })
@@ -640,7 +711,7 @@ describe('TaskBoardView', () => {
     await flushPromises()
     await nextTick()
 
-    await wrapper.get('#task-detail-status').setValue('done')
+    await wrapper.get('[data-status="done"]').trigger('click')
     await flushPromises()
     await nextTick()
 
@@ -649,7 +720,29 @@ describe('TaskBoardView', () => {
       workspace: 'personal',
       expected_revision: NEXT_REVISION,
     })
-    expect((wrapper.get('#task-detail-status').element as HTMLSelectElement).value).toBe('done')
+    expect(wrapper.get('[data-status="done"]').attributes('aria-checked')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('walks the dialog\'s status radios with the arrow keys, writing each move', async () => {
+    const wrapper = await mountBoard()
+    apiGet.mockResolvedValue(detailAnswer(task(), ''))
+    apiPatch.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...task({ status: 'in_progress' }), revision: THIRD_REVISION, body: '' },
+    })
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    const group = wrapper.get('[role="radiogroup"]')
+    // One tab stop: the checked radio.
+    expect(group.findAll('[tabindex="0"]').map((r) => r.text())).toEqual(['Backlog'])
+    await group.trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    await nextTick()
+    expect((apiPatch.mock.calls[0]![1] as Record<string, unknown>).status).toBe('in_progress')
+    expect(wrapper.get('[data-status="in_progress"]').attributes('aria-checked')).toBe('true')
     wrapper.unmount()
   })
 
@@ -819,8 +912,7 @@ describe('TaskBoardView', () => {
     pending[1]!(detailAnswer(task({ id: 'doing', title: 'Wire the store' }), 'Prose belonging to Wire the store'))
     await flushPromises()
     await nextTick()
-    expect(wrapper.get<HTMLTextAreaElement>('#task-detail-body').element.value)
-      .toBe('Prose belonging to Wire the store')
+    expect(wrapper.get('.task-body').text()).toBe('Prose belonging to Wire the store')
     wrapper.unmount()
   })
 
@@ -855,9 +947,7 @@ describe('TaskBoardView', () => {
     apiPatch.mockRejectedValue(Object.assign(new Error('HTTP 409'), {
       payload: { error: { code: 'task_revision_conflict', message: 'that task changed on disk', retryable: true } },
     }))
-    await card(wrapper, 'Ship the board').get('select.task-status').setValue('in_progress')
-    await flushPromises()
-    await nextTick()
+    await dragCard(wrapper, 'Ship the board', 1)
 
     const errorLine = wrapper.get('.task-action-error')
     expect(errorLine.text()).toContain('that task changed on disk')
@@ -880,8 +970,6 @@ describe('TaskBoardView', () => {
     // The refused write never reached the file, so the card is back in the
     // column the server still has it in — not the one the select claimed.
     expect(lanes(wrapper)[0]!.text()).toContain('Ship the board')
-    expect((card(wrapper, 'Ship the board').get('select.task-status').element as HTMLSelectElement).value)
-      .toBe('backlog')
     wrapper.unmount()
   })
 
@@ -1153,9 +1241,24 @@ describe('TaskBoardView', () => {
     return wrapper.findAll('.task-sheet').find((s) => s.find('#task-delegate-title').exists())
   }
 
-  /** Open the delegation preview on a card. */
+  /** A control in the card's editor, opening the editor first. */
+  async function editorControl(wrapper: ReturnType<typeof mount>, title: string, label: string) {
+    await card(wrapper, title).get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    return wrapper.findAll('.task-delegate-actions .task-chip').find((c) => c.text() === label)!
+  }
+
+  /**
+   * Open the delegation preview for a card: the card's editor, then its Agent
+   * block's Delegate. The card itself carries no Delegate — handing over starts
+   * where the preview is.
+   */
   async function openPreview(wrapper: ReturnType<typeof mount>, title: string) {
-    await chip(wrapper, title, 'Delegate').trigger('click')
+    await card(wrapper, title).get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    await wrapper.get('.task-delegate-actions .task-chip').trigger('click')
     await flushPromises()
     await nextTick()
   }
@@ -1191,9 +1294,9 @@ describe('TaskBoardView', () => {
       // sits in Done while its attempt still holds it), and that finding carries
       // its own badge — which is the next test's subject, not this one's.
       expect(badge('Finished').text()).toBe('Review ready')
-      expect(card(wrapper, 'Finished').findAll('.task-card-badges .badge')).toHaveLength(2)
+      expect(card(wrapper, 'Finished').findAll('.task-meta .badge')).toHaveLength(2)
       // A task nobody delegated has no badge at all.
-      expect(card(wrapper, 'Never delegated').findAll('.task-card-badges .badge'))
+      expect(card(wrapper, 'Never delegated').findAll('.task-meta .badge'))
         .toHaveLength(0)
       wrapper.unmount()
     })
@@ -1284,10 +1387,14 @@ describe('TaskBoardView', () => {
 
       const labels = (title: string) =>
         card(wrapper, title).findAll('.task-chip').map((c) => c.text())
-      expect(labels('Wire the store')).toEqual(['Chat', 'Stop', 'Detach', 'History', 'Done'])
-      // A task with nothing delegated offers the one gesture that starts work, and
-      // no Chat control: the board only links a chat it was told about.
-      expect(labels('Never delegated')).toEqual(['Delegate', 'Done'])
+      expect(labels('Wire the store')).toEqual(['Chat', 'Stop', 'Detach'])
+      // A live attempt holds the task, so there is no Done to tick.
+      expect(card(wrapper, 'Wire the store').find('.task-check').exists()).toBe(true)
+      // A task with nothing delegated has no attempt gestures and no Chat: the
+      // board only links a chat it was told about, and handing over starts in
+      // the editor. Its one gesture is the Done checkbox.
+      expect(labels('Never delegated')).toEqual([])
+      expect(card(wrapper, 'Never delegated').find('.task-check').exists()).toBe(true)
       wrapper.unmount()
     })
 
@@ -1311,19 +1418,19 @@ describe('TaskBoardView', () => {
 
     const labels = card(wrapper, 'Reviewed, then released')
       .findAll('.task-chip').map((c) => c.text())
-    // History is here because the attempt is: a released review is a record, and
-    // a plain Done is right because there is nothing left to approve.
-    expect(labels).toEqual(['Delegate', 'History', 'Done'])
-    expect(labels).not.toContain('Stop')
-    expect(labels).not.toContain('Detach')
+    // No attempt gestures, and a plain Done checkbox because there is nothing
+    // left to approve.
+    expect(labels).toEqual([])
+    expect(card(wrapper, 'Reviewed, then released').find('.task-check').exists()).toBe(true)
 
     // And the editor agrees: the preview opens as a first hand-over.
     await card(wrapper, 'Reviewed, then released').get('.task-open').trigger('click')
     await flushPromises()
     await nextTick()
-    const control = wrapper.findAll('.task-delegate-actions .btn-chip')
-      .find((c) => c.text() === 'Delegate')
-    expect(control, 'no Delegate control for a released attempt').toBeTruthy()
+    const actions = wrapper.findAll('.task-delegate-actions .btn-chip').map((c) => c.text())
+    expect(actions, 'no Delegate control for a released attempt').toContain('Delegate to agent')
+    // History lives here now that the card is lean: the attempt is a record.
+    expect(actions).toContain('History')
     wrapper.unmount()
   })
 
@@ -1336,7 +1443,7 @@ describe('TaskBoardView', () => {
       // abandons the one that failed. Resume and Retry are the two real answers,
       // so they are two labelled controls rather than one that has to guess.
       expect(card(wrapper, 'Broke halfway').findAll('.task-chip').map((c) => c.text()))
-        .toEqual(['Chat', 'Resume', 'Retry', 'History', 'Done'])
+        .toEqual(['Chat', 'Resume', 'Retry'])
 
       await chip(wrapper, 'Broke halfway', 'Resume').trigger('click')
       await flushPromises()
@@ -1544,7 +1651,7 @@ describe('TaskBoardView', () => {
 
       expect(card(wrapper, 'Wire the store').get('.badge').text()).toBe('Stopped')
       expect(card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text()))
-        .toEqual(['Chat', 'Resume', 'Retry', 'History', 'Done'])
+        .toEqual(['Chat', 'Resume', 'Retry'])
       wrapper.unmount()
     })
 
@@ -1575,7 +1682,7 @@ describe('TaskBoardView', () => {
       // No Stop and no Detach on a card whose turn has ended: there is nothing
       // running to stop, and Detach-then-Done is the workaround this replaces.
       const labels = card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text())
-      expect(labels).toEqual(['Chat', 'Approve Done', 'History'])
+      expect(labels).toEqual(['Chat', 'Approve Done'])
 
       await chip(wrapper, 'Wire the store', 'Approve Done').trigger('click')
       await flushPromises()
@@ -1852,7 +1959,7 @@ describe('TaskBoardView', () => {
 
       const switchChat = vi.fn()
       useProjectStore().switchChat = switchChat
-      await chip(wrapper, 'Wire the store', 'History').trigger('click')
+      await (await editorControl(wrapper, 'Wire the store', 'History')).trigger('click')
       await flushPromises()
       await nextTick()
 
@@ -1875,7 +1982,7 @@ describe('TaskBoardView', () => {
       // Re-opening the same card does not re-read it: loaded once, like the
       // proposal queue's ledger.
       await sheet.get('.btn-small').trigger('click')
-      await chip(wrapper, 'Wire the store', 'History').trigger('click')
+      await (await editorControl(wrapper, 'Wire the store', 'History')).trigger('click')
       await flushPromises()
       expect(apiGet.mock.calls.filter((c) => String(c[0]).includes('/attempts'))).toHaveLength(1)
       wrapper.unmount()
@@ -1946,7 +2053,7 @@ describe('TaskBoardView', () => {
     await flushPromises()
     await nextTick()
 
-    await chip(wrapper, 'Wire the store', 'History').trigger('click')
+    await (await editorControl(wrapper, 'Wire the store', 'History')).trigger('click')
     await flushPromises()
     await nextTick()
     expect(wrapper.findAll('.task-sheet').length).toBeGreaterThan(0)
@@ -1992,7 +2099,7 @@ describe('TaskBoardView', () => {
       await flushPromises()
       await nextTick()
 
-      await chip(wrapper, 'Draft the runbook', 'Delegate').trigger('click')
+      await (await editorControl(wrapper, 'Draft the runbook', 'Delegate to agent')).trigger('click')
       await nextTick()
 
       store.activeWorkspace = 'work'
@@ -2049,7 +2156,7 @@ describe('TaskBoardView', () => {
         }
         return Promise.reject(new Error('no description'))
       })
-      await chip(wrapper, 'Draft the runbook', 'Delegate').trigger('click')
+      await (await editorControl(wrapper, 'Draft the runbook', 'Delegate to agent')).trigger('click')
       await flushPromises()
       await nextTick()
 
