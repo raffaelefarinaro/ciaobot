@@ -291,6 +291,37 @@ export interface TaskReconcileNote {
   actions: string
 }
 
+/** A short human label for a reconcile code; the code itself is a `data-` attribute. */
+export function taskReconcileLabel(code: TaskReconcileCode | string): string {
+  switch (code) {
+    case 'settled_attempt_holds_task':
+      return 'Out of step'
+    case 'review_without_result':
+      return 'No result to review'
+    case 'result_without_review':
+      return 'Result not flagged'
+    case 'done_while_live':
+      return 'Done but running'
+    case 'chat_not_visible':
+      return 'Chat not here'
+    default:
+      return 'Out of step'
+  }
+}
+
+/**
+ * The colour a reconcile note wears.
+ *
+ * `settled_attempt_holds_task` is the normal B5 resting state — a failed,
+ * interrupted or stopped attempt whose card still reads In progress for the
+ * agent, with Resume and Retry right there. It is worth saying, but it is not an
+ * error, and a red banner on every such card would read as one. Everything else
+ * is a genuine contradiction, which does get the error colour.
+ */
+export function taskReconcileBadgeClass(code: TaskReconcileCode | string): string {
+  return code === 'settled_attempt_holds_task' ? 'badge--muted' : 'badge--error'
+}
+
 /**
  * What is inconsistent about one row, in the order a card should say it.
  *
@@ -330,7 +361,15 @@ export function taskReconcileNotes(
       actions: 'Delegate hands the task to the agent again; nothing is rewritten for you.',
     })
   }
-  if (task.attempt_state === 'ready_for_review' && task.review_state !== 'ready') {
+  // A released attempt keeps `attempt_state: ready_for_review` forever, so the
+  // `live_attempt_id` guard is what separates "waiting for you" from "you already
+  // approved it": without it every approved or detached card raised this flag the
+  // moment the gesture cleared its live attempt.
+  if (
+    task.live_attempt_id
+    && task.attempt_state === 'ready_for_review'
+    && task.review_state !== 'ready'
+  ) {
     notes.push({
       code: 'result_without_review',
       text: 'An attempt has a result waiting, but this card carries no Review badge.',

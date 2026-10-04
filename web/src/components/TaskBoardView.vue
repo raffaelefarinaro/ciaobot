@@ -62,6 +62,8 @@ import {
   taskAttemptLabel,
   taskAttemptSummary,
   taskLanes,
+  taskReconcileBadgeClass,
+  taskReconcileLabel,
   taskReconcileNotes,
   taskStatusLabel,
   type TaskDueFilter,
@@ -328,15 +330,19 @@ async function markDone(task: Task) {
 }
 
 /**
- * Which badge an attempt's state wears.
+ * Which badge an attempt state wears.
  *
  * Four classes, because four things are being said: in flight, waiting on the user,
  * ready to be reviewed, and over. `needs_you` is deliberately the accent colour
  * rather than `running`'s quiet one — a paused turn needs the user, and a badge
  * that looks like every other running task would hide that.
+ *
+ * Takes a *state*, not a task, because a history row must wear its own attempt's
+ * colour rather than the current attempt's — a `failed` retry under a
+ * `ready_for_review` current one otherwise rendered as a green "Failed".
  */
-function attemptBadgeClass(task: Task): string {
-  switch (task.attempt_state) {
+function attemptStateBadgeClass(state: string): string {
+  switch (state) {
     case 'failed':
     case 'interrupted':
       return 'badge--error'
@@ -347,6 +353,11 @@ function attemptBadgeClass(task: Task): string {
     default:
       return 'badge--muted'
   }
+}
+
+/** The current attempt's badge: the state the task itself carries. */
+function attemptBadgeClass(task: Task): string {
+  return attemptStateBadgeClass(task.attempt_state)
 }
 
 // ── Delegation ──────────────────────────────────────────────────────────
@@ -1290,7 +1301,7 @@ const today = localDateKey()
                       class="task-reconcile-note"
                       role="status"
                     >
-                      <span class="badge badge--error">{{ note.code }}</span>
+                      <span class="badge" :class="taskReconcileBadgeClass(note.code)" :data-code="note.code">{{ taskReconcileLabel(note.code) }}</span>
                       {{ note.text }}
                       <span class="task-reconcile-actions">{{ note.actions }}</span>
                     </p>
@@ -1672,7 +1683,7 @@ const today = localDateKey()
             >
               <div class="task-card-head">
                 <span class="task-history-state">
-                  <span class="badge" :class="attemptBadgeClass(historyTask!)">
+                  <span class="badge" :class="attemptStateBadgeClass(attempt.state)">
                     {{ taskAttemptLabel(attempt.state) }}
                   </span>
                   <span v-if="attempt.live" class="badge badge--accent2">Holding the task</span>
@@ -1754,7 +1765,7 @@ const today = localDateKey()
               class="task-reconcile-note"
               role="status"
             >
-              <span class="badge badge--error">{{ note.code }}</span>
+              <span class="badge" :class="taskReconcileBadgeClass(note.code)" :data-code="note.code">{{ taskReconcileLabel(note.code) }}</span>
               {{ note.text }}
               <span class="task-reconcile-actions">{{ note.actions }}</span>
             </p>
@@ -2202,7 +2213,9 @@ const today = localDateKey()
   margin: 0;
   font-size: var(--text-sm);
   color: var(--fg2);
-}.task-project { overflow-wrap: anywhere; }
+}
+
+.task-project { overflow-wrap: anywhere; }
 .task-assignee { color: var(--fg3); }
 .task-card-foot {
   display: flex;

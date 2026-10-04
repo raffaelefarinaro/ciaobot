@@ -1570,6 +1570,12 @@ describe('TaskBoardView', () => {
         wrapper.findAll('.task-lane').find((l) => l.text().includes('Done'))!
           .findAll('.task-card').map((c) => c.text()),
       ).toEqual([expect.stringContaining('Wire the store')])
+      // The approved card is `ready_for_review` again with `review_state: 'none'`
+      // and no live attempt — the exact shape that used to raise a false
+      // "result without a badge" flag on every approved or detached review.
+      const approvedCard = wrapper.findAll('.task-card')
+        .find((c) => c.text().includes('Wire the store'))!
+      expect(approvedCard.find('.task-reconcile').exists()).toBe(false)
       wrapper.unmount()
     })
 
@@ -1711,6 +1717,10 @@ describe('TaskBoardView', () => {
       expect(rows[0]!.text()).toContain('Review ready')
       expect(rows[1]!.text()).toContain('Failed')
       expect(rows[1]!.text()).toContain('the turn ended in an error')
+      // Each row wears its own attempt's colour, not the current attempt's: a
+      // failed retry under a review-ready current one must not render green.
+      expect(rows[0]!.find('.badge').classes()).toContain('badge--success')
+      expect(rows[1]!.find('.badge').classes()).toContain('badge--error')
       await rows[1]!.get('button').trigger('click')
       expect(switchChat).toHaveBeenCalledWith('chat-3')
 
@@ -1738,6 +1748,22 @@ describe('TaskBoardView', () => {
     expect(apiPatch).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+
+  it('does not flag an approved or detached review as a result without a badge',
+    async () => {
+      // A released `ready_for_review` attempt keeps that state forever — the user
+      // already approved it or detached the card — so it must not read as "a
+      // result waiting with no Review badge". Only a *live* attempt can be that.
+      const approved = task({
+        id: 'approved', title: 'Approved result',
+        status: 'done', assignee: 'agent',
+        attempt_state: 'ready_for_review', review_state: 'none',
+        live_attempt_id: '',
+      })
+      const wrapper = await mountWithBody([approved])
+      expect(card(wrapper, 'Approved result').find('.task-reconcile').exists()).toBe(false)
+      wrapper.unmount()
+    })
 
   it('flags a chat the browser cannot see, and stays quiet before it has looked',
     async () => {

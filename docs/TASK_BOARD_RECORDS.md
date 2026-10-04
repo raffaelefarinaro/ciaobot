@@ -154,7 +154,7 @@ state the turn actually ended in.
   the attempt keeps reading `needs_you` indefinitely. The badge is honest about
   the attempt it is — the turn it launched really did end waiting — but it does
   not follow the conversation. Re-attaching a watcher when the chat's next stream
-  starts is the fix; it is tracked as a follow-up rather than done here.
+  starts is the fix; it is tracked as follow-up **#1047** rather than done here.
 - **A pending permission card does not end the turn, so the attempt reads
   `running`.** `needs_you` is derived from the chat's pending question or
   permission *after* the stream ends, so while the card is actually up and the
@@ -276,7 +276,7 @@ would be a guess about every card.
   produced. The badge and the flag are both honest about the attempt they
   describe, and the review still happens in the chat. Re-attaching a watcher when
   the chat's next stream starts is the fix — the same gap as the `needs_you` case
-  above, and tracked as a follow-up rather than done here.
+  above, and tracked as follow-up **#1047** rather than done here.
 - **It is not a way to restart a failed turn.** A settled attempt stays settled;
   continuing it is `resume` (same chat, same attempt) or `retry` (a new one), and
   the card's own foot names both rather than borrowing the update's label.
@@ -437,6 +437,6 @@ The rule is keyed on the *directory pair* `Workspace/Tasks`, not on the name
   the **watcher** rather than this store: answering a delegated chat in the
   browser does not move the attempt, and a **Send update**'s turn is not watched
   either. Re-attaching a watcher when the chat's next stream starts fixes both and
-  is a follow-up, deliberately not a change to the attempt store here.
+  is follow-up **#1047**, deliberately not a change to the attempt store here.
 - Drag, priorities, recurring tasks, deadline reminders, multi-user boards and any
   unattended delegation remain out of scope for #973.
