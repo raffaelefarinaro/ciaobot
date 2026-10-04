@@ -368,6 +368,25 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["schedule", "resume", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "resume"})),
         (["schedule", "run", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "run"})),
         (["schedule", "delete", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "delete"})),
+        (["webhook", "list"], ("webhook_list", {})),
+        # The prose travels as a file; only `--name` is required.
+        (["webhook", "create", "--name", "CI push"], ("webhook_create", {"name": "CI push"})),
+        (
+            ["webhook", "update", "a" * 32, "--revision", "3", "--name", "CI", "--disable"],
+            ("webhook_update", {"trigger_id": "a" * 32, "expected_revision": "3", "name": "CI", "enabled": False}),
+        ),
+        (
+            ["webhook", "update", "a" * 32, "--revision", "3", "--enable"],
+            ("webhook_update", {"trigger_id": "a" * 32, "expected_revision": "3", "enabled": True}),
+        ),
+        (
+            ["webhook", "rotate", "a" * 32, "--revision", "3"],
+            ("webhook_rotate", {"trigger_id": "a" * 32, "expected_revision": "3"}),
+        ),
+        (
+            ["webhook", "delete", "a" * 32, "--revision", "3"],
+            ("webhook_delete", {"trigger_id": "a" * 32, "expected_revision": "3"}),
+        ),
         (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
         (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
         (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),
@@ -435,6 +454,9 @@ def test_every_documented_command_parses() -> None:
         "task complete": ["a" * 32, "--revision", "r"],
         "schedule update": ["s"], "schedule pause": ["s"],
         "schedule resume": ["s"], "schedule run": ["s"], "schedule delete": ["s"],
+        "webhook create": ["--name", "n"], "webhook update": ["a" * 32, "--revision", "1"],
+        "webhook rotate": ["a" * 32, "--revision", "1"],
+        "webhook delete": ["a" * 32, "--revision", "1"],
         "run start": ["--", "true"], "run status": ["r"], "run cancel": ["r"],
     }
     for command, operation in table.items():
@@ -567,8 +589,12 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     # invents its own board in a note and there is no second source of truth for
     # it to have come from. The revision discipline and the completion refusal
     # have to travel with the verbs, or the first thing it does is overwrite a
-    # task nobody read. Pay for the line, and keep the ceiling honest.
-    assert len(cli) < 10300
+    # task nobody read. Raised to 11000 for webhook triggers (#1039, A6), the
+    # same trade for five commands: the shown-once secret and the
+    # created-disabled rule are the two facts that keep an agent from pasting a
+    # credential into a note or enabling a trigger nobody asked to enable, and
+    # neither survives being left to `ciao help`. Keep the ceiling honest.
+    assert len(cli) < 11000
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
