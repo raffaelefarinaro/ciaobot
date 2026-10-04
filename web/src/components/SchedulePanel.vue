@@ -595,6 +595,14 @@
               <span v-if="s.enabled && s.next_run" class="ov-when">{{ relativeWhen(s.next_run, s.timezone_name) }}</span>
             </router-link>
           </section>
+
+          <!-- Webhooks live here rather than in a top-level inbox: a trigger is
+               another way for something outside the app to reach this
+               workspace, and Automations is where the user already looks for
+               "things that happen without me". The section is rendered on its
+               own (no `v-if` on its rows) so an empty list can still be filled
+               from here. -->
+          <WebhookTriggers />
         </div>
 
         <aside class="page-rail" aria-labelledby="ov-rail-title">
@@ -666,6 +674,7 @@ import type { RuntimeProvider, Schedule, ScheduleArchivePolicy } from '../lib/ty
 import NewScheduleForm from './NewScheduleForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
+import WebhookTriggers from './WebhookTriggers.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isPerWorkspaceRoutine, scheduleInWorkspace, workspaceForSchedule } from '../lib/automationWorkspace'
 import { askConfirm } from '../lib/confirm'
@@ -1530,6 +1539,7 @@ function closeSchedule() {
 }
 </script>
 
+<style scoped src="./overviewSections.css"></style>
 <style scoped>
 .schedule-panel {
   display: flex;
@@ -1866,15 +1876,15 @@ function closeSchedule() {
 
 
 /* ── Overview ─────────────────────────────────────────────────────
-   Sections with a plain heading over hairline rows: title and a plain
-   cadence/delivery sub-line on the left, the next run on the right - the same
-   row language as Home's "Continue where you left off". */
+   The sections themselves (.ov-section, .ov-head, .ov-item and the row
+   shape) live in ./overviewSections.css, which WebhookTriggers.vue pulls in
+   too — see the note there. Only the overview's own container and the
+   rail rules below are this panel's. */
 .overview-body .page-main {
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
 }
-.ov-section { min-width: 0; }
 .rail-title--spaced { margin-top: var(--space-5); }
 .rail-note--attention { color: var(--warning); }
 .rail-runs { margin-top: var(--space-3); }
@@ -1930,66 +1940,6 @@ function closeSchedule() {
 .field-info-panel p + p {
   margin-top: var(--space-2);
 }
-.ov-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  margin-bottom: var(--space-2);
-}
-.ov-head h2 {
-  margin: 0;
-  color: var(--fg);
-  font-size: var(--text-lg);
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-.ov-section--alert .ov-head h2 { color: var(--warning); }
-.ov-run-all { margin-left: auto; }
-.ov-hint { color: var(--fg3); font-size: var(--text-sm); }
-.ov-intro { margin: -4px 0 var(--space-2); color: var(--fg3); font-size: var(--text-sm); }
-.ov-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  min-height: 56px;
-  padding: 9px 2px;
-  box-sizing: border-box;
-  border-bottom: 1px solid var(--border);
-  color: var(--fg);
-  text-decoration: none;
-}
-.ov-head + .ov-item,
-.ov-intro + .ov-item { border-top: 1px solid var(--border); }
-.ov-item:hover .ov-title { color: var(--accent); }
-.ov-item:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius-xs);
-}
-.ov-item--paused .ov-title { color: var(--fg2); font-weight: 500; }
-.ov-main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
-.ov-title {
-  overflow: hidden;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  transition: color 120ms var(--ease);
-}
-.ov-sub {
-  overflow: hidden;
-  color: var(--fg3);
-  font-size: var(--text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ov-when {
-  flex: none;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  white-space: nowrap;
-}
-.ov-when--alert { color: var(--warning); }
-.ov-empty { margin: 0; padding: 12px 2px; border-top: 1px solid var(--border); color: var(--fg3); font-size: var(--text-sm); }
 
 /* Header actions: Run now is the one primary; the toggle and Delete live in
    the menu on narrow panes. */
