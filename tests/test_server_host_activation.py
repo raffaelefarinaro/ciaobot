@@ -10,7 +10,9 @@ finally feeds it one. The rules under test are the whole of E2:
   ``ciao`` console the release installer passes as ``--python``;
 * an absent, foreign or unverified host falls back to the direct shape and
   never silently claims a host;
-* an already-hosted definition this workspace owns is preserved, not downgraded;
+* an already-hosted definition this workspace owns is preserved — but only
+  while the host executable it names still exists, so a dead definition is
+  rewritten to the working direct shape instead of being kept forever;
 * the render-time ``ValueError`` surfaces as a ``RuntimeError`` message, never a
   traceback, because the setup callers already catch it.
 
@@ -21,6 +23,7 @@ verified snapshot is injected, and every path is a pytest tmpdir.
 from __future__ import annotations
 
 import plistlib
+import shutil
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -40,12 +43,26 @@ from ciao.server_host import (
 )
 
 
-def _verified_host() -> HostOwnership:
+def _host_bundle(tmp_path: Path, *, name: str = "Host") -> Path:
+    """A ``Ciaobot Server.app`` whose executable is a real regular file.
+
+    The E2 preservation guard only cares that the argv[0] the hosted definition
+    names exists; the bundle itself is never inspected without a record. A
+    scratch directory is enough, so no live ``~/Applications`` is touched.
+    """
+    bundle = tmp_path / name / "Ciaobot Server.app"
+    executable = bundle / "Contents" / "MacOS" / "CiaobotServerHost"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    return bundle
+
+
+def _verified_host(bundle_path: str | None = None) -> HostOwnership:
     """A snapshot as ``verify_owned_host`` would return it (B1's own shape)."""
     digest = "a" * 64
     return HostOwnership(
         schema=SCHEMA_VERSION,
-        bundle_path="/Users/me/Applications/Ciaobot Server.app",
+        bundle_path=bundle_path or "/Users/me/Applications/Ciaobot Server.app",
         bundle_id=BUNDLE_ID,
         host_revision=HOST_REVISION,
         host_protocol=HOST_PROTOCOL,
@@ -144,23 +161,24 @@ def test_setup_with_verified_host_and_explicit_python_serves_that_python(
     assert data["ExitTimeOut"] == 45
 
 
-def test_setup_rerun_on_a_hosted_workspace_stays_hosted(
+def test_setup_rerun_on_a_live_hosted_workspace_stays_hosted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A hosted definition this workspace owns is a faithful no-op, not a
-    silent downgrade, when no host is selected this run."""
+    """A hosted definition this workspace owns whose host still exists is a
+    faithful no-op, not a silent downgrade, when no host is selected this run."""
     agents = tmp_path / "LaunchAgents"
     workspace = (tmp_path / "ws").resolve()
     workspace.mkdir(parents=True)
     agents.mkdir(parents=True)
+    bundle = _host_bundle(tmp_path)
 
     # An existing hosted definition for this workspace, written the way the
-    # renderer writes one.
+    # renderer writes one, naming a host executable that is really there.
     cli._write_launchd_plist(
         workspace=workspace,
         launch_agents_dir=agents,
         port=8443,
-        host=_verified_host(),
+        host=_verified_host(str(bundle)),
         host_python="/opt/ciaobot/venv/bin/python",
     )
     plist = agents / "com.ciao.server.plist"
@@ -180,8 +198,54 @@ def test_setup_rerun_on_a_hosted_workspace_stays_hosted(
         python_path=sys.executable,
     )
 
-    assert plist.read_bytes() == before, "a hosted definition was downgraded"
+    assert plist.read_bytes() == before, "a live hosted definition was downgraded"
     assert _load_plist(plist)["ExitTimeOut"] == 45
+
+
+def test_setup_rerun_on_a_dead_hosted_workspace_writes_the_direct_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept hosted definition whose host executable is gone has no repair
+    path unless setup rewrites it: setup must write the direct shape again."""
+    agents = tmp_path / "LaunchAgents"
+    workspace = (tmp_path / "ws").resolve()
+    workspace.mkdir(parents=True)
+    agents.mkdir(parents=True)
+    bundle = _host_bundle(tmp_path)
+
+    cli._write_launchd_plist(
+        workspace=workspace,
+        launch_agents_dir=agents,
+        port=8443,
+        host=_verified_host(str(bundle)),
+        host_python="/opt/ciaobot/venv/bin/python",
+    )
+    plist = agents / "com.ciao.server.plist"
+    assert _load_plist(plist)["ExitTimeOut"] == 45
+
+    # The host bundle is deleted or moved (and its record with it): the hosted
+    # definition now names nothing launchd can run.
+    shutil.rmtree(bundle)
+
+    def _refuse(*_a: object, **_k: object) -> HostOwnership:
+        raise ServerHostError("no record", code="missing_record")
+
+    monkeypatch.setattr(cli, "verify_owned_host", _refuse)
+
+    cli.setup_workspace(
+        tmp_path / "ws",
+        launch_agents_dir=agents,
+        python_path="/opt/ciaobot/venv/bin/python3.12",
+    )
+
+    data = _load_plist(plist)
+    assert data["ProgramArguments"] == [
+        "/opt/ciaobot/venv/bin/python3.12",
+        "-m",
+        "ciao.cli",
+        "run",
+    ]
+    assert "ExitTimeOut" not in data, "a dead hosted definition was kept"
 
 
 def test_setup_on_a_direct_workspace_stays_direct(
@@ -303,6 +367,49 @@ def test_existing_hosted_definition_recognition_never_raises(
             }
         )
     )
+    assert cli._existing_hosted_definition_serves(agents, workspace) is False
+
+
+def test_existing_hosted_definition_is_preserved_only_while_its_host_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The N1 guard: existence of the named host executable decides preservation.
+
+    Recognition is still offline and record-free — no ``verify_owned_host`` is
+    called — but a hosted argv whose ``ProgramArguments[0]`` is not a regular
+    file is not preserved, so setup can write the direct shape again.
+    """
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir(parents=True)
+    workspace = (tmp_path / "ws").resolve()
+    workspace.mkdir(parents=True)
+
+    def _forbid_verify(*_a: object, **_k: object) -> HostOwnership:
+        raise AssertionError("recognition must not call verify_owned_host")
+
+    monkeypatch.setattr(cli, "verify_owned_host", _forbid_verify)
+
+    bundle = _host_bundle(tmp_path)
+    argv = list(
+        host_service_argv(
+            PurePosixPath(str(bundle)),
+            PurePosixPath("/opt/ciaobot/venv/bin/python"),
+        )
+    )
+    plist = agents / "com.ciao.server.plist"
+    plist.write_bytes(
+        plistlib.dumps({"ProgramArguments": argv, "EnvironmentVariables": {"CIAO_WORKSPACE": str(workspace)}})
+    )
+    # The host executable exists: keep it.
+    assert cli._existing_hosted_definition_serves(agents, workspace) is True
+
+    # The executable is gone (bundle deleted or half-installed): stop keeping it.
+    (bundle / "Contents" / "MacOS" / "CiaobotServerHost").unlink()
+    assert cli._existing_hosted_definition_serves(agents, workspace) is False
+
+    # A directory where a regular executable file is expected is not one either.
+    executable = bundle / "Contents" / "MacOS" / "CiaobotServerHost"
+    executable.mkdir()
     assert cli._existing_hosted_definition_serves(agents, workspace) is False
 
 

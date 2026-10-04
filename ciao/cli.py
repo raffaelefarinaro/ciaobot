@@ -371,26 +371,55 @@ def _host_engine_interpreter(resolved_engine: str) -> str:
     return resolved_engine
 
 
+def _hosted_definition_program(data: dict[str, Any]) -> str | None:
+    """argv[0] of a strict hosted definition in *data*, or ``None``.
+
+    Recognition only: the hosted shape is confirmed through
+    :func:`ciao.macos_service.hosted_service_python`, the one recognizer B2
+    shares across consumers, and then argv[0] — the host executable — is read
+    off the same argv so a caller can ask whether it still exists. A direct,
+    legacy, unknown or malformed argv answers ``None`` and never raises.
+    """
+    arguments = data.get("ProgramArguments")
+    if hosted_service_python(arguments) is None:
+        return None
+    if not isinstance(arguments, (list, tuple)) or not arguments:
+        return None
+    program = arguments[0]
+    return program if isinstance(program, str) else None
+
+
 def _existing_hosted_definition_serves(launch_agents_dir: Path, workspace: Path) -> bool:
-    """Whether the installed definition is hosted and serves *workspace*.
+    """Whether the installed definition is hosted, live and serves *workspace*.
 
     The preservation half of activation. When no verified host is selected this
     run, re-rendering would silently downgrade a live hosted job to the direct
     shape, so the existing ``com.ciao.server.plist`` is read back first. Only a
-    definition that parses as the strict hosted shape through
-    :func:`ciao.macos_service.hosted_service_python` **and** names the requested
-    workspace is preserved; a missing, unreadable, direct, unknown/legacy or
-    other-workspace definition answers ``False`` and keeps today's behavior.
-    Recognition never raises. Non-macOS platforms never have a hosted
-    definition, so the check is skipped there and their offline export stays
-    byte-identical to before.
+    definition that parses as the strict hosted shape, names the requested
+    workspace, **and** still names a host executable that exists as a regular
+    file is preserved; a missing, unreadable, direct, unknown/legacy,
+    other-workspace or dead definition answers ``False``.
+
+    The existence check is the narrow guard that gives a dead definition a
+    repair path: if the ``Ciaobot Server.app`` was deleted or moved, keeping the
+    hosted plist would leave launchd a job it cannot run and the documented
+    ``ciao setup && ciao service start`` could never write the working direct
+    shape. Requiring existence (and nothing stronger — no record, no native
+    probe) keeps a live hosted definition byte-for-byte. Recognition never
+    raises. Non-macOS platforms never have a hosted definition, so the check is
+    skipped there and their offline export stays byte-identical to before.
     """
     if sys.platform != "darwin":
         return False
     data = _load_server_plist(launch_agents_dir)
-    if data is None or hosted_service_python(data.get("ProgramArguments")) is None:
+    if data is None:
         return False
-    return _plist_data_workspace(data) == workspace
+    program = _hosted_definition_program(data)
+    if program is None:
+        return False
+    if _plist_data_workspace(data) != workspace:
+        return False
+    return Path(program).is_file()
 
 
 def _setup_token_path(workspace: Path) -> Path:

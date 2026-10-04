@@ -7,8 +7,8 @@ independently updatable. The installer acquires and records it (#1050, child E1)
 and `ciao setup` / service registration activate it from a verified snapshot
 (#1060, child E2): a hosted definition is written only when
 `ciao.server_host.verify_owned_host` proves the installed bundle, is preserved
-across re-runs, and otherwise the direct shape is kept. Host upgrade and rollback
-are later children.
+across re-runs while the host executable it names still exists, and otherwise
+the direct shape is kept. Host upgrade and rollback are later children.
 
 ## What it does
 
