@@ -2907,6 +2907,7 @@ def test_run_apply_still_refuses_an_entry_point_the_receipt_does_not_name(
 # the host serves; the interpreter is what names the engine install the job runs.
 
 
+@mac_update_host
 def test_run_apply_allows_a_hosted_job_serving_the_receipt_env(
     tmp_path: Path,
 ) -> None:
@@ -2931,6 +2932,7 @@ def test_run_apply_allows_a_hosted_job_serving_the_receipt_env(
     assert engine.starts == 1
 
 
+@mac_update_host
 def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
     tmp_path: Path,
 ) -> None:
@@ -2961,6 +2963,7 @@ def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
     assert engine.run_calls == []
 
 
+@mac_update_host
 def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     tmp_path: Path,
 ) -> None:
@@ -2997,6 +3000,7 @@ def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     assert engine.starts == 0
 
 
+@mac_update_host
 def test_an_ordinary_engine_update_leaves_the_host_definition_and_bytes_untouched(
     tmp_path: Path,
 ) -> None:
@@ -3025,6 +3029,7 @@ def test_an_ordinary_engine_update_leaves_the_host_definition_and_bytes_untouche
     assert executable.read_bytes() == host_before
 
 
+@mac_update_host
 def test_a_failed_hosted_update_rolls_back_to_the_same_hosted_state(
     tmp_path: Path,
 ) -> None:
@@ -3053,6 +3058,57 @@ def test_a_failed_hosted_update_rolls_back_to_the_same_hosted_state(
     assert _env_version(engine.live_env) == FROM_VERSION
     assert definition_plist.read_bytes() == definition_before
     assert executable.read_bytes() == host_before
+
+
+def test_an_ordinary_engine_update_leaves_the_direct_definition_untouched(
+    tmp_path: Path,
+) -> None:
+    # D2 on the shape Windows actually uses: the service definition runs the
+    # engine directly (`<env>/bin/python -m ciao.cli ...`), with no native host
+    # and no launchd. The swap moves the *engine* env and must leave the service
+    # definition bytes exactly as they were — on Windows and everywhere else.
+    # No launchctl is needed: a direct-loaded job is recognised through the same
+    # `server_command` seam, so this runs in the native Windows job.
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    definition_plist = _write_server_plist(engine.live_env / "bin" / "python")
+    definition_before = definition_plist.read_bytes()
+
+    result = _run(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_loaded_job(engine, engine.live_env / "bin" / "python"),
+    )
+
+    assert result.phase == "applied", result.error
+    assert _env_version(engine.live_env) == TO_VERSION
+    # The definition that named the engine is not the transaction's to rewrite:
+    # the engine env moved underneath it, the definition bytes did not change.
+    assert definition_plist.read_bytes() == definition_before
+
+
+def test_a_failed_direct_update_rolls_back_to_the_same_definition(
+    tmp_path: Path,
+) -> None:
+    # The rollback half of the direct-path D2 property: the engine env is put
+    # back, and the direct service definition is left byte-for-byte as it was.
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    definition_plist = _write_server_plist(engine.live_env / "bin" / "python")
+    definition_before = definition_plist.read_bytes()
+
+    result = _run(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_loaded_job(engine, engine.live_env / "bin" / "python"),
+        run=_broken_probe(engine),
+    )
+
+    assert result.phase == "rolled_back", result.error
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert definition_plist.read_bytes() == definition_before
 
 
 def test_service_disagreement_none_stays_evidence_of_nothing() -> None:
