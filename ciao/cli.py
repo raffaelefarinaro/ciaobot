@@ -190,24 +190,23 @@ def _host_service_arguments(
 def _launchd_program_arguments(
     executable: str,
     *,
-    host: HostOwnership | None = None,
-    host_python: str | None = None,
+    host_argv: tuple[str, ...] | None = None,
 ) -> str:
     """Render the ``ProgramArguments`` body for a service definition.
 
     Two shapes, and only one of them renders a verified value:
 
-    * with ``host``, the exact ``CiaobotServerHost serve --python <interpreter>``
-      arguments from :func:`_host_service_arguments` (the host executable is
-      argv[0] and is substituted into ``{{CIAO_EXECUTABLE}}`` by the caller, so
-      only the tail is rendered here);
-    * without ``host``, the direct shape the renderer has always emitted:
+    * with ``host_argv``, the exact ``CiaobotServerHost serve --python
+      <interpreter>`` command from :func:`_host_service_arguments` (the host
+      executable is argv[0] and is substituted into ``{{CIAO_EXECUTABLE}}`` by
+      the caller, so only the tail is rendered here);
+    * without it, the direct shape the renderer has always emitted:
       ``-m ciao.cli run`` for a python interpreter, ``run`` for any other
       launcher name.
     """
 
-    if host is not None:
-        arguments = list(_host_service_arguments(host, host_python)[1:])
+    if host_argv is not None:
+        arguments = list(host_argv[1:])
     else:
         name = Path(executable).name.lower()
         arguments = (
@@ -246,8 +245,11 @@ def _render_launchd_plist(
     production is the installer (child E); nothing here invents a host.
     """
 
-    if host is not None:
-        executable = _host_service_arguments(host, host_python)[0]
+    host_argv = (
+        _host_service_arguments(host, host_python) if host is not None else None
+    )
+    if host_argv is not None:
+        executable = host_argv[0]
     else:
         executable = engine_path or python_path or sys.executable
     template = resources.files("ciao.stock").joinpath(
@@ -263,14 +265,14 @@ def _render_launchd_plist(
         ),
         "{{CIAO_EXECUTABLE}}": html.escape(executable, quote=False),
         "{{LAUNCHD_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(
-            executable, host=host, host_python=host_python
+            executable, host_argv=host_argv
         ),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
     }
     for key, value in replacements.items():
         template = template.replace(key, value)
-    if host is not None:
+    if host_argv is not None:
         # The template has no ExitTimeOut placeholder: a bare direct
         # definition never has one, and only a hosted definition must exceed
         # the host's stop grace. Insert it as the last key of the job dict.

@@ -1430,3 +1430,19 @@ def test_the_runtime_the_enable_call_carries_keeps_argv0_for_a_legacy_shape(
     )
 
     assert runtime.python_path == "/opt/ciao/bin/Python3"
+
+
+def test_the_runtime_the_enable_call_carries_ignores_a_non_string_program(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-string argv[0] names no program: the answer is this interpreter."""
+    _install(tmp_path, monkeypatch)
+    plist_path = tmp_path / "LaunchAgents" / f"{SERVER}.plist"
+
+    runtime = service_login._macos_runtime(
+        {"ProgramArguments": [7, "run"]},
+        plist_path,
+        tmp_path / "workspace",
+    )
+
+    assert runtime.python_path == sys.executable

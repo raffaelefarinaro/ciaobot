@@ -162,7 +162,22 @@ def read_dotenv(path: Path) -> dict[str, str]:
     return values
 
 
-def _service_python_path(arguments: object) -> str:
+def hosted_service_python(arguments: object) -> str | None:
+    """The interpreter a hosted ``ProgramArguments`` serves, or ``None``.
+
+    ``None`` for anything that is not the strict hosted shape
+    (``CiaobotServerHost serve --python <interpreter>``) as
+    :func:`ciao.server_host.parse_service_command` reads it, including every
+    malformed value the parser refuses. Syntax only: it never proves ownership.
+    """
+    try:
+        parsed = parse_service_command(arguments)
+    except ServerHostError:
+        return None
+    return parsed.python if parsed.mode == "hosted" else None
+
+
+def service_python_path(arguments: object) -> str:
     """The interpreter the service definition actually runs.
 
     A **hosted** definition (``CiaobotServerHost serve --python <interpreter>``)
@@ -177,20 +192,18 @@ def _service_python_path(arguments: object) -> str:
     arbitrary console name or a case variant — keeps today's behavior: argv[0]
     is the program, no refusal. Recognition stays permissive on purpose;
     refusing here would turn a working install's status and classification into
-    an error, which is exactly the operator state this must not drop.
+    an error, which is exactly the operator state this must not drop. A missing
+    or non-string argv[0] names no program, so the answer is this interpreter.
     """
-    if isinstance(arguments, (list, tuple)) and arguments and all(
-        isinstance(argument, str) for argument in arguments
+    hosted = hosted_service_python(arguments)
+    if hosted is not None:
+        return hosted
+    if (
+        isinstance(arguments, (list, tuple))
+        and arguments
+        and isinstance(arguments[0], str)
     ):
-        try:
-            parsed = parse_service_command(list(arguments))
-        except ServerHostError:
-            parsed = None
-        if parsed is not None and parsed.mode == "hosted":
-            return parsed.python
-        return str(arguments[0])
-    if isinstance(arguments, (list, tuple)) and arguments:
-        return str(arguments[0])
+        return arguments[0]
     return sys.executable
 
 
@@ -253,7 +266,7 @@ def discover_runtime(
         runtime = Path(".runtime").resolve()
 
     arguments = plist.get("ProgramArguments")
-    python_path = _service_python_path(arguments)
+    python_path = service_python_path(arguments)
     return DesktopRuntime(
         workspace=str(workspace or ""),
         runtime_root=str(runtime.resolve()),

@@ -580,11 +580,11 @@ def _macos_runtime(
     definition runs ``CiaobotServerHost serve --python <interpreter>``, so the
     host executable must not be reported as the interpreter; the served python
     is resolved by the shared recognition in
-    ``macos_service._service_python_path`` (through ``parse_service_command``),
+    ``macos_service.service_python_path`` (through ``parse_service_command``),
     and an unparsed legacy direct argv keeps today's argv[0] behavior.
     """
     arguments = plist.get("ProgramArguments")
-    python_path = macos_service._service_python_path(arguments)
+    python_path = macos_service.service_python_path(arguments)
     return macos_service.DesktopRuntime(
         workspace=str(workspace),
         runtime_root=str(workspace / ".runtime"),
