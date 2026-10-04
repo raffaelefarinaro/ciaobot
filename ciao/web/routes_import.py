@@ -1,8 +1,8 @@
-"""The import consent surface: what is on this machine, and what a selection would process.
+"""The import consent surface and the private batch store behind it.
 
-Two routes, both behind the signed session cookie like every other ``/api/*``
-route (``ciao.web.auth.AuthMiddleware`` covers the prefix, so neither is
-registered in a public or loopback-only allowlist and neither has an origin
+Six routes, all behind the signed session cookie like every other ``/api/*``
+route (``ciao.web.auth.AuthMiddleware`` covers the prefix, so none is
+registered in a public or loopback-only allowlist and none has an origin
 exception of its own):
 
 * ``GET /api/import/sources?workspace=`` — discovery. Metadata only: source ids,
@@ -13,13 +13,20 @@ exception of its own):
   refs: per-conversation counts, the source's own first date when it has one,
   what the reader omitted, the effective provider and model, an input-volume
   estimate and the per-batch cap. It reads the selected files, and nothing else.
+* ``POST /api/import/batches`` — file a batch over a selection (C6).
+* ``GET /api/import/batches?workspace=`` — that workspace's batches, with
+  progress.
+* ``POST /api/import/batches/{id}/cancel`` — stop a batch, keeping what it
+  produced.
+* ``DELETE /api/import/batches/{id}`` — drop a batch record; queue and vault
+  are untouched.
 
-**Neither route extracts anything.** There is no model call, no proposal write
-and no batch store here: extraction is C7 and the store is C6. The preview exists
-so that everything a person is consenting to is stated *before* the first model
-call, and it answers with counts and reasons rather than text — a full
-transcript never reaches the browser, so a selection screen cannot leak the
-conversation it is asking about.
+**The batch, discovery and preview routes extract nothing.** There is no model
+call and no proposal write here: extraction is C7 and consumes the batch
+store. The preview exists so that everything a person is consenting to is
+stated *before* the first model call, and it answers with counts and reasons
+rather than text — a full transcript never reaches the browser, so a selection
+screen cannot leak the conversation it is asking about.
 
 **The selection names a source, not a location.** A request body carries
 ``{"provider", "source_id"}`` pairs; every path is rebuilt from the workspace's
@@ -41,9 +48,12 @@ import logging
 from typing import Any
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
-from ciao.import_decouple import RegistrySnapshotError
+from ciao.import_decouple import (
+    RegistrySnapshotError,
+    ciaobot_own_session_ids,
+)
 from ciao.import_discover import (
     MAX_SELECTION,
     UnknownWorkspace,
@@ -51,6 +61,14 @@ from ciao.import_discover import (
     preview_selected,
 )
 from ciao.import_sources import KNOWN_PROVIDERS, SourceRef
+from ciao.import_store import (
+    CONFLICT,
+    INVALID_BATCH,
+    NOT_FOUND,
+    ImportStore,
+    ImportStoreError,
+    engine_store_path,
+)
 from ciao.web.routes_helpers import api_error
 
 logger = logging.getLogger(__name__)
@@ -198,3 +216,193 @@ async def _read_json_object(request: Request) -> dict[str, Any] | JSONResponse:
     if not isinstance(body, dict):
         return api_error("expected an object", 400)
     return body
+
+
+# ── Import batches (C6): the private per-workspace batch store ─────────────
+#
+# Four routes over :mod:`ciao.import_store`, session-cookie gated like every
+# other ``/api/*`` route. A request may only *name* a workspace; the store
+# path is resolved from the engine config, so no caller-supplied path ever
+# reaches the filesystem. No provider call and no model call live here: the
+# create handler reads Ciaobot's own registry (to refuse Ciaobot-own
+# sessions) and the batch file, and nothing else. Extraction is C7.
+
+
+def import_batch_store(config: Any) -> ImportStore:
+    """The engine's batch store: ``<runtime>/import/import-batches.json``.
+
+    Resolved through :func:`ciao.import_store.engine_store_path`, the one
+    place that path is built — shared with the retention sweep, so the two
+    spellings cannot drift.
+
+    Constructed per call. The store is cheap and cross-process-safe by design
+    (every mutation re-reads the file under its locks), so no ``app.state``
+    wiring is needed.
+    """
+    return ImportStore(engine_store_path(config))
+
+
+def _store(request: Request) -> ImportStore:
+    """The request's batch store. See :func:`import_batch_store`."""
+    return import_batch_store(request.app.state.config)
+
+
+def _batch_error(exc: ImportStoreError) -> JSONResponse:
+    """Map a store refusal onto its status: 404/409/400, else 500."""
+    if exc.code == NOT_FOUND:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    if exc.code == CONFLICT:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    if exc.code == INVALID_BATCH:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+def _require_registered_workspace(config: Any, workspace: Any) -> str | None:
+    """The error for a missing or unregistered workspace, or ``None`` when ok."""
+    name = workspace.strip() if isinstance(workspace, str) else ""
+    if not name or config.workspace(name) is None:
+        return "unknown workspace: expected a registered workspace name"
+    return None
+
+
+async def import_batches_create(request: Request) -> JSONResponse:
+    """File a new batch over a selection: ``{"workspace", "sources": [...]}``.
+
+    ``sources`` is one ``{provider, source_id}`` pair per selected
+    conversation — ids, never paths — with an optional ``content_digest``
+    when the caller already read the session. Answers 201 with the batch as
+    stored: its selection, per-source digests (empty until C7 reads them),
+    progress and provenance. Digests only, never transcript text.
+
+    A selection naming a Ciaobot-own session is a 400, not a batch: the
+    store refuses it against Ciaobot's own records, which are read here (an
+    unreadable registry is a 500, like discovery, because the exclusion could
+    not be established). A second batch while one is still open for the
+    workspace, or a conversation a live batch already covers, is a 409.
+    """
+    config = request.app.state.config
+    body = await _read_json_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    error = _require_registered_workspace(config, body.get("workspace"))
+    if error is not None:
+        return api_error(error, 400)
+    workspace = str(body.get("workspace")).strip()
+    sources = body.get("sources")
+    if not isinstance(sources, list):
+        return api_error("expected a 'sources' list of {provider, source_id} pairs", 400)
+    destination = body.get("destination")
+    if destination is not None and not isinstance(destination, str):
+        return api_error("destination must be a workspace name", 400)
+    if isinstance(destination, str) and (
+        not destination.strip() or config.workspace(destination.strip()) is None
+    ):
+        return api_error(
+            "unknown destination: expected a registered workspace name", 400
+        )
+    try:
+        known_own = await asyncio.to_thread(ciaobot_own_session_ids, config, workspace)
+    except RegistrySnapshotError as exc:
+        logger.error("import batches: Ciaobot's own records are unreadable (%s)", exc)
+        return api_error(
+            "Cannot read Ciaobot's own chat records, so Ciaobot's own sessions "
+            "cannot be excluded. Nothing was filed.",
+            500,
+        )
+    try:
+        batch = await asyncio.to_thread(
+            _store(request).create,
+            workspace=workspace,
+            sources=sources,
+            destination=destination.strip() if isinstance(destination, str) else None,
+            known_own_ids=known_own,
+        )
+    except ImportStoreError as exc:
+        return _batch_error(exc)
+    return JSONResponse({"batch": batch.to_json()}, status_code=201)
+
+
+async def import_batches_list(request: Request) -> JSONResponse:
+    """Every batch filed for ``?workspace=``, oldest first, with progress."""
+    config = request.app.state.config
+    error = _require_registered_workspace(
+        config, request.query_params.get("workspace", "")
+    )
+    if error is not None:
+        return api_error(error, 400)
+    workspace = str(request.query_params.get("workspace", "")).strip()
+    try:
+        # In a thread: every store call takes a file lock, which is the event
+        # loop's time to spend, not its own.
+        batches = await asyncio.to_thread(
+            _store(request).list_for_workspace, workspace
+        )
+    except ImportStoreError as exc:
+        return _batch_error(exc)
+    return JSONResponse(
+        {"workspace": workspace, "batches": [batch.to_json() for batch in batches]}
+    )
+
+
+async def import_batch_cancel(request: Request) -> JSONResponse:
+    """Stop a batch, keeping what it produced. Idempotent; answers the batch.
+
+    The body names the workspace (``{"workspace": ...}``), and a batch filed
+    for another workspace is a 404 rather than a refusal: a caller that may
+    only name a workspace learns nothing about batches outside it. A batch
+    that already settled as done, failed or partial is a 409 — its outcome
+    stands. Cancellation retains recorded progress and provenance and cannot
+    unsend provider input.
+    """
+    config = request.app.state.config
+    body = await _read_json_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    error = _require_registered_workspace(config, body.get("workspace"))
+    if error is not None:
+        return api_error(error, 400)
+    workspace = str(body.get("workspace")).strip()
+    batch_id = str(request.path_params.get("batch_id", ""))
+    store = _store(request)
+    try:
+        batch = await asyncio.to_thread(store.get, batch_id)
+    except ImportStoreError as exc:
+        return _batch_error(exc)
+    if batch.workspace != workspace:
+        return api_error(f"no import batch {batch_id!r} is recorded", 404)
+    try:
+        updated = await asyncio.to_thread(store.cancel, batch_id, reason="")
+    except ImportStoreError as exc:
+        return _batch_error(exc)
+    return JSONResponse({"batch": updated.to_json()})
+
+
+async def import_batch_delete(request: Request) -> Response:
+    """Drop a batch record. Answers 204. Queue and vault are untouched.
+
+    ``?workspace=`` is required, and a batch filed for another workspace is
+    a 404, like the cancel route. Removing an import never implicitly deletes
+    accepted memories: the filed proposals stay queued and the accepted facts
+    stay in the vault — that is the existing review/undo path.
+    """
+    config = request.app.state.config
+    error = _require_registered_workspace(
+        config, request.query_params.get("workspace", "")
+    )
+    if error is not None:
+        return api_error(error, 400)
+    workspace = str(request.query_params.get("workspace", "")).strip()
+    batch_id = str(request.path_params.get("batch_id", ""))
+    store = _store(request)
+    try:
+        batch = await asyncio.to_thread(store.get, batch_id)
+    except ImportStoreError as exc:
+        return _batch_error(exc)
+    if batch.workspace != workspace:
+        return api_error(f"no import batch {batch_id!r} is recorded", 404)
+    try:
+        await asyncio.to_thread(store.forget, batch_id)
+    except ImportStoreError as exc:
+        return _batch_error(exc)
+    return Response(status_code=204)
