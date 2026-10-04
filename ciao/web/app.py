@@ -183,7 +183,14 @@ from ciao.web.routes_push import (
     push_unsubscribe,
 )
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
-from ciao.web.routes_import import import_preview, import_sources
+from ciao.web.routes_import import (
+    import_batch_cancel,
+    import_batch_delete,
+    import_batches_create,
+    import_batches_list,
+    import_preview,
+    import_sources,
+)
 from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.routes_tasks import (
     task_attempt_action,
@@ -471,9 +478,20 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Import consent (C5): discovery is metadata only and the preview reads
         # the *selected* conversations, so neither answers before a person has
         # chosen what to process. Session-protected like every other /api route;
-        # no extraction lives here (C7) and no batch store (C6).
+        # no extraction lives here (C7); the batch store (C6) is the routes below.
         Route("/api/import/sources", import_sources, methods=["GET"]),
         Route("/api/import/preview", import_preview, methods=["POST"]),
+        # Import batches (C6): the private per-workspace batch store. The
+        # literal `cancel` segment precedes the bare `{batch_id}` pattern so
+        # cancellation is not read as a batch id.
+        Route("/api/import/batches", import_batches_create, methods=["POST"]),
+        Route("/api/import/batches", import_batches_list, methods=["GET"]),
+        Route(
+            "/api/import/batches/{batch_id}/cancel",
+            import_batch_cancel,
+            methods=["POST"],
+        ),
+        Route("/api/import/batches/{batch_id}", import_batch_delete, methods=["DELETE"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),

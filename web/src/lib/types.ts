@@ -575,6 +575,68 @@ export interface Schedule {
   removable?: boolean
 }
 
+// ── Webhook triggers ─────────────────────────────────────────────────────
+
+/**
+ * How a trigger's turn runs. Set at create and never editable afterwards.
+ *
+ * The three are the store's `WEBHOOK_MODES`; the receiver accepts nothing else
+ * and answers 400 for a mode it does not know.
+ */
+export type WebhookMode = 'normal' | 'auto' | 'plan'
+
+/**
+ * The body a sender may post. `event_text` is the only policy the store has, so
+ * this is a named type rather than a bare string: the body shape a recipe shows
+ * is derived from the policy, and there is one policy.
+ */
+export type WebhookInputPolicy = 'event_text'
+
+/**
+ * One configured webhook trigger, as the public record the store returns.
+ *
+ * **There is no field here that holds a credential.** The engine keeps a
+ * verifier beside the record and never serialises it, so a trigger read from
+ * `GET /api/webhooks` cannot carry a secret — and neither may a type the PWA
+ * writes. The one-time secret arrives top-level in the create and rotate
+ * responses instead, and never again.
+ *
+ * `project_id: null` is the workspace's General project, not "unset".
+ * `mode` and `input_policy` are create-only: `PATCH` accepts `name`,
+ * `instructions` and `enabled` and refuses everything else.
+ */
+export interface WebhookTrigger {
+  trigger_id: string
+  name: string
+  workspace: WorkspaceName
+  project_id: string | null
+  instructions: string
+  enabled: boolean
+  mode: WebhookMode
+  input_policy: WebhookInputPolicy
+  created_at: string
+  updated_at: string
+  /** Optimistic-concurrency counter from 1; every write presents the one it read. */
+  revision: number
+}
+
+/** `GET /api/webhooks?workspace=` — public records only, never a secret. */
+export interface WebhookTriggerResponse {
+  triggers: WebhookTrigger[]
+}
+
+/**
+ * `POST /api/webhooks` and `POST /api/webhooks/{id}/rotate`.
+ *
+ * `secret` is top-level, beside the record rather than inside it, and it is the
+ * only time either response carries one. Nothing re-reads a trigger to find it
+ * again, so the PWA keeps it in one dialog and drops it when the dialog closes.
+ */
+export interface WebhookCreateResponse {
+  trigger: WebhookTrigger
+  secret: string
+}
+
 // ── Status & Models ─────────────────────────────────────────────────────
 
 export interface StatusResponse {
