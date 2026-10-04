@@ -387,17 +387,10 @@ def _existing_hosted_definition_serves(launch_agents_dir: Path, workspace: Path)
     """
     if sys.platform != "darwin":
         return False
-    plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
-    try:
-        with plist.open("rb") as handle:
-            data = plistlib.load(handle)
-    except (OSError, ValueError):
+    data = _load_server_plist(launch_agents_dir)
+    if data is None or hosted_service_python(data.get("ProgramArguments")) is None:
         return False
-    if not isinstance(data, dict):
-        return False
-    if hosted_service_python(data.get("ProgramArguments")) is None:
-        return False
-    return _plist_workspace(launch_agents_dir) == workspace
+    return _plist_data_workspace(data) == workspace
 
 
 def _setup_token_path(workspace: Path) -> Path:
@@ -1386,7 +1379,11 @@ def setup_workspace(
             # workspace, it is left exactly as it is: re-rendering would silently
             # downgrade a live hosted job to the direct shape.
             host = _verified_host_if_installed()
-            if host is not None:
+            if host is None and _existing_hosted_definition_serves(launch_dir, root):
+                # A hosted definition already owns this workspace; setup is a
+                # faithful no-op for the service definition, not a downgrade.
+                written.append(launch_dir.expanduser() / "com.ciao.server.plist")
+            else:
                 try:
                     written.append(_write_launchd_plist(
                         workspace=root,
@@ -1398,7 +1395,11 @@ def setup_workspace(
                         plist_name="com.ciao.server.plist",
                         confirm_repoint=confirm_repoint,
                         host=host,
-                        host_python=_host_engine_interpreter(resolved_engine),
+                        host_python=(
+                            _host_engine_interpreter(resolved_engine)
+                            if host is not None
+                            else None
+                        ),
                     ))
                 except ValueError as exc:
                     # The render-time refusal B2 defines (a host given without
@@ -1406,21 +1407,6 @@ def setup_workspace(
                     # RuntimeError and report it as a message, so it is never a
                     # traceback.
                     raise RuntimeError(str(exc)) from exc
-            elif _existing_hosted_definition_serves(launch_dir, root):
-                # A hosted definition already owns this workspace; setup is a
-                # faithful no-op for the service definition, not a downgrade.
-                written.append(launch_dir.expanduser() / "com.ciao.server.plist")
-            else:
-                written.append(_write_launchd_plist(
-                    workspace=root,
-                    launch_agents_dir=launch_dir,
-                    engine_path=resolved_engine,
-                    runtime_root=runtime_root,
-                    port=port,
-                    path=os.environ.get("PATH", ""),
-                    plist_name="com.ciao.server.plist",
-                    confirm_repoint=confirm_repoint,
-                ))
             # Explicit --launch-agents-dir also permits offline plist generation.
             _remove_legacy_app_shortcuts(app_root_dir)
             _disable_legacy_menubar_agent(launch_dir)
@@ -1451,13 +1437,30 @@ def _looks_like_source_checkout(path: Path) -> bool:
 def _plist_workspace(launch_agents_dir: Path) -> Path | None:
     """Workspace the server LaunchAgent currently points at, if set up."""
 
+    return _plist_data_workspace(_load_server_plist(launch_agents_dir))
+
+
+def _load_server_plist(launch_agents_dir: Path) -> dict[str, Any] | None:
+    """The parsed ``com.ciao.server.plist`` dict, or ``None`` if unreadable."""
+
     plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
     try:
         with plist.open("rb") as handle:
             data = plistlib.load(handle)
     except (OSError, ValueError):
         return None
-    workspace = (data.get("EnvironmentVariables") or {}).get("CIAO_WORKSPACE")
+    return data if isinstance(data, dict) else None
+
+
+def _plist_data_workspace(data: dict[str, Any] | None) -> Path | None:
+    """The resolved ``CIAO_WORKSPACE`` a parsed server plist names, if any."""
+
+    if data is None:
+        return None
+    environment = data.get("EnvironmentVariables")
+    if not isinstance(environment, dict):
+        return None
+    workspace = environment.get("CIAO_WORKSPACE")
     if not workspace:
         return None
     try:
@@ -5916,12 +5919,10 @@ def _register_launchd_service(workspace: Path) -> Path:
         runtime_root = root / runtime_root
     launch_dir = default_launch_agents_dir()
     resolved_engine = os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable
-    # Activation (E2): a verified host selects the hosted service; otherwise an
-    # already-hosted definition this workspace owns is preserved rather than
-    # downgraded, exactly as in `setup_workspace`.
+    # Activation (E2): a verified host selects the hosted service, otherwise the
+    # direct shape is written. The only caller registers when no definition is
+    # installed, so there is no hosted definition here to preserve.
     host = _verified_host_if_installed()
-    if host is None and _existing_hosted_definition_serves(launch_dir, root):
-        return launch_dir.expanduser() / "com.ciao.server.plist"
     host_python = _host_engine_interpreter(resolved_engine) if host is not None else None
     try:
         return _write_launchd_plist(

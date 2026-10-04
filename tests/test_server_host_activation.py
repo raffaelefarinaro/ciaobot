@@ -55,6 +55,10 @@ def _verified_host() -> HostOwnership:
     )
 
 
+#: A POSIX engine interpreter, so the hosted argv renders on every runner.
+_ENGINE_PYTHON = "/opt/ciaobot/tool/bin/python"
+
+
 @pytest.fixture(autouse=True)
 def _darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     """A verified host is a macOS fact; force the branch everywhere."""
@@ -95,6 +99,9 @@ def test_setup_with_verified_host_renders_host_argv_and_engine(
     serving the *engine interpreter*, with ExitTimeOut 45."""
     host = _verified_host()
     monkeypatch.setattr(cli, "verify_owned_host", lambda *a, **k: host)
+    # The engine interpreter behind the console; pinned so a Windows runner's
+    # `C:\...\python.exe` is not what the host is asked to serve.
+    monkeypatch.setattr(sys, "executable", _ENGINE_PYTHON)
     agents = tmp_path / "LaunchAgents"
 
     # The release installer passes `--python "$ciao"` (the console entry point).
@@ -105,9 +112,9 @@ def test_setup_with_verified_host_renders_host_argv_and_engine(
     )
 
     data = _load_plist(agents / "com.ciao.server.plist")
-    assert data["ProgramArguments"] == _hosted_expected(host, sys.executable)
+    assert data["ProgramArguments"] == _hosted_expected(host, _ENGINE_PYTHON)
     assert data["ProgramArguments"][0].endswith("CiaobotServerHost")
-    assert data["ProgramArguments"][3] == sys.executable
+    assert data["ProgramArguments"][3] == _ENGINE_PYTHON
     assert data["ProgramArguments"][3] != "/opt/ciaobot/bin/ciao"
     assert data["ExitTimeOut"] == EXIT_TIMEOUT_SECONDS == 45
     # The workspace facts a hosted definition still needs survive.
@@ -264,6 +271,24 @@ def test_existing_hosted_definition_recognition_never_raises(
         )
         assert cli._existing_hosted_definition_serves(agents, workspace) is False
 
+    hosted_argv = list(
+        host_service_argv(
+            PurePosixPath(_verified_host().bundle_path),
+            PurePosixPath("/opt/ciaobot/venv/bin/python"),
+        )
+    )
+    # A hosted argv whose EnvironmentVariables is not a dict names no workspace.
+    for environment in ("not-a-dict", ["CIAO_WORKSPACE"], 7):
+        plist.write_bytes(
+            plistlib.dumps(
+                {"ProgramArguments": hosted_argv, "EnvironmentVariables": environment}
+            )
+        )
+        assert cli._existing_hosted_definition_serves(agents, workspace) is False
+    # A plist whose top level is not a dict is not a definition at all.
+    plist.write_bytes(plistlib.dumps(hosted_argv))
+    assert cli._existing_hosted_definition_serves(agents, workspace) is False
+
     # A hosted definition for a *different* workspace is not ours either.
     plist.write_bytes(
         plistlib.dumps(
@@ -288,6 +313,8 @@ def test_register_launchd_service_selects_the_verified_host(
     definition, serving the engine interpreter."""
     host = _verified_host()
     monkeypatch.setattr(cli, "verify_owned_host", lambda *a, **k: host)
+    monkeypatch.setattr(sys, "executable", _ENGINE_PYTHON)
+    monkeypatch.delenv("CIAO_ENGINE_PATH", raising=False)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
@@ -296,36 +323,8 @@ def test_register_launchd_service_selects_the_verified_host(
 
     agents = Path(cli.default_launch_agents_dir())
     data = _load_plist(agents / "com.ciao.server.plist")
-    assert data["ProgramArguments"] == _hosted_expected(host, sys.executable)
+    assert data["ProgramArguments"] == _hosted_expected(host, _ENGINE_PYTHON)
     assert data["ExitTimeOut"] == 45
-
-
-def test_register_launchd_service_preserves_an_owned_hosted_definition(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    agents = Path(cli.default_launch_agents_dir())
-    workspace = (tmp_path / "ws").resolve()
-    workspace.mkdir(parents=True)
-    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
-    agents.mkdir(parents=True, exist_ok=True)
-    cli._write_launchd_plist(
-        workspace=workspace,
-        launch_agents_dir=agents,
-        port=9555,
-        host=_verified_host(),
-        host_python="/opt/ciaobot/venv/bin/python",
-    )
-    plist = agents / "com.ciao.server.plist"
-    before = plist.read_bytes()
-
-    def _refuse(*_a: object, **_k: object) -> HostOwnership:
-        raise ServerHostError("no record", code="missing_record")
-
-    monkeypatch.setattr(cli, "verify_owned_host", _refuse)
-
-    cli._register_launchd_service(workspace)
-
-    assert plist.read_bytes() == before
 
 
 def test_register_launchd_service_render_refusal_is_a_message(
