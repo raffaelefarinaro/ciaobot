@@ -145,6 +145,10 @@ _EDITABLE_FIELDS = frozenset(
     {"title", "status", "project_id", "due", "assignee", "review_state"}
 )
 
+#: The two linkage fields, editable only through :meth:`TaskBoardStore.link` and
+#: :meth:`TaskBoardStore.unlink`. See :func:`_check_editable`.
+_EDITABLE_LINKAGE_FIELDS = frozenset({"chat_id", "attempt_id"})
+
 _REQUIRED_FIELDS = (
     "schema",
     "id",
@@ -768,12 +772,30 @@ def render_new_task(record: TaskRecord, body: str) -> bytes:
 # ── Source-preserving patch ──────────────────────────────────────────
 
 
-def _check_editable(changes: Mapping[str, object]) -> None:
-    """Refuse non-editable and unknown patch fields explicitly."""
+def _check_editable(
+    changes: Mapping[str, object], *, allow_linkage: bool = False
+) -> None:
+    """Refuse non-editable and unknown patch fields explicitly.
+
+    ``allow_linkage`` is set only by :meth:`TaskBoardStore.link` /
+    :meth:`TaskBoardStore.unlink`, the delegation child's own writes. Linkage is
+    not an ordinary user patch — an agent naming its own ``chat_id`` would be
+    claiming a delegation it never made — but it is not immutable either, or the
+    board could never be pointed at a turn. So it is a separate door rather than
+    a field any caller may pass.
+    """
     for key in changes:
         if key in _EDITABLE_FIELDS or key == "updated_at":
             continue
-        if key in ("schema", "id", "created_at", "chat_id", "attempt_id"):
+        if key in _EDITABLE_LINKAGE_FIELDS:
+            if allow_linkage:
+                continue
+            raise TaskBoardError(
+                "invalid_task",
+                f"{key} is not an editable patch field (identity, creation time "
+                "and linkage belong to the store and the delegation child)",
+            )
+        if key in ("schema", "id", "created_at"):
             raise TaskBoardError(
                 "invalid_task",
                 f"{key} is not an editable patch field (identity, creation time "
@@ -810,6 +832,8 @@ def _normalize_change(key: str, value: object) -> Union[str, datetime, None]:
             )
         return str(value)
     if key in ("project_id",):
+        return _coerce_optional_id(value, key)
+    if key in _EDITABLE_LINKAGE_FIELDS:
         return _coerce_optional_id(value, key)
     if key == "due":
         return _coerce_due(value)
@@ -860,10 +884,26 @@ def patch_task(
     collection, or a multi-line scalar; invalid or truncated
     frontmatter). A parseable but unsupported edit shape is reported,
     never normalized silently.
+
+    Linkage (``chat_id``/``attempt_id``) is refused here: it is written
+    by the delegation child's own :meth:`TaskBoardStore.link` /
+    :meth:`TaskBoardStore.unlink` and by nothing else.
     """
+    return _patch(document, changes, body=body)
+
+
+def _patch(
+    document: TaskDocument,
+    changes: Mapping[str, object],
+    *,
+    body: str | None = None,
+    allow_linkage: bool = False,
+) -> bytes:
+    """:func:`patch_task`, with the linkage door opened only for the delegation
+    child's two store methods."""
     if body is not None and not isinstance(body, str):
         raise TaskBoardError("invalid_task", "task body must be a string or None")
-    _check_editable(changes)
+    _check_editable(changes, allow_linkage=allow_linkage)
     normalized: dict[str, Union[str, datetime, None]] = {
         key: _normalize_change(key, value) for key, value in changes.items()
     }
@@ -1449,6 +1489,140 @@ class TaskBoardStore:
                 raise TaskBoardError(
                     "revision_conflict",
                     "the task changed while the edit was being prepared; nothing was written",
+                )
+            self._atomic_write(path, new_raw, existing=path)
+            return parse_task(new_raw, expected_id=task_id)
+
+    # -- linkage (the delegation child, #1033) -------------------------
+    #
+    # `chat_id` and `attempt_id` are the one pair of fields an ordinary `update`
+    # refuses: an agent naming its own chat would be claiming a delegation it
+    # never made, and the linked-task rules in `_plan_changes` treat a non-null
+    # linkage as "an attempt owns this task". So they get their own revision-
+    # checked door below, called only by the delegation service, and each write
+    # is one atomic replacement like every other managed write here.
+
+    def link(
+        self,
+        task_id: str,
+        *,
+        expected_revision: str,
+        chat_id: str,
+        attempt_id: str,
+        status: str = "in_progress",
+        assignee: str = "agent",
+    ) -> TaskDocument:
+        """Point one task at the chat and attempt working on it, in one write.
+
+        The revision the delegation service read is required and rechecked under
+        the workspace lock, exactly as for :meth:`update`: the linkage is written
+        before the turn starts, so a stale read must fail here rather than point
+        a running attempt at a task somebody else has since changed.
+
+        ``status``/``assignee`` default to handing the task over — ``in_progress``
+        and ``agent`` — in the same atomic write, because a delegated task that
+        stays in *Backlog* assigned to the user cannot reach ``review_state:
+        ready`` (which needs exactly that pair) and so could never be reviewed.
+        They are parameters so the service, not this method, owns the decision.
+
+        Raises ``invalid_task`` for a malformed id, a missing chat or attempt id,
+        a bad status/assignee, or an edit that would need an ambiguous rewrite;
+        ``not_found``, ``revision_conflict`` and ``read_failed`` as
+        :meth:`update` does.
+        """
+        if not str(chat_id or "").strip():
+            raise TaskBoardError(
+                "invalid_task", "linking a task requires the chat the attempt runs in"
+            )
+        if not str(attempt_id or "").strip():
+            raise TaskBoardError(
+                "invalid_task", "linking a task requires the attempt that owns it"
+            )
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never links a task it has not read",
+            )
+        changes: dict[str, object] = {
+            "chat_id": str(chat_id).strip(),
+            "attempt_id": str(attempt_id).strip(),
+            "status": status,
+            "assignee": assignee,
+        }
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since this delegation was planned; nothing was written",
+                )
+            document = parse_task(current_raw, expected_id=task_id)
+            normalized = {
+                key: _normalize_change(key, value) for key, value in changes.items()
+            }
+            if all(
+                _change_is_noop(key, value, document.record)
+                for key, value in normalized.items()
+            ):
+                return document
+            normalized["updated_at"] = self._now()
+            new_raw = _patch(document, normalized, allow_linkage=True)
+            if new_raw == current_raw:
+                return document
+            reread = self._read_file_bytes(path, task_id)
+            if _revision(reread) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed while the delegation was being prepared; nothing was written",
+                )
+            self._atomic_write(path, new_raw, existing=path)
+            return parse_task(new_raw, expected_id=task_id)
+
+    def unlink(self, task_id: str, *, expected_revision: str) -> TaskDocument:
+        """Release a task from the chat and attempt that were working on it.
+
+        The whole of what makes a delegated task completable again: while
+        ``chat_id``/``attempt_id`` are non-null, :meth:`_plan_changes` refuses
+        both completion and reassignment, because a task with a turn in flight is
+        not one the user should be closing behind its back. Clearing the linkage
+        is the gesture that says the attempt no longer speaks for the task — the
+        attempt itself stays as history in the delegation child's own store.
+
+        Same protocol as :meth:`update`: revision required, rechecked under the
+        lock, nothing written on a conflict or a parse failure.
+        """
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never unlinks a task it has not read",
+            )
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since this detach was planned; nothing was written",
+                )
+            document = parse_task(current_raw, expected_id=task_id)
+            changes: dict[str, object] = {"chat_id": None, "attempt_id": None}
+            if all(
+                _change_is_noop(key, _normalize_change(key, value), document.record)
+                for key, value in changes.items()
+            ):
+                return document
+            changes["updated_at"] = self._now()
+            new_raw = _patch(document, changes, allow_linkage=True)
+            if new_raw == current_raw:
+                return document
+            reread = self._read_file_bytes(path, task_id)
+            if _revision(reread) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed while the detach was being prepared; nothing was written",
                 )
             self._atomic_write(path, new_raw, existing=path)
             return parse_task(new_raw, expected_id=task_id)

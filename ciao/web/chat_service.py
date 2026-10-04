@@ -101,6 +101,15 @@ _TASK_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # A `prompt_digest`, at the width `update_tasks.FINGERPRINT_CHARS` keeps.
 _HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
 
+# A board task id / attempt id in a `task_delegation` helper, and the SHA-256 hex
+# of the task file's bytes. Deliberately re-declared rather than imported from
+# `ciao.task_board` / `ciao.task_attempts` for the same reason `_TASK_ID_RE` is:
+# the chat store must keep validating these shapes if either module's id minting
+# ever changes, and a chat store that cannot read a helper is a chat the board
+# cannot link back to.
+_BOARD_TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_TASK_REVISION_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -575,6 +584,33 @@ def _normalize_update_task_helper(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_task_delegation_helper(value: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed on a task-delegation helper, same contract as the other kinds.
+
+    This kind is what makes a delegated board task's chat findable again after a
+    reload, a second device or a restart: it is the only record of which task
+    and which attempt a chat belongs to. Every field is therefore required and
+    typed — both ids are the 32 lowercase hex this codebase mints, and the
+    revision is the 64-hex SHA-256 of the task file's exact bytes, because a
+    value that is not one is a value this code did not write.
+    """
+    task_id = str(value.get("task_id") or "")
+    if not _BOARD_TASK_ID_RE.fullmatch(task_id):
+        return {}
+    task_revision = str(value.get("task_revision") or "")
+    if not _TASK_REVISION_RE.fullmatch(task_revision):
+        return {}
+    attempt_id = str(value.get("attempt_id") or "")
+    if not _BOARD_TASK_ID_RE.fullmatch(attempt_id):
+        return {}
+    return {
+        "kind": "task_delegation",
+        "task_id": task_id,
+        "task_revision": task_revision,
+        "attempt_id": attempt_id,
+    }
+
+
 def _normalize_chat_helper(value: Any) -> dict[str, Any]:
     """Fail closed on lifecycle metadata supplied by older or invalid clients."""
     if not isinstance(value, dict):
@@ -584,6 +620,8 @@ def _normalize_chat_helper(value: Any) -> dict[str, Any]:
         return _normalize_memory_pass_helper(value)
     if kind == "update_task":
         return _normalize_update_task_helper(value)
+    if kind == "task_delegation":
+        return _normalize_task_delegation_helper(value)
     if kind != "proposal":
         return {}
     intent = str(value.get("intent") or "")

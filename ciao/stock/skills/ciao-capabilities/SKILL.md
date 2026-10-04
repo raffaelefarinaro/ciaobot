@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, vault review, archiving, adversarial review, schedules, interval automations, routines, workspaces, projects, forks, subagents, skills, MCP servers, slash commands, models, providers, opencode, plan mode, permission modes, notifications, package updates, after-this-update tasks, keyboard shortcuts, files, document conversion, chat comments, pinned files, document previews, CSV tables and cell comments, HTML artifacts, artifact comments, backlinks, memory map, vault graph, note graph, retirement candidates, importing past conversations from Claude Code or OpenCode) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you import my old chats", "bring in my past conversations", "can you review vault notes", "can you run an adversarial review", "what will accepting this change", "show me the change before I accept", "can I talk about a note before retiring it", "can you convert documents", "can you comment on a chart", "can I fork this chat", "can you ask another provider", "can you stop asking permission", "can I install this on my mac", "how do I update ciaobot", "what happened after the update", "ciaobot wants me to do something after updating", "can you hide that task", "can you reopen it", "can you host on linux", "can I install this on windows", "can I run you on a VPS", "ubuntu server install", even when the word "Ciaobot" is not mentioned.
+description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, vault review, archiving, adversarial review, schedules, interval automations, routines, webhook triggers, workspaces, projects, forks, subagents, skills, MCP servers, slash commands, models, providers, opencode, plan mode, permission modes, notifications, package updates, after-this-update tasks, keyboard shortcuts, files, document conversion, chat comments, pinned files, document previews, CSV tables and cell comments, HTML artifacts, artifact comments, backlinks, memory map, vault graph, note graph, retirement candidates, importing past conversations from Claude Code or OpenCode) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you review vault notes", "can you run an adversarial review", "what will accepting this change", "show me the change before I accept", "can I talk about a note before retiring it", "can you convert documents", "can you comment on a chart", "can I fork this chat", "can you ask another provider", "can you stop asking permission", "can I set up a webhook", "can something external call ciaobot when a build fails", "can I install this on my mac", "how do I update ciaobot", "what happened after the update", "ciaobot wants me to do something after updating", "can you hide that task", "can you reopen it", "can you host on linux", "can I install this on windows", "can I run you on a VPS", "ubuntu server install", even when the word "Ciaobot" is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -75,6 +75,43 @@ for current commands; do not invent version-sensitive install or login syntax.
 - Time-of-day runs that were due while the app was off are caught up on the next launch; each workspace shows how many it missed. A run that dispatched but stopped before it finished (a restart mid-turn, a killed model process) counts as missed too — it is recovered once on the next launch, and stays listed as missed if that recovery fails as well. A run that completed is never repeated. Interval runs are not replayed — their cadence just resumes.
 - System maintenance schedules ship with the app and appear on the Automations page next to the user's own. The **Session insights** switch in Settings → General stops the memory pass for newly archived chats.
 
+### 3a. Webhook triggers (the other direction: events in, not times out)
+
+Automations run because a time arrived. A **webhook trigger** runs because
+something outside called a URL: a CI provider, a monitoring agent, a
+home-automation box. Configure them on the Automations page or in chat with
+`ciao webhook list|create|update|rotate|delete` (`ciao help` for the flags), and
+the sender's own call is a short `curl` recipe in `PWA_API.md`.
+
+- **Each trigger has its own revocable secret**, shown once when it is created
+  or rotated and never readable again (only a hash is kept). Create one,
+  hand the secret to the sender, enable it; rotate it the moment it is exposed —
+  rotation kills the previous secret immediately, so a sender holding the old one
+  stops working on the spot. Deleting a trigger destroys its secret for good, and
+  archiving a workspace destroys every trigger secret in it, so restoring that
+  name later cannot bring an old secret back to life.
+- **The ingress is a separate machine surface**, not the dashboard: it takes that
+  one trigger's bearer secret and an idempotency key, never the PWA password and
+  never a browser session cookie. The dashboard password is not a webhook
+  credential and cannot be used as one.
+- **A new trigger does nothing until it is enabled**, on purpose: you can
+  configure it fully while it cannot be called.
+- **The sender's only input is event text.** It cannot choose the workspace,
+  project, chat, model or permission mode — those were decided when the trigger
+  was configured.
+- **A webhook event grants no extra permission.** The turn it launches is an
+  ordinary chat in the trigger's own project, running in the trigger's configured
+  mode with your own model settings; if it needs an approval, that is an ordinary
+  approval card waiting for you in **Needs-you**, and nobody is watching to
+  answer it. It is not an unattended automation, so it never runs in bypass.
+- **`202 accepted` means the event was recorded**, not that the work happened:
+  the chat it becomes is an ordinary one you open yourself. If the launch could
+  not happen (a deleted project, a disabled trigger), the receipt says so and
+  nothing is retried behind your back.
+- Reusable for "whenever X happens, open a chat and do Y" — say what the sender
+  should POST and Ciaobot can set up the trigger, or configure it yourself when
+  the user wants to do it by hand.
+
 ### 4. Files
 
 - Create, preview, edit, and **restore** workspace and vault files from the PWA, with history — no terminal needed.
@@ -145,12 +182,13 @@ When onboarding someone, walk through these hands-on:
 3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews.
 4. **Memory** — archive → memory pass; confident facts are filed, unsure ones wait, and no unattended run promotes a new always-loaded fact.
 5. **Schedules** — set up one small routine they'd actually use.
-6. **Settings** — models & providers, package updates, and the engine's own service controls.
+6. **Webhooks** — point an external system at one trigger URL, if they have something that reports events.
+7. **Settings** — models & providers, package updates, and the engine's own service controls.
 
 Close with: they can ask "what can Ciaobot do?" (or about any specific feature) in any chat, anytime.
 
 ## Where the details live
 
 - Workspace customization surface (env vars, workspaces registry, tool deny-lists, model routing): `CIAO_CUSTOMIZATION.md` in the workspace root.
-- Automations how-to: `ciao schedule` commands in `ciao help`. Spawning chats: `ciao chat create`. Reaching another model: `ciao chat handover` and the `/critique` command. Vault read conventions are inline system-prompt policy.
+- Automations how-to: `ciao schedule` commands in `ciao help`. Webhook triggers: `ciao webhook` commands in `ciao help`, and the manage + sender recipes in `PWA_API.md`. Spawning chats: `ciao chat create`. Reaching another model: `ciao chat handover` and the `/critique` command. Vault read conventions are inline system-prompt policy.
 - Canonical docs in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`, also present in source checkouts): `README.md`, `docs/ARCHITECTURE.md`, and `PWA_API.md` (routes, auth, agent recipes).
