@@ -7,6 +7,7 @@
  * per-row save: the form edits a local draft and the panel's Save sends the
  * list, exactly as the server's contract requires.
  */
+import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useEntityTypesStore, isValidEntityTypeId, type EntityTypeKind, type EntityTypeRow } from '../stores/entityTypes'
@@ -351,9 +352,7 @@ async function saveDraft() {
       </p>
     </section>
 
-    <div v-if="catLoading" class="cat-loading" role="status" aria-live="polite">
-      <span class="cat-spinner" aria-hidden="true"></span> Loading categories…
-    </div>
+    <SkeletonLoader v-if="catLoading" label="Loading categories" :count="6" />
 
     <div v-else-if="catFailed" class="cat-failed" role="alert">
       <p class="cat-failed-text">{{ store.loadError }}</p>
@@ -640,22 +639,6 @@ async function saveDraft() {
 .cat-why-line em { font-style: normal; color: var(--fg3); }
 .cat-why-foot { margin-top: 4px; }
 
-.cat-loading {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-.cat-spinner {
-  width: 12px; height: 12px; flex: none;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: cat-spin 0.7s linear infinite;
-}
-@keyframes cat-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .cat-spinner { animation: none; } }
 
 .cat-failed {
   display: flex;

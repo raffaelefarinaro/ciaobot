@@ -207,9 +207,7 @@
               <span class="settings-status">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
             </div>
           </div>
-          <div v-if="packageLoading && !packageStatus" class="loading">
-            Checking package status...
-          </div>
+          <SkeletonLoader v-if="packageLoading && !packageStatus" label="Checking package status" :count="2" />
           <div v-else-if="packageStatus">
             <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
               Update check failed: {{ packageStatus.error }}
@@ -403,7 +401,7 @@
               {{ workspaceHealth?.status || (agentAssetsLoaded ? 'unknown' : 'loading') }}
             </span>
           </div>
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Scanning&hellip;</span></div>
+          <SkeletonLoader v-if="!agentAssetsLoaded" label="Scanning workspace health" :count="3" />
           <p v-else-if="agentAssetsError" class="hint hint--warn">{{ agentAssetsError }}</p>
           <div v-else-if="workspaceHealth && prioritizedHealthChecks.length" class="health-list">
             <div
@@ -458,7 +456,7 @@
               {{ authSettings.auth_required ? 'on' : 'off' }}
             </span>
           </div>
-          <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
           <template v-else>
             <div class="settings-form-panel">
               <p v-if="!authSettings.auth_required" class="hint hint--warn">
@@ -839,7 +837,7 @@
         </template>
 
         <!-- Background models -->
-        <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <div v-if="!routinesLoaded" class="card"><SkeletonLoader label="Loading routines" :count="3" /></div>
         <template v-else-if="routinesError">
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
         </template>
@@ -933,7 +931,7 @@
 
       <!-- WORKSPACES TAB -->
       <template v-if="currentTab === 'workspaces'">
-        <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <div v-if="!workspacesLoaded" class="card"><SkeletonLoader label="Loading workspaces" :count="3" /></div>
         <template v-else-if="workspacesError">
           <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
         </template>
@@ -1245,9 +1243,7 @@
               </span>
             </div>
 
-            <div v-if="!gwsIntegrationLoaded" class="loading">
-              Loading Google Workspace status&hellip;
-            </div>
+            <SkeletonLoader v-if="!gwsIntegrationLoaded" label="Loading Google Workspace status" :count="2" />
             <p v-else-if="gwsIntegrationError" class="hint hint--warn">
               {{ gwsIntegrationError }}
             </p>
@@ -1629,7 +1625,7 @@
             <div v-if="addSkillResult" class="action-result" :class="{ '--error': addSkillError }" role="alert">{{ addSkillResult }}</div>
           </div>
 
-          <div v-if="!skillsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <SkeletonLoader v-if="!skillsLoaded" label="Loading skills" :count="4" />
           <template v-else-if="skillsError">
             <p class="hint hint--warn">{{ skillsError }}</p>
           </template>
@@ -1746,7 +1742,7 @@
           </div>
           <div v-if="assetLifecycleResult" class="action-result" :class="{ '--error': assetLifecycleError }">{{ assetLifecycleResult }}</div>
 
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <SkeletonLoader v-if="!agentAssetsLoaded" label="Loading subagents" :count="3" />
           <template v-else-if="agentAssetsError">
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
@@ -1865,7 +1861,7 @@
 
           <div v-if="assetLifecycleResult" class="action-result" :class="{ '--error': assetLifecycleError }">{{ assetLifecycleResult }}</div>
 
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <SkeletonLoader v-if="!agentAssetsLoaded" label="Loading commands" :count="3" />
           <template v-else-if="agentAssetsError">
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
@@ -2017,6 +2013,7 @@
 </template>
 
 <script setup lang="ts">
+import SkeletonLoader from './SkeletonLoader.vue'
 import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'

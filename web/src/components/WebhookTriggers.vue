@@ -20,9 +20,7 @@
     <!-- First load: a pending question, not an empty answer. It replaces the
          list rather than sitting above it, because there is no list yet and an
          empty one beside "Loading…" would be two answers to one question. -->
-    <p v-if="store.loading && !store.loaded" class="ov-empty" role="status">
-      Loading webhook triggers…
-    </p>
+    <SkeletonLoader v-if="store.loading && !store.loaded" label="Loading webhook triggers" variant="cards" :count="2" />
 
     <!-- First load failed. An empty list would claim the workspace has none.
          The two error states are siblings rather than one branch, because only
@@ -377,6 +375,7 @@
 </template>
 
 <script setup lang="ts">
+import SkeletonLoader from './SkeletonLoader.vue'
 import {
   DialogClose,
   DialogContent,
