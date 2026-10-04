@@ -1302,6 +1302,7 @@ describe('ChatLayout home arrow navigation', () => {
         { path: '/project/:projectId', component: EmptyStub },
         { path: '/settings', component: EmptyStub },
         { path: '/schedules', component: EmptyStub },
+        { path: '/tasks', component: EmptyStub },
         { path: '/memory', component: EmptyStub },
       ],
     })
@@ -1436,7 +1437,35 @@ describe('ChatLayout home arrow navigation', () => {
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
     await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/tasks')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
+    await flushPromises()
     expect(router.currentRoute.value.path).toBe('/memory')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/tasks')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/schedules')
+    wrapper.unmount()
+  })
+
+  // `/tasks` has no `viewMode` arm of its own in the index arithmetic, so it fell
+  // through to Settings: Option+Right off the board jumped to Home and
+  // Option+Left jumped to Memory, neither of them the neighbouring section.
+  it('walks to and from the task board rather than over it', async () => {
+    const wrapper = await mountHome('/tasks')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/memory')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/tasks')
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true }))
     await flushPromises()

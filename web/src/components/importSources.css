@@ -1,0 +1,100 @@
+/* The shared half of Memory → Import (#1041, C8): the listing's rows, the
+   status lines, the disclosure blocks and the 44px floor they all stand on.
+   Pulled in by `ImportSources.vue` (discovery, selection, confirmation) and
+   `ImportRuns.vue` (the filed batches, their progress and their retention) as
+   `<style scoped src="./importSources.css">`, the shape `memoryReview.css` and
+   `overviewSections.css` already use in this directory.
+
+   It is a shared file because the two halves are one journey drawn in two
+   components: a row, a disclosure and a quiet button have to look and measure
+   the same on both sides of the "file this batch" line, and a second copy of
+   the rules is how the two would drift apart — including the touch floor, which
+   is the one thing a reader on a phone notices. */
+
+.import-head,
+.import-runs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.import-head-actions,
+.import-actions,
+.import-runs-head-actions,
+.import-run-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Every quiet control is a full touch target, not just its label. */
+.import-quiet { min-height: var(--touch); }
+
+.import-status {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.import-error { color: var(--error); }
+.import-warn { color: var(--warning); }
+
+.import-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.import-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.import-row--off { opacity: 0.75; }
+
+/* The whole row is the hit target: a checkbox alone is under the 44px floor. */
+.import-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: var(--space-2);
+  cursor: pointer;
+}
+
+.import-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--space-2);
+}
+
+.import-row-title { font-size: var(--text-sm); }
+
+.import-row-meta {
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  overflow-wrap: anywhere;
+}
+
+.import-aside { margin-top: var(--space-1); }
+
+.import-aside-title {
+  cursor: pointer;
+  min-height: var(--touch);
+  display: flex;
+  align-items: center;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}

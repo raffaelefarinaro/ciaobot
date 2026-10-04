@@ -59,6 +59,7 @@ function task(overrides: Partial<UpdateTaskRow> = {}): UpdateTaskRow {
     offered: false,
     suppressed: true,
     chat_id: 'chat-9',
+    chat_live: true,
     prompt_digest: '',
     attempted_fingerprint: 'abc123',
     updated_at: '2026-09-05T18:30:00+00:00',
@@ -545,7 +546,19 @@ describe('outcome links', () => {
   it('offers no chat link for a task that never got one', async () => {
     // A dismissal of a failed attempt drops its empty chat, so a link here would
     // open a chat the engine knows holds nothing.
-    apiGet.mockResolvedValue(listing([task({ status: 'failed', chat_id: '' })]))
+    apiGet.mockResolvedValue(listing([task({ status: 'failed', chat_id: '', chat_live: false })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    expect(buttonLabels(wrapper)).not.toContain('Open its chat')
+    wrapper.unmount()
+  })
+
+  it('offers no chat link for a chat that was archived or deleted', async () => {
+    // The record deliberately keeps the id after the chat is gone, so `chat_id`
+    // alone would keep offering a control that opens nothing. Liveness decides.
+    apiGet.mockResolvedValue(
+      listing([task({ status: 'dismissed', chat_id: 'gone-chat', chat_live: false })]),
+    )
     const wrapper = mount(SettingsUpdateTasks)
     await flushPromises()
     expect(buttonLabels(wrapper)).not.toContain('Open its chat')

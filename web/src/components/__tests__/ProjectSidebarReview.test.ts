@@ -147,14 +147,18 @@ describe('ProjectSidebar review section', () => {
     expect(nav.findAll('.sidebar-list-label').map(h => h.text())).toEqual(['Explore', 'Records'])
     const items = nav.findAll('.memory-nav-item')
     expect(items.map(i => i.attributes('href'))).toEqual([
-      '/memory/review', '/memory/map', '/memory/categories',
+      '/memory/review', '/memory/map', '/memory/categories', '/memory/import',
       '/memory/retired', '/memory/history',
     ])
-    // Explore holds the map, then the list of what the map is drawing.
+    // Explore holds the map, then the list of what the map is drawing, then the
+    // way conversations get in.
     expect(items[1].text()).toContain('Map')
     expect(items[2].text()).toContain('Categories')
-    // The category list is configuration, not a queue: no count on it.
+    expect(items[3].text()).toContain('Import')
+    // The category list is configuration, not a queue: no count on it. Import has
+    // none either — nothing is listed until the reader asks for a scan.
     expect(items[2].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
     // Three proposals in `personal` plus one note to revisit, on the one
     // To decide row; its count is the accent one, and the accessible name
     // carries the number.
@@ -162,7 +166,7 @@ describe('ProjectSidebar review section', () => {
     expect(items[0].get('.memory-nav-count').classes()).toContain('memory-nav-count--due')
     expect(items[0].attributes('aria-label')).toBe('To decide, 4 waiting')
     // Nothing retired: no zero badge.
-    expect(items[3].find('.memory-nav-count').exists()).toBe(false)
+    expect(items[4].find('.memory-nav-count').exists()).toBe(false)
   })
 
   it('offers a Manage link from the map\'s category chips to the category list', async () => {

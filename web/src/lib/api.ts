@@ -177,6 +177,10 @@ export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body),
-  del: <T>(path: string) => request<T>('DELETE', path),
+  // A body is optional because most DELETEs carry none, but `/api/tasks/{id}`
+  // refuses a delete that does not present the `expected_revision` it read in the
+  // request body — a route that cannot be called without one needs the client to
+  // be able to send one.
+  del: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body),
   postForm: <T>(path: string, form: FormData) => requestForm<T>('POST', path, form),
 }

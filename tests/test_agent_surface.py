@@ -222,19 +222,27 @@ def test_task_operations_register_as_two_reads_and_three_writes(tmp_path: Path) 
     a `_READ` entry on a write would let a plan-mode chat file a task. And
     `task_action` is `_WRITE`, not `_DESTRUCTIVE`: the store refuses an agent's
     completion outright, so it carries no reachable destructive effect.
+    `task_attempt_action` is the exception among the delegation pair and *is*
+    `_DESTRUCTIVE`, because its `stop` ends a turn irreversibly — the same reason
+    `chat_stop` is ask-class.
     """
     from ciao import mcp_server
 
     service = _task_service(tmp_path)
     assert {
         "task_list", "task_get", "task_create", "task_update", "task_action",
+        "task_delegate", "task_attempt_action",
     } <= set(service.operation_table)
     for name in ("task_list", "task_get"):
         assert mcp_server.OPERATIONS_BY_NAME[name].annotations == mcp_server._READ
-    for name in ("task_create", "task_update", "task_action"):
+    for name in ("task_create", "task_update", "task_action", "task_delegate"):
         annotations = mcp_server.OPERATIONS_BY_NAME[name].annotations
         assert annotations == mcp_server._WRITE, name
         assert annotations.readOnlyHint is False
+    assert (
+        mcp_server.OPERATIONS_BY_NAME["task_attempt_action"].annotations
+        == mcp_server._DESTRUCTIVE
+    )
 
 
 def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path) -> None:
@@ -368,6 +376,25 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["schedule", "resume", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "resume"})),
         (["schedule", "run", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "run"})),
         (["schedule", "delete", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "delete"})),
+        (["webhook", "list"], ("webhook_list", {})),
+        # The prose travels as a file; only `--name` is required.
+        (["webhook", "create", "--name", "CI push"], ("webhook_create", {"name": "CI push"})),
+        (
+            ["webhook", "update", "a" * 32, "--revision", "3", "--name", "CI", "--disable"],
+            ("webhook_update", {"trigger_id": "a" * 32, "expected_revision": "3", "name": "CI", "enabled": False}),
+        ),
+        (
+            ["webhook", "update", "a" * 32, "--revision", "3", "--enable"],
+            ("webhook_update", {"trigger_id": "a" * 32, "expected_revision": "3", "enabled": True}),
+        ),
+        (
+            ["webhook", "rotate", "a" * 32, "--revision", "3"],
+            ("webhook_rotate", {"trigger_id": "a" * 32, "expected_revision": "3"}),
+        ),
+        (
+            ["webhook", "delete", "a" * 32, "--revision", "3"],
+            ("webhook_delete", {"trigger_id": "a" * 32, "expected_revision": "3"}),
+        ),
         (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
         (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
         (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),
@@ -433,8 +460,13 @@ def test_every_documented_command_parses() -> None:
         "task get": ["a" * 32], "task update": ["a" * 32, "--revision", "r"],
         "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
         "task complete": ["a" * 32, "--revision", "r"],
+        "task delegate": ["a" * 32, "--revision", "r"],
+        "task attempt": ["a" * 32, "stop"],
         "schedule update": ["s"], "schedule pause": ["s"],
         "schedule resume": ["s"], "schedule run": ["s"], "schedule delete": ["s"],
+        "webhook create": ["--name", "n"], "webhook update": ["a" * 32, "--revision", "1"],
+        "webhook rotate": ["a" * 32, "--revision", "1"],
+        "webhook delete": ["a" * 32, "--revision", "1"],
         "run start": ["--", "true"], "run status": ["r"], "run cancel": ["r"],
     }
     for command, operation in table.items():
@@ -568,7 +600,21 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     # it to have come from. The revision discipline and the completion refusal
     # have to travel with the verbs, or the first thing it does is overwrite a
     # task nobody read. Pay for the line, and keep the ceiling honest.
-    assert len(cli) < 10300
+    # Raised again to 10600 for task delegation (#1033, B5), the same trade for two
+    # more: without `task delegate`/`task attempt` an agent handed "work on the
+    # board task" reaches for `task update` and edits the record by hand, which
+    # produces no chat, no attempt and no review — the three things that make a
+    # delegation a delegation. Two lines of prose had to come with them, because
+    # "attended, not bypassing" and "a finished turn waits for review" are the two
+    # properties a model cannot infer from a verb list.
+    # Raised again to 11000 for webhook triggers (#1039, A6), the same trade for five
+    # commands: the shown-once secret and the created-disabled rule are the two facts
+    # that keep an agent from pasting a credential into a note or enabling a trigger
+    # nobody asked to enable, and neither survives being left to `ciao help`.
+    # B5 (#1033) and A6 (#1039) added their lines on divergent branches and meet
+    # here, so this is 11400 rather than either's 10600/11000: both sets of prose
+    # have to travel or one feature's guarantee silently disappears.
+    assert len(cli) < 11400
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(

@@ -62,7 +62,7 @@
             </li>
             <li>
               <strong>Archive into a second brain.</strong>
-              <span>Archive a chat and it remembers what should be: your preferences, the people and projects you mention. Notes are sorted by category, and you can change those categories any time after setup.</span>
+              <span>Archive a chat and it remembers what should be: your preferences, the people and projects you mention. Notes are sorted by category, and you can change those categories any time after setup. Past Claude Code and OpenCode conversations are not imported on their own — after setup, Memory → Import is where you choose which ones Ciaobot may read, and every fact waits for you to accept.</span>
             </li>
             <li>
               <strong>Files, with history.</strong>

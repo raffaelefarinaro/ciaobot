@@ -1,0 +1,2404 @@
+<script setup lang="ts">
+/**
+ * The workspace task board (`/tasks`).
+ *
+ * Four fixed columns — Backlog, In progress, On hold, Done — on a wide pane, and
+ * one status-filtered list on a narrow one. There is no drag: a card's status is
+ * a native `<select>`, which is a control a keyboard, a screen reader and a
+ * phone can all use.
+ *
+ * Every write goes through `stores/taskBoard.ts` at the `revision` this pane read,
+ * so a board drawn from an older read gets the server's 409 with its rows intact
+ * instead of overwriting what is on disk now.
+ *
+ * **Delegation** adds a card action, an attempt badge, a link to the chat an
+ * attempt ran in, and the gestures that own a turn — Stop and Detach for a live
+ * one, Resume and Retry for a settled one, both reached from the preview as well
+ * as the card. Four things this pane is careful not to imply:
+ *
+ * - A finished turn is a **badge**, never *Done*. `ready_for_review` draws in
+ *   *In progress* and only the user's own Done moves the card.
+ * - The delegated turn is **attended**. The preview says so, and the server holds
+ *   to it: an approval card the turn raises is an ordinary Needs-you card in that
+ *   chat, not something swallowed because nobody was there.
+ * - **Stop is not detach.** Stopping ends the turn; the task keeps its linkage and
+ *   stays uncompletable until it is detached, so "stopped" never quietly becomes
+ *   "the user may close this".
+ * - **"Changed since delegated" is the reviewer's problem.** The pane says the
+ *   result was reached against an older description and decides nothing about it.
+ *
+ * The review loop is the rest of it: a **Ready for review** card says where the
+ * result is and carries one **Approve Done**, which is the user's completion —
+ * not a Detach and then a Done, and not a gesture that would settle the attempt
+ * as `stopped` and lose the answer. **Send update** answers a mid-run edit with a
+ * `chat_send`-shaped message into the attempt's own chat, never a second
+ * delegation. **History** reads one task's attempts so a retried or stopped one is
+ * still readable, and a row that disagrees with itself is **flagged with what
+ * disagrees and the controls that resolve it** rather than silently rewritten.
+ */
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import PaneHeader from './PaneHeader.vue'
+import { useModalFocus } from '../composables/useModalFocus'
+import { useProjectStore } from '../stores/projects'
+import { useTaskBoardStore, type TaskChanges } from '../stores/taskBoard'
+import { askConfirm, pendingConfirm } from '../lib/confirm'
+import { renderUserMarkdown } from '../lib/safeMarkdown'
+import {
+  TASK_DUE_FILTERS,
+  TASK_NO_PROJECT,
+  TASK_STATUS_OPTIONS,
+  buildTaskUpdateMessage,
+  formatTaskDue,
+  invalidTaskRows,
+  isLiveAttemptState,
+  isOverdue,
+  localDateKey,
+  matchesDueFilter,
+  matchesProjectFilter,
+  openTaskCount,
+  readableTasks,
+  statusCounts,
+  taskAssigneeLabel,
+  taskAttemptLabel,
+  taskAttemptSummary,
+  taskLanes,
+  taskReconcileBadgeClass,
+  taskReconcileLabel,
+  taskReconcileNotes,
+  taskStatusLabel,
+  type TaskDueFilter,
+  type TaskReconcileNote,
+} from '../lib/taskBoard'
+import type { Task, TaskAttempt, TaskDetail, TaskStatus } from '../lib/types'
+
+const emit = defineEmits<{ 'open-sidebar': [] }>()
+
+const projectStore = useProjectStore()
+const board = useTaskBoardStore()
+const workspace = computed(() => projectStore.activeWorkspace)
+
+/**
+ * Where the four columns become one list.
+ *
+ * One measurement, and it is the one the CSS below uses: the `chat-pane`
+ * container's own inline size, against the same 940px the
+ * `@container chat-pane (max-width: 940px)` rule uses. The window is not that
+ * measurement — with the sidebar open or the split pane showing, a window
+ * comfortably past any window threshold can still leave the pane under it, and
+ * two thresholds is how the board ends up rendering four *stacked* lanes: not
+ * the four columns, and not the status-filtered list either.
+ *
+ * The pane root is a block that fills its container, so observing the root
+ * measures the container. `contentRect` is the same inline-size the container
+ * query resolves against; the window keeps a listener off this component
+ * entirely, since the pane resizes when the sidebar drags, not only on resize.
+ */
+const NARROW_PANE_PX = 940
+const paneEl = ref<HTMLElement | null>(null)
+const paneWidth = ref<number | null>(null)
+const isNarrow = computed(() => paneWidth.value !== null && paneWidth.value <= NARROW_PANE_PX)
+
+let paneObserver: ResizeObserver | null = null
+onMounted(() => {
+  const node = paneEl.value
+  if (!node) return
+  // jsdom has no ResizeObserver; the width stays null and the board draws its
+  // columns, which is what a test reads.
+  if (typeof ResizeObserver === 'undefined') return
+  paneObserver = new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1]
+    if (entry) paneWidth.value = entry.contentRect.width
+  })
+  paneObserver.observe(node)
+})
+onBeforeUnmount(() => {
+  paneObserver?.disconnect()
+  paneObserver = null
+})
+
+// ── Load states ───────────────────────────────────────────────────────────
+//
+// Five states, each read off its own slot, so a failed or pending GET can never
+// read as "this workspace has no tasks": a first load in flight, a first load
+// that failed (the server's sentence and a Retry, never an empty board), a
+// failed refresh over rows that are still on screen (keep them, mark them stale,
+// offer Retry), a filter hiding a non-empty set (offer to clear it), and a
+// genuinely empty set.
+
+const firstLoad = computed(() => !board.loadedWorkspace && !board.loadError)
+const loadFailed = computed(() => Boolean(board.loadError) && !board.loadedWorkspace)
+const loadStale = computed(() => Boolean(board.loadError) && Boolean(board.loadedWorkspace))
+const boardEmpty = computed(
+  () => Boolean(board.loadedWorkspace) && !board.loadError && tasks.value.length === 0,
+)
+
+const tasks = computed(() => readableTasks(board.rows))
+const unreadable = computed(() => invalidTaskRows(board.rows))
+const counts = computed(() => statusCounts(tasks.value))
+const openCount = computed(() => openTaskCount(tasks.value))
+
+/**
+ * Re-read the board: on mount, on a workspace switch, and after a refused write.
+ *
+ * On mount it is a refresh rather than a first load: coming back to the board
+ * should show what an agent or `ciao task` did while the user was elsewhere, so
+ * the rows stay on screen and only `loading` is set. The same call is the way
+ * out of a 409 — the write was refused precisely because the record moved on, so
+ * re-reading is the only correct next step.
+ */
+function load() {
+  void board.reload(workspace.value)
+}
+
+/**
+ * What the Retry and Reload buttons call.
+ *
+ * Identical to `load` plus clearing the message being recovered from. The
+ * automatic reload above must *not* do that: it runs while the server's refusal
+ * is the sentence the user still needs to read, and the re-read does not clear
+ * the action slot.
+ */
+function reloadBoard() {
+  board.clearError()
+  load()
+}
+
+onMounted(load)
+// A switch is the one case that must not keep the old rows: `reload` drops them
+// first, so the new workspace's own first-load and failed states are what shows.
+//
+// Every dialog closes with it, and that is a correctness point rather than a
+// gesture one: `1`–`9` keep switching workspaces while the board is open, so an
+// open editor would otherwise be editing a task id from the workspace the user
+// just left, and its next Save would present that task's revision to a
+// workspace that has never heard of it. The delegation preview is the same case
+// with a worse outcome — its confirm would launch a turn in the workspace that
+// was left, described by a task the new one has never seen.
+watch(workspace, () => {
+  closeCreate()
+  closeDetail()
+  closeHistory()
+  // Not `closeDelegate`: a gesture already in flight makes that one refuse, which
+  // would leave the sheet marked open with nothing drawn and the focus trap still
+  // holding. `resetDelegate` closes it either way, and the late answer is dropped
+  // by the store's own `drawingWorkspace` guard.
+  resetDelegate()
+  load()
+})
+
+// ── Filters ───────────────────────────────────────────────────────────────
+
+const statusFilter = ref<TaskStatus | 'all'>('all')
+const projectFilter = ref('')
+const dueFilter = ref<TaskDueFilter>('any')
+
+const filtersActive = computed(
+  () => statusFilter.value !== 'all' || !!projectFilter.value || dueFilter.value !== 'any',
+)
+
+function clearFilters() {
+  statusFilter.value = 'all'
+  projectFilter.value = ''
+  dueFilter.value = 'any'
+}
+
+const filtered = computed(() =>
+  tasks.value.filter(
+    (task) =>
+      matchesProjectFilter(task, projectFilter.value) && matchesDueFilter(task, dueFilter.value),
+  ),
+)
+
+/** A filter hiding a non-empty set, offered the way back rather than an empty board. */
+const filteredEmpty = computed(
+  () =>
+    !firstLoad.value
+    && !loadFailed.value
+    && !boardEmpty.value
+    && tasks.value.length > 0
+    && filtered.value.length === 0,
+)
+
+const lanes = computed(() =>
+  taskLanes(filtered.value, { status: statusFilter.value, narrow: isNarrow.value }),
+)
+
+/**
+ * The projects a task can name: the unfiled bucket when any task uses it, then
+ * this workspace's own projects, then any project id the board has seen that the
+ * registry no longer lists.
+ *
+ * That last group is load-bearing rather than tidy: a `<select>` with no matching
+ * `<option>` renders blank, and a Save would then send `project_id: null` and
+ * quietly detach the task from a project that exists. Naming the unknown id is
+ * the difference between "I cannot see that project" and "I cleared it".
+ */
+const projectOptions = computed(() => {
+  const options: Array<{ value: string; label: string }> = []
+  if (tasks.value.some((task) => !task.project_id)) {
+    options.push({ value: TASK_NO_PROJECT, label: 'No project' })
+  }
+  const listed = new Set<string>()
+  for (const project of projectStore.workspaceProjects) {
+    if (project.project_id === TASK_NO_PROJECT) continue
+    listed.add(project.project_id)
+    options.push({ value: project.project_id, label: project.name })
+  }
+  for (const task of tasks.value) {
+    if (!task.project_id || listed.has(task.project_id)) continue
+    listed.add(task.project_id)
+    options.push({ value: task.project_id, label: `${task.project_id} (not in this workspace)` })
+  }
+  return options
+})
+
+/** The create dialog's list: no "unfiled" entry, because its blank already
+ *  means that and the card reads it as General. */
+const createProjectOptions = computed(() =>
+  projectOptions.value.filter((option) => option.value !== TASK_NO_PROJECT),
+)
+
+const projectName = (projectId: string): string => {
+  if (!projectId) return 'General'
+  return projectStore.workspaceProjects.find((p) => p.project_id === projectId)?.name || projectId
+}
+
+/**
+ * The description this dialog may show and write back, or `null`.
+ *
+ * A list row carries no `body`, so the description is what `get` read for it, and
+ * without one the field stays absent and a Save omits `body`: sending an empty
+ * one would erase prose nobody was shown, which is the one failure an editor
+ * cannot undo.
+ *
+ * It has to be the record at the revision the row carries, and those two
+ * revisions have to be the same. The row is the newest read of what is on disk,
+ * and a `described` slot left over from an earlier open is the record as it was
+ * then. Another writer's edit moves the row's revision on while the slot keeps
+ * the prose it was read with, and a body written at that newer revision goes out
+ * with no 409 to stop it: the write succeeds and their prose is gone. So a stale
+ * slot is not a prefill and never rides on a Save — {@link loadDescription} reads
+ * it again, and the read is the only thing that can make it current.
+ */
+function heldDescription(task: Task | null): TaskDetail | null {
+  const held = board.described
+  if (!task || !held || held.id !== task.id) return null
+  return held.revision === task.revision ? held : null
+}
+
+// ── Writes ────────────────────────────────────────────────────────────────
+
+const busyTaskId = ref('')
+
+/**
+ * Move one card to another column.
+ *
+ * The `<select>` is put back to the column the row is actually in before the
+ * request goes out, so a refused move never leaves a card claiming a column it
+ * was never admitted to. Moving *to* Done is the completion gesture, which is
+ * why it goes to `complete` rather than through the status field: the store
+ * enforces completion as the signed-in user's own act.
+ */
+async function moveTask(task: Task, event: Event) {
+  const select = event.target as HTMLSelectElement
+  const next = select.value as TaskStatus
+  select.value = task.status
+  if (next === task.status) return
+  const revision = board.revisionOf(task.id)
+  if (!revision) {
+    board.clearError()
+    return
+  }
+  board.clearError()
+  busyTaskId.value = task.id
+  if (next === 'done') await board.complete(workspace.value, task.id, revision)
+  else await board.update(workspace.value, task.id, revision, { status: next })
+  busyTaskId.value = ''
+  // A refused write means the record moved on, so re-read rather than leave the
+  // user holding a conflict they can only clear by switching workspace.
+  if (board.error) load()
+}
+
+async function markDone(task: Task) {
+  const revision = board.revisionOf(task.id)
+  if (!revision) return
+  board.clearError()
+  busyTaskId.value = task.id
+  await board.complete(workspace.value, task.id, revision)
+  busyTaskId.value = ''
+  if (board.error) load()
+}
+
+/**
+ * Which badge an attempt state wears.
+ *
+ * Four classes, because four things are being said: in flight, waiting on the user,
+ * ready to be reviewed, and over. `needs_you` is deliberately the accent colour
+ * rather than `running`'s quiet one — a paused turn needs the user, and a badge
+ * that looks like every other running task would hide that.
+ *
+ * Takes a *state*, not a task, because a history row must wear its own attempt's
+ * colour rather than the current attempt's — a `failed` retry under a
+ * `ready_for_review` current one otherwise rendered as a green "Failed".
+ */
+function attemptStateBadgeClass(state: string): string {
+  switch (state) {
+    case 'failed':
+    case 'interrupted':
+      return 'badge--error'
+    case 'needs_you':
+      return 'badge--accent2'
+    case 'ready_for_review':
+      return 'badge--success'
+    default:
+      return 'badge--muted'
+  }
+}
+
+/** The current attempt's badge: the state the task itself carries. */
+function attemptBadgeClass(task: Task): string {
+  return attemptStateBadgeClass(task.attempt_state)
+}
+
+// ── Delegation ──────────────────────────────────────────────────────────
+//
+// One gesture opens the preview, and the preview is where the decision is
+// actually made: the task's own project or General, the model and permissions the
+// chat will run with, and the fact that the turn is *attended* — an approval card
+// it raises is an ordinary Needs-you card in that chat, not something swallowed
+// because nobody was there.
+//
+// Every write here presents the revision the card was drawn at, so a board from an
+// older read gets the server's 409 with the rows intact rather than delegating a
+// description that has moved on.
+
+type DelegateMode = 'delegate' | 'resume' | 'retry' | 'open_chat' | 'update'
+
+const delegateOpen = ref(false)
+const delegateEl = ref<HTMLElement | null>(null)
+const delegateBusy = ref(false)
+const delegateTaskId = ref('')
+/**
+ * The description this preview will quote, read by `openDelegate`.
+ *
+ * A list row carries none, so this is the only way the preview can show the prose
+ * that goes into the chat. It is a *separate* slot from the detail dialog's
+ * description rather than a shared one: two dialogs can be open on two tasks, and
+ * the store's single `described` slot is written by whichever read answered last —
+ * sharing it here would let the preview show one task's prose under another's title.
+ */
+const delegateBody = ref('')
+/**
+ * The revision the description on screen was read at.
+ *
+ * `read.revision` from the same `board.get`, held for the length of the sheet. The
+ * confirm presents *this* rather than whatever `revisionOf` says at the time it is
+ * pressed, because those are two different facts: a reload, an adopted write or a
+ * move from another tab can put a newer revision on the row while the sheet is
+ * open, and the user has read the body at the older one. Sending the row's
+ * revision would let a turn be launched from a description nobody saw, defeating
+ * the 409 guard — so a body that has moved on is refused and the preview re-reads.
+ */
+const delegateRevision = ref('')
+/** The description read is in flight, or failed and wants a retry. */
+const delegateBodyState = ref<'idle' | 'loading' | 'failed'>('idle')
+/** Ticket for the newest preview read; older answers are dropped. */
+let delegateSeq = 0
+/** What the sheet's confirm does, chosen when the sheet opens. */
+const delegateMode = ref<DelegateMode>('delegate')
+
+/** The task the preview is for, or undefined once it is gone. */
+const delegateTask = computed(
+  () => tasks.value.find((task) => task.id === delegateTaskId.value) ?? null,
+)
+
+/**
+ * What the delegated turn will run with, named rather than implied.
+ *
+ * The provider and model are the operator's own workspace defaults — the board has
+ * no reach into them, exactly as a webhook trigger has none — so the preview says
+ * so rather than showing a value it cannot promise. The permission mode is the
+ * chat's, taken from those defaults and *never* escalated: a delegated turn runs
+ * with the default attendance, which is the whole reason an approval card it asks
+ * for can be answered.
+ */
+const delegatePreview = computed(() => {
+  const task = delegateTask.value
+  if (!task) return null
+  return {
+    project: projectName(task.project_id),
+    provider: 'Your workspace default',
+    model: 'Your workspace default',
+    // Named as the fact it is, since the client cannot read the chat's mode before
+    // the chat exists.
+    attendance: 'Attended — approval cards ask you in the chat',
+  }
+})
+
+const delegateFocusActive = computed(
+  () => delegateOpen.value && !pendingConfirm.value,
+)
+
+/**
+ * The mode a sheet opens in, from the row alone.
+ *
+ * The four cases are four different things a card can need, and the old single
+ * branch got two of them wrong. A **live** attempt (`running`, `needs_you`,
+ * `ready_for_review`) is never resumable — the server refuses `resume` for every
+ * live state — so offering "Continue this chat" was a button that always
+ * errored; what a live attempt needs is to be *read*, in the chat it is running
+ * in. A **settled** attempt still linked to the task (`failed`, `interrupted`,
+ * `stopped`) is the only resumable case, and it is the one that had no UI at all:
+ * the card showed a plain Delegate, which starts a new attempt in a new chat
+ * rather than continuing the one that failed. So resume and retry are separate,
+ * labelled gestures there, and neither is a second delegation.
+ */
+function delegateModeFor(task: Task): DelegateMode {
+  if (task.live_attempt_id) return 'open_chat'
+  if (isSettledLinked(task)) return 'resume'
+  return 'delegate'
+}
+
+/**
+ * Whether this row's attempt settled and is still linked: the resumable case.
+ *
+ * `attempt_id` names the attempt the gestures act on, and its state says whether it
+ * is still live. The server sends `live_attempt_id` alongside as its own answer to
+ * "does an attempt hold this task", and the two always agree — this reads the
+ * state through the one place the vocabulary is written down rather than
+ * re-deriving it here.
+ */
+function isSettledLinked(task: Task): boolean {
+  return Boolean(task.attempt_id) && !isLiveAttemptState(task.attempt_state)
+}
+
+/**
+ * What the confirm button says, which is the whole of the already-delegated case.
+ *
+ * Each mode names the gesture it will perform rather than a generic "Continue":
+ * "Open chat" starts nothing, "Resume" continues one attempt's chat, "Start a new
+ * attempt" mints another one, and "Delegate" is a first hand-over. A button whose
+ * label could mean two of those is a button the user has to guess at.
+ */
+const delegateButtonLabel = computed(() => {
+  if (delegateBusy.value) return 'Working…'
+  switch (delegateMode.value) {
+    case 'open_chat':
+      return 'Open chat'
+    case 'resume':
+      return 'Resume'
+    case 'retry':
+      return 'Start a new attempt'
+    case 'update':
+      return 'Send update'
+    default:
+      return 'Delegate'
+  }
+})
+
+/**
+ * The description as it will read, when the dialog offers to show it.
+ *
+ * `renderUserMarkdown`, for the same reason the detail dialog uses it: the body is
+ * prose the user wrote in their own vault, so raw HTML in it is escaped and shown
+ * as typed rather than parsed.
+ */
+const delegateBodyPreview = computed(() => renderUserMarkdown(delegateBody.value))
+
+/** Re-read the description without closing the preview. */
+function retryDelegateBody() {
+  const task = delegateTask.value
+  if (task) void openDelegate(task, delegateMode.value)
+}
+
+useModalFocus(delegateEl, delegateFocusActive, {
+  onEscape: () => { if (!delegateBusy.value) closeDelegate() },
+})
+
+/**
+ * Open the delegation preview, and read the description it will quote.
+ *
+ * The read is not optional. A list row carries no `body`, so without it the
+ * preview would say "your description is quoted into the chat" without showing the
+ * description — which is exactly the decision the user is being asked to make. The
+ * read is answered only while this dialog is still the one that asked, by the same
+ * rule the detail dialog uses, so a read that lands after the user has moved on
+ * writes nothing.
+ *
+ * Its revision is kept for the confirm rather than read from the row then: see
+ * {@link delegateRevision}.
+ */
+async function openDelegate(task: Task, mode?: DelegateMode) {
+  board.clearError()
+  delegateTaskId.value = task.id
+  delegateMode.value = mode ?? delegateModeFor(task)
+  delegateBody.value = ''
+  delegateRevision.value = ''
+  delegateBodyState.value = 'loading'
+  delegateOpen.value = true
+  const seq = ++delegateSeq
+  const read = await board.get(workspace.value, task.id)
+  if (seq !== delegateSeq || !delegateOpen.value || delegateTaskId.value !== task.id) {
+    return
+  }
+  delegateBodyState.value = read ? 'idle' : 'failed'
+  // Only the prose the board actually read. A `null` answer means either a refused
+  // read or a write that landed in between, and neither may put stale prose in the
+  // sheet the user is about to confirm.
+  delegateBody.value = read ? read.body : ''
+  delegateRevision.value = read ? read.revision : ''
+}
+
+function closeDelegate() {
+  if (delegateBusy.value) return
+  resetDelegate()
+}
+
+/**
+ * Put the preview back to its closed state, ignoring an in-flight gesture.
+ *
+ * {@link closeDelegate} refuses while a gesture is running, which is right for a
+ * user pressing Cancel and wrong for a workspace switch: the watch that drops the
+ * old rows would then leave the sheet marked open with nothing drawn and the focus
+ * trap still holding. A gesture that lands after this is dropped by the store's own
+ * `drawingWorkspace` guard, so closing early loses nothing but a stale answer.
+ */
+function resetDelegate() {
+  delegateOpen.value = false
+  delegateTaskId.value = ''
+  delegateBody.value = ''
+  delegateRevision.value = ''
+  delegateBodyState.value = 'idle'
+  delegateMode.value = 'delegate'
+  // Invalidate any read still in flight, so its answer cannot fill a later dialog.
+  delegateSeq++
+  board.clearError()
+}
+
+/**
+ * Confirm the sheet, which is five gestures rather than one.
+ *
+ * `open_chat` starts nothing and opens the chat the attempt is running in — the
+ * honest action for a live attempt, which cannot be resumed and must not be
+ * delegated a second time. `update` sends one ordinary message into that same
+ * chat carrying the task as it stands now, which is the only answer to an edit
+ * made under a running turn. `resume` continues that attempt's own chat under its
+ * own id. `retry` is a fresh delegation, and `delegate` is the first hand-over;
+ * both present the revision the description on screen was read at.
+ */
+async function submitDelegate() {
+  const task = delegateTask.value
+  if (delegateBusy.value || !task) return
+  if (delegateMode.value === 'update') {
+    sendTaskUpdate()
+    return
+  }
+  // The revision the *previewed description* was read at, not the row's newest: a
+  // body that moved while the sheet was open must be refused, not delegated.
+  const revision = delegateRevision.value
+  if (delegateMode.value !== 'open_chat' && !revision) {
+    resetDelegate()
+    return
+  }
+  board.clearError()
+  delegateBusy.value = true
+  let outcome: TaskAttempt | null = null
+  if (delegateMode.value === 'open_chat') {
+    delegateBusy.value = false
+    openAttemptChat(task)
+    resetDelegate()
+    return
+  }
+  if (delegateMode.value === 'resume' && task.attempt_id) {
+    outcome = await board.attemptAction(
+      workspace.value, task.id, task.attempt_id, 'resume',
+    )
+  } else {
+    outcome = await board.delegate(workspace.value, task.id, revision)
+  }
+  delegateBusy.value = false
+  if (!outcome) return
+  board.clearError()
+  // The turn is running; the badge now says so, and there is nothing left to
+  // confirm. Closing is the honest end of the gesture.
+  closeDelegate()
+}
+
+/** One lifecycle gesture on a card's attempt. */
+async function actOnAttempt(
+  task: Task,
+  action: 'stop' | 'detach' | 'resume' | 'retry',
+) {
+  // A settled attempt still linked to its task is acted on through its own id,
+  // which is the one `live_attempt_id` deliberately does not carry.
+  const attemptId = task.live_attempt_id || task.attempt_id
+  if (!attemptId || busyTaskId.value === task.id) return
+  board.clearError()
+  busyTaskId.value = task.id
+  await board.attemptAction(workspace.value, task.id, attemptId, action)
+  busyTaskId.value = ''
+  if (board.error) load()
+}
+
+/**
+ * Open the chat an attempt ran in.
+ *
+ * `switchChat` on the project store, not a route push: that is the same call the
+ * sidebar row and the in-app toast make, so the chat resolves, loads its history
+ * and marks itself read the one way the app already has. A delegation-specific
+ * navigation here would be a second path to a chat and would drift the first time
+ * either changed.
+ *
+ * The board cannot know whether that chat still exists — chats get archived and
+ * deleted routinely — so the button is drawn only for a chat the row actually
+ * names, and `switchChat` handles a gone chat as it does everywhere else.
+ */
+function openAttemptChat(task: Task) {
+  if (!task.chat_id) return
+  void projectStore.switchChat(task.chat_id)
+}
+
+// ── Review loop, history, reconcile ────────────────────────────────────────
+//
+// Three things the review needs that a badge cannot carry: where the result is,
+// what was tried before, and whether this row agrees with itself.
+
+//: The chats this browser can see, for the reconcile check below.
+const knownChatIds = computed<ReadonlySet<string>>(
+  () => new Set(projectStore.chats.map((chat) => chat.chat_id)),
+)
+
+/**
+ * What this card disagrees with itself about.
+ *
+ * Flagged, never repaired: the board is the one place allowed to *say* a record
+ * contradicts itself, and every case names the controls that resolve it. See
+ * `taskReconcileNotes` for what is deliberately not a contradiction.
+ */
+function reconcile(task: Task): TaskReconcileNote[] {
+  return taskReconcileNotes(task, { knownChatIds: knownChatIds.value })
+}
+
+/**
+ * Whether this card's completion gesture is an **approval**, not a plain Done.
+ *
+ * `live_attempt_id` is the discriminator, not the badge: an approved or detached
+ * card keeps reading `ready_for_review` forever, and offering "Approve Done" on a
+ * result the user already approved would be a second completion gesture for the
+ * same review.
+ */
+function isReviewReady(task: Task): boolean {
+  return task.attempt_state === 'ready_for_review' && Boolean(task.live_attempt_id)
+}
+
+/** The attempts this board holds for one card, the live one first. */
+function heldAttempts(task: Task): TaskAttempt[] {
+  return board.attemptsTaskId === task.id ? board.attempts : []
+}
+
+/**
+ * How the current attempt ended, once History has been read for this card.
+ *
+ * Empty before that, which the card states as a pointer to the chat rather than
+ * as a summary: the board holds no copy of the agent's answer, and paraphrasing
+ * one it has not read is the one reading a reviewer cannot check.
+ */
+function reviewEnded(task: Task): string {
+  const attempt = heldAttempts(task)[0]
+  return attempt ? taskAttemptSummary(attempt) : ''
+}
+
+// ── Attempt history ───────────────────────────────────────────────────────
+
+const historyOpen = ref(false)
+const historyEl = ref<HTMLElement | null>(null)
+const historyTaskId = ref('')
+
+/** The card History was opened on, or `null` once it is gone. */
+const historyTask = computed(
+  () => tasks.value.find((task) => task.id === historyTaskId.value) ?? null,
+)
+
+/** Its attempts, live one first — a retry does not erase what it replaced. */
+const historyAttempts = computed<TaskAttempt[]>(() =>
+  historyTask.value ? heldAttempts(historyTask.value) : [],
+)
+
+useModalFocus(historyEl, historyOpen, { onEscape: () => closeHistory() })
+
+/**
+ * Open one task's attempt history, reading it the first time.
+ *
+ * Lazy on purpose: the list rows carry the current attempt's badge and nothing
+ * else, and a workspace where fifty tasks have been retried would otherwise read
+ * fifty histories nobody looked at. The read is the proposal queue's History
+ * pattern rather than a new timeline store — loaded once, invalidated by a
+ * gesture, re-read on the next open.
+ */
+async function openHistory(task: Task) {
+  board.clearError()
+  historyTaskId.value = task.id
+  historyOpen.value = true
+  await board.ensureAttempts(workspace.value, task.id)
+}
+
+function closeHistory() {
+  historyOpen.value = false
+  historyTaskId.value = ''
+}
+
+/** Re-read a history that failed, without closing the sheet. */
+function retryHistory() {
+  if (historyTaskId.value) void board.ensureAttempts(workspace.value, historyTaskId.value)
+}
+
+// ── Send update ───────────────────────────────────────────────────────────
+
+/**
+ * The exact text a Send update would hand to the attempt's chat.
+ *
+ * Shown before it is sent, not after: the user is approving a message into a
+ * conversation they may not have open, and the whole reason the control exists
+ * is that the description has changed underneath the agent.
+ */
+const updateMessage = computed(() =>
+  delegateTask.value ? buildTaskUpdateMessage(delegateTask.value, delegateBody.value) : '',
+)
+
+/**
+ * Hand the current task to the attempt's own chat, as one ordinary message.
+ *
+ * `projectStore.sendMessage`, the same call the composer makes — not a second
+ * delegation and not a task route. That is the whole point of this gesture: the
+ * answer comes back into the chat the attempt is already bound to, so the attempt
+ * on the card is still the one that produced it, and the revision binding, the
+ * linkage and the history are untouched.
+ *
+ * No revision is presented, because nothing on the board is written: the write
+ * the user already made is the edit that raised `changed_since_delegated`.
+ */
+function sendTaskUpdate() {
+  const task = delegateTask.value
+  const chatId = task?.chat_id
+  // A description this board could not read is not "empty". Sending the framed
+  // message without it would tell the agent the description is gone, which is a
+  // fact nobody checked; the confirm is disabled above, and this is the same rule
+  // at the door.
+  if (!task || !chatId || delegateBodyState.value !== 'idle') {
+    resetDelegate()
+    return
+  }
+  projectStore.sendMessage(chatId, buildTaskUpdateMessage(task, delegateBody.value))
+  resetDelegate()
+}
+
+// ── Create ────────────────────────────────────────────────────────────────
+
+const createOpen = ref(false)
+const createEl = ref<HTMLElement | null>(null)
+const createTitleField = ref<HTMLInputElement | null>(null)
+const createSaving = ref(false)
+const createForm = reactive({ title: '', project_id: '', due: '', body: '' })
+const createValid = computed(() => createForm.title.trim() !== '')
+
+useModalFocus(createEl, createOpen, { initialFocus: createTitleField, onEscape: () => { if (!createSaving.value) closeCreate() } })
+
+function openCreate() {
+  board.clearError()
+  createForm.title = ''
+  createForm.project_id = ''
+  createForm.due = ''
+  createForm.body = ''
+  createOpen.value = true
+}
+
+function closeCreate() {
+  if (createSaving.value) return
+  createOpen.value = false
+  board.clearError()
+}
+
+async function submitCreate() {
+  if (createSaving.value || !createValid.value) return
+  createSaving.value = true
+  const created = await board.create(workspace.value, {
+    title: createForm.title,
+    body: createForm.body,
+    project_id: createForm.project_id,
+    due: createForm.due,
+  })
+  createSaving.value = false
+  // A refusal keeps the form open with what was typed; the server's sentence
+  // sits under the buttons.
+  if (!created) return
+  createOpen.value = false
+  board.clearError()
+}
+
+// ── Detail ────────────────────────────────────────────────────────────────
+
+const detailOpen = ref(false)
+const detailEl = ref<HTMLElement | null>(null)
+const detailTitleField = ref<HTMLInputElement | null>(null)
+const detailSaving = ref(false)
+const detailId = ref('')
+/** The description read is in flight, or failed and wants a retry. */
+const descriptionState = ref<'idle' | 'loading' | 'failed'>('idle')
+/** A successful Save, so the dialog says so rather than only going quiet. */
+const savedAt = ref(0)
+const detailForm = reactive({
+  title: '',
+  status: 'backlog' as TaskStatus,
+  due: '',
+  assignee: 'user' as 'user' | 'agent',
+  project_id: '',
+  body: '',
+})
+
+/**
+ * The detail dialog's focus and Escape handling, while a confirm is over it.
+ *
+ * `useModalFocus` claims Escape in the capture phase and stops propagation, so
+ * with both up the *detail* dialog answered it — closing the editor behind a
+ * delete confirm the user was still being asked about, and leaving the confirm
+ * with no Escape of its own. The active ref is therefore false while the
+ * confirm is pending: this dialog claims nothing, and the confirm above it owns
+ * the key. `detailSaving` is guarded separately, since an in-flight write is
+ * this dialog's own business and the confirm is not involved.
+ */
+const detailFocusActive = computed(() => detailOpen.value && !pendingConfirm.value)
+
+useModalFocus(detailEl, detailFocusActive, {
+  initialFocus: detailTitleField,
+  onEscape: () => { if (pendingConfirm.value || detailSaving.value) return; closeDetail() },
+})
+
+/** The row a dialog is editing, or undefined once it has been deleted. */
+const detailTask = computed(() => tasks.value.find((task) => task.id === detailId.value) ?? null)
+
+/**
+ * Whether this dialog is offering the description, and may therefore write it.
+ *
+ * Offered only while it is the record at the revision being presented — see
+ * {@link heldDescription}. A slot the dialog has not re-read at this revision
+ * keeps the field absent, which is what stops a Save from clearing prose nobody
+ * was shown.
+ */
+const detailDescribed = computed(() => Boolean(heldDescription(detailTask.value)))
+
+const detailValid = computed(() => detailForm.title.trim() !== '')
+
+/**
+ * The editor's delegation summary, read off the row it is editing.
+ *
+ * `detailTask` is the row, not the description slot, so the badge here is the
+ * record's own current state: a delegation that started while this dialog was open
+ * (the store adopts the answer onto the row) updates this without a second read.
+ */
+const detailAttemptState = computed(() => detailTask.value?.attempt_state ?? '')
+const detailAttemptBadgeClass = computed(() =>
+  detailTask.value ? attemptBadgeClass(detailTask.value) : 'badge--muted',
+)
+/**
+ * What the editor's delegation control offers, from the row it is editing.
+ *
+ * The same four cases the preview's confirm reads, named the same way: a live
+ * attempt is read in its chat rather than continued (the server refuses `resume`
+ * for every live state), a settled attempt is continued or retried, and a task
+ * nobody delegated is handed over.
+ */
+const detailDelegateLabel = computed(() => {
+  const task = detailTask.value
+  if (!task) return 'Delegate'
+  switch (delegateModeFor(task)) {
+    case 'open_chat':
+      return 'Open chat'
+    case 'resume':
+      return 'Resume'
+    default:
+      return 'Delegate'
+  }
+})
+
+/**
+ * Read the description the list never carries, then fill the dialog from it.
+ *
+ * The answer is applied only while this dialog is still the one that asked:
+ * `detailId` is cleared when it closes and set to whoever is open next, and a
+ * late answer landing on a task the user has moved on to would put the previous
+ * task's prose — and the failure state of a read they are no longer waiting for —
+ * under their next edit. A dialog can also ask twice for the same task (close and
+ * reopen, or a Retry behind a first answer still in flight), so the newest ask
+ * wins over an older one for the same id too.
+ */
+let descriptionSeq = 0
+async function loadDescription(taskId: string) {
+  const seq = ++descriptionSeq
+  descriptionState.value = 'loading'
+  const read = await board.get(workspace.value, taskId)
+  if (seq !== descriptionSeq || !detailOpen.value || detailId.value !== taskId) return
+  if (read) {
+    descriptionState.value = 'idle'
+    detailForm.body = read.body
+    return
+  }
+  // No answer: either the read was refused, or the board was told something newer
+  // while it was in flight — a write of this dialog's own, say. The slot decides,
+  // by the same rule as everywhere else in this dialog: a write's answer is the
+  // record at the revision now presented, so a Save in the middle of a read keeps
+  // the description the form was filled with, and a refused read has nothing to
+  // offer and leaves the field absent.
+  descriptionState.value = heldDescription(detailTask.value) ? 'idle' : 'failed'
+}
+
+/**
+ * Open one task's editor.
+ *
+ * Every open reads. The description slot outlives both the dialog and the pane —
+ * it is store state — so "the board already has this body" is a claim about an
+ * instant that has passed: `ciao task`, an agent or a second browser can have
+ * edited the task since, and the reload that reported it did not carry the prose.
+ * Skipping the read on a slot is how a stale body gets written back at a fresh
+ * revision, with no 409 to stop it.
+ *
+ * What the slot still buys is the form being filled the instant the dialog
+ * appears rather than empty for the length of a GET, so a Save in that window
+ * writes the other fields and leaves the description alone. It is a prefill, and
+ * only while it is the record at the row's revision — {@link heldDescription}.
+ */
+function openDetail(task: Task) {
+  board.clearError()
+  detailId.value = task.id
+  const held = heldDescription(task)
+  detailForm.title = task.title
+  detailForm.status = task.status
+  detailForm.due = task.due
+  detailForm.assignee = task.assignee
+  detailForm.project_id = task.project_id
+  detailForm.body = held?.body ?? ''
+  savedAt.value = 0
+  detailOpen.value = true
+  void loadDescription(task.id)
+}
+
+function closeDetail() {
+  if (detailSaving.value) return
+  detailOpen.value = false
+  detailId.value = ''
+  descriptionState.value = 'idle'
+  descriptionSeq++
+  board.clearError()
+}
+
+/** The status field of the open dialog is a move, written the moment it changes. */
+async function onDetailStatusChange(event: Event) {
+  const select = event.target as HTMLSelectElement
+  const next = select.value as TaskStatus
+  const task = detailTask.value
+  select.value = detailForm.status
+  if (!task || next === detailForm.status) return
+  const revision = board.revisionOf(task.id)
+  if (!revision) return
+  board.clearError()
+  detailSaving.value = true
+  // Only Done is the completion gesture. Any other status is a plain move, and
+  // routing it through `complete` would mark a task done while the user chose
+  // "On hold" — a write to the record, not just to this dialog.
+  const saved = next === 'done'
+    ? await board.complete(workspace.value, task.id, revision)
+    : await board.update(workspace.value, task.id, revision, { status: next })
+  detailSaving.value = false
+  if (!saved) {
+    load()
+    return
+  }
+  // The select is bound to this field, so it has to follow the record the write
+  // actually stored rather than snapping back to what it was when it opened.
+  detailForm.status = saved.status
+  board.clearError()
+}
+
+/**
+ * The fields the Save sends: only what this dialog changed.
+ *
+ * A `PATCH` writes every key it is given, so sending the form wholesale would
+ * make every Save an edit — and a `project_id` the workspace no longer has is a
+ * 400 `project_not_found`, which would block a title-only Save on a task whose
+ * project was deleted underneath the board. Nothing changed and no description
+ * was read means there is nothing to send at all.
+ */
+function detailChanges(task: Task): TaskChanges {
+  const changes: TaskChanges = {}
+  const title = detailForm.title.trim()
+  if (title !== task.title) changes.title = title
+  const due = detailForm.due || null
+  if ((due ?? '') !== (task.due || '')) changes.due = due
+  if (detailForm.assignee !== task.assignee) changes.assignee = detailForm.assignee
+  const project = detailForm.project_id || null
+  if ((project ?? '') !== (task.project_id || '')) changes.project_id = project
+  return changes
+}
+
+async function saveDetail() {
+  const task = detailTask.value
+  if (detailSaving.value || !task || !detailValid.value) return
+  // The revision is read first and the slot asked about *it* below:
+  // `revisionOf` drops a slot that disagrees with the row, so the two questions
+  // have to be about the same instant or the answer is about a different one.
+  const revision = board.revisionOf(task.id)
+  const changes = detailChanges(task)
+  // `body` rides only when this dialog showed the prose and it is the record at
+  // that revision: a description read for an earlier revision is not something
+  // this dialog may write (its body is not what the row says is on disk, so
+  // sending it erases whatever replaced it, and the newer revision going out
+  // means no 409 stands in the way), an unread one is omitted rather than sent
+  // empty, and an unedited one needs no write at all.
+  const held = heldDescription(task)
+  const body = held && held.revision === revision && held.body !== detailForm.body
+    ? detailForm.body
+    : undefined
+  if (!Object.keys(changes).length && body === undefined) return
+  detailSaving.value = true
+  const saved = await board.update(
+    workspace.value,
+    task.id,
+    revision,
+    changes,
+    body,
+  )
+  detailSaving.value = false
+  if (!saved) {
+    load()
+    return
+  }
+  detailForm.title = saved.title
+  detailForm.due = saved.due
+  detailForm.assignee = saved.assignee
+  detailForm.project_id = saved.project_id
+  savedAt.value = Date.now()
+  board.clearError()
+}
+
+async function deleteTask() {
+  const task = detailTask.value
+  if (!task || detailSaving.value) return
+  const ok = await askConfirm(
+    `"${task.title}" will be deleted from this workspace. The record is a file in your vault and this unlinks it — there is no trash.`,
+    { title: 'Delete task', confirmLabel: 'Delete', destructive: true },
+  )
+  if (!ok) return
+  const revision = board.revisionOf(task.id)
+  if (!revision) return
+  board.clearError()
+  detailSaving.value = true
+  const removed = await board.remove(workspace.value, task.id, revision)
+  detailSaving.value = false
+  if (removed) closeDetail()
+  // A refused delete is a stale revision or a file already gone; re-read so the
+  // row on screen matches the disk.
+  else load()
+}
+
+/** Re-read the description after a failed one, without closing the dialog. */
+function retryDescription() {
+  if (detailId.value) void loadDescription(detailId.value)
+}
+
+/**
+ * The description as it will read.
+ *
+ * `renderUserMarkdown`, not `renderMarkdown`: a task body is prose the user
+ * edits in this very dialog, so raw HTML in it is escaped and shown as typed
+ * rather than parsed. It still goes through DOMPurify.
+ */
+const bodyPreview = computed(() => renderUserMarkdown(detailForm.body))
+const createPreview = computed(() => renderUserMarkdown(createForm.body))
+
+const today = localDateKey()
+</script>
+
+<template>
+  <div ref="paneEl" class="task-view">
+    <PaneHeader page-tag="Tasks" @open-sidebar="emit('open-sidebar')">
+      <template #actions>
+        <button type="button" class="btn-primary btn-small task-new" @click="openCreate">New task</button>
+      </template>
+    </PaneHeader>
+
+    <div class="page-grid page-grid--single">
+      <div class="page-main">
+        <!-- The filters sit outside the load branches: they describe what the
+             board holds, not whether it has answered yet, so they are never the
+             thing that disappears on a slow GET. -->
+        <div class="task-filters">
+          <div class="task-chips" role="group" aria-label="Filter by status">
+            <button
+              type="button"
+              class="btn-chip task-chip"
+              :class="{ active: statusFilter === 'all' }"
+              :aria-pressed="statusFilter === 'all' ? 'true' : 'false'"
+              @click="statusFilter = 'all'"
+            >All <span class="task-chip-count">{{ tasks.length }}</span></button>
+            <button
+              v-for="option in TASK_STATUS_OPTIONS"
+              :key="option.status"
+              type="button"
+              class="btn-chip task-chip"
+              :class="{ active: statusFilter === option.status }"
+              :aria-pressed="statusFilter === option.status ? 'true' : 'false'"
+              @click="statusFilter = option.status"
+            >{{ option.label }} <span class="task-chip-count">{{ counts[option.status] }}</span></button>
+          </div>
+
+          <div class="task-selects">
+            <label class="sr-only" for="task-filter-project">Filter by project</label>
+            <select id="task-filter-project" v-model="projectFilter" class="task-filter">
+              <option value="">All projects</option>
+              <option v-for="option in projectOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+            <label class="sr-only" for="task-filter-due">Filter by due date</label>
+            <select id="task-filter-due" v-model="dueFilter" class="task-filter">
+              <option v-for="option in TASK_DUE_FILTERS" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+            <!-- One way back, never two: while the board is showing nothing
+                 because of these filters, the empty state offers it more
+                 prominently and this duplicate steps aside. -->
+            <button
+              v-if="filtersActive && !filteredEmpty"
+              type="button"
+              class="btn-chip task-chip"
+              @click="clearFilters"
+            >Clear filters</button>
+          </div>
+        </div>
+
+        <!-- 1 · first load in flight -->
+        <div v-if="firstLoad" class="task-loading" role="status" aria-live="polite">
+          <span class="task-spinner" aria-hidden="true"></span> Loading tasks…
+        </div>
+
+        <!-- 2 · first load failed: the server's sentence and a Retry. Never an
+             "empty board" claim, which is what a failed GET would be read as. -->
+        <div v-else-if="loadFailed" class="task-failed" role="alert">
+          <p class="task-failed-text">{{ board.loadError }}</p>
+          <button type="button" class="btn-small" @click="reloadBoard">Retry</button>
+        </div>
+
+        <template v-else>
+          <!-- 3 · a refresh failed over rows that are still on screen: they stay,
+               marked stale, with the same Retry. -->
+          <p v-if="loadStale" class="task-stale" role="status">
+            <span>{{ board.loadError }} These are the tasks as they were last read.</span>
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Retry</button>
+          </p>
+
+          <p class="task-lede">
+            {{ openCount }} open of {{ tasks.length }} in {{ workspace }}.
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
+          </p>
+
+          <!-- A file the server could not read as a task is shown, never dropped:
+               an unreadable board is not an empty one. -->
+          <section
+            v-if="unreadable.length"
+            class="task-unreadable"
+            aria-labelledby="task-unreadable-title"
+          >
+            <h3 id="task-unreadable-title" class="section-title">
+              {{ unreadable.length }} task file{{ unreadable.length === 1 ? '' : 's' }} could not be read
+            </h3>
+            <ul class="task-unreadable-list">
+              <li v-for="row in unreadable" :key="row.path || row.id">
+                <code class="task-unreadable-path">{{ row.path || row.id }}</code>
+                <span class="badge badge--error">{{ row.code }}</span>
+                <span class="task-unreadable-msg">{{ row.message }}</span>
+              </li>
+            </ul>
+          </section>
+
+          <!-- 4 · a filter hides a non-empty set. -->
+          <div v-if="filteredEmpty" class="task-filtered-empty">
+            <p class="hint">
+              No task here matches these filters. {{ tasks.length }} task{{ tasks.length === 1 ? '' : 's' }} in
+              {{ workspace }}.
+            </p>
+            <button type="button" class="btn-small" @click="clearFilters">Clear filters</button>
+          </div>
+
+          <!-- 5 · genuinely empty. -->
+          <p v-else-if="boardEmpty" class="task-empty hint">
+            No tasks in {{ workspace }} yet. Add one with New task, or file them
+            from the command line with <code>ciao task</code>.
+          </p>
+
+          <!-- One card, one status select, one render path. Wide with no status
+               picked the lanes are the four columns; narrow (or filtered) it is
+               the one lane, and CSS lays it out as a list. -->
+          <div
+            v-else
+            class="task-lanes"
+            :class="lanes.length > 1 ? 'task-lanes--columns' : 'task-lanes--list'"
+          >
+            <section
+              v-for="lane in lanes"
+              :key="lane.status || 'all'"
+              class="task-lane"
+              :aria-label="lane.label"
+            >
+              <h3 class="task-lane-head">
+                <span class="task-lane-label">{{ lane.label }}</span>
+                <span class="badge badge--muted">{{ lane.tasks.length }}</span>
+              </h3>
+              <p v-if="!lane.tasks.length" class="task-lane-empty">Nothing here.</p>
+              <ul v-else class="task-cards">
+                <li
+                  v-for="task in lane.tasks"
+                  :key="task.id"
+                  class="task-card"
+                  @click="openDetail(task)"
+                >
+                  <div class="task-card-head">
+                    <button
+                      type="button"
+                      class="task-open"
+                      :aria-label="`Edit ${task.title}`"
+                      @click.stop="openDetail(task)"
+                    >{{ task.title }}</button>
+                    <span class="task-card-badges">
+                      <span
+                        v-if="task.attempt_state"
+                        class="badge"
+                        :class="attemptBadgeClass(task)"
+                      >{{ taskAttemptLabel(task.attempt_state) }}</span>
+                      <span v-if="task.review_state === 'ready'" class="badge badge--accent2">Review</span>
+                    </span>
+                  </div>
+                  <p v-if="task.changed_since_delegated" class="task-changed">
+                    Changed since delegated — the result was reached against an older
+                    description.
+                  </p>
+                  <!-- Where the answer is, and when it ended. Never a summary of it:
+                       the board holds no copy of the agent's reply, so it names the
+                       chat to read and the approval that closes the card. -->
+                  <p v-if="isReviewReady(task)" class="task-review">
+                    <span class="task-review-lead">Ready for review.</span>
+                    <span v-if="reviewEnded(task)" class="task-review-when">
+                      {{ reviewEnded(task) }}.
+                    </span>
+                    The result is in the linked chat — read it there, then approve
+                    Done to close the card.
+                  </p>
+                  <!-- Inconsistency, said rather than repaired: the board may report
+                       that a row disagrees with itself, never quietly rewrite it. -->
+                  <div v-if="reconcile(task).length" class="task-reconcile">
+                    <p
+                      v-for="note in reconcile(task)"
+                      :key="note.code"
+                      class="task-reconcile-note"
+                      role="status"
+                    >
+                      <span class="badge" :class="taskReconcileBadgeClass(note.code)" :data-code="note.code">{{ taskReconcileLabel(note.code) }}</span>
+                      {{ note.text }}
+                      <span class="task-reconcile-actions">{{ note.actions }}</span>
+                    </p>
+                  </div>
+                  <p class="task-meta">
+                    <span class="task-project">{{ projectName(task.project_id) }}</span>
+                    <span v-if="formatTaskDue(task.due)" class="badge" :class="isOverdue(task, today) ? 'badge--error' : 'badge--muted'">
+                      {{ isOverdue(task, today) ? 'Overdue · ' : 'Due ' }}{{ formatTaskDue(task.due) }}
+                    </span>
+                    <span class="task-assignee">{{ taskAssigneeLabel(task.assignee) }}</span>
+                  </p>
+                  <div class="task-card-foot">
+                    <label class="sr-only" :for="`task-status-${task.id}`">
+                      Status for {{ task.title }}
+                    </label>
+                    <select
+                      :id="`task-status-${task.id}`"
+                      class="task-filter task-status"
+                      :value="task.status"
+                      :disabled="busyTaskId === task.id"
+                      @click.stop
+                      @change="moveTask(task, $event)"
+                    >
+                      <option v-for="option in TASK_STATUS_OPTIONS" :key="option.status" :value="option.status">
+                        {{ option.label }}
+                      </option>
+                    </select>
+                    <!-- The attempt's chat, when the board knows one. A button rather
+                         than a link because it goes through the project store, not a
+                         route — the same call the sidebar row makes. -->
+                    <button
+                      v-if="task.chat_id"
+                      type="button"
+                      class="btn-chip task-chip"
+                      :disabled="busyTaskId === task.id"
+                      :aria-label="`Open the chat working on ${task.title}`"
+                      @click.stop="openAttemptChat(task)"
+                    >Chat</button>
+                    <!-- A mid-run edit. One message into the attempt's own chat,
+                         carrying the task as it stands now — the sheet shows the exact
+                         text first. Never a second delegation: that would mint a new
+                         attempt and leave the one whose result is under review looking
+                         abandoned. -->
+                    <button
+                      v-if="task.changed_since_delegated && task.chat_id"
+                      type="button"
+                      class="btn-chip task-chip"
+                      :disabled="busyTaskId === task.id"
+                      :aria-label="`Send the current description of ${task.title} to the chat working on it`"
+                      @click.stop="openDelegate(task, 'update')"
+                    >Send update</button>
+                    <!-- A review-ready card is read, not managed: the turn has ended,
+                         so there is nothing to Stop, and Detach-then-Done would settle
+                         the attempt as stopped and lose the result. Approve Done is
+                         the whole of it. -->
+                    <template v-if="isReviewReady(task)">
+                      <button
+                        v-if="task.status !== 'done'"
+                        type="button"
+                        class="btn-chip task-chip"
+                        :disabled="busyTaskId === task.id"
+                        :aria-label="`Approve the result of ${task.title} and mark it done`"
+                        @click.stop="markDone(task)"
+                      >Approve Done</button>
+                    </template>
+                    <template v-else-if="!task.live_attempt_id && !isSettledLinked(task)">
+                      <button
+                        type="button"
+                        class="btn-chip task-chip"
+                        :disabled="busyTaskId === task.id"
+                        :aria-label="`Delegate ${task.title} to the agent`"
+                        @click.stop="openDelegate(task)"
+                      >Delegate</button>
+                    </template>
+                    <!-- A settled attempt still holds the task, and it is the only
+                         case the server will resume. Resume continues that chat
+                         under the same attempt; Retry mints a new one. They are
+                         two labelled gestures rather than one button, because
+                         "Delegate" here would start a second attempt and quietly
+                         abandon the one that failed. -->
+                    <template v-else-if="isSettledLinked(task)">
+                      <button
+                        type="button"
+                        class="btn-chip task-chip"
+                        :disabled="busyTaskId === task.id"
+                        :aria-label="`Resume the attempt on ${task.title} in its own chat`"
+                        @click.stop="actOnAttempt(task, 'resume')"
+                      >Resume</button>
+                      <button
+                        type="button"
+                        class="btn-chip task-chip"
+                        :disabled="busyTaskId === task.id"
+                        :aria-label="`Start a new attempt at ${task.title}`"
+                        @click.stop="actOnAttempt(task, 'retry')"
+                      >Retry</button>
+                    </template>
+                    <template v-else>
+                      <button
+                        type="button"
+                        class="btn-chip task-chip"
+                        :disabled="busyTaskId === task.id"
+                        :aria-label="`Stop the turn working on ${task.title}`"
+                        @click.stop="actOnAttempt(task, 'stop')"
+                      >Stop</button>
+                      <button
+                        type="button"
+                        class="btn-chip task-chip"
+                        :disabled="busyTaskId === task.id"
+                        :aria-label="`Detach ${task.title} from its attempt`"
+                        @click.stop="actOnAttempt(task, 'detach')"
+                      >Detach</button>
+                    </template>
+                    <!-- History is on any card that was ever delegated: a retried or
+                         stopped attempt is a record, not something the current badge
+                         replaces. -->
+                    <button
+                      v-if="task.attempt_state"
+                      type="button"
+                      class="btn-chip task-chip"
+                      :disabled="busyTaskId === task.id"
+                      :aria-label="`Show every attempt at ${task.title}`"
+                      @click.stop="openHistory(task)"
+                    >History</button>
+                    <button
+                      v-if="!isReviewReady(task) && task.status !== 'done'"
+                      type="button"
+                      class="btn-chip task-chip"
+                      :disabled="busyTaskId === task.id"
+                      :aria-label="`Mark ${task.title} done`"
+                      @click.stop="markDone(task)"
+                    >Done</button>
+                  </div>
+                </li>
+              </ul>
+            </section>
+          </div>
+
+          <!-- A refused write keeps the rows it had and says the server's own
+               sentence; the action slot is separate from the load slot so an
+               unread 409 cannot be cleared by a later list read. The Reload is
+               the way out: a conflict is the record moving on, and re-reading is
+               how this board catches up. -->
+          <p v-if="board.error" class="task-action-error" role="alert">
+            {{ board.error }}
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
+          </p>
+        </template>
+      </div>
+    </div>
+
+    <!-- Create -->
+    <div v-if="createOpen" class="modal-backdrop" @click.self="closeCreate">
+      <div
+        ref="createEl"
+        class="modal-sheet task-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-create-title"
+      >
+        <header class="task-sheet-head">
+          <h3 id="task-create-title">New task</h3>
+          <button type="button" class="btn-icon" aria-label="Close" @click="closeCreate">×</button>
+        </header>
+        <form class="task-form" novalidate @submit.prevent="submitCreate">
+          <div class="form-group">
+            <label for="task-create-name">Title</label>
+            <input
+              id="task-create-name"
+              ref="createTitleField"
+              v-model="createForm.title"
+              type="text"
+              autocomplete="off"
+            />
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="task-create-project">Project</label>
+              <select id="task-create-project" v-model="createForm.project_id">
+                <option value="">General</option>
+                <option v-for="option in createProjectOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="task-create-due">Due</label>
+              <input id="task-create-due" v-model="createForm.due" type="date" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="task-create-body">Description</label>
+            <textarea id="task-create-body" v-model="createForm.body" rows="4"></textarea>
+            <p class="hint">Markdown. Optional.</p>
+            <details v-if="createForm.body" class="task-preview">
+              <summary>Preview</summary>
+              <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+              <div class="task-preview-body markdown" v-html="createPreview"></div>
+            </details>
+          </div>
+          <div class="form-actions">
+            <button
+              type="submit"
+              class="btn-primary"
+              :disabled="!createValid || createSaving"
+            >{{ createSaving ? 'Filing…' : 'File task' }}</button>
+            <button type="button" class="btn-small" :disabled="createSaving" @click="closeCreate">Cancel</button>
+            <p v-if="board.error" class="task-action-error" role="alert">{{ board.error }}</p>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Delegate preview -->
+    <div v-if="delegateOpen && delegateTask" class="modal-backdrop" @click.self="closeDelegate">
+      <div
+        ref="delegateEl"
+        class="modal-sheet task-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-delegate-title"
+      >
+        <header class="task-sheet-head">
+          <h3 id="task-delegate-title">{{
+            delegateMode === 'update' ? 'Send the update to the chat' : 'Hand this task to the agent'
+          }}</h3>
+          <button type="button" class="btn-icon" aria-label="Close" @click="closeDelegate">×</button>
+        </header>
+
+        <div class="task-form">
+          <!-- The decision, stated before it is made: where the chat runs, what it
+               runs with, and — the part a board cannot imply — that the turn is
+               attended. An approval card it raises is an ordinary Needs-you card in
+               that chat, answered in the ordinary way. -->
+          <dl v-if="delegateMode !== 'update'" class="task-preview-facts">
+            <div>
+              <dt>Chat runs in</dt>
+              <dd>{{ delegatePreview?.project }}</dd>
+            </div>
+            <div>
+              <dt>Provider &amp; model</dt>
+              <dd>{{ delegatePreview?.provider }} · {{ delegatePreview?.model }}</dd>
+            </div>
+            <div>
+              <dt>Attendance</dt>
+              <dd>{{ delegatePreview?.attendance }}</dd>
+            </div>
+          </dl>
+
+          <!-- The description that goes into the chat, read by `openDelegate`
+               because a list row carries none. While it is loading the sheet says
+               so rather than showing an empty box: a user confirming a delegation
+               against a description they were not shown is the one thing this
+               preview exists to prevent. -->
+          <p v-if="delegateBodyState === 'loading'" class="hint" role="status">
+            Loading description…
+          </p>
+          <template v-else-if="delegateBodyState === 'failed'">
+            <p class="hint">
+              This board could not read this task's description, so it is not shown
+              here. The chat still receives the record as it stands on disk.
+            </p>
+            <button type="button" class="btn-chip task-chip" @click="retryDelegateBody">
+              Retry
+            </button>
+          </template>
+          <template v-else>
+            <p class="hint">
+              <template v-if="delegateMode === 'update'">
+                {{
+                  delegateBody.trim()
+                    ? 'The description below is what the message carries.'
+                    : 'This task has no description, so the message carries only its title and metadata.'
+                }}
+              </template>
+              <template v-else>
+                {{
+                  delegateBody.trim()
+                    ? 'The description below is quoted into the chat as the task.'
+                    : 'This task has no description; only its title and metadata are handed over.'
+                }}
+              </template>
+            </p>
+            <details v-if="delegateBody.trim()" class="task-preview">
+              <summary>Show the description</summary>
+              <div class="task-preview-body markdown" v-html="delegateBodyPreview"></div>
+            </details>
+          </template>
+
+          <p v-if="delegateMode === 'open_chat'" class="hint">
+            This task's attempt is still live. Confirming opens the chat it is
+            running in rather than starting a second turn.
+          </p>
+          <p v-else-if="delegateMode === 'resume'" class="hint">
+            This task's last attempt ended. Resuming continues that attempt in its
+            own chat; starting a new attempt leaves it as history.
+          </p>
+          <p v-else-if="delegateMode === 'retry'" class="hint">
+            This starts a new attempt in a new chat. The previous attempt stays as
+            history and is not re-run.
+          </p>
+          <p v-else-if="delegateMode === 'update'" class="hint">
+            This sends one message into the chat this attempt is working in,
+            carrying the task as it stands now. It does not delegate again and
+            starts no new attempt — the answer comes back into the same chat.
+          </p>
+
+          <!-- The exact message, before it is sent. The user is putting words into a
+               conversation they may not have open, and the whole reason this
+               control exists is that the description changed underneath the agent. -->
+          <details v-if="delegateMode === 'update'" class="task-preview">
+            <summary>Show the message</summary>
+            <pre class="task-update-text">{{ updateMessage }}</pre>
+          </details>
+
+          <p v-if="board.error" class="task-action-error" role="alert">
+            {{ board.error }}
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
+          </p>
+
+          <div class="form-actions">
+            <button
+              type="button"
+              class="btn-primary"
+              :disabled="delegateBusy || (delegateMode === 'update' && delegateBodyState !== 'idle')"
+              @click="submitDelegate"
+            >{{ delegateButtonLabel }}</button>
+            <!-- Both ways out of a settled attempt, named separately: one
+                 continues the chat that failed, the other starts a different one.
+                 A single control here would have to be one of the two. -->
+            <button
+              v-if="delegateMode === 'resume'"
+              type="button"
+              class="btn-small"
+              :disabled="delegateBusy"
+              @click="openDelegate(delegateTask!, 'retry')"
+            >Start a new attempt</button>
+            <button type="button" class="btn-small" :disabled="delegateBusy" @click="closeDelegate">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Attempt history -->
+    <div v-if="historyOpen && historyTask" class="modal-backdrop" @click.self="closeHistory">
+      <div
+        ref="historyEl"
+        class="modal-sheet task-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-history-title"
+      >
+        <header class="task-sheet-head">
+          <h3 id="task-history-title">Attempt history</h3>
+          <button type="button" class="btn-icon" aria-label="Close" @click="closeHistory">×</button>
+        </header>
+
+        <div class="task-form">
+          <p class="hint">
+            Every attempt at &ldquo;{{ historyTask.title }}&rdquo;, newest first. A
+            retry does not erase the one it replaced, and a stopped attempt is a
+            record of what was tried.
+          </p>
+
+          <p v-if="board.attemptsLoading" class="hint" role="status">Loading history…</p>
+          <p v-else-if="board.attemptsError" class="task-action-error" role="alert">
+            {{ board.attemptsError }}
+            <button type="button" class="btn-chip task-chip" @click="retryHistory">Retry</button>
+          </p>
+          <p v-else-if="!historyAttempts.length" class="hint">
+            No attempt has been delegated for this task.
+          </p>
+          <ul v-else class="task-history">
+            <li
+              v-for="attempt in historyAttempts"
+              :key="attempt.attempt_id"
+              class="task-history-row"
+            >
+              <div class="task-card-head">
+                <span class="task-history-state">
+                  <span class="badge" :class="attemptStateBadgeClass(attempt.state)">
+                    {{ taskAttemptLabel(attempt.state) }}
+                  </span>
+                  <span v-if="attempt.live" class="badge badge--accent2">Holding the task</span>
+                </span>
+                <!-- The chat each attempt ran in, so a stopped one is still
+                     reachable: the current row's linkage is gone by the time a retry
+                     exists, and this is where the old turn's answer lives. -->
+                <button
+                  v-if="attempt.chat_id"
+                  type="button"
+                  class="btn-chip task-chip"
+                  :aria-label="`Open the chat attempt ${attempt.attempt_id} ran in`"
+                  @click="openAttemptChat({ ...historyTask!, chat_id: attempt.chat_id })"
+                >Chat</button>
+              </div>
+              <p class="task-history-summary">{{ taskAttemptSummary(attempt) }}</p>
+            </li>
+          </ul>
+
+          <div class="form-actions">
+            <button type="button" class="btn-small" @click="closeHistory">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detail -->
+    <div v-if="detailOpen" class="modal-backdrop" @click.self="closeDetail">
+      <div
+        ref="detailEl"
+        class="modal-sheet task-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-detail-title"
+      >
+        <header class="task-sheet-head">
+          <h3 id="task-detail-title">Edit task</h3>
+          <button type="button" class="btn-icon" aria-label="Close" @click="closeDetail">×</button>
+        </header>
+
+        <!-- Delegation, inside the editor rather than on the card foot.
+             The card's controls are the ones that change a card — a status move, a
+             completion — and a delegation is not that: it starts a turn elsewhere
+             and the card's own fields are untouched. It is also the gesture that
+             needs a *preview*, and a sheet is where a preview belongs. One place
+             carries the whole lifecycle: delegate, open the chat, resume, retry,
+             stop, detach. -->
+        <div class="task-delegate">
+          <p v-if="detailAttemptState" class="task-delegate-state">
+            <span class="badge" :class="detailAttemptBadgeClass">{{
+              taskAttemptLabel(detailAttemptState)
+            }}</span>
+            <span v-if="detailTask?.chat_id" class="hint">
+              Working in
+              <button type="button" class="btn-chip task-chip" @click="openAttemptChat(detailTask)">
+                the chat
+              </button>
+            </span>
+          </p>
+          <p v-if="detailTask?.changed_since_delegated" class="task-changed">
+            Changed since delegated — the result was reached against an older
+            description.
+          </p>
+          <p v-if="detailTask && isReviewReady(detailTask)" class="task-review">
+            <span class="task-review-lead">Ready for review.</span>
+            <span v-if="reviewEnded(detailTask)" class="task-review-when">
+              {{ reviewEnded(detailTask) }}.
+            </span>
+            The result is in the linked chat — read it there, then approve Done to
+            close the card.
+          </p>
+          <div
+            v-if="detailTask && reconcile(detailTask).length"
+            class="task-reconcile"
+          >
+            <p
+              v-for="note in detailTask ? reconcile(detailTask) : []"
+              :key="note.code"
+              class="task-reconcile-note"
+              role="status"
+            >
+              <span class="badge" :class="taskReconcileBadgeClass(note.code)" :data-code="note.code">{{ taskReconcileLabel(note.code) }}</span>
+              {{ note.text }}
+              <span class="task-reconcile-actions">{{ note.actions }}</span>
+            </p>
+          </div>
+          <div class="task-delegate-actions">
+            <button
+              type="button"
+              class="btn-chip task-chip"
+              :disabled="detailSaving || board.saving || !detailTask"
+              @click="openDelegate(detailTask!)"
+            >{{ detailDelegateLabel }}</button>
+            <!-- The one gesture that completes a reviewed result. The same call the
+                 card's Approve Done makes: the service releases the linkage and
+                 closes the card together, so the attempt stays as review-ready
+                 history instead of settling as stopped. -->
+            <button
+              v-if="detailTask && isReviewReady(detailTask) && detailTask.status !== 'done'"
+              type="button"
+              class="btn-chip task-chip"
+              :disabled="detailSaving || board.saving"
+              @click="markDone(detailTask!)"
+            >Approve Done</button>
+            <button
+              v-if="detailTask?.changed_since_delegated && detailTask?.chat_id"
+              type="button"
+              class="btn-chip task-chip"
+              :disabled="detailSaving || board.saving"
+              @click="openDelegate(detailTask!, 'update')"
+            >Send update</button>
+            <button
+              v-if="detailTask?.attempt_state"
+              type="button"
+              class="btn-chip task-chip"
+              :disabled="detailSaving || board.saving"
+              @click="openHistory(detailTask!)"
+            >History</button>
+            <!-- Deliberately not a second Resume/Retry pair here: this control
+                 already opens the preview in the mode the row calls for, and the
+                 preview names both ways out. A duplicate that opened a sheet and a
+                 duplicate that acted immediately would be the same label on two
+                 different gestures. The card's own foot carries the direct pair. -->
+            <button
+              v-if="detailTask?.live_attempt_id && !isReviewReady(detailTask!)"
+              type="button"
+              class="btn-chip task-chip"
+              :disabled="detailSaving || board.saving"
+              @click="actOnAttempt(detailTask!, 'stop')"
+            >Stop</button>
+            <button
+              v-if="detailTask?.live_attempt_id && !isReviewReady(detailTask!)"
+              type="button"
+              class="btn-chip task-chip"
+              :disabled="detailSaving || board.saving"
+              @click="actOnAttempt(detailTask!, 'detach')"
+            >Detach</button>
+          </div>
+        </div>
+
+        <!-- The status field is a move, not a field to save: changing it writes
+             at once, through the same gesture the card offers. Moving to Done is
+             the completion gesture, which the store keeps as the user's act. -->
+        <div class="task-move">
+          <label class="sr-only" for="task-detail-status">Move this task to</label>
+          <select
+            id="task-detail-status"
+            class="task-filter task-status"
+            :value="detailForm.status"
+            :disabled="detailSaving || board.saving"
+            @change="onDetailStatusChange"
+          >
+            <option v-for="option in TASK_STATUS_OPTIONS" :key="option.status" :value="option.status">
+              {{ option.label }}
+            </option>
+          </select>
+          <p class="hint">Moving a task to {{ taskStatusLabel('done') }} marks it done.</p>
+        </div>
+
+        <form class="task-form" novalidate @submit.prevent="saveDetail">
+          <div class="form-group">
+            <label for="task-detail-name">Title</label>
+            <input
+              id="task-detail-name"
+              ref="detailTitleField"
+              v-model="detailForm.title"
+              type="text"
+              autocomplete="off"
+            />
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="task-detail-project">Project</label>
+              <select id="task-detail-project" v-model="detailForm.project_id">
+                <option value="">General</option>
+                <option v-for="option in projectOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="task-detail-due">Due</label>
+              <input
+                id="task-detail-due"
+                v-model="detailForm.due"
+                type="date"
+              />
+            </div>
+            <div class="form-group">
+              <label for="task-detail-assignee">Assignee</label>
+              <select id="task-detail-assignee" v-model="detailForm.assignee">
+                <option value="user">For me</option>
+                <option value="agent">For the agent</option>
+              </select>
+            </div>
+          </div>
+          <!-- The description. A list row carries none, so it is read by id: the editor
+               shows the prose it will write back, and while the read is in flight
+               the field is absent rather than an empty box whose Save would clear
+               what nobody was shown. -->
+          <div class="form-group">
+            <label for="task-detail-body">Description</label>
+            <p v-if="descriptionState === 'loading'" class="hint" role="status">Loading description…</p>
+            <template v-else-if="detailDescribed">
+              <textarea
+                id="task-detail-body"
+                v-model="detailForm.body"
+                rows="6"
+              ></textarea>
+              <details v-if="detailForm.body" class="task-preview">
+                <summary>Preview</summary>
+                <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+                <div class="task-preview-body markdown" v-html="bodyPreview"></div>
+              </details>
+            </template>
+            <p v-else class="hint">
+              This board could not read this task's description, so it will not
+              overwrite it.
+              <button type="button" class="btn-chip task-chip" @click="retryDescription">Retry</button>
+            </p>
+          </div>
+
+          <p v-if="board.error" class="task-action-error" role="alert">
+            {{ board.error }}
+            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
+          </p>
+          <p v-else-if="savedAt" class="task-saved" role="status">Saved</p>
+
+          <div class="form-actions">
+            <button
+              type="submit"
+              class="btn-primary"
+              :disabled="!detailValid || detailSaving"
+            >{{ detailSaving ? 'Saving…' : 'Save' }}</button>
+            <button type="button" class="btn-small" :disabled="detailSaving" @click="closeDetail">Cancel</button>
+            <button
+              type="button"
+              class="btn-small btn-danger task-delete"
+              :disabled="detailSaving"
+              @click="deleteTask"
+            >Delete</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+/* The pane root. It is also the element `NARROW_PANE_PX` observes: a block
+   filling the `chat-pane` container, so its inline size IS the container's, and
+   the one number both the JS lanes and the CSS breakpoint agree on. */
+.task-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.task-view > .page-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* ── Filters ───────────────────────────────────────────────────────────── */
+.task-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-4) 0 var(--space-3);
+}
+.task-chips,
+.task-selects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+.task-chip { gap: var(--space-1); }
+.task-chip-count {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg3);
+}
+.task-chip.active .task-chip-count { color: inherit; }
+.task-filter {
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+/* ── Load states ───────────────────────────────────────────────────────── */
+.task-loading,
+.task-failed,
+.task-filtered-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-5) 0;
+}
+.task-loading { flex-direction: row; align-items: center; color: var(--fg2); }
+.task-failed-text,
+.task-stale,
+.task-action-error {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+/* The action error carries a Reload beside it, so it lays out as a line rather
+   than as prose with a button jammed into the sentence. */
+.task-action-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+/* Muted small text with a Reload beside it: it is a caption on the board, not
+   one of its voices. */
+.task-lede {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+.task-saved {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+.task-stale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+
+/* ── Unreadable files ──────────────────────────────────────────────────── */
+.task-unreadable {
+  margin-bottom: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 6%, var(--bg2));
+}
+.task-unreadable-list { margin: var(--space-2) 0 0; padding: 0; list-style: none; }
+.task-unreadable-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  font-size: var(--text-sm);
+}
+.task-unreadable-path { color: var(--fg); }
+.task-unreadable-msg { color: var(--fg2); min-width: 0; }
+
+/* ── Board ─────────────────────────────────────────────────────────────── */
+.task-lanes {
+  display: grid;
+  gap: var(--space-3);
+  padding-bottom: var(--space-6);
+  align-items: start;
+}
+.task-lanes--columns { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.task-lanes--list { grid-template-columns: minmax(0, 1fr); }
+
+/* A narrow pane gets the one lane the filters chose, read as a list. The grid
+   above already collapsed to a single track; the lane only has to stop dressing
+   itself like a column. Same 940px the script's NARROW_PANE_PX uses — one
+   measurement, two renderers. */
+@container chat-pane (max-width: 940px) {
+  .task-lanes--columns { grid-template-columns: minmax(0, 1fr); }
+}
+
+.task-lane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.task-lane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--border);
+  font-size: calc(15px * var(--font-scale));
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.task-lane-empty {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+.task-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  cursor: pointer;
+  min-width: 0;
+}
+.task-card:hover { border-color: var(--border-strong); }
+.task-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+/* The whole card is clickable, and this is the reachable control inside it: a
+   pointer-only card is not acceptable, so the title is a real button that carries
+   the card's one job. */
+.task-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* A one-line title is ~20px of text. The reachable control gets a real box so
+     it is not a 20px-tall hit area the card's own click handler was quietly
+     carrying; the card is still clickable, this is what makes it operable. */
+  min-height: var(--touch);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.task-open:hover { color: var(--accent); }
+.task-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The badge group, kept to one line so a long title keeps the room it needs. */
+.task-card-badges {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+/* "Changed since delegated" is a warning about the *result*, not about the card, so
+   it reads as a caption on it rather than as one of its voices. */
+.task-changed {
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+/* The review block is the card's own state, not a warning about it: it is where
+   the answer lives and what closes the card. Kept beside the changed-since
+   caption rather than inside it, because the two can both be true. */
+.task-review {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border-left: 3px solid var(--success);
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.task-review-lead { font-weight: 600; color: var(--fg); }
+.task-review-when { color: var(--fg3); }
+/* An inconsistency the board reports rather than repairs. Distinct from the
+   warning above: this one is about the row's own fields contradicting each
+   other, and each line ends with the controls that resolve it. */
+.task-reconcile { display: grid; gap: var(--space-1); }
+.task-reconcile-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border-left: 3px solid var(--error);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.task-reconcile-actions { color: var(--fg3); }
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+
+.task-project { overflow-wrap: anywhere; }
+.task-assignee { color: var(--fg3); }
+.task-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.task-status { flex: 1 1 auto; min-width: 0; }
+
+/* 44px on touch: the shared rule raises .btn-chip, and the native selects and
+   buttons here carry it directly so a coarse pointer never gets a 34px target. */
+@media (pointer: coarse) {
+  .task-filter,
+  .task-card .btn-chip {
+    min-height: var(--touch);
+  }
+  /* The shared input rule is ~40px on touch, which every form in the app shares;
+     the board's own fields hold the 44px line the rest of this pane does. */
+  .task-form input,
+  .task-form select,
+  .task-form textarea {
+    min-height: var(--touch);
+  }
+}
+
+/* ── Dialogs ───────────────────────────────────────────────────────────── */
+.task-sheet { padding: 0; }
+/* The shared `.btn-icon` is already 44px square, but a scoped rule for the
+   board's own headers wins on specificity over a change to the shared one, and
+   the close button is the one target in the dialog a coarse pointer cannot miss
+   if it is small. */
+.task-sheet-head .btn-icon { min-width: var(--touch); min-height: var(--touch); }
+.task-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.task-sheet-head h3 {
+  margin: 0;
+  font-size: calc(15px * var(--font-scale));
+  font-weight: 650;
+}
+/* The editor's delegation block: its own band between the sheet header and the
+   status move, because it acts on a different thing — a turn in another chat —
+   than the form below edits. */
+.task-delegate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) 0;
+}
+.task-delegate-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+}
+.task-delegate-state .hint { margin: 0; }
+.task-delegate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.task-move {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) 0;
+}
+.task-move .hint { margin: 0; }
+/* The delegation preview's facts. A definition list rather than a table because
+   each row is a label and one value, read in order down the sheet — a two-column
+   grid of a label and a value would invite reading across rows as columns. */
+.task-preview-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+}
+.task-preview-facts > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.task-preview-facts dt {
+  min-width: 8.5rem;
+  color: var(--fg3);
+  font-size: var(--text-sm);
+}
+.task-preview-facts dd {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+}
+.task-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+/* The shared `.form-grid` is `1fr 1fr`, and a `1fr` track's min is its content:
+   a native select sized by its longest option pushed the second column past the
+   sheet's own edge. `minmax(0, 1fr)` is the same two columns without that — the
+   unbreakable-child trap, in a grid. */
+.task-form .form-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.task-form .hint { margin: 0; }
+.task-delete { margin-left: auto; }
+.task-preview { margin-top: var(--space-2); }
+.task-preview-facts + .task-preview,
+.task-preview-facts + .form-actions { margin-top: var(--space-2); }
+.task-preview summary {
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.task-preview-body {
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+.task-preview-body :deep(p:first-child) { margin-top: 0; }
+/* The exact text a Send update would put into the delegated chat. A <pre>, not
+   the Markdown renderer: it is a message to a chat, not prose the user wrote in
+   their own vault, and wrapping it is the point. */
+.task-update-text {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Attempt history. A list of records rather than a table: the columns a table
+   would give are the badge, one sentence and a chat link, and at a phone width a
+   table is where that stops being readable. */
+.task-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.task-history-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.task-history-row .task-card-head { align-items: center; }
+.task-history-state {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+.task-history-summary {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.task-preview-body :deep(p:last-child) { margin-bottom: 0; }
+.task-preview-body :deep(pre) { overflow-x: auto; }
+</style>

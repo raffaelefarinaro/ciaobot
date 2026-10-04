@@ -82,6 +82,8 @@ task create      --title TITLE [--body-file FILE.md] [--project P] [--due YYYY-M
 task update      ID --revision REV [--title T] [--body-file FILE.md] [--due D] [--assignee user|agent] [--status STATUS]
 task move        ID --to STATUS --revision REV
 task complete    ID --revision REV
+task delegate   ID --revision REV [--project P]
+task attempt    ID stop|resume|retry|detach
 schedule list
 schedule preview  <sched>
 schedule create   <sched>
@@ -90,6 +92,11 @@ schedule pause    ID
 schedule resume   ID
 schedule run      ID
 schedule delete   ID
+webhook list
+webhook create    --name NAME [--instructions-file FILE] [--project P] [--mode normal|auto|plan]
+webhook update    ID --revision REV [--name NAME] [--instructions-file FILE] [--enable|--disable]
+webhook rotate    ID --revision REV
+webhook delete    ID --revision REV
 run start         [--cwd DIR] [--env K=V]... [--timeout-s N] [--label T] -- CMD [ARGS...]
 run status        ID [--lines N]
 run cancel        ID
@@ -106,4 +113,5 @@ workspace list
 
 - The memory-proposal review queue has its own two commands, outside the table: `ciao memory-proposals` lists it, and `ciao memory-proposal-dismiss --text-file F [--promoted]` removes one row (fact text in a file, never argv; `--promoted` only after filing the fact).
 - `note verify --payload-file F` settles a stale note's facts (JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence`, `before`/`after`); `status` is `applied`, `needs_review` (a `note_edit` proposal for a person), `unverified` or `conflict`. Never hand-edit a stale note's `updated:` instead.
-- Tasks live one per file under `Workspace/Tasks/` in this workspace's vault, and `task list`/`task get` return the `revision` every edit has to pass back. A stale revision changes nothing, so re-read and re-plan instead of resending it. You cannot mark a task done: `task complete` is the user's call, so report what is finished and let them close it. Put a task body in a file and pass `--body-file` rather than as a shell argument.
+- Tasks live one per file under `Workspace/Tasks/` in this workspace's vault, and `task list`/`task get` return the `revision` every edit has to pass back. A stale revision changes nothing, so re-read and re-plan instead of resending it. You cannot mark a task done: `task complete` is the user's call, so report what is finished and let them close it. `task delegate` hands it to the agent as one ordinary attended chat, and `task attempt ID ACTION` then stops, resumes, retries or detaches that run; a finished turn waits for review, it does not close the task. Put a task body in a file and pass `--body-file` rather than as a shell argument.
+- `webhook create|rotate` return a secret **shown once**: hand it to the user, never store it. A trigger is created disabled, so ask before `webhook update --enable`, then tell them the sender POSTs `{"text": "..."}` to `/hooks/v1/<trigger_id>` on this engine, with that secret as a bearer token and an `Idempotency-Key`. `webhook rotate` kills the old secret at once. Instructions go in a file: `--instructions-file`.
