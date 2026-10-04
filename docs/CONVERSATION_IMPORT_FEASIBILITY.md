@@ -1032,6 +1032,78 @@ existing review/accept/undo, unchanged.
 
 Depends on: **C4 and C6 merged**. No UI.
 
+#### C7 landed (#1038)
+
+Shipped as **`ciao/import_run.py`** (the name above was a draft; the module is
+the per-batch runner C8's route drives) plus the three touches the section
+predicted:
+
+* **`run_import_batch(config, batch_id, model=…, provider=…)`** walks the
+  batch's selection one source at a time: C5's own resolution
+  (`_resolve_claude_code_ref`, `read_claude_code_session` /
+  `read_opencode_session`, and the OpenCode listing check) → C4's one
+  tool-less `extract_facts` turn → `record_source` (with the SHA-256 of the
+  normalized session as the content digest), `record_progress`, and one
+  `FactProvenance` per bullet the run actually filed. The provenance list is
+  read off the queue by diffing it before and after the turn, because
+  `append_proposals` drops already-queued and already-decided rows silently and
+  the filed set is otherwise unknowable.
+* **C4 is called exactly as its docstring requires**: `known_own_ids=
+  ciaobot_own_session_ids(config, workspace)` plus the chat ids derived from it,
+  so a Ciaobot-own session is refused by `classify_session` before any turn.
+  `refused_anchor` names both a session refusal and a single refused *row*, so
+  the runner tells them apart by the usage record (`messages_in_prompt == 0`
+  means the turn never ran).
+* **`FactCandidate.source_anchors: tuple[str, ...]`** is the field the
+  [Provenance and old-versus-new](#provenance-and-old-versus-new) section said
+  was **not optional**, and it is read out of `source_section` by code
+  (`external_anchor`: the leading segment must be a provider in the import
+  contract's `KNOWN_PROVIDERS`, and the tag must pass
+  `assert_external_provenance`) rather than by a colon count. `MemoryProposal`
+  needs no field of its own — `as_bullet` already renders the tag into the
+  bullet's `_(from: …)_` tail and it reads back — so the anchor survives the
+  round trip, and `_provenance_row` now stamps `source_anchors` beside
+  `source_message_ids` on the region write's receipt. For an import the integer
+  field stays empty, `provenance` stays `"unknown"`, and `attended` stays
+  `None`.
+* **The route**: `POST /api/import/batches/{batch_id}/run`, session-gated and
+  workspace-scoped. It moves the batch to `running`, schedules the runner and
+  answers 202 — **no turn runs inside the request**, and no request field chooses
+  the model. A batch already `running` is answered 200 with its current state
+  (that is the two-presses race); a settled batch is a 409.
+* **Dated conflicts**: nothing new. Two queued rows naming the same fact with
+  different `[as-of:]` dates both stay queued with their own source date and
+  anchor — the review path never compares them, and the test pins that neither is
+  dropped or re-stamped. That is the whole of "dated conflict review": a
+  property of the existing review surface, not an engine.
+* **The accept path carries the anchor, and the run cannot strand a batch.**
+  Three things this child originally got wrong, corrected here rather than
+  deferred:
+  * `proposal_service._promote_region_row` built its proposal with
+    `source_section="review"`, so the *accepted region's* receipt recorded
+    `section: "review"` and `source_anchors: []` for an imported row — the field
+    was dead exactly where it mattered. `accept_region_fact` takes a
+    `source_section` now and the accept route hands over
+    `external_anchor(row["source"]) or "review"`, so a row that carries no
+    external tag is unaffected and an imported one lands with its anchor.
+  * A turn that came back unreadable — a failing provider, a timeout, a reply
+    that is not a JSON array — is now a **skipped** source with an empty digest
+    and is counted in `unread`, so the batch settles `partial`/`failed`. It used
+    to be recorded `extracted` with the session's digest, which made a
+    misconfigured model report "done, 0 proposals" and fed the batch dedupe key
+    a conversation nobody had read. A genuine "nothing worth filing" has C4's
+    `skipped == 0` and is still an extraction.
+  * An exception out of the run — a corrupt own-session registry, a non-conflict
+    store error, a cancel on shutdown — settles the batch `failed` before it
+    propagates, and every blocking call in the runner is on a thread
+    (`asyncio.to_thread`), because the OpenCode membership check shells out to
+    the CLI under 60s timeouts and the runner runs on the server's event loop.
+  * Still open for C8: reconciling a batch left `running` by an engine restart
+    (the in-process failures are covered above), and showing on the consent
+    screen the model the run will actually use — `preview_selected` reports
+    `default_model_for_workspace` for the workspace's provider, while the run
+    resolves the per-provider insights model for the *source's*.
+
 ### C8 — entry point, retention/cancel UI, docs, browser journey
 
 * Touches: the Memory-side entry point, `web/src/components/…` for the

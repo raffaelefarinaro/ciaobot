@@ -186,6 +186,7 @@ from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
 from ciao.web.routes_import import (
     import_batch_cancel,
     import_batch_delete,
+    import_batch_run,
     import_batches_create,
     import_batches_list,
     import_preview,
@@ -481,11 +482,18 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # no extraction lives here (C7); the batch store (C6) is the routes below.
         Route("/api/import/sources", import_sources, methods=["GET"]),
         Route("/api/import/preview", import_preview, methods=["POST"]),
-        # Import batches (C6): the private per-workspace batch store. The
-        # literal `cancel` segment precedes the bare `{batch_id}` pattern so
-        # cancellation is not read as a batch id.
+        # Import batches (C6): the private per-workspace batch store, and the
+        # run (C7) that drives one into the review queue. The literal `cancel`
+        # and `run` segments precede the bare `{batch_id}` pattern so neither is
+        # read as a batch id. `run` schedules the extraction and starts no turn
+        # in the request; the batch is the one-running-at-a-time gate.
         Route("/api/import/batches", import_batches_create, methods=["POST"]),
         Route("/api/import/batches", import_batches_list, methods=["GET"]),
+        Route(
+            "/api/import/batches/{batch_id}/run",
+            import_batch_run,
+            methods=["POST"],
+        ),
         Route(
             "/api/import/batches/{batch_id}/cancel",
             import_batch_cancel,

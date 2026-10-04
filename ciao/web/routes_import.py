@@ -1,6 +1,6 @@
-"""The import consent surface and the private batch store behind it.
+"""The import consent surface, the private batch store behind it, and the run.
 
-Six routes, all behind the signed session cookie like every other ``/api/*``
+Seven routes, all behind the signed session cookie like every other ``/api/*``
 route (``ciao.web.auth.AuthMiddleware`` covers the prefix, so none is
 registered in a public or loopback-only allowlist and none has an origin
 exception of its own):
@@ -16,17 +16,26 @@ exception of its own):
 * ``POST /api/import/batches`` — file a batch over a selection (C6).
 * ``GET /api/import/batches?workspace=`` — that workspace's batches, with
   progress.
+* ``POST /api/import/batches/{id}/run`` — schedule the extraction (C7).
 * ``POST /api/import/batches/{id}/cancel`` — stop a batch, keeping what it
   produced.
 * ``DELETE /api/import/batches/{id}`` — drop a batch record; queue and vault
   are untouched.
 
-**The batch, discovery and preview routes extract nothing.** There is no model
-call and no proposal write here: extraction is C7 and consumes the batch
-store. The preview exists so that everything a person is consenting to is
-stated *before* the first model call, and it answers with counts and reasons
-rather than text — a full transcript never reaches the browser, so a selection
-screen cannot leak the conversation it is asking about.
+**Only the run route extracts anything.** Every other route here reads no
+conversation and calls no model: the preview exists so that everything a person
+is consenting to is stated *before* the first model call, and it answers with
+counts and reasons rather than text — a full transcript never reaches the
+browser, so a selection screen cannot leak the conversation it is asking about.
+
+**The run route starts no turn in the request.** It moves the batch to
+``running`` on the C6 store, schedules :func:`ciao.import_run.run_import_batch`
+on the event loop and answers immediately with the batch; the extraction
+happens after the response, in the runner, where C4 owns every model call. A
+batch already ``running`` is answered with its current state rather than a
+second run, and one that has settled is a 409. The model and provider are
+resolved from the configuration by the runner — no request field chooses what
+reads a user's history.
 
 **The selection names a source, not a location.** A request body carries
 ``{"provider", "source_id"}`` pairs; every path is rebuilt from the workspace's
@@ -65,6 +74,7 @@ from ciao.import_store import (
     CONFLICT,
     INVALID_BATCH,
     NOT_FOUND,
+    RUNNING,
     ImportStore,
     ImportStoreError,
     engine_store_path,
@@ -72,6 +82,11 @@ from ciao.import_store import (
 from ciao.web.routes_helpers import api_error
 
 logger = logging.getLogger(__name__)
+
+#: The scheduled extractions this process has running. A strong reference, so a
+#: task nobody awaits cannot be collected mid-run, and a task that has finished
+#: is dropped from it.
+_RUN_TASKS: set[asyncio.Task[None]] = set()
 
 
 async def import_sources(request: Request) -> JSONResponse:
@@ -218,14 +233,16 @@ async def _read_json_object(request: Request) -> dict[str, Any] | JSONResponse:
     return body
 
 
-# ── Import batches (C6): the private per-workspace batch store ─────────────
+# ── Import batches (C6), and the run that drives them (C7) ─────────────────
 #
-# Four routes over :mod:`ciao.import_store`, session-cookie gated like every
+# Five routes over :mod:`ciao.import_store`, session-cookie gated like every
 # other ``/api/*`` route. A request may only *name* a workspace; the store
 # path is resolved from the engine config, so no caller-supplied path ever
-# reaches the filesystem. No provider call and no model call live here: the
+# reaches the filesystem. Four of them read or move batch records only — the
 # create handler reads Ciaobot's own registry (to refuse Ciaobot-own
-# sessions) and the batch file, and nothing else. Extraction is C7.
+# sessions) and the batch file, and nothing else. The fifth schedules
+# :mod:`ciao.import_run`, which owns the conversation reads and every model
+# call; this module starts no turn of its own.
 
 
 def import_batch_store(config: Any) -> ImportStore:
@@ -343,6 +360,103 @@ async def import_batches_list(request: Request) -> JSONResponse:
     return JSONResponse(
         {"workspace": workspace, "batches": [batch.to_json() for batch in batches]}
     )
+
+
+async def import_batch_run(request: Request) -> JSONResponse:
+    """Schedule a filed batch's extraction. Answers 202 with the batch.
+
+    The body names the workspace (``{"workspace": ...}``), and a batch filed for
+    another workspace is a 404 rather than a refusal, like the cancel route: a
+    caller that may only name a workspace learns nothing about batches outside
+    it.
+
+    **No model call happens in this request.** The batch moves to ``running`` on
+    the store and :func:`ciao.import_run.run_import_batch` is scheduled on the
+    event loop; the answer is the batch as it stands, and the extraction — the
+    tool-less turn per selected conversation, and the proposals it files — happens
+    after the response. A body naming a model or a provider is ignored on
+    purpose: which model reads a user's own history is the configuration's
+    answer, and specifically the per-provider insights model
+    :func:`ciao.import_run._resolve_call` resolves — which is not necessarily
+    the model ``preview_selected`` reported on the consent screen.
+
+    A batch already ``running`` is answered **200 with its current state** rather
+    than starting a second run: one batch at a time is C6's rule and this is the
+    race two presses of the button would otherwise lose. A batch that has already
+    settled — done, failed, cancelled or partial — is a 409 whose outcome stands;
+    re-running it is a new batch.
+    """
+    config = request.app.state.config
+    body = await _read_json_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    error = _require_registered_workspace(config, body.get("workspace"))
+    if error is not None:
+        return api_error(error, 400)
+    workspace = str(body.get("workspace")).strip()
+    batch_id = str(request.path_params.get("batch_id", ""))
+    store = _store(request)
+    try:
+        batch = await asyncio.to_thread(store.get, batch_id)
+    except ImportStoreError as exc:
+        return _batch_error(exc)
+    if batch.workspace != workspace:
+        return api_error(f"no import batch {batch_id!r} is recorded", 404)
+    if batch.status == RUNNING:
+        return JSONResponse({"batch": batch.to_json()})
+    try:
+        started = await asyncio.to_thread(store.begin, batch_id)
+    except ImportStoreError as exc:
+        if exc.code != CONFLICT:
+            return _batch_error(exc)
+        # Another press won the race. A batch now running is reported, not
+        # refused: the answer is the state, and no second extraction starts.
+        try:
+            current = await asyncio.to_thread(store.get, batch_id)
+        except ImportStoreError as inner:
+            return _batch_error(inner)
+        if current.status == RUNNING:
+            return JSONResponse({"batch": current.to_json()})
+        return _batch_error(exc)
+    _schedule_run(config, started)
+    return JSONResponse({"batch": started.to_json()}, status_code=202)
+
+
+def _schedule_run(config: Any, batch: Any) -> None:
+    """Run an already-begun batch's extraction in the background, and hold the task.
+
+    The batch arrived here straight from :meth:`ImportStore.begin`, so it is
+    already ``running`` and this is the only extraction that owns it — the gate
+    was taken synchronously, so a second press could be answered rather than
+    scheduled. The coroutine absorbs its own failures: a runner that raised into
+    the event loop would take the WebSocket server down with it. The batch is
+    not left ``running`` by such a failure — the runner settles it ``failed``
+    before the exception reaches here — so all that is left to do is log it.
+    """
+    batch_id = batch.batch_id
+
+    async def _run() -> None:
+        from ciao.import_run import run_import_batch
+
+        try:
+            result = await run_import_batch(config, batch_id, batch=batch)
+        except Exception:  # noqa: BLE001 — the loop must not see a run's failure
+            logger.exception("Import batch %s could not be run", batch_id)
+            return
+        logger.info(
+            "Import batch %s settled as %s (%d proposal(s) filed)",
+            batch_id,
+            result.status,
+            result.proposals_filed,
+        )
+
+    try:
+        task = asyncio.create_task(_run(), name=f"import-run-{batch_id}")
+    except RuntimeError:  # pragma: no cover — no loop means no server
+        logger.error("Import batch %s has no event loop to run on", batch_id)
+        return
+    _RUN_TASKS.add(task)
+    task.add_done_callback(_RUN_TASKS.discard)
 
 
 async def import_batch_cancel(request: Request) -> JSONResponse:
