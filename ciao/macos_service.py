@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from ciao.server_host import ServerHostError, parse_service_command
+
 SERVER_LABEL = "com.ciao.server"
 LEGACY_MENUBAR_LABEL = "com.ciao.menubar"
 DEFAULT_PORT = 8443
@@ -160,6 +162,51 @@ def read_dotenv(path: Path) -> dict[str, str]:
     return values
 
 
+def hosted_service_python(arguments: object) -> str | None:
+    """The interpreter a hosted ``ProgramArguments`` serves, or ``None``.
+
+    ``None`` for anything that is not the strict hosted shape
+    (``CiaobotServerHost serve --python <interpreter>``) as
+    :func:`ciao.server_host.parse_service_command` reads it, including every
+    malformed value the parser refuses. Syntax only: it never proves ownership.
+    """
+    try:
+        parsed = parse_service_command(arguments)
+    except ServerHostError:
+        return None
+    return parsed.python if parsed.mode == "hosted" else None
+
+
+def service_python_path(arguments: object) -> str:
+    """The interpreter the service definition actually runs.
+
+    A **hosted** definition (``CiaobotServerHost serve --python <interpreter>``)
+    runs the native host, which is not a Python interpreter: reporting its
+    executable as ``python_path`` would make ``update_engine``'s bundled-engine
+    check and every consumer that hands this value to a process start the wrong
+    thing. The hosted shape is recognised through
+    :func:`ciao.server_host.parse_service_command` and the answer is the
+    interpreter the host was told to serve.
+
+    Anything else — including a legacy direct argv the parser refuses, an
+    arbitrary console name or a case variant — keeps today's behavior: argv[0]
+    is the program, no refusal. Recognition stays permissive on purpose;
+    refusing here would turn a working install's status and classification into
+    an error, which is exactly the operator state this must not drop. A missing
+    or non-string argv[0] names no program, so the answer is this interpreter.
+    """
+    hosted = hosted_service_python(arguments)
+    if hosted is not None:
+        return hosted
+    if (
+        isinstance(arguments, (list, tuple))
+        and arguments
+        and isinstance(arguments[0], str)
+    ):
+        return arguments[0]
+    return sys.executable
+
+
 def discover_runtime(
     *,
     launch_agents_dir: Path | None = None,
@@ -219,11 +266,7 @@ def discover_runtime(
         runtime = Path(".runtime").resolve()
 
     arguments = plist.get("ProgramArguments")
-    python_path = (
-        str(arguments[0])
-        if isinstance(arguments, list) and arguments
-        else sys.executable
-    )
+    python_path = service_python_path(arguments)
     return DesktopRuntime(
         workspace=str(workspace or ""),
         runtime_root=str(runtime.resolve()),

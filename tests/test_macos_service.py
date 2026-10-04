@@ -88,6 +88,61 @@ def test_discover_runtime_prefers_workspace_dotenv(tmp_path: Path) -> None:
     assert runtime.python_path == "/stable/python"
 
 
+def test_discover_runtime_reports_the_served_interpreter_for_a_hosted_definition(
+    tmp_path: Path,
+) -> None:
+    # A hosted definition runs CiaobotServerHost, which is not a Python
+    # interpreter: reporting argv[0] as python_path would hand every consumer
+    # (and update_engine's bundled-engine check) the host binary. The served
+    # interpreter is the answer.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    (agents / "com.ciao.server.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "WorkingDirectory": str(workspace),
+                "ProgramArguments": [
+                    "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/"
+                    "CiaobotServerHost",
+                    "serve",
+                    "--python",
+                    "/opt/ciao/venv/bin/python",
+                ],
+            }
+        )
+    )
+
+    runtime = macos_service.discover_runtime(launch_agents_dir=agents, environ={})
+
+    assert runtime.python_path == "/opt/ciao/venv/bin/python"
+
+
+def test_discover_runtime_keeps_argv0_for_a_legacy_direct_shape(
+    tmp_path: Path,
+) -> None:
+    # The parser refuses an arbitrary console name and a python3-intel64-style
+    # interpreter basename. Recognition is permissive on purpose: a working
+    # install's status must not become an error, so argv[0] stays the answer.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    (agents / "com.ciao.server.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "WorkingDirectory": str(workspace),
+                "ProgramArguments": ["/opt/ciao/bin/python3-intel64", "run"],
+            }
+        )
+    )
+
+    runtime = macos_service.discover_runtime(launch_agents_dir=agents, environ={})
+
+    assert runtime.python_path == "/opt/ciao/bin/python3-intel64"
+
+
 def test_start_service_uses_explicit_launchctl_argv(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     calls: list[list[str]] = []

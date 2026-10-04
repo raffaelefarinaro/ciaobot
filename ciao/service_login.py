@@ -575,11 +575,16 @@ def _macos_runtime(
     re-checks that the validated definition is still a file before it asks
     launchd anything. The rest keeps the result message honest about which
     workspace and program this is.
+
+    ``python_path`` is the interpreter the definition runs. A hosted
+    definition runs ``CiaobotServerHost serve --python <interpreter>``, so the
+    host executable must not be reported as the interpreter; the served python
+    is resolved by the shared recognition in
+    ``macos_service.service_python_path`` (through ``parse_service_command``),
+    and an unparsed legacy direct argv keeps today's argv[0] behavior.
     """
     arguments = plist.get("ProgramArguments")
-    python_path = sys.executable
-    if isinstance(arguments, list) and arguments and isinstance(arguments[0], str):
-        python_path = arguments[0]
+    python_path = macos_service.service_python_path(arguments)
     return macos_service.DesktopRuntime(
         workspace=str(workspace),
         runtime_root=str(workspace / ".runtime"),

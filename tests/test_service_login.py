@@ -1382,3 +1382,67 @@ def test_as_dict_is_the_dataclass_fields_and_nothing_else(
         "reason",
         "setup_command",
     }
+
+
+def test_the_runtime_the_enable_call_carries_resolves_a_hosted_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enable path builds a ``DesktopRuntime`` from the validated plist.
+
+    A hosted definition runs the native host, so the interpreter it serves —
+    not the host executable — is what the runtime must report.
+    """
+    _install(tmp_path, monkeypatch)
+    plist_path = tmp_path / "LaunchAgents" / f"{SERVER}.plist"
+    body = plistlib.loads(plist_path.read_bytes())
+    body["ProgramArguments"] = [
+        "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/"
+        "CiaobotServerHost",
+        "serve",
+        "--python",
+        "/opt/ciao/venv/bin/python",
+    ]
+    plist_path.write_bytes(plistlib.dumps(body))
+
+    runtime = service_login._macos_runtime(
+        plistlib.loads(plist_path.read_bytes()),
+        plist_path,
+        tmp_path / "workspace",
+    )
+
+    assert runtime.python_path == "/opt/ciao/venv/bin/python"
+
+
+def test_the_runtime_the_enable_call_carries_keeps_argv0_for_a_legacy_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy direct argv the parser refuses stays permissive: argv[0]."""
+    _install(tmp_path, monkeypatch)
+    plist_path = tmp_path / "LaunchAgents" / f"{SERVER}.plist"
+    body = plistlib.loads(plist_path.read_bytes())
+    body["ProgramArguments"] = ["/opt/ciao/bin/Python3", "run"]
+    plist_path.write_bytes(plistlib.dumps(body))
+
+    runtime = service_login._macos_runtime(
+        plistlib.loads(plist_path.read_bytes()),
+        plist_path,
+        tmp_path / "workspace",
+    )
+
+    assert runtime.python_path == "/opt/ciao/bin/Python3"
+
+
+def test_the_runtime_the_enable_call_carries_ignores_a_non_string_program(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-string argv[0] names no program: the answer is this interpreter."""
+    _install(tmp_path, monkeypatch)
+    plist_path = tmp_path / "LaunchAgents" / f"{SERVER}.plist"
+
+    runtime = service_login._macos_runtime(
+        {"ProgramArguments": [7, "run"]},
+        plist_path,
+        tmp_path / "workspace",
+    )
+
+    assert runtime.python_path == sys.executable
