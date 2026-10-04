@@ -575,6 +575,68 @@ export interface Schedule {
   removable?: boolean
 }
 
+// ── Webhook triggers ─────────────────────────────────────────────────────
+
+/**
+ * How a trigger's turn runs. Set at create and never editable afterwards.
+ *
+ * The three are the store's `WEBHOOK_MODES`; the receiver accepts nothing else
+ * and answers 400 for a mode it does not know.
+ */
+export type WebhookMode = 'normal' | 'auto' | 'plan'
+
+/**
+ * The body a sender may post. `event_text` is the only policy the store has, so
+ * this is a named type rather than a bare string: the body shape a recipe shows
+ * is derived from the policy, and there is one policy.
+ */
+export type WebhookInputPolicy = 'event_text'
+
+/**
+ * One configured webhook trigger, as the public record the store returns.
+ *
+ * **There is no field here that holds a credential.** The engine keeps a
+ * verifier beside the record and never serialises it, so a trigger read from
+ * `GET /api/webhooks` cannot carry a secret — and neither may a type the PWA
+ * writes. The one-time secret arrives top-level in the create and rotate
+ * responses instead, and never again.
+ *
+ * `project_id: null` is the workspace's General project, not "unset".
+ * `mode` and `input_policy` are create-only: `PATCH` accepts `name`,
+ * `instructions` and `enabled` and refuses everything else.
+ */
+export interface WebhookTrigger {
+  trigger_id: string
+  name: string
+  workspace: WorkspaceName
+  project_id: string | null
+  instructions: string
+  enabled: boolean
+  mode: WebhookMode
+  input_policy: WebhookInputPolicy
+  created_at: string
+  updated_at: string
+  /** Optimistic-concurrency counter from 1; every write presents the one it read. */
+  revision: number
+}
+
+/** `GET /api/webhooks?workspace=` — public records only, never a secret. */
+export interface WebhookTriggerResponse {
+  triggers: WebhookTrigger[]
+}
+
+/**
+ * `POST /api/webhooks` and `POST /api/webhooks/{id}/rotate`.
+ *
+ * `secret` is top-level, beside the record rather than inside it, and it is the
+ * only time either response carries one. Nothing re-reads a trigger to find it
+ * again, so the PWA keeps it in one dialog and drops it when the dialog closes.
+ */
+export interface WebhookCreateResponse {
+  trigger: WebhookTrigger
+  secret: string
+}
+
 // ── Status & Models ─────────────────────────────────────────────────────
 
 export interface StatusResponse {
@@ -1033,6 +1095,181 @@ export interface HousekeepingDismissResponse {
   summary: string
   result?: Record<string, unknown>
   actions: OperatorAction[]
+}
+
+// ── Task board: /api/tasks* ───────────────────────────────────────────────
+//
+// The shape is `ciao/control_plane.py::_task_payload`, copied rather than
+// invented. `revision` is a **string** (the SHA-256 of the file's exact bytes),
+// not a number: every write has to present it back, which is what makes a stale
+// edit a 409 instead of a lost update, so a client that rounded it into a number
+// would be sending back a revision the server never issued.
+
+/** The four board columns, in board order. */
+export type TaskStatus = 'backlog' | 'in_progress' | 'on_hold' | 'done'
+
+/** Who the task is for. Delegation is B5; the field exists so the card can say. */
+export type TaskAssignee = 'user' | 'agent'
+
+/** Whether a result is waiting to be looked at. */
+export type TaskReviewState = 'none' | 'ready'
+
+/** One readable task file, as `GET /api/tasks` serves it (no `body`). */
+export interface Task {
+  id: string
+  title: string
+  status: TaskStatus
+  /** Empty when the task belongs to no project; the board reads that as General. */
+  project_id: string
+  /** `YYYY-MM-DD`, or empty for no date. */
+  due: string
+  assignee: TaskAssignee
+  review_state: TaskReviewState
+  /** The chat an attempt is working in, empty when nothing is delegated. */
+  chat_id: string
+  /** The attempt holding the task, empty when nothing is delegated. */
+  attempt_id: string
+  created_at: string
+  updated_at: string
+  /** SHA-256 of the file's exact bytes, hex. Every write presents the one it read. */
+  revision: string
+  relative_path: string
+  /**
+   * The current attempt's state (`ciao/task_attempts.py::ATTEMPT_STATES`), or `''`
+   * when the task has never been delegated.
+   *
+   * The badge's field, and deliberately not "the live attempt's state": `failed`,
+   * `interrupted` and `stopped` are settled states a user has to see, so a board
+   * reading only live attempts would go blank the moment a turn ended.
+   */
+  attempt_state: TaskAttemptState | ''
+  /**
+   * Non-empty only while an attempt actually holds the task.
+   *
+   * That is what tells the board whether Stop and Detach are available: a
+   * `ready_for_review` attempt is live while the task stays linked, a `stopped`
+   * one is not, and a released one — approved or detached — is not either even
+   * though its `attempt_state` still reads `ready_for_review`. The badge alone
+   * cannot say which, which is why the server sends this beside it.
+   */
+  live_attempt_id: string
+  /**
+   * The task was edited after the current attempt was handed over.
+   *
+   * The result the agent is about to produce was reached against a description
+   * the user has since changed. Nothing resolves this for the reviewer — the board
+   * says it and lets them decide.
+   */
+  changed_since_delegated: boolean
+}
+
+/**
+ * One delegation attempt's state, as `ciao/task_attempts.py::ATTEMPT_STATES`.
+ *
+ * `running` and `needs_you` mean a turn is in flight; `ready_for_review` means the
+ * provider turn ended and the result waits for the user; `failed`, `interrupted`
+ * and `stopped` are settled. None of them is a board column — `ready_for_review` is
+ * a badge in *In progress*, and only the user moves a card to *Done*.
+ */
+export type TaskAttemptState =
+  | 'running'
+  | 'needs_you'
+  | 'failed'
+  | 'interrupted'
+  | 'ready_for_review'
+  | 'stopped'
+
+/**
+ * One attempt, as `POST /delegate` and the gesture routes answer with it.
+ *
+ * `live` is carried rather than derived, so a client cannot disagree with the
+ * server about which attempts hold a task.
+ */
+export interface TaskAttempt {
+  attempt_id: string
+  task_id: string
+  /** The task revision this attempt was handed, rebound after the linkage write. */
+  task_revision: string
+  chat_id: string
+  state: TaskAttemptState
+  created_at: string
+  updated_at: string
+  /** Empty while the attempt is live; stamped when it settles. */
+  ended_at: string
+  /** A bounded sentence about the engine's own outcome, never user prose. */
+  detail: string
+  /**
+   * The user approved this result or detached the card, so the task is free again.
+   *
+   * A marker and not a state: `state` stays what the turn ended as, which is the
+   * record of what the agent did. What it changes is `live`, and a released
+   * `ready_for_review` attempt is not live — which is what lets the card be
+   * delegated again.
+   */
+  released: boolean
+  live: boolean
+}
+
+/** One task's whole attempt history: the live attempt first, live and settled alike. */
+export interface TaskAttemptsResponse {
+  workspace: string
+  task: TaskDetail
+  attempts: TaskAttempt[]
+}
+
+/** What `POST /delegate` answers with. `created: false` means nothing was started. */
+export interface TaskDelegateResponse {
+  workspace: string
+  created: boolean
+  attempt: TaskAttempt
+  chat_id: string
+  /** Where the chat was hosted, and whether a project, the task or General chose it. */
+  project_id: string
+  project_origin: 'requested' | 'task' | 'general' | ''
+  task: TaskDetail
+  changed_since_delegated: boolean
+}
+
+/** What an attempt gesture answers with. `resume`/`retry` add their own flags. */
+export interface TaskAttemptActionResponse {
+  workspace: string
+  attempt: TaskAttempt
+  chat_id: string
+  task?: TaskDetail
+  resumed?: boolean
+  retried?: boolean
+}
+
+/**
+ * A file the server could not read as a task.
+ *
+ * `GET /api/tasks` appends one of these per unreadable file rather than dropping
+ * it, so a malformed task can never read as an empty or healthy board.
+ */
+export interface TaskInvalidRow {
+  id: string
+  path: string
+  code: string
+  message: string
+}
+
+/** What one entry of `GET /api/tasks`'s `tasks` array may be. */
+export type TaskRow = Task | TaskInvalidRow
+
+export interface TaskListResponse {
+  workspace: string
+  tasks: TaskRow[]
+}
+
+/**
+ * The same record with its Markdown description.
+ *
+ * Every write answers with one (`create`, `update`, `complete`), and there is no
+ * read-by-id route to get it for an arbitrary task — which is why the board only
+ * ever shows a description it actually holds.
+ */
+export interface TaskDetail extends Task {
+  body: string
 }
 
 // ── Update tasks: the "After this update" group ────────────────────────────

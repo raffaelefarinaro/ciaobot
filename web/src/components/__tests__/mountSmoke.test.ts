@@ -142,6 +142,9 @@ vi.mock('../../lib/api', () => {
     '/api/chats': [],
     '/api/tasks': { tasks: [] },
     '/api/schedules': [],
+    // The Automations overview reads the webhook triggers section on mount, so
+    // the shared fixture answers it. A bare `[]` would break `triggers.map`.
+    '/api/webhooks': { triggers: [] },
     '/api/workspaces': {
       workspaces: [],
       active: null,
@@ -236,6 +239,7 @@ function makeRouter() {
       { path: '/chat/:chatId?', name: 'chat-detail', component: Stub },
       { path: '/project/:projectId', name: 'project', component: Stub },
       { path: '/schedules', name: 'schedules', component: Stub },
+      { path: '/tasks', name: 'tasks', component: Stub },
       { path: '/memory', name: 'memory', component: Stub },
       { path: '/settings', name: 'settings', component: Stub },
       { path: '/settings/:tab', name: 'settings-tab', component: Stub },
@@ -352,6 +356,57 @@ describe('component mount smoke', () => {
     await nextTick()
 
     expect(wrapper.find('[data-testid="memory-map-stub"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('TaskBoardView mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../TaskBoardView.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('ChatLayout renders the task board at /tasks', async () => {
+    const router = makeRouter()
+    await router.push('/tasks')
+    await router.isReady()
+    const mod = await import('../ChatLayout.vue')
+    const wrapper = mount(mod.default as never, {
+      global: {
+        plugins: [router],
+        stubs: { Teleport: true },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The pane is a `viewMode` branch, so the route is what puts it on screen.
+    // The shared `/api/tasks` fixture answers `{ tasks: [] }`, which is an empty
+    // board rather than a load error — the mount must not mistake one for the
+    // other and throw.
+    expect(wrapper.text()).toContain('No tasks in')
+    expect(wrapper.text()).not.toContain('Could not load')
+    wrapper.unmount()
+  })
+
+  it('WebhookTriggers mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../WebhookTriggers.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('WebhookTriggers renders the Automations section against the shared fixture', async () => {
+    // The section is mounted here rather than through SchedulePanel, which this
+    // file stubs out as an async no-op — the overview itself is covered by
+    // SchedulePanelCards.test.ts.
+    const mod = await import('../WebhookTriggers.vue')
+    const wrapper = mount(mod.default as never, { global: { stubs: { Teleport: true } } })
+    await flushPromises()
+    await nextTick()
+
+    // The shared `/api/webhooks` fixture answers `{ triggers: [] }`, which is an
+    // empty list rather than a load error: the mount must not mistake one for the
+    // other, or it will render a failure over a workspace that simply has none.
+    expect(wrapper.text()).toContain('Webhook triggers')
+    expect(wrapper.text()).toContain('No webhook triggers yet')
+    expect(wrapper.text()).not.toContain('Could not load webhook triggers')
     wrapper.unmount()
   })
 

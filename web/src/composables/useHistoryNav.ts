@@ -34,10 +34,12 @@ function install(router: Router): void {
 const SECTION_LABELS: Record<string, string> = {
   '/': 'Home',
   '/schedules': 'Automations',
+  '/tasks': 'Tasks',
   '/memory': 'Memory',
   '/memory/review': 'To decide',
   '/memory/map': 'Memory map',
   '/memory/categories': 'Categories',
+  '/memory/import': 'Import conversations',
   '/memory/retired': 'Retired notes',
   '/memory/history': 'Memory history',
   '/settings': 'Settings',

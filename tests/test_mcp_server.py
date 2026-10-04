@@ -1900,6 +1900,29 @@ def test_task_operations_are_registered_in_the_shared_table() -> None:
         assert declared[name].readOnlyHint is False, name
 
 
+def test_webhook_operations_are_registered_in_the_shared_table() -> None:
+    """Webhook triggers are part of the one operation table, with the right split.
+
+    Same reason as the task board above: an operation missing from `OPERATIONS`
+    is a command that exists only in the CLI's help text. The split matters
+    more here — `webhook_list` is `_READ`, the three config verbs are `_WRITE`
+    with `readOnlyHint=False` (so a plan-mode chat cannot create, enable or
+    rotate a trigger behind the user's back), and `webhook_delete` is
+    `_DESTRUCTIVE` because it destroys a verifier that no edit can bring back.
+    """
+    declared = {operation.name: operation.annotations for operation in mcp_server.OPERATIONS}
+    for name in (
+        "webhook_list", "webhook_create", "webhook_update", "webhook_rotate",
+        "webhook_delete",
+    ):
+        assert name in declared, name
+    assert declared["webhook_list"] == mcp_server._READ
+    for name in ("webhook_create", "webhook_update", "webhook_rotate"):
+        assert declared[name] == mcp_server._WRITE, name
+        assert declared[name].readOnlyHint is False, name
+    assert declared["webhook_delete"] == mcp_server._DESTRUCTIVE
+
+
 def test_tools_list_reports_the_whole_catalog(tmp_path: Path) -> None:
     """Every registered operation is present in the shared table.
 
