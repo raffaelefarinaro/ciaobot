@@ -21,6 +21,9 @@
 //    credentials it has.
 //  - the recipe carries the real trigger id and the machine contract (bearer,
 //    Idempotency-Key, the 202 receipt), and never a secret.
+//  - the receipt history says what arrived, which chat it became and which one
+//    needs a person — with the same five load states as the list above it, so a
+//    history nobody has read is never drawn as a trigger that received nothing.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -29,7 +32,7 @@ import { nextTick } from 'vue'
 import WebhookTriggers from '../WebhookTriggers.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useWebhookStore } from '../../stores/webhooks'
-import type { WebhookTrigger } from '../../lib/types'
+import type { WebhookReceipt, WebhookTrigger } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -37,6 +40,7 @@ const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
 const writeClipboard = vi.hoisted(() => vi.fn(async (_text: string) => true))
 const askConfirm = vi.hoisted(() => vi.fn(async () => true))
+const routerPush = vi.hoisted(() => vi.fn(async () => {}))
 
 vi.mock('../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: apiPatch, del: apiDel },
@@ -48,6 +52,9 @@ vi.mock('../../lib/codeCopy', () => ({ writeClipboard }))
 // The confirm dialog lives in App.vue, not in the section, so a delete has to be
 // answerable from here without a second dialog mounted.
 vi.mock('../../lib/confirm', () => ({ askConfirm }))
+// A chat the event became is opened by pushing the app's own deep link, which is
+// what resolves it to a workspace and a transcript.
+vi.mock('../../router', () => ({ router: { push: routerPush } }))
 
 const SECRET = 'whsec_9f2c1d4e7a8b'
 const NEW_SECRET = 'whsec_5b3a0c6d2e1f'
@@ -71,6 +78,38 @@ function trigger(overrides: Partial<WebhookTrigger> = {}): WebhookTrigger {
 
 function listing(rows: WebhookTrigger[]): { triggers: WebhookTrigger[] } {
   return { triggers: rows }
+}
+
+/** One recorded event, as `GET /api/webhooks/{id}/receipts` returns it. */
+function receipt(overrides: Partial<WebhookReceipt> = {}): WebhookReceipt {
+  return {
+    receipt_id: 'wbrcpt_1a2b3c',
+    trigger_id: 'trg_issue_1034',
+    trigger_name: 'New issue from GitHub',
+    status: 'launched',
+    chat_id: 'chat-from-the-event',
+    event_text: 'the nightly build failed on main',
+    created_at: '2026-03-04T09:00:00+00:00',
+    updated_at: '2026-03-04T09:00:05+00:00',
+    detail: 'chat chat-from-the-event',
+    ...overrides,
+  }
+}
+
+/**
+ * The list read and the history read in one mock.
+ *
+ * Both go through `api.get`, so the history tests answer by URL rather than by
+ * call order — a queue of `mockResolvedValueOnce` would make every test that
+ * opens a history depend on how many reads preceded it.
+ */
+function serving(rows: WebhookReceipt[], options: { limit?: number; triggers?: WebhookTrigger[] } = {}) {
+  const triggers = options.triggers ?? [trigger()]
+  apiGet.mockImplementation(async (url: string) =>
+    url.includes('/receipts')
+      ? { limit: options.limit ?? 50, receipts: rows }
+      : listing(triggers),
+  )
 }
 
 /** An `ApiError` as `lib/api.ts` builds it: a flat `{"error": "…"}` body. */
@@ -123,6 +162,19 @@ function row(wrapper: ReturnType<typeof mountSection>, name: string) {
   const found = wrapper.findAll('.wh-row').find(r => r.text().includes(name))
   if (!found) throw new Error(`no row for ${name}`)
   return found
+}
+
+/** The open receipt history panel, or a throw naming what is on screen. */
+function historyPanel(wrapper: ReturnType<typeof mountSection>): DOMWrapper<HTMLElement> {
+  const found = wrapper.find('.wh-history')
+  if (!found.exists()) throw new Error(`no history panel; the section shows "${wrapper.text()}"`)
+  return found as DOMWrapper<HTMLElement>
+}
+
+/** Open the row's history and wait for the read it starts. */
+async function openHistory(wrapper: ReturnType<typeof mountSection>, name = 'New issue from GitHub') {
+  await row(wrapper, name).findAll('button').filter(b => b.text() === 'History')[0].trigger('click')
+  await flushPromises()
 }
 
 /**
@@ -180,6 +232,7 @@ beforeEach(() => {
   writeClipboard.mockResolvedValue(true)
   askConfirm.mockReset()
   askConfirm.mockResolvedValue(true)
+  routerPush.mockClear()
 })
 
 afterEach(() => {
@@ -949,6 +1002,271 @@ describe('the receiver recipe', () => {
     await flushPromises()
     expect(openDialog(wrapper)).toBeNull()
     expect(button(wrapper, 'Recipe').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+describe('the receipt history', () => {
+  it('reads one trigger on demand, scoped to the workspace, and names its rows', async () => {
+    serving([
+      receipt(),
+      receipt({
+        receipt_id: 'wbrcpt_older',
+        status: 'failed',
+        chat_id: null,
+        event_text: 'a rejected event',
+        detail: 'the project does not exist',
+      }),
+    ])
+    const wrapper = mountSection()
+    await flushPromises()
+    // Nothing is read until a history is opened: events arrive while a person is
+    // looking at a trigger, so every row carrying its own read would be a request
+    // per trigger on every pane visit.
+    expect(apiGet).toHaveBeenCalledTimes(1)
+
+    await openHistory(wrapper)
+
+    expect(apiGet).toHaveBeenCalledWith('/api/webhooks/trg_issue_1034/receipts?workspace=personal')
+
+    const panel = historyPanel(wrapper)
+    expect(panel.text()).toContain('the nightly build failed on main')
+    expect(panel.text()).toContain('a rejected event')
+    // An outcome in words, newest first, never a colour alone.
+    const rows = panel.findAll('.wh-receipt')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].text()).toContain('Launched')
+    expect(rows[1].text()).toContain('Failed')
+    wrapper.unmount()
+  })
+
+  it('opens the chat a launched event became, and offers no button where none is', async () => {
+    serving([
+      receipt(),
+      receipt({ receipt_id: 'wbrcpt_stuck', status: 'interrupted', chat_id: null, detail: 'review before retrying' }),
+    ])
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+
+    const panel = historyPanel(wrapper)
+    expect(panel.findAll('.wh-receipt')[0].findAll('button')).toHaveLength(1)
+
+    await panel.findAll('.wh-receipt')[0].find('button').trigger('click')
+    await flushPromises()
+
+    expect(routerPush).toHaveBeenCalledWith('/chat/chat-from-the-event')
+    // An interrupted receipt names no chat: a button that cannot open anything is
+    // worse than no button, and there is nothing to open.
+    expect(panel.findAll('.wh-receipt')[1].find('button').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows an interrupted event, in words, rather than dropping it', async () => {
+    // The one state nothing else reports and nobody replays: a process died
+    // inside the launch window, so a person has to look at it.
+    serving([
+      receipt({
+        receipt_id: 'wbrcpt_stuck',
+        status: 'interrupted',
+        chat_id: null,
+        detail: 'the launch allocation was recorded but the outcome was not',
+      }),
+    ])
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+
+    const panel = historyPanel(wrapper)
+    expect(panel.text()).toContain('Interrupted')
+    expect(panel.text()).toContain('the launch allocation was recorded but the outcome was not')
+    expect(panel.findAll('.wh-receipt')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('says the read is capped once the rows fill it', async () => {
+    // A history that hit its cap and stopped is otherwise indistinguishable from a
+    // trigger that received exactly that many events ever.
+    serving([receipt()], { limit: 1 })
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+
+    expect(historyPanel(wrapper).text()).toContain('The 1 most recent events')
+    expect(historyPanel(wrapper).text()).toContain('not in this list')
+    wrapper.unmount()
+  })
+
+  it('says it is checking rather than claiming the trigger received nothing', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.includes('/receipts')) return new Promise(() => {})
+      return listing([trigger()])
+    })
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+
+    const panel = historyPanel(wrapper)
+    expect(panel.text()).toContain('Loading received events')
+    expect(panel.text()).not.toContain('No events yet')
+    wrapper.unmount()
+  })
+
+  it('shows a first read that failed, and never an empty answer from it', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.includes('/receipts')) throw refused(500, 'the receipt journal could not be read')
+      return listing([trigger()])
+    })
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+
+    const alert = wrapper.find('.wh-history [role="alert"]')
+    expect(alert.text()).toContain('Could not load received events')
+    expect(alert.text()).toContain('the receipt journal could not be read')
+    expect(historyPanel(wrapper).text()).not.toContain('No events yet')
+
+    // Retry is the whole answer, and it reads again.
+    serving([receipt()])
+    await button(wrapper, 'Retry').trigger('click')
+    await flushPromises()
+    expect(historyPanel(wrapper).text()).toContain('the nightly build failed on main')
+    wrapper.unmount()
+  })
+
+  it('keeps the rows it has when a refresh fails, and says they are stale', async () => {
+    serving([receipt()])
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+    expect(historyPanel(wrapper).findAll('.wh-receipt')).toHaveLength(1)
+
+    await button(wrapper, 'Hide history').trigger('click')
+    await flushPromises()
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.includes('/receipts')) throw refused(500, 'the receipt journal could not be read')
+      return listing([trigger()])
+    })
+    await openHistory(wrapper)
+
+    // The rows on screen are older than the answer that failed, and the panel says
+    // so: an empty history here would claim the trigger received nothing at all.
+    const panel = historyPanel(wrapper)
+    expect(panel.findAll('.wh-receipt')).toHaveLength(1)
+    expect(panel.text()).toContain('Showing the last successful load')
+    expect(panel.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('says so when a trigger genuinely has received nothing', async () => {
+    serving([])
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+
+    const panel = historyPanel(wrapper)
+    expect(panel.text()).toContain('No events yet')
+    // And the reason a person needs: a sender's accepted event appears here.
+    expect(panel.text()).toContain('appears here the moment it')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('drops a late answer from the workspace that was left behind', async () => {
+    let answerReceipts!: (value: unknown) => void
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.includes('/receipts')) {
+        return new Promise(resolve => { answerReceipts = resolve })
+      }
+      return listing([trigger()])
+    })
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+
+    // A `1`–`9` shortcut moves the pane while the read is open. The trigger id
+    // means nothing in the workspace that replaced it, so its answer is not that
+    // workspace's history.
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+    expect(wrapper.find('.wh-history').exists()).toBe(false)
+
+    answerReceipts({ limit: 50, receipts: [receipt()] })
+    await flushPromises()
+
+    expect(wrapper.find('.wh-history').exists()).toBe(false)
+    expect(wrapper.findAll('.wh-receipt')).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('the nightly build failed on main')
+    expect(useWebhookStore().receipts).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('never draws one trigger’s rows under another', async () => {
+    // One history at a time: the store holds a single one, keyed by trigger, so
+    // opening a second cannot leave the first one's rows on screen under a row
+    // they have nothing to do with.
+    let answerSecond!: (value: unknown) => void
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.includes('/trg_second/receipts')) return new Promise(resolve => { answerSecond = resolve })
+      if (url.includes('/receipts')) return { limit: 50, receipts: [receipt()] }
+      return listing([trigger(), trigger({ trigger_id: 'trg_second', name: 'Second trigger' })])
+    })
+    const wrapper = mountSection()
+    await flushPromises()
+    await openHistory(wrapper)
+    expect(historyPanel(wrapper).text()).toContain('the nightly build failed on main')
+
+    await openHistory(wrapper, 'Second trigger')
+
+    // Its own read is asked for (events arrive while a person looks) and, until it
+    // answers, the panel is a pending question — not the previous trigger's rows.
+    expect(apiGet).toHaveBeenCalledWith('/api/webhooks/trg_second/receipts?workspace=personal')
+    expect(historyPanel(wrapper).text()).toContain('Loading received events')
+    expect(historyPanel(wrapper).text()).not.toContain('the nightly build failed on main')
+
+    answerSecond({ limit: 50, receipts: [receipt({ receipt_id: 'wbrcpt_second', trigger_id: 'trg_second', event_text: 'the other trigger’s event' })] })
+    await flushPromises()
+    expect(historyPanel(wrapper).text()).toContain('the other trigger’s event')
+    wrapper.unmount()
+  })
+
+  it('is a keyboard-reachable disclosure with 44px targets', async () => {
+    serving([receipt()])
+    const wrapper = mountSection()
+    await flushPromises()
+
+    // A native button with the expanded state named, and the panel it controls
+    // named by id — so a screen reader is told what the press will do and which
+    // element it owns.
+    const toggle = row(wrapper, 'New issue from GitHub').findAll('button')
+      .find(b => b.text() === 'History')!
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    // The shared button class is what carries the touch floor (App.vue gives
+    // `.btn-small` `min-height: var(--touch)` on coarse pointers), so a bespoke
+    // class here would quietly opt the history out of it.
+    expect(toggle.classes()).toContain('btn-small')
+
+    await toggle.trigger('click')
+    await flushPromises()
+    const panel = historyPanel(wrapper)
+    expect(panel.attributes('id')).toBe('wh-history-trg_issue_1034')
+    const opened = row(wrapper, 'New issue from GitHub').findAll('button')
+      .find(b => b.text() === 'Hide history')!
+    expect(opened.attributes('aria-controls')).toBe('wh-history-trg_issue_1034')
+    expect(opened.attributes('aria-expanded')).toBe('true')
+    // A native button is focusable, so a keyboard can carry from the disclosure
+    // straight into the panel's own controls.
+    opened.element.focus()
+    expect(document.activeElement).toBe(opened.element)
+    const openChatButton = panel.findAll('.wh-receipt')[0].find('button')
+    expect(openChatButton.element.tagName).toBe('BUTTON')
+    expect(openChatButton.classes()).toContain('btn-small')
+
+    // And the same press closes it again, rather than leaving a disclosure the
+    // reader cannot undo.
+    await button(wrapper, 'Hide history').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.wh-history').exists()).toBe(false)
     wrapper.unmount()
   })
 })

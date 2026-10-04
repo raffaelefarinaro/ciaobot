@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -77,7 +76,7 @@ from ciao.webhooks import (
     WebhookReceipt,
     WebhookStoreError,
 )
-from ciao.web.routes_webhooks import webhook_store
+from ciao.web.routes_webhooks import webhook_receiver, webhook_store
 
 logger = logging.getLogger(__name__)
 
@@ -136,17 +135,6 @@ def _receiver_error(exc: WebhookReceiverError) -> JSONResponse:
         # advice is "one window from now", not "whenever".
         response.headers["Retry-After"] = str(RATE_WINDOW_SECONDS)
     return response
-
-
-def webhook_receiver(config: Any) -> WebhookReceiver:
-    """The engine's receiver, with its journal beside the trigger store.
-
-    Built per call, like the store it reads: both are cheap and cross-process
-    safe by design (every decision re-reads the file under its locks), so no
-    ``app.state`` wiring is needed and a rotated or revoked secret is visible to
-    the very next request.
-    """
-    return WebhookReceiver(webhook_store(config).path)
 
 
 def schedule_webhook_dispatch(

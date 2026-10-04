@@ -92,6 +92,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` | One lifecycle gesture on one attempt; `{"workspace"}` is the only body key, because the gesture acts on an attempt rather than editing a record (there is no field to present a revision at). `action` is `stop` (ends the turn irreversibly; the task keeps its linkage and stays uncompletable), `resume` (continues the **same** chat under the **same** attempt; only an attempt that did not finish is resumable), `retry` (starts a **new** attempt in a new chat, leaving the previous one as history) or `detach` (stops the turn if running and clears the linkage, which is what makes the task completable again). An unknown verb is a 400 `invalid_action`; an unknown attempt id is a 404 |
 | GET | `/api/webhooks?workspace=` | List a workspace's webhook triggers (public records only, never secrets) |
 | POST | `/api/webhooks` | Create a webhook trigger; returns the trigger plus its one-time secret |
+| GET | `/api/webhooks/receipts?workspace=` | A workspace's recorded webhook events across every trigger, newest first, at most `limit` rows (#1044). A row is `{receipt_id, trigger_id, trigger_name, status, chat_id, event_text, created_at, updated_at, detail}`; `status` is `accepted`/`launching`/`launched`/`failed`/`interrupted`, `chat_id` is the chat a `launched` event became (`null` otherwise), and a receipt whose trigger has since been deleted is still listed — it is filtered on its own `workspace`. Never a verifier, an idempotency key or a body digest |
+| GET | `/api/webhooks/{trigger_id}/receipts?workspace=` | One trigger's recorded events, newest first, at most `limit` rows (#1044), beside that trigger's `trigger_id`, `trigger_name` and the same `limit`. `?workspace=` is required (400 otherwise) and a trigger that is not that workspace's is a 404 — the same answer as an unknown id |
 | PATCH | `/api/webhooks/{trigger_id}` | Update a trigger's name, instructions, or enabled flag (revision-checked) |
 | POST | `/api/webhooks/{trigger_id}/rotate` | Rotate a trigger's secret; returns the trigger plus the new one-time secret |
 | DELETE | `/api/webhooks/{trigger_id}` | Delete a trigger and its verifier (`?expected_revision=`, revision-checked) |
@@ -1505,8 +1507,23 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/webhoo
 
 # Delete the trigger and destroy its verifier. Irreversible: the id cannot be
 # made to authenticate again, so the sender needs a new trigger. Receipts
-# already recorded for past events are kept.
+# already recorded for past events are kept, and stay readable on the workspace
+# read below.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/webhooks/$TRIGGER?expected_revision=3"
+
+# What this trigger has received, newest first, at most `limit` (50) rows. One
+# row per accepted event, not per journal line: a row carries the receipt's
+# *current* state, so an event that walked accepted → launching → launched
+# appears once, as `launched`, with the chat it became.
+# 200 {"trigger_id":"…","trigger_name":"…","limit":50,"receipts":[
+#        {"receipt_id":"wbrcpt_…","trigger_id":"…","trigger_name":"…",
+#         "status":"launched","chat_id":"…","event_text":"…",
+#         "created_at":"…","updated_at":"…","detail":"chat …"}]}
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/webhooks/$TRIGGER/receipts?workspace=default"
+
+# The same rows for a whole workspace, across every trigger — which is how you
+# still see a receipt whose trigger has since been deleted.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/webhooks/receipts?workspace=default"
 
 # Archiving the workspace (POST /api/workspaces/<name>/archive) also disables
 # every trigger in it and destroys its verifiers, so restoring the name later
@@ -1520,6 +1537,35 @@ an approval card raised in that turn is an ordinary card in Needs-you. The
 trigger's `instructions` come first and the sender's text follows as data; a
 sender cannot choose the chat, the project, the workspace, the model or the
 permission mode. See `docs/WEBHOOK_TRIGGER_STORE.md`.
+
+### Read a trigger's receipt history
+
+`GET /api/webhooks/{trigger_id}/receipts?workspace=` is the answer to "what has
+this trigger actually received, and which chat did each event become" — including
+the one left `interrupted`, which nothing else reports and which is never replayed
+on its own.
+
+- **`status` is the receipt's current state, not a log line.** `accepted` and
+  `launching` mean the event is still in flight (recorded, or its launch
+  allocated and not yet reported); `launched` is the **success** outcome and
+  `chat_id` names the ordinary chat the event became; `failed` means the launch
+  did not complete and `detail` says why; `interrupted` means a process died
+  inside the launch window, so nobody can tell whether the turn ran — review it,
+  do not assume it did not.
+- **The read is bounded and capped at `limit` (50), newest first.** Older rows
+  are still in the journal; they are just not what a history view reads. The
+  journal is trimmed in its own right (4 MiB / 4000 settled rows), so this is a
+  cap on what a page draws rather than on what is kept.
+- **Retention.** The seven-day window is the *dedupe* window and nothing more: it
+  decides whether a sender reusing an `Idempotency-Key` collapses onto an earlier
+  receipt or starts a new generation of the id. A settled receipt stays readable
+  past it; what ages out is the key, never the record of what happened.
+- **Workspace-scoped, like the management routes.** An unregistered
+  `?workspace=` is a 400, and a trigger belonging to another workspace is the same
+  404 as an unknown id.
+- **No credential is in a row.** The projection
+  (`WebhookReceipt.to_public_dict`) carries no verifier, no `idempotency_key` and
+  no `body_digest`.
 
 ### Send a webhook event
 
@@ -1549,7 +1595,9 @@ and the sender is not told about it — so no recipe, skill or capability may re
 `202` as "a turn ran" or "your work was done". The chat the event becomes is an
 ordinary one the operator opens like any other, and its outcome is recorded in
 that same journal (`launched`, `failed`, or `interrupted` if the engine died
-inside the launch window — which is never replayed automatically).
+inside the launch window — which is never replayed automatically). A sender still
+has no way to read that outcome back; the *operator* can, through
+[the receipt-history read](#read-a-triggers-receipt-history).
 
 | Status | Meaning | Retry? |
 |---|---|---|

@@ -3,7 +3,14 @@ import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 import { apiErrorMessage } from '../lib/errorMessage'
 import { webhookTriggerFrom } from '../lib/webhooks'
-import type { WebhookCreateResponse, WebhookMode, WebhookTrigger, WebhookTriggerResponse } from '../lib/types'
+import type {
+  WebhookCreateResponse,
+  WebhookMode,
+  WebhookReceipt,
+  WebhookReceiptsResponse,
+  WebhookTrigger,
+  WebhookTriggerResponse,
+} from '../lib/types'
 
 /**
  * Fields accepted by `POST /api/webhooks`.
@@ -34,6 +41,10 @@ function triggersUrl(workspace: string): string {
 
 function triggerUrl(triggerId: string): string {
   return `/api/webhooks/${encodeURIComponent(triggerId)}`
+}
+
+function receiptsUrl(workspace: string, triggerId: string): string {
+  return `${triggerUrl(triggerId)}/receipts?workspace=${encodeURIComponent(workspace)}`
 }
 
 /**
@@ -96,8 +107,85 @@ export const useWebhookStore = defineStore('webhooks', () => {
    */
   let writeSeq = 0
 
+  /**
+   * One trigger's recorded events, and the states that read them.
+   *
+   * Separate from the trigger list because the two have different lives: a
+   * workspace's triggers are a configuration list that is read on mount, while a
+   * history is something a person opens on one row. So it is read on demand, for
+   * one trigger at a time, and `receiptsTriggerId` is what says whose rows these
+   * are — a row drawn under the wrong trigger would read as a different trigger's
+   * events, which is the one thing a history must never do.
+   */
+  const receipts = ref<WebhookReceipt[]>([])
+  const receiptsTriggerId = ref('')
+  const receiptsLoaded = ref(false)
+  const receiptsLoading = ref(false)
+  const receiptsError = ref('')
+  /** The cap the read was bounded by, so the view can say what it is showing. */
+  const receiptsLimit = ref(0)
+  /** Ticket for the newest history read; a late answer is dropped, not drawn. */
+  let receiptsSeq = 0
+
   /** Whether this workspace's list has been read at least once, successfully. */
   const loaded = computed(() => loadedWorkspace.value !== '')
+
+  /**
+   * Read one trigger's recorded events, newest first, always.
+   *
+   * The same shape as {@link reload}, for the same reasons: a failed refresh keeps
+   * the rows on screen (the section reads `receiptsError` over non-empty rows as
+   * its own stale state), a switch to another trigger drops them first — a receipt
+   * id from the previous trigger would otherwise be drawn under this one — and a
+   * late answer is dropped rather than merged.
+   *
+   * Gated on {@link drawingWorkspace} like every write here: a trigger id means
+   * nothing outside the workspace it was configured in, so an answer that arrives
+   * after the pane moved on is not this workspace's history even though it is a
+   * perfectly good one.
+   */
+  async function loadReceipts(workspace: string, triggerId: string): Promise<void> {
+    if (!workspace || !triggerId) return
+    if (triggerId !== receiptsTriggerId.value) {
+      receipts.value = []
+      receiptsTriggerId.value = ''
+      receiptsLoaded.value = false
+      receiptsLimit.value = 0
+    }
+    const seq = ++receiptsSeq
+    receiptsLoading.value = true
+    receiptsError.value = ''
+    try {
+      const data = await api.get<WebhookReceiptsResponse>(receiptsUrl(workspace, triggerId))
+      if (seq !== receiptsSeq || !drawingWorkspace(workspace)) return
+      const fresh = Array.isArray(data?.receipts) ? data.receipts : []
+      receipts.value = fresh
+      receiptsLimit.value = Number(data?.limit ?? 0) || fresh.length
+      receiptsTriggerId.value = triggerId
+      receiptsLoaded.value = true
+    } catch (e) {
+      if (seq !== receiptsSeq || !drawingWorkspace(workspace)) return
+      receiptsError.value = apiErrorMessage(e, 'Could not load received events.')
+    } finally {
+      if (seq === receiptsSeq) receiptsLoading.value = false
+    }
+  }
+
+  /** Whether a successful history read has ever answered for `triggerId`. */
+  function receiptsLoadedFor(triggerId: string): boolean {
+    return receiptsLoaded.value && receiptsTriggerId.value === triggerId
+  }
+
+  /**
+   * The history this store holds for `triggerId`, or `[]` when it holds none.
+   *
+   * Keyed by id rather than returned bare, because the store holds exactly one
+   * history at a time: a caller that asked for a different trigger must be told
+   * nothing rather than handed the previous one's events.
+   */
+  function receiptsFor(triggerId: string): WebhookReceipt[] {
+    return receiptsTriggerId.value === triggerId ? receipts.value : []
+  }
 
   /**
    * Read the list for `workspace`, always.
@@ -438,6 +526,8 @@ export const useWebhookStore = defineStore('webhooks', () => {
   return {
     triggers, loadedWorkspace, loaded, loading, loadError, error, saving,
     reload, ensureLoaded, revisionOf,
+    receipts, receiptsLimit, receiptsLoading, receiptsError,
+    loadReceipts, receiptsLoadedFor, receiptsFor,
     create, update, rotate, remove, clearError,
   }
 })

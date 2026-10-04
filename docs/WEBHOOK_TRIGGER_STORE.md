@@ -10,11 +10,13 @@
 > Automations page that manages the triggers (A5), and the agent's own
 > management surface — the `ciao webhook` noun and the matching operations —
 > together with the user/sender recipes and the capability text that describes it
-> (A6). What the whole set does **not** ship: a receipt-history view, outbound
-> callbacks, provider-specific signature adapters, public tunnels, model
-> overrides. A `202` from the receiver means "your event is recorded", not "a
-> turn ran", and no page, skill or recipe may claim otherwise. This document is
-> the store's, the receiver's and the dispatcher's own contract.
+> (A6), and the session-authenticated **receipt-history read** over the same
+> journal, with a per-trigger history in that Automations page (#1044). What the
+> whole set does **not** ship: outbound callbacks, provider-specific signature
+> adapters, public tunnels, model overrides. A `202` from the receiver means "your
+> event is recorded", not "a turn ran", and no page, skill or recipe may claim
+> otherwise. This document is the store's, the receiver's and the dispatcher's own
+> contract.
 
 ## What it is
 
@@ -224,9 +226,67 @@ launch as a crash at the next boot.
 
 **Deliberately not here.** The launch itself (`begin_launch`, `settle_launched`
 and `settle_failed` are the dispatcher's entry points, and nothing in
-`ciao/webhooks.py` calls them), a receipt-list API, outbound callbacks, and any
-provider-specific signature adapter — the bearer secret is the whole
-authentication story.
+`ciao/webhooks.py` calls them), outbound callbacks, and any provider-specific
+signature adapter — the bearer secret is the whole authentication story.
+
+## The receipt history (#1044)
+
+A read surface over the same journal, so "what has this trigger received, and
+which chat did each event become" has an answer that does not require reading a
+JSONL file by hand. Two session-authenticated, workspace-scoped reads, beside the
+management routes in `ciao/web/routes_webhooks.py`:
+
+- `GET /api/webhooks/{trigger_id}/receipts?workspace=` — one trigger's events,
+  beside its `trigger_id`, `trigger_name` and the `limit` it was read with.
+- `GET /api/webhooks/receipts?workspace=` — the same rows for a whole workspace,
+  across every trigger.
+
+Both take the ordinary session cookie like every other `/api/*` route, and both
+answer an unregistered or absent `?workspace=` with a **400** and a trigger that
+is not that workspace's with the same **404** as an unknown id — a history is not
+a way to confirm what another workspace has configured. The workspace-wide read
+filters on each receipt's **own** `workspace` field rather than on the triggers
+that exist now, which is what keeps a receipt readable after its trigger is
+deleted, renamed or retargeted.
+
+**The row is a projection, not the journal line.** `WebhookReceipt.to_public_dict`
+is the only shape that leaves the engine: `receipt_id`, `trigger_id`,
+`trigger_name`, `status`, `chat_id`, `event_text`, `created_at`, `updated_at` and
+`detail`. No verifier — and deliberately none of the journal's own retry
+machinery either: the sender's `idempotency_key` and the request `body_digest`
+are what collapses a retry, and neither is what "what arrived?" asks for.
+`chat_id` is derived from the `launched` receipt's `detail` (`"chat <id>"`) so a
+caller never parses a chat id out of an engine's own prose, and `detail` stays
+beside it because on a `failed` or `interrupted` row it is the only sentence
+explaining what happened.
+
+**The read is bounded, and bounded where the trim is not.** `receipts_for()`
+(fold the whole journal) exists because a dedupe decision genuinely has to know
+about every row; the history read is a *question* about the recent tail, so it
+walks the file backwards in `_REVERSE_WINDOW_BYTES` windows
+(`_iter_rows_newest_first`) and stops at `RECEIPTS_HISTORY_LIMIT` (50). Reading
+fifty rows costs fifty rows of memory rather than the whole journal's, and one
+row per receipt id is all that is kept even though the journal holds three lines
+for an event that walked `accepted → launching → launched` — walking backwards,
+the first row seen for an id *is* that receipt's effective state, which is what
+makes the early stop safe. The rows behind the cap are still in the journal and
+still trimmed only by the journal's own bounds (4 MiB / 4000 settled rows);
+`limit` is a cap on what a page draws, not on what is kept.
+
+**Retention, stated honestly.** `DEDUPE_RETENTION_DAYS` (7) is a *dedupe*
+window: it decides whether a sender reusing an `Idempotency-Key` collapses onto an
+earlier receipt or takes the next generation of the id. A settled receipt stays
+readable past it, and what ages out is the key, never the record of what
+happened. Nothing here promises more than the journal keeps — once the trim drops
+a settled row, it is gone, and that is the only thing that erases it.
+
+**What the UI draws.** `web/src/components/WebhookTriggers.vue` gained a
+per-trigger history under the trigger's row: one line per receipt with its
+outcome in words, when it arrived, and a button to open the chat a `launched`
+event became. An `interrupted` row is drawn like any other, because it is a
+record that needs a person and not an error to hide. A sender still cannot read
+any of this back — the surface is the operator's, and `202` remains the sender's
+whole answer.
 
 ## Dispatch (#1020)
 
@@ -410,10 +470,10 @@ have taken.
 - **A5 — the Automations UI.** The section on the Automations page that lists a
   workspace's triggers, creates one, reveals and copies its one-time secret (and
   says the old one is dead after a rotation), shows the sender's own recipe, and
-  enables, disables, rotates and deletes. Shipped in #1034. **It does not show
-  receipt history**, and no child builds one: a receipt-list API is still
-  deliberately absent (see **The ingress receipts** above), so what a trigger
-  received is readable only in the journal file itself.
+  enables, disables, rotates and deletes. Shipped in #1034. It did not show
+  receipt history then, because there was no receipt-list API to render; #1044
+  added that read and this section's per-trigger history under the row (see **The
+  receipt history** above).
 - **A6 — the agent surface, the recipes and the capabilities text.** Scoped
   management from a chat: `ciao webhook list|create|update|rotate|delete`
   (`ciao/agent_cli.py`) over `workspace_webhook_*` (`ciao/control_plane.py`) and
@@ -430,6 +490,7 @@ have taken.
 
 Every child of #974 has now shipped, so nothing is left on this list and this
 document is the whole of the feature: a surface added later has to describe what
-is here rather than what was once planned. The one thing the plan named that no
-child built is a receipt-history view, which stays out of scope rather than
-becoming a claim: there is no receipt-list API to render it from.
+is here rather than what was once planned. The one thing the original plan named
+that no child of #974 built — a receipt-history view — shipped afterwards in
+#1044 as a read surface over this journal (see **The receipt history** above),
+with the bounded cap and the retention truth stated there.

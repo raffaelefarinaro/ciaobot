@@ -208,7 +208,9 @@ from ciao.web.routes_webhooks import (
     webhook_create,
     webhook_delete,
     webhook_list,
+    webhook_receipts,
     webhook_rotate,
+    webhook_trigger_receipts,
     webhook_update,
 )
 from ciao.web.security import SecurityHeadersMiddleware
@@ -468,9 +470,19 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Webhook trigger management (A2). The literal `rotate` segment
         # precedes the bare `{trigger_id}` pattern so rotation is not read
         # as a trigger id. Management routes only; the receiver is
-        # `routes_hooks.py`.
+        # `routes_hooks.py`. The two `receipts` reads (#1044) are the history
+        # surface over the ingress journal, and they precede `{trigger_id}`
+        # for the same reason `rotate` does: a workspace-wide `receipts` would
+        # otherwise be answered with a 405 by the bare `{trigger_id}` route
+        # registered below, since Starlette stops at the first partial match.
         Route("/api/webhooks", webhook_list, methods=["GET"]),
         Route("/api/webhooks", webhook_create, methods=["POST"]),
+        Route("/api/webhooks/receipts", webhook_receipts, methods=["GET"]),
+        Route(
+            "/api/webhooks/{trigger_id}/receipts",
+            webhook_trigger_receipts,
+            methods=["GET"],
+        ),
         Route(
             "/api/webhooks/{trigger_id}/rotate", webhook_rotate, methods=["POST"]
         ),

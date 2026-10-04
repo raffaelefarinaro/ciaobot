@@ -637,6 +637,57 @@ export interface WebhookCreateResponse {
   secret: string
 }
 
+/**
+ * How far one recorded event got.
+ *
+ * The two open states are not failures — `accepted` is recorded and nothing has
+ * been launched yet, `launching` is the durable allocation and the turn has not
+ * reported back. `launched` is the **success** outcome (the turn ran; its
+ * progress lives in the chat, not here). `interrupted` is the one a person has
+ * to look at: a process died inside the launch window, so nobody can tell
+ * whether the turn ran.
+ */
+export type WebhookReceiptStatus = 'accepted' | 'launching' | 'launched' | 'failed' | 'interrupted'
+
+/**
+ * One recorded webhook event, as the history read returns it.
+ *
+ * **A projection, not the journal row.** There is no verifier here and no
+ * idempotency key or body digest either: those are the receiver's machinery for
+ * collapsing a retry, and "what arrived?" does not ask for them. `chat_id` is the
+ * chat a `launched` event became and `null` for every other state — the chat is an
+ * ordinary one whose title says nothing about which event made it, so this is
+ * the only thing that can point at it.
+ *
+ * `detail` is the engine's own sentence about the outcome: the chat on a
+ * `launched` row, why the launch did not complete on a `failed` one, and why
+ * nobody can tell on an `interrupted` one.
+ */
+export interface WebhookReceipt {
+  receipt_id: string
+  trigger_id: string
+  trigger_name: string
+  status: WebhookReceiptStatus
+  chat_id: string | null
+  event_text: string
+  created_at: string
+  updated_at: string
+  detail: string
+}
+
+/**
+ * `GET /api/webhooks/{id}/receipts?workspace=` and
+ * `GET /api/webhooks/receipts?workspace=`.
+ *
+ * `limit` is the cap the read was bounded by, so the UI can say what it is
+ * showing instead of implying the list is everything the trigger ever received.
+ * The per-trigger read adds the trigger's own `trigger_id`/`trigger_name`.
+ */
+export interface WebhookReceiptsResponse {
+  limit: number
+  receipts: WebhookReceipt[]
+}
+
 // ── Status & Models ─────────────────────────────────────────────────────
 
 export interface StatusResponse {
