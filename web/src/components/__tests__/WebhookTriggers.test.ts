@@ -24,7 +24,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { flushPromises, mount } from '@vue/test-utils'
+import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import WebhookTriggers from '../WebhookTriggers.vue'
 import { useProjectStore } from '../../stores/projects'
@@ -85,23 +85,38 @@ function refused(status: number, message: string): Error {
 /**
  * Mounted with `attachTo` and **no** Teleport stub.
  *
- * The row's delete is behind a Reka `DropdownMenu`, which portals its content to
- * `document.body` — stubbing Teleport would leave the menu permanently empty and
- * the only way to reach a destructive action untested. The helper below reads
- * the portal through `document`, which is where a reader's click lands anyway.
+ * The row's delete is behind a Reka `DropdownMenu`, and both dialogs are in a
+ * Reka `DialogPortal` — the pane has `container-type: inline-size`, so an
+ * in-place `position: fixed` overlay would be clipped to the Automations pane and
+ * leave the sidebar live (see `ChatLayout.vue`). Both teleport to `document.body`,
+ * so stubbing Teleport would leave them permanently empty. The helpers below read
+ * through `document`, which is where a reader's click and focus land anyway.
  */
 function mountSection() {
   return mount(WebhookTriggers, { attachTo: document.body })
 }
 
-function button(wrapper: ReturnType<typeof mountSection>, label: string) {
-  const found = wrapper.findAll('button').find(b => b.text() === label)
+/**
+ * Every button in the document, the portalled dialogs' included.
+ *
+ * Through `document` rather than `wrapper` because the dialogs are out of this
+ * component's subtree, and a helper that only looked where the component happens
+ * to render would quietly stop finding their controls at all. Wrapped in a
+ * `DOMWrapper` so callers keep the usual `trigger`/`classes` vocabulary.
+ */
+function buttons(): DOMWrapper<HTMLButtonElement>[] {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+    .map(el => new DOMWrapper<HTMLButtonElement>(el))
+}
+
+function button(_wrapper: ReturnType<typeof mountSection>, label: string) {
+  const found = buttons().find(b => b.text() === label)
   if (!found) throw new Error(`no button labelled ${label}`)
   return found
 }
 
-function hasButton(wrapper: ReturnType<typeof mountSection>, label: string): boolean {
-  return wrapper.findAll('button').some(b => b.text() === label)
+function hasButton(_wrapper: ReturnType<typeof mountSection>, label: string): boolean {
+  return buttons().some(b => b.text() === label)
 }
 
 function row(wrapper: ReturnType<typeof mountSection>, name: string) {
@@ -131,9 +146,27 @@ async function pressMenuItem(wrapper: ReturnType<typeof mountSection>, rowName: 
   await flushPromises()
 }
 
-/** The open dialog, or `null`. Reka keeps both dialogs mounted, so open is state. */
-function openDialog(wrapper: ReturnType<typeof mountSection>) {
-  return wrapper.findAll('.wh-card').find(card => card.isVisible()) || null
+/**
+ * The open dialog, or `null`.
+ *
+ * Through `document` because the dialogs are portalled to `body` — see
+ * {@link mountSection}. Reka unmounts a closed dialog's content (`Presence`), so
+ * the first `.wh-card` in the document is the open one.
+ */
+/**
+ * Every word on the page, dialogs included.
+ *
+ * `document` rather than `wrapper` for the same reason as {@link buttons}: the
+ * portalled dialogs are the only place a secret is ever written, so a check
+ * scoped to the component's own subtree would pass without ever looking at it.
+ */
+function pageText(): string {
+  return document.body.textContent ?? ''
+}
+
+function openDialog(_wrapper: ReturnType<typeof mountSection>): DOMWrapper<HTMLElement> | null {
+  const card = document.querySelector<HTMLElement>('.wh-card')
+  return card ? new DOMWrapper<HTMLElement>(card) : null
 }
 
 beforeEach(() => {
@@ -387,6 +420,74 @@ describe('creating a trigger', () => {
     wrapper.unmount()
   })
 
+  it('keeps the secret when a refresh started while the create was in flight', async () => {
+    apiGet.mockResolvedValue(listing([]))
+    // The POST is left open and a read for the same workspace starts underneath
+    // it. That overlap is reachable from the UI: the stale banner's Retry stays
+    // clickable while the form is open, and so does a workspace switch.
+    let answerPost!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { answerPost = resolve }))
+    const wrapper = mountSection()
+    await flushPromises()
+    await openForm(wrapper)
+    await wrapper.find('input[type="text"]').setValue('New issue from GitHub')
+    await button(wrapper, 'Create trigger').trigger('click')
+    await flushPromises()
+
+    await useWebhookStore().reload('personal')
+    await flushPromises()
+
+    // The read decides the rows; the secret has no second copy and cannot be
+    // re-read, so the answer still owes it to the user.
+    answerPost({ trigger: trigger(), secret: SECRET })
+    await flushPromises()
+
+    expect(openDialog(wrapper)!.text()).toContain(SECRET)
+    wrapper.unmount()
+  })
+
+  it('reports a create answered without a secret instead of showing an empty one', async () => {
+    // An empty string is the server not answering with it, not an empty
+    // credential: a dialog with nothing in it reads as the whole answer, and the
+    // user has no way to tell the two apart.
+    apiGet.mockResolvedValue(listing([]))
+    apiPost.mockResolvedValue({ trigger: trigger(), secret: '' })
+    const wrapper = mountSection()
+    await flushPromises()
+    await openForm(wrapper)
+    await wrapper.find('input[type="text"]').setValue('New issue from GitHub')
+    await button(wrapper, 'Create trigger').trigger('click')
+    await flushPromises()
+
+    expect(openDialog(wrapper)).toBeNull()
+    expect(wrapper.find('[role="alert"]').text()).toContain('did not answer with a secret')
+    wrapper.unmount()
+  })
+
+  it('says in the empty state that a new trigger starts disabled', async () => {
+    // The store files it disabled, so a sender wired up straight away gets the
+    // receiver's 401 and nothing here would say why.
+    apiGet.mockResolvedValue(listing([]))
+    const wrapper = mountSection()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('New triggers start disabled')
+    expect(wrapper.text()).toContain('Enable')
+    wrapper.unmount()
+  })
+
+  it('says mode and project cannot be changed later, while they can still be chosen', async () => {
+    apiGet.mockResolvedValue(listing([]))
+    const wrapper = mountSection()
+    await flushPromises()
+    await openForm(wrapper)
+
+    // The row has no Edit and the route reads neither field on a PATCH, so the
+    // form is the only place this is ever said.
+    expect(wrapper.text()).toContain('cannot be changed after the trigger is created')
+    wrapper.unmount()
+  })
+
   it('keeps the form open and shows the sentence when the create is refused', async () => {
     apiGet.mockResolvedValue(listing([]))
     apiPost.mockRejectedValueOnce(refused(400, 'trigger name must be 1-120 characters'))
@@ -418,14 +519,14 @@ describe('the one-time secret', () => {
     const wrapper = mountSection()
     await flushPromises()
     await createAndReveal(wrapper)
-    expect(wrapper.text()).toContain(SECRET)
+    expect(pageText()).toContain(SECRET)
 
     await button(wrapper, 'Done').trigger('click')
     await flushPromises()
 
     // Not hidden, gone: the engine only ever sends it once, so there is nothing
     // left to re-show and a later render must not be able to produce it again.
-    expect(wrapper.text()).not.toContain(SECRET)
+    expect(pageText()).not.toContain(SECRET)
     expect(openDialog(wrapper)).toBeNull()
     wrapper.unmount()
   })
@@ -477,9 +578,60 @@ describe('the one-time secret', () => {
     expect(button(wrapper, 'Copy failed').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  it('says a new trigger starts disabled, so the 401 that follows is expected', async () => {
+    // The store files every trigger disabled and the sender is the next thing the
+    // user does, so the dialog is where the reason has to be.
+    apiGet.mockResolvedValue(listing([]))
+    apiPost.mockResolvedValue({ trigger: trigger(), secret: SECRET })
+    const wrapper = mountSection()
+    await flushPromises()
+    await createAndReveal(wrapper)
+
+    expect(openDialog(wrapper)!.text()).toContain('New triggers start disabled')
+    expect(openDialog(wrapper)!.text()).toContain('Enable')
+    wrapper.unmount()
+  })
+
+  it('focuses the copy button, and hands focus back to New trigger after a create', async () => {
+    apiGet.mockResolvedValue(listing([]))
+    apiPost.mockResolvedValue({ trigger: trigger(), secret: SECRET })
+    const wrapper = mountSection()
+    await flushPromises()
+    await createAndReveal(wrapper)
+
+    // The dialog exists to put this on the clipboard, and the submit that opened
+    // it has just been unmounted with the rest of the form — so with nothing
+    // hand-placed, focus would be on `BODY` and the trap would hold nothing.
+    expect(document.activeElement?.textContent).toBe('Copy secret')
+
+    await button(wrapper, 'Done').trigger('click')
+    await flushPromises()
+
+    // And back to the section's own control, not the top of the document.
+    expect(document.activeElement?.textContent).toBe('New trigger')
+    wrapper.unmount()
+  })
 })
 
 describe('rotating', () => {
+  it('asks first, because one click retires a credential that is working now', async () => {
+    apiGet.mockResolvedValue(listing([trigger()]))
+    const wrapper = mountSection()
+    await flushPromises()
+
+    askConfirm.mockResolvedValueOnce(false)
+    await button(wrapper, 'Rotate').trigger('click')
+    await flushPromises()
+
+    // The warning used to be a `title`, which no touch reader ever sees and which
+    // arrives after the secret is already dead.
+    expect(askConfirm).toHaveBeenCalled()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(openDialog(wrapper)).toBeNull()
+    wrapper.unmount()
+  })
+
   it('presents the revision the row was read at and reveals a new secret', async () => {
     apiGet.mockResolvedValue(listing([trigger({ revision: 4 })]))
     apiPost.mockResolvedValue({ trigger: trigger({ revision: 5 }), secret: NEW_SECRET })
@@ -512,7 +664,46 @@ describe('rotating', () => {
     const dialog = openDialog(wrapper)!
     expect(dialog.text()).toContain('The old secret is dead')
     expect(dialog.text()).toContain('Update every sender')
-    expect(wrapper.text()).not.toContain(SECRET)
+    expect(pageText()).not.toContain(SECRET)
+    wrapper.unmount()
+  })
+
+  it('keeps the new secret when a refresh started while the rotation was in flight', async () => {
+    apiGet.mockResolvedValue(listing([trigger({ revision: 4 })]))
+    let answerPost!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { answerPost = resolve }))
+    const wrapper = mountSection()
+    await flushPromises()
+
+    await button(wrapper, 'Rotate').trigger('click')
+    await flushPromises()
+
+    // Same overlap as a create under a refresh, and worse: by the time this
+    // answers the old credential is already dead, so a lost new one leaves the
+    // sender holding nothing that works and the pane saying nothing.
+    await useWebhookStore().reload('personal')
+    await flushPromises()
+
+    answerPost({ trigger: trigger({ revision: 5 }), secret: NEW_SECRET })
+    await flushPromises()
+
+    const dialog = openDialog(wrapper)!
+    expect(dialog.text()).toContain(NEW_SECRET)
+    expect(dialog.text()).toContain('The old secret is dead')
+    wrapper.unmount()
+  })
+
+  it('reports a rotation answered without the new secret, rather than silently', async () => {
+    apiGet.mockResolvedValue(listing([trigger()]))
+    apiPost.mockResolvedValue({ trigger: trigger({ revision: 4 }), secret: '' })
+    const wrapper = mountSection()
+    await flushPromises()
+
+    await button(wrapper, 'Rotate').trigger('click')
+    await flushPromises()
+
+    expect(openDialog(wrapper)).toBeNull()
+    expect(wrapper.find('[role="alert"]').text()).toContain('did not answer with the new one')
     wrapper.unmount()
   })
 
@@ -693,7 +884,37 @@ describe('the receiver recipe', () => {
     // The recipe outlives the copy button, and a credential in it would be a
     // second copy of a secret the engine only sends once.
     expect(openDialog(wrapper)!.text()).toContain('<secret>')
-    expect(wrapper.text()).not.toContain(SECRET)
+    expect(pageText()).not.toContain(SECRET)
+    wrapper.unmount()
+  })
+
+  it('focuses Copy recipe, the control the dialog exists for', async () => {
+    apiGet.mockResolvedValue(listing([trigger()]))
+    const wrapper = mountSection()
+    await flushPromises()
+
+    await button(wrapper, 'Recipe').trigger('click')
+    await flushPromises()
+
+    // Reka's own first stop would be `Done`, which only closes the dialog.
+    expect(document.activeElement?.textContent).toBe('Copy recipe')
+    wrapper.unmount()
+  })
+
+  it('portals out of the pane, so the backdrop covers the window and not the pane', async () => {
+    apiGet.mockResolvedValue(listing([trigger()]))
+    const wrapper = mountSection()
+    await flushPromises()
+    await button(wrapper, 'Recipe').trigger('click')
+    await flushPromises()
+
+    // `.chat-main` declares `container-type: inline-size`, which makes it the
+    // containing block for `position: fixed` descendants: an overlay drawn in
+    // place would dim and clip to the Automations pane and leave the sidebar
+    // live and undimmed behind a "modal".
+    const backdrop = document.querySelector('.wh-backdrop')
+    expect(backdrop).not.toBeNull()
+    expect(wrapper.element.contains(backdrop)).toBe(false)
     wrapper.unmount()
   })
 

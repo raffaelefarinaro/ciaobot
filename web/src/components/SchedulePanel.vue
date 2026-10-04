@@ -599,9 +599,7 @@
           <!-- Webhooks live here rather than in a top-level inbox: a trigger is
                another way for something outside the app to reach this
                workspace, and Automations is where the user already looks for
-               "things that happen without me". The section is rendered on its
-               own (no `v-if` on its rows) so an empty list can still be filled
-               from here. -->
+               "things that happen without me". -->
           <WebhookTriggers />
         </div>
 
@@ -645,13 +643,29 @@
       </div>
     </div>
 
-    <div v-else class="empty-state">
-      <h2>No automations yet</h2>
-      <p class="empty-hint">
-        An automation runs a prompt on a schedule — at a time of day or every
-        N minutes — in a new chat each time, or continuing one you pick. Start
-        one with <strong>New</strong> next to Routines in the sidebar.
-      </p>
+    <!-- No automations in this workspace. The same page grid as the overview with
+         the routine sections replaced by one note, so the webhook section below
+         sits in the column it sits in above: a trigger needs no routine to exist
+         first, and the first run of this workspace is exactly where somebody
+         looking for one will be. No rail here — there is nothing for it to
+         count. -->
+    <div v-else class="scroll-body overview-body">
+      <div class="page-grid page-grid--single">
+        <div class="page-main">
+          <section class="ov-section" aria-labelledby="ov-empty-title">
+            <div class="ov-head"><h2 id="ov-empty-title">No automations yet</h2></div>
+            <p class="ov-intro">
+              An automation runs a prompt on a schedule — at a time of day or every
+              N minutes — in a new chat each time, or continuing one you pick. Start
+              one with <strong>New</strong> next to Routines in the sidebar.
+            </p>
+          </section>
+
+          <!-- Webhooks, again: a trigger is not an automation and does not wait
+               for one. See the note on the same component in the overview above. -->
+          <WebhookTriggers />
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -1494,7 +1508,11 @@ const overviewEl = ref<HTMLElement | null>(null)
 function overviewItems(): HTMLElement[] {
   const root = overviewEl.value
   if (!root) return []
-  return Array.from(root.querySelectorAll<HTMLElement>('.ov-item'))
+  // Links only. The webhook rows reuse `.ov-item` on a plain `<div>`, which takes
+  // no focus: arrowing onto one would report that it had moved focus, move none,
+  // and swallow the key — so the press after the last schedule link would do
+  // nothing and look broken.
+  return Array.from(root.querySelectorAll<HTMLElement>('a.ov-item'))
 }
 
 function focusOverviewElement(element: HTMLElement) {
@@ -1850,23 +1868,6 @@ function closeSchedule() {
 @media (max-width: 640px) {
   .card-edit { min-height: var(--touch); min-width: var(--touch); }
 }
-
-.empty-state {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: var(--space-2);
-  width: 100%;
-  max-width: 560px;
-  margin: 0 auto;
-  padding: var(--space-4) var(--page-gutter);
-  box-sizing: border-box;
-  color: var(--fg2);
-}
-.empty-state h2 { margin: 0; color: var(--fg); font-size: calc(20px * var(--font-scale)); letter-spacing: -0.02em; }
-.empty-state .empty-hint { margin: 0; color: var(--fg2); font-size: var(--text-sm); line-height: 1.55; }
 
 .hint { font-size: var(--text-xs); color: var(--fg2); margin: 0; }
 

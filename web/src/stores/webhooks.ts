@@ -70,6 +70,10 @@ function createBody(input: WebhookCreateInput): Record<string, unknown> {
  * for it, so no later render, a list refresh or a log can echo a credential that
  * the engine only ever sends once. The dialog that shows it owns it and drops it
  * on close.
+ *
+ * **A ticket never costs a secret.** The tickets below decide which *record* may
+ * be merged into the rows on screen; a credential that exists nowhere else is
+ * handed over however late its answer arrived. See {@link create}.
  */
 export const useWebhookStore = defineStore('webhooks', () => {
   const triggers = ref<WebhookTrigger[]>([])
@@ -87,8 +91,8 @@ export const useWebhookStore = defineStore('webhooks', () => {
    * things this store is told, and neither may cancel the other. So `reload`
    * takes a ticket here too — a whole-list re-read is newer than a write that
    * started before it — and so does every write (its own answer is the newest
-   * record this list holds). Either way the late answer drops rather than putting
-   * a stale revision back on a row the newer one replaced.
+   * record this list holds). Either way the late answer stops being merged rather
+   * than putting a stale revision back on a row the newer one replaced.
    */
   let writeSeq = 0
 
@@ -197,8 +201,9 @@ export const useWebhookStore = defineStore('webhooks', () => {
    * from that row would present those ids to a workspace that has never heard of
    * them. Same guard, same reason as `taskBoard`.
    *
-   * The write itself did land on disk, so nothing is lost by dropping its answer:
-   * the next reload of the right workspace shows it.
+   * The write itself did land on disk, so the *row* it answered with is what a
+   * switch costs: the next reload of the right workspace shows it. A one-time
+   * secret is not a row, so `create` and `rotate` still hand it back.
    */
   function drawingWorkspace(workspace: string): boolean {
     return loadedWorkspace.value === workspace
@@ -239,15 +244,24 @@ export const useWebhookStore = defineStore('webhooks', () => {
    * `null` with `error` set.
    *
    * The create path returns 201 with `secret` at the top level, once. The
-   * returned pair is what the one-time dialog draws; the record is adopted onto
-   * the list so the row is there without waiting for a re-read.
+   * returned pair is what the one-time dialog draws; the record is merged onto the
+   * list so the row is there without waiting for a re-read.
    *
-   * `null` also means the section stopped drawing this workspace while the POST
-   * was in flight: the trigger was created, and its answer is dropped rather
-   * than drawn on the workspace that replaced this one — see
-   * {@link drawingWorkspace}. The case where this list has never been read is
-   * not reachable from `WebhookTriggers.vue`, which only draws the create form
-   * once a read has succeeded.
+   * **The secret is never dropped for a ticket reason.** `reload` takes a
+   * `writeSeq` ticket of its own, so a list read that started while this POST was
+   * in flight used to arrive second, find `seq !== writeSeq`, and take the secret
+   * down with it: the trigger was created, the only copy of its credential was
+   * thrown away, `error` stayed empty, and the natural next click — Create again —
+   * made a duplicate. The tickets decide the *row*: whether this record may be
+   * merged into the rows on screen, and nothing else. A workspace switch costs the
+   * merge too and still reveals the secret, because the alternative is a
+   * credential that exists nowhere the user can read it. See
+   * {@link drawingWorkspace}.
+   *
+   * `null` is then a refusal, or a 2xx this store cannot use: no record to draw,
+   * or no secret at all. Both put a sentence in `error` whatever the tickets say,
+   * because the write may well have landed and a silent no-op reads as "nothing
+   * happened" for it.
    */
   async function create(input: WebhookCreateInput): Promise<WebhookCreateResponse | null> {
     if (!input.workspace || !input.name.trim()) return null
@@ -258,17 +272,29 @@ export const useWebhookStore = defineStore('webhooks', () => {
     error.value = ''
     try {
       const data = await api.post<WebhookCreateResponse>('/api/webhooks', createBody(input))
-      if (seq !== writeSeq || !drawingWorkspace(workspace)) return null
-      const trigger = adopt(data?.trigger)
+      const trigger = webhookTriggerFrom(data?.trigger)
+      const secret = String(data?.secret ?? '')
+      if (!secret) {
+        // Asked for once and not given. An empty string is a missing answer, not
+        // an empty credential, and it must not be handed back as one: the caller
+        // would show a dialog with nothing in it and the user would read that as
+        // the whole answer. The only way back from here is a rotation.
+        error.value = 'The trigger was created, but the server did not answer with a secret. Rotate the trigger to get one.'
+        return null
+      }
       if (!trigger) {
         // A 2xx whose body is not the record. Silence here would leave the form
         // open with no complaint, which reads as "nothing happened" for a write
-        // that may well have landed — and a secret the caller would then never
-        // be shown. The next reload shows whether it exists.
+        // that may well have landed. The next reload shows whether it exists.
         error.value = 'The trigger was created, but the server did not answer with it. Reload to see it.'
         return null
       }
-      return { trigger, secret: String(data?.secret ?? '') }
+      // Only the row is gated. A read or another write that started after this
+      // one may already hold a newer record for this list, and merging here would
+      // put an older revision back on the screen; the secret is not on screen
+      // anywhere else, so it is handed over regardless.
+      if (seq === writeSeq && drawingWorkspace(workspace)) adopt(trigger)
+      return { trigger, secret }
     } catch (e) {
       if (seq === writeSeq) error.value = apiErrorMessage(e, 'Could not create the webhook trigger.')
       return null
@@ -323,9 +349,12 @@ export const useWebhookStore = defineStore('webhooks', () => {
    * gets the receiver's single 401 answer, and nothing in this store can tell it
    * which of the two credentials it has.
    *
-   * `null` also comes back from a workspace switch made while the POST was in
-   * flight; see {@link drawingWorkspace}. The rotation itself landed, so the next
-   * reload of the right workspace shows the new revision.
+   * **The new secret is never dropped for a ticket reason**, for the same reason
+   * {@link create} keeps its own: a rotation has already killed the old credential
+   * by the time this answers, so an answer lost to a `reload` that overlapped it
+   * would leave the trigger with one working secret and nobody holding it. The
+   * ticket gates the row merge alone; a workspace switch still reveals the secret
+   * — see {@link drawingWorkspace}.
    */
   async function rotate(
     workspace: string,
@@ -340,16 +369,26 @@ export const useWebhookStore = defineStore('webhooks', () => {
       const data = await api.post<WebhookCreateResponse>(`${triggerUrl(triggerId)}/rotate`, {
         expected_revision: expectedRevision,
       })
-      if (seq !== writeSeq || !drawingWorkspace(workspace)) return null
-      const trigger = adopt(data?.trigger)
-      if (!trigger) {
-        // The rotation may have landed and its new secret is now the only one
-        // that works, so this cannot pass as a quiet no-op: the old credential is
-        // dead either way and the user has to be told a reload is needed.
-        error.value = 'The secret was rotated, but the server did not answer with the new one. Reload before sending anything.'
+      const trigger = webhookTriggerFrom(data?.trigger)
+      const secret = String(data?.secret ?? '')
+      if (!secret) {
+        // The old credential is dead whatever this answers, so a rotation with no
+        // replacement cannot pass as a quiet no-op: the sender holds something the
+        // receiver will refuse, and only another rotation repairs it.
+        error.value = 'The secret was rotated, but the server did not answer with the new one. Rotate it again before sending anything.'
         return null
       }
-      return { trigger, secret: String(data?.secret ?? '') }
+      if (!trigger) {
+        // The rotation may have landed, so the row itself is the only thing
+        // missing: the next reload has to supply it.
+        error.value = 'The secret was rotated, but the server did not answer with the trigger. Reload to see it.'
+        return null
+      }
+      // Only the row is gated, as in `create`: an overlapping read or
+      // write may already hold a newer revision for this list, and the credential
+      // is on screen nowhere else.
+      if (seq === writeSeq && drawingWorkspace(workspace)) adopt(trigger)
+      return { trigger, secret }
     } catch (e) {
       if (seq === writeSeq) error.value = apiErrorMessage(e, 'Could not rotate the webhook secret.')
       return null

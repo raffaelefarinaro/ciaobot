@@ -9,6 +9,7 @@
            states. -->
       <button
         v-if="showFormArea"
+        ref="newTriggerBtn"
         type="button"
         class="btn-small ov-run-all"
         :aria-expanded="showForm"
@@ -85,7 +86,10 @@
             </option>
           </select>
         </label>
-        <p class="wh-hint wh-field--wide">{{ modeHint }}</p>
+        <!-- Mode and project are said here or nowhere: the row has no Edit, and both
+             are create-only on the route, so this form is the only place the
+             choice is ever explained. -->
+        <p class="wh-hint wh-field--wide">{{ modeHint }} Project and mode cannot be changed after the trigger is created.</p>
         <div class="wh-actions wh-field--wide">
           <button type="button" class="btn-small" :disabled="store.saving" @click="closeForm">
             Cancel
@@ -179,86 +183,107 @@
       <p v-if="!store.triggers.length" class="ov-empty">
         No webhook triggers yet. One lets another tool post an event straight into
         this workspace — create it, then hand the sender the secret it shows once.
+        New triggers start disabled. Press Enable on the row when the sender is ready.
       </p>
     </template>
 
     <!-- The receiver recipe: the machine contract, with this trigger's real id.
-         The secret is not in it — see lib/webhooks.ts. -->
+         The secret is not in it — see lib/webhooks.ts.
+
+         Portalled to `body`, which is not decoration: this section is drawn inside
+         `.chat-main`, and that pane declares `container-type: inline-size`, which
+         makes it the containing block for `position: fixed` descendants. An
+         in-place overlay would dim and clip to the Automations pane and leave the
+         sidebar live. `as-child` keeps the backdrop this template's own element, so
+         the scoped styles still reach it. -->
     <DialogRoot :open="recipeId !== ''" modal @update:open="onRecipeOpenChange">
-      <DialogOverlay as-child>
-        <div class="wh-backdrop">
-          <DialogContent
-            class="wh-card"
-            aria-modal="true"
-            @open-auto-focus="onRecipeAutoFocus"
-            @escape-key-down="onRecipeEscape"
-          >
-            <DialogTitle as="p" class="wh-card-title">Receiver recipe</DialogTitle>
-            <DialogDescription as="p" class="wh-card-text">
-              Post this to Ciaobot to record an event for
-              <strong>{{ recipeName }}</strong>. Send
-              <code>&lt;secret&gt;</code> as the bearer — the trigger's secret, which
-              the one-time dialog showed you and this page will not show again.
-              Use a fresh <code>Idempotency-Key</code> per event: the same key with a
-              different body is refused.
-            </DialogDescription>
-            <pre class="wh-recipe"><code>{{ recipeText }}</code></pre>
-            <div class="wh-card-actions">
-              <DialogClose as-child>
-                <button type="button" class="wh-action wh-action--cancel">Done</button>
-              </DialogClose>
-              <button type="button" class="wh-action wh-action--primary" @click="copyRecipe">
-                {{ recipeCopyLabel }}
-              </button>
-            </div>
-          </DialogContent>
-        </div>
-      </DialogOverlay>
+      <DialogPortal>
+        <DialogOverlay as-child>
+          <div class="wh-backdrop">
+            <DialogContent
+              class="wh-card"
+              aria-modal="true"
+              @open-auto-focus="onRecipeAutoFocus"
+              @escape-key-down="onRecipeEscape"
+            >
+              <DialogTitle as="p" class="wh-card-title">Receiver recipe</DialogTitle>
+              <DialogDescription as="p" class="wh-card-text">
+                Post this to Ciaobot to record an event for
+                <strong>{{ recipeName }}</strong>. Send
+                <code>&lt;secret&gt;</code> as the bearer — the trigger's secret, which
+                the one-time dialog showed you and this page will not show again.
+                Use a fresh <code>Idempotency-Key</code> per event: the same key with a
+                different body is refused.
+              </DialogDescription>
+              <pre class="wh-recipe"><code>{{ recipeText }}</code></pre>
+              <div class="wh-card-actions">
+                <DialogClose as-child>
+                  <button type="button" class="wh-action wh-action--cancel">Done</button>
+                </DialogClose>
+                <button ref="recipeCopyBtn" type="button" class="wh-action wh-action--primary" @click="copyRecipe">
+                  {{ recipeCopyLabel }}
+                </button>
+              </div>
+            </DialogContent>
+          </div>
+        </DialogOverlay>
+      </DialogPortal>
     </DialogRoot>
 
     <!-- The one and only place a raw secret is ever shown. `secret` is a plain
          ref rather than a store field, cleared when the dialog closes, so no
          later render, list refresh or log can echo a credential the engine only
-         sends once. -->
+         sends once.
+
+         Portalled for the same reason as the recipe above, and closed on Done or
+         Escape only: a backdrop click that dismissed this would throw away the
+         one copy of a credential the engine will not send again, and the user's
+         only recovery would be a rotation they did not know they needed. -->
     <DialogRoot :open="revealedSecret !== ''" modal @update:open="onSecretOpenChange">
-      <DialogOverlay as-child>
-        <div class="wh-backdrop">
-          <DialogContent
-            class="wh-card"
-            aria-modal="true"
-            @open-auto-focus="onSecretAutoFocus"
-            @escape-key-down="onSecretEscape"
-          >
-            <DialogTitle as="p" class="wh-card-title">
-              {{ revealed?.rotated ? 'The old secret is dead' : 'Copy this secret now' }}
-            </DialogTitle>
-            <DialogDescription as="p" class="wh-card-text">
-              <template v-if="revealed?.rotated">
-                The previous secret for <strong>{{ revealed.name }}</strong> stopped
-                working just now. Update every sender that uses it, or they will be
-                refused.
-              </template>
-              <template v-else>
-                This is the only time Ciaobot will show the secret for
-                <strong>{{ revealed?.name }}</strong>. There is no copy you can read
-                again — if you lose it, rotate the trigger to get a new one.
-              </template>
-            </DialogDescription>
-            <p class="wh-warning">Shown once.</p>
-            <pre class="wh-recipe"><code>{{ revealedSecret }}</code></pre>
-            <div class="wh-card-actions">
-              <DialogClose as-child>
-                <button type="button" class="wh-action wh-action--cancel" @click="closeSecret">
-                  Done
+      <DialogPortal>
+        <DialogOverlay as-child>
+          <div class="wh-backdrop">
+            <DialogContent
+              class="wh-card"
+              aria-modal="true"
+              @open-auto-focus="onSecretAutoFocus"
+              @escape-key-down="onSecretEscape"
+              @pointer-down-outside.prevent
+              @interact-outside.prevent
+            >
+              <DialogTitle as="p" class="wh-card-title">
+                {{ revealed?.rotated ? 'The old secret is dead' : 'Copy this secret now' }}
+              </DialogTitle>
+              <DialogDescription as="p" class="wh-card-text">
+                <template v-if="revealed?.rotated">
+                  The previous secret for <strong>{{ revealed.name }}</strong> stopped
+                  working just now. Update every sender that uses it, or they will be
+                  refused.
+                </template>
+                <template v-else>
+                  This is the only time Ciaobot will show the secret for
+                  <strong>{{ revealed?.name }}</strong>. There is no copy you can read
+                  again — if you lose it, rotate the trigger to get a new one. New
+                  triggers start disabled, so a sender posts a 401 until you press
+                  Enable on the row.
+                </template>
+              </DialogDescription>
+              <p class="wh-warning">Shown once.</p>
+              <pre class="wh-recipe"><code>{{ revealedSecret }}</code></pre>
+              <div class="wh-card-actions">
+                <DialogClose as-child>
+                  <button type="button" class="wh-action wh-action--cancel" @click="closeSecret">
+                    Done
+                  </button>
+                </DialogClose>
+                <button ref="secretCopyBtn" type="button" class="wh-action wh-action--primary" @click="copySecret">
+                  {{ secretCopyLabel }}
                 </button>
-              </DialogClose>
-              <button type="button" class="wh-action wh-action--primary" @click="copySecret">
-                {{ secretCopyLabel }}
-              </button>
-            </div>
-          </DialogContent>
-        </div>
-      </DialogOverlay>
+              </div>
+            </DialogContent>
+          </div>
+        </DialogOverlay>
+      </DialogPortal>
     </DialogRoot>
   </section>
 </template>
@@ -269,6 +294,7 @@ import {
   DialogContent,
   DialogDescription,
   DialogOverlay,
+  DialogPortal,
   DialogRoot,
   DialogTitle,
   DropdownMenuContent,
@@ -338,6 +364,17 @@ let copyTimer: number | undefined
 const revealedSecret = ref('')
 /** The trigger the secret belongs to, and whether a rotation retired a previous one. */
 const revealed = ref<{ name: string; rotated: boolean } | null>(null)
+
+/*
+ * The controls focus is handed to, none of which Reka can choose on its own.
+ *
+ * Each dialog cancels the primitive's own first-focus choice and places its own
+ * after the render tick, the way `PromptDialog.vue` does with its input: the
+ * choice is a *control*, not the first focusable thing in the card.
+ */
+const newTriggerBtn = ref<HTMLButtonElement | null>(null)
+const secretCopyBtn = ref<HTMLButtonElement | null>(null)
+const recipeCopyBtn = ref<HTMLButtonElement | null>(null)
 
 const recipeName = computed(
   () => store.triggers.find(t => t.trigger_id === recipeId.value)?.name || 'this trigger',
@@ -428,6 +465,14 @@ async function toggleEnabled(t: WebhookTrigger) {
 }
 
 async function rotate(t: WebhookTrigger) {
+  // One click retires a credential that is working right now, so it is asked for
+  // first: the warning used to be a `title`, which no touch reader ever sees and
+  // which arrives after the secret is already dead.
+  const confirmed = await askConfirm(
+    `Rotate the secret for “${t.name}”? Every sender using it is refused until it is updated with the new one.`,
+    { title: 'Rotate this webhook secret?', confirmLabel: 'Rotate secret' },
+  )
+  if (!confirmed) return
   pendingId.value = t.trigger_id
   try {
     const result = await store.rotate(workspace.value, t.trigger_id, revisionFor(t))
@@ -459,9 +504,20 @@ function reveal(secret: string, name: string, isRotation: boolean) {
   revealed.value = { name, rotated: isRotation }
 }
 
+/**
+ * Close the secret dialog, and hand focus back to where it came from.
+ *
+ * The section's own "New trigger" button, but only after a create: that submit
+ * unmounted the whole form, submit button included, so without this focus falls
+ * to `BODY` and the next Tab restarts from the top of the document. After a
+ * rotation the row is still there, so Reka's own focus return is the right one
+ * and this leaves it alone.
+ */
 function closeSecret() {
+  const afterCreate = revealed.value?.rotated === false
   revealedSecret.value = ''
   revealed.value = null
+  if (afterCreate) void nextTick(() => newTriggerBtn.value?.focus())
 }
 
 function onSecretOpenChange(open: boolean) {
@@ -469,17 +525,17 @@ function onSecretOpenChange(open: boolean) {
 }
 
 /**
- * Where focus lands in the secret dialog.
+ * Where focus lands in the secret dialog: the copy button.
  *
- * Cancelled rather than redirected: the secret block is selectable text and the
- * copy button is the useful first stop, so Reka's own choice — the first
- * focusable, which is `Done` — is wrong here, and nothing is lost by letting the
- * dialog open with its own ordering intact rather than hand-placing focus on a
- * `<pre>` that is not a control.
+ * Hand-placed rather than left to Reka, whose own choice is the first focusable
+ * — `Done` here, the one control in the card that is *not* why it is open. The
+ * secret itself is a `<pre>`: selectable text, not focusable, so nothing is lost
+ * by skipping it. `preventDefault` is what keeps the primitive from undoing this
+ * on its way out.
  */
 function onSecretAutoFocus(event: Event) {
   event.preventDefault()
-  void nextTick()
+  void nextTick(() => secretCopyBtn.value?.focus())
 }
 
 function onSecretEscape(event: KeyboardEvent) {
@@ -519,9 +575,15 @@ function onRecipeOpenChange(open: boolean) {
   if (!open) closeRecipe()
 }
 
+/**
+ * Where focus lands in the recipe dialog: Copy recipe.
+ *
+ * The dialog exists to put that text on the clipboard, so the control that does
+ * it is the first stop; `Done` only closes it.
+ */
 function onRecipeAutoFocus(event: Event) {
   event.preventDefault()
-  void nextTick()
+  void nextTick(() => recipeCopyBtn.value?.focus())
 }
 
 function onRecipeEscape(event: KeyboardEvent) {
