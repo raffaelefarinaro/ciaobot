@@ -1319,7 +1319,8 @@ export interface UpdateTaskRow {
   offered: boolean
   suppressed: boolean
   /** The chat an earlier start created, so "Resume" never needs the browser to
-   *  have remembered it. Empty when no live attempt exists. */
+   *  have remembered it. Empty when no attempt exists; a nonempty id may still
+   *  name an archived or deleted chat — see `chat_live`. */
   chat_id: string
   /** Whether that chat is still one the operator can open. `chat_id` names the
    *  chat a record remembers; an archived or deleted one is no longer open, and
