@@ -114,8 +114,10 @@ CDHash and can require the user to reapprove the prompt.
 
 ## What this does not do
 
-- It does not activate, install, load or launch the host, and it does not touch
-  launchd, `~/Applications`, TCC or any permission.
+- It does not activate, load or launch the host, and it does not touch launchd,
+  `~/Applications`, TCC or any permission. Acquiring and installing the host is
+  the installer's separate, opt-in job (child E1, `ciao/server_host_install.py`);
+  the release only authenticates the archive.
 - It does not make the engine updater overwrite an installed host: an installed
   compatible host is never auto-replaced by an engine update, because the host
   is authenticated but opt-in and its revision is independent of the engine.

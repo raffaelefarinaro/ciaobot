@@ -207,6 +207,26 @@ unchanged: there
 `--workspace` is how a workspace is named, and it is created. The workflow
 attaches it as the `install-engine.sh` release asset, and again as `install.sh`.
 
+When the signed manifest also carries a `server-host` entry (child E1 of
+#1008, `ciao/server_host_install.py`), the installer reads that entry through the
+verified wheel's own selector — the same "run the wheel's code" pattern the
+migration classifier uses, so no second copy of the selector ships in shell — and
+if one is present it downloads `ciaobot-server-host-macos-universal-v1.tar.gz`,
+checks its SHA-256 and size against the signed entry, and asks the wheel's module to
+install it. The module re-checks the archive, extracts it under `filter="data"`,
+inspects the staged `Ciaobot Server.app` with the B1 contract (plist identity and
+the read-only `/usr/bin/codesign` probes), renames it atomically to
+`~/Applications/Ciaobot Server.app`, writes the owner-only record at
+`~/.local/state/ciaobot/server-host.json` (`0600` in a `0700` directory) and
+re-verifies with `verify_owned_host`. An existing verified host is a no-op, a
+foreign or tampered one is refused and left untouched, and a failure after the
+rename removes what the run placed. The host is **not activated**: no launchd, no
+plist, no service change, no permission prompt — activation is a later child.
+A wheel-only manifest (every historical release) prints nothing from the selector
+and installs the engine exactly as before, and so does an explicit `--version`
+naming a wheel cut before the host work: the shell probes for the module first,
+so an engine that predates it never aborts on a missing one.
+
 The classifier was the retired app's own hand-over bridge for that transition
 release (#604): its updater installed a signed `.app.tar.gz`, which cannot run a
 shell script, so an app user never re-runs the one-liner on their own. The app
