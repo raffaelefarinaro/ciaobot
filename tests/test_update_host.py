@@ -436,7 +436,7 @@ def test_mac_update_host_server_command_reads_the_loaded_hosted_job(
     # The loaded-job authority for the whole argv: `program` names the host, and
     # the `arguments` block names the interpreter it serves. `server_command`
     # folds the program in front of the block so a caller can parse the hosted
-    # command, and `server_program` stays its first element.
+    # command.
     host_path = "/Users/operator/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
     printed = (
         f"{SERVER} = {{\n"
@@ -466,8 +466,7 @@ def test_mac_update_host_server_command_reads_the_loaded_hosted_job(
         "--python",
         "/Users/operator/tools/ciaobot/bin/python",
     )
-    assert host.server_program() == host_path
-    assert calls == [["print", "gui/501/com.ciao.server"]] * 2
+    assert calls == [["print", "gui/501/com.ciao.server"]]
 
 
 def test_mac_update_host_server_command_uses_the_disk_plist_when_not_loaded(
@@ -503,24 +502,22 @@ def test_mac_update_host_server_command_uses_the_disk_plist_when_not_loaded(
         "--python",
         "/Applications/engine/bin/python",
     )
-    assert host.server_program() == (
-        "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
-    )
 
 
-def test_mac_update_host_server_program_is_the_first_element_on_disk(
+def test_mac_update_host_server_command_reads_a_direct_plist_on_disk(
     tmp_path: Path,
 ) -> None:
-    # The direct shape the on-disk plist used to answer with is still its first
-    # argument, so every existing caller of `server_program` is unchanged.
-    _write_server_plist(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+    # The direct shape the on-disk plist answers with comes back whole, so the
+    # agreement check still compares its program at argv[0].
+    program = tmp_path / "elsewhere" / "ciaobot" / "bin" / "python"
+    _write_server_plist(program)
 
     def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, 113, "", "not found")
 
     host = MacUpdateHost(launchctl=launchctl, uid=501)
 
-    assert host.server_program() == str(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+    assert host.server_command() == (str(program), "-m", "ciao.main")
 
 
 def test_mac_update_host_server_command_folds_the_program_only_once() -> None:
@@ -564,7 +561,6 @@ def test_mac_update_host_server_command_folds_a_quoted_program_only_once() -> No
     host = MacUpdateHost(launchctl=lambda args: subprocess.CompletedProcess(args, 0, printed, ""), uid=501)
 
     assert host.server_command() == (host_path, "serve", "--python", "/a/tools/ciaobot/bin/python")
-    assert host.server_program() == host_path
 
 
 def test_mac_update_host_server_command_is_none_when_launchd_says_nothing() -> None:
@@ -572,9 +568,8 @@ def test_mac_update_host_server_command_is_none_when_launchd_says_nothing() -> N
         launchctl=lambda args: subprocess.CompletedProcess(args, 0, "", ""), uid=501
     )
 
-    # No program line at all is evidence of nothing, and `server_program` agrees.
+    # No program line at all is evidence of nothing.
     assert host.server_command() is None
-    assert host.server_program() is None
 
 
 def test_mac_update_host_forwards_launchctl_and_uid_exactly(tmp_path: Path) -> None:
@@ -744,10 +739,6 @@ class FakeHost:
     def server_command(self) -> tuple[str, ...] | None:
         self._record("server_command")
         return None if self.program is None else (self.program,)
-
-    def server_program(self) -> str | None:
-        command = self.server_command()
-        return command[0] if command else None
 
     def spawn_updater(
         self, op: Any, python: str, *, verb: str = "run-apply", args: Any = None

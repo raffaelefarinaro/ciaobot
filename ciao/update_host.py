@@ -117,23 +117,12 @@ class UpdateHost(Protocol):
     def server_command(self) -> tuple[str, ...] | None:
         """The full argv the loaded service actually runs, or ``None``.
 
-        The loaded job is the authority, exactly as for
-        :meth:`server_program`, but the whole argument vector and not just
-        ``argv[0]``: a native hosted service runs ``CiaobotServerHost serve
+        The loaded job is the authority, and the whole argument vector and not
+        just ``argv[0]``: a native hosted service runs ``CiaobotServerHost serve
         --python <interpreter>``, so the engine install the job is actually
         using is named by the interpreter it serves, not by the host
         executable. ``None`` is "not loaded, or nothing usable was reported",
         and is the only case in which an on-disk definition may answer instead.
-        """
-        ...
-
-    def server_program(self) -> str | None:
-        """The program the loaded service actually runs, or ``None``.
-
-        ``None`` is "not loaded, or nothing usable was reported", and is the
-        only case in which an on-disk definition may answer instead. It is the
-        first element of :meth:`server_command`, kept as its own answer because
-        that was the question before a hosted command had a second one.
         """
         ...
 
@@ -776,16 +765,6 @@ class MacUpdateHost:
         if not isinstance(arguments, list) or not arguments:
             return None
         return tuple(str(argument) for argument in arguments)
-
-    def server_program(self) -> str | None:
-        """What the loaded ``com.ciao.server`` runs, or the plist's, or ``None``.
-
-        The first element of :meth:`server_command`, and the answer to the
-        question the transaction asked before a hosted command had a second one
-        (the interpreter it serves).
-        """
-        command = self.server_command()
-        return command[0] if command else None
 
     # ── the jobs that own the swap ──────────────────────────────────
 

@@ -276,15 +276,10 @@ class WindowsUpdateHost:
         second argument that names a served interpreter; the command *is* the
         install to compare. ``task_command`` already refuses a command the console
         code page could not print faithfully, answering ``None`` — evidence of
-        nothing, exactly as for :meth:`server_program`.
+        nothing.
         """
         command = windows_service.task_command(windows_service.TASK_NAME, runner=self._schtasks)
         return None if command is None else (command,)
-
-    def server_program(self) -> str | None:
-        """What the registered ``\\Ciaobot\\Engine`` runs, or None."""
-        command = self.server_command()
-        return command[0] if command else None
 
     # ── the tasks that own the swap ─────────────────────────────────
 
