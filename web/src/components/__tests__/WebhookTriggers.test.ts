@@ -1092,8 +1092,8 @@ describe('the receipt history', () => {
     await flushPromises()
     await openHistory(wrapper)
 
-    expect(historyPanel(wrapper).text()).toContain('The 1 most recent events')
-    expect(historyPanel(wrapper).text()).toContain('not in this list')
+    expect(historyPanel(wrapper).text()).toContain('Showing up to 1 recent events; older retained events are not shown.')
+    expect(historyPanel(wrapper).text()).not.toContain('Older ones are in the journal')
     wrapper.unmount()
   })
 

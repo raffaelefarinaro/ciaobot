@@ -567,7 +567,7 @@ const historyCaption = computed(() => {
   const limit = store.receiptsLimit
   const shown = historyRows.value.length
   if (limit > 0 && shown >= limit) {
-    return `The ${shown} most recent events. Older ones are in the journal but not in this list.`
+     return `Showing up to ${limit} recent events; older retained events are not shown.`
   }
   return `${shown} event${shown === 1 ? '' : 's'}, newest first.`
 })
@@ -888,10 +888,13 @@ const secretCopyLabel = computed(() => copyLabel('secret', 'Copy secret'))
   row-gap: var(--space-2);
 }
 .wh-row > .ov-main { flex: 1 1 16rem; }
-/* The right-hand group: badge, then controls, wrapping as one unit. */
+/* Keep both nested groups within the pane: even the longer disclosure labels
+   must wrap controls rather than push Rotate or the overflow menu off screen. */
 .wh-row-side {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
@@ -900,8 +903,12 @@ const secretCopyLabel = computed(() => copyLabel('secret', 'Copy secret'))
 }
 .wh-row-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-2);
 }
 .wh-overflow { color: var(--fg2); }
