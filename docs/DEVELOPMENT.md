@@ -215,15 +215,20 @@ if one is present it downloads `ciaobot-server-host-macos-universal-v1.tar.gz`,
 checks its SHA-256 and size against the signed entry, and asks the wheel's module to
 install it. The module re-checks the archive, extracts it under `filter="data"`,
 inspects the staged `Ciaobot Server.app` with the B1 contract (plist identity and
-the read-only `/usr/bin/codesign` probes), renames it atomically to
-`~/Applications/Ciaobot Server.app`, writes the owner-only record at
-`~/.local/state/ciaobot/server-host.json` (`0600` in a `0700` directory) and
-re-verifies with `verify_owned_host`. It runs after the read-only preflight and
-never on a `--migrate --as-client` Mac. An existing verified host is a no-op; a
-bundle at the target the module cannot prove it owns is left untouched with a
-warning (module exit 3) and the engine install continues, while an archive that
-fails verification stops the run; a failure after the rename removes the bundle
-and record the run placed. The host is **not activated**: no launchd, no
+the read-only `/usr/bin/codesign` probes), writes the owner-only record at
+`~/.local/state/ciaobot/server-host.json` (`0600` in a `0700` directory) from the
+staged snapshot — **before** the atomic rename to `~/Applications/Ciaobot Server.app`
+— and re-verifies the installed host with `verify_owned_host`. It runs after the
+read-only preflight and never on a `--migrate --as-client` Mac. An existing verified
+host is a no-op. Only a refusal about the release — a manifest that did not verify,
+or an archive that does not match its signed digest — stops the run; every other
+host refusal (a disk full, a `codesign` probe that timed out, a bundle at the target
+the module cannot prove it owns) warns (module exit 3) and the engine install
+continues, because the host is optional and inert and must not abort the one-liner.
+Because the record is written before the rename, a process killed in that window
+leaves a consistent, verified host rather than a recordless bundle every later run
+reports as `host_exists`; a Python failure removes both the bundle and record the
+run placed. The host is **not activated**: no launchd, no
 plist, no service change, no permission prompt — activation is a later child.
 A wheel-only manifest (every historical release) prints nothing from the selector
 and installs the engine exactly as before, and so does an explicit `--version`

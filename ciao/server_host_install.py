@@ -19,25 +19,43 @@ The steps are deliberately ordered so a refusal leaves nothing installed:
    — the plist identity and the native ``/usr/bin/codesign`` probes, not the
    manifest constants alone — while it is still in the dotted staging directory
    beside the target, not at the target path;
-4. the staging directory is fsynced and renamed onto the target, which must not
-   already exist as a symlink, and an existing verified host is a no-op rather
-   than something to overwrite;
-5. the installed bundle is inspected again for its canonical path, the
-   owner-only record is written from :meth:`ciao.server_host.HostOwnership.to_record`,
-   and :func:`ciao.server_host.verify_owned_host` must accept it.
+4. the owner-only record is written from the staged snapshot, then the staging
+   directory is renamed onto the target, which must not already exist as a
+   symlink, and an existing verified host is a no-op rather than something to
+   overwrite;
+5. :func:`ciao.server_host.verify_owned_host` must accept the installed bundle
+   and the record.
+
+The record is written **before** the rename on purpose: the window between the
+rename and a record write contains a full native re-inspection (seconds), and a
+process killed there would leave ``~/Applications/Ciaobot Server.app`` with no
+record, which every later run then reports as ``host_exists`` until the user
+deletes it by hand. Written first, a crash before the rename leaves a record
+with no bundle (the next fresh install overwrites it) and a crash after the
+rename leaves a consistent, verified host.
 
 A foreign, tampered or mismatched archive is refused at step 1-3, before the
-target is touched; a failure at step 5 removes the bundle this run just renamed
-into place and any record it wrote, so a partial install survives neither as a
-bundle without a record nor as a record without a bundle.
-There is no fallback that trusts an unverified archive, and the record path is
+target is touched; a Python failure removes the bundle this run renamed into
+place *and* the record it wrote, so a partial install survives neither as a
+bundle without a record nor as a record without a bundle. There is no fallback
+that trusts an unverified archive, and the record path is
 :func:`ciao.server_host.default_ownership_path` with no Ciaobot-specific
 environment override.
+
+A refusal is only fatal to the engine install when it is about the release the
+shell could not already rule out — a manifest that did not verify, or an
+``ARCHIVE_MISMATCH``. Everything else (``INSTALL_FAILED``, ``INSPECTION_FAILED``,
+an ``ARCHIVE_UNSAFE`` archive the release signed, an existing
+``HOST_EXISTS``/``TARGET_UNSAFE`` target) returns :data:`HOST_WARNING_EXIT` from
+``install`` so the shell warns and carries on: the host is optional and inert,
+and it must not abort the one-liner. :data:`WARN_AND_CONTINUE` is that set.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import errno
 import hashlib
 import json
 import os
@@ -63,6 +81,7 @@ from ciao.release_manifest import (
 )
 from ciao.server_host import (
     APP_NAME,
+    INSPECTION_FAILED,
     UNSUPPORTED_PLATFORM,
     HostOwnership,
     Runner,
@@ -76,11 +95,12 @@ from ciao.server_host import (
 __all__ = [
     "ARCHIVE_MISMATCH",
     "ARCHIVE_UNSAFE",
-    "EXISTING_HOST_EXIT",
     "HOST_EXISTS",
+    "HOST_WARNING_EXIT",
     "INSTALL_FAILED",
     "STAGING_PREFIX",
     "TARGET_UNSAFE",
+    "WARN_AND_CONTINUE",
     "ServerHostInstallError",
     "extract_host_archive",
     "install_server_host",
@@ -96,19 +116,36 @@ HOST_EXISTS = "host_exists"
 INSTALL_FAILED = "install_failed"
 TARGET_UNSAFE = "target_unsafe"
 
+#: Refusal codes that must not abort the engine install. The shell has already
+#: verified the signed manifest and the archive's digest and size, so by the time
+#: ``install`` runs these are local facts (a disk full, a permission error, a
+#: ``codesign`` probe that timed out) or a signed-build defect — never attacker
+#: input — and the engine should install anyway: the host is optional and inert.
+#: ``ARCHIVE_MISMATCH`` is deliberately absent: a downloaded archive that does not
+#: match the signed entry means the release did not verify, and the run stops.
+WARN_AND_CONTINUE = frozenset(
+    {
+        ARCHIVE_UNSAFE,
+        HOST_EXISTS,
+        INSTALL_FAILED,
+        INSPECTION_FAILED,
+        TARGET_UNSAFE,
+        UNSUPPORTED_PLATFORM,
+    }
+)
+
 #: The staging directory is created beside the target so the final rename is a
 #: same-filesystem, atomic operation. The name is dotted so a listing of
 #: ``~/Applications`` during a run shows it as scratch, and unique so two runs
 #: cannot collide.
 STAGING_PREFIX = ".ciaobot-host-stage."
 
-#: ``install``'s exit status when the target already holds something this
-#: installer cannot prove it owns (``host_exists``) or must not follow
-#: (``target_unsafe``). It is left untouched, and the shell installer warns and
-#: carries on with the engine: a host that is optional and inert must not turn
-#: every later engine install into a failure until the user deletes it by hand.
-#: Every other refusal - a mismatched, unsafe or foreign archive - is exit 1.
-EXISTING_HOST_EXIT = 3
+#: ``install``'s exit status for a refusal in :data:`WARN_AND_CONTINUE`. The
+#: target is left exactly as it is and the shell installer warns and carries on
+#: with the engine: a host that is optional and inert must not turn every later
+#: engine install into a failure. Every other refusal - a mismatched archive the
+#: release did not authenticate, or a manifest that did not verify - is exit 1.
+HOST_WARNING_EXIT = 3
 
 _CHUNK = 1 << 20
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -428,10 +465,13 @@ def install_server_host(
 
     An existing, verified host is returned untouched (a no-op); an existing
     bundle this installer cannot prove it owns is refused. On a fresh install the
-    staged bundle is inspected before the rename, so a foreign or tampered
-    archive never reaches ``~/Applications``, and a failure after the rename
-    removes what this run put there. No service, launchd, plist or permission
-    surface is touched.
+    staged bundle is inspected before the record is written and before the
+    rename, so a foreign or tampered archive never reaches ``~/Applications``.
+    The record is written *before* the rename, from the staged snapshot with the
+    canonical target path, so a process killed after the rename leaves a
+    consistent, verified host rather than a bundle no record vouches for; a
+    Python failure removes both the bundle this run renamed into place and the
+    record it wrote. No service, launchd, plist or permission surface is touched.
     """
     _require_macos()
     path = Path(archive_path)
@@ -471,7 +511,7 @@ def install_server_host(
         # Prove the bytes before they reach ~/Applications. This runs the plist
         # identity checks and the native codesign probes; a foreign or tampered
         # bundle is refused here, with the target still untouched.
-        inspect_host_bundle(staged_app, runner=runner)
+        staged = inspect_host_bundle(staged_app, runner=runner)
         if os.path.lexists(bundle):
             # Lost the race with another installer between the check above and
             # the rename. Refuse rather than replace what appeared.
@@ -479,20 +519,34 @@ def install_server_host(
                 f"a host bundle appeared at {bundle} while this install was staging",
                 code=HOST_EXISTS,
             )
+        # The record names the canonical target, not the staging directory, and
+        # is written before the rename. A crash before the rename leaves a record
+        # with no bundle (the next fresh install overwrites it); a crash after
+        # the rename leaves a consistent, verified host. Writing it after the
+        # rename would put a full native re-inspection (seconds) in the window
+        # where a kill leaves a bundle no record vouches for.
+        canonical = os.path.join(os.path.realpath(parent), APP_NAME)
+        record_snapshot = dataclasses.replace(staged, bundle_path=canonical)
         _fsync_tree(staged_app)
+        _write_ownership_record(record_snapshot, record_path)
+        recorded = True
         try:
             os.rename(staged_app, bundle)
         except OSError as exc:
+            # A concurrent creation after the lexists re-check surfaces as
+            # EEXIST/ENOTEMPTY; that is the same "not ours to replace" refusal,
+            # not a local install failure.
+            code = (
+                HOST_EXISTS
+                if exc.errno in (errno.EEXIST, errno.ENOTEMPTY)
+                else INSTALL_FAILED
+            )
             raise ServerHostInstallError(
-                f"the staged host could not be moved to {bundle}: {exc}",
-                code=INSTALL_FAILED,
+                f"the staged host could not be moved to {bundle}: {exc}", code=code
             ) from exc
         renamed = True
         _fsync_dir(parent)
 
-        installed = inspect_host_bundle(bundle, runner=runner)
-        recorded = True
-        _write_ownership_record(installed, record_path)
         return verify_owned_host(bundle, ownership_path=record_path, runner=runner)
     except BaseException:
         # Nothing of this run survives a failure: the staging directory is
@@ -524,9 +578,11 @@ def main(argv: list[str] | None = None) -> int:
 
     ``install`` re-verifies the manifest and its selected host entry (the shell
     installer has already read the same bytes, and re-verifying here closes the
-    gap between the two reads) and installs the archive. A target it leaves
-    untouched because it cannot prove it owns it is :data:`EXISTING_HOST_EXIT`,
-    not 1, so the shell installer can tell it from a refused archive.
+    gap between the two reads) and installs the archive. A refusal in
+    :data:`WARN_AND_CONTINUE` — everything except a manifest that did not verify
+    and an ``ARCHIVE_MISMATCH`` — is :data:`HOST_WARNING_EXIT`, not 1, so the
+    shell installer warns and carries on with the engine instead of aborting the
+    one-liner for an optional, inert host.
     """
     parser = argparse.ArgumentParser(
         prog="python -m ciao.server_host_install", description=__doc__
@@ -600,11 +656,16 @@ def main(argv: list[str] | None = None) -> int:
                 bundle_path=args.bundle_path,
                 ownership_path=args.ownership_path,
             )
-        except ServerHostInstallError as exc:
-            if exc.code not in (HOST_EXISTS, TARGET_UNSAFE):
+        except ServerHostError as exc:
+            # The shell has already checked the manifest signature and the
+            # archive's digest and size, so a refusal here is local or a
+            # signed-build defect. Only a manifest/selection error or an
+            # ARCHIVE_MISMATCH is about the release and stops the engine install;
+            # everything else warns and the shell continues.
+            if exc.code not in WARN_AND_CONTINUE:
                 raise
             print(f"warning: {exc}", file=sys.stderr)
-            return EXISTING_HOST_EXIT
+            return HOST_WARNING_EXIT
     except (ServerHostError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

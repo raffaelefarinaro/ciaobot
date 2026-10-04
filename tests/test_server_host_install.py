@@ -11,6 +11,7 @@ here touches the real ``~/Applications``, ``launchctl``, a running engine or TCC
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import io
@@ -525,6 +526,7 @@ def test_install_refuses_a_foreign_bundle_inside_the_archive(
 ) -> None:
     # The archive's digest matches its entry, but the bundle inside is not the
     # signed identity: the plist check refuses it before the rename.
+    monkeypatch.setattr(sys, "platform", "darwin")
     bundle = _make_bundle(tmp_path / "src")
     document = BUILD.bundle_info()
     document["CFBundleIdentifier"] = "local.other"
@@ -676,6 +678,191 @@ def test_a_failed_final_verification_leaves_neither_bundle_nor_record(
         )
     assert not target.exists()
     assert not record.exists()
+
+
+@requires_posix_uid
+def test_the_record_is_written_before_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The window between the rename and a record write contains a full native
+    # re-inspection, so the record is written from the staged snapshot first. At
+    # the instant of the rename the record is already on disk.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    real_rename = os.rename
+    seen: dict[str, bool] = {}
+
+    def observing_rename(src: Any, dst: Any) -> None:
+        seen["record_before_rename"] = record.exists()
+        real_rename(src, dst)
+
+    monkeypatch.setattr(server_host_install.os, "rename", observing_rename)
+
+    server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=_FakeRunner()
+    )
+
+    assert seen["record_before_rename"] is True
+
+
+@requires_posix_uid
+def test_an_eexist_rename_is_host_exists_not_install_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A concurrent creation after the lexists re-check surfaces at the rename as
+    # EEXIST/ENOTEMPTY; that is "not ours to replace", the warn-and-continue
+    # code, not a local install failure.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+
+    def refuse_rename(_src: Any, _dst: Any) -> None:
+        raise OSError(errno.EEXIST, "File exists")
+
+    monkeypatch.setattr(server_host_install.os, "rename", refuse_rename)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert caught.value.code in server_host_install.WARN_AND_CONTINUE
+    # The record this run wrote is removed again: no record outlives the bundle
+    # it never got to describe.
+    assert not record.exists()
+
+
+@requires_posix_uid
+def test_a_non_eexist_rename_failure_is_install_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+
+    def refuse_rename(_src: Any, _dst: Any) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(server_host_install.os, "rename", refuse_rename)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert not record.exists()
+
+
+# ── a killed run leaves a consistent host, not a recordless bundle ───────────
+
+
+#: A whole separate interpreter that installs the host with a rename that kills
+#: the process *at the instant the bundle lands*, before any rollback or
+#: ``finally`` can run — the SIGKILL/SIGTERM window R2 is about. It runs in a
+#: fresh process rather than a fork so it is safe under the parallel test runner.
+_KILL_AFTER_RENAME_CHILD = """
+import os
+import sys
+
+# The host is a macOS bundle; the child models that on any CI platform.
+sys.platform = "darwin"
+
+from pathlib import Path
+
+from ciao import server_host_install
+from ciao.release_manifest import server_host_artifact_entry
+
+if os.environ.get("CIAO_KILL_FAKE_RUNNER"):
+    # The fixture bundle carries no real signature; drive the native probes with
+    # the test's fake runner. The real-build variant leaves this unset and uses
+    # the real subprocess runner against the real signed host.
+    from tests.test_server_host_install import _FakeRunner
+
+    runner = _FakeRunner()
+else:
+    import subprocess
+
+    runner = subprocess.run
+
+archive = Path(sys.argv[1])
+bundle = Path(sys.argv[2])
+record = Path(sys.argv[3])
+entry = server_host_artifact_entry(archive)
+
+_real_rename = server_host_install.os.rename
+
+
+def _killing_rename(src, dst):
+    _real_rename(src, dst)
+    # The kill: no exception, no rollback, no `finally`. Exactly a SIGKILL.
+    os._exit(0)
+
+
+server_host_install.os.rename = _killing_rename
+try:
+    server_host_install.install_server_host(
+        archive, entry, bundle_path=bundle, ownership_path=record, runner=runner
+    )
+except BaseException:
+    os._exit(70)
+os._exit(71)
+"""
+
+
+@requires_posix_uid
+def test_a_kill_after_the_rename_leaves_a_verified_host(tmp_path: Path) -> None:
+    # Kill the process the exact instant after os.rename and before the final
+    # verification. Rollback never runs, so the stage dir is stranded - but the
+    # record was written first, so the bundle at the target is a consistent,
+    # verifiable host and the NEXT install reports it as verified (a no-op),
+    # rather than host_exists until the user deletes it by hand.
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _KILL_AFTER_RENAME_CHILD,
+            str(archive),
+            str(target),
+            str(record),
+        ],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(ROOT),
+            "CIAO_KILL_FAKE_RUNNER": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+
+    # The kill landed after the rename: the bundle and its record are both there.
+    assert target.is_dir()
+    assert read_host_ownership(record).bundle_path == os.path.realpath(target)
+
+    # The next install recognises the host as its own and is a no-op.
+    inode = target.stat().st_ino
+    snapshot = server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=_FakeRunner()
+    )
+    assert snapshot.bundle_path == os.path.realpath(target)
+    assert target.stat().st_ino == inode
 
 
 # ── the record reader sees exactly what was written ──────────────────────────
@@ -931,7 +1118,7 @@ def test_install_cli_exits_3_for_a_host_it_cannot_prove_it_owns(
         ]
     )
 
-    assert status == server_host_install.EXISTING_HOST_EXIT == 3
+    assert status == server_host_install.HOST_WARNING_EXIT == 3
     assert "warning:" in capsys.readouterr().err
     assert (target / "foreign").read_text(encoding="utf-8") == "not ours"
     assert not record.exists()
@@ -968,6 +1155,91 @@ def test_install_cli_exits_1_for_an_archive_that_does_not_match(
 
     assert status == 1
     assert not os.path.lexists(target)
+
+
+@requires_posix_uid
+@pytest.mark.parametrize(
+    "code",
+    [
+        server_host_install.INSTALL_FAILED,
+        server_host.INSPECTION_FAILED,
+        server_host_install.ARCHIVE_UNSAFE,
+        server_host_install.HOST_EXISTS,
+        server_host_install.TARGET_UNSAFE,
+    ],
+)
+def test_install_cli_warns_and_exits_3_for_a_non_release_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    code: str,
+) -> None:
+    # Every refusal the shell cannot already rule out is exit 3, so the shell
+    # warns and carries on with the engine rather than aborting the one-liner.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    manifest, signature = _signed_manifest(tmp_path, entry)
+    public_key = (tmp_path / "public-key.txt").read_text(encoding="utf-8")
+
+    def refuse(*_args: Any, **_kwargs: Any) -> HostOwnership:
+        raise server_host.ServerHostError(f"refused: {code}", code=code)
+
+    monkeypatch.setattr(server_host_install, "install_server_host", refuse)
+
+    status = server_host_install.main(
+        [
+            "install",
+            "--manifest",
+            str(manifest),
+            "--signature",
+            str(signature),
+            "--archive",
+            str(archive),
+            "--public-key",
+            public_key,
+        ]
+    )
+
+    assert status == server_host_install.HOST_WARNING_EXIT == 3
+    assert "warning:" in capsys.readouterr().err
+
+
+@requires_posix_uid
+def test_install_cli_is_fatal_for_an_archive_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ARCHIVE_MISMATCH is the one install refusal that is about the release: the
+    # downloaded bytes are not the signed ones. It stays exit 1 and stops the
+    # engine install.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    manifest, signature = _signed_manifest(tmp_path, entry)
+    public_key = (tmp_path / "public-key.txt").read_text(encoding="utf-8")
+
+    def refuse(*_args: Any, **_kwargs: Any) -> HostOwnership:
+        raise server_host_install.ServerHostInstallError(
+            "the downloaded server host does not match the signed manifest",
+            code=server_host_install.ARCHIVE_MISMATCH,
+        )
+
+    monkeypatch.setattr(server_host_install, "install_server_host", refuse)
+
+    status = server_host_install.main(
+        [
+            "install",
+            "--manifest",
+            str(manifest),
+            "--signature",
+            str(signature),
+            "--archive",
+            str(archive),
+            "--public-key",
+            public_key,
+        ]
+    )
+
+    assert status == 1
+    assert "Error:" in capsys.readouterr().err
 
 
 # ── macOS-only integration: the real universal host ──────────────────────────
@@ -1031,3 +1303,45 @@ def test_real_build_and_a_second_archive_with_different_bytes_refuse(
         server_host_install.install_server_host(other, entry)
     assert caught.value.code == server_host_install.ARCHIVE_MISMATCH
     assert verify_owned_host(bundle, runner=subprocess.run) == snapshot
+
+
+@requires_macos_tools
+def test_real_build_killed_after_the_rename_is_verified_next_run(
+    tmp_path: Path,
+) -> None:
+    # The R2 window on real signed bytes: build the universal host, then run the
+    # install in a fresh process that exits the instant the bundle lands at its
+    # canonical path, before the final verify. Nothing rolled back, but the
+    # record was written first, so the next install verifies the host as ours
+    # rather than reporting host_exists.
+    result = BUILD.build(tmp_path / "build")
+    archive: Path = result["paths"]["archive"]
+    bundle = server_host.default_bundle_path()
+    record = server_host.default_ownership_path()
+
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _KILL_AFTER_RENAME_CHILD,
+            str(archive),
+            str(bundle),
+            str(record),
+        ],
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+
+    # The kill landed after the rename: a consistent host and its record exist.
+    assert bundle.is_dir()
+    assert read_host_ownership(record).bundle_path == os.path.realpath(bundle)
+
+    inode = bundle.stat().st_ino
+    again = server_host_install.install_server_host(
+        archive, server_host_artifact_entry(archive)
+    )
+    assert again.bundle_path == os.path.realpath(bundle)
+    assert bundle.stat().st_ino == inode

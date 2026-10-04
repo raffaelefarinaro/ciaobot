@@ -1318,13 +1318,16 @@ if [ -n "$host_entry" ]; then
     [ "$actual_size" = "$host_size" ] || fail "downloaded server host does not match the signed manifest"
     # The module re-checks the digest and size, inspects the extracted bundle,
     # installs it atomically under ~/Applications and writes the owner-only
-    # record. A refusal leaves nothing installed. Exit 3 is the one refusal that
-    # is not about the release: something is already at the target that the
-    # module cannot prove is ours (a bundle left without its record by a killed
-    # run, a copied or edited one). It is left exactly as it is and the engine
-    # install carries on - an inert, optional host must not block every later
-    # engine update until the user deletes it by hand. Any other failure is a
-    # release that did not verify, and stops the run.
+    # record. A refusal leaves nothing installed. Exit 3 is everything that is
+    # not about the release: something already at the target the module cannot
+    # prove is ours, a disk full or a chmod EPERM, or a codesign probe that timed
+    # out or parsed differently on this macOS release. The manifest signature and
+    # the archive's digest were already checked above, so those are local or
+    # signed-build facts, never attacker input - and the host is optional and
+    # inert, so it must not block every later engine install until the user
+    # deletes it by hand. Exit 1 is reserved for a release that did not verify
+    # (a manifest/selection error or an archive that does not match its signed
+    # digest), and stops the run.
     host_rc=0
     "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
         python -I -m ciao.server_host_install install \
@@ -1334,7 +1337,7 @@ if [ -n "$host_entry" ]; then
         --public-key "$RELEASE_PUBLIC_KEY" >/dev/null || host_rc=$?
     case "$host_rc" in
         0) echo "Ciaobot Server host installed and recorded." ;;
-        3) echo "warning: the existing Ciaobot Server host was left untouched (see above); the engine install continues" >&2 ;;
+        3) echo "warning: the Ciaobot Server host was not installed (see above); the engine install continues" >&2 ;;
         *) fail "the signed server host could not be installed" ;;
     esac
 fi

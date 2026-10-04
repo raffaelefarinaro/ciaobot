@@ -319,6 +319,18 @@ case "${1:-}" in
                     printf 'warning: there is already a host at the target\\n' >&2
                     exit 3
                 fi
+                # The two warn-and-continue kinds the module maps to exit 3: a
+                # native inspection that failed (a codesign probe that timed out
+                # or parsed differently) and a local install failure (disk full,
+                # chmod EPERM). Both leave the engine install to carry on.
+                if [ -f "$HOME/warn-inspection-server-host" ]; then
+                    printf 'Error: the host bundle fails strict signature verification\\n' >&2
+                    exit 3
+                fi
+                if [ -f "$HOME/warn-install-server-host" ]; then
+                    printf 'Error: the ownership record could not be written: No space left on device\\n' >&2
+                    exit 3
+                fi
                 exit 0
                 ;;
         esac
@@ -802,9 +814,41 @@ def test_an_existing_unowned_host_warns_and_the_engine_still_installs(
     result = _run_installer(harness, "--version", VERSION, "--no-start")
 
     assert result.returncode == 0, result.stderr
-    assert "the existing Ciaobot Server host was left untouched" in result.stderr
+    assert "the Ciaobot Server host was not installed" in result.stderr
+    assert "the engine install continues" in result.stderr
     assert "Ciaobot Server host installed and recorded." not in result.stdout
     assert "tool install" in _log(harness, "uv-calls.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(
+    "knob",
+    ["warn-inspection-server-host", "warn-install-server-host"],
+)
+def test_a_non_security_host_failure_warns_and_the_engine_installs(
+    tmp_path: Path, knob: str
+) -> None:
+    # By the time `install` runs, the shell has already verified the manifest
+    # signature and the archive's sha256/size, so an INSTALL_FAILED (disk full,
+    # chmod EPERM) or an INSPECTION_FAILED (a codesign probe that timed out or
+    # parsed differently on this macOS release) is local or a signed-build
+    # defect, never attacker input. It must warn and let the engine install,
+    # not abort the one-liner for an optional, inert host.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    (harness["home"] / knob).write_text("")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "the Ciaobot Server host was not installed" in result.stderr
+    assert "the engine install continues" in result.stderr
+    assert "Ciaobot Server host installed and recorded." not in result.stdout
+    assert "tool install" in _log(harness, "uv-calls.log")
+    assert f"Ciaobot engine {VERSION} installed." in result.stdout
 
 
 @runs_the_sh_installer
