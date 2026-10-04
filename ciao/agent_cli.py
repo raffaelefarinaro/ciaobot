@@ -249,6 +249,15 @@ def build_parser() -> argparse.ArgumentParser:
     tcomplete = task.add_parser("complete")
     tcomplete.add_argument("task_id")
     tcomplete.add_argument("--revision", required=True)
+    tdelegate = task.add_parser("delegate")
+    tdelegate.add_argument("task_id")
+    tdelegate.add_argument("--revision", required=True, help="The revision you read; a stale one starts nothing.")
+    tdelegate.add_argument("--project", default=None, help="Override the chat's project; omit to use the task's own, else General.")
+    tattempt = task.add_parser("attempt")
+    tattempt.add_argument("attempt_id")
+    tattempt.add_argument(
+        "action", choices=["stop", "resume", "retry", "detach"]
+    )
 
     schedule = _verbs(nouns.add_parser("schedule", help="Schedules in the active workspace."))
     schedule.add_parser("list")
@@ -541,6 +550,16 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 "task_id": args.task_id,
                 "status": args.to,
                 "expected_revision": args.revision,
+            }
+        if verb == "delegate":
+            arguments = {"task_id": args.task_id, "expected_revision": args.revision}
+            if args.project is not None:
+                arguments["project_id"] = args.project
+            return "task_delegate", arguments
+        if verb == "attempt":
+            return "task_attempt_action", {
+                "attempt_id": args.attempt_id,
+                "action": args.action,
             }
         # `complete` stays its own verb even though the store refuses it: the
         # refusal is the answer, and the agent needs a name for it to report

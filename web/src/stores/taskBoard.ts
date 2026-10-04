@@ -1,8 +1,23 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../lib/api'
-import { isTaskInvalidRow, taskApiErrorMessage, taskDetailFrom, taskRowsFrom, toTaskListRow } from '../lib/taskBoard'
-import type { TaskDetail, TaskListResponse, TaskRow, TaskStatus } from '../lib/types'
+import {
+  isTaskInvalidRow,
+  taskApiErrorMessage,
+  taskAttemptFrom,
+  taskDetailFrom,
+  taskRowsFrom,
+  toTaskListRow,
+} from '../lib/taskBoard'
+import type {
+  TaskAttempt,
+  TaskAttemptActionResponse,
+  TaskDelegateResponse,
+  TaskDetail,
+  TaskListResponse,
+  TaskRow,
+  TaskStatus,
+} from '../lib/types'
 
 /** The fields a `PATCH /api/tasks/{id}` accepts, exactly as the route checks them. */
 export interface TaskChanges {
@@ -396,6 +411,104 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     }
   }
 
+  /**
+   * Hand one task to the agent as one ordinary chat, at the revision the board read.
+   *
+   * The whole of the no-escalation property lives on the server: it launches
+   * through `start_stream` with the default attendance, so an approval card the
+   * delegated turn raises is an ordinary Needs-you card in that chat. There is no
+   * body key for prompt text either — the prompt is built from the record's own
+   * fields, so a board cannot hand the agent work nobody filed.
+   *
+   * `created: false` in the answer is the normal outcome of a double click or a
+   * race with an agent: the attempt that is already running is returned and
+   * nothing was created or sent. The row is still adopted either way, because
+   * either answer changed the task (or confirmed it had already changed).
+   */
+  async function delegate(
+    workspace: string,
+    taskId: string,
+    expectedRevision: string,
+    projectId?: string,
+  ): Promise<TaskDelegateResponse['attempt'] | null> {
+    if (!workspace || !taskId || !expectedRevision) return null
+    // This write's answer is about to be the newest record the board holds.
+    descriptionSeq++
+    saving.value = true
+    error.value = ''
+    try {
+      const data = await api.post<TaskDelegateResponse | null>(
+        `/api/tasks/${encodeURIComponent(taskId)}/delegate`,
+        {
+          workspace,
+          expected_revision: expectedRevision,
+          ...(projectId ? { project_id: projectId } : {}),
+        },
+      )
+      // The board moved to another workspace while this delegated. The attempt
+      // belongs to the one that was left; adopting it would draw this workspace's
+      // chat and revision under the new name.
+      if (!drawingWorkspace(workspace)) return null
+      if (data?.task) {
+        const task = adopt(data.task)
+        if (task.id && described.value?.id === task.id) described.value = task
+      }
+      const attempt = taskAttemptFrom(data?.attempt)
+      return attempt.attempt_id ? attempt : null
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not delegate the task')
+      return null
+    } finally {
+      saving.value = false
+    }
+  }
+
+  /**
+   * Stop, resume, retry or detach one attempt.
+   *
+   * No `expected_revision`, because the gesture acts on an *attempt* rather than
+   * editing a record: there is no field for the board to present and no planned
+   * edit that could go stale. What can conflict is the attempt's own state — a
+   * `stop` on an already-stopped attempt is a 400 naming what it found — and the
+   * server decides that from the attempt, not from anything this board holds.
+   *
+   * The task row comes back on `detach` (the linkage cleared) and on `resume`/
+   * `retry` (re-linked to the new attempt), so it is adopted through the same guard
+   * as every other write.
+   */
+  async function attemptAction(
+    workspace: string,
+    taskId: string,
+    attemptId: string,
+    action: 'stop' | 'resume' | 'retry' | 'detach',
+  ): Promise<TaskAttempt | null> {
+    if (!workspace || !taskId || !attemptId) return null
+    descriptionSeq++
+    saving.value = true
+    error.value = ''
+    try {
+      const data = await api.post<TaskAttemptActionResponse | null>(
+        `/api/tasks/${encodeURIComponent(taskId)}/attempt/${encodeURIComponent(attemptId)}/${action}`,
+        { workspace },
+      )
+      // The board moved to another workspace while this gesture was in flight: the
+      // rows on screen are the other one's, and a late detach would filter this
+      // workspace's row out of it. See {@link drawingWorkspace}.
+      if (!drawingWorkspace(workspace)) return null
+      if (data?.task) {
+        const task = adopt(data.task)
+        if (task.id && described.value?.id === task.id) described.value = task
+      }
+      const attempt = taskAttemptFrom(data?.attempt)
+      return attempt.attempt_id ? attempt : null
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not act on the delegation')
+      return null
+    } finally {
+      saving.value = false
+    }
+  }
+
   /** Drop a message a dismissed dialog is done with. */
   function clearError(): void {
     error.value = ''
@@ -405,5 +518,6 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     rows, loadedWorkspace, loading, loadError, error, saving, described,
     reload, revisionOf, get,
     create, update, complete, remove, clearError,
+    delegate, attemptAction,
   }
 })

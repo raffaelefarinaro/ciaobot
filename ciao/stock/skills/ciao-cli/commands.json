@@ -54,5 +54,7 @@
   "run cancel": "background_run_cancel",
   "context get": "context_get",
   "gws status": "gws_status",
-  "workspace list": "workspaces_list"
+  "workspace list": "workspaces_list",
+  "task delegate": "task_delegate",
+  "task attempt": "task_attempt_action"
 }

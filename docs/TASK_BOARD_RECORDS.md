@@ -75,6 +75,124 @@ See [the runbook outline](https://example.test/runbook).
 - [ ] Result recorded below
 ```
 
+## Delegation attempts (#1033, child B5 of #973)
+
+A task record says what is wanted. An **attempt** says whether an agent is
+working on it right now, in which chat, and how far it got. They live in a
+separate store, `ciao/task_attempts.py`, because they are the engine's own
+bookkeeping about a turn it launched rather than the user's Markdown: the
+records are in `<runtime>/task-attempts-<workspace>.json`, not in the vault,
+and nothing here is recall, review or curation material.
+
+`TaskAttemptStore(*, workspace, runtime_dir, clock)` — one store per logical
+workspace. The vocabulary is deliberately **not** the board's:
+
+| State | Meaning | Live? |
+| ----- | ------- | ----- |
+| `running` | a turn is in flight | yes |
+| `needs_you` | the turn is paused on a question or an approval card | yes |
+| `ready_for_review` | the provider turn ended; the result waits for the user | yes |
+| `failed` | the turn ran and ended in an error | no |
+| `interrupted` | the outcome is unknown — a dead launch or a crash | no |
+| `stopped` | the user ended it, or detached it | no |
+
+`LIVE_STATES` is what holds the task's linkage and what a second `start`
+returns instead of minting a second attempt; `RESUMABLE_STATES`
+(`failed`/`interrupted`/`stopped`) is what `resume` may continue in the same
+chat. `ready_for_review` is live but not resumable on purpose: a finished turn
+is waiting for the user's decision, and continuing it is the reviewer's call.
+
+**Board state is not execution state.** None of these states is a column. A
+finished turn sets `review_state: ready` — a badge in *In progress* — and only
+the user's own completion action moves the card to `Done`. The store's
+`completion_requires_user` rule is unchanged by any of this.
+
+The review badge moves the task's revision, so the watcher rebinds the attempt to
+the revision that write left behind (`bind_revision`). Without that, *every*
+finished turn would read `changed_since_delegated`, which is a warning about the
+user editing a task under the agent and would then mean nothing.
+
+**Reviewing is one gesture.** `POST /api/tasks/{id}/complete` from the user's own
+session releases the linkage and closes the card when the task's attempt is
+`ready_for_review` — a revision-checked `unlink` and then the completion, so the
+attempt stays as `ready_for_review` history. Routing that through `detach` first
+would settle the reviewed attempt as `stopped` and lose the result. A task with a
+turn still in flight (`running`, `needs_you`) has no result to approve, so that
+completion is still refused and needs `stop` or `detach` first, as does an agent
+completion of any kind.
+
+`detach` never rewrites a finished attempt: it releases the task and leaves the
+state the turn actually ended in.
+
+### Known limitations
+
+- **Answering in the chat after `needs_you` does not move the attempt.** The
+  watcher settles the attempt when the turn it launched ends; an answer the user
+  types in that chat afterwards starts a *new* turn that nothing is watching, so
+  the attempt keeps reading `needs_you` indefinitely. The badge is honest about
+  the attempt it is — the turn it launched really did end waiting — but it does
+  not follow the conversation. Re-attaching a watcher when the chat's next stream
+  starts is the fix; it is tracked as a follow-up rather than done here.
+- **A pending permission card does not end the turn, so the attempt reads
+  `running`.** `needs_you` is derived from the chat's pending question or
+  permission *after* the stream ends, so while the card is actually up and the
+  user has not answered it, the badge still says Running. The Needs-you badge
+  appears once the turn has ended waiting, not while it waits.
+
+Four rules the store holds:
+
+- **One live attempt per task.** `start` takes the workspace lock across its
+  whole read-then-write and reports `created`, so a double click, a second tab
+  and an agent/UI race all answer with the same attempt — and only the call that
+  minted it may follow with `start_stream`.
+- **Intent is durable before the side effect.** The attempt and the task's
+  linkage are written before the turn starts. A crash in that window leaves a
+  record naming a chat nobody ran, which reads `interrupted` and is never
+  replayed; the other order would leave an orphan chat nothing points at.
+- **A crash is derived, not remembered.** Every record carries the writing
+  process's `owner` token. A live attempt owned by another process cannot have a
+  turn running in this one, so it reads `interrupted` — which is how a restart
+  re-derives it with no startup sweep and nothing held in memory.
+  `recover_interrupted()` is the durable half, for a caller that wants the
+  ambiguity settled on disk.
+- **History is bounded.** `MAX_ATTEMPTS_PER_TASK` (50) per task and
+  `MAX_HISTORY` (500) per workspace, both dropping the oldest and never a live
+  attempt, so a task retried for ever cannot grow the document without limit.
+
+The prompt and the provenance stamp are server-owned, with no parameter through
+which a caller may supply prompt text: a delegation hands over the task the user
+filed. `build_prompt` quotes the record's body inside a fixed
+`<task-board-task>` fence with the tag escaped inside the text, so a hand-edited
+body cannot close its own frame. `task_delegation_helper` stamps the chat with
+the task id, its revision and the attempt id, which is what makes the chat
+findable again after a reload or a restart. The attempt id is minted **before**
+the chat is created and passed to `start(..., attempt_id=...)`, so the stamp and
+the store can only ever name the same attempt — `update_chat` has no `helper`
+parameter, so a stamp written after the fact would raise and be swallowed.
+
+Linkage mutation is the one thing `ciao/task_board.py` delegates to this child:
+`chat_id`/`attempt_id` are refused as ordinary patch fields and get their own
+revision-checked `link()`/`unlink()` door instead.
+
+Delegating a task that is already in *Done* is refused with `invalid_task`.
+`link()` hands the task over as `in_progress`/`agent`, so delegating a finished
+one would reopen it — and an agent delegating over MCP could undo a completion
+the user made by hand. Moving the task out of *Done* is the user's own gesture.
+
+The watcher only writes to a task its own attempt still holds. It refuses to
+settle an attempt that has already settled (the store refuses the transition) and
+checks `task.attempt_id == attempt_id` before flagging a task for review, so a
+watcher left over from a detached or retried attempt cannot put a Review badge on
+a card another attempt now owns. A stream that ends without a `result` event
+settles `interrupted`, not `ready_for_review`: there is no answer to review, and
+an empty result dressed as a finished one is the one reading the user cannot
+recover from without opening the chat.
+
+The gesture routes (`stop`, `detach`) await `ProjectChatManager.stop_chat`, which
+is `async`. `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` checks `task_id`
+against the attempt and answers `task_attempt_not_found` on a mismatch, so an
+attempt id sent under another task's URL acts on nothing.
+
 ## API
 
 `TaskBoardStore(*, workspace, vault_root, runtime_dir, clock)` — one store
@@ -90,6 +208,15 @@ store does not resolve or fall back across workspaces.
 - `update(task_id, *, expected_revision, changes, body=None, actor)` —
   managed field edits plus an optional wholesale body replacement. The
   body changes only when `body` is not None.
+- `link(task_id, *, expected_revision, chat_id, attempt_id, status="in_progress", assignee="agent")` /
+  `unlink(task_id, *, expected_revision)` — the delegation child's own door onto
+  the two linkage fields. `update` refuses `chat_id`/`attempt_id` as patch fields
+  (an agent naming its own chat would be claiming a delegation it never made), so
+  these are the only writes that stamp or clear linkage, and they carry the same
+  revision protocol: required, rechecked under the lock, nothing written on a
+  conflict. `link` defaults to handing the task over — `in_progress` and `agent` —
+  in the same atomic write, because a delegated task left in *Backlog* assigned to
+  the user could never reach `review_state: ready`, which needs exactly that pair.
 - `delete(task_id, *, expected_revision)` — revision-checked under the
   workspace lock; unlinks only a real task record inside
   `Workspace/Tasks`, never a link target or anything outside it. Raises
@@ -165,8 +292,11 @@ a hand edit may hold any schema-valid state:
 - An `agent` caller cannot set status `done` (`completion_requires_user`).
   A `user` can complete a manual (unlinked) task.
 - A task linked to a live chat or attempt (`chat_id`/`attempt_id`
-  non-null) cannot be completed or reassigned here at all; that needs the
-  delegation service's stop/detach workflow.
+  non-null) cannot be completed or reassigned here at all — by **any** actor,
+  including the signed-in user's own session, because a turn is in flight. The
+  delegation service's `detach` clears the linkage, and only then does
+  completion become available; `stop` alone does not, so "stopped" never quietly
+  becomes "the user may close this".
 - `ready` requires `agent` assignment and `in_progress` status. Leaving
   `in_progress` without an explicit review change clears `ready` to `none`.
 
@@ -198,9 +328,11 @@ The rule is keyed on the *directory pair* `Workspace/Tasks`, not on the name
 
 - Live project membership and completion validation is a later
   application-service obligation: this store keeps the `project_id`
-  string without judging it and invents no project registry.
-- Linkage mutation (`chat_id`/`attempt_id`) belongs to the delegation
-  child. Source hand edits may carry nullable linkage, but this store
-  never creates a live chat or attempt.
-- No board UI is shipped yet (B4), and #973 stays open for the board and
-  delegation children.
+  string without judging it and invents no project registry. (#1033 resolves
+  membership in the delegation service before it picks a chat's host, and
+  refuses rather than falling back when a named project is gone or foreign.)
+- Linkage mutation (`chat_id`/`attempt_id`) belongs to the delegation child,
+  which now ships: `link()`/`unlink()` above are that child's door, and this
+  store still never creates a live chat or attempt.
+- No board UI is shipped in this document's scope; the PWA board is #1028 and
+  the delegation gestures on it are #1033. #973 stays open for what is left.
