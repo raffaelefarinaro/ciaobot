@@ -509,21 +509,25 @@ export function formatTaskDue(due: unknown): string {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-/** The project filter's value for "filed under no project". */
+/** The project filter's value for General: "filed under no project". */
 export const TASK_NO_PROJECT = 'no-project'
 
 /**
  * Whether a task survives a project filter.
  *
- * `''` means every project and {@link TASK_NO_PROJECT} the tasks filed under
- * none, which is a real state on the board (a card reads *General*) rather than
- * an absence, so it gets its own filter value. A project whose id happened to
- * equal the sentinel is unreachable through the filter rather than silently
- * answering for the unfiled tasks.
+ * `''` means every project and {@link TASK_NO_PROJECT} General: the tasks filed
+ * under no project, together with any filed under the workspace's auto-managed
+ * General project (`generalId`), because both are the one General the board
+ * shows. A project whose id happened to equal the sentinel is unreachable
+ * through the filter rather than silently answering for the unfiled tasks.
  */
-export function matchesProjectFilter(task: Task, filter: TaskProjectFilter): boolean {
+export function matchesProjectFilter(
+  task: Task,
+  filter: TaskProjectFilter,
+  generalId = '',
+): boolean {
   if (!filter) return true
-  if (filter === TASK_NO_PROJECT) return !task.project_id
+  if (filter === TASK_NO_PROJECT) return !task.project_id || task.project_id === generalId
   return task.project_id === filter
 }
 

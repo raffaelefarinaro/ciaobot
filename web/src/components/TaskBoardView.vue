@@ -181,7 +181,7 @@ onMounted(load)
 // was left, described by a task the new one has never seen.
 watch(workspace, () => {
   closeCreate()
-  closeDetail()
+  void closeDetail({ discard: true })
   closeHistory()
   // Not `closeDelegate`: a gesture already in flight makes that one refuse, which
   // would leave the sheet marked open with nothing drawn and the focus trap still
@@ -212,7 +212,7 @@ function clearFilters() {
 const filtered = computed(() =>
   tasks.value.filter(
     (task) =>
-      matchesProjectFilter(task, projectFilter.value) && matchesDueFilter(task, dueFilter.value),
+      matchesProjectFilter(task, projectFilter.value, generalId.value) && matchesDueFilter(task, dueFilter.value),
   ),
 )
 
@@ -231,23 +231,32 @@ const lanes = computed(() =>
 )
 
 /**
- * The projects a task can name: the unfiled bucket when any task uses it, then
- * this workspace's own projects, then any project id the board has seen that the
- * registry no longer lists.
+ * The workspace's auto-managed General project, which the board treats as the
+ * same General as a task filed under no project: one name, one filter entry,
+ * one option in the editor, rather than "General", "No project" and a second
+ * "General" for the same place.
+ */
+const generalId = computed(() => projectStore.generalProject(workspace.value)?.project_id ?? '')
+
+/** A task's project with the auto-managed General folded into `''`. */
+function ownProject(projectId: string): string {
+  return projectId === generalId.value ? '' : projectId
+}
+
+/**
+ * The projects a task can name besides General: this workspace's own projects,
+ * then any project id the board has seen that the registry no longer lists.
  *
  * That last group is load-bearing rather than tidy: a `<select>` with no matching
- * `<option>` renders blank, and a Save would then send `project_id: null` and
+ * `<option>` renders blank, and a save would then send `project_id: null` and
  * quietly detach the task from a project that exists. Naming the unknown id is
  * the difference between "I cannot see that project" and "I cleared it".
  */
 const projectOptions = computed(() => {
   const options: Array<{ value: string; label: string }> = []
-  if (tasks.value.some((task) => !task.project_id)) {
-    options.push({ value: TASK_NO_PROJECT, label: 'No project' })
-  }
-  const listed = new Set<string>()
+  const listed = new Set<string>([generalId.value, TASK_NO_PROJECT])
   for (const project of projectStore.workspaceProjects) {
-    if (project.project_id === TASK_NO_PROJECT) continue
+    if (listed.has(project.project_id)) continue
     listed.add(project.project_id)
     options.push({ value: project.project_id, label: project.name })
   }
@@ -259,14 +268,14 @@ const projectOptions = computed(() => {
   return options
 })
 
-/** The create dialog's list: no "unfiled" entry, because its blank already
- *  means that and the card reads it as General. */
-const createProjectOptions = computed(() =>
-  projectOptions.value.filter((option) => option.value !== TASK_NO_PROJECT),
-)
+/** The filter's list: General first, then the same projects. */
+const filterProjectOptions = computed(() => [
+  { value: TASK_NO_PROJECT, label: 'General' },
+  ...projectOptions.value,
+])
 
 const projectName = (projectId: string): string => {
-  if (!projectId) return 'General'
+  if (!ownProject(projectId)) return 'General'
   return projectStore.workspaceProjects.find((p) => p.project_id === projectId)?.name || projectId
 }
 
@@ -1003,7 +1012,7 @@ const detailFocusActive = computed(() => detailOpen.value && !pendingConfirm.val
 
 useModalFocus(detailEl, detailFocusActive, {
   initialFocus: detailTitleField,
-  onEscape: () => { if (pendingConfirm.value || detailSaving.value) return; closeDetail() },
+  onEscape: () => { if (pendingConfirm.value || detailSaving.value) return; void closeDetail() },
 })
 
 /** The row a dialog is editing, or undefined once it has been deleted. */
@@ -1107,7 +1116,7 @@ function openDetail(task: Task) {
   detailForm.status = task.status
   detailForm.due = task.due
   detailForm.assignee = task.assignee
-  detailForm.project_id = task.project_id
+  detailForm.project_id = ownProject(task.project_id)
   detailForm.body = held?.body ?? ''
   savedAt.value = 0
   editingBody.value = false
@@ -1115,8 +1124,26 @@ function openDetail(task: Task) {
   void loadDescription(task.id)
 }
 
-function closeDetail() {
-  if (detailSaving.value) return
+/**
+ * Close the editor, saving what is still pending first.
+ *
+ * A refused save keeps the dialog open: the server's sentence is in it, and
+ * closing would leave the user believing an edit landed that did not.
+ * `discard` is the workspace switch, where a pending edit belongs to the
+ * workspace being left and must not be written into the one arrived at.
+ */
+async function closeDetail(options: { discard?: boolean } = {}) {
+  if (!detailOpen.value) return
+  if (options.discard || (!hasUnsavedEdits() && !autosaving.value)) {
+    // Nothing to write: close now, so a dialog opened straight after is not
+    // closed by this one finishing late.
+    cancelAutosave()
+  } else {
+    if (detailSaving.value) return
+    const closing = detailId.value
+    if (!(await flushDetail())) return
+    if (detailId.value !== closing) return
+  }
   detailOpen.value = false
   detailId.value = ''
   descriptionState.value = 'idle'
@@ -1132,8 +1159,12 @@ function closeDetail() {
  * "On hold" — a write to the record, not just to this dialog.
  */
 async function setDetailStatus(next: TaskStatus) {
+  if (!detailTask.value || next === detailForm.status || detailSaving.value) return
+  // A field edit still waiting goes first, so the two writes do not race for
+  // the same revision.
+  if (!(await flushDetail())) return
   const task = detailTask.value
-  if (!task || next === detailForm.status || detailSaving.value) return
+  if (!task) return
   const revision = board.revisionOf(task.id)
   if (!revision) return
   board.clearError()
@@ -1182,13 +1213,95 @@ function detailChanges(task: Task): TaskChanges {
   if ((due ?? '') !== (task.due || '')) changes.due = due
   if (detailForm.assignee !== task.assignee) changes.assignee = detailForm.assignee
   const project = detailForm.project_id || null
-  if ((project ?? '') !== (task.project_id || '')) changes.project_id = project
+  if ((project ?? '') !== ownProject(task.project_id)) changes.project_id = project
   return changes
 }
 
-async function saveDetail() {
+// ── Autosave ──────────────────────────────────────────────────────────────
+//
+// The editor has no Save button. A select or the date writes as soon as it
+// changes; the title and the description write once typing pauses, and on
+// blur, Enter and close. Every write is queued behind the one before it, so
+// each presents the revision the previous one returned instead of racing it
+// into a 409.
+
+/** How long typing has to pause before the title or description is written. */
+const AUTOSAVE_DELAY_MS = 700
+
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null
+let detailWrites: Promise<unknown> = Promise.resolve()
+
+/** Typing has scheduled a write that has not started yet. */
+const autosavePending = ref(false)
+
+function cancelAutosave() {
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  autosaveTimer = null
+  autosavePending.value = false
+}
+
+function scheduleAutosave() {
+  if (!detailOpen.value) return
+  cancelAutosave()
+  // Only an edit is pending: a fill that left the form equal to the record has
+  // nothing to say "Saving…" about.
+  autosavePending.value = hasUnsavedEdits()
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null
+    void flushDetail()
+  }, AUTOSAVE_DELAY_MS)
+}
+
+/** Whether the editor holds anything the record does not. */
+function hasUnsavedEdits(): boolean {
   const task = detailTask.value
-  if (detailSaving.value || !task || !detailValid.value) return
+  if (!task) return false
+  if (Object.keys(detailChanges(task)).length) return true
+  const held = heldDescription(task)
+  return Boolean(held) && held!.body !== detailForm.body
+}
+
+/**
+ * Write whatever the editor holds that the record does not, now.
+ *
+ * Resolves `false` when the write was refused, so a caller about to close or
+ * move on can stop and leave the server's sentence on screen.
+ */
+async function flushDetail(): Promise<boolean> {
+  cancelAutosave()
+  const run = detailWrites.then(() => saveDetail())
+  detailWrites = run.catch(() => undefined)
+  return (await run) !== false
+}
+
+// Programmatic fills (open, the description read) land here too; they leave the
+// form equal to the record, so the write they schedule finds nothing to send.
+watch(
+  () => [detailForm.title, detailForm.body],
+  () => scheduleAutosave(),
+)
+watch(
+  () => [detailForm.due, detailForm.assignee, detailForm.project_id],
+  () => { if (detailOpen.value) void flushDetail() },
+)
+onBeforeUnmount(() => {
+  if (autosaveTimer && detailOpen.value) void flushDetail()
+  cancelAutosave()
+})
+
+/** A write in flight from the editor's fields, for the "Saving…" line. */
+const autosaving = ref(false)
+
+/**
+ * Write the fields this editor changed. `false` only when the server refused.
+ *
+ * Nothing is written back into the form from the answer: the user may have
+ * typed on while it was in flight, and the row the store adopted is what the
+ * next comparison runs against.
+ */
+async function saveDetail(): Promise<boolean> {
+  const task = detailTask.value
+  if (!detailOpen.value || !task || !detailValid.value) return true
   // The revision is read first and the slot asked about *it* below:
   // `revisionOf` drops a slot that disagrees with the row, so the two questions
   // have to be about the same instant or the answer is about a different one.
@@ -1204,8 +1317,8 @@ async function saveDetail() {
   const body = held && held.revision === revision && held.body !== detailForm.body
     ? detailForm.body
     : undefined
-  if (!Object.keys(changes).length && body === undefined) return
-  detailSaving.value = true
+  if (!Object.keys(changes).length && body === undefined) return true
+  autosaving.value = true
   const saved = await board.update(
     workspace.value,
     task.id,
@@ -1213,22 +1326,20 @@ async function saveDetail() {
     changes,
     body,
   )
-  detailSaving.value = false
+  autosaving.value = false
   if (!saved) {
     load()
-    return
+    return false
   }
-  detailForm.title = saved.title
-  detailForm.due = saved.due
-  detailForm.assignee = saved.assignee
-  detailForm.project_id = saved.project_id
   savedAt.value = Date.now()
   board.clearError()
+  return true
 }
 
 async function deleteTask() {
   const task = detailTask.value
   if (!task || detailSaving.value) return
+  cancelAutosave()
   const ok = await askConfirm(
     `"${task.title}" will be deleted from this workspace. The record is a file in your vault and this unlinks it — there is no trash.`,
     { title: 'Delete task', confirmLabel: 'Delete', destructive: true },
@@ -1240,7 +1351,7 @@ async function deleteTask() {
   detailSaving.value = true
   const removed = await board.remove(workspace.value, task.id, revision)
   detailSaving.value = false
-  if (removed) closeDetail()
+  if (removed) void closeDetail({ discard: true })
   // A refused delete is a stale revision or a file already gone; re-read so the
   // row on screen matches the disk.
   else load()
@@ -1300,7 +1411,7 @@ const today = localDateKey()
             <label class="sr-only" for="task-filter-project">Filter by project</label>
             <select id="task-filter-project" v-model="projectFilter" class="task-filter">
               <option value="">All projects</option>
-              <option v-for="option in projectOptions" :key="option.value" :value="option.value">
+              <option v-for="option in filterProjectOptions" :key="option.value" :value="option.value">
                 {{ option.label }}
               </option>
             </select>
@@ -1447,7 +1558,7 @@ const today = localDateKey()
                        most cards are, and saying so on each one buries the rest. The
                        mixed list has no column to say a card's status, so it does. -->
                   <p
-                    v-if="!lane.status || task.attempt_state || task.project_id || formatTaskDue(task.due) || task.assignee !== 'user'"
+                    v-if="!lane.status || task.attempt_state || ownProject(task.project_id) || formatTaskDue(task.due) || task.assignee !== 'user'"
                     class="task-meta"
                   >
                     <span
@@ -1457,7 +1568,7 @@ const today = localDateKey()
                     >{{ taskAttemptLabel(task.attempt_state) }}</span>
                     <span v-if="task.review_state === 'ready'" class="badge badge--accent2">Review</span>
                     <span v-if="!lane.status" class="badge badge--muted task-status-badge">{{ taskStatusLabel(task.status) }}</span>
-                    <span v-if="task.project_id" class="task-project">{{ projectName(task.project_id) }}</span>
+                    <span v-if="ownProject(task.project_id)" class="task-project">{{ projectName(task.project_id) }}</span>
                     <span v-if="formatTaskDue(task.due)" class="badge" :class="isOverdue(task, today) ? 'badge--error' : 'badge--muted'">
                       {{ isOverdue(task, today) ? 'Overdue · ' : 'Due ' }}{{ formatTaskDue(task.due) }}
                     </span>
@@ -1629,7 +1740,7 @@ const today = localDateKey()
               <label for="task-create-project">Project</label>
               <select id="task-create-project" v-model="createForm.project_id">
                 <option value="">General</option>
-                <option v-for="option in createProjectOptions" :key="option.value" :value="option.value">
+                <option v-for="option in projectOptions" :key="option.value" :value="option.value">
                   {{ option.label }}
                 </option>
               </select>
@@ -1856,7 +1967,7 @@ const today = localDateKey()
     </div>
 
     <!-- Detail -->
-    <div v-if="detailOpen" class="modal-backdrop" @click.self="closeDetail">
+    <div v-if="detailOpen" class="modal-backdrop" @click.self="closeDetail()">
       <div
         ref="detailEl"
         class="modal-sheet task-sheet"
@@ -1866,10 +1977,10 @@ const today = localDateKey()
       >
         <header class="task-sheet-head">
           <h3 id="task-detail-title">Edit task</h3>
-          <button type="button" class="btn-icon" aria-label="Close" @click="closeDetail">×</button>
+          <button type="button" class="btn-icon" aria-label="Close" @click="closeDetail()">×</button>
         </header>
 
-        <form class="task-form" novalidate @submit.prevent="saveDetail">
+        <form class="task-form" novalidate @submit.prevent="flushDetail">
           <div class="form-group">
             <label for="task-detail-name">Title</label>
             <input
@@ -1878,6 +1989,7 @@ const today = localDateKey()
               v-model="detailForm.title"
               type="text"
               autocomplete="off"
+              @blur="flushDetail"
             />
           </div>
           <!-- Status is a move, not a field to save: pressing one writes at once,
@@ -1954,6 +2066,7 @@ const today = localDateKey()
                 ref="bodyField"
                 v-model="detailForm.body"
                 rows="8"
+                @blur="flushDetail"
                 placeholder="Markdown. What done looks like, links, notes."
               ></textarea>
               <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
@@ -2076,15 +2189,19 @@ const today = localDateKey()
             {{ board.error }}
             <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
           </p>
-          <p v-else-if="savedAt" class="task-saved" role="status">Saved</p>
 
+          <!-- No Save: every field writes itself (see the Autosave section), and
+               this line says where that stands. -->
           <div class="form-actions">
-            <button
-              type="submit"
-              class="btn-primary"
-              :disabled="!detailValid || detailSaving"
-            >{{ detailSaving ? 'Saving…' : 'Save' }}</button>
-            <button type="button" class="btn-small" :disabled="detailSaving" @click="closeDetail">Cancel</button>
+            <p class="task-saved" role="status" aria-live="polite">{{
+              !detailValid
+                ? 'Add a title to save.'
+                : autosaving || autosavePending
+                  ? 'Saving…'
+                  : savedAt
+                    ? 'Saved'
+                    : 'Changes save as you go.'
+            }}</p>
             <button
               type="button"
               class="btn-small btn-danger task-delete"
@@ -2219,6 +2336,7 @@ const today = localDateKey()
 }
 .task-saved {
   margin: 0;
+  min-width: 0;
   color: var(--fg3);
   font-size: var(--text-sm);
 }
