@@ -210,6 +210,31 @@
             </span>
             <span class="nav-item-label" aria-hidden="true">Memory</span>
           </router-link>
+          <!-- The board the workspace's own task records live on: four fixed
+               columns, filed by status, one row per task file. A destination
+               like Memory and Automations above it, so it gets the same rail
+               row and the same `mode`-driven active state. -->
+          <router-link
+            to="/tasks"
+            class="nav-item"
+            :class="{ 'nav-item--active': mode === 'tasks' }"
+            title="tasks"
+            aria-label="tasks"
+          >
+            <!-- Clipboard with a check: the board's own subject, in the same
+                 rectilinear stroke as the rest of the rail. -->
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect x="4" y="4" width="16" height="17" rx="1" />
+                <line x1="9" y1="2" x2="9" y2="6" />
+                <line x1="15" y1="2" x2="15" y2="6" />
+                <line x1="4" y1="9" x2="20" y2="9" />
+                <polyline points="8 15 11 18 16 13" />
+              </svg>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">Tasks</span>
+          </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/models, /settings/workspaces, ...) and none of them match
                the /settings record, so active-class left this item inactive on
@@ -884,7 +909,7 @@ import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
 import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 
-const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
+const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
 
 const store = useProjectStore()
@@ -910,6 +935,10 @@ const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
   { label: 'Explore', items: [
     { section: 'map', label: 'Map' },
     { section: 'categories', label: 'Categories' },
+    // The way conversations get in: a scan of this computer's own agent folders,
+    // opt-in, in its own page. No count — nothing is listed until it is asked
+    // for, so a number here would describe a scan nobody ran.
+    { section: 'import', label: 'Import' },
   ] },
   { label: 'Records', items: [
     { section: 'retired', label: 'Retired' },
@@ -932,6 +961,9 @@ function memoryNavCount(section: MemorySection): number | null {
     // ask for attention no click can clear, and the map's own note count already
     // says how much of the vault there is.
     case 'categories': return null
+    // Nothing is listed until the reader presses Find, so there is nothing to
+    // count before then and nothing stale to show after.
+    case 'import': return null
     case 'history': return historyLoaded ? proposals.historyTotal || null : null
   }
 }

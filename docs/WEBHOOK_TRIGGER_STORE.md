@@ -1,17 +1,22 @@
-# Webhook trigger store, ingress receiver and dispatch (#981, #1010, #1020)
+# Webhook trigger store, ingress receiver and dispatch (#981, #1010, #1020, #1034, #1039)
 
-> **This is not a finished webhook feature.** `ciao/webhooks.py` owns the
+> **This is the whole of the webhook feature.** `ciao/webhooks.py` owns the
 > private configuration and credential store for the webhook feature tracked in
 > #974, plus the ingress receiver that records what a secret caused;
 > `ciao/webhook_dispatch.py` turns an accepted event into an ordinary chat.
-> What ships today is: management routes over the store (A2), one
-> bearer-authenticated endpoint that records a durable receipt for an accepted
-> event (A3), and the dispatch that launches that event as an ordinary project
-> chat (A4). What does **not** ship is the part a user would call a *surface* —
-> **there is no Automations UI, no receipt history page, no CLI, skill or
-> recipe**: a `202` from the receiver means "your event is recorded", not "a
-> turn ran", and no page, skill or recipe may claim otherwise. This document is
-> the store's, the receiver's and the dispatcher's own contract.
+> What ships is: management routes over the store (A2), one bearer-authenticated
+> endpoint that records a durable receipt for an accepted event (A3), the
+> dispatch that launches that event as an ordinary project chat (A4), the
+> Automations page that manages the triggers (A5), and the agent's own
+> management surface — the `ciao webhook` noun and the matching operations —
+> together with the user/sender recipes and the capability text that describes it
+> (A6), and the session-authenticated **receipt-history read** over the same
+> journal, with a per-trigger history in that Automations page (#1044). What the
+> whole set does **not** ship: outbound callbacks, provider-specific signature
+> adapters, public tunnels, model overrides. A `202` from the receiver means "your
+> event is recorded", not "a turn ran", and no page, skill or recipe may claim
+> otherwise. This document is the store's, the receiver's and the dispatcher's own
+> contract.
 
 ## What it is
 
@@ -221,9 +226,67 @@ launch as a crash at the next boot.
 
 **Deliberately not here.** The launch itself (`begin_launch`, `settle_launched`
 and `settle_failed` are the dispatcher's entry points, and nothing in
-`ciao/webhooks.py` calls them), a receipt-list API, outbound callbacks, and any
-provider-specific signature adapter — the bearer secret is the whole
-authentication story.
+`ciao/webhooks.py` calls them), outbound callbacks, and any provider-specific
+signature adapter — the bearer secret is the whole authentication story.
+
+## The receipt history (#1044)
+
+A read surface over the same journal, so "what has this trigger received, and
+which chat did each event become" has an answer that does not require reading a
+JSONL file by hand. Two session-authenticated, workspace-scoped reads, beside the
+management routes in `ciao/web/routes_webhooks.py`:
+
+- `GET /api/webhooks/{trigger_id}/receipts?workspace=` — one trigger's events,
+  beside its `trigger_id`, `trigger_name` and the `limit` it was read with.
+- `GET /api/webhooks/receipts?workspace=` — the same rows for a whole workspace,
+  across every trigger.
+
+Both take the ordinary session cookie like every other `/api/*` route, and both
+answer an unregistered or absent `?workspace=` with a **400** and a trigger that
+is not that workspace's with the same **404** as an unknown id — a history is not
+a way to confirm what another workspace has configured. The workspace-wide read
+filters on each receipt's **own** `workspace` field rather than on the triggers
+that exist now, which is what keeps a receipt readable after its trigger is
+deleted, renamed or retargeted.
+
+**The row is a projection, not the journal line.** `WebhookReceipt.to_public_dict`
+is the only shape that leaves the engine: `receipt_id`, `trigger_id`,
+`trigger_name`, `status`, `chat_id`, `event_text`, `created_at`, `updated_at` and
+`detail`. No verifier — and deliberately none of the journal's own retry
+machinery either: the sender's `idempotency_key` and the request `body_digest`
+are what collapses a retry, and neither is what "what arrived?" asks for.
+`chat_id` is derived from the `launched` receipt's `detail` (`"chat <id>"`) so a
+caller never parses a chat id out of an engine's own prose, and `detail` stays
+beside it because on a `failed` or `interrupted` row it is the only sentence
+explaining what happened.
+
+**The read is bounded, and bounded where the trim is not.** `receipts_for()`
+(fold the whole journal) exists because a dedupe decision genuinely has to know
+about every row; the history read is a *question* about the recent tail, so it
+walks the file backwards in `_REVERSE_WINDOW_BYTES` windows
+(`_iter_rows_newest_first`) and stops at `RECEIPTS_HISTORY_LIMIT` (50). Reading
+fifty rows costs fifty rows of memory rather than the whole journal's, and one
+row per receipt id is all that is kept even though the journal holds three lines
+for an event that walked `accepted → launching → launched` — walking backwards,
+the first row seen for an id *is* that receipt's effective state, which is what
+makes the early stop safe. The rows behind the cap are still in the journal and
+still trimmed only by the journal's own bounds (4 MiB / 4000 settled rows);
+`limit` is a cap on what a page draws, not on what is kept.
+
+**Retention, stated honestly.** `DEDUPE_RETENTION_DAYS` (7) is a *dedupe*
+window: it decides whether a sender reusing an `Idempotency-Key` collapses onto an
+earlier receipt or takes the next generation of the id. A settled receipt stays
+readable past it, and what ages out is the key, never the record of what
+happened. Nothing here promises more than the journal keeps — once the trim drops
+a settled row, it is gone, and that is the only thing that erases it.
+
+**What the UI draws.** `web/src/components/WebhookTriggers.vue` gained a
+per-trigger history under the trigger's row: one line per receipt with its
+outcome in words, when it arrived, and a button to open the chat a `launched`
+event became. An `interrupted` row is drawn like any other, because it is a
+record that needs a person and not an error to hide. A sender still cannot read
+any of this back — the surface is the operator's, and `202` remains the sender's
+whole answer.
 
 ## Dispatch (#1020)
 
@@ -345,12 +408,18 @@ cannot accidentally pick a status:
 | `receipt_unavailable` | 503 | yes | the journal could not be read, locked or appended to — the event was **not** recorded |
 | `invalid_receipt` | 500 | no | a journal row cannot be decoded as a receipt this code wrote; failed closed rather than read as absent |
 
-## Deliberately not supported yet
+## Deliberately not supported
+
+Every item below was rechecked against the shipped code when the last child
+(#1039) landed, and every one of them is still true: none is an oversight
+waiting for a later release, and each is a refusal somebody could otherwise
+have taken.
 
 - **Unattended `bypass`.** `bypass` is a real `BridgeMode` (`ciao.models`) and
   is not representable here. An unattended turn is a trust decision, and a
   foundation that can store it hands that decision to whoever writes the store
-  next.
+  next. Dispatch therefore launches every accepted event as an ordinary turn
+  (see **Dispatch** above) whatever the trigger's own mode says.
 - **Caller-supplied prompts.** `input_policy` is `event_text` only: fixed
   instructions plus bounded event text. A caller-prompt mode is a separately
   approved per-trigger choice, and payload URLs are never fetched.
@@ -359,10 +428,19 @@ cannot accidentally pick a status:
   store will ever do: refusing an unregistered workspace name here would make it
   own workspace lifecycle. Whether the workspace is registered and live, and
   whether the named project exists, is dispatch's obligation — and dispatch fails
-  the launch rather than falling back to General.
-- **A principal, a session or a login.** There is none.
+  the launch rather than falling back to General. The one place a *caller* is
+  checked is the control plane (`workspace_webhook_*`), which refuses an
+  unregistered workspace name before it reaches the store at all.
+- **A principal, a session or a login.** There is none. Management is
+  session-authenticated (`/api/*`) or agent-scoped (`ciao webhook`); ingress is
+  authorized by one trigger's own secret. No surface turns a webhook secret into
+  a user, a session or a permission.
+- **Outbound callbacks, provider-specific signature adapters, public tunnels and
+  model overrides.** The bearer secret is the whole authentication story, a
+  trigger decides only where its events run, and a sender never reaches model
+  selection.
 
-## What the later children owe
+## What the children owed, and what shipped
 
 - **A2 — management and lifecycle.** Session-authenticated `/api/*` routes over
   these methods (`ciao/web/routes_webhooks.py`: list, create, update, rotate and
@@ -389,9 +467,30 @@ cannot accidentally pick a status:
   recorded. Shipped in #1020 — `ciao/webhook_dispatch.py`, with the receiver
   answering `202` without waiting on the turn and `main.py` sweeping at startup.
   See **Dispatch** above.
-- **A5/A6 — surfaces.** The Automations UI and receipt history, the agent CLI,
-  user recipes, capabilities and public docs — all of which must describe only
-  what has actually shipped. Until they do, no surface may present a webhook
-  event as though the receiver had run it.
+- **A5 — the Automations UI.** The section on the Automations page that lists a
+  workspace's triggers, creates one, reveals and copies its one-time secret (and
+  says the old one is dead after a rotation), shows the sender's own recipe, and
+  enables, disables, rotates and deletes. Shipped in #1034. It did not show
+  receipt history then, because there was no receipt-list API to render; #1044
+  added that read and this section's per-trigger history under the row (see **The
+  receipt history** above).
+- **A6 — the agent surface, the recipes and the capabilities text.** Scoped
+  management from a chat: `ciao webhook list|create|update|rotate|delete`
+  (`ciao/agent_cli.py`) over `workspace_webhook_*` (`ciao/control_plane.py`) and
+  the five operations in the shared table (`ciao/mcp_server.py`) — each
+  revision-checked exactly as the routes are, each returning the public record
+  and, for create and rotate only, the one-time secret, which is never logged or
+  stored in the clear. Alongside them: the manage recipe and the external sender
+  recipe in `PWA_API.md`, the noun/verb table and the shown-once caveat in the
+  `ciao-cli` skill, and the Webhook triggers subsection in `ciao-capabilities`.
+  Shipped in #1039, verified end to end by `tests/test_webhook_journey.py`:
+  configure → signed request → accepted receipt → exactly one ordinary chat,
+  with a duplicate collapsed onto the same receipt and a same-key different-body
+  refused `409`.
 
-Until a child ships, this file is the whole of the feature.
+Every child of #974 has now shipped, so nothing is left on this list and this
+document is the whole of the feature: a surface added later has to describe what
+is here rather than what was once planned. The one thing the original plan named
+that no child of #974 built — a receipt-history view — shipped afterwards in
+#1044 as a read surface over this journal (see **The receipt history** above),
+with the bounded cap and the retention truth stated there.

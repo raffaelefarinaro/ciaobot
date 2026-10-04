@@ -269,9 +269,17 @@ class WindowsUpdateHost:
             return False
         return self._wait_lock_free()
 
-    def server_program(self) -> str | None:
-        """What the registered ``\\Ciaobot\\Engine`` runs, or None."""
-        return windows_service.task_command(windows_service.TASK_NAME, runner=self._schtasks)
+    def server_command(self) -> tuple[str, ...] | None:
+        """What the registered ``\\Ciaobot\\Engine`` runs, as a one-element argv.
+
+        Windows runs the engine task's ``Exec/Command`` directly, so there is no
+        second argument that names a served interpreter; the command *is* the
+        install to compare. ``task_command`` already refuses a command the console
+        code page could not print faithfully, answering ``None`` — evidence of
+        nothing.
+        """
+        command = windows_service.task_command(windows_service.TASK_NAME, runner=self._schtasks)
+        return None if command is None else (command,)
 
     # ── the tasks that own the swap ─────────────────────────────────
 

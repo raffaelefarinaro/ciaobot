@@ -183,19 +183,35 @@ from ciao.web.routes_push import (
     push_unsubscribe,
 )
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
+from ciao.web.routes_import import (
+    import_batch_cancel,
+    import_batch_delete,
+    import_batch_run,
+    import_batches_create,
+    import_batches_list,
+    import_preview,
+    import_sources,
+)
 from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.routes_tasks import (
+    task_attempt_action,
+    task_attempts,
     task_complete,
     task_create,
+    task_delegate,
     task_delete,
+    task_get,
     task_list,
+    task_send_update,
     task_update,
 )
 from ciao.web.routes_webhooks import (
     webhook_create,
     webhook_delete,
     webhook_list,
+    webhook_receipts,
     webhook_rotate,
+    webhook_trigger_receipts,
     webhook_update,
 )
 from ciao.web.security import SecurityHeadersMiddleware
@@ -336,8 +352,30 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Literal `complete` precedes the `{task_id}` pattern so it is not
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
-        # Same path, two handlers: a PATCH edits the record, a DELETE removes
-        # it, and both present the revision they read.
+        # Delegation (B5). `delegate` hands the task to the agent as one ordinary
+        # chat with no attendance bypass and returns the attempt; the attempt
+        # routes act on it (stop/resume/retry/detach), and `attempts` is the
+        # history behind a retry. The literal verbs come before the `{action}`
+        # pattern so they are not read as an action name.
+        Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
+        Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
+        # Send update: one ordinary message into the attempt's own chat, then the
+        # attempt is rebound to the revision it was made at. Literal `update` before
+        # the `{action}` pattern, like `complete`, so it is not read as an action name.
+        Route(
+            "/api/tasks/{task_id}/attempt/{attempt_id}/update",
+            task_send_update,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/tasks/{task_id}/attempt/{attempt_id}/{action}",
+            task_attempt_action,
+            methods=["POST"],
+        ),
+        # Same path, three handlers: a GET reads one task with its description
+        # (the list carries none), a PATCH edits the record, a DELETE removes
+        # it, and both writes present the revision they read.
+        Route("/api/tasks/{task_id}", task_get, methods=["GET"]),
         Route("/api/tasks/{task_id}", task_update, methods=["PATCH"]),
         Route("/api/tasks/{task_id}", task_delete, methods=["DELETE"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
@@ -441,14 +479,48 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Webhook trigger management (A2). The literal `rotate` segment
         # precedes the bare `{trigger_id}` pattern so rotation is not read
         # as a trigger id. Management routes only; the receiver is
-        # `routes_hooks.py`.
+        # `routes_hooks.py`. The two `receipts` reads (#1044) are the history
+        # surface over the ingress journal, and they precede `{trigger_id}`
+        # for the same reason `rotate` does: a workspace-wide `receipts` would
+        # otherwise be answered with a 405 by the bare `{trigger_id}` route
+        # registered below, since Starlette stops at the first partial match.
         Route("/api/webhooks", webhook_list, methods=["GET"]),
         Route("/api/webhooks", webhook_create, methods=["POST"]),
+        Route("/api/webhooks/receipts", webhook_receipts, methods=["GET"]),
+        Route(
+            "/api/webhooks/{trigger_id}/receipts",
+            webhook_trigger_receipts,
+            methods=["GET"],
+        ),
         Route(
             "/api/webhooks/{trigger_id}/rotate", webhook_rotate, methods=["POST"]
         ),
         Route("/api/webhooks/{trigger_id}", webhook_update, methods=["PATCH"]),
         Route("/api/webhooks/{trigger_id}", webhook_delete, methods=["DELETE"]),
+        # Import consent (C5): discovery is metadata only and the preview reads
+        # the *selected* conversations, so neither answers before a person has
+        # chosen what to process. Session-protected like every other /api route;
+        # no extraction lives here (C7); the batch store (C6) is the routes below.
+        Route("/api/import/sources", import_sources, methods=["GET"]),
+        Route("/api/import/preview", import_preview, methods=["POST"]),
+        # Import batches (C6): the private per-workspace batch store, and the
+        # run (C7) that drives one into the review queue. The literal `cancel`
+        # and `run` segments precede the bare `{batch_id}` pattern so neither is
+        # read as a batch id. `run` schedules the extraction and starts no turn
+        # in the request; the batch is the one-running-at-a-time gate.
+        Route("/api/import/batches", import_batches_create, methods=["POST"]),
+        Route("/api/import/batches", import_batches_list, methods=["GET"]),
+        Route(
+            "/api/import/batches/{batch_id}/run",
+            import_batch_run,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/import/batches/{batch_id}/cancel",
+            import_batch_cancel,
+            methods=["POST"],
+        ),
+        Route("/api/import/batches/{batch_id}", import_batch_delete, methods=["DELETE"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),

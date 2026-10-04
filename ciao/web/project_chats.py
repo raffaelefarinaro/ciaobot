@@ -651,6 +651,14 @@ class ProjectChatManager:
         # service workers can dismiss already-delivered OS notifications for
         # that chat.
         self.clear_notifications_cb: Optional[Callable[[str], None]] = None
+        # `on_turn_started(chat_id, stream)` fires once per turn a person asked
+        # for: a delegated task's answer, a Send update, an approval the user
+        # answered in the composer, an ordinary message. The delegation service
+        # subscribes so a turn in a delegated chat is settled by *that* turn
+        # rather than only by the one it launched — the same injection point as
+        # the callbacks above, and for the same reason: the manager must not
+        # depend on the task board to know what a turn is.
+        self._turn_started: list[Callable[[str, "ChatStream"], None]] = []
         # Per-chat pending push tasks. Pushes are scheduled with a short
         # delay (30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
@@ -1357,6 +1365,37 @@ class ProjectChatManager:
             "`Workspace/Memory-Proposals.md` instead of filing it."
         )
 
+        # One block, both shapes, for the same reason as `memory_intro` and
+        # `known_state` (#1041, C8): the import affordance is the same sentence
+        # whichever vault the user pointed us at, and the seeded welcome is the
+        # one place a first-run user meets a capability that is not automatic. It
+        # names the page and what happens there — choose, confirm, then every fact
+        # waits for a person — and it claims nothing that has not happened: this
+        # chat reads no provider history, and a welcome that said past
+        # conversations were imported would be promising a run nobody performed
+        # (DESIGN.md's onboarding rule).
+        import_intro = (
+            "**Your past conversations are not imported automatically.** If you "
+            "want what your Claude Code and OpenCode chats already know about you "
+            "in this workspace, that is a separate, explicit choice in "
+            "[Import conversations](/memory/import): you pick the conversations, "
+            "see exactly what would be read and which model would receive it "
+            "before anything runs, and every fact it finds waits for you in "
+            "**To decide**. Nothing is read until you choose, and nothing is sent "
+            "until you confirm. The same page is in Memory at any time."
+        )
+        # The matching agent instruction. It points at the page and stops: an
+        # onboarding turn that ran an import itself would read a user's history
+        # with no consent screen, which is the one thing this journey exists to
+        # make impossible.
+        import_tour = (
+            "Past conversations are not imported on their own. Name "
+            "**Memory → Import** as the place where they choose which "
+            "conversations Ciaobot may read, say that every fact waits for them "
+            "to accept, and stop there: do not run an import for them, do not "
+            "scan past chats, and do not read any provider history yourself."
+        )
+
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
             user_msg = (
@@ -1373,7 +1412,7 @@ class ProjectChatManager:
                 f"6. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
                 f"7. **Starting knowledge**: {starting_knowledge}\n"
                 f"8. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
-                f"9. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"9. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime. {import_tour}\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
@@ -1381,6 +1420,7 @@ class ProjectChatManager:
                 f"I've connected workspace **{workspace_name}** to your existing folder at `{vault_root}`. "
                 f"I'll first inspect what is already there, then help curate the clear, durable knowledge into Ciaobot's current structure while preserving the rest.\n\n"
                 f"{memory_intro}\n\n"
+                f"{import_intro}\n\n"
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To get started, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
@@ -1399,7 +1439,7 @@ class ProjectChatManager:
                 f"5. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
                 f"6. **Starting knowledge**: {starting_knowledge}\n"
                 f"7. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
-                f"8. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"8. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime. {import_tour}\n\n"
                 f"Introduce yourself to the user, explain that you are starting logical workspace **{workspace_name}** at `{vault_root}`, and ask the first onboarding questions to bootstrap their profile."
             )
             assistant_msg = (
@@ -1407,6 +1447,7 @@ class ProjectChatManager:
                 f"Welcome! I've initialized logical workspace **{workspace_name}** at `{vault_root}` from scratch. "
                 f"I'm ready to customize the current vault structure and curate your durable knowledge with you.\n\n"
                 f"{memory_intro}\n\n"
+                f"{import_intro}\n\n"
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To begin, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
@@ -5393,6 +5434,34 @@ class ProjectChatManager:
         if not flat:
             return False
         return any(p.search(flat) for p in _INTERIM_SUBAGENT_PATTERNS)
+
+    def on_turn_started(
+        self, callback: Callable[[str, "ChatStream"], None]
+    ) -> None:
+        """Subscribe to "a turn a person is present for has begun".
+
+        Fired from :meth:`ChatStreaming.start_drive`, which is the one place a
+        turn begins — so it covers every route to the model (this manager's
+        ``start_stream``, the composer's WebSocket, an approval the user answered
+        in the chat) rather than the subset a caller happens to know about.
+
+        Only *attended* turns are announced. A background drain and an
+        unattended dispatch are the engine talking to itself in a chat, and
+        treating them as the user's continuation of a conversation would settle a
+        delegated attempt on work nobody asked for.
+
+        A callback that raises is logged and skipped: an observer cannot be
+        allowed to fail the turn it is watching.
+        """
+        self._turn_started.append(callback)
+
+    def notify_turn_started(self, chat_id: str, stream: ChatStream) -> None:
+        """Tell every subscriber a turn began here. Never raises."""
+        for callback in tuple(self._turn_started):
+            try:
+                callback(chat_id, stream)
+            except Exception:
+                logger.exception("A turn-start subscriber failed for chat %s", chat_id)
 
     def start_stream(
         self,

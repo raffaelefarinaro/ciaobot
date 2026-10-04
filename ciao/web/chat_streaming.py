@@ -195,6 +195,8 @@ class ChatStreamingHost(Protocol):
     @staticmethod
     def _is_interim_subagent_text(text: str) -> bool: ...
 
+    def notify_turn_started(self, chat_id: str, stream: ChatStream) -> None: ...
+
     def _park_result_announce(
         self, chat_id: str, project_id: str, title: str, snippet: str
     ) -> int: ...
@@ -353,6 +355,11 @@ class ChatStreaming:
         is_retry: bool,
         unattended: bool,
     ) -> None:
+        # The one place a turn begins, so it is the one place a subscriber hears
+        # about it. Announced before the task exists: the drive loop is the turn,
+        # and a watcher that subscribes after it would miss the whole of it.
+        if not unattended:
+            self._host.notify_turn_started(chat_id, stream)
         task = asyncio.create_task(
             self.drive(
                 chat_id=chat_id,

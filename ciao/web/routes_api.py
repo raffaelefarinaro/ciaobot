@@ -8879,7 +8879,8 @@ async def _update_task_rows(request: Request, workspace: str) -> list[dict[str, 
         workspace=workspace,
         installed_version=__version__,
     )
-    return [_update_task_row(status) for status in statuses]
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    return [_update_task_row(status, pcm) for status in statuses]
 
 
 async def _with_update_task_rows(
@@ -8905,7 +8906,7 @@ async def _with_update_task_rows(
     return payload
 
 
-def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
+def _update_task_row(status: "update_tasks.TaskStatus", pcm: Any) -> dict[str, Any]:
     """One task, its lifecycle, and the chat its attempt is in.
 
     ``status`` is the durable answer and ``applicability`` is the computed one,
@@ -8913,6 +8914,14 @@ def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
     can be ``applicable`` and ``dismissed`` (the operator decided against work
     that does apply), or ``not_applicable`` and ``completed``. A row with no
     record at all reports ``offered``, which is also what an absent record means.
+
+    ``chat_live`` answers a different question from ``chat_id``: the record names
+    the chat its attempt opened, but an archived or deleted one is no longer a
+    chat the operator can open, and a card that said "its chat is open" and
+    offered "Open its chat" against it would be describing something that is not
+    there. It reuses ``update_task_launch``'s own rule — the same one a start
+    uses to decide whether to mint a fresh chat — rather than inventing a second
+    definition of "live".
 
     Two timestamps, deliberately not merged. ``applicability_checked_at`` is when
     a detector last produced this row's answer, and inside the freshness window it
@@ -8922,8 +8931,11 @@ def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
     attempt, not a check. A surface that rendered one of them under the other's
     name would claim a task was re-checked when an operator merely declined it.
     """
+    from ciao.web.update_task_launch import _live_chat
+
     task = status.task
     state = status.state
+    chat_id = state.chat_id if state is not None else ""
     return {
         "id": task.id,
         "revision": task.revision,
@@ -8936,7 +8948,8 @@ def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
         "applicability_checked_at": status.applicability.checked_at,
         "offered": status.offered,
         "suppressed": status.suppressed,
-        "chat_id": state.chat_id if state is not None else "",
+        "chat_id": chat_id,
+        "chat_live": _live_chat(pcm, state) is not None,
         "prompt_digest": state.prompt_digest if state is not None else "",
         "attempted_fingerprint": (
             state.attempted_fingerprint if state is not None else ""

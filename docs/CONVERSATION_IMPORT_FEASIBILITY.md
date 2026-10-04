@@ -124,6 +124,78 @@ takes, so **C7 still owes `ciao/fact_candidates.py` the structured field**. The
 judgment gap (Q4) is unchanged and still open — nothing in #1012 claims to have
 closed it.
 
+**Update — C6 landed (#1032).** The batch store this report's C6 section
+proposes is now `ciao/import_store.py`, and the C6 section below remains
+authoritative for the design; nothing in it was rewritten. One batch is one
+import run over a selection: the selection, per-source content digests,
+progress (`queued → running → done | failed | cancelled | partial`),
+cancellation, and per-fact `provider:source_id:anchor` provenance. It is
+private runtime state at `<runtime>/import/import-batches.json` — never the
+vault's public ledger — owner-private (`mkstemp_private`, `make_private_dir`),
+atomically replaced, mutated under `keyed_lock` plus an owner-private
+advisory sibling lock, and failing closed on corruption rather than silently
+resetting. Creation refuses a Ciaobot-own session against `import_decouple`
+and re-selecting a conversation a live batch already covers under the
+`(provider, source_id, content_digest, destination, extraction_revision)` key;
+one batch at a time per workspace. Cancellation keeps recorded progress and
+provenance and cannot unsend provider input; `prune_expired` drops terminal
+batches past `IMPORT_SNAPSHOT_RETENTION_DAYS` (30 days, a named constant)
+while retaining accepted fact evidence, and `forget` drops only the batch
+record — filed proposals stay queued and accepted facts stay in the vault.
+The routes are `POST /api/import/batches` (create), `GET
+/api/import/batches?workspace=` (list with progress), `POST
+/api/import/batches/{id}/cancel` and `DELETE /api/import/batches/{id}`,
+session-authenticated and workspace-scoped, with no provider call and no
+model call. No extraction lives here: C7 consumes the store.
+
+**Update — C8 landed (#1041). The journey ships; #975 closes.** Everything the
+Design section below asked #975 to prove — a person can pick their own past
+conversations, see exactly what would be read and sent, and end up with nothing
+saved until they accept it — is now one flow with one entry point, and it added
+no store, adapter, extraction policy or route family of its own. What shipped:
+
+* **One flow, reachable twice.** `web/src/components/ImportSources.vue` (the
+  scan, the selection and the consent screen) plus `web/src/components/
+  ImportRuns.vue` (the filed batches, their progress, the cancel, the provenance
+  each run recorded and the retention) over `web/src/stores/import.ts`, drawn on
+  the **existing** Memory → Import section. The split is by lifetime, not by
+  feature: the listing and the selection do not survive the page, a filed batch
+  does. First-run reaches the same page — the setup wizard names it in the tour
+  and the seeded welcome links to it (`project_chats._create_onboarding_chat`) —
+  so there is no second implementation to keep in step.
+* **The onboarding entry reads Ciaobot's own state and nothing else.** The
+  wizard tile is static copy (that screen runs before login, so no route is
+  called), and the welcome names the page without running an import: no
+  provider history is read pre-auth, and the seeded chat still cannot claim that
+  past conversations were imported.
+* **The journey's states are separate, never merged.** Discovery, the selection,
+  the run list and the provenance under each run each keep a first load, a
+  first-load failure, a failed refresh over rows already on screen (kept, marked
+  stale), a genuine empty list and a filter that hid everything. A failed read
+  must never read as "there is nothing here", and a filter that matched nothing
+  is not a list that is empty.
+* **Cancel says both halves.** It stops the conversations not yet started, keeps
+  every proposal already filed, and says that text already sent to the configured
+  provider cannot be unsent — the third clause is the one a UI usually drops.
+* **Retention is the engine's own number.** `GET /api/import/batches` now answers
+  `retention_days`, read from `import_store.IMPORT_SNAPSHOT_RETENTION_DAYS`, so
+  the panel states the window the once-per-boot sweep prunes on instead of
+  carrying a second copy of the number in the PWA. The same paragraph says the
+  two things a user has to be told: an accepted fact keeps its provenance after
+  the snapshot is gone, and removing an import removes neither a queued proposal
+  nor an accepted memory.
+* **The consent screen no longer promises the preview's model.** C7's leftover
+  is closed on the UI side: the confirmation says each conversation is read by
+  the model Ciaobot uses for its own insights on *that conversation's provider*,
+  which can differ from the workspace default listed beside it. The preview still
+  reports the workspace's effective provider and model — the honest answer for
+  the workspace's own provider — and the screen no longer presents either as the
+  model that will read each selection.
+
+Still open, unchanged by this child: the judgment gap (**Q4** — is this already
+in a note, does this supersede it, is this person new) and the **Q1** export
+sample that keeps the Claude account adapter unfiled.
+
 
 ## What this report had to settle
 
@@ -931,6 +1003,44 @@ single-page cap** have to be solved.
 Depends on: **C3 merged**. Consumes C3's adapter module; must not reimplement
 discovery. Blocks C6.
 
+**C5 landed (#1029).** `ciao/import_discover.py` and `ciao/web/routes_import.py`,
+with `GET /api/import/sources?workspace=` and `POST /api/import/preview` on the
+ordinary session cookie, and an **Import conversations** panel at Memory →
+Import — its own section, because the controls a person has to reach sit below
+the rows and a listing of hundreds does not fit a pane that does not scroll.
+Three things the design above pinned down, as built:
+
+* **Discovery is metadata only, and resolves one root per source from config
+  alone** — Claude Code through `agent_paths.claude_projects_dir(agent_root_for(
+  config, workspace))`, OpenCode through `discover_opencode_sessions` on that same
+  agent root. It scans nothing above either one, follows no link, refuses a
+  non-regular file or one over `MAX_SESSION_BYTES`, and returns ids and hints —
+  the browser is sent no absolute path.
+* **A listed row is *undecided*, never `external`.** The classification rule
+  needs the session's own opening turn, and discovery reads no content, so
+  `classify_for_import` with no turn answers `ambiguous` — the direction that
+  refuses. What metadata *can* decide is Ciaobot's own usage, and those rows are
+  excluded before the file is opened; `preview_selected` then reads the selected
+  refs, classifies again with the turn it read, and reports anything that is not
+  `external` as an excluded row with its reason. So the "never guessed as
+  external" rule holds while the selection screen still has something to offer,
+  and Ciaobot's own sessions are never read at all.
+* **A listing is a page, and a source that cannot be listed is a row.** Reaching
+  `MAX_SESSIONS_PER_SOURCE` or OpenCode's own `DISCOVERY_MAX_COUNT` sets the
+  per-provider `truncated` flag; an OpenCode below the V2 floor lands in
+  `unsupported` with the adapter's reason rather than as an empty list.
+* **An OpenCode id is checked against this workspace's own listing before it is
+  exported.** `opencode session export <id>` resolves ids across projects, so an
+  id the request body carries is not evidence of ownership; the preview lists
+  this workspace once and refuses anything that listing did not name, without
+  running the export.
+
+No extraction (C7), no batch store (C6), no model call, and no transcript text in
+either answer — the rows carry counts, the source's own first date when it has
+one, the reader's omission record, the effective provider/model, an input-volume
+estimate and `batch_cap`. `already_imported` is in the payload and is C6's to
+fill.
+
 ### C6 — private batch store, dedupe, provenance and progress
 
 Resumable, cancellable, serialized per workspace. Private runtime state, never
@@ -970,6 +1080,78 @@ existing review/accept/undo, unchanged.
 
 Depends on: **C4 and C6 merged**. No UI.
 
+#### C7 landed (#1038)
+
+Shipped as **`ciao/import_run.py`** (the name above was a draft; the module is
+the per-batch runner C8's route drives) plus the three touches the section
+predicted:
+
+* **`run_import_batch(config, batch_id, model=…, provider=…)`** walks the
+  batch's selection one source at a time: C5's own resolution
+  (`_resolve_claude_code_ref`, `read_claude_code_session` /
+  `read_opencode_session`, and the OpenCode listing check) → C4's one
+  tool-less `extract_facts` turn → `record_source` (with the SHA-256 of the
+  normalized session as the content digest), `record_progress`, and one
+  `FactProvenance` per bullet the run actually filed. The provenance list is
+  read off the queue by diffing it before and after the turn, because
+  `append_proposals` drops already-queued and already-decided rows silently and
+  the filed set is otherwise unknowable.
+* **C4 is called exactly as its docstring requires**: `known_own_ids=
+  ciaobot_own_session_ids(config, workspace)` plus the chat ids derived from it,
+  so a Ciaobot-own session is refused by `classify_session` before any turn.
+  `refused_anchor` names both a session refusal and a single refused *row*, so
+  the runner tells them apart by the usage record (`messages_in_prompt == 0`
+  means the turn never ran).
+* **`FactCandidate.source_anchors: tuple[str, ...]`** is the field the
+  [Provenance and old-versus-new](#provenance-and-old-versus-new) section said
+  was **not optional**, and it is read out of `source_section` by code
+  (`external_anchor`: the leading segment must be a provider in the import
+  contract's `KNOWN_PROVIDERS`, and the tag must pass
+  `assert_external_provenance`) rather than by a colon count. `MemoryProposal`
+  needs no field of its own — `as_bullet` already renders the tag into the
+  bullet's `_(from: …)_` tail and it reads back — so the anchor survives the
+  round trip, and `_provenance_row` now stamps `source_anchors` beside
+  `source_message_ids` on the region write's receipt. For an import the integer
+  field stays empty, `provenance` stays `"unknown"`, and `attended` stays
+  `None`.
+* **The route**: `POST /api/import/batches/{batch_id}/run`, session-gated and
+  workspace-scoped. It moves the batch to `running`, schedules the runner and
+  answers 202 — **no turn runs inside the request**, and no request field chooses
+  the model. A batch already `running` is answered 200 with its current state
+  (that is the two-presses race); a settled batch is a 409.
+* **Dated conflicts**: nothing new. Two queued rows naming the same fact with
+  different `[as-of:]` dates both stay queued with their own source date and
+  anchor — the review path never compares them, and the test pins that neither is
+  dropped or re-stamped. That is the whole of "dated conflict review": a
+  property of the existing review surface, not an engine.
+* **The accept path carries the anchor, and the run cannot strand a batch.**
+  Three things this child originally got wrong, corrected here rather than
+  deferred:
+  * `proposal_service._promote_region_row` built its proposal with
+    `source_section="review"`, so the *accepted region's* receipt recorded
+    `section: "review"` and `source_anchors: []` for an imported row — the field
+    was dead exactly where it mattered. `accept_region_fact` takes a
+    `source_section` now and the accept route hands over
+    `external_anchor(row["source"]) or "review"`, so a row that carries no
+    external tag is unaffected and an imported one lands with its anchor.
+  * A turn that came back unreadable — a failing provider, a timeout, a reply
+    that is not a JSON array — is now a **skipped** source with an empty digest
+    and is counted in `unread`, so the batch settles `partial`/`failed`. It used
+    to be recorded `extracted` with the session's digest, which made a
+    misconfigured model report "done, 0 proposals" and fed the batch dedupe key
+    a conversation nobody had read. A genuine "nothing worth filing" has C4's
+    `skipped == 0` and is still an extraction.
+  * An exception out of the run — a corrupt own-session registry, a non-conflict
+    store error, a cancel on shutdown — settles the batch `failed` before it
+    propagates, and every blocking call in the runner is on a thread
+    (`asyncio.to_thread`), because the OpenCode membership check shells out to
+    the CLI under 60s timeouts and the runner runs on the server's event loop.
+  * Still open for C8: reconciling a batch left `running` by an engine restart
+    (the in-process failures are covered above), and showing on the consent
+    screen the model the run will actually use — `preview_selected` reports
+    `default_model_for_workspace` for the workspace's provider, while the run
+    resolves the per-provider insights model for the *source's*.
+
 ### C8 — entry point, retention/cancel UI, docs, browser journey
 
 * Touches: the Memory-side entry point, `web/src/components/…` for the
@@ -977,6 +1159,35 @@ Depends on: **C4 and C6 merged**. No UI.
   `docs/ARCHITECTURE.md`, and `ciao/stock/skills/ciao-cli/SKILL.md` if a CLI
   verb is added
 * Depends on: C5, C7 merged, and #979 (education) for the onboarding placement
+
+#### C8 landed (#1041)
+
+Shipped as the PWA journey and the docs — no new backend module, and the two
+planned touches that turned out not to be needed were left undone on purpose:
+**no CLI verb** (the journey is consent-gated and browser-shaped; a `ciao …`
+import would have to reproduce the whole consent screen in a terminal) and **no
+`docs/MEMORY_DESIGN.md` section** (the design lives in `DESIGN.md`'s onboarding
+principle and in the Capability catalog, which is where a user reads it). What
+did ship: `ImportSources.vue` + `ImportRuns.vue` + `web/src/stores/import.ts` +
+`importSources.css`, the first-run entry, the `retention_days` field on the
+existing list route, `PWA_API.md`, `ARCHITECTURE.md`, `DESIGN.md` and
+`ciao-capabilities`. The shipped shape is in the C8 update at the top of this
+document; the points worth keeping from the plan below are that the entry is one
+page and not two and that no control describes a flow that is not implemented (an
+unsupported source says *Unsupported version, export a file instead*).
+
+**What the browser walk covered, and what it did not.** The walk ran against the
+fixture engine with mocked batch responses, so what was checked was everything up
+to the extraction: the listing's five load states (first load, pending, first-load
+failure, failed refresh over rows already on screen, genuine empty), keyboard
+focus through Find, the checkboxes, Review and the confirmation, the run list's
+five states, the 44px touch targets, 200% zoom, and light and dark. The **live
+model success path was not walked**: nobody took a real extraction through to
+accepting a fact and then finding it retrievable, because this machine has no
+model credentials. That path is covered only by C7's backend runner tests and by
+the mocked UI and e2e tests — good enough for a PR that adds no extraction code,
+but it has not been exercised end to end in a browser by a person, and a reader
+should not infer that it has.
 
 ### Explicitly not a child
 

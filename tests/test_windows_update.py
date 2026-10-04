@@ -429,6 +429,34 @@ def test_windows_update_host_is_an_update_host(tmp_path: Path) -> None:
     assert isinstance(host, WindowsUpdateHost)
 
 
+def test_windows_server_command_is_the_task_command_as_one_element(
+    tmp_path: Path,
+) -> None:
+    # Windows runs the engine task's `Exec/Command` directly, so the loaded
+    # command for the updater's agreement is that one command, byte for byte,
+    # so the Windows behaviour is unchanged by the C child.
+    body = (
+        '<?xml version="1.0" encoding="UTF-16"?>\r\r\n'
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec>'
+        f"<Command>{PYTHONW}</Command></Exec></Actions></Task>"
+    )
+    runner, _ = _query(body)
+    host = WindowsUpdateHost(schtasks=runner, state_dir=tmp_path)
+
+    assert host.server_command() == (PYTHONW,)
+
+
+def test_windows_server_command_is_none_when_the_task_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    # Evidence of nothing is evidence of nothing in both shapes: a command the
+    # code page could not print faithfully refuses an update in neither.
+    runner, _ = _query("", 1)
+    host = WindowsUpdateHost(schtasks=runner, state_dir=tmp_path)
+
+    assert host.server_command() is None
+
+
 def test_engine_port_comes_from_the_task_workspace(tmp_path: Path) -> None:
     machine = _Machine(tmp_path)
 
