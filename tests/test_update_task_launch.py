@@ -1116,10 +1116,43 @@ def test_get_lists_tasks_with_their_state(tmp_path: Path, packaged: Any) -> None
     assert row["offered"] is False
     assert row["status"] == "offered"
     assert row["chat_id"] == ""
+    # No chat, so nothing to be live. A card keys both "Open its chat" and
+    # "Resume chat" off this, so it must be present and honest when empty.
+    assert row["chat_live"] is False
     assert body["coverage_gap"]["reason"] == "not_substantiated"
 
     # A missing workspace is a bad request, not a guess at one.
     assert client.get("/api/update-tasks").status_code == 400
+
+
+@pytest.mark.parametrize("what_happened_to_the_chat", ["archived", "deleted"])
+def test_a_row_says_its_chat_is_no_longer_live(
+    tmp_path: Path, packaged: Any, what_happened_to_the_chat: str
+) -> None:
+    """An archived or deleted chat is reported dead, not as "its chat is open".
+
+    The record keeps naming the chat its attempt opened — that is what makes a
+    later start recoverable — but the chat is not one the operator can open, and
+    ``_live_chat`` is the launch path's own answer to whether it is. The listing
+    reuses it so a card can stop claiming "Its chat is open" and stop offering
+    "Open its chat" against a chat that is gone.
+    """
+    pcm = _FakePCM()
+    first = _launch(tmp_path, pcm)
+    client = _client(_config(tmp_path), pcm)
+
+    live = client.get(f"/api/update-tasks?workspace={WORKSPACE}").json()["tasks"][0]
+    assert live["chat_id"] == first["chat_id"]
+    assert live["chat_live"] is True, "a chat that exists and is open is live"
+
+    if what_happened_to_the_chat == "archived":
+        pcm.chats[first["chat_id"]].archived = True
+    else:
+        pcm.delete_chat(first["chat_id"])
+
+    dead = client.get(f"/api/update-tasks?workspace={WORKSPACE}").json()["tasks"][0]
+    assert dead["chat_id"] == first["chat_id"], "the record still names it"
+    assert dead["chat_live"] is False, "but it is not a chat to open"
 
 
 def test_a_row_reports_when_its_answer_was_computed(

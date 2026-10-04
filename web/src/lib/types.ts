@@ -1321,6 +1321,11 @@ export interface UpdateTaskRow {
   /** The chat an earlier start created, so "Resume" never needs the browser to
    *  have remembered it. Empty when no live attempt exists. */
   chat_id: string
+  /** Whether that chat is still one the operator can open. `chat_id` names the
+   *  chat a record remembers; an archived or deleted one is no longer open, and
+   *  a card that said "its chat is open" against it would be describing
+   *  something that is not there. A start over a dead chat mints a fresh one. */
+  chat_live: boolean
   prompt_digest: string
   attempted_fingerprint: string
   /** When the *record* was last written — a decision or an attempt. */
