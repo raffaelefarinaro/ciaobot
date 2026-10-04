@@ -441,6 +441,14 @@ def _provenance_row(proposal: MemoryProposal) -> dict[str, Any]:
     rather than being given a plausible id — the receipt has to be able to say
     "this archive never said where this came from", which is a different fact
     from "it came from turn 3".
+
+    ``source_anchors`` is the same rule for the other kind of citation: a fact
+    imported from somebody else's conversation names no Ciaobot turn, so
+    :attr:`ciao.fact_candidates.FactCandidate.source_message_ids` stays empty and
+    the ``provider:session_id:anchor`` tag rides here instead. That keeps an
+    accepted import matchable back to a specific message years later while
+    ``provenance`` still says ``"unknown"`` — the anchors carry the attribution,
+    the verdict is not upgraded to agree with them.
     """
     from ciao.fact_candidates import candidate_from_proposal
 
@@ -448,6 +456,7 @@ def _provenance_row(proposal: MemoryProposal) -> dict[str, Any]:
     return {
         "schema": candidate.schema,
         "source_message_ids": list(candidate.source_message_ids),
+        "source_anchors": list(candidate.source_anchors),
         "provenance": candidate.provenance,
         "section": candidate.section,
         "as_of": candidate.as_of,

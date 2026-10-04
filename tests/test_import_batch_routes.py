@@ -1,19 +1,23 @@
 """The import batch routes, against the signed cookie and a real config.
 
-The four routes are ``POST /api/import/batches``,
+The five routes are ``POST /api/import/batches``,
 ``GET /api/import/batches?workspace=``, ``POST
+/api/import/batches/{batch_id}/run``, ``POST
 /api/import/batches/{batch_id}/cancel`` and ``DELETE
 /api/import/batches/{batch_id}``. What is pinned here is the surface, not the
-store rules (those are ``tests/test_import_store.py``): the session boundary,
-the workspace check (unknown is a 400, a batch filed for another workspace is
-a 404), and the promise that batching performs no provider or model call —
-the batch records a selection, it never reads one.
+store rules (those are ``tests/test_import_store.py``) and not the extraction
+(``tests/test_import_run.py``): the session boundary, the workspace check
+(unknown is a 400, a batch filed for another workspace is a 404), and the two
+promises that matter for ``run`` — that filing a batch calls no provider and no
+model at all, and that *running* one starts no turn inside the request either.
 """
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,12 +33,15 @@ from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_import import (
     import_batch_cancel,
     import_batch_delete,
+    import_batch_run,
     import_batches_create,
     import_batches_list,
 )
 
 
-def _world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, dict[str, str]]:
+def _world(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[TestClient, dict[str, str]]:
     """A session-guarded batch app over a real config with `personal` and `work`."""
     monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".runtime"))
     monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", lambda *a, **k: None)
@@ -57,6 +64,11 @@ def _world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient,
         routes=[
             Route("/api/import/batches", import_batches_create, methods=["POST"]),
             Route("/api/import/batches", import_batches_list, methods=["GET"]),
+            Route(
+                "/api/import/batches/{batch_id}/run",
+                import_batch_run,
+                methods=["POST"],
+            ),
             Route(
                 "/api/import/batches/{batch_id}/cancel",
                 import_batch_cancel,
@@ -103,6 +115,11 @@ def _create(client: TestClient, cookies: dict[str, str], *source_ids: str) -> di
         ("post", "/api/import/batches", {"json": _selection("sess-a")}),
         (
             "post",
+            "/api/import/batches/0123456789abcdef0123456789abcdef/run",
+            {"json": {"workspace": "personal"}},
+        ),
+        (
+            "post",
             "/api/import/batches/0123456789abcdef0123456789abcdef/cancel",
             {"json": {"workspace": "personal"}},
         ),
@@ -113,7 +130,7 @@ def _create(client: TestClient, cookies: dict[str, str], *source_ids: str) -> di
         ),
     ],
 )
-def test_all_four_routes_require_the_signed_session_cookie(
+def test_every_batch_route_requires_the_signed_session_cookie(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     method: str,
@@ -127,7 +144,7 @@ def test_all_four_routes_require_the_signed_session_cookie(
     assert response.status_code == 401
 
 
-def test_the_session_cookie_admits_all_four_routes(
+def test_the_session_cookie_admits_every_batch_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, cookies = _world(tmp_path, monkeypatch)
@@ -136,6 +153,12 @@ def test_the_session_cookie_admits_all_four_routes(
     listed = client.get("/api/import/batches", params={"workspace": "personal"}, cookies=cookies)
     assert listed.status_code == 200
     assert [row["batch_id"] for row in listed.json()["batches"]] == [batch["batch_id"]]
+    run = client.post(
+        f"/api/import/batches/{batch['batch_id']}/run",
+        json={"workspace": "personal"},
+        cookies=cookies,
+    )
+    assert run.status_code == 202
     cancelled = client.post(
         f"/api/import/batches/{batch['batch_id']}/cancel",
         json={"workspace": "personal"},
@@ -177,6 +200,14 @@ def test_unknown_workspaces_are_a_400(
     )
     assert (
         client.post(
+            f"/api/import/batches/{batch['batch_id']}/run",
+            json={"workspace": name},
+            cookies=cookies,
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
             f"/api/import/batches/{batch['batch_id']}/cancel",
             json={"workspace": name},
             cookies=cookies,
@@ -199,6 +230,14 @@ def test_a_body_that_is_not_an_object_is_a_400(
     client, cookies = _world(tmp_path, monkeypatch)
 
     assert client.post("/api/import/batches", content=b"not json", cookies=cookies).status_code == 400
+    assert (
+        client.post(
+            "/api/import/batches/0123456789abcdef0123456789abcdef/run",
+            content=b"not json",
+            cookies=cookies,
+        ).status_code
+        == 400
+    )
     assert (
         client.post(
             "/api/import/batches/0123456789abcdef0123456789abcdef/cancel",
@@ -271,6 +310,13 @@ def test_a_foreign_batch_is_a_404_and_is_left_alone(
     client, cookies = _world(tmp_path, monkeypatch)
     batch = _create(client, cookies, "sess-a")
 
+    ran = client.post(
+        f"/api/import/batches/{batch['batch_id']}/run",
+        json={"workspace": "work"},
+        cookies=cookies,
+    )
+    assert ran.status_code == 404
+
     cancelled = client.post(
         f"/api/import/batches/{batch['batch_id']}/cancel",
         json={"workspace": "work"},
@@ -299,6 +345,14 @@ def test_unknown_batch_ids_are_a_404(
     client, cookies = _world(tmp_path, monkeypatch)
     missing = "0123456789abcdef0123456789abcdef"
 
+    assert (
+        client.post(
+            f"/api/import/batches/{missing}/run",
+            json={"workspace": "personal"},
+            cookies=cookies,
+        ).status_code
+        == 404
+    )
     assert (
         client.post(
             f"/api/import/batches/{missing}/cancel",
@@ -450,3 +504,257 @@ def test_a_ciaobot_own_session_is_never_filed(
         "/api/import/batches", json=_selection("chat-1234abcd"), cookies=cookies
     )
     assert shaped.status_code == 400
+
+
+# ── The run route: schedule the extraction, start nothing ──────────────────
+
+
+def _stub_runner(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace ``run_import_batch`` with one that records the batch and returns.
+
+    The route holds its own import of the runner inside the scheduled coroutine,
+    so patching the name on the module the route reaches through is what makes
+    the scheduling observable without a model.
+    """
+    started: list[str] = []
+
+    async def fake_run(config: Any, batch_id: str, **kwargs: Any) -> Any:
+        started.append(batch_id)
+        return SimpleNamespace(status="done", proposals_filed=0)
+
+    monkeypatch.setattr("ciao.import_run.run_import_batch", fake_run)
+    return started
+
+
+def test_run_answers_202_and_starts_no_turn_in_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The response is the batch; the extraction is scheduled, not performed.
+
+    ``run_oneshot`` is poisoned and the whole provider surface with it, so a
+    model call inside the request would be a failure rather than an absence. The
+    runner is also stubbed, because what is under test here is the scheduling,
+    not the extraction (``tests/test_import_run.py`` owns that).
+    """
+    client, cookies = _world(tmp_path, monkeypatch)
+    batch = _create(client, cookies, "sess-a")
+    started = _stub_runner(monkeypatch)
+
+    def _refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the run route must not reach a provider or a model")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", _refuse)
+    monkeypatch.setattr("ciao.import_sources.opencode._run_opencode_json", _refuse)
+    monkeypatch.setattr(subprocess, "run", _refuse)
+
+    with client:
+        response = client.post(
+            f"/api/import/batches/{batch['batch_id']}/run",
+            json={"workspace": "personal"},
+            cookies=cookies,
+        )
+
+    assert response.status_code == 202
+    assert response.json()["batch"]["status"] == "running"
+    assert started == [batch["batch_id"]], "the runner was scheduled, once"
+
+
+def test_run_never_starts_a_second_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second press answers the current state; a settled batch is a 409.
+
+    One batch at a time is C6's rule, and the race two presses of the button
+    would otherwise lose is exactly what the first branch here prevents.
+    """
+    client, cookies = _world(tmp_path, monkeypatch)
+    batch = _create(client, cookies, "sess-a")
+    started = _stub_runner(monkeypatch)
+
+    def _run() -> Any:
+        return client.post(
+            f"/api/import/batches/{batch['batch_id']}/run",
+            json={"workspace": "personal"},
+            cookies=cookies,
+        )
+
+    with client:
+        first = _run()
+        assert first.status_code == 202
+        # The scheduled task has not run yet, so the store still says `running`.
+        second = _run()
+
+    assert second.status_code == 200
+    assert second.json()["batch"]["status"] == "running"
+
+    with client:
+        cancelled = client.post(
+            f"/api/import/batches/{batch['batch_id']}/cancel",
+            json={"workspace": "personal"},
+            cookies=cookies,
+        )
+    assert cancelled.status_code == 200
+    with client:
+        settled = _run()
+    assert settled.status_code == 409
+    assert len(started) == 1, "the settled press started nothing either"
+
+
+def test_a_run_of_a_done_batch_is_a_conflict_not_a_second_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch that already settled keeps its outcome; re-running is a new batch."""
+    client, cookies = _world(tmp_path, monkeypatch)
+    batch = _create(client, cookies, "sess-a")
+    started = _stub_runner(monkeypatch)
+
+    with client:
+        assert (
+            client.post(
+                f"/api/import/batches/{batch['batch_id']}/run",
+                json={"workspace": "personal"},
+                cookies=cookies,
+            ).status_code
+            == 202
+        )
+        cancelled = client.post(
+            f"/api/import/batches/{batch['batch_id']}/cancel",
+            json={"workspace": "personal"},
+            cookies=cookies,
+        )
+    assert cancelled.status_code == 200
+
+    with client:
+        again = client.post(
+            f"/api/import/batches/{batch['batch_id']}/run",
+            json={"workspace": "personal"},
+            cookies=cookies,
+        )
+    assert again.status_code == 409
+    assert "cancelled" in again.json()["error"]
+    assert len(started) == 1
+
+
+def test_the_route_and_the_runner_share_one_begin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The request takes the single-run gate; the runner must not take it again.
+
+    The route moves the batch to ``running`` so it can answer a second press
+    instead of scheduling one, and hands that begun batch to the runner. If the
+    runner claimed it a second time it would collide with its own gate and the
+    extraction would never happen — so this test runs the **real** runner behind
+    the **real** route, with only the conversation read and the turn stubbed, and
+    asserts the batch actually settled with its proposal filed.
+    """
+    client, cookies = _world(tmp_path, monkeypatch)
+    filed: list[str] = []
+    batch = client.post(
+        "/api/import/batches",
+        json={
+            "workspace": "personal",
+            "sources": [{"provider": "opencode", "source_id": "sess-a"}],
+        },
+        cookies=cookies,
+    ).json()["batch"]
+
+    from ciao.import_sources.contract import (
+        ROLE_USER,
+        NormalizedMessage,
+        NormalizedSession,
+        SourceRef,
+    )
+
+    session = NormalizedSession(
+        source=SourceRef(provider="opencode", source_id="sess-a"),
+        messages=(
+            NormalizedMessage(
+                role=ROLE_USER,
+                text="When do we deploy?",
+                anchor="msg_0001",
+                timestamp="2025-02-07T10:00:00Z",
+            ),
+        ),
+    )
+    monkeypatch.setattr("ciao.import_run.read_opencode_session", lambda _sid: session)
+    monkeypatch.setattr(
+        "ciao.import_run._opencode_membership",
+        lambda selected, _root: frozenset(ref.source_id for ref in selected),
+    )
+
+    async def fake_run_oneshot(_prompt: str, **_kwargs: object) -> str:
+        filed.append("called")
+        return json.dumps(
+            [
+                {
+                    "text": "Deploys happen on Fridays.",
+                    "destination": "memory",
+                    "payload": "",
+                    "source_anchor": "msg_0001",
+                    "as_of": "2026-01-01",
+                }
+            ]
+        )
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_run_oneshot)
+
+    from ciao.memory_proposals import list_proposals
+
+    settled: dict[str, Any] = {}
+    with client:
+        assert (
+            client.post(
+                f"/api/import/batches/{batch['batch_id']}/run",
+                json={"workspace": "personal"},
+                cookies=cookies,
+            ).status_code
+            == 202
+        )
+        # Poll through the app itself: every request yields to the event loop the
+        # runner is scheduled on, so the extraction actually progresses. A sleep
+        # here would block the very loop it is waiting for.
+        for _ in range(400):
+            listed = client.get(
+                "/api/import/batches",
+                params={"workspace": "personal"},
+                cookies=cookies,
+            ).json()["batches"]
+            settled = next(row for row in listed if row["batch_id"] == batch["batch_id"])
+            if settled["status"] != "running":
+                break
+
+    config = client.app.state.config
+    assert settled["status"] == "done", settled
+    assert settled["progress"]["proposals_filed"] == 1
+    assert filed == ["called"], "the real runner ran the real turn"
+    rows = list_proposals(
+        config.workspace_vault_root("personal") / "Workspace/Memory-Proposals.md"
+    )
+    assert [row["text"] for row in rows] == [
+        "Deploys happen on Fridays. [as-of: 2025-02-07]"
+    ], "the source message's date, never the model's or the import's"
+    assert [row["source"] for row in rows] == ["opencode:sess-a:msg_0001"]
+
+
+def test_a_run_body_cannot_choose_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The configuration decides what reads a user's history, not the body.
+
+    The field is not part of the contract, so it is ignored rather than
+    refused — an ignored unknown key is what a client that guessed gets, and a
+    refusal would be a claim the route does not need to make.
+    """
+    client, cookies = _world(tmp_path, monkeypatch)
+    batch = _create(client, cookies, "sess-a")
+    _stub_runner(monkeypatch)
+
+    with client:
+        response = client.post(
+            f"/api/import/batches/{batch['batch_id']}/run",
+            json={"workspace": "personal", "model": "someone-elses-model"},
+            cookies=cookies,
+        )
+
+    assert response.status_code == 202
+    assert response.json()["batch"]["batch_id"] == batch["batch_id"]

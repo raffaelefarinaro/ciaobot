@@ -1032,6 +1032,59 @@ existing review/accept/undo, unchanged.
 
 Depends on: **C4 and C6 merged**. No UI.
 
+#### C7 landed (#1038)
+
+Shipped as **`ciao/import_run.py`** (the name above was a draft; the module is
+the per-batch runner C8's route drives) plus the three touches the section
+predicted:
+
+* **`run_import_batch(config, batch_id, model=…, provider=…)`** walks the
+  batch's selection one source at a time: C5's own resolution
+  (`_resolve_claude_code_ref`, `read_claude_code_session` /
+  `read_opencode_session`, and the OpenCode listing check) → C4's one
+  tool-less `extract_facts` turn → `record_source` (with the SHA-256 of the
+  normalized session as the content digest), `record_progress`, and one
+  `FactProvenance` per bullet the run actually filed. The provenance list is
+  read off the queue by diffing it before and after the turn, because
+  `append_proposals` drops already-queued and already-decided rows silently and
+  the filed set is otherwise unknowable.
+* **C4 is called exactly as its docstring requires**: `known_own_ids=
+  ciaobot_own_session_ids(config, workspace)` plus the chat ids derived from it,
+  so a Ciaobot-own session is refused by `classify_session` before any turn.
+  `refused_anchor` names both a session refusal and a single refused *row*, so
+  the runner tells them apart by the usage record (`messages_in_prompt == 0`
+  means the turn never ran).
+* **`FactCandidate.source_anchors: tuple[str, ...]`** is the field the
+  [Provenance and old-versus-new](#provenance-and-old-versus-new) section said
+  was **not optional**, and it is read out of `source_section` by code
+  (`external_anchor`: the leading segment must be a provider in the import
+  contract's `KNOWN_PROVIDERS`, and the tag must pass
+  `assert_external_provenance`) rather than by a colon count. `MemoryProposal`
+  needs no field of its own — `as_bullet` already renders the tag into the
+  bullet's `_(from: …)_` tail and it reads back — so the anchor survives the
+  round trip, and `_provenance_row` now stamps `source_anchors` beside
+  `source_message_ids` on the region write's receipt. For an import the integer
+  field stays empty, `provenance` stays `"unknown"`, and `attended` stays
+  `None`.
+* **The route**: `POST /api/import/batches/{batch_id}/run`, session-gated and
+  workspace-scoped. It moves the batch to `running`, schedules the runner and
+  answers 202 — **no turn runs inside the request**, and no request field chooses
+  the model. A batch already `running` is answered 200 with its current state
+  (that is the two-presses race); a settled batch is a 409.
+* **Dated conflicts**: nothing new. Two queued rows naming the same fact with
+  different `[as-of:]` dates both stay queued with their own source date and
+  anchor — the review path never compares them, and the test pins that neither is
+  dropped or re-stamped. That is the whole of "dated conflict review": a
+  property of the existing review surface, not an engine.
+* **Still open for C8**: the PWA accept path
+  (`proposal_service` → `memory_proposals.accept_region_fact`) builds its
+  proposal with `source_section="review"`, so the *accepted region's* receipt
+  records `section: "review"` rather than the row's external tag — for an
+  imported row as for every other one. The queued bullet keeps its anchor and
+  `candidate_from_proposal` reads it correctly; carrying it through the accept
+  call is a one-parameter change to `accept_region_fact` and belongs with the
+  review UI that makes the decision.
+
 ### C8 — entry point, retention/cancel UI, docs, browser journey
 
 * Touches: the Memory-side entry point, `web/src/components/…` for the
