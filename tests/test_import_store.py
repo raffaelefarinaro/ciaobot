@@ -442,6 +442,20 @@ def test_a_selection_is_bounded_and_well_formed(tmp_path: Path) -> None:
     assert excinfo.value.code == INVALID_BATCH
 
 
+def test_a_selection_naming_one_conversation_twice_is_refused(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, _Clock(_moment()))
+
+    with pytest.raises(ImportStoreError) as excinfo:
+        store.create(
+            workspace="personal",
+            sources=[_pair("sess-a"), {**_pair("sess-a"), "source_id": " sess-a "}],
+        )
+    assert excinfo.value.code == INVALID_BATCH
+    assert "sess-a" in str(excinfo.value)
+
+
 def test_forget_drops_only_the_batch_record(tmp_path: Path) -> None:
     store = _store(tmp_path, _Clock(_moment()))
     batch = store.create(workspace="personal", sources=[_pair("sess-a")])
@@ -513,3 +527,13 @@ def test_sweep_is_fail_soft_on_a_corrupt_store(tmp_path: Path) -> None:
     # and answers zero, and the file stays fail-closed for real readers.
     assert sweep_import_batches(config) == 0
     assert path.read_text(encoding="utf-8") == "{ not json"
+
+
+def test_sweep_on_a_fresh_install_creates_nothing(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    config = SimpleNamespace(state_path=tmp_path / ".runtime" / "state.json")
+
+    assert sweep_import_batches(config) == 0
+    assert not engine_store_path(config).exists()
+    assert not engine_store_path(config).parent.exists()

@@ -21,16 +21,12 @@ exception of its own):
 * ``DELETE /api/import/batches/{id}`` — drop a batch record; queue and vault
   are untouched.
 
-**The batch routes extract nothing.** There is no model call and no proposal
-write here: extraction is C7 and consumes the batch store.
-
-**Discovery and preview extract nothing.** There is no model call and no
-proposal write in them: extraction is C7 and consumes the batch store. The
-preview exists
-so that everything a person is consenting to is stated *before* the first model
-call, and it answers with counts and reasons rather than text — a full
-transcript never reaches the browser, so a selection screen cannot leak the
-conversation it is asking about.
+**The batch, discovery and preview routes extract nothing.** There is no model
+call and no proposal write here: extraction is C7 and consumes the batch
+store. The preview exists so that everything a person is consenting to is
+stated *before* the first model call, and it answers with counts and reasons
+rather than text — a full transcript never reaches the browser, so a selection
+screen cannot leak the conversation it is asking about.
 
 **The selection names a source, not a location.** A request body carries
 ``{"provider", "source_id"}`` pairs; every path is rebuilt from the workspace's

@@ -463,7 +463,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Import consent (C5): discovery is metadata only and the preview reads
         # the *selected* conversations, so neither answers before a person has
         # chosen what to process. Session-protected like every other /api route;
-        # no extraction lives here (C7) and no batch store (C6).
+        # no extraction lives here (C7); the batch store (C6) is the routes below.
         Route("/api/import/sources", import_sources, methods=["GET"]),
         Route("/api/import/preview", import_preview, methods=["POST"]),
         # Import batches (C6): the private per-workspace batch store. The

@@ -114,7 +114,8 @@ BatchStatus = Literal["queued", "running", "done", "failed", "cancelled", "parti
 OPEN_STATUSES: tuple[str, ...] = (QUEUED, RUNNING)
 
 #: Every status a batch can rest in. Cancellation is terminal: a cancelled
-#: batch never resumes, and re-running its selection is a new batch.
+#: batch never resumes, and its sources stay covered until the batch is
+#: forgotten or expires past retention.
 TERMINAL_STATUSES: tuple[str, ...] = (DONE, FAILED, CANCELLED, PARTIAL)
 
 BATCH_STATUSES: tuple[str, ...] = (QUEUED, RUNNING, DONE, FAILED, CANCELLED, PARTIAL)
@@ -941,6 +942,16 @@ class ImportStore:
                 f"got {len(requested)}",
                 code=INVALID_BATCH,
             )
+        seen: set[tuple[str, str]] = set()
+        for source in requested:
+            key = (canonical_provider(source.provider), source.source_id)
+            if key in seen:
+                raise ImportStoreError(
+                    f"{source.provider} session {source.source_id!r} is "
+                    "selected twice; a batch covers each conversation once",
+                    code=INVALID_BATCH,
+                )
+            seen.add(key)
         own = {
             (canonical_provider(str(provider)), str(session_id).strip())
             for provider, session_id in known_own_ids
@@ -1421,7 +1432,10 @@ def sweep_import_batches(config: Any) -> int:
     removed.
     """
     try:
-        return ImportStore(engine_store_path(config)).prune_expired()
+        path = engine_store_path(config)
+        if not path.exists():
+            return 0
+        return ImportStore(path).prune_expired()
     except Exception:
         logger.exception("Import batch retention sweep failed; nothing was pruned")
         return 0

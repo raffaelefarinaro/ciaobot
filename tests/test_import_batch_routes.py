@@ -242,6 +242,26 @@ def test_a_bad_selection_is_a_400_and_names_what_is_wrong(
     assert str(BATCH_CAP) in over.json()["error"]
 
 
+def test_a_selection_naming_one_conversation_twice_is_a_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, cookies = _world(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/import/batches",
+        json={
+            "workspace": "personal",
+            "sources": [
+                {"provider": "claude_code", "source_id": "sess-a"},
+                {"provider": "claude_code", "source_id": " sess-a "},
+            ],
+        },
+        cookies=cookies,
+    )
+    assert response.status_code == 400
+    assert "sess-a" in response.json()["error"]
+
+
 # ── a batch filed for another workspace is a 404 ──────────────────────────
 
 
