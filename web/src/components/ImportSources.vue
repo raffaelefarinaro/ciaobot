@@ -150,21 +150,19 @@
             {{ labelOf(row.source) }} — {{ row.message || row.reason }}
           </li>
         </ul>
+        <!-- One sentence, on purpose. "{provider} / {model} would receive this
+             text" reads as a promise, and the run resolves the model per
+             conversation's provider — so the two facts sit together or the first
+             one contradicts the second. -->
         <p class="import-confirm-line">
-          {{ preview.provider }} / {{ preview.model }} would receive this text, about
-          <strong>{{ preview.estimated_chars.toLocaleString() }}</strong> characters across
-          <strong>{{ preview.estimated_messages.toLocaleString() }}</strong> turns.
-          At most <strong>{{ preview.batch_cap }}</strong> conversations per batch.
-        </p>
-        <!-- The workspace default above is the workspace's own provider's model.
-             The run reads each conversation with the model Ciaobot is configured
-             to use for its own insights on that conversation's provider, so say
-             that rather than let the screen promise one model and run another. -->
-        <p class="import-confirm-line">
-          Each conversation is read by the model Ciaobot uses for its own insights on that
-          conversation's provider, which can differ from the workspace default above. Every
-          fact it finds waits for you in <strong>To decide</strong>; the import writes nothing
-          into your memory by itself.
+          This workspace's default is <strong>{{ preview.provider }} / {{ preview.model }}</strong>:
+          about <strong>{{ preview.estimated_chars.toLocaleString() }}</strong> characters across
+          <strong>{{ preview.estimated_messages.toLocaleString() }}</strong> turns, and at most
+          <strong>{{ preview.batch_cap }}</strong> conversations per batch. Each conversation
+          is read by the model Ciaobot uses for its own insights on that conversation's
+          provider, which can differ from the workspace default. Every fact it finds waits
+          for you in <strong>To decide</strong>; the import writes nothing into your memory
+          by itself.
         </p>
         <div class="import-confirm-actions">
           <button
@@ -264,6 +262,28 @@ const preview = ref<PreviewPayload | null>(null)
 const filing = ref(false)
 const fileError = ref('')
 
+/**
+ * Ticket for the newest scan, and a monotonic one so two scans of the *same*
+ * workspace can also race.
+ *
+ * Both reads here are one workspace's answer, and two things can move under them:
+ * the `1`–`9` shortcuts switch the pane, and a second Find supersedes the first.
+ * A stale answer is dropped rather than drawn. That is not tidiness — under
+ * another workspace it puts one workspace's conversation ids beside another
+ * workspace's name, and `POST /api/import/batches` checks that the ids are
+ * Ciaobot's own and not whose history they name, so the person would be shown
+ * another workspace's checkboxes and could file them under their own consent.
+ *
+ * `loading` is only cleared by whoever still holds the ticket, so a dropped
+ * answer cannot switch off the progress line a newer scan is drawing, and the
+ * workspace watcher clears it instead — otherwise Find would stay disabled for a
+ * workspace whose own scan has not been made yet.
+ */
+let scanSeq = 0
+
+/** The same ticket for the consent preview, retired by `discardPreview`. */
+let previewSeq = 0
+
 const candidates = computed(() => rows.value.available)
 const excluded = computed(() => rows.value.excluded)
 const unsupported = computed(() => rows.value.unsupported)
@@ -305,20 +325,34 @@ function omittedText(row: PreviewRow): string {
   return Object.entries(row.omitted).map(([kind, count]) => `${kind} ×${count}`).join(', ')
 }
 
+/**
+ * Drop the consent screen, and the request that would put it back.
+ *
+ * The preview answers over one selection, so retiring the selection — or ticking
+ * one row while the read is open — retires the request with it: its answer
+ * describes rows the reader can no longer act on, and the progress line stops
+ * with it rather than waiting for an answer that is no longer wanted.
+ */
+function discardPreview() {
+  previewSeq++
+  previewing.value = false
+  preview.value = null
+}
+
 function toggle(source: ImportSource) {
   const key = keyOf(source)
   // No auto-select-all anywhere: a person ticks what they mean to process.
   selected.value = selected.value.includes(key)
     ? selected.value.filter(k => k !== key)
     : [...selected.value, key]
-  preview.value = null
+  discardPreview()
 }
 
 function clearSelection() {
   selected.value = []
-  preview.value = null
   previewError.value = ''
   fileError.value = ''
+  discardPreview()
 }
 
 /**
@@ -339,6 +373,12 @@ function clearSelection() {
  */
 async function fileBatch() {
   if (!workspace.value || !processable.value.length || filing.value) return
+  // The same guard the two reads take: a create that answers after the `1`–`9`
+  // shortcuts have moved the pane belongs to a workspace this screen has left, so
+  // its answer is not this screen's to report — and calling a batch that exists a
+  // failure is how a person is talked into pressing the button again and meeting
+  // a 409.
+  const forWorkspace = workspace.value
   filing.value = true
   fileError.value = ''
   const sources = processable.value.map(row => ({
@@ -346,7 +386,8 @@ async function fileBatch() {
     source_id: row.source.source_id,
   }))
   try {
-    const batch = await runs.file(workspace.value, sources)
+    const batch = await runs.file(forWorkspace, sources)
+    if (forWorkspace !== workspace.value) return
     if (!batch) {
       // The sentence belongs beside the button that was pressed, so it is
       // moved here and cleared from the runs list rather than printed twice.
@@ -361,46 +402,59 @@ async function fileBatch() {
 }
 
 async function load() {
-  if (!workspace.value || loading.value) return
+  if (!workspace.value) return
+  const forWorkspace = workspace.value
+  const ticket = ++scanSeq
   loading.value = true
   loadError.value = ''
   try {
     const payload = await api.get<{ sources: SourcesPayload }>(
-      `/api/import/sources?workspace=${encodeURIComponent(workspace.value)}`,
+      `/api/import/sources?workspace=${encodeURIComponent(forWorkspace)}`,
     )
+    if (ticket !== scanSeq || forWorkspace !== workspace.value) return
     rows.value = payload.sources
     listed.value = true
     clearSelection()
   } catch (err) {
+    if (ticket !== scanSeq || forWorkspace !== workspace.value) return
     loadError.value = err instanceof Error ? err.message : String(err)
   } finally {
-    loading.value = false
+    if (ticket === scanSeq) loading.value = false
   }
 }
 
 async function previewSelection() {
   if (!workspace.value || !selected.value.length) return
+  const forWorkspace = workspace.value
+  const ticket = ++previewSeq
   previewing.value = true
   previewError.value = ''
   preview.value = null
   try {
     const chosen = candidates.value.filter(s => selected.value.includes(keyOf(s)))
     const payload = await api.post<{ preview: PreviewPayload }>('/api/import/preview', {
-      workspace: workspace.value,
+      workspace: forWorkspace,
       sources: chosen.map(s => ({ provider: s.provider, source_id: s.source_id })),
     })
+    if (ticket !== previewSeq || forWorkspace !== workspace.value) return
     preview.value = payload.preview
   } catch (err) {
+    if (ticket !== previewSeq || forWorkspace !== workspace.value) return
     previewError.value = err instanceof Error ? err.message : String(err)
   } finally {
-    previewing.value = false
+    if (ticket === previewSeq) previewing.value = false
   }
 }
 
 // A workspace switch drops the listing: the rows named the old one, and a
 // selection that outlived it would be a selection of conversations the reader
-// cannot see.
+// cannot see. It also invalidates whatever is still in flight and clears the busy
+// flags, or the rows would be gone but the answers would come back and stay.
 watch(workspace, () => {
+  scanSeq++
+  loading.value = false
+  filing.value = false
+  loadError.value = ''
   listed.value = false
   rows.value = { available: [], excluded: [], unsupported: [], truncated: {} }
   clearSelection()

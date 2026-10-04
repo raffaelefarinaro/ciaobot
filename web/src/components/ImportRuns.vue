@@ -135,11 +135,11 @@
 
             <!-- What a cancel does and does not do, said where the button is:
                  keeping the proposals is the point, and text already handed to
-                 the provider is gone whatever this button says. -->
+                 the provider is gone whatever this button says. Which of those
+                 is true depends on whether the run has started, so the sentence
+                 does too. -->
             <p v-if="store.isOpen(batch)" class="import-run-note">
-              Cancelling stops the conversations not yet started. Proposals already
-              filed stay queued for you to decide, and text already sent to the
-              configured provider cannot be unsent.
+              {{ openNote(batch) }}
             </p>
             <p v-else class="import-run-note">
               {{ settledNote(batch) }}
@@ -228,12 +228,21 @@ const visible = computed(() => {
 
 const hasOpen = computed(() => store.batches.some((row) => store.isOpen(row)))
 
+/**
+ * The window as the sweep actually prunes on.
+ *
+ * `prune_expired` drops *any* terminal batch whose `updated_at` is older than the
+ * window, whatever became of its proposals, and it runs once per boot — so the
+ * honest sentence is "about N days, checked when Ciaobot starts" and says nothing
+ * about what the reader decided. "If you never decided its proposals" would have
+ * promised a longer life for an undecided import than the store gives it.
+ */
 const retentionNote = computed(() => {
   const days = store.retentionDays
   const window = days > 0 ? `${days} days` : 'a limited time'
   return (
     `Ciaobot keeps a private copy of what an import read, and drops it ${window} after the ` +
-    'import settles if you never decided its proposals. Facts you accepted keep a short ' +
+    'import settles (checked when Ciaobot starts). Facts you accepted keep a short ' +
     'record of the conversation and message they came from, so an imported fact stays ' +
     'attributable after that copy is gone. Removing an import only removes this record: ' +
     'proposals already filed stay queued, and a fact you accepted stays in your memory. ' +
@@ -276,6 +285,28 @@ function statusOf(batch: ImportBatch): string {
     default:
       return 'Did not finish'
   }
+}
+
+/**
+ * What the Cancel button will do, per status.
+ *
+ * Split because the two halves are not both true at once. A `queued` batch has
+ * read nothing and sent nothing, so warning that text "cannot be unsent" there
+ * describes a loss that has not happened and makes a still-free cancel sound
+ * destructive.
+ */
+function openNote(batch: ImportBatch): string {
+  if (batch.status === 'queued') {
+    return (
+      'Nothing has been read or sent yet. Cancel drops this record, and a ' +
+      'conversation is only read once you start the run.'
+    )
+  }
+  return (
+    'Cancelling stops the conversations not yet started. Proposals already filed stay ' +
+    'queued for you to decide, and text already sent to the configured provider cannot ' +
+    'be unsent.'
+  )
 }
 
 /** What a settled batch left behind, said per status. */

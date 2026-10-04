@@ -19,9 +19,10 @@ import { useMemoryMapStore } from '../../stores/memoryMap'
 import { useProjectStore } from '../../stores/projects'
 
 const apiGet = vi.hoisted(() => vi.fn())
+const apiPost = vi.hoisted(() => vi.fn())
 
 vi.mock('../../lib/api', () => ({
-  api: { get: apiGet, post: vi.fn(), patch: vi.fn(), del: vi.fn() },
+  api: { get: apiGet, post: apiPost, patch: vi.fn(), del: vi.fn() },
 }))
 
 const Stub = { template: '<div />' }
@@ -544,6 +545,7 @@ describe('MemoryMapView sections', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     apiGet.mockReset()
+    apiPost.mockReset()
     apiGet.mockImplementation((url: string) => {
       if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
       if (url.startsWith('/api/memory/entity-types')) {
@@ -698,16 +700,21 @@ describe('MemoryMapView sections', () => {
     expect(wrapper.find('.mm-body').exists()).toBe(false)
     expect(wrapper.find('.mm-toolbar').exists()).toBe(false)
     expect(wrapper.find('.mm-review-rail').exists()).toBe(false)
-    // Discovery is opt-in: mounting the section scans nothing. The two routes
-    // that read a conversation — the scan and the preview — are named
-    // explicitly rather than caught by a prefix, because since #1041 the section
-    // also reads Ciaobot's *own* private batch store on mount (the run list, so a
-    // returning user sees an import they left running instead of an empty list).
-    // That read is metadata only and opens no conversation, so it is not what
-    // this assertion is about; it is pinned in ImportSources.test.ts.
-    const imported = apiGet.mock.calls.map(([url]) => String(url))
-    expect(imported.some((url) => url.startsWith('/api/import/sources'))).toBe(false)
-    expect(imported.some((url) => url.startsWith('/api/import/preview'))).toBe(false)
+    // Discovery is opt-in: mounting the section scans nothing and previews
+    // nothing. An **allowlist**, not a deny-list of two route names — a deny-list
+    // lets any later `/api/import/…` GET through unexamined, and a history-reading
+    // GET is exactly the thing that must not be added by accident. The one import
+    // GET this page does make is Ciaobot's *own* batch store (the run list, so a
+    // returning user sees an import they left running instead of an empty list):
+    // metadata only, opening no conversation, and pinned in ImportSources.test.ts.
+    const importGets = apiGet.mock.calls
+      .map(([url]) => String(url))
+      .filter((url) => url.startsWith('/api/import/'))
+    expect(importGets).toEqual(['/api/import/batches?workspace=personal'])
+    // Preview is a POST, so a GET predicate could never have caught it: the scan
+    // and the preview are checked on the mock that can actually issue them.
+    const importPosts = apiPost.mock.calls.map(([url]) => String(url))
+    expect(importPosts.filter((url) => url.startsWith('/api/import/'))).toEqual([])
     wrapper.unmount()
 
     const map = await mountSection('map')

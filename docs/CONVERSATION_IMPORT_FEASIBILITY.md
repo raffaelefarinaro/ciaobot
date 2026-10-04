@@ -1173,10 +1173,21 @@ did ship: `ImportSources.vue` + `ImportRuns.vue` + `web/src/stores/import.ts` +
 existing list route, `PWA_API.md`, `ARCHITECTURE.md`, `DESIGN.md` and
 `ciao-capabilities`. The shipped shape is in the C8 update at the top of this
 document; the points worth keeping from the plan below are that the entry is one
-page and not two, that no control describes a flow that is not implemented
-(an unsupported source says *Unsupported version, export a file instead*), and
-that the browser walk covered the five load states, keyboard focus, 200% zoom,
-44px targets and light/dark.
+page and not two and that no control describes a flow that is not implemented (an
+unsupported source says *Unsupported version, export a file instead*).
+
+**What the browser walk covered, and what it did not.** The walk ran against the
+fixture engine with mocked batch responses, so what was checked was everything up
+to the extraction: the listing's five load states (first load, pending, first-load
+failure, failed refresh over rows already on screen, genuine empty), keyboard
+focus through Find, the checkboxes, Review and the confirmation, the run list's
+five states, the 44px touch targets, 200% zoom, and light and dark. The **live
+model success path was not walked**: nobody took a real extraction through to
+accepting a fact and then finding it retrievable, because this machine has no
+model credentials. That path is covered only by C7's backend runner tests and by
+the mocked UI and e2e tests — good enough for a PR that adds no extraction code,
+but it has not been exercised end to end in a browser by a person, and a reader
+should not infer that it has.
 
 ### Explicitly not a child
 

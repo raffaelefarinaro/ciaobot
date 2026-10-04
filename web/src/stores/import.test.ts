@@ -172,6 +172,35 @@ describe('the import store', () => {
     expect(store.batches[0]!.status).toBe('running')
   })
 
+  it('files a batch even when the list is read underneath it', async () => {
+    // An overlap, not an edge: the runs list polls while an open batch is on
+    // screen, and "Check for progress" reads on demand, so a create is regularly
+    // in flight when a read starts.
+    const reading = deferred<{ batches: Record<string, unknown>[]; retention_days: number }>()
+    get.mockResolvedValueOnce({ batches: [], retention_days: 30 })
+    get.mockReturnValueOnce(reading.promise)
+    const filing = deferred<{ batch: Record<string, unknown> }>()
+    post.mockReturnValue(filing.promise)
+    const store = useImportStore()
+    await store.reload('personal')
+
+    // The write first, then the read underneath it: that is the order the
+    // journey produces, since the runs list polls on a timer and a person can
+    // press "Check for progress" while their create is open.
+    const filed = store.file('personal', [{ provider: 'claude_code', source_id: 'sess-a' }])
+    const refresh = store.reload('personal')
+    reading.resolve({ batches: [], retention_days: 30 })
+    await refresh
+    filing.resolve({ batch: batch() })
+
+    // The batch exists, so the caller must be told so. A read that took a write's
+    // ticket made this `null`, which the panel reads as "The import could not be
+    // filed" — and a person who believes that presses again and meets a 409.
+    expect((await filed)?.batch_id).toBe('batch-1')
+    expect(store.batches.map((row) => row.batch_id)).toEqual(['batch-1'])
+    expect(store.error).toBe('')
+  })
+
   it('keeps the rows and marks them stale when a refresh fails', async () => {
     get.mockResolvedValueOnce({ batches: [batch()], retention_days: 30 })
     get.mockRejectedValueOnce(new Error('the engine went away'))

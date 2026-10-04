@@ -204,8 +204,23 @@ export const useImportStore = defineStore('import', () => {
   const busyIds = ref<Set<string>>(new Set())
   /** Ticket for the newest list read; an older answer is dropped, not drawn. */
   let requestSeq = 0
-  /** Ticket for the newest write answer, and for any read issued after it. */
+  /**
+   * Ticket for the newest write, so two writes race the same way two reads do.
+   *
+   * Only writes take one. A *read* must never take a write's ticket: a poll or a
+   * manual refresh starting while a create is in flight is ordinary, and
+   * invalidating the create over it turned a batch that exists into a "could not
+   * file" the person then re-pressed into a 409.
+   */
   let writeSeq = 0
+  /**
+   * Bumped by every record a write adopts.
+   *
+   * This is the counter a read watches, because it answers the question the read
+   * actually has to ask: did a write land *while this read was open*? A read
+   * cannot know about a write taken after it, so the newer record is held.
+   */
+  let adoptSeq = 0
 
   const loaded = computed(() => loadedWorkspace.value !== '')
 
@@ -250,7 +265,7 @@ export const useImportStore = defineStore('import', () => {
       retentionDays.value = 0
     }
     const seq = ++requestSeq
-    writeSeq++
+    const adoptedAtRead = adoptSeq
     loading.value = true
     loadError.value = ''
     try {
@@ -261,7 +276,7 @@ export const useImportStore = defineStore('import', () => {
       const fresh = Array.isArray(data?.batches)
         ? data.batches.map(importBatchFrom).filter((b): b is ImportBatch => b !== null)
         : []
-      batches.value = mergeNewer(fresh, batches.value, seq)
+      batches.value = mergeNewer(fresh, batches.value, adoptedAtRead)
       retentionDays.value = count(data?.retention_days)
       loadedWorkspace.value = workspace
     } catch (e) {
@@ -277,14 +292,14 @@ export const useImportStore = defineStore('import', () => {
    *
    * A read is authoritative about *which batches exist* — one it does not list
    * was removed while it was open — but it cannot know about a write that landed
-   * after it was taken. A held row the read also lists keeps its record when the
-   * write is newer, so a Run landing next to a refresh does not flip the row
-   * back to `queued` for as long as the stale read took to answer.
+   * after it was taken. `adoptedAtRead` is the counter the read started from, so
+   * a write that moved a row while it was in flight is visible; a write from
+   * before it is not, because this read is the newer word about that row.
    */
-  function mergeNewer(read: ImportBatch[], held: ImportBatch[], seq: number): ImportBatch[] {
+  function mergeNewer(read: ImportBatch[], held: ImportBatch[], adoptedAtRead: number): ImportBatch[] {
     const known = new Set(read.map((row) => row.batch_id))
     const writes = new Map<string, ImportBatch>()
-    if (writeSeq > seq) {
+    if (adoptSeq !== adoptedAtRead) {
       for (const row of held) if (known.has(row.batch_id)) writes.set(row.batch_id, row)
     }
     return read.map((row) => {
@@ -319,6 +334,7 @@ export const useImportStore = defineStore('import', () => {
     const index = batches.value.findIndex((row) => row.batch_id === batch.batch_id)
     if (index >= 0) batches.value.splice(index, 1, batch)
     else batches.value.push(batch)
+    adoptSeq++
     return batch
   }
 

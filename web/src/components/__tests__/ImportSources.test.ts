@@ -252,6 +252,81 @@ describe('ImportSources', () => {
     expect(wrapper.text()).toContain('Review 1 selected')
   })
 
+  it('drops a listing that answers after the workspace moved, and leaves Find usable', async () => {
+    const runs = RUNS_READ
+    let release: (value: unknown) => void = () => {}
+    apiGet.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/import/batches')) return runs(path)
+      return new Promise(resolve => { release = resolve })
+    })
+    const wrapper = await mountPanel()
+
+    await wrapper.get('.import-head button.btn-primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Looking for conversations')
+
+    // The `1`–`9` shortcuts move the pane while the scan is open.
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+
+    release({ workspace: 'personal', sources: listing() })
+    await flushPromises()
+
+    // `personal`'s rows never appear under `work`. They would be checkable, and
+    // filing them sends `workspace=work` with another workspace's conversation
+    // ids — a create checks that the ids are Ciaobot's own, not whose history
+    // they name.
+    expect(wrapper.text()).not.toContain('sess-a')
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(0)
+    // And Find is not held behind a request this workspace never made.
+    const findAgain = wrapper.get('.import-head button.btn-primary')
+    expect(findAgain.attributes('disabled')).toBeUndefined()
+    expect(findAgain.text()).toContain('Find conversations')
+    expect(wrapper.text()).not.toContain('Looking for conversations')
+    wrapper.unmount()
+  })
+
+  it('drops a consent preview that answers after the workspace moved', async () => {
+    const runs = RUNS_READ
+    let release: (value: unknown) => void = () => {}
+    apiGet.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/import/batches')) return runs(path)
+      if (String(path).includes('workspace=work')) {
+        return { workspace: 'work', sources: listing({ available: [source('sess-work', 'opencode')] }) }
+      }
+      return { workspace: 'personal', sources: listing() }
+    })
+    apiPost.mockImplementation(async (path: string) => {
+      if (String(path) !== '/api/import/preview') return { batch: batch() }
+      return new Promise(resolve => { release = resolve })
+    })
+    const wrapper = await mountPanel()
+    await find(wrapper)
+    await wrapper.findAll('input[type="checkbox"]')[0].setValue(true)
+    await wrapper.get('.import-actions button.btn-primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Reading…')
+
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+    // The new workspace scans and lists its own rows.
+    await find(wrapper)
+    expect(wrapper.text()).toContain('sess-work')
+
+    release(previewPayload())
+    await flushPromises()
+
+    // The confirmation is one workspace's consent over one workspace's rows, with
+    // that workspace's model and destination on it. A late answer must not put
+    // `personal`'s numbers in `work`'s panel, where the one button under them
+    // files with `workspace=work`.
+    expect(wrapper.find('.import-confirm').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Before anything runs')
+    expect(wrapper.text()).not.toContain('/tmp/p/memory-vault/personal')
+    expect(wrapper.text()).not.toContain('Reading…')
+    wrapper.unmount()
+  })
+
   it('states what would be processed, on whose account, before anything runs', async () => {
     const wrapper = await mountPanel()
     await find(wrapper)
@@ -272,7 +347,7 @@ describe('ImportSources', () => {
     expect(text).toContain('isSidechain ×3')
     expect(text).toContain('claude / sonnet')
     expect(text).toContain('4,800')
-    expect(text).toContain('At most 10 conversations per batch')
+    expect(text).toContain('at most 10 conversations per batch')
     // The destination, and a cancel.
     expect(text).toContain('/tmp/p/memory-vault/personal')
     expect(wrapper.text()).toContain('Cancel')
@@ -385,6 +460,11 @@ describe('ImportSources', () => {
     let runs = wrapper.get('.import-runs')
     expect(runs.text()).toContain('Filed, waiting to start')
     expect(runs.text()).toContain('Nothing starts on its own')
+    // The note beside Cancel is per status: a queued batch has sent nothing, so
+    // warning that provider input cannot be unsent describes a loss that has not
+    // happened and makes a still-free cancel sound destructive.
+    expect(runs.text()).toContain('Nothing has been read or sent yet')
+    expect(runs.text()).not.toContain('cannot be unsent')
 
     await runs.get('.import-run-actions button.btn-primary').trigger('click')
     await flushPromises()
@@ -424,6 +504,12 @@ describe('ImportSources', () => {
 
     // The window is the server's own number, not one typed into the PWA.
     expect(text).toContain('30 days after the import settles')
+    // About that long, and no longer: the sweep drops any settled batch past the
+    // window whatever became of its proposals, and only looks when Ciaobot
+    // starts. A sentence tying the window to the reader's indecision would
+    // promise an undecided import a longer life than the store gives it.
+    expect(text).toContain('checked when Ciaobot starts')
+    expect(text).not.toContain('if you never decided')
     expect(text).toContain('Facts you accepted keep a short record')
     expect(text).toContain('Removing an import only removes this record')
     expect(text).toContain('a fact you accepted stays in your memory')

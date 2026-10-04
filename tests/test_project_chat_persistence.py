@@ -206,7 +206,14 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
         prompt, _ = _seeded_welcome(manager, title)
         assert "**Explain memory early**" in prompt
         assert "Do not run a second interview round about categories" in prompt
-        assert "do not scan past chats" in prompt
+        # Pinned with the clause that follows it. Since #1041 the same words also
+        # appear in `import_tour` ("do not scan past chats, and do not read any
+        # provider history yourself"), so the bare fragment no longer proves the
+        # memory step kept its own instruction.
+        assert "do not scan past chats, and do not import anything" in prompt
+        # The instruction that matters most since #1041, in the agent's own words:
+        # an onboarding turn must not run the import the user has to consent to.
+        assert "do not run an import for them" in prompt
         assert "Ask the user 2-3 important questions" in prompt
 
     # The existing-vault preservation and routing instructions are untouched.
