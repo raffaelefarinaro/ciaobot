@@ -3099,6 +3099,11 @@ def test_service_disagreement_reads_a_direct_program_unchanged() -> None:
             "/a/b/bin/python",
         ),
         ("com.ciao.server = {\n\tprogram = {\n\t\t/a/b/bin/python\n\t}\n}", "/a/b/bin/python"),
+        # A multi-line list keeps a spaced element whole, as the arguments do.
+        (
+            "com.ciao.server = {\n\tprogram = {\n\t\t/a/my env/bin/python\n\t}\n}",
+            "/a/my env/bin/python",
+        ),
         # A scalar program keeps its spaces: the native host lives inside
         # `Ciaobot Server.app`, and a token split would truncate it at the bundle
         # name before any agreement could see the interpreter it serves.
@@ -3139,6 +3144,26 @@ def test_loaded_program_argument_reads_launchctl_output(
         (
             "com.ciao.server = {\n\targuments = ( -I -m ciao.main )\n}",
             ["-I", "-m", "ciao.main"],
+        ),
+        # A single-line list is that line only, never the key printed after it.
+        (
+            "com.ciao.server = {\n\targuments = ( -I -m ciao.main )\n\tpid = 7\n}",
+            ["-I", "-m", "ciao.main"],
+        ),
+        # An element on the line that opens the block is an element, and quotes
+        # come off exactly as they do from a scalar program, so the fold in
+        # `_loaded_server_command` compares like with like.
+        (
+            "com.ciao.server = {\n\targuments = ( \"/Applications/Ciaobot Server.app/x\"\n"
+            "\t\tserve\n\t\t--python\n\t\t\"/tools/my env/bin/python\"\n\t)\n}",
+            ["/Applications/Ciaobot Server.app/x", "serve", "--python", "/tools/my env/bin/python"],
+        ),
+        # Only the block's own delimiters come off, so an element that ends in a
+        # bracket of its own keeps it.
+        (
+            "com.ciao.server = {\n\targuments = {\n\t\t/tools/env (copy)/bin/python\n"
+            "\t\t-m\n\t}\n}",
+            ["/tools/env (copy)/bin/python", "-m"],
         ),
         ("com.ciao.server = {\n\tstate = running\n}", []),
     ],

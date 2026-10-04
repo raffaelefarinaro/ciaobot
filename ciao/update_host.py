@@ -461,6 +461,10 @@ def _loaded_field(printed: str, key: str) -> str:
         # The list's own delimiters, so a block that opens here is collected up
         # to the line that closes it — one argument per line, in every shape.
         depth = value.count("(") + value.count("{") - value.count(")") - value.count("}")
+        if depth <= 0:
+            # Opened and closed on the key's own line: the value is that line,
+            # not that line plus whatever key launchd printed after it.
+            return value
         for nxt in lines[index + 1 :]:
             parts.append(nxt)
             depth += nxt.count("(") + nxt.count("{") - nxt.count(")") - nxt.count("}")
@@ -485,44 +489,52 @@ def _loaded_program_argument(printed: str) -> str | None:
     The ``program`` value in every shape launchd prints it (see
     :func:`_loaded_field`): a bare scalar keeps its spaces, because the host the
     service runs under is ``Ciaobot Server.app`` and a token split would truncate
-    it at the bundle name; a list keeps the old first-token rule. Nothing
-    recognisable answers ``None``, which is evidence of nothing and so never
-    refuses an update.
+    it at the bundle name; a list answers its first element (see
+    :func:`_loaded_list`). Nothing recognisable answers ``None``, which is
+    evidence of nothing and so never refuses an update.
     """
     raw = _loaded_field(printed, "program").strip()
     if not raw:
         return None
-    if raw[:1] in {"(", "{"}:
-        tokens = re.findall(r"[^\s,(){}]+", raw)
-        return tokens[0].strip("\"'") if tokens else None
-    return raw.strip("\"'")
+    if raw[:1] not in {"(", "{"}:
+        return raw.strip("\"'")
+    items = _loaded_list(printed, "program")
+    return items[0] if items else None
+
+
+def _loaded_list(printed: str, key: str) -> list[str]:
+    """The elements of a list ``launchctl print`` rendered for ``key``.
+
+    launchd renders a job's list one element per line inside a delimited block,
+    and that layout is what preserves an element that contains a space — the
+    native host's own path does (``Ciaobot Server.app``), and so may the
+    interpreter it serves. Splitting those lines on whitespace would truncate the
+    host path at the first space, so a multi-line block is read line by line,
+    including any element on the line that opens it. The older single-line
+    shapes (``( -I -m ... )`` or ``{ -I -m ... }``) carry no spaces in their
+    tokens and are read as whitespace-separated tokens, as :func:`_loaded_tokens`
+    does. Quotes are stripped from every element, exactly as from a scalar
+    program, so the two agree when :func:`_loaded_server_command` folds them.
+    """
+    lines = [line.strip() for line in _loaded_field(printed, key).splitlines()]
+    if not lines:
+        return []
+    if len(lines) == 1:
+        elements = re.findall(r"[^\s,(){}]+", lines[0])
+    else:
+        # Only the block's own delimiters come off: the opening one on the first
+        # line and the closing one on the last. An element may itself end in a
+        # bracket (`/tools/env (copy)`), so no line is stripped of them wholesale.
+        lines[0] = lines[0][1:]
+        if lines[-1][-1:] in {")", "}"}:
+            lines[-1] = lines[-1][:-1]
+        elements = [line.strip().rstrip(",").strip() for line in lines]
+    return [stripped for element in elements if (stripped := element.strip("\"'"))]
 
 
 def _loaded_arguments(printed: str) -> list[str]:
-    """The arguments ``launchctl print`` rendered for a loaded job's job.
-
-    launchd renders a job's arguments one per line inside a delimited block, and
-    that layout is what preserves an argument that contains a space — the native
-    host's own path does (``Ciaobot Server.app``), and so may the interpreter it
-    serves. Splitting those lines on whitespace would truncate the host path at
-    the first space, so the multi-line block is read line by line. The older
-    single-line shapes (``arguments = ( -I -m ... )`` or ``{ -I -m ... }``)
-    carry no spaces in their tokens and are read as whitespace-separated tokens,
-    as :func:`_loaded_tokens` does.
-    """
-    field = _loaded_field(printed, "arguments")
-    if not field:
-        return []
-    lines = field.splitlines()
-    first = lines[0]
-    # If the list opens and closes on its own first line (`arguments = ( -I -m
-    # ... )`), it is the flat legacy shape and its tokens are whitespace-
-    # separated. Otherwise it is launchd's one-argument-per-line block, and each
-    # line is one argument, spaces and all.
-    depth = first.count("(") + first.count("{") - first.count(")") - first.count("}")
-    if depth <= 0:
-        return re.findall(r"[^\s,(){}]+", first)
-    return [stripped for line in lines[1:] if (stripped := line.strip().strip(",(){}").strip())]
+    """The arguments ``launchctl print`` rendered for a loaded job (see :func:`_loaded_list`)."""
+    return _loaded_list(printed, "arguments")
 
 
 def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...] | None:

@@ -39,6 +39,7 @@ from typing import IO, Any, Callable
 from ciao import install_receipt, macos_service, package_version, release_manifest
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
+from ciao.server_host import ServerHostError, parse_service_command
 from ciao.update_host import (
     RECOVER_LABEL,
     UPDATER_LABEL,
@@ -47,7 +48,6 @@ from ciao.update_host import (
     current_update_host,
     default_update_host,
 )
-from ciao.server_host import ServerHostError, parse_service_command
 
 logger = logging.getLogger(__name__)
 

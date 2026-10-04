@@ -545,6 +545,28 @@ def test_mac_update_host_server_command_folds_the_program_only_once() -> None:
     assert host.server_command() == ("/a/b/python", "-m", "ciao.cli", "run")
 
 
+def test_mac_update_host_server_command_folds_a_quoted_program_only_once() -> None:
+    # A spaced path launchd quotes is quoted in both places; the fold compares
+    # them unquoted, so the hosted argv parses instead of carrying the host twice.
+    host_path = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+    printed = (
+        f"{SERVER} = {{\n"
+        f'\tprogram = "{host_path}"\n'
+        "\targuments = {\n"
+        f'\t\t"{host_path}"\n'
+        "\t\tserve\n"
+        "\t\t--python\n"
+        "\t\t/a/tools/ciaobot/bin/python\n"
+        "\t}\n"
+        "}\n"
+    )
+
+    host = MacUpdateHost(launchctl=lambda args: subprocess.CompletedProcess(args, 0, printed, ""), uid=501)
+
+    assert host.server_command() == (host_path, "serve", "--python", "/a/tools/ciaobot/bin/python")
+    assert host.server_program() == host_path
+
+
 def test_mac_update_host_server_command_is_none_when_launchd_says_nothing() -> None:
     host = MacUpdateHost(
         launchctl=lambda args: subprocess.CompletedProcess(args, 0, "", ""), uid=501
