@@ -143,6 +143,39 @@ def test_classify_engine_for_a_hosted_definition(tmp_path: Path) -> None:
     assert result.plist_program.endswith("CiaobotServerHost")
 
 
+def test_classify_never_names_the_server_host_bundle_as_an_app_to_retire(
+    tmp_path: Path,
+) -> None:
+    # A host argv the strict parser refuses (an interpreter basename it does
+    # not accept) must not fall through to `_app_bundle`, which would name
+    # `Ciaobot Server.app` as the Ciaobot.app the migration deletes.
+    agents = tmp_path / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (agents / "com.ciao.server.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "com.ciao.server",
+                "ProgramArguments": [
+                    "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/"
+                    "CiaobotServerHost",
+                    "serve",
+                    "--python",
+                    "/opt/ciao/venv/bin/python3-intel64",
+                ],
+                "EnvironmentVariables": {"CIAO_WORKSPACE": str(workspace)},
+                "WorkingDirectory": str(workspace),
+            }
+        )
+    )
+
+    result = classify(agents)
+
+    assert result.kind == "engine"
+    assert result.app_bundle == ""
+
+
 @macos_app_layout
 def test_classify_desktop_host_when_node_state_absent(tmp_path: Path) -> None:
     # No node state at all is the host path: the desktop shell writes one as

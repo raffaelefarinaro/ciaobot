@@ -27,7 +27,7 @@ import os
 import plistlib
 import sys
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -37,6 +37,7 @@ from ciao.macos_service import (
     discover_runtime,
     hosted_service_python,
 )
+from ciao.server_host import APP_NAME as SERVER_HOST_APP_NAME
 
 # The engine LaunchAgent this classifies from: the same file
 # `macos_service.SERVER_LABEL` names, spelled out because this module also runs
@@ -98,12 +99,20 @@ def _read_plist(path: Path) -> tuple[bool, dict[str, Any]]:
 
 
 def _app_bundle(program: str) -> str:
-    """The `.app` path `program` lives in, or "" when it lives outside one."""
+    """The `.app` path `program` lives in, or "" when it lives outside one.
+
+    The native `Ciaobot Server.app` host is never a `Ciaobot.app` to retire,
+    even when its argv is one the strict hosted parser refuses: naming it here
+    would send the installer's migration to `rm -rf` the host bundle.
+    """
     marker = ".app/"
     index = program.find(marker)
     if index < 0:
         return ""
-    return program[: index + len(".app")]
+    bundle = program[: index + len(".app")]
+    if PurePosixPath(bundle).name == SERVER_HOST_APP_NAME:
+        return ""
+    return bundle
 
 
 def _client_host_url(value: Any) -> str:
