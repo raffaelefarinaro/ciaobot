@@ -260,7 +260,7 @@
               <button type="button" class="btn-small" @click="loadAutomations">Retry</button>
             </div>
           </div>
-          <p v-else-if="schedulesState === 'loading'" class="empty-row">Loading automations…</p>
+          <SkeletonLoader v-else-if="schedulesState === 'loading'" label="Loading automations" :count="2" />
           <p v-else-if="schedulesState === 'error'" class="empty-row" role="alert">
             Could not load automations.
             <button type="button" class="btn-small" @click="loadAutomations">Retry</button>
@@ -331,6 +331,7 @@
 </template>
 
 <script setup lang="ts">
+import SkeletonLoader from './SkeletonLoader.vue'
 import { ref, computed, watch, onBeforeUnmount, onMounted, nextTick, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'

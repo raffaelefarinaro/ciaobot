@@ -353,7 +353,7 @@ describe('TaskBoardView', () => {
     const wrapper = mount(TaskBoardView, { attachTo: document.body })
     await nextTick()
 
-    expect(wrapper.find('.task-loading').exists()).toBe(true)
+    expect(wrapper.get('.skeleton').attributes('aria-label')).toBe('Loading tasks')
     expect(wrapper.text()).not.toContain('No tasks in')
     expect(wrapper.findAll('.task-card')).toHaveLength(0)
 

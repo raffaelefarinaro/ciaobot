@@ -128,12 +128,8 @@
       <button type="button" class="btn-small" @click="refreshSchedules">Retry</button>
     </div>
 
-    <div
-      v-else-if="!store.schedulesLoaded"
-      class="schedule-load-state"
-      role="status"
-    >
-      Loading automations…
+    <div v-else-if="!store.schedulesLoaded" class="scroll-body">
+      <SkeletonLoader label="Loading automations" variant="cards" :count="3" />
     </div>
 
     <!-- Detail -->
@@ -671,6 +667,7 @@
 </template>
 
 <script setup lang="ts">
+import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import {
   DropdownMenuContent,

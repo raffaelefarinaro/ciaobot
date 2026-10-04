@@ -41,6 +41,7 @@
  * that disagrees with itself is **flagged with what disagrees and the controls
  * that resolve it** rather than silently rewritten.
  */
+import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import { useModalFocus } from '../composables/useModalFocus'
@@ -1433,9 +1434,7 @@ const today = localDateKey()
         </div>
 
         <!-- 1 · first load in flight -->
-        <div v-if="firstLoad" class="task-loading" role="status" aria-live="polite">
-          <span class="task-spinner" aria-hidden="true"></span> Loading tasks…
-        </div>
+        <SkeletonLoader v-if="firstLoad" label="Loading tasks" :variant="isNarrow ? 'cards' : 'board'" :count="3" />
 
         <!-- 2 · first load failed: the server's sentence and a Retry. Never an
              "empty board" claim, which is what a failed GET would be read as. -->
@@ -2267,7 +2266,6 @@ const today = localDateKey()
 }
 
 /* ── Load states ───────────────────────────────────────────────────────── */
-.task-loading,
 .task-failed,
 .task-filtered-empty {
   display: flex;
@@ -2276,7 +2274,6 @@ const today = localDateKey()
   gap: var(--space-2);
   padding: var(--space-5) 0;
 }
-.task-loading { flex-direction: row; align-items: center; color: var(--fg2); }
 .task-failed-text,
 .task-stale,
 .task-action-error {
