@@ -19,6 +19,8 @@ What is pinned here is the wiring C7 owns, not C4's contract (that is
 * a model-written date is dropped and the **source** message's date survives;
 * two conflicting dated claims both stay queued for a person to decide;
 * a cancel mid-batch keeps what was filed and stops the rest;
+* an unreadable turn is a skipped source with no digest, never an extraction;
+* an exception out of the run leaves the batch `failed`, never `running`;
 * forgetting the batch leaves an accepted memory intact.
 """
 
@@ -379,9 +381,12 @@ async def test_the_run_calls_exactly_one_turn_per_conversation(
 ) -> None:
     """One no-tools turn, and never with a caller-named model.
 
-    The model and provider the runner uses come from the configuration (the same
-    answer the preview showed), so the assertion is on what the call was given
-    and on the fact that the body could not have chosen it.
+    The model and provider come from the configuration's own resolution — the
+    per-provider insights model for the *source's* provider, which with no
+    override set is that provider's workspace default. That is not
+    `preview_selected`'s answer (the workspace default for the *workspace's*
+    provider), so the assertion is on what the call was actually given rather
+    than on what a consent screen reported.
     """
     config = _world(tmp_path, monkeypatch)
     _seed_vault(config)
@@ -869,6 +874,188 @@ async def test_a_claude_code_selection_is_resolved_through_the_adapters(
     assert len(calls) == 1
     assert calls[0]["model"] == "claude-sonnet-test"
     assert calls[0]["provider"] == "claude"
+
+
+# ── A turn that produced nothing readable is not an extraction ─────────────
+
+
+@pytest.mark.asyncio
+async def test_a_failing_turn_skips_the_source_and_never_says_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider that raises is a source that was not read, not a clean run.
+
+    ``extract_facts`` swallows a failing turn and answers ``skipped=1`` with
+    nothing filed, so recording that as an extraction is what made a
+    misconfigured model report "done, 0 proposals" — and record the source's
+    digest, which then feeds the batch dedupe key. The batch must settle
+    ``failed``, the source ``skipped``, and no digest may be claimed.
+    """
+    config = _world(tmp_path, monkeypatch)
+    vault, _guide = _seed_vault(config)
+    _read_session(monkeypatch, {SESSION_ID: _session()})
+
+    async def _explode(prompt: str, **_kwargs: object) -> str:
+        raise RuntimeError("the provider rejected the model")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", _explode)
+
+    store = batch_store(config)
+    batch = store.create(
+        workspace="personal",
+        sources=[{"provider": PROVIDER_OPENCODE, "source_id": SESSION_ID}],
+    )
+
+    result = await run_import_batch(config, batch.batch_id, store=store)
+
+    assert result.status == FAILED
+    assert result.status != DONE
+    assert result.sources_extracted == 0
+    assert result.sources_skipped == 1
+    assert result.proposals_filed == 0
+    assert list_proposals(vault / QUEUE) == []
+
+    settled = store.get(batch.batch_id)
+    assert settled.status == FAILED
+    assert settled.error, "a batch that read nothing says why"
+    source = settled.sources[0]
+    assert source.status == SOURCE_SKIPPED
+    assert source.content_digest == "", (
+        "no digest is claimed for a conversation whose facts were never read"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_reply_is_a_skipped_source_not_an_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same for a turn that answered with something that is not a JSON array.
+
+    A model that chats instead of replying with the array produced no fact, and
+    C4 counts one unreadable reply as ``skipped``. That is the same fact as a
+    failed turn as far as the batch is concerned.
+    """
+    config = _world(tmp_path, monkeypatch)
+    vault, _guide = _seed_vault(config)
+    _read_session(monkeypatch, {SESSION_ID: _session()})
+    _reply(monkeypatch, "I am sorry, I cannot help with that request.")
+
+    store = batch_store(config)
+    batch = store.create(
+        workspace="personal",
+        sources=[{"provider": PROVIDER_OPENCODE, "source_id": SESSION_ID}],
+    )
+
+    result = await run_import_batch(config, batch.batch_id, store=store)
+
+    assert result.status == FAILED
+    assert result.sources_extracted == 0
+    assert result.sources_skipped == 1
+    assert list_proposals(vault / QUEUE) == []
+    source = store.get(batch.batch_id).sources[0]
+    assert source.status == SOURCE_SKIPPED
+    assert source.content_digest == ""
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_with_nothing_worth_filing_is_still_extracted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half that must not move: an empty array is a read conversation.
+
+    C4 answers ``skipped=0`` for a reply that proposed nothing, so the source
+    keeps its digest and the batch settles ``done``. Reading it and finding
+    nothing is a different fact from not being able to read it.
+    """
+    config = _world(tmp_path, monkeypatch)
+    _seed_vault(config)
+    _read_session(monkeypatch, {SESSION_ID: _session()})
+    _reply(monkeypatch, "[]")
+
+    store = batch_store(config)
+    batch = store.create(
+        workspace="personal",
+        sources=[{"provider": PROVIDER_OPENCODE, "source_id": SESSION_ID}],
+    )
+
+    result = await run_import_batch(config, batch.batch_id, store=store)
+
+    assert result.status == DONE
+    assert result.sources_extracted == 1
+    source = store.get(batch.batch_id).sources[0]
+    assert source.status == SOURCE_EXTRACTED
+    assert len(source.content_digest) == 64, (
+        "the conversation was read, so its digest is recorded"
+    )
+
+
+# ── An exception must not leave the batch `running` ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_runner_exception_leaves_the_batch_failed_not_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raise after ``begin`` must not strand the batch.
+
+    ``ciaobot_own_session_ids`` raises ``RegistrySnapshotError`` on a corrupt
+    registry by design, so this is a reachable failure and not a synthetic one.
+    A stranded ``running`` batch is unrecoverable without a person: ``create``
+    refuses a second open batch for the workspace and every later press of run
+    is answered with the batch that is "already running".
+    """
+    from ciao.import_decouple import RegistrySnapshotError
+
+    config = _world(tmp_path, monkeypatch)
+    _seed_vault(config)
+    _read_session(monkeypatch, {SESSION_ID: _session()})
+    _reply(monkeypatch, _row_reply())
+
+    def _corrupt(config: CiaoConfig, workspace: str) -> frozenset[tuple[str, str]]:
+        raise RegistrySnapshotError("web_projects.json is not readable")
+
+    monkeypatch.setattr("ciao.import_run.ciaobot_own_session_ids", _corrupt)
+
+    store = batch_store(config)
+    batch = store.create(
+        workspace="personal",
+        sources=[{"provider": PROVIDER_OPENCODE, "source_id": SESSION_ID}],
+    )
+
+    with pytest.raises(RegistrySnapshotError):
+        await run_import_batch(config, batch.batch_id, store=store)
+
+    settled = store.get(batch.batch_id)
+    assert settled.status == FAILED, "the run raised; the batch cannot still be running"
+    assert settled.error == "the import run did not complete"
+    assert "RegistrySnapshotError" not in settled.error, (
+        "the stored reason is the runner's own sentence, never an exception string"
+    )
+
+
+def test_a_settled_batch_is_not_second_guessed_by_the_failure_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The best-effort settle never overwrites a state that is already terminal.
+
+    A cancel that lands as the run is unwinding owns the outcome, so the sweep
+    is refused and swallowed rather than turning ``cancelled`` into ``failed``.
+    """
+    config = _world(tmp_path, monkeypatch)
+    _seed_vault(config)
+    store = batch_store(config)
+    batch = store.create(
+        workspace="personal",
+        sources=[{"provider": PROVIDER_OPENCODE, "source_id": SESSION_ID}],
+    )
+    store.begin(batch.batch_id)
+    store.cancel(batch.batch_id)
+
+    from ciao.import_run import _settle_failed
+
+    _settle_failed(store, batch.batch_id)
+
+    assert store.get(batch.batch_id).status == "cancelled"
 
 
 def test_an_unreadable_source_is_one_skipped_row_not_a_failed_batch(

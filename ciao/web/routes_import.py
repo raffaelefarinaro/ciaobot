@@ -376,7 +376,9 @@ async def import_batch_run(request: Request) -> JSONResponse:
     tool-less turn per selected conversation, and the proposals it files — happens
     after the response. A body naming a model or a provider is ignored on
     purpose: which model reads a user's own history is the configuration's
-    answer, the same one the preview showed before the batch was filed.
+    answer, and specifically the per-provider insights model
+    :func:`ciao.import_run._resolve_call` resolves — which is not necessarily
+    the model ``preview_selected`` reported on the consent screen.
 
     A batch already ``running`` is answered **200 with its current state** rather
     than starting a second run: one batch at a time is C6's rule and this is the
@@ -427,8 +429,9 @@ def _schedule_run(config: Any, batch: Any) -> None:
     already ``running`` and this is the only extraction that owns it — the gate
     was taken synchronously, so a second press could be answered rather than
     scheduled. The coroutine absorbs its own failures: a runner that raised into
-    the event loop would take the WebSocket server down with it, and the batch
-    would be left ``running`` forever.
+    the event loop would take the WebSocket server down with it. The batch is
+    not left ``running`` by such a failure — the runner settles it ``failed``
+    before the exception reaches here — so all that is left to do is log it.
     """
     batch_id = batch.batch_id
 

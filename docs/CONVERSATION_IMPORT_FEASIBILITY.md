@@ -1076,14 +1076,33 @@ predicted:
   anchor — the review path never compares them, and the test pins that neither is
   dropped or re-stamped. That is the whole of "dated conflict review": a
   property of the existing review surface, not an engine.
-* **Still open for C8**: the PWA accept path
-  (`proposal_service` → `memory_proposals.accept_region_fact`) builds its
-  proposal with `source_section="review"`, so the *accepted region's* receipt
-  records `section: "review"` rather than the row's external tag — for an
-  imported row as for every other one. The queued bullet keeps its anchor and
-  `candidate_from_proposal` reads it correctly; carrying it through the accept
-  call is a one-parameter change to `accept_region_fact` and belongs with the
-  review UI that makes the decision.
+* **The accept path carries the anchor, and the run cannot strand a batch.**
+  Three things this child originally got wrong, corrected here rather than
+  deferred:
+  * `proposal_service._promote_region_row` built its proposal with
+    `source_section="review"`, so the *accepted region's* receipt recorded
+    `section: "review"` and `source_anchors: []` for an imported row — the field
+    was dead exactly where it mattered. `accept_region_fact` takes a
+    `source_section` now and the accept route hands over
+    `external_anchor(row["source"]) or "review"`, so a row that carries no
+    external tag is unaffected and an imported one lands with its anchor.
+  * A turn that came back unreadable — a failing provider, a timeout, a reply
+    that is not a JSON array — is now a **skipped** source with an empty digest
+    and is counted in `unread`, so the batch settles `partial`/`failed`. It used
+    to be recorded `extracted` with the session's digest, which made a
+    misconfigured model report "done, 0 proposals" and fed the batch dedupe key
+    a conversation nobody had read. A genuine "nothing worth filing" has C4's
+    `skipped == 0` and is still an extraction.
+  * An exception out of the run — a corrupt own-session registry, a non-conflict
+    store error, a cancel on shutdown — settles the batch `failed` before it
+    propagates, and every blocking call in the runner is on a thread
+    (`asyncio.to_thread`), because the OpenCode membership check shells out to
+    the CLI under 60s timeouts and the runner runs on the server's event loop.
+  * Still open for C8: reconciling a batch left `running` by an engine restart
+    (the in-process failures are covered above), and showing on the consent
+    screen the model the run will actually use — `preview_selected` reports
+    `default_model_for_workspace` for the workspace's provider, while the run
+    resolves the per-provider insights model for the *source's*.
 
 ### C8 — entry point, retention/cancel UI, docs, browser journey
 

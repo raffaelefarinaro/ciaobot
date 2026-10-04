@@ -17,13 +17,16 @@ What is pinned here:
   ``"unknown"`` and ``attended`` stays ``None`` — the anchors carry the
   attribution and none of the verdicts is upgraded to agree with them;
 * an accepted import's region write stamps the anchor on its receipt, so a saved
-  fact can be traced back to a specific message years later;
+  fact can be traced back to a specific message years later — asserted through
+  the accept path *and* through the PWA accept helper that feeds it, because a
+  row's tag only reaches the receipt if that call site hands it over;
 * a row filed before this field existed — the anchor only in ``source_section`` —
   still reads back with its anchor, and still lists.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date
 from pathlib import Path
@@ -50,6 +53,45 @@ def _proposal(**overrides: Any) -> mp.MemoryProposal:
     }
     base.update(overrides)
     return mp.MemoryProposal(**base)
+
+
+def _accept(
+    tmp_path: Path,
+    *,
+    text: str,
+    source_section: str,
+    target: str = "memory",
+) -> dict[str, Any]:
+    """Accept one row through the real path and hand back the committed receipt.
+
+    ``accept_region_fact`` is the only durable writer a person reaches by
+    pressing accept, and ``receipt_out`` is what it fills when a write actually
+    happened. ``tmp_path`` is the workspace: the guide sits at its root and the
+    receipt journal inside its vault.
+    """
+    from ciao import memory_tool as mt
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    guide = tmp_path / "AGENTS.md"
+    guide.write_text("# Guide\n", encoding="utf-8")
+    mt.ensure_regions(guide)
+
+    receipt: dict[str, Any] = {}
+    outcome, _promotable = mp.accept_region_fact(
+        guide_path=guide,
+        target=target,
+        text=text,
+        vault_root=tmp_path / "vault",
+        actor="operator",
+        source="pwa",
+        workspace="personal",
+        source_section=source_section,
+        receipt_out=receipt,
+    )
+
+    assert outcome == "written", outcome
+    assert receipt, "a written accept commits a receipt"
+    return receipt
 
 
 # ── The field itself ───────────────────────────────────────────────────────
@@ -220,21 +262,23 @@ def test_a_row_filed_before_the_structured_field_still_lists(
 
 
 def test_an_accepted_import_stamps_the_anchor_on_its_receipt(tmp_path: Path) -> None:
-    """The region write's provenance row carries the anchor, not just the prose.
+    """The committed receipt carries the anchor, not just the prose.
 
-    ``_provenance_row`` is what ``memory_receipts`` commits beside the region
-    change. Its ``section`` was always prose; the anchor is now a field of its
-    own, so a later reader can match the accepted claim back to one specific
-    message rather than to a tag they would have to re-parse.
+    This goes through the real accept path — ``accept_region_fact`` with the
+    tag the queue row carries — and reads the receipt ``memory_receipts``
+    committed beside the region change, because the anchor only reaches an
+    accepted fact through the ``source_section`` that path builds. A test on
+    ``_provenance_row`` alone passes with a hand-built proposal and would keep
+    passing if the accept path stamped nothing at all, which is exactly the bug
+    this pins.
     """
-    proposal = _proposal(
-        target="memory",
+    receipt = _accept(
+        tmp_path,
         text="Refreshes run on Sunday. [as-of: 2024-05-01]",
         source_section=TAG,
     )
 
-    row = mp._provenance_row(proposal)
-
+    row = receipt["provenance"]
     assert row["source_anchors"] == [TAG]
     assert row["section"] == TAG
     assert row["source_message_ids"] == [], "no Ciaobot transcript index to cite"
@@ -244,21 +288,92 @@ def test_an_accepted_import_stamps_the_anchor_on_its_receipt(tmp_path: Path) -> 
     ), "the source message's date, never the import date"
     assert json.loads(json.dumps(row)) == row, "the receipt row is JSON-safe"
 
+    # The receipt is on disk, not only in the out-parameter.
+    journal = tmp_path / "vault" / "Workspace" / "Memory-Receipts.jsonl"
+    committed = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert committed["provenance"]["source_anchors"] == [TAG], (
+        "the anchor is in the durable receipt, so it survives the response"
+    )
+
+
+def test_the_accept_route_hands_the_queue_tags_anchor_to_the_receipt(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The call site, not just the function: a real queue row reaches the receipt.
+
+    ``accept_region_fact`` doing the right thing with a tag it was handed is half
+    the promise; the other half is the PWA handing it over. This drives
+    ``proposal_service._promote_region_row`` — the helper behind the accept
+    button — with the row ``list_proposals`` returns for an imported bullet, and
+    reads the committed receipt. Dropping the ``source_section=`` argument at
+    that call site is what made the field dead where it mattered, and only this
+    test fails when it happens again.
+    """
+    from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
+    from ciao.web import proposal_service
+
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(tmp_path / ".runtime"))
+    monkeypatch.setattr("ciao.sync_skills.sync_workspace_skills", lambda *a, **k: None)
+    reset_reroot_cache()
+    config = CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal")
+        },
+    )
+    vault = config.workspace_vault_root("personal")
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+
+    for bullet, expect in (
+        (
+            f"- [memory] Refreshes run on Sunday. [as-of: 2024-05-01]  _(from: {TAG})_",
+            [TAG],
+        ),
+        ("- [memory] Deploys run on Thursdays.  _(from: User corrections)_", []),
+        (f"- [memory] Handled by Ciaobot itself.  _(from: {CHAT_ID}:{SESSION_ID})_", []),
+    ):
+        queue = vault / QUEUE
+        queue.write_text(bullet + "\n", encoding="utf-8")
+        row = dict(mp.list_proposals(queue)[0])
+        row["workspace"] = "personal"
+
+        outcome = asyncio.run(proposal_service._promote_region_row(config, row))
+
+        assert outcome.ok, outcome.as_dict()
+        journal = vault / "Workspace" / "Memory-Receipts.jsonl"
+        committed = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+        assert committed["provenance"]["source_anchors"] == expect, bullet
+
 
 def test_a_ciaobot_proposal_stamps_no_anchors(tmp_path: Path) -> None:
-    """The additive half: the field is empty for everything that is not an import."""
-    row = mp._provenance_row(
-        mp.MemoryProposal(
-            target="memory",
-            text="Deploys run on Thursdays. [idx=3]",
-            source_section="User corrections",
-            citations=(3,),
-        )
+    """The additive half: the field is empty for everything that is not an import.
+
+    Same path, a row whose ``source_section`` is prose: the anchor field stays
+    empty and the integer citations are still lifted, so the new field changed
+    nothing for a Ciaobot bullet.
+    """
+    proposal = mp.MemoryProposal(
+        target="memory",
+        text="Deploys run on Thursdays. [idx=3]",
+        source_section="User corrections",
+        citations=(3,),
     )
+
+    row = mp._provenance_row(proposal)
 
     assert row["source_anchors"] == []
     assert row["source_message_ids"] == [3]
     assert row["provenance"] == fc.PROVENANCE_CITED
+
+    receipt = _accept(
+        tmp_path / "ciaobot", text="Deploys run on Thursdays.", source_section="review"
+    )
+    assert receipt["provenance"]["source_anchors"] == [], (
+        "a row with no external tag stamps no anchor, through the accept path too"
+    )
 
 
 def test_the_accepted_region_entry_keeps_the_source_date(tmp_path: Path) -> None:

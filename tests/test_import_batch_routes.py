@@ -148,6 +148,10 @@ def test_the_session_cookie_admits_every_batch_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, cookies = _world(tmp_path, monkeypatch)
+    # The runner is stubbed because this is about the session boundary: the real
+    # one settles the batch it is handed, and a cancel afterwards would then be
+    # a conflict rather than the 200 this asserts.
+    _stub_runner(monkeypatch)
 
     batch = _create(client, cookies, "sess-a")
     listed = client.get("/api/import/batches", params={"workspace": "personal"}, cookies=cookies)

@@ -36,12 +36,21 @@ What this module adds is the wiring around that one write:
   session whose id does not look like a chat id would not be recognised;
 * the model and provider are resolved the way the post-archive memory pass
   resolves its call (``archive_pipeline._insights_model_for`` →
-  ``insights._resolve_insights_call``), never from a request body. A caller may
-  pass them explicitly — the route never does, and a test must — but the
-  configuration is the answer otherwise, which is also the answer the C5 preview
-  showed the person before they filed the batch;
+  ``insights._resolve_insights_call``), never from a request body: the
+  per-provider insights model for the **source's** provider, or the workspace
+  default when no override is set. That is not the model C5's preview reports
+  (``preview_selected`` answers ``default_model_for_workspace`` for the
+  *workspace's* provider), so the two can differ, and only this module's answer
+  is the one that reads the conversation;
 * cancellation is checked between sources: a cancelled batch stops extracting,
-  keeps every proposal it already filed, and never tries to finish.
+  keeps every proposal it already filed, and never tries to finish;
+* every blocking call is on a thread. This coroutine runs on the server's event
+  loop, and the OpenCode membership check alone shells out to the CLI under
+  sixty-second timeouts, so a synchronous call here would freeze HTTP and
+  WebSockets for the whole server;
+* a turn that produced nothing readable is a source that was not read, not an
+  extraction: it is recorded ``skipped`` with **no** digest, so a misconfigured
+  model cannot report a clean run or claim a conversation as already imported.
 
 **Dedupe is C4's and C6's, not a new one.** The per-fact dedupe is
 ``append_proposals``' exact-text one (a fact already queued, or already decided,
@@ -182,6 +191,15 @@ def _resolve_call(
     knows (a test, a future CLI verb). No HTTP route passes them: a client
     choosing the model that reads a user's history would be a capability this
     child does not have.
+
+    Note for the consent screen this feeds: this is **not** the model
+    :func:`ciao.import_discover.preview_selected` reports, which answers
+    ``default_model_for_workspace`` for the workspace's own provider. The run
+    uses the insights model keyed by the *source's* provider, so a batch mixing
+    a Claude Code and an OpenCode conversation is read by two different models,
+    and a workspace whose insights model is set to something else is read by
+    that rather than by its default. Anything shown before the press must show
+    this resolution, not the preview's.
     """
     canonical = canonical_provider(source_provider)
     wanted_model = model
@@ -314,7 +332,9 @@ async def run_import_batch(
     not ``queued`` (``begin`` refuses), so a route can answer 404/409 without
     catching anything else. Everything *inside* a source is absorbed: one
     unreadable conversation, one refused session or one failing turn costs that
-    source, never the batch.
+    source, never the batch. Anything that escapes :func:`_extract_selection`
+    instead leaves the batch ``failed`` rather than ``running`` — see
+    :func:`_settle_failed` — and is re-raised for the caller's log.
 
     ``batch`` is the **already-begun** batch a route got back from
     :meth:`~ciao.import_store.ImportStore.begin`. Handing it over is how the
@@ -331,16 +351,85 @@ async def run_import_batch(
     started = (
         batch if batch is not None else await asyncio.to_thread(runner.begin, batch_id)
     )
+    try:
+        return await _extract_selection(
+            runner, config, started, model=model, provider=provider
+        )
+    except BaseException:
+        # Any failure out of the run settles the batch before it propagates —
+        # a stranded `running` batch is the one failure nothing else can undo.
+        # BaseException rather than Exception: a cancel landing here (shutdown)
+        # strands exactly the same batch.
+        _settle_failed(runner, started.batch_id)
+        raise
+
+
+def _settle_failed(runner: ImportStore, batch_id: str) -> None:
+    """Best-effort ``failed`` for a run that did not finish its batch.
+
+    A ``running`` batch is the one failure mode with no way out but a person:
+    ``create`` refuses a second open batch for the workspace, and every later
+    press of run is answered with the batch that is "already running". So any
+    exception out of the run — a corrupt own-session registry, a store error
+    that is not a conflict, a cancel — settles the batch before it propagates.
+
+    The message is fixed rather than ``str(exc)``: this is stored state a person
+    reads in the batch list, and an exception string carries whatever the
+    failing layer put there. The engine log already has the real one.
+
+    Synchronous on purpose. It runs while the run is unwinding, which may be a
+    cancel from loop shutdown, and an ``await`` is not guaranteed to be reached
+    again from there. A store refusal is swallowed and logged: the batch may
+    already be cancelled, forgotten or settled, and any of those is a better
+    state to leave behind than ``running``.
+    """
+    try:
+        runner.finish(batch_id, FAILED, error="the import run did not complete")
+    except ImportStoreError as exc:
+        logger.info(
+            "import run: batch %s could not be marked failed; the store says %s",
+            batch_id,
+            exc.code,
+        )
+    except Exception:  # noqa: BLE001 — cleanup must not raise over the real error
+        logger.exception("import run: batch %s could not be marked failed", batch_id)
+
+
+async def _extract_selection(
+    runner: ImportStore,
+    config: CiaoConfig,
+    started: ImportBatch,
+    *,
+    model: str | None,
+    provider: str | None,
+) -> ImportRunResult:
+    """Walk one begun batch's selection and settle it.
+
+    Split out of :func:`run_import_batch` only so the exception that leaves a
+    batch stranded has one handler around all of it.
+
+    **Every blocking call is on a thread**: the own-session registry read, the
+    OpenCode membership check (which shells out to ``opencode --version`` and
+    ``session list`` under ten- and sixty-second timeouts), the model
+    resolution, and the two queue reads. This coroutine runs on the server's
+    event loop, where any of those synchronously is a frozen HTTP and WebSocket
+    server for as long as it takes — :func:`asyncio.to_thread` is what keeps a
+    slow provider a slow import rather than a slow engine. The only work left on
+    the loop is :func:`_content_digest`, a hash of a session already in memory.
+    """
     batch_id = started.batch_id
     workspace = started.workspace
     destination = started.destination
     vault_root = config.workspace_vault_root(destination)
 
-    known_own = frozenset(ciaobot_own_session_ids(config, workspace))
+    known_own = frozenset(
+        await asyncio.to_thread(ciaobot_own_session_ids, config, workspace)
+    )
     known_chat_ids = _known_chat_ids(known_own)
     # One OpenCode listing for the whole batch, and none at all when no OpenCode
     # source was selected — the same economy `preview_selected` keeps.
-    opencode_ids = _opencode_membership(
+    opencode_ids = await asyncio.to_thread(
+        _opencode_membership,
         [
             SourceRef(provider=item.provider, source_id=item.source_id)
             for item in started.sources
@@ -391,16 +480,18 @@ async def run_import_batch(
             continue
 
         digest = _content_digest(session)
-        effective_model, effective_provider = _resolve_call(
+        effective_model, effective_provider = await asyncio.to_thread(
+            _resolve_call,
             config,
             workspace=workspace,
             source_provider=source.provider,
             model=model,
             provider=provider,
         )
-        before = _queue_rows(vault_root)
+        before = await asyncio.to_thread(_queue_rows, vault_root)
+        result: ExtractionResult | None
         try:
-            result: ExtractionResult = await extract_facts(
+            result = await extract_facts(
                 session,
                 model=effective_model,
                 destination_workspace=vault_root,
@@ -410,24 +501,13 @@ async def run_import_batch(
             )
         except Exception:  # noqa: BLE001 — one turn must not strand the batch
             logger.exception(
-                "import run: extraction failed for %s session %s",
+                "import run: extraction raised for %s session %s",
                 source.provider,
                 source.source_id,
             )
-            unread += 1
-            skipped += 1
-            await _record_source(
-                runner,
-                batch_id,
-                source,
-                SOURCE_SKIPPED,
-                content_digest=digest,
-                why="the extraction turn did not complete",
-            )
-            await _advance(runner, batch_id, extracted, unread, refused, filed, skipped)
-            continue
+            result = None
 
-        if _refused_session(result):
+        if result is not None and _refused_session(result):
             # C4 refused the session itself — Ciaobot's own, or undecided from
             # its own opening turn — before any turn ran and before anything
             # was read into a prompt. Nothing was filed and nothing may be.
@@ -444,6 +524,32 @@ async def run_import_batch(
             await _advance(runner, batch_id, extracted, unread, refused, filed, skipped)
             continue
 
+        if result is None or _unreadable_turn(result):
+            # Nothing came back that can be read as this conversation's facts, so
+            # nothing about it is extracted. Counted as unread rather than
+            # extracted, and recorded with **no digest**: the batch-level dedupe
+            # key is (provider, source_id, content_digest, destination), and a
+            # digest recorded here would claim the content was read when it was
+            # not — a later attempt at the same conversation would then be
+            # refused as already imported. A misconfigured model must not be able
+            # to mark a user's history imported. See `_unreadable_turn`.
+            unread += 1
+            skipped += 1 if result is None else result.skipped
+            await _record_source(
+                runner,
+                batch_id,
+                source,
+                SOURCE_SKIPPED,
+                content_digest="",
+                why=(
+                    "the extraction turn did not complete"
+                    if result is None
+                    else "the extraction turn could not be read"
+                ),
+            )
+            await _advance(runner, batch_id, extracted, unread, refused, filed, skipped)
+            continue
+
         extracted += 1
         filed += result.proposals_filed
         skipped += result.skipped
@@ -455,7 +561,7 @@ async def run_import_batch(
             content_digest=digest,
             why=f"filed {result.proposals_filed} proposal(s)",
         )
-        after = _queue_rows(vault_root)
+        after = await asyncio.to_thread(_queue_rows, vault_root)
         for text in set(after) - set(before):
             evidence = _fact_provenance(after[text], destination=destination)
             if evidence is None:
@@ -513,6 +619,27 @@ def _refused_session(result: ExtractionResult) -> bool:
     a rendered transcript and therefore put turns in it.
     """
     return bool(result.refused_anchor) and result.usage.messages_in_prompt == 0
+
+
+def _unreadable_turn(result: ExtractionResult) -> bool:
+    """Whether the turn produced nothing a person could call an extraction.
+
+    :func:`ciao.import_extract.extract_facts` never raises for a turn that
+    failed, timed out, was refused by the provider, or came back as prose it
+    could not parse: each returns ``skipped=1`` with nothing filed. Treating
+    that as an extraction is how a misconfigured model reports "done, 0
+    proposals" — the user is told it worked, and the source's digest is recorded
+    as extracted, which then feeds the batch-level dedupe key and can mark a
+    conversation as already imported on the attempt that would actually read it.
+
+    So the two are told apart by C4's own counters. ``skipped > 0`` with nothing
+    filed means something was proposed or returned and could not be admitted —
+    the turn ran and its output was lost. A conversation with nothing worth
+    filing has ``skipped == 0``: an empty array, or rows the queue already held
+    (``append_proposals``' dedupe drops them without counting them skipped). That
+    one *was* read, so it stays an extraction with its digest.
+    """
+    return result.proposals_filed == 0 and result.skipped > 0
 
 
 def _settle_note(unread: int, refused: int) -> str:

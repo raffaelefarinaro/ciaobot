@@ -800,6 +800,7 @@ def accept_region_fact(
     actor: str = "operator",
     source: str = "pwa",
     workspace: str = "",
+    source_section: str = "review",
     deferral_out: list[ReconcileDecision] | None = None,
     receipt_out: dict[str, Any] | None = None,
 ) -> tuple[PromotionOutcome, str | None]:
@@ -827,8 +828,17 @@ def accept_region_fact(
     ``receipt_out`` to also learn which receipt performed the write: the
     caller records the decision under the bullet's ORIGINAL text, so an
     accept of an edited wording has no way to find its own receipt again.
+
+    ``source_section`` is the row's own ``_(from: …)_`` tag, which is where an
+    imported conversation's ``provider:session_id:anchor`` lives — the one place
+    :func:`_provenance_row` can read it from, so an accepted import stays
+    matchable back to a specific message. A caller that holds a queue row passes
+    that tag (already verified by
+    :func:`ciao.fact_candidates.external_anchor`, so nothing unverified reaches
+    the receipt); everything else leaves the default ``"review"``, which carries
+    no anchor and stamps an empty ``source_anchors``.
     """
-    proposal = MemoryProposal(target=target, text=text, source_section="review")
+    proposal = MemoryProposal(target=target, text=text, source_section=source_section)
     return _promote_to_region(
         proposal,
         guide_path,
