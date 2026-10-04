@@ -294,17 +294,37 @@ function taskStateLine(task: UpdateTaskRow): string {
     return 'Checking whether this applies here…'
   }
   if (task.status === 'waiting_review') {
-    return 'Its chat is open and waiting for you to decide what to do with it.'
+    // An archived chat cannot be "open and waiting": say what is true instead,
+    // because the operator is being asked to decide about a chat that is gone.
+    return task.chat_live
+      ? 'Its chat is open and waiting for you to decide what to do with it.'
+      : 'The chat this opened has been archived or deleted. Starting opens a new one.'
   }
   if (task.status === 'failed') {
-    return 'The last attempt did not get going. Starting again reuses the same chat.'
+    return task.chat_live
+      ? 'The last attempt did not get going. Starting again reuses the same chat.'
+      : 'The last attempt did not get going, and its chat is gone. Starting opens a new one.'
   }
   if (task.status === 'in_progress') {
     // Not "on the left": the chat is a route, and on a phone the list is above
-    // the conversation. Where it opens is the layout's business.
-    return 'Started. Its chat is open.'
+    // the conversation. Where it opens is the layout's business. And when the
+    // chat no longer exists, "its chat is open" would be a flat untruth — the
+    // start will mint a fresh one, which is what this line says.
+    return task.chat_live
+      ? 'Started. Its chat is open.'
+      : 'Started, but its chat has been archived or deleted. Starting opens a new one.'
   }
   return 'New since this update.'
+}
+
+/** What the lead button says for a task already under way.
+ *
+ * "Resume chat" is right only while there is a chat to resume. Against an
+ * archived or deleted one a start mints a fresh chat and dispatches the prompt
+ * into that, so calling it "Resume" would promise continuity the server does not
+ * deliver. Same action, honest label. */
+function startLabel(task: UpdateTaskRow): string {
+  return task.chat_live ? 'Resume chat' : 'Start a new chat'
 }
 
 /** Whether this row's lead button starts — or resumes — its chat.
@@ -438,7 +458,12 @@ async function dismissTask(task: UpdateTaskRow): Promise<void> {
   // takes to read, and the press after it belongs to the workspace it was
   // confirmed in.
   const at = projectStore.activeWorkspace || ''
-  const hasChat = task.status === 'in_progress' || task.status === 'waiting_review' || !!task.chat_id
+  // "Its chat stays open" is only true while the chat is live. Against an
+  // archived or deleted one the promise would be about a chat that is gone, so
+  // the copy falls back to the plain dismissal wording.
+  const hasChat =
+    task.chat_live
+    && (task.status === 'in_progress' || task.status === 'waiting_review' || !!task.chat_id)
   const message = hasChat
     ? 'Hide this task in this workspace? Its chat stays open and is not marked ' +
       'done — you can carry on in it, and reopen the task from Settings → ' +
@@ -635,8 +660,8 @@ watch(
           @click="startTask(task)"
         >
           <template v-if="taskBusy(task)">Working…</template>
-          <template v-else-if="task.status === 'in_progress'">Resume chat</template>
-          <template v-else-if="task.status === 'waiting_review'">Resume chat</template>
+          <template v-else-if="task.status === 'in_progress'">{{ startLabel(task) }}</template>
+          <template v-else-if="task.status === 'waiting_review'">{{ startLabel(task) }}</template>
           <template v-else-if="task.status === 'failed'">Try again</template>
           <template v-else>Start in chat</template>
         </button>
@@ -654,7 +679,7 @@ watch(
         >Check again</button>
 
         <button
-          v-if="task.chat_id"
+          v-if="task.chat_live"
           type="button"
           class="btn-small btn-chip"
           @click="openTaskChat(task.chat_id)"

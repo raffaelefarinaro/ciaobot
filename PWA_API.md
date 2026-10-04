@@ -90,6 +90,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/tasks/{task_id}/delegate` | Hand one task to the agent as **one ordinary chat**, at `expected_revision` (required): `{"workspace", "expected_revision", "project_id"}` and nothing else — there is no body key for prompt text, because the prompt is built server-side from the record's own fields. `project_id` takes an id or a name in this workspace and overrides where the chat is hosted; omit it to use the task's own project, or the workspace's General. The turn runs with the **default** attendance — never `unattended`, so an approval card it raises is an ordinary Needs-you card. Answers 200 with `{workspace, created, attempt, chat_id, project_id, project_origin, task, changed_since_delegated}`; `created: false` means a live attempt already existed and nothing was created or sent |
 | GET | `/api/tasks/{task_id}/attempts?workspace=` | One task's whole attempt history, the live attempt first. A row is `{attempt_id, task_id, task_revision, chat_id, state, created_at, updated_at, ended_at, detail, live}`; `state` is one of `running`, `needs_you`, `failed`, `interrupted`, `ready_for_review`, `stopped` |
 | POST | `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` | One lifecycle gesture on one attempt; `{"workspace"}` is the only body key, because the gesture acts on an attempt rather than editing a record (there is no field to present a revision at). `action` is `stop` (ends the turn irreversibly; the task keeps its linkage and stays uncompletable), `resume` (continues the **same** chat under the **same** attempt; only an attempt that did not finish is resumable), `retry` (starts a **new** attempt in a new chat, leaving the previous one as history) or `detach` (stops the turn if running and clears the linkage, which is what makes the task completable again). An unknown verb is a 400 `invalid_action`; an unknown attempt id is a 404 |
+| POST | `/api/tasks/{task_id}/attempt/{attempt_id}/update` | **Send update**: `{"workspace", "expected_revision", "message"}` and nothing else. Sends one ordinary attended message into that attempt's own chat — no second chat, no second attempt, the linkage untouched, and the turn watched so the agent's answer advances the card — and then rebinds the attempt to `expected_revision`, so `changed_since_delegated` comes back `false` and the control retires. `message` is the text the board previewed, so it travels with the request; the revision is what the server checks, and a stale one is a **409** with nothing sent. A turn already running in that chat gets the message queued into it and the answer is `queued: true`; a chat that will not take it yet is a **409** `task_update_busy`, also with nothing sent and nothing rebound. An attempt that no longer holds the task is a 400 `invalid_action` — continuing a dead turn is `resume`, not this |
 | GET | `/api/webhooks?workspace=` | List a workspace's webhook triggers (public records only, never secrets) |
 | POST | `/api/webhooks` | Create a webhook trigger; returns the trigger plus its one-time secret |
 | GET | `/api/webhooks/receipts?workspace=` | A workspace's recorded webhook events across every trigger, newest first, at most `limit` rows (#1044). A row is `{receipt_id, trigger_id, trigger_name, status, chat_id, event_text, created_at, updated_at, detail}`; `status` is `accepted`/`launching`/`launched`/`failed`/`interrupted`, `chat_id` is the chat a `launched` event became (`null` otherwise), and a receipt whose trigger has since been deleted is still listed — it is filtered on its own `workspace`. Never a verifier, an idempotency key or a body digest |
@@ -594,6 +595,17 @@ curl -sS -b /tmp/ciao.jar -X POST \
 curl -sS -b /tmp/ciao.jar -X POST \
   "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/detach" \
   -H 'content-type: application/json' -d '{"workspace":"personal"}'
+
+# Send update: the task was edited after the hand-off, so hand the agent the current
+# description in the chat it is already working in. One ordinary attended message, no
+# second attempt — and the attempt is rebound to $TREV, so `changed_since_delegated`
+# goes back to false and the answer settles the card. A turn already running there
+# takes the message as its next follow-up (`queued: true`); a stale $TREV is a 409
+# that sends nothing and rebinds nothing.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/update" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\",\"message\":\"The task has changed since you were handed it. Work from this version.\"}"
 ```
 
 Project and chat uploads are limited to 50 MB per file, 100 files per request,

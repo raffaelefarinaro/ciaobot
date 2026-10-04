@@ -1292,6 +1292,24 @@ export interface TaskAttemptActionResponse {
 }
 
 /**
+ * What a **Send update** answers with.
+ *
+ * The attempt comes back rebound to the revision the update was made at, so
+ * `task.changed_since_delegated` is `false` in this same answer — which is what
+ * retires the control. `queued` says which of the two it was: the message was
+ * accepted either way, but a queued one is still waiting behind a turn already
+ * running in that chat.
+ */
+export interface TaskSendUpdateResponse {
+  workspace: string
+  attempt: TaskAttempt
+  chat_id: string
+  task: TaskDetail
+  updated: boolean
+  queued: boolean
+}
+
+/**
  * A file the server could not read as a task.
  *
  * `GET /api/tasks` appends one of these per unreadable file rather than dropping
@@ -1370,8 +1388,14 @@ export interface UpdateTaskRow {
   offered: boolean
   suppressed: boolean
   /** The chat an earlier start created, so "Resume" never needs the browser to
-   *  have remembered it. Empty when no live attempt exists. */
+   *  have remembered it. Empty when no attempt exists; a nonempty id may still
+   *  name an archived or deleted chat — see `chat_live`. */
   chat_id: string
+  /** Whether that chat is still one the operator can open. `chat_id` names the
+   *  chat a record remembers; an archived or deleted one is no longer open, and
+   *  a card that said "its chat is open" against it would be describing
+   *  something that is not there. A start over a dead chat mints a fresh one. */
+  chat_live: boolean
   prompt_digest: string
   attempted_fingerprint: string
   /** When the *record* was last written — a decision or an attempt. */

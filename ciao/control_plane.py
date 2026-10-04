@@ -1016,6 +1016,12 @@ class CiaoControlPlane:
         #: See :meth:`_schedule_watch` — the loop keeps only a weak reference, and
         #: a collected watcher would never settle its attempt.
         self._watchers: set[asyncio.Task[None]] = set()
+        #: Current stream and its task revision per workspace/attempt. A new
+        #: stream supersedes the old watcher even before its callback has run.
+        #: See :meth:`_watch_turn` — a turn in a delegated chat is announced once
+        #: per turn, and the paths that start one may announce it too.
+        self._watching: dict[tuple[str, str], tuple[Any, str]] = {}
+        self._subscribe_turn_watch()
 
     def _defer_until_chat_idle(
         self,
@@ -3154,7 +3160,7 @@ class CiaoControlPlane:
 
     def _watch_turn(
         self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
-    ) -> None:
+    ) -> str:
         """Settle one attempt when its turn ends, and nothing else.
 
         A long task must not hold a file lock, and a settling write that failed
@@ -3170,13 +3176,127 @@ class CiaoControlPlane:
         ``failed`` when the provider ended it in an error, and ``stopped`` when
         the user pressed Stop. None of them is ``done`` — that is the user's
         gesture through the same completion route as any other task.
+
+        Idempotent per stream, so the announcement and explicit attach share
+        one watcher while a new stream supersedes its predecessor. Two watchers on
+        one stream would settle the same attempt twice and flag the same task for
+        review twice, and a delegation that started the turn itself already
+        announced that turn to :meth:`_on_chat_turn_started`.
         """
+        key = (workspace, attempt_id)
+        current = self._watching.get(key)
+        if current is not None and current[0] is stream:
+            return current[1]
         try:
-            self._schedule_watch(workspace, attempt_id, task_id, chat_id, stream)
+            live = self._attempt_call(workspace, lambda store: store.get(attempt_id))
+            document = self._task_call(workspace, lambda store: store.get(task_id))
+            if not live.is_live or document.record.attempt_id != attempt_id:
+                return ""
+            self._attempt_call(workspace, lambda store: store.continue_turn(attempt_id))
+            self._watching[key] = (stream, document.revision)
+            if document.record.review_state == "ready":
+                try:
+                    cleared = self._task_call(
+                        workspace,
+                        lambda store: store.update(
+                            task_id, expected_revision=document.revision,
+                            changes={"review_state": "none"}, actor="user",
+                        ),
+                    )
+                    # Follow only our own write, not an edit the agent never received.
+                    if live.task_revision == document.revision:
+                        self._attempt_call(
+                            workspace, lambda store: store.bind_revision(attempt_id, cleared.revision)
+                        )
+                    document = cleared
+                except ControlPlaneError:
+                    # A concurrent edit refuses the badge write, not the watcher.
+                    # The running lifecycle still makes the old review inactionable.
+                    logger.exception("delegation: could not retire review for task %s", task_id)
+            self._schedule_watch(workspace, attempt_id, task_id, chat_id, stream, document.revision)
+            return str(document.revision)
         except Exception:  # noqa: BLE001 — a watcher that never ran is recoverable
             logger.exception(
                 "delegation: could not watch the turn for attempt %s", attempt_id
             )
+            return ""
+
+    def _subscribe_turn_watch(self) -> None:
+        """Ask the chat manager to announce the turns a person starts.
+
+        The one place the board learns that a delegated chat went on without it:
+        the user answering an approval card in the composer, or typing a follow-up
+        into a chat a **Send update** was just sent in. Both start a turn the
+        delegation's own watcher knows nothing about, and both are the same event —
+        "the conversation in this delegated chat continued" — so they are answered
+        by one subscription rather than one special case each.
+
+        Best effort and never fatal: a manager that cannot announce turns (a test
+        fake, a legacy build) simply does not re-attach, and the paths that start
+        a turn themselves still attach their own watcher.
+        """
+        subscribe = getattr(self.pcm, "on_turn_started", None)
+        if not callable(subscribe):
+            return
+        try:
+            subscribe(self._on_chat_turn_started)
+        except Exception:  # noqa: BLE001 — a missing hook is not a broken engine
+            logger.exception("delegation: could not subscribe to chat turn starts")
+
+    def _delegated_chat(self, chat_id: str) -> tuple[str, str, str]:
+        """``(workspace, task_id, attempt_id)`` for a chat this engine delegated.
+
+        The provenance stamp is the only thing that says a chat belongs to a task —
+        the title is prose a user can retype — and a chat whose stamp is absent,
+        malformed or points at a chat this manager no longer holds is simply not a
+        delegation to follow. Empty strings say so; nothing here is allowed to
+        refuse a turn, because it runs inside the turn's own start.
+        """
+        chat = self.pcm.get_chat(chat_id)
+        helper = getattr(chat, "helper", None)
+        if not isinstance(helper, dict) or helper.get("kind") != "task_delegation":
+            return ("", "", "")
+        project = self.pcm.get_project(str(getattr(chat, "project_id", "") or ""))
+        return (
+            str(getattr(project, "workspace", "") or ""),
+            str(helper.get("task_id") or ""),
+            str(helper.get("attempt_id") or ""),
+        )
+
+    def _on_chat_turn_started(self, chat_id: str, stream: Any) -> None:
+        """Re-attach a delegated attempt to the turn that has just begun in its chat.
+
+        The conversation continuing is the user's own act, and the attempt on the
+        card is the one whose chat that is: the badge should follow the chat, or a
+        turn answered in the chat would leave the card describing a moment that has
+        already moved on. The accepted turn becomes running before its watcher
+        can settle, and :meth:`_settle_from_result` refuses an attempt that has
+        stopped holding its task, so a watcher left over from a released attempt
+        cannot flag a card another one now owns.
+
+        Silently a no-op for a chat with nothing delegated to it, which is almost
+        every chat, and for an attempt that is settled or released: continuing a
+        dead turn is ``resume`` and replacing it is ``retry``, and neither is
+        something a keystroke in the chat may do.
+        """
+        try:
+            workspace, task_id, attempt_id = self._delegated_chat(chat_id)
+            if not workspace or not task_id or not attempt_id:
+                return
+            live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
+            if live is None or live.chat_id != chat_id or live.attempt_id != attempt_id:
+                return
+        except ControlPlaneError as exc:
+            # A stamp this plane cannot resolve is not a delegation to follow, and a
+            # store read that failed is not a turn to break: both are logged and the
+            # turn runs. The attempt's own state is still whatever it was, which is
+            # the honest answer for a turn nothing recorded.
+            logger.info("delegation: chat %s has no attempt to re-attach (%s)", chat_id, exc)
+            return
+        except Exception:  # noqa: BLE001 — a re-attach must never fail the turn
+            logger.exception("delegation: could not re-attach the attempt for chat %s", chat_id)
+            return
+        self._watch_turn(workspace, attempt_id, task_id, chat_id, stream)
 
     def _schedule_watch(
         self,
@@ -3185,6 +3305,7 @@ class CiaoControlPlane:
         task_id: str,
         chat_id: str,
         stream: Any,
+        task_revision: str,
     ) -> None:
         """Attach the settling coroutine to the running loop, or settle inline.
 
@@ -3216,7 +3337,21 @@ class CiaoControlPlane:
         # watcher a turn is actually waiting on rather than every turn this process
         # ever delegated.
         self._watchers.add(watcher)
-        watcher.add_done_callback(self._watchers.discard)
+        # Cleanup belongs to this stream only: an older callback cannot remove
+        # the current turn's marker after a finish/start interleaving.
+        key = (workspace, attempt_id)
+        self._watching[key] = (stream, task_revision)
+
+        def _release(finished: asyncio.Task[None]) -> None:
+            if self._is_current_turn(workspace, attempt_id, stream):
+                self._watching.pop(key)
+            self._watchers.discard(finished)
+
+        watcher.add_done_callback(_release)
+
+    def _is_current_turn(self, workspace: str, attempt_id: str, stream: Any) -> bool:
+        current = self._watching.get((workspace, attempt_id))
+        return current is not None and current[0] is stream
 
     async def _await_turn(
         self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
@@ -3236,7 +3371,10 @@ class CiaoControlPlane:
             raise
         except Exception:  # noqa: BLE001 — an unknown outcome is `interrupted`
             logger.exception("delegation: the turn for attempt %s failed to stream", attempt_id)
-            self._settle_interrupted(workspace, attempt_id, "the turn's outcome is unknown")
+            if self._is_current_turn(workspace, attempt_id, stream):
+                self._settle_interrupted(workspace, attempt_id, "the turn's outcome is unknown")
+            return
+        if not self._is_current_turn(workspace, attempt_id, stream):
             return
         if not seen_result:
             # The stream ended without a result event. Whatever the turn did — a
@@ -3290,6 +3428,9 @@ class CiaoControlPlane:
         else:
             state, detail = "ready_for_review", ""
         try:
+            live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
+            if live is None or live.attempt_id != attempt_id or live.chat_id != chat_id:
+                return
             settled = self._attempt_call(
                 workspace,
                 lambda store: store.finish(attempt_id, state, detail=detail),
@@ -3384,6 +3525,140 @@ class CiaoControlPlane:
         return {
             "task": self._task_with_attempt(workspace, document, include_body=True),
             "attempts": [attempt.to_dict() for attempt in history],
+        }
+
+    def workspace_task_send_update(
+        self,
+        workspace: str,
+        task_id: str,
+        attempt_id: str,
+        *,
+        expected_revision: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """Hand the edited task to the attempt's own chat, and rebind the attempt.
+
+        The **Send update** gesture, and the two things it owes the card afterwards.
+        Both matter, and the second is the one a composer send cannot do:
+
+        1. **One ordinary message in the attempt's own chat.** Never a second
+           delegation: that would mint a new attempt, re-quote the description from
+           scratch and leave the result waiting for review looking abandoned. Sent
+           through :meth:`_launch_turn`, so ``unattended`` is not named here either
+           and an approval card the turn raises is an ordinary Needs-you card.
+        2. **The rebind.** The attempt is re-stamped to the revision this message
+           was made at, exactly as the delegation path re-stamps it after its
+           linkage write. That is what makes ``changed_since_delegated`` return to
+           ``false`` and the button retire instead of offering the same update for
+           ever. **The order is the contract:** a send that was refused rebinds
+           nothing, because a cleared flag over an update the agent never saw is the
+           one thing this gesture must not be able to say.
+
+        ``expected_revision`` is required and checked before anything is sent. The
+        message claims to carry the task as it stands, and a description edited
+        since the preview was read is not that — so a stale board is refused with
+        the ordinary 409 and nothing goes to the agent.
+
+        Only an attempt that still holds the task may be updated. A settled one is
+        refused: continuing a turn that did not finish is ``resume`` and replacing
+        it is ``retry``, and a keystroke in a chat is neither. An attempt id sent
+        under another task's URL is ``task_attempt_not_found``, the same answer as
+        one nobody has.
+
+        **Queuing is the ordinary case, not an edge.** An edit made *under* a
+        running agent is what this gesture exists for, so a turn is usually already
+        in flight in that chat — and ``start_stream`` hands back a turn already
+        running rather than dropping the message on the floor, which would leave the
+        rebind claiming an update nobody received. So the message is queued into the
+        running turn exactly as the composer queues it, and that turn runs it as its
+        own follow-up and ends only afterwards: which is what settles the attempt
+        with the answer to the update in it. A queued follow-up needs no watcher of
+        its own; a turn this call started is attached through
+        :meth:`_watch_turn` like any other.
+
+        The message text travels with the request rather than being rebuilt here. It
+        is an ordinary attended message the user composed and was shown in full
+        before sending, so what is sent is what was approved; what this method
+        checks is the revision it was made at.
+        """
+        clean_task = str(task_id or "").strip()
+        clean_attempt = str(attempt_id or "").strip()
+        text = str(message or "").strip()
+        if not text:
+            raise ControlPlaneError("invalid_task", "An update must carry a message.")
+        document = self._task_call(workspace, lambda store: store.get(clean_task))
+        if str(expected_revision or "").strip() != document.revision:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "the task changed since this update was planned; nothing was sent",
+                retryable=True,
+            )
+        attempt = self._attempt_call(workspace, lambda store: store.get(clean_attempt))
+        if attempt.task_id != clean_task:
+            raise ControlPlaneError(
+                "task_attempt_not_found",
+                f"no delegation attempt {clean_attempt} on task {clean_task}",
+            )
+        if not attempt.is_live:
+            raise ControlPlaneError(
+                "invalid_action",
+                f"attempt {attempt.attempt_id} is {attempt.state!r} and no longer holds "
+                "this task; resume or retry it rather than sending it an update.",
+            )
+        if document.record.attempt_id != attempt.attempt_id:
+            # The store's live set and the record's linkage disagree, so the task
+            # belongs to some other attempt now. Answered like `resume` answers it:
+            # the update is not the way to take a card back.
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "the task is linked to a different attempt now; retry it instead.",
+                retryable=True,
+            )
+        queued = bool(self.pcm.queue_message(attempt.chat_id, text))
+        started: Any = None
+        if not queued:
+            active = self.pcm.get_active_stream(attempt.chat_id)
+            stream, refusal = self._launch_turn(attempt.chat_id, text)
+            if stream is None:
+                raise ControlPlaneError(
+                    "task_launch_failed",
+                    f"the update could not be sent to the delegated chat ({refusal}); "
+                    "nothing was sent, and the task still reads as changed since delegated.",
+                    retryable=True,
+                )
+            if stream is active:
+                # `start_stream` returned the turn already running instead of
+                # starting one, which it does before it queues anything: the message
+                # went nowhere. Refusing here is what keeps a rebind from claiming an
+                # update the agent never saw.
+                raise ControlPlaneError(
+                    "task_update_busy",
+                    "the delegated chat is finishing a turn and cannot take the update "
+                    "yet; send it again once that turn has settled.",
+                    retryable=True,
+                )
+            started = stream
+        turn_revision = document.revision
+        if started is not None:
+            turn_revision = self._watch_turn(
+                workspace, attempt.attempt_id, clean_task, attempt.chat_id, started
+            ) or document.revision
+            # Starting the continuation retires the previous review badge, a
+            # revision-safe service write that the accepted update also carries.
+            document = self._task_call(workspace, lambda store: store.get(clean_task))
+        bound = self._attempt_call(
+            workspace,
+            lambda store: store.bind_revision(attempt.attempt_id, turn_revision),
+        )
+        return {
+            # `bound`, for the same reason the delegation reply carries `bound`: the
+            # answer's `changed_since_delegated` has to be the one this call just made
+            # false, not the one the row carried a moment ago.
+            **_attempt_payload(bound, self._task_with_attempt(workspace, document)),
+            "updated": True,
+            # Which of the two it was, so a caller can say what it did: the message is
+            # accepted either way, but a queued one is still waiting behind a turn.
+            "queued": queued,
         }
 
     async def workspace_task_attempt_action(
