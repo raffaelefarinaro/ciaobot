@@ -61,6 +61,7 @@ class ArchivePipelineHost(Protocol):
         project: ProjectInfo | None,
         archive_path: Path,
         doc_path: str,
+        focus: dict[str, str] | None = None,
     ) -> str | None: ...
 
 
@@ -137,6 +138,7 @@ class ArchivePipeline:
         outcome: ArchiveOutcome,
         chat_meta: ChatInfo | None,
         project_meta: ProjectInfo | None,
+        focus: dict[str, str] | None = None,
     ) -> None:
         config = self._host._config
         from ciao.web import memory_pass
@@ -173,6 +175,7 @@ class ArchivePipeline:
                         project_meta,
                         outcome.path,
                         self._project_doc_path(chat, project_meta),
+                        focus,
                     )
                 except Exception:  # noqa: BLE001 — the archive already succeeded
                     logger.exception(

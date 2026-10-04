@@ -21,9 +21,9 @@ import type {
 
 /** The board's four fixed columns, in board order. */
 export const TASK_COLUMNS: ReadonlyArray<{ status: TaskStatus; label: string }> = [
-  { status: 'backlog', label: 'Backlog' },
+  { status: 'backlog', label: 'To do' },
   { status: 'in_progress', label: 'In progress' },
-  { status: 'on_hold', label: 'On hold' },
+  { status: 'in_review', label: 'In review' },
   { status: 'done', label: 'Done' },
 ]
 
@@ -156,7 +156,6 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     project_id: asString(row.project_id),
     due: asString(row.due),
     assignee: row.assignee === 'agent' ? 'agent' : 'user',
-    review_state: row.review_state === 'ready' ? 'ready' : 'none',
     chat_id: asString(row.chat_id),
     attempt_id: asString(row.attempt_id),
     created_at: asString(row.created_at),
@@ -250,7 +249,6 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     project_id: detail.project_id,
     due: detail.due,
     assignee: detail.assignee,
-    review_state: detail.review_state,
     chat_id: detail.chat_id,
     attempt_id: detail.attempt_id,
     created_at: detail.created_at,
@@ -387,11 +385,13 @@ export function taskReconcileNotes(
       actions: 'Resume continues that attempt, Retry starts a new one, Detach releases the card.',
     })
   }
-  if (task.review_state === 'ready' && task.attempt_state !== 'ready_for_review') {
+  // A card you moved to In review yourself is ordinary; one an attempt still
+  // holds without a result waiting is the contradiction.
+  if (task.status === 'in_review' && task.live_attempt_id && task.attempt_state !== 'ready_for_review') {
     notes.push({
       code: 'review_without_result',
-      text: 'The Review badge is set, but no attempt has a result waiting to be reviewed.',
-      actions: 'Delegate hands the task to the agent again; nothing is rewritten for you.',
+      text: 'This card is In review, but its attempt has no result waiting to be reviewed.',
+      actions: 'Open the chat to see where it is; Detach releases the card.',
     })
   }
   // A released attempt keeps `attempt_state: ready_for_review` forever, so the
@@ -401,11 +401,11 @@ export function taskReconcileNotes(
   if (
     task.live_attempt_id
     && task.attempt_state === 'ready_for_review'
-    && task.review_state !== 'ready'
+    && task.status !== 'in_review'
   ) {
     notes.push({
       code: 'result_without_review',
-      text: 'An attempt has a result waiting, but this card carries no Review badge.',
+      text: 'An attempt has a result waiting, but this card is not In review.',
       actions: 'Open the chat to read it, then Approve Done to close the card.',
     })
   }
@@ -639,7 +639,7 @@ export function taskLanes(
 
 /** The board's counts per status, unreadable files excluded. */
 export function statusCounts(tasks: Task[]): Record<TaskStatus, number> {
-  const counts = { backlog: 0, in_progress: 0, on_hold: 0, done: 0 } as Record<TaskStatus, number>
+  const counts = { backlog: 0, in_progress: 0, in_review: 0, done: 0 } as Record<TaskStatus, number>
   for (const task of tasks) counts[task.status] += 1
   return counts
 }

@@ -400,7 +400,6 @@ def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict
         "project_id": record.project_id,
         "due": record.due,
         "assignee": record.assignee,
-        "review_state": record.review_state,
         "chat_id": record.chat_id,
         "attempt_id": record.attempt_id,
         "created_at": record.created_at.isoformat(),
@@ -2441,10 +2440,41 @@ class CiaoControlPlane:
         neither the agent envelope nor a session route can see a store code the
         error table above does not name.
         """
+        self._migrate_task_schema(workspace)
         try:
             return call(self._task_store(workspace))
         except TaskBoardError as exc:
             raise _task_error(exc) from exc
+
+    def _migrate_task_schema(self, workspace: str) -> None:
+        """Rewrite *workspace*'s schema-1 task files to schema 2, once per process.
+
+        The first task call for a workspace does it (#1069), so a board is never
+        read in the old shape. An attempt bound to a file's old bytes follows the
+        rewrite: the migration is not an edit to the task, and leaving the binding
+        behind would read as "changed since delegated". Best effort; a file it
+        cannot upgrade lists as an unsupported-schema row that says why.
+        """
+        done: set[str] = self.__dict__.setdefault("_task_schema_checked", set())
+        if workspace in done:
+            return
+        done.add(workspace)
+        try:
+            migrated = self._task_store(workspace).migrate_schema_1()
+        except (TaskBoardError, OSError):
+            logger.exception("tasks: could not migrate %s's task files to schema 2", workspace)
+            return
+        if not migrated:
+            return
+        logger.info("tasks: migrated %d task file(s) in %s to schema 2", len(migrated), workspace)
+        try:
+            store = self._attempt_store(workspace)
+            for task_id, old, new in migrated:
+                for attempt in store.list_for_task(task_id):
+                    if attempt.task_revision == old:
+                        store.bind_revision(attempt.attempt_id, new)
+        except (TaskAttemptError, OSError):
+            logger.exception("tasks: could not rebind attempts after migrating %s", workspace)
 
     def _task_project(self, workspace: str, ref: str) -> str:
         """The exact project id a task may name inside *workspace*.
@@ -2739,11 +2769,69 @@ class CiaoControlPlane:
             )
             raise
         self._release_attempt(workspace, attempt.attempt_id)
+        self._learn_from_approved(workspace, attempt, document.record.title)
         # Read again rather than returning the completion's own row: the reply is
         # what a board paints, and a completed card still naming a live attempt
         # would keep drawing Stop and Detach over a task with no chat to open.
         done: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
         return self._task_with_attempt(workspace, done, include_body=True)
+
+    def _learn_from_approved(self, workspace: str, attempt: TaskAttempt, title: str) -> None:
+        """Archive an approved task's chat and run a procedure-focused memory pass.
+
+        The user approving a delegated result says this conversation is how that
+        kind of work is done correctly (#1069). Archiving it runs the ordinary
+        memory pass with an ``approved_task`` focus: the pass extracts the
+        procedure and files skill proposals or new-skill drafts, and facts as
+        usual — all waiting in To decide for the user. Archiving is the natural
+        end of an approved task's chat, and the attempt is already released, so
+        the archive hook leaves the task alone.
+
+        Scheduled on the loop, never awaited: an approval must not wait on a
+        transcript render, and nothing here may fail the approval. Outside a loop
+        (a test calling the service directly) it does nothing.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        focus = {
+            "focus": "approved_task",
+            "task_title": title,
+            "task_summary": attempt.summary,
+        }
+
+        async def _run() -> None:
+            try:
+                chat = self.pcm.get_chat(attempt.chat_id)
+                if chat is None:
+                    return
+                project = self.pcm.get_project(str(getattr(chat, "project_id", "") or ""))
+                if getattr(chat, "archived", False):
+                    archive_path = str(getattr(chat, "archive_path", "") or "")
+                    if archive_path:
+                        path = Path(archive_path)
+                        if not path.is_absolute():
+                            path = Path(self.config.workspace_root) / path
+                        self.pcm.enqueue_memory_pass(
+                            chat, project, path,
+                            project.vault_doc_path if project is not None and not project.is_auto else "",
+                            focus,
+                        )
+                    return
+                outcome = await self.pcm.archive_chat(attempt.chat_id)
+                if outcome is not None:
+                    self.pcm.run_archive_postprocess(
+                        attempt.chat_id, outcome, chat, project, focus
+                    )
+            except Exception:  # noqa: BLE001 — the approval already succeeded
+                logger.exception(
+                    "tasks: could not learn from the approved task in chat %s", attempt.chat_id
+                )
+
+        task = loop.create_task(_run(), name=f"task-learn-{attempt.attempt_id[:8]}")
+        self._watchers.add(task)
+        task.add_done_callback(self._watchers.discard)
 
     def _relink_after_refusal(
         self,
@@ -3393,13 +3481,15 @@ class CiaoControlPlane:
                 return ""
             self._attempt_call(workspace, lambda store: store.continue_turn(attempt_id))
             self._watching[key] = (stream, document.revision)
-            if document.record.review_state == "ready":
+            if document.record.status == "in_review":
+                # The conversation went on, so the result is not the one under
+                # review any more: the card goes back to In progress.
                 try:
                     cleared = self._task_call(
                         workspace,
                         lambda store: store.update(
                             task_id, expected_revision=document.revision,
-                            changes={"review_state": "none"}, actor="user",
+                            changes={"status": "in_progress"}, actor="user",
                         ),
                     )
                     # Follow only our own write, not an edit the agent never received.
@@ -3653,8 +3743,8 @@ class CiaoControlPlane:
                 state,
             )
             return
-        # A finished turn puts the task in front of the user for review, which is
-        # `review_state: ready` — a badge, not a column. Only for a turn that
+        # A turn the agent reported done puts the task in front of the user for
+        # review, which is the In review column (#1069). Only for a turn that
         # actually produced something to review: a `needs_you` attempt has no
         # result yet, so "review" on it would ask the user to review nothing.
         if settled.state == "ready_for_review":
@@ -3666,8 +3756,8 @@ class CiaoControlPlane:
 
         Two refusals this method is built around, and neither is cosmetic:
 
-        * **The task must still belong to this attempt.** ``review_state`` is on
-          the task record, so a watcher whose attempt has been detached or
+        * **The task must still belong to this attempt.** The ``in_review`` status
+          is on the task record, so a watcher whose attempt has been detached or
           superseded would be writing to a card it no longer owns — flagging the
           new attempt's work for review, or a task nobody delegated any more.
         * **The badge write moves the task's revision, and the attempt has to
@@ -3694,12 +3784,14 @@ class CiaoControlPlane:
                     attempt_id,
                 )
                 return
+            if document.record.status == "in_review":
+                return
             flagged = self._task_call(
                 workspace,
                 lambda store: store.update(
                     task_id,
                     expected_revision=document.revision,
-                    changes={"review_state": "ready"},
+                    changes={"status": "in_review"},
                     actor="user",
                 ),
             )
@@ -4137,10 +4229,9 @@ class CiaoControlPlane:
         live attempt nothing holds, and a live attempt nothing holds is the stuck
         state this exists to end.
 
-        The card's review badge goes with it. ``review_state: ready`` on a task
-        with no attempt behind it asks the user to review a result they have
-        already released, and the badge is a claim about the task rather than about
-        the attempt, so it is cleared here and nowhere else.
+        The card leaves In review with it: a task in that column with no attempt
+        behind it asks the user to review a result they have already released, so
+        it goes back to In progress here and nowhere else.
         """
         document = self._attempt_task(workspace, attempt)
         if attempt.state == "running":
@@ -4164,13 +4255,13 @@ class CiaoControlPlane:
                     document.record.id, expected_revision=document.revision
                 ),
             )
-            if document.record.review_state == "ready":
+            if document.record.status == "in_review":
                 document = self._task_call(
                     workspace,
                     lambda store: store.update(
                         document.record.id,
                         expected_revision=document.revision,
-                        changes={"review_state": "none"},
+                        changes={"status": "in_progress"},
                         actor="user",
                     ),
                 )

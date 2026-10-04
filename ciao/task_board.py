@@ -28,7 +28,7 @@ raw bytes. Every update must present the revision it read; a stale one is a
 :ref:`revision_conflict <TaskBoardError>` and the file is left unchanged.
 
 **Managed-operation rules are not file restrictions.** The agent-cannot-complete,
-linked-task and ``ready`` rules below bind this store's ``update`` path.
+and linked-task rules below bind this store's ``update`` path.
 A user editing the Markdown directly can write whatever the schema accepts;
 this module never polices hand edits, it only refuses to manufacture such
 states through the managed API.
@@ -96,8 +96,14 @@ from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import carry_mode
 
-SCHEMA_VERSION = 1
-"""The only frontmatter schema this store implements."""
+SCHEMA_VERSION = 2
+"""The only frontmatter schema this store implements.
+
+Schema 2 (#1069) is the four-column board ``backlog | in_progress | in_review |
+done``: ``on_hold`` is gone and the separate ``review_state`` flag became the
+``in_review`` column. A schema-1 file is rewritten once by
+:meth:`TaskBoardStore.migrate_schema_1`; this parser reads only schema 2.
+"""
 
 MAX_TASK_BYTES = 65536
 """Largest raw task file this store will read or write, in bytes."""
@@ -105,14 +111,11 @@ MAX_TASK_BYTES = 65536
 TASKS_RELATIVE = Path("Workspace") / "Tasks"
 """Vault-relative directory holding one ``<id>.md`` file per task."""
 
-STATUSES = ("backlog", "in_progress", "on_hold", "done")
-"""Allowed ``status`` values."""
+STATUSES = ("backlog", "in_progress", "in_review", "done")
+"""Allowed ``status`` values, in board order. ``backlog`` is the *To do* column."""
 
 ASSIGNEES = ("user", "agent")
 """Allowed ``assignee`` values."""
-
-REVIEW_STATES = ("none", "ready")
-"""Allowed ``review_state`` values."""
 
 _ID_RE = re.compile(r"[0-9a-f]{32}")
 """A task id: 32 lowercase hex characters, nothing else."""
@@ -129,7 +132,6 @@ _FIELD_ORDER = (
     "project_id",
     "due",
     "assignee",
-    "review_state",
     "created_at",
     "updated_at",
     "chat_id",
@@ -142,7 +144,7 @@ _FIELD_ORDER = (
 # linkage mutation belongs to the delegation child. ``updated_at`` is set by
 # the store from its clock, never by the caller.
 _EDITABLE_FIELDS = frozenset(
-    {"title", "status", "project_id", "due", "assignee", "review_state"}
+    {"title", "status", "project_id", "due", "assignee"}
 )
 
 #: The two linkage fields, editable only through :meth:`TaskBoardStore.link` and
@@ -155,7 +157,6 @@ _REQUIRED_FIELDS = (
     "title",
     "status",
     "assignee",
-    "review_state",
     "created_at",
     "updated_at",
 )
@@ -218,7 +219,6 @@ class TaskRecord:
     project_id: str | None
     due: str | None
     assignee: str
-    review_state: str
     created_at: datetime
     updated_at: datetime
     chat_id: str | None
@@ -600,6 +600,40 @@ def _mapping_values(root: MappingNode) -> dict[str, ScalarNode | None]:
     return found
 
 
+# ── Schema 1 → 2 ─────────────────────────────────────────────────────
+
+_FRONTMATTER = re.compile(rb"\A(\xef\xbb\xbf)?---\r?\n(.*?)(\r?\n)---", re.DOTALL)
+
+
+def _upgrade_schema_1(raw: bytes) -> bytes | None:
+    """The file rewritten to schema 2, or ``None`` when it is not schema 1.
+
+    Line edits on the frontmatter only, each anchored to a whole ``key: value``
+    line (quoted or not), so a value that merely contains one of these words is
+    never touched.
+    """
+    match = _FRONTMATTER.match(raw)
+    if match is None:
+        return None
+    front = match.group(2)
+    if not re.search(rb"(?m)^schema:[ \t]*1[ \t]*\r?$", front):
+        return None
+    value = rb"[ \t]*[\"']?([a-z_]+)[\"']?[ \t]*(\r?)$"
+    status = re.search(rb"(?m)^status:" + value, front)
+    review = re.search(rb"(?m)^review_state:" + value, front)
+    current = status.group(1) if status else b""
+    target = current
+    if current == b"on_hold":
+        target = b"backlog"
+    elif current == b"in_progress" and review is not None and review.group(1) == b"ready":
+        target = b"in_review"
+    if status is not None and target != current:
+        front = re.sub(rb"(?m)^status:" + value, b"status: " + target + rb"\2", front, count=1)
+    front = re.sub(rb"(?m)^review_state:.*\n?", b"", front)
+    front = re.sub(rb"(?m)^schema:[ \t]*1([ \t]*\r?)$", rb"schema: 2\1", front, count=1)
+    return raw[: match.start(2)] + front + raw[match.end(2) :]
+
+
 # ── Record building ──────────────────────────────────────────────────
 
 
@@ -655,12 +689,6 @@ def _build_record(data: Mapping[str, Any], expected_id: str) -> TaskRecord:
         raise TaskBoardError(
             "invalid_task", f"task assignee {assignee!r} is not one of {list(ASSIGNEES)}"
         )
-    review_state = data["review_state"]
-    if review_state not in REVIEW_STATES:
-        raise TaskBoardError(
-            "invalid_task",
-            f"task review_state {review_state!r} is not one of {list(REVIEW_STATES)}",
-        )
     created_at = _coerce_utc(data["created_at"], "created_at")
     updated_at = _coerce_utc(data["updated_at"], "updated_at")
     return TaskRecord(
@@ -671,7 +699,6 @@ def _build_record(data: Mapping[str, Any], expected_id: str) -> TaskRecord:
         project_id=_coerce_optional_id(data.get("project_id"), "project_id"),
         due=_coerce_due(data.get("due")),
         assignee=str(assignee),
-        review_state=str(review_state),
         created_at=created_at,
         updated_at=updated_at,
         chat_id=_coerce_optional_id(data.get("chat_id"), "chat_id"),
@@ -739,7 +766,7 @@ def _render_field_value(key: str, record: TaskRecord) -> str:
     """The canonical YAML rendering of one owned record field."""
     value: Any = getattr(record, key)
     if key == "schema":
-        return "1"
+        return str(SCHEMA_VERSION)
     if value is None:
         return "null"
     if isinstance(value, datetime):
@@ -822,13 +849,6 @@ def _normalize_change(key: str, value: object) -> Union[str, datetime, None]:
         if value not in ASSIGNEES:
             raise TaskBoardError(
                 "invalid_task", f"task assignee {value!r} is not one of {list(ASSIGNEES)}"
-            )
-        return str(value)
-    if key == "review_state":
-        if value not in REVIEW_STATES:
-            raise TaskBoardError(
-                "invalid_task",
-                f"task review_state {value!r} is not one of {list(REVIEW_STATES)}",
             )
         return str(value)
     if key in ("project_id",):
@@ -1202,6 +1222,51 @@ class TaskBoardStore:
         path = self._task_path(task_id)
         return parse_task(self._read_file_bytes(path, task_id), expected_id=task_id)
 
+    def migrate_schema_1(self) -> list[tuple[str, str, str]]:
+        """Rewrite every schema-1 task file in place to schema 2, once (#1069).
+
+        ``on_hold`` becomes ``backlog`` (*To do*); a task flagged ``review_state:
+        ready`` while ``in_progress`` becomes ``in_review``; the ``review_state``
+        line is dropped and ``schema`` set to 2. Only those frontmatter lines
+        change — everything else in the file is byte-for-byte what it was.
+
+        A file that does not parse as schema 2 after the rewrite is left exactly
+        as it was (it then lists as an unsupported-schema row, which says why),
+        so a hand-edited shape this cannot read is never half-migrated.
+
+        Returns ``(task_id, old_revision, new_revision)`` per rewritten file, so
+        the delegation service can rebind an attempt bound to the old bytes.
+        """
+        tasks_dir = self._tasks_dir()
+        try:
+            if not tasks_dir.is_dir():
+                return []
+            names = sorted(entry.name for entry in tasks_dir.iterdir())
+        except OSError:
+            return []
+        migrated: list[tuple[str, str, str]] = []
+        for name in names:
+            match = re.fullmatch(r"([0-9a-f]{32})\.md", name)
+            if not match:
+                continue
+            task_id = match.group(1)
+            path = tasks_dir / name
+            with _workspace_lock(self._workspace, self._runtime_dir):
+                try:
+                    raw = self._read_file_bytes(path, task_id)
+                except TaskBoardError:
+                    continue
+                upgraded = _upgrade_schema_1(raw)
+                if upgraded is None:
+                    continue
+                try:
+                    parse_task(upgraded, expected_id=task_id)
+                except TaskBoardError:
+                    continue
+                self._atomic_write(path, upgraded, existing=path)
+                migrated.append((task_id, _revision(raw), _revision(upgraded)))
+        return migrated
+
     def list(self) -> TaskListResult:
         """List this workspace's tasks in board order.
 
@@ -1395,7 +1460,6 @@ class TaskBoardStore:
                     project_id=clean_project,
                     due=clean_due,
                     assignee="user",
-                    review_state="none",
                     created_at=now,
                     updated_at=now,
                     chat_id=None,
@@ -1443,9 +1507,6 @@ class TaskBoardStore:
         - A task linked to a live chat or attempt (non-null ``chat_id`` /
           ``attempt_id``) cannot be completed or reassigned here at all:
           that needs the later delegation service's stop/detach workflow.
-        - ``ready`` requires ``agent`` assignment and ``in_progress``
-          status. Leaving ``in_progress`` without an explicit review
-          change clears ``ready`` back to ``none``.
 
         Live project membership validation is a later application-service
         obligation; this store keeps the string without judging it.
@@ -1521,8 +1582,7 @@ class TaskBoardStore:
 
         ``status``/``assignee`` default to handing the task over — ``in_progress``
         and ``agent`` — in the same atomic write, because a delegated task that
-        stays in *Backlog* assigned to the user cannot reach ``review_state:
-        ready`` (which needs exactly that pair) and so could never be reviewed.
+        stays in *To do* assigned to the user is not what a hand-over looks like.
         They are parameters so the service, not this method, owns the decision.
 
         Raises ``invalid_task`` for a malformed id, a missing chat or attempt id,
@@ -1701,21 +1761,4 @@ class TaskBoardStore:
                 "a task linked to a live chat or attempt cannot be reassigned "
                 "here; the delegation service's stop/detach workflow owns that",
             )
-        planned = dict(changes)
-        effective_status = str(changes.get("status", current.status))
-        effective_assignee = str(changes.get("assignee", current.assignee))
-        effective_review = str(changes.get("review_state", current.review_state))
-        if effective_status != "in_progress" and effective_review == "ready" and "review_state" not in planned:
-            # Leaving In progress drops the review flag rather than carrying
-            # a stale `ready` into a state that can never satisfy it.
-            planned["review_state"] = "none"
-            effective_review = "none"
-        if effective_review == "ready" and not (
-            effective_assignee == "agent" and effective_status == "in_progress"
-        ):
-            raise TaskBoardError(
-                "invalid_task",
-                "review_state 'ready' requires assignee 'agent' and status "
-                "'in_progress'",
-            )
-        return planned
+        return dict(changes)

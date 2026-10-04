@@ -417,8 +417,8 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
             ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "title": "Ship the board"}),
         ),
         (
-            ["task", "update", "a1b2", "--revision", "rev1", "--status", "on_hold"],
-            ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "status": "on_hold"}),
+            ["task", "update", "a1b2", "--revision", "rev1", "--status", "in_review"],
+            ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "status": "in_review"}),
         ),
         (
             ["task", "move", "a1b2", "--to", "in_progress", "--revision", "rev1"],

@@ -77,7 +77,7 @@ _STATUS_BY_CODE = {
 
 #: Task fields a ``PATCH`` may carry. A key outside this set is a 400 rather
 #: than a store refusal, so a typo in a body is not reported as a broken task.
-_PATCHABLE = ("title", "status", "project_id", "due", "assignee", "review_state")
+_PATCHABLE = ("title", "status", "project_id", "due", "assignee")
 
 #: Body keys every write may carry beyond the patchable fields.
 _WRITE_KEYS = ("workspace", "expected_revision", "body")

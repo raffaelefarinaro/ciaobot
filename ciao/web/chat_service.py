@@ -540,7 +540,7 @@ def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
     source_chat_id = str(value.get("source_chat_id") or "")
     if not source_chat_id or len(source_chat_id) > 128:
         return {}
-    return {
+    normalized = {
         "kind": "memory_pass",
         "source_chat_id": source_chat_id,
         "archive_path": str(value.get("archive_path") or ""),
@@ -550,6 +550,14 @@ def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
         "state": state,
         "archive_policy": "when_clean",
     }
+    # A pass may carry a focus (#1069): "approved_task" is a delegated task the
+    # user approved as done correctly, and the pass extracts how it was done. An
+    # unknown focus is dropped, not refused — the pass is still a pass.
+    if value.get("focus") == "approved_task":
+        normalized["focus"] = "approved_task"
+        normalized["task_title"] = str(value.get("task_title") or "")[:200]
+        normalized["task_summary"] = str(value.get("task_summary") or "")[:4000]
+    return normalized
 
 
 def _normalize_update_task_helper(value: dict[str, Any]) -> dict[str, Any]:

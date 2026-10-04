@@ -681,7 +681,7 @@ async def test_the_linked_task_says_so_on_disk(tmp_path: Path) -> None:
     assert f"chat_id: {outcome['chat_id']}" in raw
     assert f"attempt_id: {outcome['attempt']['attempt_id']}" in raw
     # Delegation hands the task over: in progress, for the agent, which is what
-    # makes `review_state: ready` reachable when the turn finishes.
+    # is the hand-over shape the review column follows from.
     assert "status: in_progress" in raw
     assert "assignee: agent" in raw
 
@@ -972,11 +972,11 @@ async def test_a_finished_turn_settles_ready_for_review_and_never_done(
     assert attempt.ended_at
 
     row = _get_task(plane, task["id"])
-    assert row["status"] == "in_progress"
+    assert row["status"] == "in_review"  # a review column, never Done
     assert row["status"] != "done"
     # The result is flagged for review, which the store only allows for an
     # agent-assigned task in progress — both written by the link.
-    assert row["review_state"] == "ready"
+    assert row["status"] == "in_review"
     assert row["assignee"] == "agent"
 
 
@@ -998,7 +998,7 @@ async def test_a_turn_waiting_on_an_approval_card_settles_needs_you(
     assert row["attempt_state"] == "needs_you"
     assert row["status"] != "done"
     # And no Review badge: there is no result yet, so there is nothing to review.
-    assert row["review_state"] == "none"
+    assert row["status"] != "in_review"
 
 
 async def test_a_stream_with_no_result_is_interrupted_not_a_review(
@@ -1020,7 +1020,7 @@ async def test_a_stream_with_no_result_is_interrupted_not_a_review(
 
     row = _get_task(plane, task["id"])
     assert row["attempt_state"] == "interrupted"
-    assert row["review_state"] == "none"
+    assert row["status"] != "in_review"
     attempt = _attempt_store(plane).list_for_task(task["id"])[0]
     assert attempt.state == "interrupted"
     assert attempt.detail == "the turn ended without a result"
@@ -1047,7 +1047,7 @@ async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
     await _end_turns(pcm)
 
     settled = _get_task(plane, task["id"])
-    assert settled["review_state"] == "ready", "the badge is what moves the revision"
+    assert settled["status"] == "in_review", "the badge is what moves the revision"
     assert settled["changed_since_delegated"] is False
     # And only a real edit trips it.
     edited = plane.workspace_task_update(
@@ -1173,7 +1173,7 @@ async def test_a_turn_started_by_an_update_settles_the_attempt(tmp_path: Path) -
     settled = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
     assert settled.state == "ready_for_review"
     row = _get_task(plane, task["id"])
-    assert row["review_state"] == "ready"
+    assert row["status"] == "in_review"
     assert row["changed_since_delegated"] is False, (
         "the watcher's own review flag moves the revision, so the rebind has to follow it"
     )
@@ -1312,7 +1312,7 @@ async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
     assert row["attempt_state"] == "ready_for_review", (
         "the answer's own turn settles the attempt; nothing was watching it before"
     )
-    assert row["review_state"] == "ready"
+    assert row["status"] == "in_review"
     assert _attempt_store(plane).get(outcome["attempt"]["attempt_id"]).state == "ready_for_review"
 
 
@@ -1341,7 +1341,7 @@ async def test_a_live_continuation_records_its_error(tmp_path: Path, path: str) 
     assert running.state == "running"
     assert running.ended_at == ""
     assert running.detail == ""
-    assert _get_task(plane, task["id"])["review_state"] == "none"
+    assert _get_task(plane, task["id"])["status"] != "in_review"
     assert _get_task(plane, task["id"])["changed_since_delegated"] is False
     _agent_says_done(plane)
     await _end_turns(pcm)
@@ -1374,12 +1374,12 @@ async def test_finished_stream_cannot_settle_the_next_stream(
         await asyncio.sleep(0)
     assert second.subscriber_count == 1
     assert _get_task(plane, task["id"])["attempt_state"] == "running"
-    assert _get_task(plane, task["id"])["review_state"] == "none"
+    assert _get_task(plane, task["id"])["status"] != "in_review"
     second.publish({"type": "result", "is_error": True, "text": "new failure"})
     second.finish()
     await asyncio.gather(*plane._watchers)
     assert _get_task(plane, task["id"])["attempt_state"] == "failed"
-    assert _get_task(plane, task["id"])["review_state"] == "none"
+    assert _get_task(plane, task["id"])["status"] != "in_review"
 
 
 async def test_a_turn_in_an_ordinary_chat_re_attaches_nothing(tmp_path: Path) -> None:
@@ -1432,7 +1432,7 @@ async def test_a_detached_watcher_may_not_flag_a_task_it_no_longer_holds(
     await _end_turns(pcm)
 
     row = _get_task(plane, task["id"])
-    assert row["review_state"] == "none"
+    assert row["status"] != "in_review"
     assert row["chat_id"] is None
     assert row["attempt_id"] is None
     # The attempt keeps what the user's gesture said about it, not what a late
@@ -1462,7 +1462,7 @@ async def test_a_superseded_watcher_may_not_flag_the_attempt_that_replaced_it(
 
     row = _get_task(plane, task["id"])
     assert row["attempt_state"] == "running"
-    assert row["review_state"] == "none"
+    assert row["status"] != "in_review"
     assert row["attempt_id"] == retried["attempt"]["attempt_id"]
     assert _attempt_store(plane).get(first["attempt"]["attempt_id"]).state == "stopped"
 
@@ -1726,7 +1726,7 @@ async def test_the_user_approves_done_on_a_review_ready_card_in_one_gesture(
     _agent_says_done(plane)
     await _end_turns(pcm)
     settled = _get_task(plane, task["id"])
-    assert settled["review_state"] == "ready"
+    assert settled["status"] == "in_review"
     assert settled["attempt_state"] == "ready_for_review"
 
     done = plane.workspace_task_action(
@@ -1826,9 +1826,9 @@ async def test_detaching_a_reviewed_attempt_leaves_the_review_alone(
     assert detached["attempt"]["state"] == "ready_for_review"
     assert detached["attempt"]["detail"] == "", "no stop was invented for it"
     assert detached["task"]["chat_id"] is None
-    # The badge goes with the attempt it was about: `review_state: ready` with no
+    # In review goes with the attempt it was about: a card in review with no
     # attempt behind it asks the user to review a result they have just released.
-    assert detached["task"]["review_state"] == "none"
+    assert detached["task"]["status"] != "in_review"
     assert detached["task"]["live_attempt_id"] == ""
     # And it did not stop a turn that had already ended.
     assert pcm.stop_awaited == 0
@@ -1985,10 +1985,10 @@ async def test_a_refused_completion_leaves_the_review_ready_card_linked(
 
     assert excinfo.value.code == "project_not_found"
     row = _get_task(plane, task["id"])
-    assert row["status"] == "in_progress", "the task was not completed"
+    assert row["status"] == "in_review", "the task was not completed"
     assert row["attempt_id"] == attempt_id, "the linkage was put back"
     assert row["chat_id"] == outcome["chat_id"]
-    assert row["review_state"] == "ready"
+    assert row["status"] == "in_review"
     assert row["live_attempt_id"] == attempt_id
     assert row["changed_since_delegated"] is False, (
         "the re-link is not an edit the user made"
@@ -2227,7 +2227,7 @@ async def test_a_clean_end_with_no_report_is_unfinished_not_for_review(tmp_path:
     attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
     assert attempt.state == "needs_you"
     assert "without a report" in attempt.detail
-    assert _get_task(plane, task["id"])["review_state"] == "none"
+    assert _get_task(plane, task["id"])["status"] != "in_review"
 
 
 @pytest.mark.parametrize("reported", ["blocked", "needs_input"])
@@ -2242,7 +2242,7 @@ async def test_a_blocked_or_needs_input_report_waits_on_the_user(tmp_path: Path,
     await _end_turns(pcm)
     attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
     assert (attempt.state, attempt.outcome, attempt.summary) == ("needs_you", reported, "Need the key.")
-    assert _get_task(plane, task["id"])["review_state"] == "none"
+    assert _get_task(plane, task["id"])["status"] != "in_review"
 
 
 async def test_only_the_chat_holding_the_task_may_report_on_it(tmp_path: Path) -> None:
@@ -2281,7 +2281,7 @@ async def test_the_task_body_logs_each_attempt_without_tripping_changed_since_de
     assert "Wrote the runbook in docs/run.md." in text
     assert f"attempt:{outcome['attempt']['attempt_id']}" in text
     row = _get_task(plane, task["id"])
-    assert row["review_state"] == "ready"
+    assert row["status"] == "in_review"
     assert row["changed_since_delegated"] is False
 
 
@@ -2342,9 +2342,71 @@ async def test_archiving_a_chat_whose_result_awaits_review_leaves_it_to_approve(
     plane._on_chat_ended(outcome["chat_id"], chat, "archived")
     attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
     assert attempt.state == "ready_for_review" and attempt.is_live
-    assert _get_task(plane, task["id"])["review_state"] == "ready"
+    assert _get_task(plane, task["id"])["status"] == "in_review"
 
 
 async def test_a_chat_that_is_not_a_delegation_is_ignored_when_archived(tmp_path: Path) -> None:
     plane, _pcm = _world(tmp_path)
     plane._on_chat_ended("plain", SimpleNamespace(helper={}, project_id="p"), "archived")
+
+
+async def test_the_first_task_call_migrates_schema_1_and_rebinds_the_attempt(tmp_path: Path) -> None:
+    """#1069: a schema-1 file is rewritten on the first call, and an attempt bound
+    to its old bytes follows, so the migration never reads as an edit."""
+    plane, _pcm = _world(tmp_path)
+    task = _create(plane, title="Legacy review")
+    outcome = _delegate(plane, task)
+    path = next(_tasks_dir(plane).glob("*.md"))
+    legacy = (
+        path.read_text(encoding="utf-8")
+        .replace("schema: 2", "schema: 1", 1)
+        .replace("assignee: agent", "assignee: agent\nreview_state: ready", 1)
+    )
+    path.write_text(legacy, encoding="utf-8")
+    import hashlib
+    _attempt_store(plane).bind_revision(
+        outcome["attempt"]["attempt_id"], hashlib.sha256(path.read_bytes()).hexdigest()
+    )
+    plane.__dict__.pop("_task_schema_checked", None)
+
+    row = _get_task(plane, task["id"])
+
+    assert row["status"] == "in_review"
+    assert row["changed_since_delegated"] is False
+    assert "review_state" not in path.read_text(encoding="utf-8")
+
+
+async def test_approving_a_delegated_result_archives_its_chat_and_queues_a_learning_pass(
+    tmp_path: Path,
+) -> None:
+    """#1069: the approved conversation is a worked example. Approving archives it
+    and postprocesses it with an approved-task focus carrying the agent's summary."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Learnable work")
+    outcome = _delegate(plane, task)
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    archived: list[str] = []
+    postprocessed: list[tuple[str, Any]] = []
+
+    async def archive_chat(chat_id: str) -> Any:
+        archived.append(chat_id)
+        return SimpleNamespace(path=tmp_path / "archive.md", turn_count=3)
+
+    pcm.archive_chat = archive_chat  # type: ignore[attr-defined]
+    pcm.run_archive_postprocess = (  # type: ignore[attr-defined]
+        lambda chat_id, outcome, chat, project, focus=None: postprocessed.append((chat_id, focus))
+    )
+    current = _get_task(plane, task["id"])
+
+    plane.workspace_task_action(
+        "personal", "complete", task["id"], expected_revision=current["revision"], actor="user",
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    assert archived == [outcome["chat_id"]]
+    assert postprocessed == [(
+        outcome["chat_id"],
+        {"focus": "approved_task", "task_title": "Learnable work", "task_summary": "Did the work."},
+    )]

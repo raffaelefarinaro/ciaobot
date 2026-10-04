@@ -2,7 +2,7 @@
 /**
  * The workspace task board (`/tasks`).
  *
- * Four fixed columns — Backlog, In progress, On hold, Done — on a wide pane, and
+ * Four fixed columns — To do, In progress, In review, Done — on a wide pane, and
  * one status-filtered list on a narrow one. On the columns a card is dragged to
  * another lane, or moved one lane over with Shift+←/→ while its title has focus.
  * Everywhere, the editor's status control is the path a screen reader and a phone
@@ -1148,7 +1148,7 @@ async function closeDetail(options: { discard?: boolean } = {}) {
  *
  * Only Done is the completion gesture. Any other status is a plain move, and
  * routing it through `complete` would mark a task done while the user chose
- * "On hold" — a write to the record, not just to this dialog.
+ * "In review" — a write to the record, not just to this dialog.
  */
 async function setDetailStatus(next: TaskStatus) {
   if (!detailTask.value || next === detailForm.status || detailSaving.value) return
@@ -1583,7 +1583,6 @@ const today = localDateKey()
                       class="badge"
                       :class="attemptBadgeClass(task)"
                     >{{ taskAttemptLabel(task.attempt_state, task.attempt_outcome, task.attempt_detail) }}</span>
-                    <span v-if="task.review_state === 'ready'" class="badge badge--accent2">Review</span>
                     <span v-if="!lane.status" class="badge badge--muted task-status-badge">{{ taskStatusLabel(task.status) }}</span>
                     <span v-if="ownProject(task.project_id)" class="task-project">{{ projectName(task.project_id) }}</span>
                     <span v-if="formatTaskDue(task.due)" class="badge" :class="isOverdue(task, today) ? 'badge--error' : 'badge--muted'">

@@ -45,7 +45,6 @@ function running(overrides: Record<string, unknown> = {}): Task {
     assignee: 'agent',
     project_id: '',
     due: '',
-    review_state: 'none',
     chat_id: 'chat-7',
     attempt_id: ATTEMPT_ID,
     attempt_state: 'running',

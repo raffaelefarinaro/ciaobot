@@ -1098,7 +1098,7 @@ def test_the_complete_route_approves_a_review_ready_result(world) -> None:
     task = _create(client, cookies, title="Ready for review")
     attempt_id = _delegate(client, cookies, task, pcm).json()["attempt"]["attempt_id"]
     before = _settle(client, cookies, pcm, task["id"], report="done")
-    assert before["review_state"] == "ready"
+    assert before["status"] == "in_review"
 
     done = client.post(
         f"/api/tasks/{task['id']}/complete",

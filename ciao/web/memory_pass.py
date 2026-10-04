@@ -92,6 +92,33 @@ MEMORY_PASS_PROMPT = (
 #: positional name, because the draft's own JSON already names the skill).
 DRAFT_COMMAND = "`ciao skill-draft-add --input-file FILE`"
 
+#: The section an approved delegated task's pass carries (#1069). The user
+#: approved this conversation's result as the task done correctly, which makes it
+#: a worked example: the pass's job widens from "what facts are durable" to "how
+#: is this kind of work done here", and it is handed both skill routes whether or
+#: not the workspace keeps a Learnings document — the procedure is the finding.
+APPROVED_TASK_PROMPT = (
+    "\n\nThis conversation is a delegated task the user APPROVED as done "
+    "correctly: \"{task}\". The agent's own report of what it did:\n"
+    "<approved-task-summary>\n{summary}\n</approved-task-summary>\n\n"
+    "Treat it as a worked example of how this kind of work is done here, and "
+    "extract the procedure: the steps that mattered, the tools and commands, the "
+    "checks that proved it worked, the conventions the user held it to, and any "
+    "correction the user made along the way (a correction is the most valuable "
+    "part — it is what the next attempt would otherwise get wrong). Route it:\n"
+    "- A procedure that belongs in a skill this workspace already owns: file a "
+    "proposal for that skill with `ciao skill-proposal-add NAME --input-file FILE` "
+    "(a JSON object with `title`, `problem`, `change`, `rationale`).\n"
+    "- A reusable procedure no skill covers: file a `[review]` draft for a new "
+    "skill through {draft} — a proposed `skill` name, and a `change` holding its "
+    "purpose, the trigger that should load it, and the steps.\n"
+    "- A durable fact (a path, a contact, a preference, a decision): memory, as "
+    "above.\n"
+    "File nothing for a one-off: a task that will not recur teaches no procedure. "
+    "Everything you file waits for the user to accept; you do not edit a skill "
+    "or create one yourself."
+)
+
 #: The skill-review section, appended to the pass prompt when the workspace owns
 #: a skill the archived transcript shows in use. The one rendering rule is the
 #: ``{skills}`` field: the candidates are resolved here, from the archive's own
@@ -303,8 +330,13 @@ class MemoryPassCoordinator:
         project: ProjectInfo | None,
         archive_path: Path,
         doc_path: str,
+        focus: dict[str, str] | None = None,
     ) -> str | None:
         """Queue a memory pass for an archived chat, and start it if free.
+
+        ``focus`` (#1069) narrows what the pass looks for: ``{"focus":
+        "approved_task", "task_title", "task_summary"}`` is a delegated task the
+        user approved as done correctly, and the pass extracts the procedure.
 
         Returns the memory chat's id, or ``None`` when the pass was deduped or
         the workspace could not be resolved.
@@ -318,14 +350,18 @@ class MemoryPassCoordinator:
         if not workspace:
             return None
 
-        # One pass per archived chat. An archived pass is still a pass: a
-        # second archive of the same source must not re-run the extraction, and
-        # a dedupe that ignored archived rows would pass again on every retry.
+        # One pass per archived chat and focus. An archived pass is still a pass:
+        # a second archive of the same source must not re-run the extraction,
+        # and a dedupe that ignored archived rows would pass again on every retry.
+        # An approved task's chat may have had an ordinary pass already; the
+        # focused one reads it for a different thing, so it is its own pass.
+        wanted = (focus or {}).get("focus", "")
         for existing in host._chats.values():
             helper = chat_service._normalize_chat_helper(existing.helper)
             if (
                 helper.get("kind") == MEMORY_PASS_KIND
                 and helper.get("source_chat_id") == source.chat_id
+                and helper.get("focus", "") == wanted
             ):
                 return None
 
@@ -359,6 +395,7 @@ class MemoryPassCoordinator:
                 ),
                 "state": "queued",
                 "archive_policy": "when_clean",
+                **(focus or {}),
             },
         )
         self._set_source_step(source.chat_id, "queued", chat.chat_id)
@@ -498,7 +535,18 @@ class MemoryPassCoordinator:
             title=helper.get("source_title") or chat.title,
             project=helper.get("source_project") or "no project",
             doc=helper.get("doc_path") or "none",
-        ) + self._skill_review_section(chat, helper)
+        ) + self._focus_section(helper) + self._skill_review_section(chat, helper)
+
+    @staticmethod
+    def _focus_section(helper: dict) -> str:
+        """The approved-task section, or nothing for an ordinary pass (#1069)."""
+        if helper.get("focus") != "approved_task":
+            return ""
+        return APPROVED_TASK_PROMPT.format(
+            task=helper.get("task_title") or "this task",
+            summary=(helper.get("task_summary") or "(no summary)").strip(),
+            draft=DRAFT_COMMAND,
+        )
 
     def _skill_review_section(self, chat: ChatInfo, helper: dict) -> str:
         """The skill-review section, or nothing when there is nothing to review.

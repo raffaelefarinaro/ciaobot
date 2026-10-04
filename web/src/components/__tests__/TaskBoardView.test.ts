@@ -53,7 +53,6 @@ function task(overrides: Partial<Task> = {}): Task {
     project_id: '',
     due: '',
     assignee: 'user',
-    review_state: 'none',
     chat_id: '',
     attempt_id: '',
     created_at: '2026-03-01T09:00:00+00:00',
@@ -73,8 +72,8 @@ function task(overrides: Partial<Task> = {}): Task {
 const BOARD: TaskRow[] = [
   task(),
   task({ id: 'doing', title: 'Wire the store', status: 'in_progress', project_id: 'p1' }),
-  task({ id: 'held', title: 'Wait on a key', status: 'on_hold' }),
-  task({ id: 'done', title: 'Land the types', status: 'done', assignee: 'agent', review_state: 'ready' }),
+  task({ id: 'held', title: 'Wait on a key', status: 'in_review' }),
+  task({ id: 'done', title: 'Land the types', status: 'done', assignee: 'agent' }),
 ]
 
 async function mountBoard(rows: TaskRow[] = BOARD) {
@@ -177,7 +176,7 @@ describe('TaskBoardView', () => {
 
     expect(apiGet.mock.calls[0]![0]).toBe('/api/tasks?workspace=personal')
     expect(lanes(wrapper).map((lane) => lane.get('.task-lane-label').text()))
-      .toEqual(['Backlog', 'In progress', 'On hold', 'Done'])
+      .toEqual(['To do', 'In progress', 'In review', 'Done'])
     // The count is the board's own, read off the rows rather than recomputed
     // from the filters, so a filtered column still says what is in it.
     expect(lanes(wrapper).map((lane) => lane.get('.badge').text())).toEqual(['1', '1', '1', '1'])
@@ -185,7 +184,7 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
-  it('shows a card\'s title, project, due date and review badge, and no assignee', async () => {
+  it('shows a card\'s title, project and due date, and no assignee or review badge', async () => {
     const wrapper = await mountBoard([
       task({
         id: 'ship',
@@ -195,7 +194,6 @@ describe('TaskBoardView', () => {
         // separate assertion in its own right.
         due: '2099-03-20',
         assignee: 'agent',
-        review_state: 'ready',
       }),
     ])
 
@@ -205,8 +203,8 @@ describe('TaskBoardView', () => {
     expect(shown.text()).toContain('Due Mar 20')
     // Who it is for is the Agent block's business, not a label on every card.
     expect(shown.text()).not.toContain('For the agent')
-    // The review state is a badge, so it is never colour alone.
-    expect(shown.get('.badge').text()).toBe('Review')
+    // Review is the column a card sits in (#1069), not a badge on it.
+    expect(shown.text()).not.toContain('Review')
     wrapper.unmount()
   })
 
@@ -231,7 +229,7 @@ describe('TaskBoardView', () => {
     reportPaneWidth(390)
     await nextTick()
     expect(lanes(wrapper)).toHaveLength(1)
-    expect(card(wrapper, 'Wait on a key').get('.task-status-badge').text()).toBe('On hold')
+    expect(card(wrapper, 'Wait on a key').get('.task-status-badge').text()).toBe('In review')
     // Nothing to drag between in a list.
     expect(card(wrapper, 'Wait on a key').attributes('draggable')).toBe('false')
     wrapper.unmount()
@@ -792,27 +790,27 @@ describe('TaskBoardView', () => {
     apiGet.mockResolvedValue(detailAnswer(task(), ''))
     apiPatch.mockResolvedValue({
       workspace: 'personal',
-      task: { ...task({ status: 'on_hold' }), revision: NEXT_REVISION, body: '' },
+      task: { ...task({ status: 'in_review' }), revision: NEXT_REVISION, body: '' },
     })
     await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
     await flushPromises()
     await nextTick()
 
-    await wrapper.get('[data-status="on_hold"]').trigger('click')
+    await wrapper.get('[data-status="in_review"]').trigger('click')
     await flushPromises()
     await nextTick()
 
-    // "On hold" is a move, not the completion gesture: the record must not be
+    // "In review" is a move, not the completion gesture: the record must not be
     // marked done because the select changed.
     expect(apiPost).not.toHaveBeenCalled()
     expect(apiPatch).toHaveBeenCalledTimes(1)
     const [path, sent] = apiPatch.mock.calls[0]! as [string, Record<string, unknown>]
     expect(path).toBe('/api/tasks/ship')
-    expect(sent.status).toBe('on_hold')
+    expect(sent.status).toBe('in_review')
     expect(sent.expected_revision).toBe(NEXT_REVISION)
     // And the control follows the stored record rather than snapping back to the
     // status the dialog was opened on.
-    expect(wrapper.get('[data-status="on_hold"]').attributes('aria-checked')).toBe('true')
+    expect(wrapper.get('[data-status="in_review"]').attributes('aria-checked')).toBe('true')
     expect(wrapper.get('[data-status="backlog"]').attributes('aria-checked')).toBe('false')
     expect(lanes(wrapper)[2]!.text()).toContain('Ship the board')
     wrapper.unmount()
@@ -855,7 +853,7 @@ describe('TaskBoardView', () => {
 
     const group = wrapper.get('[role="radiogroup"]')
     // One tab stop: the checked radio.
-    expect(group.findAll('[tabindex="0"]').map((r) => r.text())).toEqual(['Backlog'])
+    expect(group.findAll('[tabindex="0"]').map((r) => r.text())).toEqual(['To do'])
     await group.trigger('keydown', { key: 'ArrowRight' })
     await flushPromises()
     await nextTick()
@@ -1201,7 +1199,7 @@ describe('TaskBoardView', () => {
       await nextTick()
       expect(lanes(wrapper)).toHaveLength(4)
       expect(lanes(wrapper).map((lane) => lane.get('.task-lane-label').text()))
-        .toEqual(['Backlog', 'In progress', 'On hold', 'Done'])
+        .toEqual(['To do', 'In progress', 'In review', 'Done'])
       wrapper.unmount()
     } finally {
       Object.defineProperty(window, 'innerWidth', { value: original, configurable: true })
@@ -1387,13 +1385,12 @@ describe('TaskBoardView', () => {
         task({ id: 'a', title: 'Never delegated' }),
         liveTask(),
         task({
-          id: 'b', title: 'Waiting on you', status: 'on_hold',
+          id: 'b', title: 'Waiting on you', status: 'in_review',
           attempt_state: 'needs_you', live_attempt_id: 'c'.repeat(32),
         }),
         task({
           id: 'c', title: 'Finished', status: 'done',
           attempt_state: 'ready_for_review', live_attempt_id: 'd'.repeat(32),
-          review_state: 'ready',
         }),
         task({ id: 'd', title: 'Dead turn', attempt_state: 'failed' }),
       ])
@@ -1407,12 +1404,11 @@ describe('TaskBoardView', () => {
       expect(badge('Waiting on you').classes()).toContain('badge--accent2')
       expect(badge('Dead turn').text()).toBe('Failed')
       expect(badge('Dead turn').classes()).toContain('badge--error')
-      // And a finished turn is a badge beside Review, never a Done the board moved
-      // on its own. Scoped to the badge row: this card is also *inconsistent* (it
-      // sits in Done while its attempt still holds it), and that finding carries
-      // its own badge — which is the next test's subject, not this one's.
+      // And a finished turn is a badge, never a Done the board moved on its own.
+      // Scoped to the meta row: this card is also *inconsistent* (it sits in Done
+      // while its attempt still holds it), and that finding carries its own badge.
       expect(badge('Finished').text()).toBe('Review ready')
-      expect(card(wrapper, 'Finished').findAll('.task-meta .badge')).toHaveLength(2)
+      expect(card(wrapper, 'Finished').findAll('.task-meta .badge')).toHaveLength(1)
       // A task nobody delegated has no badge at all.
       expect(card(wrapper, 'Never delegated').findAll('.task-meta .badge'))
         .toHaveLength(0)
@@ -1423,7 +1419,7 @@ describe('TaskBoardView', () => {
     const wrapper = await mountWithBody([
       liveTask(),
       task({
-        id: 'b', title: 'Waiting on you', status: 'on_hold',
+        id: 'b', title: 'Waiting on you', status: 'in_review',
         changed_since_delegated: true, attempt_state: 'ready_for_review',
         live_attempt_id: 'c'.repeat(32),
       }),
@@ -1779,7 +1775,7 @@ describe('TaskBoardView', () => {
       // and completes together so the attempt stays as review-ready history rather
       // than settling as `stopped` and losing the result.
       const reviewed = liveTask({
-        attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+        attempt_state: 'ready_for_review', revision: THIRD_REVISION,
       })
       apiPost.mockResolvedValue({
         workspace: 'personal',
@@ -1788,7 +1784,6 @@ describe('TaskBoardView', () => {
           status: 'done',
           chat_id: '',
           attempt_id: '',
-          review_state: 'none',
           attempt_state: 'ready_for_review',
           live_attempt_id: '',
           revision: NEXT_REVISION,
@@ -1815,7 +1810,7 @@ describe('TaskBoardView', () => {
         wrapper.findAll('.task-lane').find((l) => l.text().includes('Done'))!
           .findAll('.task-card').map((c) => c.text()),
       ).toEqual([expect.stringContaining('Wire the store')])
-      // The approved card is `ready_for_review` again with `review_state: 'none'`
+      // The approved card is `ready_for_review` again with ``
       // and no live attempt — the exact shape that used to raise a false
       // "result without a badge" flag on every approved or detached review.
       const approvedCard = wrapper.findAll('.task-card')
@@ -1827,7 +1822,7 @@ describe('TaskBoardView', () => {
   it('points a review-ready card at the result and approves it from the editor too',
     async () => {
       const reviewed = liveTask({
-        attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+        attempt_state: 'ready_for_review', revision: THIRD_REVISION,
         attempt_outcome: 'done', attempt_summary: 'Wired the store; tests in store.test.ts.',
       })
       apiPost.mockResolvedValue({
@@ -1862,7 +1857,6 @@ describe('TaskBoardView', () => {
       const edited = liveTask({
         changed_since_delegated: true,
         attempt_state: 'ready_for_review',
-        review_state: 'ready',
         revision: THIRD_REVISION,
       })
       // The answer the server gives: the attempt rebound to the revision the
@@ -1904,7 +1898,6 @@ describe('TaskBoardView', () => {
     const edited = liveTask({
       changed_since_delegated: true,
       attempt_state: 'ready_for_review',
-      review_state: 'ready',
       revision: THIRD_REVISION,
     })
     apiPost.mockResolvedValue(updateAnswer(edited))
@@ -1983,7 +1976,6 @@ describe('TaskBoardView', () => {
       const edited = liveTask({
         changed_since_delegated: true,
         attempt_state: 'ready_for_review',
-        review_state: 'ready',
         revision: THIRD_REVISION,
       })
       let release = (_answer: unknown) => {}
@@ -2026,7 +2018,7 @@ describe('TaskBoardView', () => {
     // with no warning has no update to send, and a button that would re-send an
     // unchanged description is the silent re-delegation the board rules out.
     const wrapper = await mountWithBody([
-      liveTask({ attempt_state: 'ready_for_review', review_state: 'ready' }),
+      liveTask({ attempt_state: 'ready_for_review' }),
     ])
 
     const labels = card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text())
@@ -2038,7 +2030,7 @@ describe('TaskBoardView', () => {
   it('reads a task\'s attempts as history, with each one\'s chat and ending',
     async () => {
       const reviewed = liveTask({
-        attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+        attempt_state: 'ready_for_review', revision: THIRD_REVISION,
       })
       const attemptsAnswer = {
         workspace: 'personal',
@@ -2130,7 +2122,7 @@ describe('TaskBoardView', () => {
       const approved = task({
         id: 'approved', title: 'Approved result',
         status: 'done', assignee: 'agent',
-        attempt_state: 'ready_for_review', review_state: 'none',
+        attempt_state: 'ready_for_review',
         live_attempt_id: '',
       })
       const wrapper = await mountWithBody([approved])

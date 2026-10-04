@@ -1064,8 +1064,7 @@ async def _op_task_create(service: CiaoMcpService, title: str, body: str = "",
 async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revision: str,
                           title: str | None = None, body: str | None = None,
                           status: str | None = None, project_id: str | None = None,
-                          due: str | None = None, assignee: str | None = None,
-                          review_state: str | None = None) -> dict[str, Any]:
+                          due: str | None = None, assignee: str | None = None) -> dict[str, Any]:
     """Edit one task at the revision you read.
 
     Args:
@@ -1073,7 +1072,7 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
         expected_revision: The `revision` you read. A stale one is a
             `task_revision_conflict` with nothing written — re-read and
             re-plan rather than resending the same revision.
-        title, status, project_id, due, assignee, review_state: Only the
+        title, status, project_id, due, assignee: Only the
             fields you pass change. Omit one to leave it alone.
         body: Replaces the description/links wholesale when given.
 
@@ -1086,7 +1085,7 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
         key: value
         for key, value in (
             ("title", title), ("status", status), ("project_id", project_id),
-            ("due", due), ("assignee", assignee), ("review_state", review_state),
+            ("due", due), ("assignee", assignee),
         )
         if value is not None
     }
@@ -1197,7 +1196,9 @@ async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
 
     action:
         "move"     — set the column. status is required
-            (`backlog`, `in_progress`, `on_hold`, `done`).
+            (`backlog` = To do, `in_progress`, `in_review`, `done`). A task you
+            were delegated reaches `in_review` by your `task_report` with
+            outcome `done`; you need not move it there yourself.
         "complete" — mark it done. **Refused for you**: the user completes a
             task, not the agent, so this returns
             `task_completion_requires_user` however it is spelled. Ask the
