@@ -185,6 +185,17 @@ The TUI footer shows the active model (e.g. "Space Bunny Alpha OpenRouter") — 
    (strongest), both billed to the subscription. For a headless one-off review,
    `claude -p "<prompt>" --model claude-opus-5-5 --allowedTools "Read,Glob,Grep,Bash"`
    works and is fine to smoke-test with.
+
+   **OpenAI models run through opencode on the `openai` provider, not OpenRouter.** When
+   a reviewer or implementer is an OpenAI model (`openai/gpt-6.1-sol`,
+   `openai/gpt-6-luna`, …), launch an `opencode` session and write that id into
+   `<wt>/opencode.json` (`{"model":"openai/gpt-6.1-sol"}`) — the `openai` provider is
+   the user's own OpenAI auth and is billed there, so it is the choice when Anthropic
+   quota or OpenRouter credit is the blocker. Do not route an OpenAI model through
+   `openrouter/openai/...`. **If the model you were asked to use has no working
+   provider — not the Claude Code CLI, not an opencode provider, not OpenRouter —
+   stop and ask the user** rather than silently substituting a different model or a
+   different provider.
 3. Dispatch the task into that terminal. Orca injects the worker preamble (Task/Dispatch IDs, how to send `worker_done`):
 
    ```bash
@@ -271,6 +282,7 @@ Merge procedure:
 
 - **opencode has no `--model` flag in its TUI and Orca's `--model` skips opencode.** The model comes from `<wt>/opencode.json` (§4); git-exclude it or `git add -A` commits it.
 - **Anthropic reviewer models go through Claude Code, not OpenRouter.** The reviewer is a `claude` session (§4); `claude-sonnet-5-5` / `claude-opus-5-5` are subscription-billed and always work. Launching the reviewer as an `opencode` session with `openrouter/anthropic/...` fails the instant OpenRouter is out of credit — the TUI shows `This request requires more credits, or fewer max_tokens … can only afford N`, the round dies before reading the diff, and no verdict is posted. If you see that, do not retry OpenRouter: relaunch the round as a `claude` reviewer. Confirm the balance with `curl -s https://openrouter.ai/api/v1/credits -H "Authorization: Bearer $OPENROUTER_API_KEY"` before blaming the reviewer for a silent non-answer.
+- **OpenAI models go through opencode on the `openai` provider, not OpenRouter.** Set `<wt>/opencode.json` to `{"model":"openai/<id>"}`; the `openai` provider is the user's own auth and bills there, which is what to use when OpenRouter credit is exhausted. If the model you were asked to run has no working provider (not the Claude Code CLI, not an opencode provider, not OpenRouter), **stop and ask the user** — do not silently substitute another model or provider.
 - **Headless runs are invisible and unreliable — don't use them for workers.** `opencode run` without `--standalone` returns within seconds while the session keeps working (seen on #564 R0), and `terminal create --command '<cmd>'` leaves an interactive shell behind, so `--for exit` never fires (#564 R1). If you ever need a one-off headless smoke test, use `opencode run --standalone … ; exit`.
 - **`terminal wait` timing out still prints a result.** Read `wait.satisfied`.
 - **Cheap models claim green tests they never ran**, and sometimes edit tests to pass. Check the diff of `tests/` against the plan's test list every round.
