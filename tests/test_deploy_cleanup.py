@@ -99,6 +99,130 @@ def test_render_launchd_plist_uses_bundled_engine_path() -> None:
     assert "ciao.cli" not in out
 
 
+def _verified_host():
+    """A ``HostOwnership`` snapshot as ``verify_owned_host`` would return it."""
+    from ciao.server_host import (
+        BUNDLE_ID,
+        HOST_PROTOCOL,
+        HOST_REVISION,
+        REQUIRED_BUNDLE_FILES,
+        SCHEMA_VERSION,
+        HostOwnership,
+    )
+
+    digest = "a" * 64
+    return HostOwnership(
+        schema=SCHEMA_VERSION,
+        bundle_path="/Users/me/Applications/Ciaobot Server.app",
+        bundle_id=BUNDLE_ID,
+        host_revision=HOST_REVISION,
+        host_protocol=HOST_PROTOCOL,
+        executable_sha256=digest,
+        per_arch_cdhashes={"arm64": "b" * 40, "x86_64": "c" * 40},
+        bundle_files={name: digest for name in sorted(REQUIRED_BUNDLE_FILES)},
+    )
+
+
+def test_render_launchd_plist_direct_shape_has_no_exit_timeout() -> None:
+    import plistlib
+
+    from ciao.cli import _render_launchd_plist
+
+    out = _render_launchd_plist(
+        workspace=Path("/tmp/ciao-ws"),
+        python_path="/opt/ciao/venv/bin/python",
+        port=8443,
+    )
+
+    data = plistlib.loads(out.encode("utf-8"))
+    assert data["ProgramArguments"] == [
+        "/opt/ciao/venv/bin/python",
+        "-m",
+        "ciao.cli",
+        "run",
+    ]
+    # A bare direct definition must stay byte-identical to before: no
+    # ExitTimeOut key, because only a native host has a stop grace to exceed.
+    assert "ExitTimeOut" not in data
+
+
+def test_render_launchd_plist_with_verified_host_renders_host_argv_and_timeout() -> None:
+    import plistlib
+
+    from ciao.cli import _render_launchd_plist
+
+    host = _verified_host()
+    out = _render_launchd_plist(
+        workspace=Path("/tmp/ciao-ws"),
+        port=8443,
+        host=host,
+        host_python="/opt/ciao/venv/bin/python",
+    )
+
+    data = plistlib.loads(out.encode("utf-8"))
+    # The exact host_service_argv for the canonical verified bundle path, plus
+    # the launchd bound above the host's 35 s stop grace.
+    assert data["ProgramArguments"] == [
+        "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+        "serve",
+        "--python",
+        "/opt/ciao/venv/bin/python",
+    ]
+    assert data["ExitTimeOut"] == 45
+    # The workspace/runtime facts a hosted definition still carries survive.
+    assert data["EnvironmentVariables"]["CIAO_WORKSPACE"] == "/tmp/ciao-ws"
+
+
+def test_render_launchd_plist_host_refuses_a_non_python_interpreter() -> None:
+    import pytest
+
+    from ciao.cli import _render_launchd_plist
+
+    # The install script passes the `ciao` console entry point as --python; the
+    # host contract requires a python executable, and silently writing a
+    # command the host will refuse at launch is not a thing B2 may do.
+    with pytest.raises(ValueError, match="interpreter"):
+        _render_launchd_plist(
+            workspace=Path("/tmp/ciao-ws"),
+            port=8443,
+            host=_verified_host(),
+            host_python="/Users/me/.local/bin/ciao",
+        )
+
+    with pytest.raises(ValueError, match="interpreter it will serve"):
+        _render_launchd_plist(
+            workspace=Path("/tmp/ciao-ws"),
+            port=8443,
+            host=_verified_host(),
+        )
+
+
+def test_write_launchd_plist_hosted_definition_keeps_workspace_discovery(
+    tmp_path: Path,
+) -> None:
+    """Repoint protection and workspace discovery read the plist back.
+
+    A hosted definition carries the same EnvironmentVariables/WorkingDirectory
+    as a direct one, so ``_plist_workspace`` still answers the workspace the
+    guard compares against — a hosted install must not look un-owned.
+    """
+    from ciao.cli import _plist_workspace, _write_launchd_plist
+
+    agents = tmp_path / "LaunchAgents"
+    workspace = tmp_path / "workspace"
+
+    written = _write_launchd_plist(
+        workspace=workspace,
+        launch_agents_dir=agents,
+        port=8443,
+        host=_verified_host(),
+        host_python="/opt/ciao/venv/bin/python",
+    )
+
+    assert written.is_file()
+    assert _plist_workspace(agents) == workspace.resolve()
+
+
 def test_run_step_reports_missing_binary_as_failed_step() -> None:
     from ciao.subprocess_step import run_step as _run_step
 

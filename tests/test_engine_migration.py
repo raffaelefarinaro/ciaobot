@@ -111,6 +111,38 @@ def test_classify_engine_for_non_app_program(tmp_path: Path) -> None:
     assert result.plist_program.endswith(".local/bin/ciao")
 
 
+def test_classify_engine_for_a_hosted_definition(tmp_path: Path) -> None:
+    # The native Ciaobot Server host already fronts the engine. `_app_bundle`
+    # would read the host's own `Ciaobot Server.app` as though it were a stale
+    # Ciaobot.app; the hosted shape is recognised through the host parser and
+    # classifies as an installer-managed engine, on every platform.
+    agents = tmp_path / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (agents / "com.ciao.server.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "com.ciao.server",
+                "ProgramArguments": [
+                    "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/"
+                    "CiaobotServerHost",
+                    "serve",
+                    "--python",
+                    "/opt/ciao/venv/bin/python",
+                ],
+                "EnvironmentVariables": {"CIAO_WORKSPACE": str(workspace)},
+                "WorkingDirectory": str(workspace),
+            }
+        )
+    )
+
+    result = classify(agents)
+
+    assert result.kind == "engine"
+    assert result.plist_program.endswith("CiaobotServerHost")
+
+
 @macos_app_layout
 def test_classify_desktop_host_when_node_state_absent(tmp_path: Path) -> None:
     # No node state at all is the host path: the desktop shell writes one as

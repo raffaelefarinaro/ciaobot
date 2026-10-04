@@ -32,6 +32,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ciao.macos_service import DEFAULT_PORT, default_launch_agents_dir, discover_runtime
+from ciao.server_host import ServerHostError, parse_service_command
 
 # The engine LaunchAgent this classifies from: the same file
 # `macos_service.SERVER_LABEL` names, spelled out because this module also runs
@@ -255,6 +256,24 @@ def _classify(agents: Path) -> Classification:
         # A service definition that names no program is still a service
         # definition somebody's launchd may be running.
         return _unreadable()
+
+    if isinstance(arguments, (list, tuple)) and all(
+        isinstance(argument, str) for argument in arguments
+    ):
+        try:
+            parsed = parse_service_command(list(arguments))
+        except ServerHostError:
+            parsed = None
+        if parsed is not None and parsed.mode == "hosted":
+            # The native `Ciaobot Server.app` host already owns the service.
+            # This migration exists to hand a live `Ciaobot.app` over to the
+            # terminal engine; a hosted definition is already that engine's
+            # front, so there is nothing to migrate and it classifies as an
+            # installer-managed engine. `_app_bundle` would read the host's own
+            # bundle as though it were a `Ciaobot.app`, which is wrong: the
+            # hosted shape is recognised through the host parser, not by
+            # filename.
+            return Classification(kind="engine", plist_program=program)
 
     bundle = _app_bundle(program)
     if not bundle:

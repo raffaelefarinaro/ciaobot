@@ -17,12 +17,18 @@ import subprocess
 import sys
 from dataclasses import asdict, replace
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, public_release, release, service_backend
+from ciao.server_host import (
+    EXIT_TIMEOUT_SECONDS,
+    HostOwnership,
+    ServerHostError,
+    host_service_argv,
+)
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir
 from ciao.jsonio import write_private_text
@@ -149,15 +155,66 @@ def _write_if_missing(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8", newline="")
 
 
-def _launchd_program_arguments(executable: str) -> str:
-    """Render the arguments needed to start either a ciao launcher or Python."""
+def _host_service_arguments(
+    host: HostOwnership, python: str | None
+) -> tuple[str, ...]:
+    """The exact hosted argv for a verified host, or an actionable refusal.
 
-    name = Path(executable).name.lower()
-    arguments = (
-        ["-m", "ciao.cli", "run"]
-        if name == "python" or name.startswith("python3")
-        else ["run"]
-    )
+    ``host`` must be a :class:`ciao.server_host.HostOwnership` returned by
+    :func:`ciao.server_host.verify_owned_host` — the rendered command is built
+    from that canonical ``bundle_path``, never from a raw caller path, because
+    :func:`host_service_argv` can see names but not the bytes behind them.
+
+    ``python`` is the interpreter the host will run. A host cannot serve the
+    ``ciao`` console entry point (its own parser demands a python executable),
+    so a basename that is not ``python``/``python3``/``python3.N`` — or a
+    missing interpreter — is refused here with the reason, rather than being
+    written into launchd to fail at the next sign-in.
+    """
+    if python is None:
+        raise ValueError(
+            "cannot render the Ciaobot Server host service: a verified host "
+            "needs the interpreter it will serve. Pass the absolute python "
+            "the host runs, not the ciao console entry point."
+        )
+    try:
+        return host_service_argv(
+            PurePosixPath(host.bundle_path), PurePosixPath(python)
+        )
+    except ServerHostError as exc:
+        raise ValueError(
+            f"cannot render the Ciaobot Server host service: {exc}"
+        ) from exc
+
+
+def _launchd_program_arguments(
+    executable: str,
+    *,
+    host: HostOwnership | None = None,
+    host_python: str | None = None,
+) -> str:
+    """Render the ``ProgramArguments`` body for a service definition.
+
+    Two shapes, and only one of them renders a verified value:
+
+    * with ``host``, the exact ``CiaobotServerHost serve --python <interpreter>``
+      arguments from :func:`_host_service_arguments` (the host executable is
+      argv[0] and is substituted into ``{{CIAO_EXECUTABLE}}`` by the caller, so
+      only the tail is rendered here);
+    * without ``host``, the direct shape the renderer has always emitted:
+      ``-m ciao.cli run`` for a python interpreter, ``run`` for any other
+      launcher name.
+    """
+
+    if host is not None:
+        arguments = list(_host_service_arguments(host, host_python)[1:])
+    else:
+        name = Path(executable).name.lower()
+        arguments = (
+            ["-m", "ciao.cli", "run"]
+            if name == "python" or name.startswith("python3")
+            else ["run"]
+        )
     return "\n".join(
         f"        <string>{html.escape(argument, quote=False)}</string>"
         for argument in arguments
@@ -173,8 +230,26 @@ def _render_launchd_plist(
     port: int,
     path: str = "",
     template_name: str = "com.ciao.server.plist.tmpl",
+    host: HostOwnership | None = None,
+    host_python: str | None = None,
 ) -> str:
-    executable = engine_path or python_path or sys.executable
+    """Render the server LaunchAgent plist.
+
+    The default direct shape is byte-identical to before: ``python_path`` /
+    ``engine_path`` name the program and the arguments follow the launcher
+    name. When ``host`` is given — a snapshot from
+    ``ciao.server_host.verify_owned_host``, the only proof the bytes are ours —
+    the program becomes the native ``CiaobotServerHost`` running
+    ``serve --python <host_python>`` and the job gains ``ExitTimeOut``
+    ``EXIT_TIMEOUT_SECONDS`` (45 s), so launchd never sweeps the job group out
+    from under the host's own 35 s stop grace. The caller supplying ``host`` in
+    production is the installer (child E); nothing here invents a host.
+    """
+
+    if host is not None:
+        executable = _host_service_arguments(host, host_python)[0]
+    else:
+        executable = engine_path or python_path or sys.executable
     template = resources.files("ciao.stock").joinpath(
         "deploy", template_name
     ).read_text(encoding="utf-8")
@@ -187,12 +262,24 @@ def _render_launchd_plist(
             str((runtime_root or (workspace / ".runtime")).resolve()), quote=False
         ),
         "{{CIAO_EXECUTABLE}}": html.escape(executable, quote=False),
-        "{{LAUNCHD_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(executable),
+        "{{LAUNCHD_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(
+            executable, host=host, host_python=host_python
+        ),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
     }
     for key, value in replacements.items():
         template = template.replace(key, value)
+    if host is not None:
+        # The template has no ExitTimeOut placeholder: a bare direct
+        # definition never has one, and only a hosted definition must exceed
+        # the host's stop grace. Insert it as the last key of the job dict.
+        exit_timeout = (
+            "    <key>ExitTimeOut</key>\n"
+            f"    <integer>{EXIT_TIMEOUT_SECONDS}</integer>\n"
+        )
+        head, marker, tail = template.rpartition("</dict>")
+        template = f"{head}{exit_timeout}{marker}{tail}"
     return template
 
 
@@ -207,6 +294,8 @@ def _write_launchd_plist(
     path: str = "",
     plist_name: str = "com.ciao.server.plist",
     confirm_repoint: bool = False,
+    host: HostOwnership | None = None,
+    host_python: str | None = None,
 ) -> Path:
     if not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
@@ -244,6 +333,8 @@ def _write_launchd_plist(
             port=port,
             path=path,
             template_name=f"{plist_name}.tmpl",
+            host=host,
+            host_python=host_python,
             ),
         encoding="utf-8", newline="",
     )
