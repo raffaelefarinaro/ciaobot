@@ -708,12 +708,55 @@ def test_the_record_is_written_before_the_rename(
 
 
 @requires_posix_uid
+def test_a_concurrent_creation_is_host_exists_and_keeps_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two one-liners race: B writes the record before its rename, then finds A
+    # already renamed an identical host into place (ENOTEMPTY). That is
+    # host_exists, the warn-and-continue code - and B must leave the record: it
+    # can only verify A's byte-identical bundle, so unlinking it would strip the
+    # winner of the record it needs and leave it recordless.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+
+    def racing_rename(src: Any, dst: Any) -> None:
+        # The winner A lands its identical bundle at the target first, then B's
+        # own rename finds it there and fails the way a concurrent one would.
+        if not os.path.lexists(dst):
+            shutil.copytree(src, dst, symlinks=True)
+        raise OSError(errno.ENOTEMPTY, "Directory not empty")
+
+    monkeypatch.setattr(server_host_install.os, "rename", racing_rename)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert caught.value.code in server_host_install.WARN_AND_CONTINUE
+
+    # The winner's host and B's record both survive, and the host reads as ours.
+    assert target.is_dir()
+    assert record.exists()
+    assert verify_owned_host(
+        target, ownership_path=record, runner=_FakeRunner()
+    ) == read_host_ownership(record)
+
+
+@requires_posix_uid
 def test_an_eexist_rename_is_host_exists_not_install_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A concurrent creation after the lexists re-check surfaces at the rename as
-    # EEXIST/ENOTEMPTY; that is "not ours to replace", the warn-and-continue
-    # code, not a local install failure.
+    # The same code mapping with nothing actually landing at the target: EEXIST
+    # is "not ours to replace", the warn-and-continue code, not a local install
+    # failure. The record is still kept - it names the canonical path and can
+    # only ever verify a bundle byte-identical to this run's.
     monkeypatch.setattr(sys, "platform", "darwin")
     archive, _bundle, entry = _fixture(tmp_path)
     target = _target(tmp_path)
@@ -734,9 +777,8 @@ def test_an_eexist_rename_is_host_exists_not_install_failed(
         )
     assert caught.value.code == server_host_install.HOST_EXISTS
     assert caught.value.code in server_host_install.WARN_AND_CONTINUE
-    # The record this run wrote is removed again: no record outlives the bundle
-    # it never got to describe.
-    assert not record.exists()
+    assert not os.path.lexists(target)
+    assert record.exists()
 
 
 @requires_posix_uid
@@ -822,7 +864,9 @@ os._exit(71)
 
 
 @requires_posix_uid
-def test_a_kill_after_the_rename_leaves_a_verified_host(tmp_path: Path) -> None:
+def test_a_kill_after_the_rename_leaves_a_verified_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Kill the process the exact instant after os.rename and before the final
     # verification. Rollback never runs, so the stage dir is stranded - but the
     # record was written first, so the bundle at the target is a consistent,
@@ -851,6 +895,12 @@ def test_a_kill_after_the_rename_leaves_a_verified_host(tmp_path: Path) -> None:
         check=False,
     )
     assert child.returncode == 0, child.stderr
+
+    # The parent's own follow-up install runs in *this* interpreter, so it needs
+    # the same platform patch the child applies to itself; without it
+    # `install_server_host` raises unsupported_platform off macOS. The child is a
+    # separate process and does not inherit this.
+    monkeypatch.setattr(sys, "platform", "darwin")
 
     # The kill landed after the rename: the bundle and its record are both there.
     assert target.is_dir()

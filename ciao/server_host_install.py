@@ -506,6 +506,7 @@ def install_server_host(
 
     renamed = False
     recorded = False
+    keep_record = False
     try:
         staged_app = extract_host_archive(path, stage)
         # Prove the bytes before they reach ~/Applications. This runs the plist
@@ -525,6 +526,10 @@ def install_server_host(
         # the rename leaves a consistent, verified host. Writing it after the
         # rename would put a full native re-inspection (seconds) in the window
         # where a kill leaves a bundle no record vouches for.
+        #
+        # The record is built from the staged snapshot, so it is identical for
+        # two racing installers of the same signed archive - which is what makes
+        # keeping it on a concurrent-creation refusal below safe.
         canonical = os.path.join(os.path.realpath(parent), APP_NAME)
         record_snapshot = dataclasses.replace(staged, bundle_path=canonical)
         _fsync_tree(staged_app)
@@ -533,16 +538,25 @@ def install_server_host(
         try:
             os.rename(staged_app, bundle)
         except OSError as exc:
-            # A concurrent creation after the lexists re-check surfaces as
-            # EEXIST/ENOTEMPTY; that is the same "not ours to replace" refusal,
-            # not a local install failure.
-            code = (
-                HOST_EXISTS
-                if exc.errno in (errno.EEXIST, errno.ENOTEMPTY)
-                else INSTALL_FAILED
-            )
+            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                # A concurrent one-liner won the race and renamed a host into
+                # place first. Its bundle is byte-identical to this one (both
+                # came from the same signed archive), so this run's record can
+                # only ever verify that same host - a foreign or different
+                # bundle still gets `host_exists` on the next read, so nothing is
+                # weakened. Leave the record; unlinking it here would strip the
+                # winner's bundle of the record this run just wrote and leave it
+                # recordless. This is the one refusal that must not roll back the
+                # record.
+                keep_record = True
+                raise ServerHostInstallError(
+                    f"a host bundle appeared at {bundle} while this install was "
+                    f"staging: {exc}",
+                    code=HOST_EXISTS,
+                ) from exc
             raise ServerHostInstallError(
-                f"the staged host could not be moved to {bundle}: {exc}", code=code
+                f"the staged host could not be moved to {bundle}: {exc}",
+                code=INSTALL_FAILED,
             ) from exc
         renamed = True
         _fsync_dir(parent)
@@ -554,10 +568,12 @@ def install_server_host(
         # away again so a recordless host is never left behind, together with a
         # record this run may have written for it. A bundle that was already
         # there is never touched - `renamed` is the fact that separates "this
-        # run put it there" from "this run found it".
+        # run put it there" from "this run found it" - and `keep_record` is the
+        # fact that separates a concurrent creation (where the record verifies
+        # the winner's identical host) from an install failure this run caused.
         if renamed:
             shutil.rmtree(bundle, ignore_errors=True)
-        if recorded:
+        if recorded and not keep_record:
             try:
                 record_path.unlink(missing_ok=True)
             except OSError:
