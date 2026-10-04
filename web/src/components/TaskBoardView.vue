@@ -186,6 +186,8 @@ watch(workspace, () => {
   // holding. `resetDelegate` closes it either way, and the late answer is dropped
   // by the store's own `drawingWorkspace` guard.
   resetDelegate()
+  updateSentTaskId.value = ''
+  updateSentWorkspace.value = ''
   load()
 })
 
@@ -570,6 +572,8 @@ function closeDelegate() {
  * `drawingWorkspace` guard, so closing early loses nothing but a stale answer.
  */
 function resetDelegate() {
+  delegateBusy.value = false
+  updateTaskId.value = ''
   delegateOpen.value = false
   delegateTaskId.value = ''
   delegateBody.value = ''
@@ -608,6 +612,8 @@ async function submitDelegate() {
   }
   board.clearError()
   delegateBusy.value = true
+  const originWorkspace = workspace.value
+  const seq = delegateSeq
   let outcome: TaskAttempt | null = null
   if (delegateMode.value === 'open_chat') {
     delegateBusy.value = false
@@ -622,6 +628,7 @@ async function submitDelegate() {
   } else {
     outcome = await board.delegate(workspace.value, task.id, revision)
   }
+  if (seq !== delegateSeq || workspace.value !== originWorkspace) return
   delegateBusy.value = false
   if (!outcome) return
   board.clearError()
@@ -778,6 +785,7 @@ const updateMessage = computed(() =>
 /** The card whose update is in flight, and the one whose update has landed. */
 const updateTaskId = ref('')
 const updateSentTaskId = ref('')
+const updateSentWorkspace = ref('')
 
 /**
  * Hand the current task to the attempt's own chat, as one ordinary message.
@@ -828,9 +836,12 @@ async function sendTaskUpdate() {
   board.clearError()
   delegateBusy.value = true
   updateTaskId.value = task.id
+  const originWorkspace = workspace.value
+  const seq = delegateSeq
   const sent = await board.sendUpdate(
-    workspace.value, task.id, attemptId, revision, updateMessage.value,
+    originWorkspace, task.id, attemptId, revision, updateMessage.value,
   )
+  if (seq !== delegateSeq || workspace.value !== originWorkspace) return
   delegateBusy.value = false
   updateTaskId.value = ''
   if (!sent) return
@@ -839,6 +850,7 @@ async function sendTaskUpdate() {
   // the control has retired. What is left to say is that it was this card's update
   // and that it landed, which nothing on the row records.
   updateSentTaskId.value = task.id
+  updateSentWorkspace.value = originWorkspace
   closeDelegate()
 }
 
@@ -1335,7 +1347,7 @@ const today = localDateKey()
                        its own (the rebind clears the flag it reads), so without this
                        the card would simply go back to looking untouched and the user
                        could not tell whether the send landed. -->
-                  <p v-if="updateSentTaskId === task.id" class="task-update-sent" role="status">
+                  <p v-if="updateSentWorkspace === workspace && updateSentTaskId === task.id" class="task-update-sent" role="status">
                     Update sent — the agent has it in the linked chat, and its answer
                     will land here.
                   </p>

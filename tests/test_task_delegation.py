@@ -1294,6 +1294,70 @@ async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
     assert _attempt_store(plane).get(outcome["attempt"]["attempt_id"]).state == "ready_for_review"
 
 
+@pytest.mark.parametrize("path", ["update", "answer"])
+async def test_a_live_continuation_records_its_error(tmp_path: Path, path: str) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Continue the same attempt")
+    outcome = _delegate(plane, task)
+    if path == "answer":
+        pcm.get_chat("chat-1").pending_permission = "Allow write"
+    await _end_turns(pcm)
+    before = _get_task(plane, task["id"])
+    assert before["attempt_state"] == ("needs_you" if path == "answer" else "ready_for_review")
+    pcm.get_chat("chat-1").pending_permission = ""
+    pcm.next_events = [{"type": "result", "text": "provider failed", "is_error": True}]
+    if path == "update":
+        edited = plane.workspace_task_update(
+            "personal", task["id"], expected_revision=before["revision"],
+            changes={}, body="Use the revised description",
+        )
+        _update(plane, edited, outcome["attempt"], "Use the revised description")
+    else:
+        pcm.answer_in_chat("chat-1", "Approved")
+    running = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert running.state == "running"
+    assert running.ended_at == ""
+    assert running.detail == ""
+    assert _get_task(plane, task["id"])["review_state"] == "none"
+    assert _get_task(plane, task["id"])["changed_since_delegated"] is False
+    await _end_turns(pcm)
+    assert _get_task(plane, task["id"])["attempt_state"] == "failed"
+    assert _attempt_store(plane).get(running.attempt_id).detail == "provider failed"
+    assert len(_attempt_store(plane).list_for_task(task["id"])) == 1
+
+
+@pytest.mark.parametrize("old_result", [True, False])
+async def test_finished_stream_cannot_settle_the_next_stream(
+    tmp_path: Path, old_result: bool,
+) -> None:
+    from ciao.web.chat_broker import ChatStream
+
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Back to back turns")
+    outcome = _delegate(plane, task)
+    await _end_turns(pcm)
+    first, second = ChatStream(), ChatStream()
+    plane._on_chat_turn_started("chat-1", first)
+    await asyncio.sleep(0)
+    assert first.subscriber_count == 1
+    if old_result:
+        first.publish({"type": "result", "text": "old answer"})
+    first.finish()
+    # No loop drain: the broker has finished A, but its watcher still exists.
+    plane._on_chat_turn_started("chat-1", second)
+    plane._watch_turn("personal", outcome["attempt"]["attempt_id"], task["id"], "chat-1", second)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert second.subscriber_count == 1
+    assert _get_task(plane, task["id"])["attempt_state"] == "running"
+    assert _get_task(plane, task["id"])["review_state"] == "none"
+    second.publish({"type": "result", "is_error": True, "text": "new failure"})
+    second.finish()
+    await asyncio.gather(*plane._watchers)
+    assert _get_task(plane, task["id"])["attempt_state"] == "failed"
+    assert _get_task(plane, task["id"])["review_state"] == "none"
+
+
 async def test_a_turn_in_an_ordinary_chat_re_attaches_nothing(tmp_path: Path) -> None:
     """Every turn announces itself, so the announcement has to be free for the chats
     that have no delegation behind them — and a task nothing is delegated to must not

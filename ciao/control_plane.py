@@ -1016,10 +1016,11 @@ class CiaoControlPlane:
         #: See :meth:`_schedule_watch` — the loop keeps only a weak reference, and
         #: a collected watcher would never settle its attempt.
         self._watchers: set[asyncio.Task[None]] = set()
-        #: Attempts with a watcher attached right now, so re-attaching is a no-op.
+        #: Current stream and its task revision per workspace/attempt. A new
+        #: stream supersedes the old watcher even before its callback has run.
         #: See :meth:`_watch_turn` — a turn in a delegated chat is announced once
         #: per turn, and the paths that start one may announce it too.
-        self._watching: set[str] = set()
+        self._watching: dict[tuple[str, str], tuple[Any, str]] = {}
         self._subscribe_turn_watch()
 
     def _defer_until_chat_idle(
@@ -3159,7 +3160,7 @@ class CiaoControlPlane:
 
     def _watch_turn(
         self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
-    ) -> None:
+    ) -> str:
         """Settle one attempt when its turn ends, and nothing else.
 
         A long task must not hold a file lock, and a settling write that failed
@@ -3176,20 +3177,49 @@ class CiaoControlPlane:
         the user pressed Stop. None of them is ``done`` — that is the user's
         gesture through the same completion route as any other task.
 
-        Idempotent, and that is what lets one method be the re-attach path for
-        every turn: an attempt already being watched is left alone. Two watchers on
+        Idempotent per stream, so the announcement and explicit attach share
+        one watcher while a new stream supersedes its predecessor. Two watchers on
         one stream would settle the same attempt twice and flag the same task for
         review twice, and a delegation that started the turn itself already
         announced that turn to :meth:`_on_chat_turn_started`.
         """
-        if attempt_id in self._watching:
-            return
+        key = (workspace, attempt_id)
+        current = self._watching.get(key)
+        if current is not None and current[0] is stream:
+            return current[1]
         try:
-            self._schedule_watch(workspace, attempt_id, task_id, chat_id, stream)
+            live = self._attempt_call(workspace, lambda store: store.get(attempt_id))
+            document = self._task_call(workspace, lambda store: store.get(task_id))
+            if not live.is_live or document.record.attempt_id != attempt_id:
+                return ""
+            self._attempt_call(workspace, lambda store: store.continue_turn(attempt_id))
+            self._watching[key] = (stream, document.revision)
+            if document.record.review_state == "ready":
+                try:
+                    cleared = self._task_call(
+                        workspace,
+                        lambda store: store.update(
+                            task_id, expected_revision=document.revision,
+                            changes={"review_state": "none"}, actor="user",
+                        ),
+                    )
+                    # Follow only our own write, not an edit the agent never received.
+                    if live.task_revision == document.revision:
+                        self._attempt_call(
+                            workspace, lambda store: store.bind_revision(attempt_id, cleared.revision)
+                        )
+                    document = cleared
+                except ControlPlaneError:
+                    # A concurrent edit refuses the badge write, not the watcher.
+                    # The running lifecycle still makes the old review inactionable.
+                    logger.exception("delegation: could not retire review for task %s", task_id)
+            self._schedule_watch(workspace, attempt_id, task_id, chat_id, stream, document.revision)
+            return str(document.revision)
         except Exception:  # noqa: BLE001 — a watcher that never ran is recoverable
             logger.exception(
                 "delegation: could not watch the turn for attempt %s", attempt_id
             )
+            return ""
 
     def _subscribe_turn_watch(self) -> None:
         """Ask the chat manager to announce the turns a person starts.
@@ -3239,8 +3269,8 @@ class CiaoControlPlane:
         The conversation continuing is the user's own act, and the attempt on the
         card is the one whose chat that is: the badge should follow the chat, or a
         turn answered in the chat would leave the card describing a moment that has
-        already moved on. Attaching is all this does — no state is moved here, and
-        :meth:`_settle_from_result` still refuses to settle an attempt that has
+        already moved on. The accepted turn becomes running before its watcher
+        can settle, and :meth:`_settle_from_result` refuses an attempt that has
         stopped holding its task, so a watcher left over from a released attempt
         cannot flag a card another one now owns.
 
@@ -3275,6 +3305,7 @@ class CiaoControlPlane:
         task_id: str,
         chat_id: str,
         stream: Any,
+        task_revision: str,
     ) -> None:
         """Attach the settling coroutine to the running loop, or settle inline.
 
@@ -3306,17 +3337,21 @@ class CiaoControlPlane:
         # watcher a turn is actually waiting on rather than every turn this process
         # ever delegated.
         self._watchers.add(watcher)
-        # The attempt is now watched, and is no longer so the moment this watcher is:
-        # the marker is what makes a second turn re-attaching rather than attaching
-        # twice, and it has to come off when the watcher finishes or the next turn in
-        # that chat would find the attempt already watched and settle nothing.
-        self._watching.add(attempt_id)
+        # Cleanup belongs to this stream only: an older callback cannot remove
+        # the current turn's marker after a finish/start interleaving.
+        key = (workspace, attempt_id)
+        self._watching[key] = (stream, task_revision)
 
         def _release(finished: asyncio.Task[None]) -> None:
-            self._watching.discard(attempt_id)
+            if self._is_current_turn(workspace, attempt_id, stream):
+                self._watching.pop(key)
             self._watchers.discard(finished)
 
         watcher.add_done_callback(_release)
+
+    def _is_current_turn(self, workspace: str, attempt_id: str, stream: Any) -> bool:
+        current = self._watching.get((workspace, attempt_id))
+        return current is not None and current[0] is stream
 
     async def _await_turn(
         self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
@@ -3336,7 +3371,10 @@ class CiaoControlPlane:
             raise
         except Exception:  # noqa: BLE001 — an unknown outcome is `interrupted`
             logger.exception("delegation: the turn for attempt %s failed to stream", attempt_id)
-            self._settle_interrupted(workspace, attempt_id, "the turn's outcome is unknown")
+            if self._is_current_turn(workspace, attempt_id, stream):
+                self._settle_interrupted(workspace, attempt_id, "the turn's outcome is unknown")
+            return
+        if not self._is_current_turn(workspace, attempt_id, stream):
             return
         if not seen_result:
             # The stream ended without a result event. Whatever the turn did — a
@@ -3390,6 +3428,9 @@ class CiaoControlPlane:
         else:
             state, detail = "ready_for_review", ""
         try:
+            live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
+            if live is None or live.attempt_id != attempt_id or live.chat_id != chat_id:
+                return
             settled = self._attempt_call(
                 workspace,
                 lambda store: store.finish(attempt_id, state, detail=detail),
@@ -3597,12 +3638,18 @@ class CiaoControlPlane:
                     retryable=True,
                 )
             started = stream
+        turn_revision = document.revision
+        if started is not None:
+            turn_revision = self._watch_turn(
+                workspace, attempt.attempt_id, clean_task, attempt.chat_id, started
+            ) or document.revision
+            # Starting the continuation retires the previous review badge, a
+            # revision-safe service write that the accepted update also carries.
+            document = self._task_call(workspace, lambda store: store.get(clean_task))
         bound = self._attempt_call(
             workspace,
-            lambda store: store.bind_revision(attempt.attempt_id, document.revision),
+            lambda store: store.bind_revision(attempt.attempt_id, turn_revision),
         )
-        if started is not None:
-            self._watch_turn(workspace, bound.attempt_id, clean_task, attempt.chat_id, started)
         return {
             # `bound`, for the same reason the delegation reply carries `bound`: the
             # answer's `changed_since_delegated` has to be the one this call just made

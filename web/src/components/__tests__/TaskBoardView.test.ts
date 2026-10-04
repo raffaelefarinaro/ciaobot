@@ -1707,6 +1707,53 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+  it('does not carry a sent confirmation to a colliding workspace task', async () => {
+    const edited = liveTask({ changed_since_delegated: true })
+    apiPost.mockResolvedValue(updateAnswer(edited))
+    const wrapper = await mountWithBody([edited])
+    await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
+    await flushPromises()
+    await wrapper.get('.task-sheet .btn-primary').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.task-update-sent').exists()).toBe(true)
+    apiGet.mockResolvedValue({ workspace: 'work', tasks: [edited] })
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+    expect(card(wrapper, 'Wire the store').exists()).toBe(true)
+    expect(wrapper.find('.task-update-sent').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each(['success', 'refusal'])('drops a late update %s without altering a new sheet', async (result) => {
+    const edited = liveTask({ changed_since_delegated: true })
+    let resolve = (_answer: unknown) => {}
+    let reject = (_error: unknown) => {}
+    apiPost.mockImplementation(() => new Promise((yes, no) => { resolve = yes; reject = no }))
+    const wrapper = await mountWithBody([edited])
+    await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
+    await flushPromises()
+    await wrapper.get('.task-sheet .btn-primary').trigger('click')
+    expect(wrapper.get('.task-sheet .btn-primary').attributes('disabled')).toBeDefined()
+    apiGet.mockImplementation((url: string) => Promise.resolve(url.includes('/api/tasks?')
+      ? { workspace: 'work', tasks: [edited] }
+      : { workspace: 'work', task: { ...edited, body: 'Work description' } }))
+    useProjectStore().activeWorkspace = 'work'
+    await flushPromises()
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Sending…')
+    await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.task-sheet .btn-primary').attributes('disabled')).toBeUndefined()
+    if (result === 'success') resolve(updateAnswer(edited))
+    else reject(new Error('Late refusal'))
+    await flushPromises()
+    expect(wrapper.get('.task-sheet').text()).toContain('Work description')
+    expect(wrapper.get('.task-sheet .btn-primary').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('.task-update-sent').exists()).toBe(false)
+    expect(wrapper.find('.task-action-error').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('shows the update in flight, then keeps the control when the send is refused',
     async () => {
       const edited = liveTask({

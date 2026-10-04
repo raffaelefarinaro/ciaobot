@@ -201,6 +201,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
   async function reload(workspace: string): Promise<void> {
     if (!workspace) return
     if (workspace !== loadedWorkspace.value) {
+      saving.value = false
+      error.value = ''
       rows.value = []
       loadedWorkspace.value = ''
       // Task slugs can collide across workspaces, so a description held for one
@@ -642,7 +644,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
   ): Promise<TaskAttempt | null> {
     if (!workspace || !taskId || !attemptId || !expectedRevision || !message.trim()) return null
     // This write's answer is about to be the newest record the board holds.
-    descriptionSeq++
+    const seq = ++descriptionSeq
+    const current = () => seq === descriptionSeq && drawingWorkspace(workspace)
     saving.value = true
     error.value = ''
     try {
@@ -654,7 +657,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       // and its chat belong to the one that was left, and adopting them here would
       // draw this workspace's linkage under the new name. See
       // {@link drawingWorkspace}.
-      if (!drawingWorkspace(workspace)) return null
+      if (!current()) return null
       // The rebind changed the attempt's own record, so the history a reader would
       // draw is out of date the moment this lands.
       invalidateAttempts()
@@ -665,10 +668,11 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       const attempt = taskAttemptFrom(data?.attempt)
       return attempt.attempt_id ? attempt : null
     } catch (e) {
+      if (!current()) return null
       error.value = taskApiErrorMessage(e, 'Could not send the update')
       return null
     } finally {
-      saving.value = false
+      if (current()) saving.value = false
     }
   }
 
