@@ -27,10 +27,12 @@ from ciao.server_host import (
     EXIT_TIMEOUT_SECONDS,
     HostOwnership,
     ServerHostError,
+    default_bundle_path,
     host_service_argv,
+    verify_owned_host,
 )
 from ciao.setup_status import detect_nested_workspaces
-from ciao.macos_service import default_launch_agents_dir
+from ciao.macos_service import default_launch_agents_dir, hosted_service_python
 from ciao.jsonio import write_private_text
 from ciao.os_support.console import use_utf8_stdio
 from ciao.git_proc import EXACT_BYTES
@@ -326,6 +328,98 @@ def _write_launchd_plist(
         encoding="utf-8", newline="",
     )
     return plist
+
+
+def _verified_host_if_installed() -> HostOwnership | None:
+    """This machine's verified server host, or ``None`` when there is none.
+
+    The one decision setup and registration make about activating the native
+    host: only a snapshot from :func:`ciao.server_host.verify_owned_host` —
+    which reads the owner-only record and proves the installed
+    ``Ciaobot Server.app`` bytes against it — selects the hosted service. A
+    missing record, a foreign or tampered bundle and every non-macOS platform
+    read as "no host", so the current direct shape is written instead. Nothing
+    here writes, signs, launches or starts anything, and no path renders a host
+    without that proof: verification is not inferred from a filename.
+
+    The bundle is :func:`ciao.server_host.default_bundle_path`, which is exactly
+    where the E1 installer installs and records the host, so the path the
+    installer used is the one verified.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        return verify_owned_host(default_bundle_path())
+    except (ServerHostError, OSError):
+        return None
+
+
+def _host_engine_interpreter(resolved_engine: str) -> str:
+    """The python a selected host must serve, from the direct path's program.
+
+    The direct shape writes ``resolved_engine`` as its program: the engine
+    interpreter itself when setup was handed one, or the ``ciao`` console the
+    release installer passes as ``--python``. A host cannot serve that console
+    — its own parser demands a python executable — so the console resolves to
+    this process's interpreter, which is the engine interpreter behind it when
+    setup runs from the installed ``ciao``. Anything else is passed through
+    untouched, so :func:`_host_service_arguments` refuses it with the reason
+    instead of a made-up interpreter being written into launchd.
+    """
+    if Path(resolved_engine).name.lower() == "ciao":
+        return sys.executable
+    return resolved_engine
+
+
+def _hosted_definition_program(data: dict[str, Any]) -> str | None:
+    """argv[0] of a strict hosted definition in *data*, or ``None``.
+
+    Recognition only: the hosted shape is confirmed through
+    :func:`ciao.macos_service.hosted_service_python`, the one recognizer B2
+    shares across consumers, and then argv[0] — the host executable — is read
+    off the same argv so a caller can ask whether it still exists. A direct,
+    legacy, unknown or malformed argv answers ``None`` and never raises.
+    """
+    arguments = data.get("ProgramArguments")
+    if hosted_service_python(arguments) is None:
+        return None
+    if not isinstance(arguments, (list, tuple)) or not arguments:
+        return None
+    program = arguments[0]
+    return program if isinstance(program, str) else None
+
+
+def _existing_hosted_definition_serves(launch_agents_dir: Path, workspace: Path) -> bool:
+    """Whether the installed definition is hosted, live and serves *workspace*.
+
+    The preservation half of activation. When no verified host is selected this
+    run, re-rendering would silently downgrade a live hosted job to the direct
+    shape, so the existing ``com.ciao.server.plist`` is read back first. Only a
+    definition that parses as the strict hosted shape, names the requested
+    workspace, **and** still names a host executable that exists as a regular
+    file is preserved; a missing, unreadable, direct, unknown/legacy,
+    other-workspace or dead definition answers ``False``.
+
+    The existence check is the narrow guard that gives a dead definition a
+    repair path: if the ``Ciaobot Server.app`` was deleted or moved, keeping the
+    hosted plist would leave launchd a job it cannot run and the documented
+    ``ciao setup && ciao service start`` could never write the working direct
+    shape. Requiring existence (and nothing stronger — no record, no native
+    probe) keeps a live hosted definition byte-for-byte. Recognition never
+    raises. Non-macOS platforms never have a hosted definition, so the check is
+    skipped there and their offline export stays byte-identical to before.
+    """
+    if sys.platform != "darwin":
+        return False
+    data = _load_server_plist(launch_agents_dir)
+    if data is None:
+        return False
+    program = _hosted_definition_program(data)
+    if program is None:
+        return False
+    if _plist_data_workspace(data) != workspace:
+        return False
+    return Path(program).is_file()
 
 
 def _setup_token_path(workspace: Path) -> Path:
@@ -1307,16 +1401,41 @@ def setup_workspace(
             except (ValueError, windows_service.WindowsServiceError) as exc:
                 raise RuntimeError(str(exc)) from exc
         else:
-            written.append(_write_launchd_plist(
-                workspace=root,
-                launch_agents_dir=launch_dir,
-                engine_path=resolved_engine,
-                runtime_root=runtime_root,
-                port=port,
-                path=os.environ.get("PATH", ""),
-                plist_name="com.ciao.server.plist",
-                confirm_repoint=confirm_repoint,
-            ))
+            # Activation (E2): only a verified host selects the native hosted
+            # service; an absent, foreign or unverified host is not claimed and
+            # the direct shape is written. When no host is selected this run but
+            # the installed definition is already hosted and serves this
+            # workspace, it is left exactly as it is: re-rendering would silently
+            # downgrade a live hosted job to the direct shape.
+            host = _verified_host_if_installed()
+            if host is None and _existing_hosted_definition_serves(launch_dir, root):
+                # A hosted definition already owns this workspace; setup is a
+                # faithful no-op for the service definition, not a downgrade.
+                written.append(launch_dir.expanduser() / "com.ciao.server.plist")
+            else:
+                try:
+                    written.append(_write_launchd_plist(
+                        workspace=root,
+                        launch_agents_dir=launch_dir,
+                        engine_path=resolved_engine,
+                        runtime_root=runtime_root,
+                        port=port,
+                        path=os.environ.get("PATH", ""),
+                        plist_name="com.ciao.server.plist",
+                        confirm_repoint=confirm_repoint,
+                        host=host,
+                        host_python=(
+                            _host_engine_interpreter(resolved_engine)
+                            if host is not None
+                            else None
+                        ),
+                    ))
+                except ValueError as exc:
+                    # The render-time refusal B2 defines (a host given without
+                    # the python it must serve). Both `ciao setup` callers catch
+                    # RuntimeError and report it as a message, so it is never a
+                    # traceback.
+                    raise RuntimeError(str(exc)) from exc
             # Explicit --launch-agents-dir also permits offline plist generation.
             _remove_legacy_app_shortcuts(app_root_dir)
             _disable_legacy_menubar_agent(launch_dir)
@@ -1347,13 +1466,30 @@ def _looks_like_source_checkout(path: Path) -> bool:
 def _plist_workspace(launch_agents_dir: Path) -> Path | None:
     """Workspace the server LaunchAgent currently points at, if set up."""
 
+    return _plist_data_workspace(_load_server_plist(launch_agents_dir))
+
+
+def _load_server_plist(launch_agents_dir: Path) -> dict[str, Any] | None:
+    """The parsed ``com.ciao.server.plist`` dict, or ``None`` if unreadable."""
+
     plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
     try:
         with plist.open("rb") as handle:
             data = plistlib.load(handle)
     except (OSError, ValueError):
         return None
-    workspace = (data.get("EnvironmentVariables") or {}).get("CIAO_WORKSPACE")
+    return data if isinstance(data, dict) else None
+
+
+def _plist_data_workspace(data: dict[str, Any] | None) -> Path | None:
+    """The resolved ``CIAO_WORKSPACE`` a parsed server plist names, if any."""
+
+    if data is None:
+        return None
+    environment = data.get("EnvironmentVariables")
+    if not isinstance(environment, dict):
+        return None
+    workspace = environment.get("CIAO_WORKSPACE")
     if not workspace:
         return None
     try:
@@ -5810,14 +5946,29 @@ def _register_launchd_service(workspace: Path) -> Path:
     runtime_root = Path(runtime_value).expanduser()
     if not runtime_root.is_absolute():
         runtime_root = root / runtime_root
-    return _write_launchd_plist(
-        workspace=root,
-        launch_agents_dir=default_launch_agents_dir(),
-        engine_path=os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable,
-        runtime_root=runtime_root,
-        port=_pwa_port_from_env(root, macos_service.DEFAULT_PORT),
-        path=os.environ.get("PATH", ""),
-    )
+    launch_dir = default_launch_agents_dir()
+    resolved_engine = os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable
+    # Activation (E2): a verified host selects the hosted service, otherwise the
+    # direct shape is written. The only caller registers when no definition is
+    # installed, so there is no hosted definition here to preserve.
+    host = _verified_host_if_installed()
+    host_python = _host_engine_interpreter(resolved_engine) if host is not None else None
+    try:
+        return _write_launchd_plist(
+            workspace=root,
+            launch_agents_dir=launch_dir,
+            engine_path=resolved_engine,
+            runtime_root=runtime_root,
+            port=_pwa_port_from_env(root, macos_service.DEFAULT_PORT),
+            path=os.environ.get("PATH", ""),
+            host=host,
+            host_python=host_python,
+        )
+    except ValueError as exc:
+        # The render-time refusal (a host given without the python it must
+        # serve) surfaces as the RuntimeError/ServiceResult message its callers
+        # already handle, never a traceback.
+        raise RuntimeError(str(exc)) from exc
 
 
 def _service_command(args: argparse.Namespace) -> int:
