@@ -331,7 +331,7 @@ watch(workspace, (next, previous) => {
                 @click="load"
               >Recheck</button>
               <button
-                v-if="row.chat_id"
+                v-if="row.chat_live"
                 type="button"
                 class="btn-secondary btn-small"
                 @click="openChat(row.chat_id)"
