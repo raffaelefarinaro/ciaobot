@@ -3,8 +3,12 @@
 `native/server-host/ServerHost.swift` is the production, persistent macOS host
 for Ciaobot (#1009, child A of #1008). It is small on purpose: a stable,
 immutable permission identity in front of a Python engine that stays
-independently updatable. The installer does **not** wire it up yet — service
-activation, manifest coverage and the installer transaction are later children.
+independently updatable. The installer acquires and records it (#1050, child E1)
+and `ciao setup` / service registration activate it from a verified snapshot
+(#1060, child E2): a hosted definition is written only when
+`ciao.server_host.verify_owned_host` proves the installed bundle, is preserved
+across re-runs, and otherwise the direct shape is kept. Host upgrade and rollback
+are later children.
 
 ## What it does
 
@@ -200,8 +204,10 @@ PYTHONPATH=$PWD python -m pytest tests/test_server_host.py -q
 
 ## Not in this child
 
-Service activation, the update/rollback ownership contract, release-manifest
-coverage of the host archive, the installer transaction, and all live
-launchd/TCC validation are later children of #1008. This foundation alone does
-not integrate the installer, and it never runs `launchctl`, `open`, a live
-permission request, or the engine.
+The update/rollback ownership contract, release-manifest coverage of the host
+archive, and all live launchd/TCC validation are later children of #1008. Host
+acquisition and the ownership record are E1 (#1050); selecting the hosted
+service from a verified snapshot in `ciao setup` / service registration is E2
+(#1060, `tests/test_server_host_activation.py`) and changes no live service and
+runs no `launchctl`, `open` or live permission request. This document describes
+the host itself, not the installer transaction.
