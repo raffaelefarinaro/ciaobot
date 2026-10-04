@@ -3,18 +3,20 @@
  * The workspace task board (`/tasks`).
  *
  * Four fixed columns — Backlog, In progress, On hold, Done — on a wide pane, and
- * one status-filtered list on a narrow one. There is no drag: a card's status is
- * a native `<select>`, which is a control a keyboard, a screen reader and a
- * phone can all use.
+ * one status-filtered list on a narrow one. On the columns a card is dragged to
+ * another lane, or moved one lane over with Shift+←/→ while its title has focus.
+ * Everywhere, the editor's status control is the path a screen reader and a phone
+ * use: a card carries no status control of its own, because its column already
+ * says where it is.
  *
  * Every write goes through `stores/taskBoard.ts` at the `revision` this pane read,
  * so a board drawn from an older read gets the server's 409 with its rows intact
  * instead of overwriting what is on disk now.
  *
- * **Delegation** adds a card action, an attempt badge, a link to the chat an
- * attempt ran in, and the gestures that own a turn — Stop and Detach for a live
- * one, Resume and Retry for a settled one, both reached from the preview as well
- * as the card. Four things this pane is careful not to imply:
+ * **Delegation** starts in the editor's Agent block, where the preview is, and
+ * adds an attempt badge, a link to the chat an attempt ran in, and the gestures
+ * that own a turn — Stop and Detach for a live one, Resume and Retry for a
+ * settled one, on the card's foot and in the editor. Four things this pane is careful not to imply:
  *
  * - A finished turn is a **badge**, never *Done*. `ready_for_review` draws in
  *   *In progress* and only the user's own Done moves the card.
@@ -39,7 +41,7 @@
  * that disagrees with itself is **flagged with what disagrees and the controls
  * that resolve it** rather than silently rewritten.
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
@@ -298,23 +300,15 @@ const busyTaskId = ref('')
 /**
  * Move one card to another column.
  *
- * The `<select>` is put back to the column the row is actually in before the
- * request goes out, so a refused move never leaves a card claiming a column it
- * was never admitted to. Moving *to* Done is the completion gesture, which is
- * why it goes to `complete` rather than through the status field: the store
- * enforces completion as the signed-in user's own act.
+ * Moving *to* Done is the completion gesture, which is why it goes to `complete`
+ * rather than through the status field: the store enforces completion as the
+ * signed-in user's own act.
  */
-async function moveTask(task: Task, event: Event) {
-  const select = event.target as HTMLSelectElement
-  const next = select.value as TaskStatus
-  select.value = task.status
-  if (next === task.status) return
+async function moveTo(task: Task, next: TaskStatus) {
+  if (next === task.status || busyTaskId.value === task.id) return
   const revision = board.revisionOf(task.id)
-  if (!revision) {
-    board.clearError()
-    return
-  }
   board.clearError()
+  if (!revision) return
   busyTaskId.value = task.id
   if (next === 'done') await board.complete(workspace.value, task.id, revision)
   else await board.update(workspace.value, task.id, revision, { status: next })
@@ -322,6 +316,70 @@ async function moveTask(task: Task, event: Event) {
   // A refused write means the record moved on, so re-read rather than leave the
   // user holding a conflict they can only clear by switching workspace.
   if (board.error) load()
+}
+
+// ── Drag between columns ──────────────────────────────────────────────────
+//
+// Pointer only, and only while the four columns are drawn: the narrow list has
+// no lane to drop on. The id rides in the component rather than read back from
+// `dataTransfer`, which browsers hide until the drop.
+
+const dragTaskId = ref('')
+const dropStatus = ref<TaskStatus | ''>('')
+
+const dragTask = computed(() => tasks.value.find((task) => task.id === dragTaskId.value) ?? null)
+
+function onDragStart(task: Task, event: DragEvent) {
+  dragTaskId.value = task.id
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    // Firefox starts no drag without data.
+    event.dataTransfer.setData('text/plain', task.title)
+  }
+}
+
+function onDragEnd() {
+  dragTaskId.value = ''
+  dropStatus.value = ''
+}
+
+function onDragOver(status: TaskStatus | null, event: DragEvent) {
+  const task = dragTask.value
+  if (!task || !status || status === task.status) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dropStatus.value = status
+}
+
+function onDragLeave(status: TaskStatus | null, event: DragEvent) {
+  const into = event.relatedTarget as Node | null
+  if (into && (event.currentTarget as HTMLElement).contains(into)) return
+  if (dropStatus.value === status) dropStatus.value = ''
+}
+
+function onDrop(status: TaskStatus | null) {
+  const task = dragTask.value
+  onDragEnd()
+  if (task && status) void moveTo(task, status)
+}
+
+/**
+ * The keyboard's drag: Shift+←/→ on a focused card moves it one column over.
+ *
+ * Not Alt: Option+Arrow is the app-wide section switch. Only on the columns,
+ * where left and right mean something on screen. Focus
+ * follows the card into its new lane once the move has landed.
+ */
+async function onCardKeydown(task: Task, event: KeyboardEvent) {
+  if (!event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || lanes.value.length < 2) return
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  const order = TASK_STATUS_OPTIONS.map((option) => option.status)
+  const next = order[order.indexOf(task.status) + (event.key === 'ArrowLeft' ? -1 : 1)]
+  if (!next) return
+  event.preventDefault()
+  await moveTo(task, next)
+  await nextTick()
+  paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${task.id}"] .task-open`)?.focus()
 }
 
 async function markDone(task: Task) {
@@ -908,6 +966,19 @@ const detailId = ref('')
 const descriptionState = ref<'idle' | 'loading' | 'failed'>('idle')
 /** A successful Save, so the dialog says so rather than only going quiet. */
 const savedAt = ref(0)
+/**
+ * The description reads rendered until the user asks to edit it. An empty one
+ * has nothing to read, so it opens straight in the editor.
+ */
+const editingBody = ref(false)
+const bodyEditorShown = computed(() => editingBody.value || !detailForm.body.trim())
+const bodyField = ref<HTMLTextAreaElement | null>(null)
+
+async function editBody() {
+  editingBody.value = true
+  await nextTick()
+  bodyField.value?.focus()
+}
 const detailForm = reactive({
   title: '',
   status: 'backlog' as TaskStatus,
@@ -971,14 +1042,14 @@ const detailAttemptBadgeClass = computed(() =>
  */
 const detailDelegateLabel = computed(() => {
   const task = detailTask.value
-  if (!task) return 'Delegate'
+  if (!task) return 'Delegate to agent'
   switch (delegateModeFor(task)) {
     case 'open_chat':
       return 'Open chat'
     case 'resume':
       return 'Resume'
     default:
-      return 'Delegate'
+      return 'Delegate to agent'
   }
 })
 
@@ -1039,6 +1110,7 @@ function openDetail(task: Task) {
   detailForm.project_id = task.project_id
   detailForm.body = held?.body ?? ''
   savedAt.value = 0
+  editingBody.value = false
   detailOpen.value = true
   void loadDescription(task.id)
 }
@@ -1052,20 +1124,20 @@ function closeDetail() {
   board.clearError()
 }
 
-/** The status field of the open dialog is a move, written the moment it changes. */
-async function onDetailStatusChange(event: Event) {
-  const select = event.target as HTMLSelectElement
-  const next = select.value as TaskStatus
+/**
+ * The editor's status control is a move, written the moment it is pressed.
+ *
+ * Only Done is the completion gesture. Any other status is a plain move, and
+ * routing it through `complete` would mark a task done while the user chose
+ * "On hold" — a write to the record, not just to this dialog.
+ */
+async function setDetailStatus(next: TaskStatus) {
   const task = detailTask.value
-  select.value = detailForm.status
-  if (!task || next === detailForm.status) return
+  if (!task || next === detailForm.status || detailSaving.value) return
   const revision = board.revisionOf(task.id)
   if (!revision) return
   board.clearError()
   detailSaving.value = true
-  // Only Done is the completion gesture. Any other status is a plain move, and
-  // routing it through `complete` would mark a task done while the user chose
-  // "On hold" — a write to the record, not just to this dialog.
   const saved = next === 'done'
     ? await board.complete(workspace.value, task.id, revision)
     : await board.update(workspace.value, task.id, revision, { status: next })
@@ -1074,10 +1146,23 @@ async function onDetailStatusChange(event: Event) {
     load()
     return
   }
-  // The select is bound to this field, so it has to follow the record the write
-  // actually stored rather than snapping back to what it was when it opened.
+  // Follow the record the write actually stored.
   detailForm.status = saved.status
   board.clearError()
+}
+
+/** Arrow keys walk the status radios, as a native radio group does. */
+function onStatusKeydown(event: KeyboardEvent) {
+  const step = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[event.key]
+  if (!step) return
+  event.preventDefault()
+  const order = TASK_STATUS_OPTIONS.map((option) => option.status)
+  const at = order.indexOf(detailForm.status)
+  const next = order[(at + step + order.length) % order.length]!
+  void setDetailStatus(next)
+  void nextTick(() => {
+    detailEl.value?.querySelector<HTMLElement>(`[data-status="${next}"]`)?.focus()
+  })
 }
 
 /**
@@ -1167,14 +1252,13 @@ function retryDescription() {
 }
 
 /**
- * The description as it will read.
+ * The description as it reads, shown until the user presses Edit.
  *
  * `renderUserMarkdown`, not `renderMarkdown`: a task body is prose the user
  * edits in this very dialog, so raw HTML in it is escaped and shown as typed
  * rather than parsed. It still goes through DOMPurify.
  */
 const bodyPreview = computed(() => renderUserMarkdown(detailForm.body))
-const createPreview = computed(() => renderUserMarkdown(createForm.body))
 
 const today = localDateKey()
 </script>
@@ -1297,9 +1381,9 @@ const today = localDateKey()
             from the command line with <code>ciao task</code>.
           </p>
 
-          <!-- One card, one status select, one render path. Wide with no status
-               picked the lanes are the four columns; narrow (or filtered) it is
-               the one lane, and CSS lays it out as a list. -->
+          <!-- One card, one render path. Wide with no status picked the lanes are
+               the four columns, and a card drags between them; narrow (or
+               filtered) it is the one lane, and CSS lays it out as a list. -->
           <div
             v-else
             class="task-lanes"
@@ -1309,36 +1393,76 @@ const today = localDateKey()
               v-for="lane in lanes"
               :key="lane.status || 'all'"
               class="task-lane"
+              :class="{ 'task-lane--drop': lane.status && dropStatus === lane.status }"
               :aria-label="lane.label"
+              @dragover="onDragOver(lane.status, $event)"
+              @dragleave="onDragLeave(lane.status, $event)"
+              @drop.prevent="onDrop(lane.status)"
             >
               <h3 class="task-lane-head">
                 <span class="task-lane-label">{{ lane.label }}</span>
                 <span class="badge badge--muted">{{ lane.tasks.length }}</span>
               </h3>
-              <p v-if="!lane.tasks.length" class="task-lane-empty">Nothing here.</p>
+              <p v-if="!lane.tasks.length" class="task-lane-empty">
+                {{ dragTask && lane.status && dragTask.status !== lane.status ? 'Drop here.' : 'Nothing here.' }}
+              </p>
               <ul v-else class="task-cards">
                 <li
                   v-for="task in lane.tasks"
                   :key="task.id"
                   class="task-card"
+                  :class="{ 'task-card--dragging': dragTaskId === task.id, 'task-card--done': task.status === 'done' }"
+                  :data-task-id="task.id"
+                  :draggable="lanes.length > 1 && busyTaskId !== task.id ? 'true' : 'false'"
                   @click="openDetail(task)"
+                  @dragstart="onDragStart(task, $event)"
+                  @dragend="onDragEnd"
                 >
                   <div class="task-card-head">
+                    <!-- Done is the one gesture every card offers, so it is the
+                         card's own checkbox rather than a button in a row of them.
+                         A review-ready card is approved instead, below. -->
+                    <button
+                      v-if="task.status !== 'done' && !isReviewReady(task)"
+                      type="button"
+                      class="task-check"
+                      :disabled="busyTaskId === task.id"
+                      :aria-label="`Mark ${task.title} done`"
+                      title="Mark done"
+                      @click.stop="markDone(task)"
+                    ><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 8.5l2.5 2.5L12 5.5" /></svg></button>
+                    <span v-else-if="task.status === 'done'" class="task-check task-check--done" aria-hidden="true">
+                      <svg viewBox="0 0 16 16"><path d="M4 8.5l2.5 2.5L12 5.5" /></svg>
+                    </span>
                     <button
                       type="button"
                       class="task-open"
                       :aria-label="`Edit ${task.title}`"
+                      :aria-keyshortcuts="lanes.length > 1 ? 'Shift+ArrowLeft Shift+ArrowRight' : undefined"
                       @click.stop="openDetail(task)"
+                      @keydown="onCardKeydown(task, $event)"
                     >{{ task.title }}</button>
-                    <span class="task-card-badges">
-                      <span
-                        v-if="task.attempt_state"
-                        class="badge"
-                        :class="attemptBadgeClass(task)"
-                      >{{ taskAttemptLabel(task.attempt_state) }}</span>
-                      <span v-if="task.review_state === 'ready'" class="badge badge--accent2">Review</span>
-                    </span>
                   </div>
+                  <!-- Only what differs from the default: General and For me are what
+                       most cards are, and saying so on each one buries the rest. The
+                       mixed list has no column to say a card's status, so it does. -->
+                  <p
+                    v-if="!lane.status || task.attempt_state || task.project_id || formatTaskDue(task.due) || task.assignee !== 'user'"
+                    class="task-meta"
+                  >
+                    <span
+                      v-if="task.attempt_state"
+                      class="badge"
+                      :class="attemptBadgeClass(task)"
+                    >{{ taskAttemptLabel(task.attempt_state) }}</span>
+                    <span v-if="task.review_state === 'ready'" class="badge badge--accent2">Review</span>
+                    <span v-if="!lane.status" class="badge badge--muted task-status-badge">{{ taskStatusLabel(task.status) }}</span>
+                    <span v-if="task.project_id" class="task-project">{{ projectName(task.project_id) }}</span>
+                    <span v-if="formatTaskDue(task.due)" class="badge" :class="isOverdue(task, today) ? 'badge--error' : 'badge--muted'">
+                      {{ isOverdue(task, today) ? 'Overdue · ' : 'Due ' }}{{ formatTaskDue(task.due) }}
+                    </span>
+                    <span v-if="task.assignee !== 'user'" class="task-assignee">{{ taskAssigneeLabel(task.assignee) }}</span>
+                  </p>
                   <p v-if="task.changed_since_delegated" class="task-changed">
                     Changed since delegated — the result was reached against an older
                     description.
@@ -1376,29 +1500,10 @@ const today = localDateKey()
                       <span class="task-reconcile-actions">{{ note.actions }}</span>
                     </p>
                   </div>
-                  <p class="task-meta">
-                    <span class="task-project">{{ projectName(task.project_id) }}</span>
-                    <span v-if="formatTaskDue(task.due)" class="badge" :class="isOverdue(task, today) ? 'badge--error' : 'badge--muted'">
-                      {{ isOverdue(task, today) ? 'Overdue · ' : 'Due ' }}{{ formatTaskDue(task.due) }}
-                    </span>
-                    <span class="task-assignee">{{ taskAssigneeLabel(task.assignee) }}</span>
-                  </p>
-                  <div class="task-card-foot">
-                    <label class="sr-only" :for="`task-status-${task.id}`">
-                      Status for {{ task.title }}
-                    </label>
-                    <select
-                      :id="`task-status-${task.id}`"
-                      class="task-filter task-status"
-                      :value="task.status"
-                      :disabled="busyTaskId === task.id"
-                      @click.stop
-                      @change="moveTask(task, $event)"
-                    >
-                      <option v-for="option in TASK_STATUS_OPTIONS" :key="option.status" :value="option.status">
-                        {{ option.label }}
-                      </option>
-                    </select>
+                  <!-- Only a delegated card has a foot: the gestures that act on its
+                       attempt. Handing a task over starts in the editor, where the
+                       preview is. -->
+                  <div v-if="task.attempt_id || task.chat_id" class="task-card-foot">
                     <!-- The attempt's chat, when the board knows one. A button rather
                          than a link because it goes through the project store, not a
                          route — the same call the sidebar row makes. -->
@@ -1438,15 +1543,6 @@ const today = localDateKey()
                         @click.stop="markDone(task)"
                       >Approve Done</button>
                     </template>
-                    <template v-else-if="!task.live_attempt_id && !isSettledLinked(task)">
-                      <button
-                        type="button"
-                        class="btn-chip task-chip"
-                        :disabled="busyTaskId === task.id"
-                        :aria-label="`Delegate ${task.title} to the agent`"
-                        @click.stop="openDelegate(task)"
-                      >Delegate</button>
-                    </template>
                     <!-- A settled attempt still holds the task, and it is the only
                          case the server will resume. Resume continues that chat
                          under the same attempt; Retry mints a new one. They are
@@ -1469,7 +1565,7 @@ const today = localDateKey()
                         @click.stop="actOnAttempt(task, 'retry')"
                       >Retry</button>
                     </template>
-                    <template v-else>
+                    <template v-else-if="task.live_attempt_id">
                       <button
                         type="button"
                         class="btn-chip task-chip"
@@ -1485,25 +1581,6 @@ const today = localDateKey()
                         @click.stop="actOnAttempt(task, 'detach')"
                       >Detach</button>
                     </template>
-                    <!-- History is on any card that was ever delegated: a retried or
-                         stopped attempt is a record, not something the current badge
-                         replaces. -->
-                    <button
-                      v-if="task.attempt_state"
-                      type="button"
-                      class="btn-chip task-chip"
-                      :disabled="busyTaskId === task.id"
-                      :aria-label="`Show every attempt at ${task.title}`"
-                      @click.stop="openHistory(task)"
-                    >History</button>
-                    <button
-                      v-if="!isReviewReady(task) && task.status !== 'done'"
-                      type="button"
-                      class="btn-chip task-chip"
-                      :disabled="busyTaskId === task.id"
-                      :aria-label="`Mark ${task.title} done`"
-                      @click.stop="markDone(task)"
-                    >Done</button>
                   </div>
                 </li>
               </ul>
@@ -1566,11 +1643,6 @@ const today = localDateKey()
             <label for="task-create-body">Description</label>
             <textarea id="task-create-body" v-model="createForm.body" rows="4"></textarea>
             <p class="hint">Markdown. Optional.</p>
-            <details v-if="createForm.body" class="task-preview">
-              <summary>Preview</summary>
-              <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
-              <div class="task-preview-body markdown" v-html="createPreview"></div>
-            </details>
           </div>
           <div class="form-actions">
             <button
@@ -1797,125 +1869,6 @@ const today = localDateKey()
           <button type="button" class="btn-icon" aria-label="Close" @click="closeDetail">×</button>
         </header>
 
-        <!-- Delegation, inside the editor rather than on the card foot.
-             The card's controls are the ones that change a card — a status move, a
-             completion — and a delegation is not that: it starts a turn elsewhere
-             and the card's own fields are untouched. It is also the gesture that
-             needs a *preview*, and a sheet is where a preview belongs. One place
-             carries the whole lifecycle: delegate, open the chat, resume, retry,
-             stop, detach. -->
-        <div class="task-delegate">
-          <p v-if="detailAttemptState" class="task-delegate-state">
-            <span class="badge" :class="detailAttemptBadgeClass">{{
-              taskAttemptLabel(detailAttemptState)
-            }}</span>
-            <span v-if="detailTask?.chat_id" class="hint">
-              Working in
-              <button type="button" class="btn-chip task-chip" @click="openAttemptChat(detailTask)">
-                the chat
-              </button>
-            </span>
-          </p>
-          <p v-if="detailTask?.changed_since_delegated" class="task-changed">
-            Changed since delegated — the result was reached against an older
-            description.
-          </p>
-          <p v-if="detailTask && isReviewReady(detailTask)" class="task-review">
-            <span class="task-review-lead">Ready for review.</span>
-            <span v-if="reviewEnded(detailTask)" class="task-review-when">
-              {{ reviewEnded(detailTask) }}.
-            </span>
-            The result is in the linked chat — read it there, then approve Done to
-            close the card.
-          </p>
-          <div
-            v-if="detailTask && reconcile(detailTask).length"
-            class="task-reconcile"
-          >
-            <p
-              v-for="note in detailTask ? reconcile(detailTask) : []"
-              :key="note.code"
-              class="task-reconcile-note"
-              role="status"
-            >
-              <span class="badge" :class="taskReconcileBadgeClass(note.code)" :data-code="note.code">{{ taskReconcileLabel(note.code) }}</span>
-              {{ note.text }}
-              <span class="task-reconcile-actions">{{ note.actions }}</span>
-            </p>
-          </div>
-          <div class="task-delegate-actions">
-            <button
-              type="button"
-              class="btn-chip task-chip"
-              :disabled="detailSaving || board.saving || !detailTask"
-              @click="openDelegate(detailTask!)"
-            >{{ detailDelegateLabel }}</button>
-            <!-- The one gesture that completes a reviewed result. The same call the
-                 card's Approve Done makes: the service releases the linkage and
-                 closes the card together, so the attempt stays as review-ready
-                 history instead of settling as stopped. -->
-            <button
-              v-if="detailTask && isReviewReady(detailTask) && detailTask.status !== 'done'"
-              type="button"
-              class="btn-chip task-chip"
-              :disabled="detailSaving || board.saving"
-              @click="markDone(detailTask!)"
-            >Approve Done</button>
-            <button
-              v-if="detailTask?.changed_since_delegated && detailTask?.chat_id"
-              type="button"
-              class="btn-chip task-chip"
-              :disabled="detailSaving || board.saving"
-              @click="openDelegate(detailTask!, 'update')"
-            >Send update</button>
-            <button
-              v-if="detailTask?.attempt_state"
-              type="button"
-              class="btn-chip task-chip"
-              :disabled="detailSaving || board.saving"
-              @click="openHistory(detailTask!)"
-            >History</button>
-            <!-- Deliberately not a second Resume/Retry pair here: this control
-                 already opens the preview in the mode the row calls for, and the
-                 preview names both ways out. A duplicate that opened a sheet and a
-                 duplicate that acted immediately would be the same label on two
-                 different gestures. The card's own foot carries the direct pair. -->
-            <button
-              v-if="detailTask?.live_attempt_id && !isReviewReady(detailTask!)"
-              type="button"
-              class="btn-chip task-chip"
-              :disabled="detailSaving || board.saving"
-              @click="actOnAttempt(detailTask!, 'stop')"
-            >Stop</button>
-            <button
-              v-if="detailTask?.live_attempt_id && !isReviewReady(detailTask!)"
-              type="button"
-              class="btn-chip task-chip"
-              :disabled="detailSaving || board.saving"
-              @click="actOnAttempt(detailTask!, 'detach')"
-            >Detach</button>
-          </div>
-        </div>
-
-        <!-- The status field is a move, not a field to save: changing it writes
-             at once, through the same gesture the card offers. Moving to Done is
-             the completion gesture, which the store keeps as the user's act. -->
-        <div class="task-move">
-          <label class="sr-only" for="task-detail-status">Move this task to</label>
-          <select
-            id="task-detail-status"
-            class="task-filter task-status"
-            :value="detailForm.status"
-            :disabled="detailSaving || board.saving"
-            @change="onDetailStatusChange"
-          >
-            <option v-for="option in TASK_STATUS_OPTIONS" :key="option.status" :value="option.status">
-              {{ option.label }}
-            </option>
-          </select>
-          <p class="hint">Moving a task to {{ taskStatusLabel('done') }} marks it done.</p>
-        </div>
-
         <form class="task-form" novalidate @submit.prevent="saveDetail">
           <div class="form-group">
             <label for="task-detail-name">Title</label>
@@ -1926,6 +1879,31 @@ const today = localDateKey()
               type="text"
               autocomplete="off"
             />
+          </div>
+          <!-- Status is a move, not a field to save: pressing one writes at once,
+               the same gesture as dragging the card. Done is the completion
+               gesture, which the store keeps as the user's own act. -->
+          <div class="form-group">
+            <span id="task-detail-status-label" class="task-field-label">Status</span>
+            <div
+              class="task-status-seg"
+              role="radiogroup"
+              aria-labelledby="task-detail-status-label"
+              @keydown="onStatusKeydown"
+            >
+              <button
+                v-for="option in TASK_STATUS_OPTIONS"
+                :key="option.status"
+                type="button"
+                role="radio"
+                class="task-status-opt"
+                :data-status="option.status"
+                :aria-checked="detailForm.status === option.status ? 'true' : 'false'"
+                :tabindex="detailForm.status === option.status ? 0 : -1"
+                :disabled="detailSaving || board.saving"
+                @click="setDetailStatus(option.status)"
+              >{{ option.label }}</button>
+            </div>
           </div>
           <div class="form-grid">
             <div class="form-group">
@@ -1958,19 +1936,34 @@ const today = localDateKey()
                the field is absent rather than an empty box whose Save would clear
                what nobody was shown. -->
           <div class="form-group">
-            <label for="task-detail-body">Description</label>
+            <div class="task-field-head">
+              <label v-if="bodyEditorShown" for="task-detail-body" class="task-field-label">Description</label>
+              <span v-else id="task-detail-body-label" class="task-field-label">Description</span>
+              <button
+                v-if="detailDescribed && !bodyEditorShown && descriptionState !== 'loading'"
+                type="button"
+                class="btn-chip task-chip"
+                @click="editBody"
+              >Edit</button>
+            </div>
             <p v-if="descriptionState === 'loading'" class="hint" role="status">Loading description…</p>
             <template v-else-if="detailDescribed">
               <textarea
+                v-if="bodyEditorShown"
                 id="task-detail-body"
+                ref="bodyField"
                 v-model="detailForm.body"
-                rows="6"
+                rows="8"
+                placeholder="Markdown. What done looks like, links, notes."
               ></textarea>
-              <details v-if="detailForm.body" class="task-preview">
-                <summary>Preview</summary>
-                <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
-                <div class="task-preview-body markdown" v-html="bodyPreview"></div>
-              </details>
+              <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+              <div
+                v-else
+                class="task-body markdown"
+                aria-labelledby="task-detail-body-label"
+                @dblclick="editBody"
+                v-html="bodyPreview"
+              ></div>
             </template>
             <p v-else class="hint">
               This board could not read this task's description, so it will not
@@ -1978,6 +1971,106 @@ const today = localDateKey()
               <button type="button" class="btn-chip task-chip" @click="retryDescription">Retry</button>
             </p>
           </div>
+
+          <section class="task-delegate" aria-labelledby="task-agent-title">
+            <h4 id="task-agent-title" class="task-delegate-title">Agent</h4>
+            <p v-if="!detailAttemptState" class="hint task-delegate-explain">
+              Delegating starts a new chat in
+              <strong>{{ projectName(detailForm.project_id) }}</strong> with this task as
+              its prompt. You see what it will send first, the agent asks in that chat
+              when it needs you, and the task only moves to Done when you approve it.
+            </p>
+            <p v-if="detailAttemptState" class="task-delegate-state">
+              <span class="badge" :class="detailAttemptBadgeClass">{{
+                taskAttemptLabel(detailAttemptState)
+              }}</span>
+              <span v-if="detailTask?.chat_id" class="hint">
+                Working in
+                <button type="button" class="btn-chip task-chip" @click="openAttemptChat(detailTask)">
+                  the chat
+                </button>
+              </span>
+            </p>
+            <p v-if="detailTask?.changed_since_delegated" class="task-changed">
+              Changed since delegated — the result was reached against an older
+              description.
+            </p>
+            <p v-if="detailTask && isReviewReady(detailTask)" class="task-review">
+              <span class="task-review-lead">Ready for review.</span>
+              <span v-if="reviewEnded(detailTask)" class="task-review-when">
+                {{ reviewEnded(detailTask) }}.
+              </span>
+              The result is in the linked chat — read it there, then approve Done to
+              close the card.
+            </p>
+            <div
+              v-if="detailTask && reconcile(detailTask).length"
+              class="task-reconcile"
+            >
+              <p
+                v-for="note in detailTask ? reconcile(detailTask) : []"
+                :key="note.code"
+                class="task-reconcile-note"
+                role="status"
+              >
+                <span class="badge" :class="taskReconcileBadgeClass(note.code)" :data-code="note.code">{{ taskReconcileLabel(note.code) }}</span>
+                {{ note.text }}
+                <span class="task-reconcile-actions">{{ note.actions }}</span>
+              </p>
+            </div>
+            <div class="task-delegate-actions">
+              <button
+                type="button"
+                class="btn-chip task-chip"
+                :disabled="detailSaving || board.saving || !detailTask"
+                @click="openDelegate(detailTask!)"
+              >{{ detailDelegateLabel }}</button>
+              <!-- The one gesture that completes a reviewed result. The same call the
+                   card's Approve Done makes: the service releases the linkage and
+                   closes the card together, so the attempt stays as review-ready
+                   history instead of settling as stopped. -->
+              <button
+                v-if="detailTask && isReviewReady(detailTask) && detailTask.status !== 'done'"
+                type="button"
+                class="btn-chip task-chip"
+                :disabled="detailSaving || board.saving"
+                @click="markDone(detailTask!)"
+              >Approve Done</button>
+              <button
+                v-if="detailTask?.changed_since_delegated && detailTask?.chat_id"
+                type="button"
+                class="btn-chip task-chip"
+                :disabled="detailSaving || board.saving"
+                @click="openDelegate(detailTask!, 'update')"
+              >Send update</button>
+              <button
+                v-if="detailTask?.attempt_state"
+                type="button"
+                class="btn-chip task-chip"
+                :disabled="detailSaving || board.saving"
+                @click="openHistory(detailTask!)"
+              >History</button>
+              <!-- Deliberately not a second Resume/Retry pair here: this control
+                   already opens the preview in the mode the row calls for, and the
+                   preview names both ways out. A duplicate that opened a sheet and a
+                   duplicate that acted immediately would be the same label on two
+                   different gestures. The card's own foot carries the direct pair. -->
+              <button
+                v-if="detailTask?.live_attempt_id && !isReviewReady(detailTask!)"
+                type="button"
+                class="btn-chip task-chip"
+                :disabled="detailSaving || board.saving"
+                @click="actOnAttempt(detailTask!, 'stop')"
+              >Stop</button>
+              <button
+                v-if="detailTask?.live_attempt_id && !isReviewReady(detailTask!)"
+                type="button"
+                class="btn-chip task-chip"
+                :disabled="detailSaving || board.saving"
+                @click="actOnAttempt(detailTask!, 'detach')"
+              >Detach</button>
+            </div>
+          </section>
 
           <p v-if="board.error" class="task-action-error" role="alert">
             {{ board.error }}
@@ -2047,6 +2140,31 @@ const today = localDateKey()
   color: var(--fg3);
 }
 .task-chip.active .task-chip-count { color: inherit; }
+.task-selects .task-filter { min-width: 0; max-width: 100%; }
+
+/* A phone: the status chips are one row that scrolls sideways rather than two
+   that wrap, and the two filters share one row instead of stacking. A native
+   select is as wide as its longest option, so each one gets half the row and
+   ellipsizes rather than pushing the page sideways. */
+@container chat-pane (max-width: 940px) {
+  .task-filters {
+    flex-direction: column;
+    align-items: stretch;
+    flex-wrap: nowrap;
+  }
+  .task-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin-inline: calc(-1 * var(--space-1));
+    padding: 2px var(--space-1);
+  }
+  .task-chips::-webkit-scrollbar { display: none; }
+  .task-chips .task-chip { flex: 0 0 auto; }
+  .task-selects { flex-wrap: nowrap; }
+  .task-selects .task-filter { flex: 1 1 0; }
+  .task-selects .task-chip { flex: 0 0 auto; }
+}
 .task-filter {
   box-sizing: border-box;
   min-height: 34px;
@@ -2156,6 +2274,16 @@ const today = localDateKey()
   flex-direction: column;
   gap: var(--space-2);
   min-width: 0;
+  min-height: 8rem;
+  margin: calc(-1 * var(--space-1));
+  padding: var(--space-1);
+  border-radius: var(--radius);
+  transition: background-color 120ms ease-out, box-shadow 120ms ease-out;
+}
+/* The lane a dragged card would land in. */
+.task-lane--drop {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 .task-lane-head {
   display: flex;
@@ -2195,6 +2323,47 @@ const today = localDateKey()
   min-width: 0;
 }
 .task-card:hover { border-color: var(--border-strong); }
+.task-lanes--columns .task-card[draggable='true'] { cursor: grab; }
+.task-card--dragging { opacity: 0.4; }
+.task-card--done .task-open { color: var(--fg2); }
+/* The card's Done. A round box rather than a square one: it reads as "tick
+   this off", not as a form field. The hit area is the full touch target; the
+   drawn ring sits inside it. */
+.task-check {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: 8px -2px 0 -6px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: transparent;
+  cursor: pointer;
+}
+.task-check svg {
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--fg3);
+  border-radius: 50%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: border-color 120ms ease-out, background-color 120ms ease-out, color 120ms ease-out;
+}
+button.task-check:hover svg,
+button.task-check:focus-visible svg {
+  border-color: var(--success);
+  color: var(--success);
+}
+button.task-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+button.task-check:disabled { cursor: progress; opacity: 0.5; }
+.task-check--done { cursor: default; color: var(--bg2); }
+.task-check--done svg { border-color: var(--success); background: var(--success); }
 .task-card-head {
   display: flex;
   align-items: flex-start;
@@ -2224,14 +2393,6 @@ const today = localDateKey()
 }
 .task-open:hover { color: var(--accent); }
 .task-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* The badge group, kept to one line so a long title keeps the room it needs. */
-.task-card-badges {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-}
 /* "Changed since delegated" is a warning about the *result*, not about the card, so
    it reads as a caption on it rather than as one of its voices. */
 .task-changed {
@@ -2309,14 +2470,19 @@ const today = localDateKey()
   align-items: center;
   gap: var(--space-2);
 }
-.task-status { flex: 1 1 auto; min-width: 0; }
 
 /* 44px on touch: the shared rule raises .btn-chip, and the native selects and
    buttons here carry it directly so a coarse pointer never gets a 34px target. */
 @media (pointer: coarse) {
   .task-filter,
-  .task-card .btn-chip {
+  .task-card .btn-chip,
+  .task-status-opt {
     min-height: var(--touch);
+  }
+  .task-check {
+    width: var(--touch);
+    height: var(--touch);
+    margin: 0 -10px 0 -14px;
   }
   /* The shared input rule is ~40px on touch, which every form in the app shares;
      the board's own fields hold the 44px line the rest of this pane does. */
@@ -2347,15 +2513,26 @@ const today = localDateKey()
   font-size: calc(15px * var(--font-scale));
   font-weight: 650;
 }
-/* The editor's delegation block: its own band between the sheet header and the
-   status move, because it acts on a different thing — a turn in another chat —
-   than the form below edits. */
+/* The editor's agent block: its own band at the foot of the form, because it
+   acts on a different thing — a turn in another chat — than the fields above
+   edit. */
 .task-delegate {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4) 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
 }
+.task-delegate-title {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--fg2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.task-delegate-explain { max-width: 62ch; line-height: 1.5; }
+.task-delegate-explain strong { color: var(--fg); font-weight: 600; }
 .task-delegate-state {
   display: flex;
   flex-wrap: wrap;
@@ -2370,14 +2547,88 @@ const today = localDateKey()
   align-items: center;
   gap: var(--space-2);
 }
-.task-move {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4) 0;
+.task-delegate-go {
+  border-color: color-mix(in srgb, var(--accent2) 55%, var(--border));
+  color: var(--fg);
 }
-.task-move .hint { margin: 0; }
+.task-delegate-go:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent2) 18%, var(--bg2));
+}
+/* Field captions that are not <label>s (a radio group, a rendered body) wear
+   the shared label's look. */
+.task-field-label {
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.task-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 24px;
+}
+.task-field-head .task-chip { min-height: 26px; padding-block: 0; }
+/* Status: four segments, one pressed. */
+.task-status-seg {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.task-status-opt {
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.task-status-opt:hover:not(:disabled) { background: var(--bg3); color: var(--fg); }
+.task-status-opt[aria-checked='true'] {
+  background: var(--bg3);
+  color: var(--fg);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.task-status-opt[data-status='done'][aria-checked='true'] {
+  color: var(--success);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--success) 50%, transparent);
+}
+.task-status-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.task-status-opt:disabled { cursor: progress; }
+/* The description as it reads. */
+.task-body {
+  max-height: 18rem;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.task-body :deep(p),
+.task-body :deep(ul),
+.task-body :deep(ol) { margin: 0 0 0.6em; }
+.task-body :deep(ul),
+.task-body :deep(ol) { padding-left: 1.4em; }
+.task-body :deep(p:last-child),
+.task-body :deep(ul:last-child),
+.task-body :deep(ol:last-child) { margin-bottom: 0; }
+.task-body :deep(pre) { overflow-x: auto; }
 /* The delegation preview's facts. A definition list rather than a table because
    each row is a label and one value, read in order down the sheet — a two-column
    grid of a label and a value would invite reading across rows as columns. */
