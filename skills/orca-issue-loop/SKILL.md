@@ -100,7 +100,7 @@ Classification (from `ciao-support`): title prefix `[Bug]` → label `bug`; `[Fe
 Before creating, ask the user **once**, in a single message:
 1. A 5-line summary of the plan (title, label, files touched, tests added, risk).
 2. The implementer model — show the numbered list from §2 and let them pick a number or type any `provider/model`.
-3. The reviewer — default is your own CLI and model (e.g. `claude --model <your model id>`); they may override.
+3. The reviewer — default is your own CLI and model (`claude --model claude-sonnet-5-5`, or `claude --model claude-opus-5-5` for the strongest; Anthropic models always run through the Claude Code CLI, never OpenRouter — see §4); they may override.
 
 Then create it:
 
@@ -174,6 +174,17 @@ The TUI footer shows the active model (e.g. "Space Bunny Alpha OpenRouter") — 
 
    orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json   # require wait.satisfied
    ```
+
+   **Anthropic models always run through the Claude Code CLI, never OpenRouter.** The
+   reviewer is a `claude` session, so it uses the Claude Code subscription and its own
+   model ids — do not point it at `openrouter/anthropic/...`, and do not launch the
+   reviewer as an `opencode` session with an Anthropic model in `opencode.json`
+   (OpenRouter may simply be out of credit, which fails the round on arrival with
+   "requires more credits, or fewer max_tokens"; see Traps). The reviewer models are
+   `claude --model claude-sonnet-5-5` (default) or `claude --model claude-opus-5-5`
+   (strongest), both billed to the subscription. For a headless one-off review,
+   `claude -p "<prompt>" --model claude-opus-5-5 --allowedTools "Read,Glob,Grep,Bash"`
+   works and is fine to smoke-test with.
 3. Dispatch the task into that terminal. Orca injects the worker preamble (Task/Dispatch IDs, how to send `worker_done`):
 
    ```bash
@@ -259,6 +270,7 @@ Merge procedure:
 ## Traps
 
 - **opencode has no `--model` flag in its TUI and Orca's `--model` skips opencode.** The model comes from `<wt>/opencode.json` (§4); git-exclude it or `git add -A` commits it.
+- **Anthropic reviewer models go through Claude Code, not OpenRouter.** The reviewer is a `claude` session (§4); `claude-sonnet-5-5` / `claude-opus-5-5` are subscription-billed and always work. Launching the reviewer as an `opencode` session with `openrouter/anthropic/...` fails the instant OpenRouter is out of credit — the TUI shows `This request requires more credits, or fewer max_tokens … can only afford N`, the round dies before reading the diff, and no verdict is posted. If you see that, do not retry OpenRouter: relaunch the round as a `claude` reviewer. Confirm the balance with `curl -s https://openrouter.ai/api/v1/credits -H "Authorization: Bearer $OPENROUTER_API_KEY"` before blaming the reviewer for a silent non-answer.
 - **Headless runs are invisible and unreliable — don't use them for workers.** `opencode run` without `--standalone` returns within seconds while the session keeps working (seen on #564 R0), and `terminal create --command '<cmd>'` leaves an interactive shell behind, so `--for exit` never fires (#564 R1). If you ever need a one-off headless smoke test, use `opencode run --standalone … ; exit`.
 - **`terminal wait` timing out still prints a result.** Read `wait.satisfied`.
 - **Cheap models claim green tests they never ran**, and sometimes edit tests to pass. Check the diff of `tests/` against the plan's test list every round.
