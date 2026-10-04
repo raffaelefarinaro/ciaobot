@@ -92,9 +92,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/webhooks/{trigger_id}/rotate` | Rotate a trigger's secret; returns the trigger plus the new one-time secret |
 | DELETE | `/api/webhooks/{trigger_id}` | Delete a trigger and its verifier (`?expected_revision=`, revision-checked) |
 | GET | `/api/import/sources?workspace=` | List the past conversations this workspace's known sources hold, **as metadata only**: offered refs (an id and its weakest locator, no absolute path), excluded rows with their reasons (Ciaobot's own / unreadable / over cap), sources that could not be listed (an OpenCode below the V2 floor), and per-source `truncated` when a listing cap was reached. Opens no conversation and returns no text |
-| POST | `/api/import/preview` | The pre-extraction confirmation for the **selected** sources only: per-conversation counts, the source's own first date when it has one, the reader's omission record, the effective provider and model, an input-volume estimate, `batch_cap` and the destination workspace. Body is `{"workspace", "sources": [{"provider", "source_id"}]}` — ids, never paths; an OpenCode id must be one this workspace's own listing named, or the row comes back `unreadable` with no export run. Reads the selected files and returns no transcript text; it extracts nothing (C7) and stores no batch (C6) |
+| POST | `/api/import/preview` | The pre-extraction confirmation for the **selected** sources only: per-conversation counts, the source's own first date when it has one, the reader's omission record, the effective provider and model, an input-volume estimate, `batch_cap` and the destination workspace. Body is `{"workspace", "sources": [{"provider", "source_id"}]}` — ids, never paths; an OpenCode id must be one this workspace's own listing named, or the row comes back `unreadable` with no export run. Reads the selected files and returns no transcript text; it extracts nothing and stores no batch — `POST /api/import/batches/{batch_id}/run` is the route that runs the extraction |
 | POST | `/api/import/batches` | File an import batch over a selection (#1032, C6): body is `{"workspace", "sources": [{"provider", "source_id"}]}` (ids, never paths; at most the `batch_cap` the preview states) with an optional `destination` workspace. Refuses a Ciaobot-own session (400), a second batch while one is still open for the workspace (409), and a conversation a live batch already covers (409). Answers 201 with the batch as stored — selection, per-source digests (empty until extraction reads them), progress and provenance. No provider call, no model call, no transcript text |
 | GET | `/api/import/batches?workspace=` | That workspace's import batches, oldest first, each with its selection, per-source digests, progress (`queued → running → done \| failed \| cancelled \| partial`), cancellation and per-fact provenance. Digests only, never transcript text |
+| POST | `/api/import/batches/{batch_id}/run` | Extract a filed batch's selected conversations into the **review queue** (#1038, C7): body is `{"workspace"}` and a batch filed for another workspace is a 404. Answers 202 with the batch already moved to `running` — **no model turn runs inside the request**; the tool-less extraction happens afterwards in the runner. A body naming a `model` or `provider` is ignored: the run resolves the per-provider insights model for the *source's* provider (`resolve_insights_model` → `_resolve_insights_call`), which is not necessarily the `model` the preview screen showed — that one is the workspace default for the workspace's own provider. A batch already `running` is answered 200 with its current state rather than starting a second run; one already settled as done, failed, cancelled or partial is a 409, since re-running it is a new batch. Filed rows land in `Workspace/Memory-Proposals.md` with the **source** message's `[as-of:]` date and a `_(from: provider:session_id:anchor)_` tag; nothing else in the vault is written |
 | POST | `/api/import/batches/{batch_id}/cancel` | Stop a batch, keeping its recorded progress and provenance; body is `{"workspace"}` and a batch filed for another workspace is a 404. Idempotent — cancelling a cancelled batch answers it unchanged — while a batch already settled as done, failed or partial is a 409. Cancellation cannot unsend provider input |
 | DELETE | `/api/import/batches/{batch_id}` | Drop a batch record (`?workspace=` is required; a batch filed for another workspace is a 404). Queue and vault are untouched: filed proposals stay queued and accepted facts stay in the vault |
 | POST | `/hooks/v1/{trigger_id}` | Webhook receiver (machine surface, bearer + `Idempotency-Key`, not the session cookie): records a durable receipt for one event and answers `202 accepted`. No dispatch — see `docs/WEBHOOK_TRIGGER_STORE.md` |
@@ -219,7 +220,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 `POST /api/import/batches` files one import batch over a selection (#1032,
 C6) — the private per-workspace record of what was selected, what was read,
 progress, dedupe across attempts, and per-fact provenance. One batch at a
-time per workspace; extraction itself is C7 and consumes the batch.
+time per workspace. `POST /api/import/batches/{id}/run` (#1038, C7) is what
+drives it: it answers 202 with the batch already `running` and the
+extraction happens after the response, so poll the list route for progress.
+Nothing is applied — the extracted facts arrive as review proposals with the
+*source* message's date, and a person accepts them.
 
 ```bash
 # File a batch over two selected conversations (ids, never paths).
@@ -231,9 +236,20 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/import
 # per-source digests, progress and provenance.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/import/batches?workspace=default"
 
-# Stop a batch, keeping its recorded progress and provenance. Idempotent:
-# cancelling a cancelled batch answers it unchanged. Cannot unsend provider
-# input, and a batch already settled as done, failed or partial is a 409.
+# Run the batch. Answers 202 with the batch now `running`; no model turn
+# happens in this request. Polling `GET .../batches?workspace=` shows
+# progress move to `done` / `partial` / `failed`, and the proposals land in
+# the review queue for a person to accept. A batch already `running` is
+# answered 200 with its current state (never a second run); a settled batch
+# is a 409.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/import/batches/$BATCH/run" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"default"}'
+
+# Stop a batch, keeping its recorded progress, its provenance and every
+# proposal it already filed. Idempotent: cancelling a cancelled batch answers
+# it unchanged. Cannot unsend provider input, and a batch already settled as
+# done, failed or partial is a 409.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/import/batches/$BATCH/cancel" \
   -H 'content-type: application/json' \
   -d '{"workspace":"default"}'
