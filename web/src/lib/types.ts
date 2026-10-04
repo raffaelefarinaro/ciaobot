@@ -1194,6 +1194,12 @@ export interface Task {
    * reading only live attempts would go blank the moment a turn ended.
    */
   attempt_state: TaskAttemptState | ''
+  /** The agent's own report on the current attempt (#1064), or `''`. */
+  attempt_outcome: TaskAttemptOutcome | ''
+  /** What the agent said it did and what is left, in its words. */
+  attempt_summary: string
+  /** The engine's note on how the current attempt ended, when it says one. */
+  attempt_detail: string
   /**
    * Non-empty only while an attempt actually holds the task.
    *
@@ -1236,6 +1242,9 @@ export type TaskAttemptState =
  * `live` is carried rather than derived, so a client cannot disagree with the
  * server about which attempts hold a task.
  */
+/** What a delegated agent may report about its own attempt (#1064). */
+export type TaskAttemptOutcome = 'done' | 'blocked' | 'needs_input'
+
 export interface TaskAttempt {
   attempt_id: string
   task_id: string
@@ -1249,6 +1258,10 @@ export interface TaskAttempt {
   ended_at: string
   /** A bounded sentence about the engine's own outcome, never user prose. */
   detail: string
+  /** The agent's own report (#1064): `done`, `blocked`, `needs_input`, or `''`. */
+  outcome: TaskAttemptOutcome | ''
+  /** The agent's summary with that report. */
+  summary: string
   /**
    * The user approved this result or detached the card, so the task is free again.
    *

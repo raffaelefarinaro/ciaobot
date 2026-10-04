@@ -320,6 +320,19 @@ class _RecordingPcm:
         }
 
 
+def _agent_says_done(plane: CiaoControlPlane, workspace: str = "personal") -> None:
+    """The agent's own "done", from the chat holding each live attempt (#1064).
+
+    A clean end of turn is only a result to review when the agent reported one;
+    these tests are about what happens to a reviewed result, so they report it
+    the way a delegated agent does before its turn ends.
+    """
+    for live in _attempt_store(plane, workspace).live_by_task().values():
+        plane.workspace_task_report(
+            workspace, live.task_id, outcome="done", summary="Did the work.", chat_id=live.chat_id
+        )
+
+
 def _world(tmp_path: Path) -> tuple[CiaoControlPlane, _RecordingPcm]:
     config = CiaoConfig(
         pwa_auth_token="test",
@@ -950,6 +963,8 @@ async def test_a_finished_turn_settles_ready_for_review_and_never_done(
     task = _create(plane, title="Finish the work")
     outcome = _delegate(plane, task)
 
+    _agent_says_done(plane)
+
     await _end_turns(pcm)
 
     attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
@@ -1026,6 +1041,8 @@ async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Reviewed cleanly", body="The original scope.")
     _delegate(plane, task)
+
+    _agent_says_done(plane)
 
     await _end_turns(pcm)
 
@@ -1136,6 +1153,7 @@ async def test_a_turn_started_by_an_update_settles_the_attempt(tmp_path: Path) -
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Wire the store")
     outcome = _delegate(plane, task)
+    _agent_says_done(plane)
     await _end_turns(pcm)
     edited = plane.workspace_task_update(
         "personal",
@@ -1147,6 +1165,8 @@ async def test_a_turn_started_by_an_update_settles_the_attempt(tmp_path: Path) -
 
     _update(plane, edited, outcome["attempt"], "Work from this instead.")
     update_turn = pcm.streams[-1]
+
+    _agent_says_done(plane)
 
     await _end_turns(pcm)
 
@@ -1277,6 +1297,7 @@ async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
     task = _create(plane, title="Needs an approval")
     outcome = _delegate(plane, task)
     pcm.get_chat("chat-1").pending_permission = "Write /notes.md"
+    _agent_says_done(plane)
     await _end_turns(pcm)
     assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
 
@@ -1284,6 +1305,7 @@ async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
     # started by answering in the composer, which is also what answers the card.
     pcm.get_chat("chat-1").pending_permission = ""
     pcm.answer_in_chat("chat-1", "Yes, write it.")
+    _agent_says_done(plane)
     await _end_turns(pcm)
 
     row = _get_task(plane, task["id"])
@@ -1301,6 +1323,7 @@ async def test_a_live_continuation_records_its_error(tmp_path: Path, path: str) 
     outcome = _delegate(plane, task)
     if path == "answer":
         pcm.get_chat("chat-1").pending_permission = "Allow write"
+    _agent_says_done(plane)
     await _end_turns(pcm)
     before = _get_task(plane, task["id"])
     assert before["attempt_state"] == ("needs_you" if path == "answer" else "ready_for_review")
@@ -1320,6 +1343,7 @@ async def test_a_live_continuation_records_its_error(tmp_path: Path, path: str) 
     assert running.detail == ""
     assert _get_task(plane, task["id"])["review_state"] == "none"
     assert _get_task(plane, task["id"])["changed_since_delegated"] is False
+    _agent_says_done(plane)
     await _end_turns(pcm)
     assert _get_task(plane, task["id"])["attempt_state"] == "failed"
     assert _attempt_store(plane).get(running.attempt_id).detail == "provider failed"
@@ -1699,6 +1723,7 @@ async def test_the_user_approves_done_on_a_review_ready_card_in_one_gesture(
     task = _create(plane, title="Ready for the user")
     outcome = _delegate(plane, task)
     attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
     await _end_turns(pcm)
     settled = _get_task(plane, task["id"])
     assert settled["review_state"] == "ready"
@@ -1793,6 +1818,7 @@ async def test_detaching_a_reviewed_attempt_leaves_the_review_alone(
     task = _create(plane, title="Reviewed then released")
     outcome = _delegate(plane, task)
     attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
     await _end_turns(pcm)
 
     detached = await _act(plane, attempt_id, "detach")
@@ -1842,6 +1868,7 @@ async def test_a_reviewed_attempt_released_by_detach_can_be_delegated_again(
     task = _create(plane, title="Reviewed, then released")
     first = _delegate(plane, task)
     first_attempt = first["attempt"]["attempt_id"]
+    _agent_says_done(plane)
     await _end_turns(pcm)
 
     await _act(plane, first_attempt, "detach")
@@ -1867,6 +1894,7 @@ async def test_approving_done_releases_the_attempt_and_frees_the_task_for_anothe
     task = _create(plane, title="Reviewed and approved")
     first = _delegate(plane, task)
     first_attempt = first["attempt"]["attempt_id"]
+    _agent_says_done(plane)
     await _end_turns(pcm)
     reviewed = _get_task(plane, task["id"])
 
@@ -1913,6 +1941,7 @@ async def test_the_released_attempts_history_row_still_reads_as_the_review(
     task = _create(plane, title="What the agent did")
     outcome = _delegate(plane, task)
     attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
     await _end_turns(pcm)
 
     detached = await _act(plane, attempt_id, "detach")
@@ -1939,6 +1968,7 @@ async def test_a_refused_completion_leaves_the_review_ready_card_linked(
     task = _create(plane, title="Approve, with a project that is gone")
     outcome = _delegate(plane, task)
     attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
     await _end_turns(pcm)
     reviewed = _get_task(plane, task["id"])
 
@@ -1979,6 +2009,7 @@ async def test_stopping_a_released_attempt_is_refused_rather_than_rewriting_it(
     task = _create(plane, title="Reviewed, then released")
     outcome = _delegate(plane, task)
     attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
     await _end_turns(pcm)
     await _act(plane, attempt_id, "detach")
 
@@ -2026,6 +2057,7 @@ async def test_a_ready_for_review_attempt_is_not_resumable(tmp_path: Path) -> No
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Finished")
     outcome = _delegate(plane, task)
+    _agent_says_done(plane)
     await _end_turns(pcm)
 
     with pytest.raises(ControlPlaneError) as excinfo:
@@ -2182,3 +2214,137 @@ def test_the_operation_annotations_keep_the_auto_approved_split() -> None:
     # And it is genuinely in the destructive set, so the ask-class split the
     # approval check reads is not cosmetic.
     assert "task_attempt_action" in behavioral_eval.destructive_mcp_tool_names()
+
+
+# ── The agent's report, the task's log, archive and hand-off (#1064) ────
+
+
+async def test_a_clean_end_with_no_report_is_unfinished_not_for_review(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Half done")
+    outcome = _delegate(plane, task)
+    await _end_turns(pcm)
+    attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert attempt.state == "needs_you"
+    assert "without a report" in attempt.detail
+    assert _get_task(plane, task["id"])["review_state"] == "none"
+
+
+@pytest.mark.parametrize("reported", ["blocked", "needs_input"])
+async def test_a_blocked_or_needs_input_report_waits_on_the_user(tmp_path: Path, reported: str) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Needs a hand")
+    outcome = _delegate(plane, task)
+    plane.workspace_task_report(
+        "personal", task["id"], outcome=reported, summary="Need the key.",
+        chat_id=outcome["chat_id"],
+    )
+    await _end_turns(pcm)
+    attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert (attempt.state, attempt.outcome, attempt.summary) == ("needs_you", reported, "Need the key.")
+    assert _get_task(plane, task["id"])["review_state"] == "none"
+
+
+async def test_only_the_chat_holding_the_task_may_report_on_it(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Mine")
+    _delegate(plane, task)
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.workspace_task_report(
+            "personal", task["id"], outcome="done", summary="x", chat_id="someone-else",
+        )
+    assert refused.value.code == "task_report_not_holder"
+    # And through the agent surface the chat is the caller's own, not an argument.
+    with pytest.raises(ControlPlaneError):
+        plane.task_report(_principal(), task["id"], outcome="done", summary="x")
+
+
+async def test_the_task_body_logs_each_attempt_without_tripping_changed_since_delegated(
+    tmp_path: Path,
+) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Logged", body="The description.")
+    outcome = _delegate(plane, task)
+    # The reply already carries the revision the log write left behind.
+    assert outcome["task"]["revision"] == _get_task(plane, task["id"])["revision"]
+    assert outcome["task"]["changed_since_delegated"] is False
+    plane.workspace_task_report(
+        "personal", task["id"], outcome="done", summary="Wrote the runbook in docs/run.md.",
+        chat_id=outcome["chat_id"],
+    )
+    await _end_turns(pcm)
+    files = list(_tasks_dir(plane).glob("*.md"))
+    text = files[0].read_text(encoding="utf-8")
+    assert "The description." in text
+    assert "## Delegation log" in text
+    assert "**Agent says done**" in text
+    assert "Wrote the runbook in docs/run.md." in text
+    assert f"attempt:{outcome['attempt']['attempt_id']}" in text
+    row = _get_task(plane, task["id"])
+    assert row["review_state"] == "ready"
+    assert row["changed_since_delegated"] is False
+
+
+async def test_a_retry_is_handed_what_the_earlier_attempt_reported(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Hand it over", body="Do the migration.")
+    first = _delegate(plane, task)
+    plane.workspace_task_report(
+        "personal", task["id"], outcome="blocked", summary="Schema done; data copy blocked on creds.",
+        chat_id=first["chat_id"],
+    )
+    await _end_turns(pcm)
+    plane._on_chat_ended(first["chat_id"], pcm.get_chat(first["chat_id"]), "archived")
+    assert _attempt_store(plane).get(first["attempt"]["attempt_id"]).state == "interrupted"
+
+    await _act(plane, first["attempt"]["attempt_id"], "retry")
+
+    prompt = _starts(pcm)[-1][1]
+    assert "Earlier attempts" in prompt
+    assert "Schema done; data copy blocked on creds." in prompt
+    assert first["chat_id"] in prompt
+    # The description is quoted once, without the log the first attempt left.
+    assert prompt.count("Do the migration.") == 1
+    assert "## Delegation log" not in prompt
+
+
+async def test_archiving_the_chat_settles_unfinished_work_and_refuses_resume(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Archived midway")
+    outcome = _delegate(plane, task)
+    await _end_turns(pcm)  # no report: unfinished, still live
+    chat = pcm.get_chat(outcome["chat_id"])
+    chat.archived = True
+    chat.archive_path = "memory-vault/personal/Archive/chat.md"
+    plane._on_chat_ended(outcome["chat_id"], chat, "archived")
+
+    attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the chat was archived"
+    row = _get_task(plane, task["id"])
+    assert row["attempt_id"] == outcome["attempt"]["attempt_id"]  # still linked
+    text = next(_tasks_dir(plane).glob("*.md")).read_text(encoding="utf-8")
+    assert "archived at `memory-vault/personal/Archive/chat.md`" in text
+
+    with pytest.raises(ControlPlaneError) as refused:
+        await _act(plane, outcome["attempt"]["attempt_id"], "resume")
+    assert refused.value.code == "attempt_chat_archived"
+
+
+async def test_archiving_a_chat_whose_result_awaits_review_leaves_it_to_approve(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Done, then archived")
+    outcome = _delegate(plane, task)
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    chat = pcm.get_chat(outcome["chat_id"])
+    chat.archived = True
+    plane._on_chat_ended(outcome["chat_id"], chat, "archived")
+    attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert attempt.state == "ready_for_review" and attempt.is_live
+    assert _get_task(plane, task["id"])["review_state"] == "ready"
+
+
+async def test_a_chat_that_is_not_a_delegation_is_ignored_when_archived(tmp_path: Path) -> None:
+    plane, _pcm = _world(tmp_path)
+    plane._on_chat_ended("plain", SimpleNamespace(helper={}, project_id="p"), "archived")

@@ -659,6 +659,10 @@ class ProjectChatManager:
         # the callbacks above, and for the same reason: the manager must not
         # depend on the task board to know what a turn is.
         self._turn_started: list[Callable[[str, "ChatStream"], None]] = []
+        # `on_chat_ended(chat_id, chat, how)` fires after a chat is archived or
+        # deleted, with `how` naming which. The delegation service subscribes so
+        # a task is not left pointing at a conversation that cannot go on.
+        self._chat_ended: list[Callable[[str, Any, str], None]] = []
         # Per-chat pending push tasks. Pushes are scheduled with a short
         # delay (30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
@@ -3406,6 +3410,7 @@ class ProjectChatManager:
             "project_id": chat.project_id,
             "reason": "user",
         })
+        self._notify_chat_ended(chat_id, chat, "deleted")
         return True
 
     async def _maybe_archive_proposal_helper(self, chat_id: str) -> bool:
@@ -3571,6 +3576,7 @@ class ProjectChatManager:
             "project_id": chat.project_id,
             "archive_path": chat.archive_path,
         })
+        self._notify_chat_ended(chat_id, chat, "archived")
         # Not keyed on `chat.schedule_id`: an interval entry bound to an
         # existing chat records it as its run chat without stamping the chat.
         if self.schedule_store is not None and settle_runs_for_archived_chat(
@@ -5454,6 +5460,23 @@ class ProjectChatManager:
         allowed to fail the turn it is watching.
         """
         self._turn_started.append(callback)
+
+    def on_chat_ended(self, callback: Callable[[str, Any, str], None]) -> None:
+        """Subscribe to "this chat was archived or deleted".
+
+        The callback gets the chat row as it was (a deleted chat is no longer in
+        the registry to look up) and ``"archived"`` or ``"deleted"``. A callback
+        that raises is logged and skipped: an observer cannot fail the archive.
+        """
+        self._chat_ended.append(callback)
+
+    def _notify_chat_ended(self, chat_id: str, chat: Any, how: str) -> None:
+        # `getattr`: fixtures built with `__new__` have no subscriber list.
+        for callback in tuple(getattr(self, "_chat_ended", ())):
+            try:
+                callback(chat_id, chat, how)
+            except Exception:
+                logger.exception("A chat-ended subscriber failed for chat %s", chat_id)
 
     def notify_turn_started(self, chat_id: str, stream: ChatStream) -> None:
         """Tell every subscriber a turn began here. Never raises."""

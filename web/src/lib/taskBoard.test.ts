@@ -27,6 +27,9 @@ import {
   taskApiErrorMessage,
   taskDetailFrom,
   taskLanes,
+  titleSegments,
+  splitTaskLog,
+  joinTaskLog,
   taskReconcileBadgeClass,
   taskReconcileLabel,
   taskReconcileNotes,
@@ -56,6 +59,9 @@ function task(overrides: Partial<Task> = {}): Task {
     // The delegation facts. Empty by default, which is what "never delegated"
     // looks like; each test that exercises one sets it explicitly.
     attempt_state: '',
+    attempt_outcome: '',
+    attempt_summary: '',
+    attempt_detail: '',
     live_attempt_id: '',
     changed_since_delegated: false,
     ...overrides,
@@ -359,5 +365,40 @@ describe('taskReconcileNotes', () => {
     expect(taskReconcileLabel('done_while_live')).toBe('Done but running')
     expect(taskReconcileBadgeClass('settled_attempt_holds_task')).toBe('badge--muted')
     expect(taskReconcileBadgeClass('chat_not_visible')).toBe('badge--error')
+  })
+})
+
+describe('titleSegments', () => {
+  it('splits URLs out of a title with a short label and the full href', () => {
+    expect(titleSegments('Check https://www.remotion.dev/docs/ai/skills/ before Friday.')).toEqual([
+      { text: 'Check ' },
+      { text: 'remotion.dev/docs/ai/skills', href: 'https://www.remotion.dev/docs/ai/skills/' },
+      { text: ' before Friday.' },
+    ])
+  })
+
+  it('truncates a long path and leaves a plain title alone', () => {
+    const [, link] = titleSegments('See https://huggingface.co/blog/sora-2/what-is-openai-decisions-api-a-practical-guide')
+    expect(link!.text.endsWith('…')).toBe(true)
+    expect(link!.text.length).toBe(42)
+    expect(link!.href).toBe('https://huggingface.co/blog/sora-2/what-is-openai-decisions-api-a-practical-guide')
+    expect(titleSegments('Ship it')).toEqual([{ text: 'Ship it' }])
+    expect(titleSegments('ftp://nope and javascript:alert(1)')).toEqual([{ text: 'ftp://nope and javascript:alert(1)' }])
+  })
+})
+
+describe('splitTaskLog / joinTaskLog', () => {
+  const log = '<!-- ciao:task-log -->\n## Delegation log\n\n- line <!-- attempt:x -->\n<!-- /ciao:task-log -->'
+  it('separates the description from the engine log and puts it back', () => {
+    const body = `Do the thing.\n\n${log}\n`
+    const { description, log: kept } = splitTaskLog(body)
+    expect(description).toBe('Do the thing.\n')
+    expect(kept).toBe(log)
+    expect(joinTaskLog(description, kept)).toBe(body)
+    expect(joinTaskLog('Do it better.\n', kept)).toBe(`Do it better.\n\n${log}\n`)
+  })
+  it('leaves a body with no log alone', () => {
+    expect(splitTaskLog('Plain.\n')).toEqual({ description: 'Plain.\n', log: '' })
+    expect(joinTaskLog('Plain.\n', '')).toBe('Plain.\n')
   })
 })

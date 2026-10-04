@@ -644,7 +644,14 @@ def _delegate(
     return response
 
 
-def _settle(client: TestClient, cookies: dict[str, str], pcm: _Pcm, task_id: str) -> dict:
+def _settle(
+    client: TestClient,
+    cookies: dict[str, str],
+    pcm: _Pcm,
+    task_id: str,
+    *,
+    report: str = "",
+) -> dict:
     """End every fake turn and return the task row once the watcher has settled it.
 
     A test calls this only when it wants a *finished* turn. A test about a running
@@ -659,6 +666,16 @@ def _settle(client: TestClient, cookies: dict[str, str], pcm: _Pcm, task_id: str
     The read is repeated a bounded number of times rather than assumed, so a
     refusal here is a real failure instead of a timing accident.
     """
+    if report:
+        # The agent's own report, from the chat holding the attempt, the way a
+        # delegated turn makes it before it ends (#1064).
+        current = client.get(
+            f"/api/tasks/{task_id}?workspace=personal", cookies=cookies
+        ).json()["task"]
+        client.app.state.mcp_service.control_plane.workspace_task_report(
+            "personal", task_id, outcome=report, summary="Did the work.",
+            chat_id=current["chat_id"],
+        )
     for stream in pcm.streams:
         stream.finish.set()
     for _ in range(50):
@@ -1080,7 +1097,7 @@ def test_the_complete_route_approves_a_review_ready_result(world) -> None:
     client, cookies, _config, pcm = world
     task = _create(client, cookies, title="Ready for review")
     attempt_id = _delegate(client, cookies, task, pcm).json()["attempt"]["attempt_id"]
-    before = _settle(client, cookies, pcm, task["id"])
+    before = _settle(client, cookies, pcm, task["id"], report="done")
     assert before["review_state"] == "ready"
 
     done = client.post(

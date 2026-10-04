@@ -61,6 +61,9 @@ function task(overrides: Partial<Task> = {}): Task {
     revision: REVISION,
     relative_path: 'Tasks/ship.md',
     attempt_state: '',
+    attempt_outcome: '',
+    attempt_summary: '',
+    attempt_detail: '',
     live_attempt_id: '',
     changed_since_delegated: false,
     ...overrides,
@@ -182,7 +185,7 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
-  it('shows a card\'s title, project, due date, assignee and review badge', async () => {
+  it('shows a card\'s title, project, due date and review badge, and no assignee', async () => {
     const wrapper = await mountBoard([
       task({
         id: 'ship',
@@ -200,7 +203,8 @@ describe('TaskBoardView', () => {
     expect(shown.get('.task-open').text()).toBe('Ship the board')
     expect(shown.get('.task-project').text()).toBe('Website')
     expect(shown.text()).toContain('Due Mar 20')
-    expect(shown.get('.task-assignee').text()).toBe('For the agent')
+    // Who it is for is the Agent block's business, not a label on every card.
+    expect(shown.text()).not.toContain('For the agent')
     // The review state is a badge, so it is never colour alone.
     expect(shown.get('.badge').text()).toBe('Review')
     wrapper.unmount()
@@ -697,6 +701,24 @@ describe('TaskBoardView', () => {
     // Opening it shows General selected and writes nothing.
     expect((wrapper.get('#task-detail-project').element as HTMLSelectElement).value).toBe('')
     expect(apiPatch).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('edits the description without the engine\'s log, and keeps the log on save', async () => {
+    const log = '<!-- ciao:task-log -->\n## Delegation log\n\n- a line <!-- attempt:x -->\n<!-- /ciao:task-log -->'
+    const wrapper = await mountBoard()
+    apiGet.mockResolvedValue(detailAnswer(task(), `Ship it.\n\n${log}\n`))
+    apiPatch.mockResolvedValue({ workspace: 'personal', task: { ...task(), revision: THIRD_REVISION, body: '' } })
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.get('.task-body').text()).toBe('Ship it.')
+    const field = await bodyField(wrapper)
+    expect(field.element.value).toBe('Ship it.\n')
+    await field.setValue('Ship it today.\n')
+    await field.trigger('blur')
+    await flushPromises()
+    expect((apiPatch.mock.calls[0]![1] as Record<string, unknown>).body).toBe(`Ship it today.\n\n${log}\n`)
     wrapper.unmount()
   })
 
@@ -1450,7 +1472,6 @@ describe('TaskBoardView', () => {
     // to the chat the turn runs in, and badged as running.
     const delegated = card(wrapper, 'Draft the runbook')
     expect(delegated.get('.badge').text()).toBe('Running')
-    expect(delegated.text()).toContain('For the agent')
     // And the gesture set replaced the single Delegate control.
     const labels = delegated.findAll('.task-chip').map((c) => c.text())
     expect(labels).toContain('Stop')
@@ -1525,8 +1546,8 @@ describe('TaskBoardView', () => {
     await nextTick()
     const actions = wrapper.findAll('.task-delegate-actions .btn-chip').map((c) => c.text())
     expect(actions, 'no Delegate control for a released attempt').toContain('Delegate to agent')
-    // History lives here now that the card is lean: the attempt is a record.
-    expect(actions).toContain('History')
+    // No History control: the attempts are listed inline in the same block.
+    expect(actions).not.toContain('History')
     wrapper.unmount()
   })
 
@@ -1807,6 +1828,7 @@ describe('TaskBoardView', () => {
     async () => {
       const reviewed = liveTask({
         attempt_state: 'ready_for_review', review_state: 'ready', revision: THIRD_REVISION,
+        attempt_outcome: 'done', attempt_summary: 'Wired the store; tests in store.test.ts.',
       })
       apiPost.mockResolvedValue({
         workspace: 'personal',
@@ -1814,11 +1836,10 @@ describe('TaskBoardView', () => {
       })
       const wrapper = await mountWithBody([reviewed])
 
-      // Where the answer is, named rather than summarised: the board holds no copy
-      // of the agent's reply, so it says the chat is where to read it.
+      // The agent's own word, and its own summary of what it did.
       const shown = card(wrapper, 'Wire the store')
-      expect(shown.get('.task-review').text()).toContain('Ready for review')
-      expect(shown.get('.task-review').text()).toContain('linked chat')
+      expect(shown.get('.badge').text()).toBe('Agent says done')
+      expect(shown.get('.task-agent-note').text()).toBe('Wired the store; tests in store.test.ts.')
 
       await shown.get('.task-open').trigger('click')
       await flushPromises()
@@ -2055,12 +2076,13 @@ describe('TaskBoardView', () => {
 
       const switchChat = vi.fn()
       useProjectStore().switchChat = switchChat
-      await (await editorControl(wrapper, 'Wire the store', 'History')).trigger('click')
+      // Opening the editor reads them: the list is inline in its Agent block.
+      await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
       await flushPromises()
       await nextTick()
 
       expect(apiGet).toHaveBeenCalledWith('/api/tasks/doing/attempts?workspace=personal')
-      const sheet = wrapper.get('.task-sheet')
+      const sheet = wrapper.get('.task-delegate')
       const rows = sheet.findAll('.task-history-row')
       expect(rows).toHaveLength(2)
       // Live one first, and each attempt keeps its own chat: a retry that replaced
@@ -2075,12 +2097,12 @@ describe('TaskBoardView', () => {
       await rows[1]!.get('button').trigger('click')
       expect(switchChat).toHaveBeenCalledWith('chat-3')
 
-      // Re-opening the same card does not re-read it: loaded once, like the
-      // proposal queue's ledger.
-      await sheet.get('.btn-small').trigger('click')
-      await (await editorControl(wrapper, 'Wire the store', 'History')).trigger('click')
+      // Re-opening re-reads: a turn may have reported since.
+      await wrapper.get('.task-sheet-head .btn-icon').trigger('click')
       await flushPromises()
-      expect(apiGet.mock.calls.filter((c) => String(c[0]).includes('/attempts'))).toHaveLength(1)
+      await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
+      await flushPromises()
+      expect(apiGet.mock.calls.filter((c) => String(c[0]).includes('/attempts'))).toHaveLength(2)
       wrapper.unmount()
     })
 
@@ -2149,7 +2171,7 @@ describe('TaskBoardView', () => {
     await flushPromises()
     await nextTick()
 
-    await (await editorControl(wrapper, 'Wire the store', 'History')).trigger('click')
+    await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
     await flushPromises()
     await nextTick()
     expect(wrapper.findAll('.task-sheet').length).toBeGreaterThan(0)
@@ -2162,6 +2184,57 @@ describe('TaskBoardView', () => {
     expect(wrapper.find('.task-sheet').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  it('calls a turn that ended without a report unfinished, and says why', async () => {
+    const wrapper = await mountWithBody([liveTask({
+      attempt_state: 'needs_you', attempt_detail: 'the turn ended without a report from the agent',
+    })])
+    const shown = card(wrapper, 'Wire the store')
+    expect(shown.get('.badge').text()).toBe('Unfinished')
+    expect(shown.get('.task-agent-note').text()).toContain('without a report')
+    wrapper.unmount()
+  })
+
+  it('offers to continue an archived chat\'s attempt in a new chat, never to resume it', async () => {
+    useProjectStore().chats = [{ chat_id: 'chat-7', project_id: 'p1', archived: true } as never]
+    const wrapper = await mountWithBody([settledTask({
+      attempt_outcome: 'blocked', attempt_summary: 'Schema done; need creds.',
+      attempt_detail: 'the chat was archived',
+    })])
+    const shown = card(wrapper, 'Broke halfway')
+    const labels = shown.findAll('.task-chip').map((c) => c.text())
+    expect(labels).not.toContain('Resume')
+    expect(labels).toContain('Continue in new chat')
+    expect(shown.text()).toContain('The chat was archived')
+    expect(shown.get('.task-agent-note').text()).toBe('Schema done; need creds.')
+
+    await shown.get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.get('.task-delegate-actions .task-chip').text()).toBe('Continue in a new chat')
+    wrapper.unmount()
+  })
+
+  it('makes a URL in a title a link that opens without opening the card', async () => {
+    const wrapper = await mountWithBody([plainTask({
+      title: 'Check https://www.remotion.dev/docs/ai/skills/ today',
+    })])
+    const shown = card(wrapper, 'remotion.dev')
+    const link = shown.get('.task-title a')
+    expect(link.attributes('href')).toBe('https://www.remotion.dev/docs/ai/skills/')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toContain('noopener')
+    expect(link.text()).toBe('remotion.dev/docs/ai/skills')
+    await link.trigger('click')
+    await nextTick()
+    expect(wrapper.find('#task-detail-title').exists()).toBe(false)
+    // The keyboard's way in still carries the whole title.
+    expect(shown.get('.task-open').attributes('aria-label')).toBe(
+      'Edit Check https://www.remotion.dev/docs/ai/skills/ today',
+    )
+    wrapper.unmount()
+  })
+
 
   it('opens the attempt chat through the project store, not a route', async () => {
     const wrapper = await mountWithBody([liveTask()])

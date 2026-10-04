@@ -1132,6 +1132,30 @@ async def _op_task_delegate(service: CiaoMcpService, task_id: str,
     )
 
 
+async def _op_task_report(service: CiaoMcpService, task_id: str, outcome: str,
+                          summary: str) -> dict[str, Any]:
+    """Report how far you got on the task this chat was handed. Call it once,
+    before you end your turn.
+
+    outcome:
+        "done"        — the work is finished. The user reviews it and closes the
+            task; you cannot, and this does not.
+        "blocked"     — you cannot go on (missing access, a failing dependency,
+            a decision that is not yours).
+        "needs_input" — you need an answer from the user before you can go on.
+    summary: Markdown — what you did, where the results are, and what is left.
+        It is saved on the task and is what the next attempt starts from.
+
+    Only the chat working on the task can report on it. A turn that ends
+    without a report is shown to the user as unfinished.
+    """
+    return await service._invoke(
+        "task_report",
+        lambda cp, p: cp.task_report(p, task_id, outcome=outcome, summary=summary),
+        mutating=True,
+    )
+
+
 async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
                                  action: str) -> dict[str, Any]:
     """One lifecycle gesture on a delegation attempt.
@@ -1382,6 +1406,7 @@ OPERATIONS: tuple[Operation, ...] = (
     # destructive effect for an agent caller.
     Operation("task_action", _WRITE, _op_task_action.__doc__ or "", _op_task_action),
     Operation("task_delegate", _WRITE, _op_task_delegate.__doc__ or "", _op_task_delegate),
+    Operation("task_report", _WRITE, _op_task_report.__doc__ or "", _op_task_report),
     # `_DESTRUCTIVE`, because `stop` ends a turn irreversibly: an ask-class
     # operation, where every other task write is allow-class.
     Operation("task_attempt_action", _DESTRUCTIVE, _op_task_attempt_action.__doc__ or "", _op_task_attempt_action),

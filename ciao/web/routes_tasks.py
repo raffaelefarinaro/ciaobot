@@ -68,6 +68,10 @@ _STATUS_BY_CODE = {
     # stale-revision case is: re-read, then send again.
     "task_update_busy": 409,
     "task_attempt_not_found": 404,
+    # Resume against a chat that was archived or deleted: there is no
+    # conversation to continue, and the way on is a retry in a new chat.
+    "attempt_chat_archived": 409,
+    "task_report_not_holder": 403,
     "task_read_failed": 500,
 }
 
