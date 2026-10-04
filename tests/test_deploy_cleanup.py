@@ -152,8 +152,9 @@ def test_render_launchd_plist_with_verified_host_renders_host_argv_and_timeout()
     from ciao.cli import _render_launchd_plist
 
     host = _verified_host()
+    workspace = Path("/tmp/ciao-ws")
     out = _render_launchd_plist(
-        workspace=Path("/tmp/ciao-ws"),
+        workspace=workspace,
         port=8443,
         host=host,
         host_python="/opt/ciao/venv/bin/python",
@@ -170,7 +171,10 @@ def test_render_launchd_plist_with_verified_host_renders_host_argv_and_timeout()
     ]
     assert data["ExitTimeOut"] == 45
     # The workspace/runtime facts a hosted definition still carries survive.
-    assert data["EnvironmentVariables"]["CIAO_WORKSPACE"] == "/tmp/ciao-ws"
+    # The renderer writes `str(workspace)`, which is POSIX on macOS and
+    # backslash-separated on Windows, so the expected value is built the same
+    # way rather than hard-coded.
+    assert data["EnvironmentVariables"]["CIAO_WORKSPACE"] == str(workspace)
 
 
 def test_render_launchd_plist_host_refuses_a_non_python_interpreter() -> None:
