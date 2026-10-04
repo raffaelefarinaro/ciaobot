@@ -47,6 +47,7 @@ from ciao.update_host import (
     current_update_host,
     default_update_host,
 )
+from ciao.server_host import ServerHostError, parse_service_command
 
 logger = logging.getLogger(__name__)
 
@@ -1137,22 +1138,49 @@ def _service_disagreement(
     env nothing is using. Checked before anything moves, so the refusal costs
     the operator a re-apply and not their install.
 
-    ``host.server_program()`` is the platform's own answer to "what is it
+    ``host.server_command()`` is the platform's own answer to "what is it
     actually running", which is the one question that matters: a supervisor
     loads a job once, so a definition rewritten afterwards describes the next
     boot while the running service still executes the old one. ``None`` means
     the host could not tell, which is evidence of nothing.
 
-    Agreement is the whole install, not just the env directory: the receipt's
-    entry point is part of it (see :func:`_runs_the_receipt_install`).
+    The loaded command has two shapes, and agreement is about the engine install
+    each actually runs (see :func:`_runs_the_receipt_install`):
 
-    Nothing the host reports is treated as a disagreement but a program outside
-    the receipt's install: a service that is not loaded yet is restored by the
+    * a **direct** command — ``python -m ciao.cli run|supervise`` or ``ciao
+      run|supervise`` — runs the engine out of its own program, so the program
+      is the install to compare;
+    * a **hosted** command — ``CiaobotServerHost serve --python <interpreter>``
+      — runs the native host, which is *not* part of the receipt's install and
+      must never be mistaken for it. The engine install it runs is the
+      interpreter it serves, so `parse_service_command` resolves that and the
+      agreement is the served interpreter, not the host executable.
+
+    Nothing the host reports is treated as a disagreement but an install
+    outside the receipt's: a service that is not loaded yet is restored by the
     rollback's own start step.
     """
-    program = host.server_program()
-    if program is None:
+    command = host.server_command()
+    if command is None:
         return ""
+    try:
+        parsed = parse_service_command(command)
+    except ServerHostError:
+        # Not a shape the parser knows. That is the direct case below with the
+        # program at argv[0]; a malformed *hosted* command still falls through
+        # to the same refusal, because the host executable is not the receipt's
+        # install.
+        parsed = None
+    if parsed is not None and parsed.mode == "hosted":
+        served = parsed.python
+        if _runs_the_receipt_install(Path(served), live_env, executable):
+            return ""
+        return (
+            f"the loaded {SERVER_LABEL} runs {parsed.program} serving {served}, "
+            f"not the receipt's environment {live_env}; point the host at the "
+            "install the receipt names, or reinstall, then apply again"
+        )
+    program = command[0]
     if _runs_the_receipt_install(Path(program), live_env, executable):
         return ""
     return (

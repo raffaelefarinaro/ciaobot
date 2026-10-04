@@ -114,11 +114,26 @@ class UpdateHost(Protocol):
         """
         ...
 
+    def server_command(self) -> tuple[str, ...] | None:
+        """The full argv the loaded service actually runs, or ``None``.
+
+        The loaded job is the authority, exactly as for
+        :meth:`server_program`, but the whole argument vector and not just
+        ``argv[0]``: a native hosted service runs ``CiaobotServerHost serve
+        --python <interpreter>``, so the engine install the job is actually
+        using is named by the interpreter it serves, not by the host
+        executable. ``None`` is "not loaded, or nothing usable was reported",
+        and is the only case in which an on-disk definition may answer instead.
+        """
+        ...
+
     def server_program(self) -> str | None:
         """The program the loaded service actually runs, or ``None``.
 
         ``None`` is "not loaded, or nothing usable was reported", and is the
-        only case in which an on-disk definition may answer instead.
+        only case in which an on-disk definition may answer instead. It is the
+        first element of :meth:`server_command`, kept as its own answer because
+        that was the question before a hosted command had a second one.
         """
         ...
 
@@ -467,25 +482,68 @@ def _loaded_tokens(printed: str, key: str) -> list[str]:
 def _loaded_program_argument(printed: str) -> str | None:
     """The program ``launchctl print`` says a loaded job runs, or ``None``.
 
-    The first token of the ``program`` value in every shape launchd prints it
-    (see :func:`_loaded_field`); nothing recognisable answers ``None``, which is
-    evidence of nothing and so never refuses an update.
+    The ``program`` value in every shape launchd prints it (see
+    :func:`_loaded_field`): a bare scalar keeps its spaces, because the host the
+    service runs under is ``Ciaobot Server.app`` and a token split would truncate
+    it at the bundle name; a list keeps the old first-token rule. Nothing
+    recognisable answers ``None``, which is evidence of nothing and so never
+    refuses an update.
     """
-    tokens = _loaded_tokens(printed, "program")
-    return tokens[0].strip("\"'") if tokens else None
+    raw = _loaded_field(printed, "program").strip()
+    if not raw:
+        return None
+    if raw[:1] in {"(", "{"}:
+        tokens = re.findall(r"[^\s,(){}]+", raw)
+        return tokens[0].strip("\"'") if tokens else None
+    return raw.strip("\"'")
 
 
-def _loaded_server_program(launch: Launchctl, domain_uid: int) -> str | None:
-    """``com.ciao.server``'s program *as launchd would run it*, or ``None``.
+def _loaded_arguments(printed: str) -> list[str]:
+    """The arguments ``launchctl print`` rendered for a loaded job's job.
 
-    This is the interpreter the acceptance criterion is about, and the on-disk
+    launchd renders a job's arguments one per line inside a delimited block, and
+    that layout is what preserves an argument that contains a space — the native
+    host's own path does (``Ciaobot Server.app``), and so may the interpreter it
+    serves. Splitting those lines on whitespace would truncate the host path at
+    the first space, so the multi-line block is read line by line. The older
+    single-line shapes (``arguments = ( -I -m ... )`` or ``{ -I -m ... }``)
+    carry no spaces in their tokens and are read as whitespace-separated tokens,
+    as :func:`_loaded_tokens` does.
+    """
+    field = _loaded_field(printed, "arguments")
+    if not field:
+        return []
+    lines = field.splitlines()
+    first = lines[0]
+    # If the list opens and closes on its own first line (`arguments = ( -I -m
+    # ... )`), it is the flat legacy shape and its tokens are whitespace-
+    # separated. Otherwise it is launchd's one-argument-per-line block, and each
+    # line is one argument, spaces and all.
+    depth = first.count("(") + first.count("{") - first.count(")") - first.count("}")
+    if depth <= 0:
+        return re.findall(r"[^\s,(){}]+", first)
+    return [stripped for line in lines[1:] if (stripped := line.strip().strip(",(){}").strip())]
+
+
+def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...] | None:
+    """``com.ciao.server``'s argv *as launchd would run it*, or ``None``.
+
+    This is the loaded job the acceptance criterion is about, and the on-disk
     plist cannot be trusted for it: launchd loads a job once, so a plist
     rewritten afterwards — by a reinstall, by an operator's editor, by a
     `Ciaobot.app` installed over a terminal install — describes the next login
     while the running service still executes the old one. ``launchctl print``
     reports the loaded job, which is the one that has to agree with the
-    receipt. ``None`` means "not loaded, or launchd said nothing usable", and
-    only then may the on-disk plist answer instead.
+    receipt. The whole argument vector and not just the program, because a
+    native hosted service runs ``CiaobotServerHost serve --python
+    <interpreter>``: the engine install it is actually using is named by the
+    interpreter it serves, not by the host executable.
+
+    ``launchctl print`` renders the program on its own line and the remaining
+    arguments in the ``arguments`` block; some versions include the program as
+    the block's first argument too, so it is folded in only when it is not
+    already there. ``None`` means "not loaded, or launchd said nothing usable",
+    and only then may the on-disk plist answer instead.
     """
     try:
         printed = launch(["print", f"gui/{domain_uid}/{SERVER_LABEL}"])
@@ -493,7 +551,14 @@ def _loaded_server_program(launch: Launchctl, domain_uid: int) -> str | None:
         return None
     if printed.returncode != 0:
         return None
-    return _loaded_program_argument(printed.stdout or "")
+    output = printed.stdout or ""
+    program = _loaded_program_argument(output)
+    if program is None:
+        return None
+    arguments = _loaded_arguments(output)
+    if arguments and arguments[0] == program:
+        return tuple(arguments)
+    return (program, *arguments)
 
 
 # A `launchctl print` renders `pid = <n>` only while a process is running the
@@ -674,18 +739,19 @@ class MacUpdateHost:
         self._launchctl(["bootout", self._target(SERVER_LABEL)])
         return wait() if wait is not None else True
 
-    def server_program(self) -> str | None:
+    def server_command(self) -> tuple[str, ...] | None:
         """What the loaded ``com.ciao.server`` runs, or the plist's, or ``None``.
 
-        The loaded job is the authority (see :func:`_loaded_server_program`): a
+        The loaded job is the authority (see :func:`_loaded_server_command`): a
         service that is registered but not loaded is the only case where the
         on-disk plist may answer, and a missing, unreadable or argument-less
         plist answers ``None`` — evidence of nothing, which never refuses an
-        update.
+        update. The whole argument vector, because a hosted command names its
+        engine install by the interpreter it serves.
         """
-        program = _loaded_server_program(self._launchctl, self._uid)
-        if program is not None:
-            return program
+        command = _loaded_server_command(self._launchctl, self._uid)
+        if command is not None:
+            return command
         path = macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
         try:
             with path.open("rb") as handle:
@@ -697,7 +763,17 @@ class MacUpdateHost:
         arguments = loaded.get("ProgramArguments")
         if not isinstance(arguments, list) or not arguments:
             return None
-        return str(arguments[0])
+        return tuple(str(argument) for argument in arguments)
+
+    def server_program(self) -> str | None:
+        """What the loaded ``com.ciao.server`` runs, or the plist's, or ``None``.
+
+        The first element of :meth:`server_command`, and the answer to the
+        question the transaction asked before a hosted command had a second one
+        (the interpreter it serves).
+        """
+        command = self.server_command()
+        return command[0] if command else None
 
     # ── the jobs that own the swap ──────────────────────────────────
 

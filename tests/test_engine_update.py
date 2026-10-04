@@ -15,7 +15,7 @@ import zipfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import sys
 
@@ -51,6 +51,7 @@ from ciao.update_host import (
     UPDATER_LABEL,
     UPDATER_PLIST_NAME,
     MacUpdateHost,
+    UpdateHost,
 )
 from ciao import install_receipt, macos_service
 from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
@@ -1003,6 +1004,43 @@ def _loaded_job(
                 f"\tprogram = {program}\n"
                 "\targuments = {\n\t\t-m\n\t\tciao.main\n\t}\n"
                 f"\tlast exit code = {0 if running else 1}\n"
+                "}\n",
+                "",
+            )
+        return engine.launchctl(args)
+
+    return launchctl
+
+
+def _loaded_hosted_job(engine: _FakeEngine, served_python: str | Path) -> Any:
+    """A launchctl reporting `com.ciao.server` loaded as the native host.
+
+    The hosted command launchd would run once the installer selects the host:
+    `CiaobotServerHost serve --python <interpreter>`. The interpreter is the
+    engine install the job actually runs, and the host executable is not part
+    of the receipt's install at all, so the loaded-job agreement has to resolve
+    the interpreter rather than compare the host's own path.
+    """
+    host = (
+        "/Users/operator/Applications/Ciaobot Server.app/Contents/MacOS/"
+        "CiaobotServerHost"
+    )
+    arguments = [host, "serve", "--python", str(served_python)]
+    rendered = "\n".join(f"\t\t{argument}" for argument in arguments)
+
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[0] == "print" and args[-1].endswith(SERVER_LABEL):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                f"{SERVER_LABEL} = {{\n"
+                "\tactive count = 1\n"
+                f"\tpath = {_server_plist_path()}\n"
+                "\ttype = LaunchAgent\n"
+                "\tstate = running\n"
+                f"\tprogram = {host}\n"
+                f"\targuments = {{\n{rendered}\n\t}}\n"
+                "\tlast exit code = 0\n"
                 "}\n",
                 "",
             )
@@ -2861,6 +2899,194 @@ def test_run_apply_still_refuses_an_entry_point_the_receipt_does_not_name(
     assert engine.run_calls == []
 
 
+# ── the hosted loaded job: the native host serving the receipt's install ──
+#
+# Once the installer selects the native host, `com.ciao.server` runs
+# `CiaobotServerHost serve --python <interpreter>`. The host executable is not
+# part of the receipt's install, so the agreement has to resolve the interpreter
+# the host serves; the interpreter is what names the engine install the job runs.
+
+
+def test_run_apply_allows_a_hosted_job_serving_the_receipt_env(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The loaded job is the native host serving the env the receipt names. The
+    # swap is exactly what this transaction is for, so the pre-flight must agree
+    # even though the program the job runs is the host, not the env.
+    _write_server_plist(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+
+    result = _run(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_loaded_hosted_job(engine, engine.live_env / "bin" / "python"),
+    )
+
+    assert result.phase == "applied", result.error
+    assert read_operation(state) == result
+    assert _env_version(engine.live_env) == TO_VERSION
+    assert engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 1
+
+
+def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The host is loaded, but it serves an env this receipt knows nothing about:
+    # the swap would replace an env nothing is using, which is the disagreement
+    # the pre-flight exists for. The host executable itself is never the answer.
+    _write_server_plist(engine.live_env / "bin" / "python")
+    elsewhere = tmp_path / "elsewhere" / "ciaobot" / "bin" / "python"
+
+    result = _run(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=_loaded_hosted_job(engine, elsewhere),
+    )
+
+    assert result.phase == "failed"
+    assert "not the receipt's environment" in result.error
+    # Both the served interpreter and the host it runs under are named, so the
+    # operator can tell which installed host is pointing where.
+    assert str(elsewhere) in result.error
+    assert "CiaobotServerHost" in result.error
+    assert engine.changed_jobs() == []
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert engine.run_calls == []
+
+
+def test_a_hosted_command_with_a_non_python_interpreter_refuses(
+    tmp_path: Path,
+) -> None:
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    # The hosted shape requires `--python` to name a python interpreter; the
+    # parser refuses anything else. A host pointed at some other executable is
+    # therefore not a shape this pre-flight can agree about, and the refusal is
+    # the loaded host not running the receipt's install — never a silent pass.
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[0] == "print" and args[-1].endswith(SERVER_LABEL):
+            host_path = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                f"{SERVER_LABEL} = {{\n"
+                "\tstate = running\n"
+                f"\tprogram = {host_path}\n"
+                "\targuments = {\n"
+                f"\t\t{host_path}\n"
+                "\t\tserve\n"
+                "\t\t--python\n"
+                "\t\t/bin/sh\n"
+                "\t}\n"
+                "}\n",
+                "",
+            )
+        return engine.launchctl(args)
+
+    result = _run(engine, op, state, receipt_path, launchctl=launchctl)
+
+    assert result.phase == "failed"
+    assert "not the receipt's environment" in result.error
+    assert engine.changed_jobs() == []
+    assert engine.starts == 0
+
+
+def test_an_ordinary_engine_update_leaves_the_host_definition_and_bytes_untouched(
+    tmp_path: Path,
+) -> None:
+    # D2: an ordinary engine update must never rebuild or replace an installed
+    # host. The transaction moves the *engine* env; nothing here writes or moves
+    # the service definition (the hosted command) or the host bundle.
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    host_bundle = tmp_path / "Applications" / "Ciaobot Server.app"
+    executable = host_bundle / "Contents" / "MacOS" / "CiaobotServerHost"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_bytes(b"the installed host bytes")
+    definition_plist = _write_server_plist(executable)
+    definition_before = definition_plist.read_bytes()
+    host_before = executable.read_bytes()
+    # The launchctl answers the hosted command serving the receipt's env, so the
+    # pre-flight agrees and the swap proceeds.
+    launchctl = _loaded_hosted_job(engine, engine.live_env / "bin" / "python")
+
+    result = _run(engine, op, state, receipt_path, launchctl=launchctl)
+
+    assert result.phase == "applied", result.error
+    assert _env_version(engine.live_env) == TO_VERSION
+    # The hosted definition and the host bundle are exactly as they were: the
+    # engine env moved, the host did not.
+    assert definition_plist.read_bytes() == definition_before
+    assert executable.read_bytes() == host_before
+
+
+def test_a_failed_hosted_update_rolls_back_to_the_same_hosted_state(
+    tmp_path: Path,
+) -> None:
+    # D2 rollback: nothing about the host changes on the failure path either. The
+    # engine env is put back; the hosted definition and host bytes are untouched.
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    host_bundle = tmp_path / "Applications" / "Ciaobot Server.app"
+    executable = host_bundle / "Contents" / "MacOS" / "CiaobotServerHost"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_bytes(b"the installed host bytes")
+    definition_plist = _write_server_plist(executable)
+    definition_before = definition_plist.read_bytes()
+    host_before = executable.read_bytes()
+    launchctl = _loaded_hosted_job(engine, engine.live_env / "bin" / "python")
+
+    result = _run(
+        engine,
+        op,
+        state,
+        receipt_path,
+        launchctl=launchctl,
+        run=_broken_probe(engine),
+    )
+
+    assert result.phase == "rolled_back", result.error
+    assert _env_version(engine.live_env) == FROM_VERSION
+    assert definition_plist.read_bytes() == definition_before
+    assert executable.read_bytes() == host_before
+
+
+def test_service_disagreement_none_stays_evidence_of_nothing() -> None:
+    # `None` from the host means it could not tell, which never refuses an
+    # update; the rollback's own start step is the answer for a job that is not
+    # loaded.
+    class _NoCommand:
+        def server_command(self) -> tuple[str, ...] | None:
+            return None
+
+    host = cast(UpdateHost, _NoCommand())
+    assert (
+        engine_update._service_disagreement(
+            Path("/a/tools/ciaobot"), executable="/a/bin/ciao", host=host
+        )
+        == ""
+    )
+
+
+def test_service_disagreement_reads_a_direct_program_unchanged() -> None:
+    # A direct loaded command still compares its program, not its arguments.
+    class _Direct:
+        def server_command(self) -> tuple[str, ...] | None:
+            return ("/a/tools/ciaobot/bin/python", "-m", "ciao.cli", "run")
+
+    host = cast(UpdateHost, _Direct())
+    assert (
+        engine_update._service_disagreement(
+            Path("/a/tools/ciaobot"), executable="/a/bin/ciao", host=host
+        )
+        == ""
+    )
+
+
 @pytest.mark.parametrize(
     "printed,expected",
     [
@@ -2873,6 +3099,13 @@ def test_run_apply_still_refuses_an_entry_point_the_receipt_does_not_name(
             "/a/b/bin/python",
         ),
         ("com.ciao.server = {\n\tprogram = {\n\t\t/a/b/bin/python\n\t}\n}", "/a/b/bin/python"),
+        # A scalar program keeps its spaces: the native host lives inside
+        # `Ciaobot Server.app`, and a token split would truncate it at the bundle
+        # name before any agreement could see the interpreter it serves.
+        (
+            'com.ciao.server = {\n\tprogram = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"\n}',
+            "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+        ),
         ("com.ciao.server = {\n\tstate = running\n\tpid = 7\n}", None),
         ("", None),
     ],
@@ -2883,6 +3116,37 @@ def test_loaded_program_argument_reads_launchctl_output(
     # The formats launchd has used for a loaded job's program, and the two answers
     # that must never refuse an update: no program, and no output at all.
     assert update_host._loaded_program_argument(printed) == expected
+
+
+@pytest.mark.parametrize(
+    "printed,expected",
+    [
+        # launchd's one-argument-per-line block: the layout that preserves a
+        # spaced host path and a spaced served-interpreter path.
+        (
+            "com.ciao.server = {\n\targuments = {\n"
+            "\t\t/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost\n"
+            "\t\tserve\n\t\t--python\n\t\t/tools/my env/bin/python\n\t}\n}",
+            [
+                "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+                "serve",
+                "--python",
+                "/tools/my env/bin/python",
+            ],
+        ),
+        # Older single-line shapes carry no spaces in their tokens and are read
+        # as whitespace-separated tokens, exactly as before.
+        (
+            "com.ciao.server = {\n\targuments = ( -I -m ciao.main )\n}",
+            ["-I", "-m", "ciao.main"],
+        ),
+        ("com.ciao.server = {\n\tstate = running\n}", []),
+    ],
+)
+def test_loaded_arguments_reads_a_jobs_arguments(
+    printed: str, expected: list[str]
+) -> None:
+    assert update_host._loaded_arguments(printed) == expected
 
 
 @pytest.mark.parametrize(

@@ -48,6 +48,7 @@ from tests.test_engine_update import (
     _interrupted,
     _recover_apply,
     _run,
+    _server_plist_path,
     _staged,
     _write_server_plist,
     phases,
@@ -429,6 +430,131 @@ def test_mac_update_host_is_an_update_host() -> None:
     assert isinstance(host, MacUpdateHost)
 
 
+def test_mac_update_host_server_command_reads_the_loaded_hosted_job(
+    tmp_path: Path,
+) -> None:
+    # The loaded-job authority for the whole argv: `program` names the host, and
+    # the `arguments` block names the interpreter it serves. `server_command`
+    # folds the program in front of the block so a caller can parse the hosted
+    # command, and `server_program` stays its first element.
+    host_path = "/Users/operator/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+    printed = (
+        f"{SERVER} = {{\n"
+        "\tstate = running\n"
+        f"\tprogram = {host_path}\n"
+        "\targuments = {\n"
+        f"\t\t{host_path}\n"
+        "\t\tserve\n"
+        "\t\t--python\n"
+        "\t\t/Users/operator/tools/ciaobot/bin/python\n"
+        "\t}\n"
+        "}\n"
+    )
+    calls: list[list[str]] = []
+
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, printed, "")
+
+    host = MacUpdateHost(launchctl=launchctl, uid=501)
+    # An on-disk plist that would disagree if it were read; the loaded job wins.
+    _write_server_plist(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+
+    assert host.server_command() == (
+        host_path,
+        "serve",
+        "--python",
+        "/Users/operator/tools/ciaobot/bin/python",
+    )
+    assert host.server_program() == host_path
+    assert calls == [["print", "gui/501/com.ciao.server"]] * 2
+
+
+def test_mac_update_host_server_command_uses_the_disk_plist_when_not_loaded(
+    tmp_path: Path,
+) -> None:
+    # A job that is registered but not loaded is the one case the on-disk plist
+    # may answer, and the whole argument vector comes back so a hosted plist is
+    # resolvable too.
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 113, "", "not found")
+
+    plist_path = _server_plist_path()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    with plist_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "Label": SERVER,
+                "ProgramArguments": [
+                    "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+                    "serve",
+                    "--python",
+                    "/Applications/engine/bin/python",
+                ],
+            },
+            handle,
+        )
+
+    host = MacUpdateHost(launchctl=launchctl, uid=501)
+
+    assert host.server_command() == (
+        "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+        "serve",
+        "--python",
+        "/Applications/engine/bin/python",
+    )
+    assert host.server_program() == (
+        "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+    )
+
+
+def test_mac_update_host_server_program_is_the_first_element_on_disk(
+    tmp_path: Path,
+) -> None:
+    # The direct shape the on-disk plist used to answer with is still its first
+    # argument, so every existing caller of `server_program` is unchanged.
+    _write_server_plist(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+
+    def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 113, "", "not found")
+
+    host = MacUpdateHost(launchctl=launchctl, uid=501)
+
+    assert host.server_program() == str(tmp_path / "elsewhere" / "ciaobot" / "bin" / "python")
+
+
+def test_mac_update_host_server_command_folds_the_program_only_once() -> None:
+    # Some `launchctl print` versions put the program inside the arguments block
+    # as well; folding it in again would produce a duplicated argv the parser
+    # refuses. The program is prepended only when the block does not start with
+    # it.
+    printed = (
+        f"{SERVER} = {{\n"
+        "\tprogram = /a/b/python\n"
+        "\targuments = {\n"
+        "\t\t/a/b/python\n"
+        "\t\t-m\n"
+        "\t\tciao.cli\n"
+        "\t\trun\n"
+        "\t}\n"
+        "}\n"
+    )
+
+    host = MacUpdateHost(launchctl=lambda args: subprocess.CompletedProcess(args, 0, printed, ""), uid=501)
+
+    assert host.server_command() == ("/a/b/python", "-m", "ciao.cli", "run")
+
+
+def test_mac_update_host_server_command_is_none_when_launchd_says_nothing() -> None:
+    host = MacUpdateHost(
+        launchctl=lambda args: subprocess.CompletedProcess(args, 0, "", ""), uid=501
+    )
+
+    # No program line at all is evidence of nothing, and `server_program` agrees.
+    assert host.server_command() is None
+    assert host.server_program() is None
+
+
 def test_mac_update_host_forwards_launchctl_and_uid_exactly(tmp_path: Path) -> None:
     calls: list[list[str]] = []
 
@@ -593,9 +719,13 @@ class FakeHost:
         # what reports that it did not stop.
         return True if wait is None else bool(wait())
 
+    def server_command(self) -> tuple[str, ...] | None:
+        self._record("server_command")
+        return None if self.program is None else (self.program,)
+
     def server_program(self) -> str | None:
-        self._record("server_program")
-        return self.program
+        command = self.server_command()
+        return command[0] if command else None
 
     def spawn_updater(
         self, op: Any, python: str, *, verb: str = "run-apply", args: Any = None
@@ -762,7 +892,7 @@ def test_fake_host_run_apply_refuses_a_service_running_another_env(
 
     assert result.phase == "failed"
     assert "not the receipt's environment" in result.error
-    assert [call[0] for call in host.calls] == ["engine_port", "server_program"]
+    assert [call[0] for call in host.calls] == ["engine_port", "server_command"]
     assert engine.up is True
 
 
@@ -780,7 +910,7 @@ def test_fake_host_run_apply_stops_once_and_moves_nothing_when_it_will_not_stop(
     # swapped, so there is nothing to roll back and nothing to restore.
     assert [call[0] for call in host.calls] == [
         "engine_port",
-        "server_program",
+        "server_command",
         "stop_engine",
         "start_engine",
     ]
@@ -805,7 +935,7 @@ def test_fake_host_run_apply_rolls_back_through_the_host_in_order(
     # points, and start. The engine is started last and unconditionally.
     assert [call[0] for call in host.calls] == [
         "engine_port",
-        "server_program",
+        "server_command",
         "stop_engine",
         "move_env",
         "env_python",
@@ -861,7 +991,7 @@ def test_fake_host_run_apply_asks_the_host_for_the_whole_forward_path(
     # has to satisfy, recorded once here so both can be checked against it.
     assert [call[0] for call in host.calls] == [
         "engine_port",
-        "server_program",
+        "server_command",
         "stop_engine",
         "move_env",
         "env_python",
