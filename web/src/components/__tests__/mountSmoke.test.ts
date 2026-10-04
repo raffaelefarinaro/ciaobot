@@ -142,6 +142,9 @@ vi.mock('../../lib/api', () => {
     '/api/chats': [],
     '/api/tasks': { tasks: [] },
     '/api/schedules': [],
+    // The Automations overview reads the webhook triggers section on mount, so
+    // the shared fixture answers it. A bare `[]` would break `triggers.map`.
+    '/api/webhooks': { triggers: [] },
     '/api/workspaces': {
       workspaces: [],
       active: null,
@@ -381,6 +384,29 @@ describe('component mount smoke', () => {
     // other and throw.
     expect(wrapper.text()).toContain('No tasks in')
     expect(wrapper.text()).not.toContain('Could not load')
+    wrapper.unmount()
+  })
+
+  it('WebhookTriggers mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../WebhookTriggers.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('WebhookTriggers renders the Automations section against the shared fixture', async () => {
+    // The section is mounted here rather than through SchedulePanel, which this
+    // file stubs out as an async no-op — the overview itself is covered by
+    // SchedulePanelCards.test.ts.
+    const mod = await import('../WebhookTriggers.vue')
+    const wrapper = mount(mod.default as never, { global: { stubs: { Teleport: true } } })
+    await flushPromises()
+    await nextTick()
+
+    // The shared `/api/webhooks` fixture answers `{ triggers: [] }`, which is an
+    // empty list rather than a load error: the mount must not mistake one for the
+    // other, or it will render a failure over a workspace that simply has none.
+    expect(wrapper.text()).toContain('Webhook triggers')
+    expect(wrapper.text()).toContain('No webhook triggers yet')
+    expect(wrapper.text()).not.toContain('Could not load webhook triggers')
     wrapper.unmount()
   })
 
