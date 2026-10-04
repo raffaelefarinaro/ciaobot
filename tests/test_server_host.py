@@ -75,20 +75,27 @@ static const char *disposition(void *h) {
     return "handler";
 }
 
+/* The signal state the child inherited from the host, read before the child
+   installs anything of its own: the record reports what the host handed over. */
+static sigset_t inherited_mask;
+static struct sigaction inherited_term, inherited_intr;
+
+static void capture_inherited(void) {
+    sigemptyset(&inherited_mask);
+    sigprocmask(SIG_BLOCK, NULL, &inherited_mask);
+    sigaction(SIGTERM, NULL, &inherited_term);
+    sigaction(SIGINT, NULL, &inherited_intr);
+}
+
 static void write_record(int argc, char **argv) {
     const char *path = getenv("HOST_RECORD");
     if (!path) return;
     FILE *f = fopen(path, "w");
     if (!f) return;
     int record_fd = fileno(f);
-    sigset_t mask;
-    sigemptyset(&mask);
-    sigprocmask(SIG_BLOCK, NULL, &mask);
     unsigned int bits = 0;
-    memcpy(&bits, &mask, sizeof(bits));
-    struct sigaction term, intr;
-    sigaction(SIGTERM, NULL, &term);
-    sigaction(SIGINT, NULL, &intr);
+    memcpy(&bits, &inherited_mask, sizeof(bits));
+    struct sigaction term = inherited_term, intr = inherited_intr;
     int extra = -1;
     const char *extra_env = getenv("HOST_EXTRA_FD");
     if (extra_env) extra = atoi(extra_env);
@@ -149,10 +156,11 @@ static void on_term(int signum) {
 int main(int argc, char **argv) {
     struct rlimit core = {0, 0};
     setrlimit(RLIMIT_CORE, &core);
-    write_record(argc, argv);
-    spawn_descendant();
+    capture_inherited();
     const char *mode = env_or("HOST_MODE", "report");
     if (strcmp(mode, "report") == 0) {
+        write_record(argc, argv);
+        spawn_descendant();
         if (getenv("HOST_ECHO")) {
             fputs("child-stdout\n", stdout);
             fputs("child-stderr\n", stderr);
@@ -170,6 +178,12 @@ int main(int argc, char **argv) {
         sigaction(SIGTERM, &sa, NULL);
         sigaction(SIGINT, &sa, NULL);
     }
+    /* The record is what the tests wait on before signalling, so it is written
+       only once the handlers are in place. Written first, a SIGTERM forwarded in
+       the gap killed the child by the default action, and the host reported a
+       clean stop (0) where the test expected the handler's exit code. */
+    write_record(argc, argv);
+    spawn_descendant();
     for (;;) pause();
     return 0;
 }
