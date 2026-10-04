@@ -46,7 +46,6 @@ function task(overrides: Partial<Task> = {}): Task {
     project_id: '',
     due: '',
     assignee: 'user',
-    review_state: 'none',
     chat_id: '',
     attempt_id: '',
     created_at: '2026-03-01T09:00:00+00:00',
@@ -107,7 +106,6 @@ describe('taskRowsFrom', () => {
       title: '',
       status: 'backlog',
       assignee: 'user',
-      review_state: 'none',
       revision: '',
     })
     // A status this build does not know is not a fifth column.
@@ -162,14 +160,14 @@ describe('taskLanes', () => {
   const rows = [
     task({ id: 'b1', title: 'Backlog one', status: 'backlog' }),
     task({ id: 'i1', title: 'Doing', status: 'in_progress' }),
-    task({ id: 'h1', title: 'Waiting', status: 'on_hold' }),
+    task({ id: 'h1', title: 'Waiting', status: 'in_review' }),
     task({ id: 'd1', title: 'Shipped', status: 'done' }),
     task({ id: 'b2', title: 'Backlog two', status: 'backlog' }),
   ]
 
   it('gives a wide unfiltered board the four fixed columns, in board order', () => {
     const lanes = taskLanes(rows, { status: 'all', narrow: false })
-    expect(lanes.map((lane) => lane.label)).toEqual(['Backlog', 'In progress', 'On hold', 'Done'])
+    expect(lanes.map((lane) => lane.label)).toEqual(['To do', 'In progress', 'In review', 'Done'])
     expect(lanes.map((lane) => lane.tasks.map((t) => t.id))).toEqual([
       ['b1', 'b2'],
       ['i1'],
@@ -187,9 +185,9 @@ describe('taskLanes', () => {
 
   it('narrows to one lane on either layout when a status is picked', () => {
     for (const narrow of [false, true]) {
-      const lanes = taskLanes(rows, { status: 'on_hold', narrow })
+      const lanes = taskLanes(rows, { status: 'in_review', narrow })
       expect(lanes).toHaveLength(1)
-      expect(lanes[0]!.label).toBe('On hold')
+      expect(lanes[0]!.label).toBe('In review')
       expect(lanes[0]!.tasks.map((t) => t.id)).toEqual(['h1'])
     }
   })
@@ -202,7 +200,7 @@ describe('taskLanes', () => {
   })
 
   it('has four columns and no more, so a status this build does not know has no lane', () => {
-    expect(TASK_COLUMNS.map((c) => c.status)).toEqual(['backlog', 'in_progress', 'on_hold', 'done'])
+    expect(TASK_COLUMNS.map((c) => c.status)).toEqual(['backlog', 'in_progress', 'in_review', 'done'])
   })
 })
 
@@ -240,7 +238,7 @@ describe('counts', () => {
       task({ status: 'in_progress' }),
       task({ status: 'done' }),
     ]
-    expect(statusCounts(rows)).toEqual({ backlog: 2, in_progress: 1, on_hold: 0, done: 1 })
+    expect(statusCounts(rows)).toEqual({ backlog: 2, in_progress: 1, in_review: 0, done: 1 })
     expect(openTaskCount(rows)).toBe(3)
   })
 })
@@ -339,7 +337,6 @@ describe('taskReconcileNotes', () => {
       status: 'done',
       assignee: 'agent',
       attempt_state: 'ready_for_review',
-      review_state: 'none',
       live_attempt_id: '',
     })
     expect(taskReconcileNotes(released)).toEqual([])
@@ -350,7 +347,6 @@ describe('taskReconcileNotes', () => {
       status: 'in_progress',
       assignee: 'agent',
       attempt_state: 'ready_for_review',
-      review_state: 'none',
       live_attempt_id: 'b'.repeat(32),
     })
     const codes = taskReconcileNotes(live).map((n) => n.code)

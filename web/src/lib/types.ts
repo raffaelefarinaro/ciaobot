@@ -1157,13 +1157,10 @@ export interface HousekeepingDismissResponse {
 // would be sending back a revision the server never issued.
 
 /** The four board columns, in board order. */
-export type TaskStatus = 'backlog' | 'in_progress' | 'on_hold' | 'done'
+export type TaskStatus = 'backlog' | 'in_progress' | 'in_review' | 'done'
 
 /** Who the task is for. Delegation is B5; the field exists so the card can say. */
 export type TaskAssignee = 'user' | 'agent'
-
-/** Whether a result is waiting to be looked at. */
-export type TaskReviewState = 'none' | 'ready'
 
 /** One readable task file, as `GET /api/tasks` serves it (no `body`). */
 export interface Task {
@@ -1175,7 +1172,6 @@ export interface Task {
   /** `YYYY-MM-DD`, or empty for no date. */
   due: string
   assignee: TaskAssignee
-  review_state: TaskReviewState
   /** The chat an attempt is working in, empty when nothing is delegated. */
   chat_id: string
   /** The attempt holding the task, empty when nothing is delegated. */

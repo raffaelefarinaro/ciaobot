@@ -42,7 +42,6 @@ function task(overrides: Partial<Task> = {}): Task {
     project_id: '',
     due: '',
     assignee: 'user',
-    review_state: 'none',
     chat_id: '',
     attempt_id: '',
     created_at: '2026-03-01T09:00:00+00:00',

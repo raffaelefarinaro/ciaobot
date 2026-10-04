@@ -28,7 +28,6 @@ export interface TaskChanges {
   project_id?: string | null
   due?: string | null
   assignee?: 'user' | 'agent'
-  review_state?: 'none' | 'ready'
 }
 
 export interface TaskCreateInput {

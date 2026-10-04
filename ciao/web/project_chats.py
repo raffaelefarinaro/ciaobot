@@ -3461,8 +3461,9 @@ class ProjectChatManager:
         project: ProjectInfo | None,
         archive_path: Path,
         doc_path: str,
+        focus: dict[str, str] | None = None,
     ) -> str | None:
-        return self._memory_pass.enqueue(source, project, archive_path, doc_path)
+        return self._memory_pass.enqueue(source, project, archive_path, doc_path, focus)
 
     async def resume_memory_passes(self) -> None:
         self._memory_pass.resume()
@@ -3613,9 +3614,10 @@ class ProjectChatManager:
         outcome: ArchiveOutcome,
         chat_meta: ChatInfo | None,
         project_meta: ProjectInfo | None,
+        focus: dict[str, str] | None = None,
     ) -> None:
         return self._archive_pipeline_for().run_archive_postprocess(
-            chat_id, outcome, chat_meta, project_meta
+            chat_id, outcome, chat_meta, project_meta, focus
         )
 
     def _run_archive_index_best_effort(

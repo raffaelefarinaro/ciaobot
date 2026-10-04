@@ -27,19 +27,18 @@ without a watcher.
 ## Schema (version 1)
 
 YAML frontmatter, then a free Markdown body (description, links, acceptance
-criteria, result notes). All twelve keys are required in the file; the four
+criteria, result notes). All eleven keys are required in the file; the four
 nullable ones take `null` (absent reads as `null` for those four only).
 
 | Key            | Type                       | Notes                                                        |
 | -------------- | -------------------------- | ------------------------------------------------------------ |
-| `schema`       | integer `1`                | Any other integer is `unsupported_schema`; a non-integer is `invalid_task`. |
+| `schema`       | integer `2`                | Any other integer is `unsupported_schema`; a non-integer is `invalid_task`. Schema-1 files are rewritten once by `migrate_schema_1` (#1069). |
 | `id`           | 32 lowercase hex string    | Must equal the filename stem.                                |
 | `title`        | string, 1–200 chars trimmed| Stored trimmed; surrounding whitespace is not significant.   |
-| `status`       | `backlog` \| `in_progress` \| `on_hold` \| `done` |                     |
+| `status`       | `backlog` \| `in_progress` \| `in_review` \| `done` | Board columns *To do*, *In progress*, *In review*, *Done*. |
 | `project_id`   | string \| null             | Opaque to this store; see "Obligations, resolved".          |
 | `due`          | calendar date \| null       | `YYYY-MM-DD`, a real calendar day.                           |
 | `assignee`     | `user` \| `agent`          |                                                              |
-| `review_state` | `none` \| `ready`          |                                                              |
 | `created_at`   | UTC datetime (ISO-8601)    | Immutable. Naive inputs are read as UTC.                     |
 | `updated_at`   | UTC datetime (ISO-8601)    | Set by the store's clock on every managed write.             |
 | `chat_id`      | string \| null             | Linkage; only hand edits carry it (see below).               |
@@ -55,14 +54,13 @@ data, never executable instructions, and a managed edit never discards them.
 
 ```markdown
 ---
-schema: 1
+schema: 2
 id: 9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c
 title: Draft the migration runbook
 status: in_progress
 project_id: null
 due: 2026-10-20
 assignee: agent
-review_state: none
 created_at: "2026-10-03T12:00:00+00:00"
 updated_at: "2026-10-04T09:30:00+00:00"
 chat_id: null
@@ -75,6 +73,30 @@ See [the runbook outline](https://example.test/runbook).
 - [ ] Outcome and rollback steps agreed
 - [ ] Result recorded below
 ```
+
+## Four columns and the schema-2 migration (#1069)
+
+The board is *To do* (`backlog`), *In progress*, *In review*, *Done*. `on_hold`
+and the `review_state` flag are gone: review is a column. On the first task call
+for a workspace each process runs `TaskBoardStore.migrate_schema_1`, which
+rewrites every schema-1 file in place — `schema: 2`, `on_hold` → `backlog`,
+`in_progress` with `review_state: ready` → `in_review`, the `review_state` line
+dropped — touching nothing else, and leaves a file it cannot upgrade untouched
+(it lists as an unsupported-schema row). Attempts bound to a file's old bytes are
+rebound to the new revision, so the migration never reads as "changed since
+delegated". A turn the agent reported done moves its task to `in_review`; a new
+turn in that chat, or a detach, moves it back to `in_progress`.
+
+### Learning from an approved task
+
+Approving a delegated result (**Approve Done**, or dropping the card on *Done*)
+archives its chat and queues the ordinary memory pass with an `approved_task`
+focus: the pass is told the conversation is a worked example the user accepted,
+handed the agent's summary, and asked to extract the procedure — a proposal for
+a skill the workspace owns (`ciao skill-proposal-add`), a `[review]` draft for a
+new skill (`ciao skill-draft-add`), and durable facts as usual. Everything it
+files waits in *To decide*. The focused pass is deduplicated per chat and focus,
+so an earlier ordinary pass of the same chat does not block it.
 
 ## The agent's report and the delegation log (#1064)
 
@@ -141,8 +163,8 @@ chat. `ready_for_review` is live but not resumable on purpose: a finished turn
 is waiting for the user's decision, and continuing it is the reviewer's call.
 
 **Board state is not execution state.** None of these states is a column. A
-finished turn sets `review_state: ready` — a badge in *In progress* — and only
-the user's own completion action moves the card to `Done`. The store's
+turn the agent reported done moves the card to *In review* (#1069), and only
+the user's own completion action moves it to `Done`. The store's
 `completion_requires_user` rule is unchanged by any of this.
 
 The review badge moves the task's revision, so the watcher rebinds the attempt to
@@ -283,8 +305,8 @@ description is now empty" is a fact nobody checked.
 card with what disagrees *and* the controls that resolve it, never silently
 rewritten. Five derivations, all decidable from the row the service already sends:
 a settled attempt while the card still reads *In progress* for the agent; a
-`review_state: ready` badge with no result waiting; a result waiting with no
-badge; a card in *Done* while an attempt still holds it; and a `chat_id` the
+card in *In review* with no result waiting while an attempt holds it; a result
+waiting while the card is not in *In review*; a card in *Done* while an attempt still holds it; and a `chat_id` the
 browser's own chat list does not contain. The last one is the only one that needs
 anything outside the row, and it is deliberately worded as what the browser can
 see — an empty chat list means the board knows nothing, and a flag on that basis
@@ -384,8 +406,8 @@ store does not resolve or fall back across workspaces.
   these are the only writes that stamp or clear linkage, and they carry the same
   revision protocol: required, rechecked under the lock, nothing written on a
   conflict. `link` defaults to handing the task over — `in_progress` and `agent` —
-  in the same atomic write, because a delegated task left in *Backlog* assigned to
-  the user could never reach `review_state: ready`, which needs exactly that pair.
+  in the same atomic write, because a delegated task left in *To do* assigned to
+  the user is not what a hand-over looks like.
 - `delete(task_id, *, expected_revision)` — revision-checked under the
   workspace lock; unlinks only a real task record inside
   `Workspace/Tasks`, never a link target or anything outside it. Raises
@@ -402,8 +424,8 @@ store does not resolve or fall back across workspaces.
 
 Pure helpers: `parse_task(raw, *, expected_id)`, `render_new_task(record,
 body)`, `patch_task(document, changes, *, body=None)`. Editable patch
-fields are `title`, `status`, `project_id`, `due`, `assignee`,
-`review_state` (plus store-managed `updated_at`). `schema`, `id`,
+fields are `title`, `status`, `project_id`, `due`, `assignee`
+(plus store-managed `updated_at`). `schema`, `id`,
 `created_at`, `chat_id` and `attempt_id` are refused as patch fields:
 identity and creation time are immutable, and linkage mutation belongs to
 the delegation child.

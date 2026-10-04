@@ -218,7 +218,7 @@ def test_an_unreadable_file_is_a_row_not_a_missing_task(tmp_path: Path) -> None:
     tasks = _tasks_dir(plane, "personal")
     tasks.mkdir(parents=True, exist_ok=True)
     (tasks / f"{broken_id}.md").write_text(
-        f"---\nschema: 1\nid: {broken_id}\ntitle: no status here\n---\n", encoding="utf-8"
+        f"---\nschema: 2\nid: {broken_id}\ntitle: no status here\n---\n", encoding="utf-8"
     )
 
     rows = plane.workspace_task_list("personal")
