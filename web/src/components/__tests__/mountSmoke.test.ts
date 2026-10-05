@@ -18,11 +18,9 @@ import { api } from '../../lib/api'
 
 vi.mock('../../lib/api', () => {
   let routineSettings = {
-    insights_model: '',
     insights_enabled: true,
 
     critique_models: '',
-    insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
 
@@ -922,8 +920,9 @@ describe('component mount smoke', () => {
       provider_default_models: { claude: 'sonnet' },
     })
 
-    const selectors = wrapper.findAll('.provider-connections .model-selector')
-    const opencodeSelector = selectors[1]!
+    // Each card holds its default-model selector first, then Session insights.
+    const opencodeSelector = wrapper.findAll('.provider-inline-defaults')[1]!
+      .findAll('.model-selector')[0]!
     await opencodeSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
     const opencodeOption = opencodeSelector.findAll('.model-selector__item')
@@ -992,14 +991,15 @@ describe('component mount smoke', () => {
       const inlineBlocks = wrapper.findAll('.provider-inline-defaults')
       expect(inlineBlocks.length).toBe(1)
       expect(wrapper.text()).toContain('Default model')
-      expect(wrapper.findAll('.provider-connections .model-selector')).toHaveLength(1)
+      // Claude's default model and Session insights model.
+      expect(wrapper.findAll('.provider-connections .model-selector')).toHaveLength(2)
     } finally {
       wrapper.unmount()
       testApi.setResponse('/api/models', originalModels)
     }
   })
 
-  it('SettingsView saves routine models by provider', async () => {
+  it('SettingsView saves the Session insights model per provider', async () => {
     const mockApi = api as typeof api & {
       getResponse(path: string): unknown
       setResponse(path: string, value: unknown): void
@@ -1028,24 +1028,36 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // insights_model carries a provider select.
-    const providerSelects = wrapper.findAll('.routine-model-controls .routine-select--provider')
-    expect(providerSelects.length).toBeGreaterThanOrEqual(1)
+    // Session insights is picked per provider, on that provider's card, and
+    // stores a bare model id for that provider.
+    expect(wrapper.find('.routine-select--provider').exists()).toBe(false)
+    const pick = async (card: number, model: string) => {
+      const selector = wrapper.findAll('.provider-inline-defaults')[card]!
+        .findAll('.model-selector')[1]!
+      await selector.find('.model-selector__trigger').trigger('click')
+      await flushPromises()
+      const option = selector.findAll('.model-selector__item')
+        .find((el) => el.attributes('data-model') === model)
+      expect(option).toBeTruthy()
+      await option!.trigger('click')
+      await flushPromises()
+    }
 
-    // Picking Claude stores the effective default as the concrete model.
-    await providerSelects[0].setValue('claude')
-    await flushPromises()
+    await pick(0, 'haiku')
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      insights_model: 'sonnet',
+      provider_insights_models: { claude: 'haiku' },
     })
 
-    // Picking opencode stores a provider-qualified concrete model.
-    await providerSelects[0].setValue('opencode')
-    await flushPromises()
-    const patchMock = api.patch as unknown as { mock: { calls: Array<[string, unknown]> } }
-    const last = patchMock.mock.calls[patchMock.mock.calls.length - 1]
-    const body = last[1] as Record<string, string>
-    expect(body.insights_model).toBe('opencode:opus')
+    await pick(1, 'anthropic/claude-opus-4.5')
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      provider_insights_models: { claude: 'haiku', opencode: 'anthropic/claude-opus-4.5' },
+    })
+
+    // Automatic clears just that provider's entry.
+    await pick(0, '__ciao_insights_default__')
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      provider_insights_models: { opencode: 'anthropic/claude-opus-4.5' },
+    })
 
     wrapper.unmount()
     mockApi.setResponse('/api/models', originalModels)

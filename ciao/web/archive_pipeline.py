@@ -115,9 +115,8 @@ class ArchivePipeline:
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
         from ciao.insights import resolve_insights_model
 
-        insights_models = getattr(self._host._config, "provider_insights_models", {}) or {}
-        return insights_models.get(chat.provider or "", "") or resolve_insights_model(
-            self._host._config, workspace or None, chat.provider or None
+        return resolve_insights_model(
+            self._host._config, workspace or None, chat.provider or "claude"
         )
 
     @staticmethod

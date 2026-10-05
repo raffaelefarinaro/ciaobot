@@ -7057,15 +7057,12 @@ class ProjectChatManager:
         if not user_text:
             return None
         try:
-            from ciao.insights import _resolve_insights_call, resolve_insights_model
+            from ciao.insights import resolve_insights_model
             from ciao.providers.oneshot import run_oneshot
 
             project = self._projects.get(chat.project_id)
             workspace = getattr(project, "workspace", None) if project else None
-            model = resolve_insights_model(self._config, workspace, provider=provider)
-            model, provider, _note = _resolve_insights_call(
-                self._config, model, provider=provider
-            )
+            model = resolve_insights_model(self._config, workspace, provider)
             reply = (assistant_text or "").strip()
             sections = [f"<user>{user_text[:1500]}</user>"]
             if reply:

@@ -1395,20 +1395,18 @@ async def _plan_accept_reconcile(
     person deciding whether to retry again, and a formatted string cannot be
     taken apart into them.
     """
-    from ciao.insights import _resolve_insights_call
     from ciao.memory_proposals import reconcile_region_fact
 
     model = str(getattr(config, "insights_model", "") or "").strip()
     if not model:
         return None, None
-    effective_model, provider, _note = _resolve_insights_call(config, model)
     try:
         decision = await reconcile_region_fact(
             guide,
             row.get("region") or row["kind"],
             row["text"],
-            model=effective_model,
-            provider=provider,
+            model=model,
+            provider="claude",
         )
     except Exception as exc:  # noqa: BLE001 — a failed retry must not write
         return None, {

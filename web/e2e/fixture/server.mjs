@@ -226,15 +226,12 @@ const GET_ROUTES = {
   // Settings → Models reads these. The real endpoints always send every
   // field; an empty object crashed the tab, so the stub mirrors the shape.
   '/api/settings/routines': () => ({
-    insights_model: '',
     insights_enabled: true,
     critique_models: '',
     provider_default_models: {},
     provider_default_modes: {},
     provider_default_thinking: {},
     provider_insights_models: {},
-    insights_model_effective: 'synthetic-model',
-    insights_model_by_workspace: {},
     critique_models_effective: '',
     model_options: { anthropic: ['synthetic-model'] },
     backends: { anthropic: true, opencode: false },

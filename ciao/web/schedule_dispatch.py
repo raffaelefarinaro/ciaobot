@@ -269,15 +269,10 @@ class ScheduleDispatcher:
         )
         user_prompt = json.dumps(payload, ensure_ascii=False)
         try:
-            from ciao.insights import (
-                _resolve_insights_call,
-                resolve_insights_model,
-            )
+            from ciao.insights import resolve_insights_model
 
-            # Route through the shared resolver (same as ciao/insights.py) so an
-            # unavailable Apple on-device model is substituted rather than
-            # raising -- a raise here keeps the run visible instead of
-            # auto-archiving it.
+            # The classifier runs on the run provider's Session insights model.
+            # A raise here keeps the run visible instead of auto-archiving it.
             project_id: str | None = getattr(entry, "web_project_id", None)
             project = self._host._projects.get(project_id) if project_id else None
             workspace = project.workspace if project else None
@@ -290,13 +285,10 @@ class ScheduleDispatcher:
             )
             if classifier_provider not in supported_providers():
                 return True
-            insights_model = resolve_insights_model(self._host._config, workspace)
-            env: dict[str, str] = {}
-            model, classifier_provider, note = _resolve_insights_call(
-                self._host._config,
-                insights_model,
-                provider=classifier_provider,
+            model = resolve_insights_model(
+                self._host._config, workspace, classifier_provider
             )
+            env: dict[str, str] = {}
         except Exception:  # noqa: BLE001
             logger.exception("Schedule attention classifier setup failed; keeping chat visible")
             return True
@@ -311,9 +303,6 @@ class ScheduleDispatcher:
                 "workspace": workspace or "",
             },
         ) as run:
-            if note:
-                run.extra["fallback_note"] = note
-                logger.info("Schedule attention classifier %s", note)
             try:
                 from ciao.providers.oneshot import run_oneshot
                 from ciao.insights import _DEFAULT_TIMEOUT_S, is_context_overflow

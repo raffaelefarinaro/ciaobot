@@ -35,8 +35,8 @@ What this module adds is the wiring around that one write:
   the default ``()`` the check is still a refusal on shape, but a Ciaobot-own
   session whose id does not look like a chat id would not be recognised;
 * the model and provider are resolved the way the post-archive memory pass
-  resolves its call (``archive_pipeline._insights_model_for`` →
-  ``insights._resolve_insights_call``), never from a request body: the
+  resolves its call (``insights.resolve_insights_model``), never from a
+  request body: the
   per-provider insights model for the **source's** provider, or the workspace
   default when no override is set. That is not the model C5's preview reports
   (``preview_selected`` answers ``default_model_for_workspace`` for the
@@ -109,7 +109,7 @@ from ciao.import_store import (
     ImportStoreError,
     engine_store_path,
 )
-from ciao.insights import _resolve_insights_call, resolve_insights_model
+from ciao.insights import resolve_insights_model
 from ciao.memory_proposals import list_proposals
 from ciao.workspaces import agent_root_for
 
@@ -175,14 +175,11 @@ def _resolve_call(
 ) -> tuple[str, str]:
     """``(model, provider)`` for one source's turn, from configuration.
 
-    Exactly the two answers the post-archive memory pass resolves its own call
-    with (``ciao/web/memory_pass.py``): the per-provider insights override when
-    the operator set one, else :func:`ciao.insights.resolve_insights_model`,
-    then :func:`ciao.insights._resolve_insights_call` to turn a routed
-    ``opencode:`` prefix into its provider. The provider the override is keyed
-    by is the **source's**, canonicalised (``claude_code`` → ``claude``), so an
-    imported OpenCode conversation is extracted by the OpenCode insights model
-    and a Claude Code one by Claude's — the same rule
+    Exactly the answer the post-archive memory pass resolves its own call with
+    (``ciao/web/memory_pass.py``): :func:`ciao.insights.resolve_insights_model`
+    for the source's provider. That provider is canonicalised (``claude_code``
+    → ``claude``), so an imported OpenCode conversation is extracted by the
+    OpenCode insights model and a Claude Code one by Claude's — the same rule
     ``archive_pipeline._insights_model_for`` applies to a chat's own provider.
     It is resolved per source for that reason: a batch may select a Claude Code
     and an OpenCode conversation at once, and they are read by different models.
@@ -202,21 +199,10 @@ def _resolve_call(
     this resolution, not the preview's.
     """
     canonical = canonical_provider(source_provider)
-    wanted_model = model
-    if wanted_model is None:
-        overrides = getattr(config, "provider_insights_models", {}) or {}
-        wanted_model = overrides.get(canonical, "") or resolve_insights_model(
-            config, workspace, canonical
-        )
-    effective_model, routed_provider, _note = _resolve_insights_call(
-        config,
-        wanted_model,
-        provider=provider if provider is not None else canonical,
+    resolved_model = model if model is not None else resolve_insights_model(
+        config, workspace, canonical
     )
-    # An explicit provider wins over the routing one: the caller asked for that
-    # runner, and `_resolve_insights_call` only ever *adds* one for an
-    # `opencode:`-prefixed model.
-    return effective_model, (provider if provider is not None else routed_provider)
+    return resolved_model, (provider if provider is not None else canonical)
 
 
 def _read_source(
