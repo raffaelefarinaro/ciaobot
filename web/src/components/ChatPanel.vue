@@ -203,16 +203,8 @@
           <TaskHandoverCard :handover="taskHandover.handover" :prompt="item.msg.content" :known-paths="knownFilePaths" />
         </div>
         <!-- User message -->
-        <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'message-wrap--selected': tappedMessageKey === `user-${i}` }">
-          <div
-            class="message-row"
-            tabindex="0"
-            :aria-expanded="tappedMessageKey === `user-${i}`"
-            aria-label="Message — press Enter for actions"
-            @click="toggleMessageActions(`user-${i}`, $event)"
-            @keydown.enter.self.prevent="toggleMessageActions(`user-${i}`, $event)"
-            @keydown.space.self.prevent="toggleMessageActions(`user-${i}`, $event)"
-          >
+        <div v-else-if="item.kind === 'user'" class="message-wrap user">
+          <div class="message-row">
             <div class="message user" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`" :data-msg-index="i" data-msg-role="user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
@@ -229,25 +221,23 @@
                 </div>
                 <div v-html="renderUserMessage(item.msg.content)"></div>
               </div>
-              <!-- The time shows only on the selected (tapped) message, so the
-                   transcript stays quiet. -->
-              <div v-if="item.msg.unattended || (item.msg.timestamp && tappedMessageKey === `user-${i}`)" class="message-meta">
-                <!-- An automation's tick, not something the reader typed.
-                     Without this the two are indistinguishable in the
-                     transcript. -->
+              <!-- An automation's tick, not something the reader typed.
+                   Without this the two are indistinguishable in the
+                   transcript. -->
+              <div v-if="item.msg.unattended" class="message-meta">
                 <span
-                  v-if="item.msg.unattended"
                   class="unattended-mark"
                   title="Sent automatically by an automation"
                 >&#10227; auto</span>
-                <span v-if="item.msg.timestamp && tappedMessageKey === `user-${i}`">{{ formatTime(item.msg.timestamp) }}</span>
               </div>
             </div>
-            <!-- Copy for a request. It sits in the flow under the bubble rather
-                 than overlaying the gap, so a 44px touch target cannot reach
-                 into the turn below. Hidden until the message is selected, and
-                 then it reserves exactly its own height. -->
-            <div v-if="item.msg.content?.trim()" class="message-actions">
+            <!-- Copy and the send time for a request, under the bubble and in
+                 the flow, so a 44px touch target cannot reach into the turn
+                 below. The row always takes its height and only fades in on
+                 hover or focus, so revealing it never reflows the transcript. -->
+            <div v-if="item.msg.content?.trim() || item.msg.timestamp" class="message-actions">
+              <span v-if="item.msg.timestamp" class="message-meta">{{ formatTime(item.msg.timestamp) }}</span>
+              <template v-if="item.msg.content?.trim()">
               <button
                 type="button"
                 class="message-action-btn"
@@ -259,20 +249,13 @@
                 <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>
                 <span>{{ copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy' }}</span>
               </button>
+              </template>
             </div>
           </div>
         </div>
         <!-- Final assistant message -->
-        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'message-wrap--selected': tappedMessageKey === `assistant-${i}` }">
-          <div
-            class="message-row"
-            tabindex="0"
-            :aria-expanded="tappedMessageKey === `assistant-${i}`"
-            aria-label="Message — press Enter for actions"
-            @click="toggleMessageActions(`assistant-${i}`, $event)"
-            @keydown.enter.self.prevent="toggleMessageActions(`assistant-${i}`, $event)"
-            @keydown.space.self.prevent="toggleMessageActions(`assistant-${i}`, $event)"
-          >
+        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
+          <div class="message-row">
             <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
               <div v-if="item.msg.is_error" class="error-attribution" role="status">
@@ -310,11 +293,10 @@
                 </ul>
               </div>
             </div>
-            <!-- The reply's own footer: Copy, Fork, and the turn's facts. It
-                 rides inside the message's card, so a selected message and the
-                 things you can do to it read as one object instead of a card
-                 with two chips floating under it. Hidden rows take no height,
-                 so an unselected turn stays tight. -->
+            <!-- The reply's own footer: Copy, Fork, and the turn's facts. The
+                 row always takes its height and only fades in on hover or
+                 focus (always shown on touch), so revealing it never reflows
+                 the transcript. -->
             <div v-if="item.msg.content?.trim() || item.meta" class="message-actions">
               <template v-if="item.msg.content?.trim()">
               <button
@@ -2010,41 +1992,6 @@ const openOutputs = ref<Record<number, boolean>>({})
 const liveTraceOpen = ref(false)
 const copiedMessageKey = ref<string | null>(null)
 const forkLoadingKey = ref<string | null>(null)
-// On touch devices there is no hover, so a tap on the bubble reveals the
-// per-message action icons. Holds the key of the message whose actions are open.
-const tappedMessageKey = ref<string | null>(null)
-
-// Click (any pointer) or Enter selects a message and shows its actions;
-// clicking the same message again puts them away. A click that lands on
-// something interactive, on a comment highlight, or that ends a text
-// selection (the start of a comment) is left alone.
-function toggleMessageActions(key: string, e: Event): void {
-  const target = e.target as HTMLElement | null
-  if (target?.closest('a, button, input, textarea, summary, .comment-highlight, [data-comment-id]')) return
-  if (window.getSelection()?.toString()) return
-  const opening = tappedMessageKey.value !== key
-  tappedMessageKey.value = opening ? key : null
-  // Selecting grows the card by its action footer, and the open-time bottom
-  // pin re-anchors `scrollTop` to the new bottom on its next frame, so the
-  // transcript would slide under the reader. A real pointer already releases
-  // the pin (the pointerdown listener below); this makes the guarantee hold
-  // for a click that arrives without one — a synthetic or keyboard-driven
-  // selection — by stopping the pin before Vue flushes the grown card.
-  releasePin()
-}
-
-function onSelectedMessageKeydown(e: KeyboardEvent): void {
-  if (e.key !== 'Escape' || !tappedMessageKey.value) return
-  // Claim it: Esc otherwise also closes the chat.
-  e.preventDefault()
-  e.stopPropagation()
-  tappedMessageKey.value = null
-}
-watch(tappedMessageKey, key => {
-  if (key) window.addEventListener('keydown', onSelectedMessageKeydown, true)
-  else window.removeEventListener('keydown', onSelectedMessageKeydown, true)
-})
-onBeforeUnmount(() => window.removeEventListener('keydown', onSelectedMessageKeydown, true))
 const commentComposeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 const commentComposeEditRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 const isNearBottom = ref(true)
@@ -4799,8 +4746,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   /* The column already carries the page gutter; the transcript only keeps
      breathing room above and below. The scroll box reaches 22px past the
      column on each side and pads it back, so the text stays aligned while
-     focus rings and a selected message's lifted card are not clipped by the
-     horizontal overflow guard below. */
+     focus rings are not clipped by the horizontal overflow guard below. */
   margin-inline: -22px;
   padding: 28px 26px 24px;
   min-height: 0;
@@ -4809,8 +4755,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .messages-content {
   display: flex;
   flex-direction: column;
-  /* One rhythm between turns (~14px). A reply's pinned action row adds its own
-     28px + 4px; hidden rows overlay this gap instead of adding to it. */
+  /* One rhythm between turns (~14px), below each message's action row. */
   gap: 14px;
   /* Pin the transcript to the bottom when it's shorter than the viewport, but
      collapse to 0 and scroll normally when it overflows. `margin-top: auto`
@@ -5050,10 +4995,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   position: relative;
 }
 
-/* A reply's row stacks its prose over the action footer, so it is a column
-   and the card can bleed that footer to its own edges. A request's row is a
-   column too, right-aligned, so its Copy chip lines up under the bubble
-   instead of beside it. */
+/* A reply's row stacks its prose over the action footer, so it is a column.
+   A request's row is a column too, right-aligned, so its Copy chip lines up
+   under the bubble instead of beside it. */
 .message-wrap.user .message-row,
 .message-wrap.assistant .message-row {
   flex-direction: column;
@@ -5093,96 +5037,33 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   line-height: 1.65;
 }
 
-/* A message's actions. They ride inside the message's own card as its footer,
-   so a selected message and the things you can do to it read as one object
-   rather than a card with two chips floating under it. The row is
-   display:none until the message is selected, so a hidden row reserves no
-   height and unselected turns stay tight. `:focus-within` cannot reach it —
-   a display:none subtree is not focusable — so selection is the only way in. */
+/* A message's actions and the turn's facts. The row is always laid out, so it
+   holds its height whether or not it shows: revealing it on hover never moves
+   the transcript. It fades in while the pointer is over the message or focus
+   is inside it (Tab reaches the buttons, which is what shows them), and on a
+   device with no hover it simply stays visible. */
 .message-actions {
-  display: none;
+  display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 10px;
+  margin-top: 6px;
   opacity: 0;
-  pointer-events: none;
   transition: opacity 0.15s;
 }
-.message-wrap--selected .message-actions {
-  display: flex;
+.message-wrap:hover .message-actions,
+.message-wrap:focus-within .message-actions {
   opacity: 1;
-  pointer-events: auto;
+}
+@media (hover: none) {
+  .message-actions { opacity: 1; }
 }
 
-/* The footer band under a reply: a hairline below the prose, bled to the
-   card's own edges and re-inset to the text column, so the buttons share the
-   prose's left edge rather than hanging outside the card. 16px of air above
-   the rule (4 here + the card's 12px padding), 10px below the buttons. The
-   -12px bottom cancels the card's vertical bleed so the band, and the outline
-   around it, stay inside the turn instead of crossing into the next one. */
-.message-wrap--selected.assistant .message-actions {
-  margin: 4px -18px -12px;
-  padding: 10px 18px;
-  border-top: 1px solid var(--border);
+/* A reply's buttons share the prose's left edge: the quiet button's own
+   horizontal padding would otherwise indent the icon. */
+.message-wrap.assistant .message-actions {
+  margin-left: -8px;
 }
-
-/* A request offers Copy only, under its bubble and in the flow, so a 44px
-   touch target cannot reach into the turn below. */
-.message-wrap--selected.user .message-actions {
-  margin-top: 6px;
-}
-
-
-
-/* Selection marks one message and nothing else. An accent outline says which
-   turn the actions belong to; the surrounding transcript keeps its own
-   contrast, so reading on does not turn into a dimmed page. */
-.message-wrap--selected.user .message {
-  outline: 1px solid var(--accent);
-  outline-offset: 3px;
-}
-/* Replies are plain prose, so a selected one is outlined around a box the same
-   size as the selected card. The negative margin keeps the text from moving.
-   The card bleeds 12px vertically rather than 16px: the transcript's turn gap
-   is 14px, so a 16px bleed drew the accent outline over the bubble above and
-   below (the comment reference card is the surface the user sees it clash
-   with). Padding and negative margin cancel, so the prose still does not move;
-   the outline just clears the neighbouring turn. */
-.message-wrap--selected.assistant .message-row {
-  margin: -12px -18px;
-  padding: 12px 18px;
-  border-radius: 14px;
-  outline: 1px solid var(--accent);
-}
-/* On a selected message the actions are the point: real controls with a
-   border, full-strength text, not the quiet text links of an unselected
-   turn. */
-.message-wrap--selected .message-action-btn {
-  height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  font-weight: 600;
-}
-.message-wrap--selected .message-action-btn:hover {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
-}
-.message-wrap--selected .message-action-btn svg {
-  width: 16px;
-  height: 16px;
-}
-@media (pointer: coarse) {
-  .message-wrap--selected .message-action-btn { height: var(--touch); }
-}
-.message-row:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 4px;
-  border-radius: 8px;
-}
-
 
 .message-action-btn {
   position: relative;
@@ -5222,17 +5103,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 
 /* Touch: the row keeps its 28px visual but each button grows a 44px hit
-   area around it, so taps land without spreading the transcript out. A
-   selected button already is the 44px target, so it drops the halo
-   instead of carrying a second, larger one. */
+   area around it, so taps land without spreading the transcript out. */
 @media (pointer: coarse) {
   .message-action-btn::after {
     content: '';
     position: absolute;
     inset: -8px 0;
-  }
-  .message-wrap--selected .message-action-btn::after {
-    content: none;
   }
 }
 
@@ -7125,8 +7001,7 @@ details[open] > .activity-summary::before {
   min-height: 0;
   overflow: hidden;
   /* Its clip box reaches 22px past the text column (padded back), so the
-     transcript's widened scroll box - and a selected message's lifted card -
-     fit inside it instead of being cut at the column edge. */
+     transcript's widened scroll box fits inside it instead of being cut at the column edge. */
   margin-inline: -22px;
   padding-inline: 22px;
 }

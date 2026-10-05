@@ -182,90 +182,25 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
-  it('shows a message\'s actions only once it is selected, and Esc puts it back', async () => {
+  it('renders every message\'s actions in place, with no click-to-select', async () => {
     const wrapper = await mountPanel(TURNS)
     const replies = wrapper.findAll('.message-wrap.assistant')
     expect(replies).toHaveLength(2)
-    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-
-    // Click the reply (not a link or button inside it) to select it.
-    await replies[0].get('.message-row').trigger('click')
-    expect(replies[0].classes()).toContain('message-wrap--selected')
-    // Selection marks one message and nothing else: no backdrop ever covers the
-    // transcript, so the turns around the selected one stay readable.
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
-    const actions = replies[0].get('.message-actions')
+    // The footer is always laid out (CSS reveals it on hover or focus), so
+    // showing it never reflows the transcript.
+    const actions = replies[0].get('.message-row > .message-actions')
     expect(actions.text()).toContain('Copy')
     expect(actions.text()).toContain('Fork from here')
 
-    // The actions are the card's own footer, not a row floating under it: a
-    // selected message and the things you can do to it are one object, so the
-    // footer can bleed to the card's edges and share its left edge.
-    expect(replies[0].findAll('.message-row > .message-actions')).toHaveLength(1)
-
-    // Esc deselects without closing the chat, and still puts nothing over the
-    // transcript.
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
-    await nextTick()
-    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-    expect(wrapper.emitted('close')).toBeUndefined()
-
-    // Enter on a focused message selects it too; the user's own offers Copy only.
     const request = wrapper.findAll('.message-wrap.user')[0]
-    await request.get('.message-row').trigger('keydown', { key: 'Enter' })
-    expect(request.classes()).toContain('message-wrap--selected')
-    expect(request.get('.message-actions').text()).toContain('Copy')
+    expect(request.get('.message-row > .message-actions').text()).toContain('Copy')
     expect(request.get('.message-actions').text()).not.toContain('Fork')
-    // Same shape on a request: the chip rides inside the row that becomes the
-    // card, so a 44px touch target cannot reach into the turn below it.
-    expect(request.findAll('.message-row > .message-actions')).toHaveLength(1)
 
-    // The reply is no longer selected and the request is, so at most one message
-    // carries the outline at a time.
-    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
-
-    // Clicking the selected message again deselects it: there is no veil to
-    // click off now, so the toggle has to live on the message.
-    await request.get('.message-row').trigger('click')
+    // A message is not a control: clicking it selects nothing and it takes no
+    // tab stop of its own.
+    await replies[0].get('.message-row').trigger('click')
     expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('does not move the transcript when a message is selected', async () => {
-    const wrapper = await mountPanel(TURNS)
-    // The transcript's visible box: top 100, 600px tall, scrolled 40px down.
-    const transcript = wrapper.get('.messages').element as HTMLElement
-    transcript.getBoundingClientRect = () => ({ top: 100, bottom: 700 }) as DOMRect
-    Object.defineProperty(transcript, 'clientHeight', { configurable: true, value: 600 })
-    Object.defineProperty(transcript, 'scrollTop', { configurable: true, writable: true, value: 40 })
-
-    const reply = wrapper.findAll('.message-wrap.assistant').at(-1)!
-    const card = reply.get('.message-row')
-    // Selecting a reply grows it, and on a phone the new footer can land under
-    // the composer. Selection must not yank the transcript: the reader keeps
-    // their place, so the old reveal scroll is gone and the scroll position is
-    // untouched even when the card's bottom sits past the visible edge.
-    card.element.getBoundingClientRect = () => ({ top: 400, bottom: 760 }) as DOMRect
-    await card.trigger('click')
-    await nextTick()
-    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
-    expect(transcript.scrollTop).toBe(40)
-    expect(scrollCalls).toEqual([])
-
-    // Deselect and re-select the same card: still no scroll, and nothing laid
-    // over the transcript.
-    await card.trigger('click')
-    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
-    await card.trigger('click')
-    await nextTick()
-    expect(scrollCalls).toEqual([])
-    expect(transcript.scrollTop).toBe(40)
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
+    expect(replies[0].get('.message-row').attributes('tabindex')).toBeUndefined()
     wrapper.unmount()
   })
 
