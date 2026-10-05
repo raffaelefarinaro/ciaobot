@@ -242,17 +242,15 @@ describe('ChatPanel turn footer placement', () => {
     expect(bubbles[0].find('.message-meta').html()).toContain('sonnet')
   })
 
-  it('shows a user message time only once the message is selected', async () => {
+  it('puts a user message time in its action row', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'hi', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
     ]
     await flushPromises()
 
-    const bubble = () => wrapper.get('.message-wrap.user')
-    expect(bubble().find('.message-meta').exists()).toBe(false)
-    await bubble().get('.message-row').trigger('click')
-    expect(bubble().classes()).toContain('message-wrap--selected')
-    expect(bubble().find('.message-meta').exists()).toBe(true)
+    const bubble = wrapper.get('.message-wrap.user')
+    expect(bubble.find('.message.user .message-meta').exists()).toBe(false)
+    expect(bubble.find('.message-actions .message-meta').exists()).toBe(true)
   })
 })
