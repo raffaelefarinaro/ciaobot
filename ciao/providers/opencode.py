@@ -3500,11 +3500,12 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, Any]]:
+def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, Any]] | None:
     """`data` rows of a V2 list route, fetched through `opencode api`.
 
     Run from the home directory so the result is the global configuration,
-    not whatever project the engine happens to be started in.
+    not whatever project the engine happens to be started in. ``None`` when
+    the route could not be read, so a failure never passes for "none".
     """
     import subprocess
 
@@ -3515,9 +3516,9 @@ def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, An
         )
         payload = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
-        return []
+        return None
     rows = payload.get("data") if isinstance(payload, dict) else None
-    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else None
 
 
 def _row_names(rows: list[dict[str, Any]]) -> list[str]:
@@ -3529,20 +3530,39 @@ def _row_names(rows: list[dict[str, Any]]) -> list[str]:
     return names
 
 
-def _opencode_inventory(binary: str, *, timeout: float) -> tuple[list[str], list[str]]:
-    """Skills and plugins, and MCP servers, the opencode CLI loads globally.
+@dataclass(frozen=True)
+class _Inventory:
+    """What the opencode CLI loads globally; ``None`` fields could not be read."""
 
-    Built-in plugins are opencode internals, and a plugin that failed to load
-    (a duplicate ID, say) brings nothing, so both are left out.
+    skills: list[str] | None
+    bundled_skills: list[str] | None
+    mcps: list[str] | None
+
+
+def _opencode_inventory(binary: str, *, timeout: float) -> _Inventory:
+    """Skills and plugins, the skills opencode ships, and MCP servers.
+
+    A skill whose path is under ``/builtin/`` ships with opencode. Built-in
+    plugins are opencode internals, and a plugin that failed to load (a
+    duplicate ID, say) brings nothing, so both are left out.
     """
-    skills = _row_names(_server_list(binary, "/api/skill", timeout=timeout))
-    plugins = _row_names([
-        row for row in _server_list(binary, "/api/plugin", timeout=timeout)
-        if (row.get("source") or {}).get("type") != "builtin"
-        and (row.get("state") or {}).get("status", "active") == "active"
-    ])
-    mcps = _row_names(_server_list(binary, "/api/mcp", timeout=timeout))
-    return skills + [name for name in plugins if name not in skills], mcps
+    skill_rows = _server_list(binary, "/api/skill", timeout=timeout)
+    plugin_rows = _server_list(binary, "/api/plugin", timeout=timeout)
+    mcp_rows = _server_list(binary, "/api/mcp", timeout=timeout)
+    skills = bundled = None
+    if skill_rows is not None and plugin_rows is not None:
+        bundled = _row_names([
+            row for row in skill_rows if str(row.get("path") or "").startswith("/builtin/")
+        ])
+        own = [name for name in _row_names(skill_rows) if name not in bundled]
+        plugins = _row_names([
+            row for row in plugin_rows
+            if (row.get("source") or {}).get("type") != "builtin"
+            and (row.get("state") or {}).get("status", "active") == "active"
+        ])
+        skills = own + [name for name in plugins if name not in own]
+    mcps = _row_names(mcp_rows) if mcp_rows is not None else None
+    return _Inventory(skills=skills, bundled_skills=bundled, mcps=mcps)
 
 
 def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
@@ -3607,7 +3627,7 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
     else:
         detail = "no credentials — free models only"
         auth = "free"
-    skills, mcps = _opencode_inventory(binary, timeout=timeout)
+    inventory = _opencode_inventory(binary, timeout=timeout)
     return _provider(
         name="opencode",
         ok=True,
@@ -3615,8 +3635,9 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
         command="opencode auth login",
         detail=detail,
         version=version or "unknown",
-        skills=skills,
-        mcps=mcps,
+        skills=inventory.skills,
+        bundled_skills=inventory.bundled_skills,
+        mcps=inventory.mcps,
     )
 
 

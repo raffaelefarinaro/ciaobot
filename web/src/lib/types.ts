@@ -770,6 +770,8 @@ export interface ProviderConnection {
   protocol?: string
   mcps?: string[]
   skills?: string[]
+  /** Skills that ship with the CLI itself; absent until the CLI has reported them. */
+  bundled_skills?: string[]
   /** Docs page for installing the CLI, set when `auth === 'not_installed'`. */
   install_url?: string
   /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */

@@ -20,7 +20,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Mapping, Any
+from typing import Iterable, Mapping, Any
 
 from ciao import provider_registry
 from ciao.os_support.shell_hints import path_hint
@@ -188,6 +188,7 @@ def _provider(
     account: str = "",
     protocol: str = "",
     skills: list[str] | None = None,
+    bundled_skills: list[str] | None = None,
     mcps: list[str] | None = None,
     install_url: str = "",
     app_path: str = "",
@@ -210,6 +211,8 @@ def _provider(
         row["protocol"] = protocol
     if skills is not None:
         row["skills"] = skills
+    if bundled_skills is not None:
+        row["bundled_skills"] = bundled_skills
     if mcps is not None:
         row["mcps"] = mcps
     if install_url:
@@ -236,6 +239,22 @@ def _cli_version(binary: str) -> str:
     return lines[-1] if lines else "installed"
 
 
+# Skills Claude Code ships itself (code-review, dataviz, ...). Nothing lists
+# them without a model turn, so the Claude provider records them from each
+# chat's init payload; until the first chat of this engine run they are
+# unknown, and Settings says so rather than showing an empty list.
+_claude_bundled_skills: tuple[str, ...] | None = None
+
+
+def record_claude_bundled_skills(names: Iterable[str]) -> None:
+    global _claude_bundled_skills
+    _claude_bundled_skills = tuple(sorted({str(n).strip() for n in names if str(n).strip()}))
+
+
+def claude_bundled_skills() -> list[str] | None:
+    return None if _claude_bundled_skills is None else list(_claude_bundled_skills)
+
+
 def discover_claude_system_skills() -> list[str]:
     """Discover enabled Claude Code plugins plus standalone ~/.claude/skills."""
     global _claude_skills_cache
@@ -249,6 +268,9 @@ def discover_claude_system_skills() -> list[str]:
     skills = _discover_claude_system_skills_uncached()
     _claude_skills_cache = (now, tuple(skills))
     return skills
+
+
+_CLAUDE_SYNCED_SKILLS_DIRNAME = "synced"
 
 
 def _claude_standalone_skills_dir() -> Path:
@@ -273,14 +295,16 @@ def _discover_claude_system_skills_uncached() -> list[str]:
             output = (res.stdout or "") + "\n" + (res.stderr or "")
             # Claude Code uses a multi-line block format:
             #   ❯ plugin-name@source
-            #     Status: ✔ enabled  (or ✘ disabled)
+            #     Status: ✔ enabled  (or ✘ disabled; plugins synced from
+            #     claude.ai report ✔ loaded)
             current_name: str | None = None
             for line in output.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("❯ "):
                     current_name = stripped[2:].split("@")[0].strip()
                 elif stripped.startswith("Status:") and current_name:
-                    if "enabled" in stripped and "disabled" not in stripped:
+                    status = stripped.removeprefix("Status:").split()
+                    if "enabled" in status or "loaded" in status:
                         skills.add(current_name)
                     current_name = None
         except Exception:
@@ -290,7 +314,13 @@ def _discover_claude_system_skills_uncached() -> list[str]:
     skills_dir = _claude_standalone_skills_dir()
     if skills_dir.is_dir():
         for entry in skills_dir.glob("*"):
-            if entry.is_dir() or entry.name.endswith(".md"):
+            if entry.name == _CLAUDE_SYNCED_SKILLS_DIRNAME and entry.is_dir():
+                # Skills synced from claude.ai sit one bucket deeper:
+                # synced/<bucket>/<skill>/SKILL.md. The folder itself is not one.
+                skills.update(
+                    skill.parent.name for skill in entry.glob("*/*/SKILL.md")
+                )
+            elif entry.is_dir() or entry.name.endswith(".md"):
                 skills.add(entry.stem)
     if not cli_ok:
         # The CLI could not report (missing, failed, timed out): list every
@@ -617,7 +647,11 @@ def claude_status_probe(
     workspace_root: Path | None = None,
     **_unused: Any,
 ) -> dict[str, Any]:
-    return _claude_status(env, config_path, workspace_root=workspace_root)
+    row = _claude_status(env, config_path, workspace_root=workspace_root)
+    bundled = claude_bundled_skills()
+    if bundled is not None:
+        row["bundled_skills"] = bundled
+    return row
 
 
 def opencode_status_probe(
