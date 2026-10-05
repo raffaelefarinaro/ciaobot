@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -1028,6 +1029,18 @@ class CiaoControlPlane:
         #: See :meth:`_watch_turn` — a turn in a delegated chat is announced once
         #: per turn, and the paths that start one may announce it too.
         self._watching: dict[tuple[str, str], tuple[Any, str]] = {}
+        #: The loop ``tasks_changed`` is published on. A task write made in a
+        #: worker thread (the routes run store calls via ``asyncio.to_thread``)
+        #: is marshalled back here, because ``EventsHub``'s queues want the loop.
+        try:
+            self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
+        #: Workspaces with a ``tasks_changed`` already scheduled, so the several
+        #: writes one gesture makes (a delegation writes the attempt, links the
+        #: task and binds the revision) reach clients as one event.
+        self._tasks_changed_pending: set[str] = set()
+        self._tasks_changed_guard = threading.Lock()
         self._subscribe_turn_watch()
         self._subscribe_chat_ended()
 
@@ -2431,7 +2444,54 @@ class CiaoControlPlane:
             vault_root=self.workspace_vault_root(workspace),
             runtime_dir=Path(self.config.state_path).parent,
             clock=_utc_now,
+            on_change=lambda: self._tasks_changed(workspace),
         )
+
+    def _tasks_changed(self, workspace: str) -> None:
+        """Tell open clients that *workspace*'s board or an attempt on it moved.
+
+        The one choke point for ``tasks_changed`` on ``/ws/events``: both stores
+        call it after every write that landed, so a route, an agent's
+        ``ciao task`` call and a turn settling at its end all announce through
+        the same place. The event carries only the workspace name — the same
+        name ``/api/tasks?workspace=`` takes — and the client re-reads.
+
+        Safe from any thread and never raises: it runs inside a store write that
+        has already landed, and failing to announce must not turn that into an
+        error. Writes made in one loop callback coalesce into one event.
+        """
+        hub = getattr(self.pcm, "events", None)
+        if hub is None:
+            # A chat-manager fake without an events hub: nothing listens.
+            return
+        try:
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._loop
+        if loop is None or loop.is_closed():
+            # Subscribers live on the engine's loop; without one nobody listens.
+            return
+        with self._tasks_changed_guard:
+            if workspace in self._tasks_changed_pending:
+                return
+            self._tasks_changed_pending.add(workspace)
+        try:
+            loop.call_soon_threadsafe(self._flush_tasks_changed, hub, workspace)
+        except RuntimeError:
+            with self._tasks_changed_guard:
+                self._tasks_changed_pending.discard(workspace)
+
+    def _flush_tasks_changed(self, hub: Any, workspace: str) -> None:
+        with self._tasks_changed_guard:
+            self._tasks_changed_pending.discard(workspace)
+        self._publish_tasks_changed(hub, workspace)
+
+    @staticmethod
+    def _publish_tasks_changed(hub: Any, workspace: str) -> None:
+        try:
+            hub.publish({"type": "tasks_changed", "workspace": workspace})
+        except Exception:  # noqa: BLE001 — an announcement never fails a write
+            logger.exception("tasks: could not publish tasks_changed for %s", workspace)
 
     def _task_call(self, workspace: str, call: Callable[[TaskBoardStore], Any]) -> Any:
         """One store call for *workspace*, its typed refusal translated into ours.
@@ -2940,6 +3000,7 @@ class CiaoControlPlane:
             workspace=workspace,
             runtime_dir=Path(self.config.state_path).parent,
             clock=_utc_now,
+            on_change=lambda: self._tasks_changed(workspace),
         )
 
     def _attempt_call(self, workspace: str, call: Callable[[TaskAttemptStore], Any]) -> Any:

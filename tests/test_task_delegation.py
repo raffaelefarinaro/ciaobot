@@ -1147,6 +1147,29 @@ async def test_a_send_update_is_one_ordinary_attended_message_and_not_a_delegati
     assert len(_attempt_store(plane).list_for_task(task["id"])) == 1
 
 
+async def test_a_reply_after_done_keeps_the_result_for_review(tmp_path: Path) -> None:
+    """A user reply after "done" is usually talk about the result ("dd is
+    DoorDash"). The turn it starts moves the card back to In progress, and a
+    turn that ends without a new report keeps the last one: the card returns to
+    In review instead of reading Unfinished."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Reply to Ivo")
+    outcome = _delegate(plane, task)
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    assert _get_task(plane, task["id"])["status"] == "in_review"
+
+    # The user's reply in the chat: the real manager announces the turn.
+    pcm.start_stream(outcome["attempt"]["chat_id"], "no need to confirm, dd is doordash")
+    assert _get_task(plane, task["id"])["status"] == "in_progress"
+    await _end_turns(pcm)
+
+    settled = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert settled.state == "ready_for_review"
+    assert settled.outcome == "done"
+    assert _get_task(plane, task["id"])["status"] == "in_review"
+
+
 async def test_a_turn_started_by_an_update_settles_the_attempt(tmp_path: Path) -> None:
     """The re-attach, on the update path: the answer comes back into the attempt's
     own chat, so the attempt is what carries it."""

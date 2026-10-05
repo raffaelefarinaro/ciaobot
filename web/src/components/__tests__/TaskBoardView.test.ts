@@ -17,6 +17,7 @@ import { nextTick } from 'vue'
 import TaskBoardView from '../TaskBoardView.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskBoardStore } from '../../stores/taskBoard'
+import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { Task, TaskRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -169,6 +170,24 @@ describe('TaskBoardView', () => {
     document.body.innerHTML = ''
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('re-reads when the app-wide task signals refresh for this workspace', async () => {
+    await mountBoard()
+    const boardReads = () => apiGet.mock.calls.filter((c) => String(c[0]).startsWith('/api/tasks?')).length
+    const before = boardReads()
+    const signals = useTaskSignalsStore()
+
+    // Another workspace's refresh is not this board's news.
+    signals.loadedWorkspace = 'work'
+    signals.tasks = []
+    await flushPromises()
+    expect(boardReads()).toBe(before)
+
+    signals.loadedWorkspace = 'personal'
+    signals.tasks = [...BOARD] as Task[]
+    await flushPromises()
+    expect(boardReads()).toBe(before + 1)
   })
 
   it('reads the active workspace and draws the four columns with their counts', async () => {
@@ -1594,31 +1613,6 @@ describe('TaskBoardView', () => {
     }
   })
 
-  it('opens the live attempt chat from the editor rather than resuming it',
-    async () => {
-      const wrapper = await mountWithBody([liveTask()])
-      const switchChat = vi.fn()
-      useProjectStore().switchChat = switchChat
-
-      await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
-      await flushPromises()
-      await nextTick()
-      await wrapper.findAll('.btn-chip').find((c) => c.text() === 'Open chat')!
-        .trigger('click')
-      await flushPromises()
-      await nextTick()
-
-      // The preview explains why there is nothing to confirm, and nothing was sent.
-      expect(delegateSheet(wrapper)!.text()).toContain('still live')
-      expect(apiPost).not.toHaveBeenCalled()
-      await delegateSheet(wrapper)!.get('.btn-primary').trigger('click')
-      await flushPromises()
-      expect(switchChat).toHaveBeenCalledWith('chat-7')
-      // And it closed rather than sitting there with a spent confirmation.
-      expect(delegateSheet(wrapper)).toBeUndefined()
-      wrapper.unmount()
-    })
-
   it('names both ways on a settled attempt in the preview', async () => {
     apiPost.mockResolvedValue({
       workspace: 'personal',
@@ -2227,6 +2221,63 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+
+  it('the editor\'s Open chat goes to the chat, not to a preview under the editor', async () => {
+    const wrapper = await mountWithBody([liveTask({ attempt_state: 'needs_you' })])
+    const switchChat = vi.fn()
+    useProjectStore().switchChat = switchChat
+    await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    const control = wrapper.get('.task-delegate-actions .task-chip')
+    expect(control.text()).toBe('Open chat')
+
+    await control.trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(switchChat).toHaveBeenCalledWith('chat-7')
+    expect(wrapper.find('#task-detail-title').exists()).toBe(false)
+    expect(wrapper.find('#task-delegate-title').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('Done on a task an open attempt holds detaches it first, after asking', async () => {
+    const wrapper = await mountWithBody([liveTask({ attempt_state: 'needs_you' })])
+    await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    apiPost.mockImplementation((url: string) => Promise.resolve(
+      url.endsWith('/detach')
+        ? { workspace: 'personal', task: { ...liveTask({ attempt_state: 'needs_you', live_attempt_id: '', chat_id: '' }), revision: REVISION }, attempt: { attempt_id: LIVE_ID, task_id: 'doing', state: 'needs_you' } }
+        : { workspace: 'personal', task: { ...liveTask({ status: 'done', live_attempt_id: '' }), revision: REVISION, body: '' } },
+    ))
+
+    await wrapper.get('.task-status-opt[data-status="done"]').trigger('click')
+    await flushPromises()
+
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    const posts = apiPost.mock.calls.map((c) => String(c[0]))
+    expect(posts[0]).toBe(`/api/tasks/doing/attempt/${LIVE_ID}/detach`)
+    expect(posts[1]).toBe('/api/tasks/doing/complete')
+    wrapper.unmount()
+  })
+
+  it('Done says a refusal beside the status control', async () => {
+    const wrapper = await mountWithBody([liveTask({ attempt_state: 'needs_you' })])
+    await card(wrapper, 'Wire the store').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    askConfirm.mockResolvedValue(true)
+    apiPost.mockRejectedValue(new Error('the attempt could not be detached'))
+
+    await wrapper.get('.task-status-opt[data-status="done"]').trigger('click')
+    await flushPromises()
+
+    const group = wrapper.get('.task-status-seg').element.parentElement!
+    expect(group.querySelector('.task-action-error')?.textContent).toBeTruthy()
+    wrapper.unmount()
+  })
 
   it('opens the attempt chat through the project store, not a route', async () => {
     const wrapper = await mountWithBody([liveTask()])

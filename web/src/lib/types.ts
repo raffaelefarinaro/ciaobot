@@ -243,6 +243,13 @@ export interface ChatInfo {
     source_project: string
     state: 'queued' | 'running' | 'done' | 'attention'
     archive_policy: 'when_clean'
+  } | {
+    // A delegated board task's chat (ciao/task_attempts.py::task_delegation_helper):
+    // the only record of which task and attempt the chat belongs to.
+    kind: 'task_delegation'
+    task_id: string
+    task_revision: string
+    attempt_id: string
   }
   // The memory pass spawned for this archived chat, as recorded on the source
   // chat (ciao/web/memory_pass.py). Present only on archived chats that queued
@@ -466,6 +473,9 @@ export type EventsWsMessage =
   // payload: the client refetches /api/schedules, which is the only place the
   // computed running/next_run fields are assembled.
   | { type: 'schedules_changed' }
+  // A board task or one of its attempts changed in `workspace` (the same name
+  // `/api/tasks?workspace=` takes). No payload: the client re-reads the board.
+  | { type: 'tasks_changed'; workspace: string }
   // A workspace was archived or restored (here or on another device). No
   // payload: the client refetches /api/workspaces.
   | { type: 'workspaces_changed' }

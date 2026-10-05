@@ -356,6 +356,26 @@ def test_a_restart_derives_a_running_attempt_as_interrupted(
     assert restarted.get_live(TASK_ID) is None
 
 
+@pytest.mark.parametrize("ended", ["ready_for_review", "needs_you"])
+def test_a_restart_keeps_an_attempt_whose_turn_had_already_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ended: str
+) -> None:
+    """Only `running` claims a turn in flight. A result waiting for review, or a
+    turn that ended waiting on the user, lost nothing to the restart: it stays
+    live, so the card stays In review and a reply still continues it."""
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    store.finish(attempt.attempt_id, ended)
+
+    monkeypatch.setattr("ciao.task_attempts._PROCESS_TOKEN", "99999-restarted")
+    restarted = _store(tmp_path)
+
+    live = restarted.get_live(TASK_ID)
+    assert live is not None and live.attempt_id == attempt.attempt_id
+    assert live.state == ended
+    assert restarted.recover_interrupted() == ()
+
+
 def test_a_restart_never_replays_a_stranded_attempt(tmp_path: Path, monkeypatch) -> None:
     """Deriving `interrupted` is a read-time answer; nothing in the store starts a
     turn, so a stranded attempt is never dispatched again by being read."""
@@ -818,13 +838,14 @@ def test_a_report_needs_a_known_outcome_a_summary_and_a_live_attempt(tmp_path: P
         store.report(attempt.attempt_id, "done", "x")
 
 
-def test_a_new_turn_owes_a_new_report_but_keeps_the_last_summary(tmp_path: Path) -> None:
+def test_a_new_turn_keeps_the_last_report_until_a_new_one(tmp_path: Path) -> None:
     store = _store(tmp_path)
     attempt = _start(store).attempt
     store.report(attempt.attempt_id, "needs_input", "Which region?")
     store.finish(attempt.attempt_id, "needs_you")
     continued = store.continue_turn(attempt.attempt_id)
-    assert continued.outcome == ""
+    assert continued.state == "running"
+    assert continued.outcome == "needs_input"
     assert continued.summary == "Which region?"
     # Every other transition carries both fields rather than dropping them.
     store.report(attempt.attempt_id, "done", "All set.")

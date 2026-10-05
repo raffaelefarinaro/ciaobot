@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { useFileViewerStore } from './fileViewer'
+import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
   isRestartDrainMessage,
@@ -92,9 +93,24 @@ export const useProjectStore = defineStore('projects', () => {
   ])
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
+  // App-wide read of the active workspace's delegated tasks: the sidebar's
+  // review count and Home's "needs you" tier. Re-read on boot, on a workspace
+  // switch, on every events snapshot (connect and reconnect) and whenever the
+  // engine says the active workspace's board moved (`tasks_changed`).
+  const taskSignals = useTaskSignalsStore()
+  function reloadTaskSignals(): void {
+    void taskSignals.reload(activeWorkspace.value)
+  }
   // False until the first fetchAll() resolves. Gates the home empty state so
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
+  // Every switch re-reads, whichever path made it (the scope menu, a deep link
+  // into another workspace's chat, a new chat there). Boot reads from
+  // `fetchAll` once the workspace is known, so a value restored from local
+  // storage before then does not fetch a board nobody is looking at.
+  watch(activeWorkspace, () => {
+    if (bootstrapped.value) reloadTaskSignals()
+  })
   const messages = ref<Record<string, ChatMessage[]>>({})
   // History is loaded independently after a chat becomes active. Keep this
   // separate from `messages` so cached text can render immediately while the
@@ -1265,7 +1281,7 @@ export const useProjectStore = defineStore('projects', () => {
    */
   function chatIsAttentionItem(chat: ChatInfo): boolean {
     if (isMemoryPassChat(chat)) return chatNeedsInput(chat.chat_id)
-    return chatNeedsInput(chat.chat_id) || chatUnread(chat.chat_id) > 0
+    return chatNeedsYou(chat.chat_id) || chatUnread(chat.chat_id) > 0
   }
 
   // Open a fresh chat in the active workspace's auto-managed General project,
@@ -1504,6 +1520,23 @@ export const useProjectStore = defineStore('projects', () => {
     return Boolean(chat?.pending_permission)
   }
 
+  // Whether the user is the one this chat is waiting on: a live question or
+  // permission card (`chatNeedsInput`), or a delegated board task whose agent
+  // stopped for them — it reported needs input or blocked, or ended without a
+  // report. The reply goes in the chat either way, so Home files both under
+  // "Needs you" and both count as attention. Deliberately separate from
+  // `chatNeedsInput`, which drives the question/permission UI and
+  // notifications and must not light up for a task with no card to answer.
+  function chatNeedsYou(chatId: string): boolean {
+    if (chatNeedsInput(chatId)) return true
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (!chat) return false
+    // Only the loaded workspace's tasks are held, and slugs collide across
+    // workspaces: another workspace's chat must not resolve against them.
+    const workspace = projects.value.find(p => p.project_id === chat.project_id)?.workspace
+    return workspace === taskSignals.loadedWorkspace && taskSignals.chatTaskWaitingOnUser(chat)
+  }
+
   // The first outstanding question is useful on the home card, where it can
   // tell the user what needs an answer before they open the chat.
   function chatPendingQuestion(chatId: string): string | null {
@@ -1541,8 +1574,10 @@ export const useProjectStore = defineStore('projects', () => {
       : cached
   }
 
+  // Same question Home asks: a delegated chat whose agent stopped for the
+  // user counts beside the chats with a live question or permission card.
   function projectNeedsInput(projectId: string): number {
-    return projectChats(projectId).filter(c => chatNeedsInput(c.chat_id)).length
+    return projectChats(projectId).filter(c => chatNeedsYou(c.chat_id)).length
   }
 
   function projectUnread(projectId: string): number {
@@ -1658,6 +1693,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
         activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
       }
+      reloadTaskSignals()
 
       // Initial active-chat resolution:
       //   1) URL /chat/:chatId represents the user's direct intent on a
@@ -3913,6 +3949,9 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeForSnap && streaming.value[activeForSnap] && !projectStreaming.value[activeForSnap]) {
           void reconcileAfterResult(activeForSnap)
         }
+        // A `tasks_changed` published while the socket was down is gone (the
+        // hub keeps no replay), so every (re)connect re-reads the board.
+        if (bootstrapped.value) reloadTaskSignals()
         break
       }
       case 'server_restarting':
@@ -4228,6 +4267,14 @@ export const useProjectStore = defineStore('projects', () => {
         // Refetch the registry so the sidebar and pickers stop offering it
         // (or show it again) without a reload.
         scheduleWorkspacesRefetch()
+        break
+      }
+      case 'tasks_changed': {
+        // A task or one of its attempts moved: created, edited, delegated,
+        // stopped, or a delegated turn settled (needs you, ready for review).
+        // Only the active workspace's tasks are held, so another one's change
+        // has nothing to refresh here.
+        if (msg.workspace === activeWorkspace.value) reloadTaskSignals()
         break
       }
       case 'schedules_changed': {
@@ -5747,7 +5794,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
-    chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
+    chatUnread, chatNeedsInput, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,

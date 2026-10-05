@@ -6,6 +6,8 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
+import { useTaskSignalsStore } from '../../stores/taskSignals'
+import type { Task } from '../../lib/types'
 
 function timestamp(secondsAgo: number): string {
   return new Date(Date.now() - secondsAgo * 1000).toISOString()
@@ -654,6 +656,97 @@ describe('HomeRecentChats new-chat entry', () => {
     expect(button.attributes('aria-haspopup')).toBe('dialog')
     await button.trigger('click')
     expect(wrapper.emitted('choose-new-chat')?.[0]).toEqual(['renamed-away'])
+    wrapper.unmount()
+  })
+})
+
+describe('delegated task chats on Home', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+  })
+
+  function task(overrides: Partial<Task>): Task {
+    return {
+      id: 'task-1', title: 'Ship it', status: 'in_progress', project_id: '', due: '',
+      assignee: 'agent', chat_id: 'quiet', attempt_id: 'attempt-1', created_at: '', updated_at: '',
+      revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'running',
+      attempt_outcome: '', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
+      changed_since_delegated: false,
+      ...overrides,
+    } as Task
+  }
+
+  async function mountWithTask(overrides: Partial<Task>) {
+    seedChats()
+    const signals = useTaskSignalsStore()
+    signals.tasks = [task(overrides)]
+    signals.loadedWorkspace = 'personal'
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+    return wrapper
+  }
+
+  function rowFor(wrapper: Awaited<ReturnType<typeof mountWithTask>>, title: string) {
+    return wrapper.findAll('.home-chat-item').find(row => row.text().includes(title))!
+  }
+
+  it('files a task waiting on the user under needs you and names its outcome', async () => {
+    const wrapper = await mountWithTask({ attempt_state: 'needs_you', attempt_outcome: 'needs_input' })
+    const row = wrapper.get('.home-tier--needsYou').findAll('.home-chat-item')
+      .find(r => r.text().includes('A quiet chat'))!
+    expect(row.get('.home-chat-project').text()).toBe('Personal project')
+    expect(row.get('.home-chat-task').text()).toBe('task')
+    expect(row.get('.home-chat-status').text()).toBe('needs input')
+    wrapper.unmount()
+  })
+
+  it.each([
+    [{ attempt_state: 'needs_you', attempt_outcome: 'blocked' }, 'blocked'],
+    [{ attempt_state: 'needs_you', attempt_outcome: '' }, 'waiting on you'],
+    [{ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' }, 'ready for review'],
+    [{ attempt_state: 'running' }, 'working'],
+    [{ attempt_state: 'stopped', live_attempt_id: '' }, 'no new activity'],
+  ] as Array<[Partial<Task>, string]>)('reads %o as "%s"', async (overrides, phrase) => {
+    const wrapper = await mountWithTask(overrides)
+    expect(rowFor(wrapper, 'A quiet chat').get('.home-chat-status').text()).toBe(phrase)
+    wrapper.unmount()
+  })
+
+  it('lets a live card speak for a running turn filed under needs you', async () => {
+    const wrapper = await mountWithTask({ chat_id: 'needs', attempt_state: 'running' })
+    const row = wrapper.get('.home-tier--needsYou').findAll('.home-chat-item')
+      .find(r => r.text().includes('Needs an answer'))!
+    expect(row.get('.home-chat-status').text()).toBe('waiting for you')
+    wrapper.unmount()
+  })
+
+  it('does not read an earlier attempt\'s chat as the task\'s current state', async () => {
+    seedChats()
+    const store = useProjectStore()
+    const quiet = store.chats.find(c => c.chat_id === 'quiet')!
+    quiet.helper = { kind: 'task_delegation', task_id: 'task-1', task_revision: 'r1', attempt_id: 'attempt-0' }
+    const signals = useTaskSignalsStore()
+    signals.tasks = [task({ chat_id: 'newer-chat', attempt_state: 'needs_you', attempt_outcome: 'needs_input' })]
+    signals.loadedWorkspace = 'personal'
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+    expect(wrapper.find('.home-tier--needsYou').text()).not.toContain('A quiet chat')
+    expect(rowFor(wrapper, 'A quiet chat').get('.home-chat-status').text()).toBe('no new activity')
+    wrapper.unmount()
+  })
+
+  it('keeps a ready-for-review task out of needs you', async () => {
+    const wrapper = await mountWithTask({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
+    expect(wrapper.get('.home-tier--quiet').text()).toContain('A quiet chat')
+    wrapper.unmount()
+  })
+
+  it('leaves ordinary chats without the task word', async () => {
+    const wrapper = await mountWithTask({ chat_id: 'someone-else' })
+    expect(wrapper.find('.home-chat-task').exists()).toBe(false)
     wrapper.unmount()
   })
 })

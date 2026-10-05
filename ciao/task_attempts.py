@@ -36,8 +36,10 @@ Five rules, and each of them is a refusal somebody could otherwise have taken:
   which derives the same answer) records it ``interrupted``: never replayed,
   because re-running a turn nobody confirmed is worse than asking.
 * **A crash is derived, not remembered.** Every record carries the
-  ``owner`` token of the process that wrote it. A live attempt owned by another
-  process cannot have a turn running in this one, so it *is* ``interrupted`` —
+  ``owner`` token of the process that wrote it. A ``running`` attempt owned by
+  another process cannot have a turn running in this one, so it *is*
+  ``interrupted`` (a ``ready_for_review`` or ``needs_you`` one had already ended
+  its turn, so a restart leaves it as it was) —
   which is how a restart re-derives it without a startup sweep and without any
   state this module would have to keep in memory.
 * **A finished turn is not a finished task.** Settling here writes
@@ -106,8 +108,8 @@ LIVE_STATES = frozenset({"running", "needs_you", "ready_for_review"})
 
 :meth:`TaskAttemptStore.get_live` returns only these, and a ``start`` against a
 task that has one returns it rather than minting a second. They are also exactly
-the states a derived ``interrupted`` replaces, because a live attempt written by
-another process cannot have a turn running in this one.
+the states a live check holds across a restart; only ``running`` is derived
+``interrupted`` there, because only it claims a turn in flight.
 
 A *released* record is not live whatever state it is in — see
 :attr:`TaskAttempt.released` and :attr:`TaskAttempt.is_live`, which is the whole
@@ -440,12 +442,16 @@ class TaskAttemptStore:
         workspace: str,
         runtime_dir: Path,
         clock: Callable[[], datetime],
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         if not isinstance(workspace, str) or not workspace.strip():
             raise ValueError("workspace must be a non-empty string")
         self._workspace = workspace
         self._runtime_dir = Path(runtime_dir)
         self._clock = clock
+        #: Called after every document write that landed, so the engine can tell
+        #: open clients an attempt moved. Never called for a failed write.
+        self._on_change = on_change
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", workspace) or "workspace"
         self._path = self._runtime_dir / f"task-attempts-{safe}.json"
 
@@ -604,6 +610,8 @@ class TaskAttemptStore:
                 temporary.unlink()
             except OSError:
                 pass
+        if self._on_change is not None:
+            self._on_change()
 
     def _derive(self, records: dict[str, TaskAttempt]) -> dict[str, TaskAttempt]:
         """Every attempt owned by another process is ``interrupted``.
@@ -621,7 +629,7 @@ class TaskAttemptStore:
         """
         derived: dict[str, TaskAttempt] = {}
         for attempt_id, record in records.items():
-            if record.is_live and record.owner != _PROCESS_TOKEN:
+            if _stranded(record):
                 record = _interrupted(record)
             derived[attempt_id] = record
         return derived
@@ -774,7 +782,7 @@ class TaskAttemptStore:
         stranded = [
             record
             for record in self._read_raw().values()
-            if record.is_live and record.owner != _PROCESS_TOKEN
+            if _stranded(record)
         ]
         if not stranded:
             return ()
@@ -906,11 +914,14 @@ class TaskAttemptStore:
             record = _require(records, attempt_id)
             if not record.is_live:
                 raise TaskAttemptError("invalid_attempt", "only a live attempt can continue")
-            # A new turn owes a new report: the last one described the turn
-            # before. The summary stays, so the card keeps saying what it said.
+            # The last report stands until the agent makes a new one. A
+            # follow-up turn is usually conversation about the result ("dd is
+            # DoorDash"), and clearing the report made that one reply turn a
+            # finished result into *Unfinished*. The agent is told to report
+            # again whenever its result changes.
             running = replace(
                 record, state="running", updated_at=self._now(), ended_at="",
-                detail="", owner=_PROCESS_TOKEN, outcome="",
+                detail="", owner=_PROCESS_TOKEN,
             )
             records[record.attempt_id] = running
             continued.append(running)
@@ -1182,6 +1193,17 @@ def _decode_entry(attempt_id: Any, entry: Any, *, path_name: str) -> TaskAttempt
     )
 
 
+def _stranded(record: TaskAttempt) -> bool:
+    """A ``running`` attempt another process wrote: its turn died with that process.
+
+    Only ``running`` claims a turn in flight. ``ready_for_review`` and
+    ``needs_you`` are written when a turn *ends* — with a result to review, or
+    waiting on the user — so a restart takes nothing from them: the result is
+    still there, and a reply in the chat still continues the attempt.
+    """
+    return record.is_live and record.state == "running" and record.owner != _PROCESS_TOKEN
+
+
 def _interrupted(record: TaskAttempt) -> TaskAttempt:
     """One live record read as ``interrupted``.
 
@@ -1296,6 +1318,14 @@ DELEGATION_INSTRUCTION = (
     "The summary file is Markdown: what you did, where the results are, and what "
     "is left. It is saved on the task and is what the next attempt starts from. "
     "A turn that ends without a report is shown to the user as unfinished.\n"
+    "\n"
+    "If you need an answer from the user to go on, ask it here with your question "
+    "tool and carry on once they reply. Report `needs_input` only if you end the "
+    "turn still waiting on them.\n"
+    "\n"
+    "Later turns in this chat keep your last report. Report again whenever your "
+    "result changes. If the user says the task is done, report `done` with what "
+    "was agreed and tell them to press Approve Done; you cannot close it yourself.\n"
     "\n"
     "Do not mark the task done, and do not try to: closing it is the user's "
     "decision. Ask for whatever approval you need in the ordinary way — an "

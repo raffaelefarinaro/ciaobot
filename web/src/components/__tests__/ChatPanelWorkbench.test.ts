@@ -98,12 +98,12 @@ const TURNS: ChatMessage[] = [
   { role: 'assistant', content: 'second answer', timestamp: '2026-09-25T10:01:07Z', effective_model: 'sonnet', duration_ms: 7000 },
 ]
 
-async function mountPanel(messages: ChatMessage[] = []): Promise<VueWrapper> {
+async function mountPanel(messages: ChatMessage[] = [], chatOverrides: Partial<ChatInfo> = {}): Promise<VueWrapper> {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
   store.projects = [project()]
-  store.chats = [chat()]
+  store.chats = [{ ...chat(), ...chatOverrides }]
   store.activeChatId = 'chat-1'
   store.messages = { 'chat-1': messages }
   store.bootstrapped = true
@@ -291,6 +291,9 @@ describe('ChatPanel aligned layout', () => {
     expect(rail.findComponent({ name: 'AgentContextSection' }).exists()).toBe(true)
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(rail.text()).not.toContain('Current state')
+    // The task origin note sits in the rail, and only there, while it shows.
+    const origins = wrapper.findAllComponents({ name: 'TaskOriginNote' })
+    expect(origins.map(o => o.props('variant'))).toEqual(['rail'])
 
     // The header carries Archive only, as an icon button (labelled on wide
     // panes, icon-only on narrow); the toggle lives with Work details.
@@ -312,5 +315,53 @@ describe('ChatPanel aligned layout', () => {
     // The drawer is the narrow-pane form; it does not open on a wide pane.
     expect(wrapper.find('.chat-work-inspector').exists()).toBe(false)
     wrapper.unmount()
+  })
+
+  describe('a delegated board task', () => {
+    const DELEGATION = {
+      helper: { kind: 'task_delegation' as const, task_id: 'ship', task_revision: 'r1', attempt_id: 'att-1' },
+    }
+    const PROMPT = 'Instruction.\n\nTitle: Ship the board\nTask id: ship\n\n<task-board-task>\n- land the types\n</task-board-task>'
+    const DELEGATED_TURNS: ChatMessage[] = [
+      { role: 'user', content: PROMPT, timestamp: '2026-09-25T10:00:00Z', turn_index: 0 },
+      { role: 'assistant', content: 'done', timestamp: '2026-09-25T10:00:05Z' },
+      { role: 'user', content: 'a follow-up', timestamp: '2026-09-25T10:01:00Z', turn_index: 1 },
+    ]
+
+    it('draws the first message as the task handed over, and later ones as typed', async () => {
+      const wrapper = await mountPanel(DELEGATED_TURNS, DELEGATION)
+      const card = wrapper.getComponent({ name: 'TaskHandoverCard' })
+      expect(card.props('handover')).toEqual({ title: 'Ship the board', description: '- land the types' })
+      expect(card.props('prompt')).toBe(PROMPT)
+      const users = wrapper.findAll('.message-wrap.user')
+      expect(users).toHaveLength(1)
+      expect(users[0].text()).toContain('a follow-up')
+      wrapper.unmount()
+    })
+
+    it('renders the first message normally when it carries no fenced description', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: 'Title: hand-typed', timestamp: '2026-09-25T10:00:00Z', turn_index: 0 },
+      ], DELEGATION)
+      expect(wrapper.findComponent({ name: 'TaskHandoverCard' }).exists()).toBe(false)
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(1)
+      wrapper.unmount()
+    })
+
+    it('leaves an ordinary chat\'s fenced text alone', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: PROMPT, timestamp: '2026-09-25T10:00:00Z', turn_index: 0 },
+      ])
+      expect(wrapper.findComponent({ name: 'TaskHandoverCard' }).exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('puts the task origin note above the transcript while the rail is hidden', async () => {
+      const wrapper = await mountPanel(DELEGATED_TURNS, DELEGATION)
+      const note = wrapper.getComponent({ name: 'TaskOriginNote' })
+      expect(note.props('variant')).toBe('note')
+      expect(note.props('chat')).toMatchObject({ chat_id: 'chat-1', helper: DELEGATION.helper })
+      wrapper.unmount()
+    })
   })
 })

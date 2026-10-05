@@ -9,8 +9,9 @@ import { useProposalsStore } from '../../stores/proposals'
 import { useTaskStore } from '../../stores/tasks'
 import { useProjectStore } from '../../stores/projects'
 import { useVaultReviewStore } from '../../stores/vaultReview'
+import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { api } from '../../lib/api'
-import type { ProposalRow, Schedule } from '../../lib/types'
+import type { ProposalRow, Schedule, Task } from '../../lib/types'
 
 const router = {
   push: vi.fn(() => Promise.resolve()),
@@ -213,5 +214,35 @@ describe('HomeReviewSummary', () => {
     expect(wrapper.text()).not.toContain('memory pass')
     expect(switchChat).not.toHaveBeenCalled()
     wrapper.unmount()
+  })
+  it('lists tasks the agent reported done and opens the one card directly', async () => {
+    const signals = useTaskSignalsStore()
+    const reviewTask = (id: string, title: string) => ({
+      id, title, status: 'in_review', attempt_state: 'ready_for_review', live_attempt_id: `a-${id}`,
+    }) as unknown as Task
+    signals.loadedWorkspace = 'personal'
+    signals.tasks = [
+      reviewTask('t1', 'Check the Q4 status'),
+      // Moved to In review by hand: no attempt, so nothing for the agent to approve.
+      { id: 't2', title: 'Manual', status: 'in_review', attempt_state: '', live_attempt_id: '' } as unknown as Task,
+    ]
+    const wrapper = mount(HomeReviewSummary)
+    const first = wrapper.findAll('.home-review-item')[0]
+    expect(first.get('.home-review-title').text()).toBe('1 task in review')
+    expect(first.get('.home-review-detail').text()).toContain('Check the Q4 status')
+    await first.trigger('click')
+    expect(router.push).toHaveBeenCalledWith({ name: 'task-detail', params: { taskId: 't1' } })
+
+    signals.tasks = [reviewTask('t1', 'One'), reviewTask('t3', 'Two')]
+    await nextTick()
+    const row = wrapper.findAll('.home-review-item')[0]
+    expect(row.get('.home-review-title').text()).toBe('2 tasks in review')
+    await row.trigger('click')
+    expect(router.push).toHaveBeenLastCalledWith('/tasks')
+
+    // Another workspace's snapshot never counts here.
+    signals.loadedWorkspace = 'work'
+    await nextTick()
+    expect(wrapper.text()).not.toContain('in review')
   })
 })

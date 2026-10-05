@@ -9,8 +9,35 @@ import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
+import { useTaskSignalsStore } from '../../stores/taskSignals'
+import type { Task } from '../../lib/types'
 
 const chatId = 'chat-1234-abcd'
+
+function delegatedTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: 'task-1', title: 'Ship it', status: 'in_review', project_id: '', due: '',
+    assignee: 'agent', chat_id: '', attempt_id: 'attempt-1', created_at: '', updated_at: '',
+    revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'ready_for_review',
+    attempt_outcome: 'done', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
+    changed_since_delegated: false,
+    ...overrides,
+  } as Task
+}
+
+async function mountSidebar() {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/', component: { template: '<div />' } }],
+  })
+  await router.push('/')
+  await router.isReady()
+  return mount(ProjectSidebar, {
+    attachTo: document.body,
+    props: { collapsed: false, mode: 'chat' },
+    global: { plugins: [router] },
+  })
+}
 
 describe('ProjectSidebar chat actions', () => {
   beforeEach(() => {
@@ -99,6 +126,55 @@ describe('ProjectSidebar chat actions', () => {
     expect(chatsLink.attributes('data-count')).toBe('1')
     expect(chatsLink.attributes('aria-label')).toBe('Home — 1 chat needs attention')
 
+    wrapper.unmount()
+  })
+
+  it('counts tasks waiting for review on the Tasks item, quietly, and hides zero', async () => {
+    const signals = useTaskSignalsStore()
+    signals.tasks = [
+      delegatedTask(),
+      delegatedTask({ id: 'task-2', live_attempt_id: 'attempt-2', attempt_id: 'attempt-2' }),
+      delegatedTask({ id: 'task-3', status: 'in_progress', attempt_state: 'running', attempt_outcome: '' }),
+    ]
+    signals.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar()
+
+    const tasksLink = wrapper.get('a[href="/tasks"]')
+    expect(tasksLink.attributes('data-count')).toBe('2')
+    expect(tasksLink.attributes('aria-label')).toBe('tasks — 2 waiting for review')
+
+    signals.tasks = []
+    await nextTick()
+    expect(tasksLink.attributes('data-count')).toBeUndefined()
+    expect(tasksLink.attributes('aria-label')).toBe('tasks')
+    wrapper.unmount()
+  })
+
+  it('tags a delegated task chat in words and keeps the full title in its tooltip', async () => {
+    const store = useProjectStore()
+    store.chats[0].helper = {
+      kind: 'task_delegation', task_id: 'task-1', task_revision: 'r1', attempt_id: 'attempt-1',
+    }
+    store.chats.push({ ...store.chats[0], chat_id: 'plain', title: 'Plain chat', helper: undefined })
+    const wrapper = await mountSidebar()
+
+    const rows = wrapper.findAll('.chat-item')
+    const delegated = rows.find(row => row.text().includes('Copy me'))!
+    const plain = rows.find(row => row.text().includes('Plain chat'))!
+    expect(delegated.get('.chat-task-tag').text()).toBe('task')
+    // The row's accessible name comes from its content, so it says "task" too.
+    expect(delegated.text()).toContain('task')
+    expect(plain.find('.chat-task-tag').exists()).toBe(false)
+    expect(delegated.attributes('title')).toBe('Copy me\nDrag to move to another project')
+    wrapper.unmount()
+  })
+
+  it('tags a chat a loaded task points at even before its stamp arrives', async () => {
+    const signals = useTaskSignalsStore()
+    signals.tasks = [delegatedTask({ chat_id: chatId })]
+    signals.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar()
+    expect(wrapper.get('.chat-item .chat-task-tag').text()).toBe('task')
     wrapper.unmount()
   })
 
