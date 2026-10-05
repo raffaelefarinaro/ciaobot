@@ -134,6 +134,13 @@ start|status` on this computer, Retry, and automatic reconnect. It is modal
 (focus trapped, shortcuts suppressed), and it lifts without a reload when the
 engine returns.
 
+A chat turn that fails because the provider CLI is signed out keeps its
+automatic retry, and both the retry card and the error bubble carry a closed
+**How to sign in again** disclosure: open a terminal, paste the sign-in command
+(the one the engine reports for that provider, with a Copy button), then come
+back and click the card's **Try now** or the bubble's **Retry**, repeated as the
+last step. Nothing opens a terminal or signs in on the user's behalf.
+
 On Home, the review rail is titled **At a glance**. Actionable operator notices, update tasks, and device setup each sit in a separate, in-flow window with the pinned file tile's tonal surface, bordered header and close control. For operator actions and update tasks, X hides the window until reload (or until **Show closed notices**) and persistent Hide remains a separate, explicit action. The device-setup reminder is different: its X is the only dismissal control and persists for this browser, so it does not nag again after a reload. Chat-row signals sit right-aligned above the relative time in both wide and narrow panes. In-flight memory insight rows use one quiet **extracting…** label; blocked and completed phases retain distinct wording. A normal browser tab cannot know whether the app is separately installed; installed PWA windows use display-mode detection, and the retired Ciaobot.app desktop wrapper does not report itself as a PWA.
 
 ## Colors

@@ -1,4 +1,4 @@
-type ErrorAttributionKind = 'timeout' | 'blocked' | 'remote-http' | 'provider' | 'unknown'
+type ErrorAttributionKind = 'auth' | 'timeout' | 'blocked' | 'remote-http' | 'provider' | 'unknown'
 
 export interface ErrorAttribution {
   kind: ErrorAttributionKind
@@ -6,8 +6,20 @@ export interface ErrorAttribution {
   copy: string
 }
 
+// The provider CLI is signed out or its login lapsed. Same shapes as
+// `_is_retryable_auth_error` in ciao/web/chat_service.py, which retries them.
+export function isProviderAuthError(errorText: string): boolean {
+  const text = (errorText || '').toLowerCase()
+  if (text.includes('oauth session expired')) return true
+  if (text.includes('could not be refreshed') && (text.includes('failed to authenticate') || text.includes('session expired'))) return true
+  return text.includes('not logged in') && text.includes('/login')
+}
+
 export function classifyError(errorText: string): ErrorAttribution {
   const text = (errorText || '').toLowerCase()
+  if (isProviderAuthError(text)) {
+    return { kind: 'auth', label: 'Signed out', copy: 'The AI provider\'s login expired. Sign in again to continue.' }
+  }
   if (/\b(timeout|timed out|deadline exceeded)\b/.test(text)) {
     return { kind: 'timeout', label: 'Timed out', copy: 'The operation took too long to finish.' }
   }

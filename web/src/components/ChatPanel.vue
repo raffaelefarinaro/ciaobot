@@ -348,6 +348,13 @@
               @click="openFixChat(i)"
             >Fix this error</button>
           </div>
+          <ProviderSignInHint
+            v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !chat.archived"
+            :provider="chat.provider"
+            action-label="Retry"
+            :action-disabled="store.isStreaming"
+            @action="retryFromError(i)"
+          />
         </div>
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
@@ -367,6 +374,13 @@
               @click="openFixChat(i)"
             >Fix this error</button>
           </div>
+          <ProviderSignInHint
+            v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !chat.archived"
+            :provider="chat.provider"
+            action-label="Retry"
+            :action-disabled="store.isStreaming"
+            @action="retryFromError(i)"
+          />
         </div>
       </template>
       </template>
@@ -375,7 +389,7 @@
         <div class="retry-card-main">
           <AppIcon class="retry-card-icon" name="clock" :size="18" />
           <div>
-            <div class="retry-card-title">Retrying this turn every hour</div>
+            <div class="retry-card-title">{{ retryCardTitle }}</div>
             <div class="retry-card-meta">
               <span v-if="chat.retry.next_at">Next try {{ formatRetryTime(chat.retry.next_at) }}</span>
               <span v-if="chat.retry.attempts"> · {{ chat.retry.attempts }} attempt{{ chat.retry.attempts === 1 ? '' : 's' }}</span>
@@ -387,6 +401,14 @@
           <button class="btn-small" :disabled="store.isStreaming" @click="tryRetryNow">Try now</button>
           <button class="btn-small" @click="stopRetry">Stop trying</button>
         </div>
+        <ProviderSignInHint
+          v-if="isProviderAuthError(chat.retry.last_error)"
+          class="retry-card-hint"
+          :provider="chat.provider"
+          action-label="Try now"
+          :action-disabled="store.isStreaming"
+          @action="tryRetryNow"
+        />
       </div>
 
       <!-- Live reasoning trace: shown from the moment streaming starts.
@@ -1283,6 +1305,7 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
+import ProviderSignInHint from './ProviderSignInHint.vue'
 import TaskOriginNote from './TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { isLiveAttemptState } from '../lib/taskBoard'
@@ -1293,7 +1316,7 @@ import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
-import { classifyError } from '../lib/errorAttribution'
+import { classifyError, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import {
   activityLines,
@@ -4129,6 +4152,15 @@ function formatRetryTime(value: string): string {
   return formatTime(d.toISOString())
 }
 
+// Quota retries wait an hour; connection, startup and auth retries 30s.
+const retryCardTitle = computed(() => {
+  const retry = chat.value?.retry
+  if (retry && isProviderAuthError(retry.last_error)) return 'Signed out — retrying this turn'
+  const seconds = retry?.interval_seconds || 0
+  if (seconds && seconds < 3600) return 'Retrying this turn shortly'
+  return 'Retrying this turn every hour'
+})
+
 async function tryRetryNow() {
   if (!chat.value || store.isStreaming) return
   await store.tryChatRetryNow(chat.value.chat_id)
@@ -5192,6 +5224,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   align-self: center;
   width: min(680px, 90%);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
@@ -5213,10 +5246,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .retry-card-title { font-size: var(--text-sm); font-weight: 700; }
 .retry-card-meta { color: var(--fg2); font-size: var(--text-xs); margin-top: 2px; }
 .retry-card-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
+.retry-card-hint { flex-basis: 100%; margin-top: 0; }
 
 @media (max-width: 640px) {
   .retry-card { align-items: stretch; flex-direction: column; }
   .retry-card-actions { justify-content: flex-end; }
+  .retry-card-hint { flex-basis: auto; }
 }
 
 /* Activity blocks (live streaming) */

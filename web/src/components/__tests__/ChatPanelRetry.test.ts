@@ -247,6 +247,78 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
+  it('offers sign-in steps under a signed-out error and retries from them', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Summarise my inbox', timestamp: '2026-10-05T15:44:00Z' },
+      {
+        role: 'assistant',
+        content: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        timestamp: '2026-10-05T15:44:01Z',
+        is_error: true,
+      },
+    ]
+    sendMessage.mockResolvedValue()
+    await flushPromises()
+
+    const hint = wrapper.findComponent({ name: 'ProviderSignInHint' })
+    expect(hint.exists()).toBe(true)
+    expect(hint.props('provider')).toBe('claude')
+    expect(hint.props('actionLabel')).toBe('Retry')
+    hint.vm.$emit('action')
+    await flushPromises()
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage.mock.calls[0][1]).toBe('Summarise my inbox')
+    wrapper.unmount()
+  })
+
+  it('shows no sign-in steps under an unrelated error', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hi', timestamp: '2026-10-05T15:44:00Z' },
+      { role: 'assistant', content: 'Error: connection refused', timestamp: '2026-10-05T15:44:01Z', is_error: true },
+    ]
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'ProviderSignInHint' }).exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('puts sign-in steps on a pending auth retry and wires them to Try now', async () => {
+    const { wrapper, store } = await mountPanel()
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-05T15:45:00Z',
+      last_error: 'Not logged in · Please run /login',
+      attempts: 2,
+      interval_seconds: 30,
+    }
+    await flushPromises()
+
+    expect(wrapper.find('.retry-card-title').text()).toBe('Signed out — retrying this turn')
+    const hint = wrapper.findComponent({ name: 'ProviderSignInHint' })
+    expect(hint.props('actionLabel')).toBe('Try now')
+    hint.vm.$emit('action')
+    await flushPromises()
+    expect(tryNow).toHaveBeenCalledWith('chat-1')
+    wrapper.unmount()
+  })
+
+  it('does not promise an hourly retry for a 30s connection retry', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-05T15:45:00Z',
+      last_error: 'connection reset by peer',
+      attempts: 1,
+      interval_seconds: 30,
+    }
+    await flushPromises()
+    expect(wrapper.find('.retry-card-title').text()).toBe('Retrying this turn shortly')
+    expect(wrapper.findComponent({ name: 'ProviderSignInHint' }).exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('suppresses scroll anchoring only while pinned at the bottom', async () => {
     const { wrapper } = await mountPanel()
     const messages = wrapper.find('.messages').element as HTMLElement
