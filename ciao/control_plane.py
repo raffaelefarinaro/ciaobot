@@ -2847,13 +2847,20 @@ class CiaoControlPlane:
         end of an approved task's chat, and the attempt is already released, so
         the archive hook leaves the task alone.
 
-        Scheduled on the loop, never awaited: an approval must not wait on a
-        transcript render, and nothing here may fail the approval. Outside a loop
-        (a test calling the service directly) it does nothing.
+        Scheduled on the engine's loop, never awaited: an approval must not wait
+        on a transcript render, and nothing here may fail the approval. The
+        ``/complete`` route runs the approval in a worker thread
+        (``asyncio.to_thread``), where there is no running loop, so the work is
+        handed to the loop this plane was built on — the same one
+        ``tasks_changed`` is published on. Without one (a test calling the
+        service outside any loop) it does nothing.
         """
         try:
-            loop = asyncio.get_running_loop()
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+            on_loop = True
         except RuntimeError:
+            loop, on_loop = self._loop, False
+        if loop is None or loop.is_closed():
             return
         focus = {
             "focus": "approved_task",
@@ -2889,9 +2896,21 @@ class CiaoControlPlane:
                     "tasks: could not learn from the approved task in chat %s", attempt.chat_id
                 )
 
-        task = loop.create_task(_run(), name=f"task-learn-{attempt.attempt_id[:8]}")
-        self._watchers.add(task)
-        task.add_done_callback(self._watchers.discard)
+        def _spawn() -> None:
+            task = loop.create_task(_run(), name=f"task-learn-{attempt.attempt_id[:8]}")
+            self._watchers.add(task)
+            task.add_done_callback(self._watchers.discard)
+
+        if on_loop:
+            _spawn()
+            return
+        try:
+            loop.call_soon_threadsafe(_spawn)
+        except RuntimeError:
+            logger.warning(
+                "tasks: the loop closed before the approved task in chat %s could be archived",
+                attempt.chat_id,
+            )
 
     def _relink_after_refusal(
         self,
