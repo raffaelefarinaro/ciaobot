@@ -231,7 +231,7 @@ describe('HomeReviewSummary', () => {
     expect(first.get('.home-review-title').text()).toBe('1 task in review')
     expect(first.get('.home-review-detail').text()).toContain('Check the Q4 status')
     await first.trigger('click')
-    expect(router.push).toHaveBeenCalledWith({ path: '/tasks', query: { task: 't1' } })
+    expect(router.push).toHaveBeenCalledWith({ name: 'task-detail', params: { taskId: 't1' } })
 
     signals.tasks = [reviewTask('t1', 'One'), reviewTask('t3', 'Two')]
     await nextTick()

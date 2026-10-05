@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify'
 import { Marked, Renderer, type Tokens } from 'marked'
 
+import { isAppRouteHref } from './appLinks'
 import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
 import { COMMENT_TAGS } from './commentContext'
 import { hasKnownFileExtension, isPlausibleFilePath, linkifyHtml } from './filePaths'
@@ -136,6 +137,10 @@ function withExternalLinkAttrs(html: string): string {
     // A file link is handled in-app by the delegated click handler; a
     // `target="_blank"` on it would be a second, wrong answer to the click.
     if (/\bclass\s*=\s*"[^"]*\bfile-link\b/i.test(attrs)) return match
+    // So is a link into the app (lib/appLinks.ts): a new tab would open a
+    // second copy of the app instead of the task.
+    const href = /\bhref\s*=\s*"([^"]*)"/i.exec(attrs)?.[1] ?? ''
+    if (isAppRouteHref(href)) return match
     return `<a ${attrs} target="_blank" rel="noopener noreferrer">`
   })
 }

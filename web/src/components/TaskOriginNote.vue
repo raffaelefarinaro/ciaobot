@@ -92,8 +92,8 @@ async function approve(): Promise<void> {
     <AppIcon class="task-origin-icon" name="activity" :size="16" />
     <div class="task-origin-body">
       <p class="task-origin-line">
-        <template v-if="task">This chat works on the task <router-link class="task-origin-link" :to="{ path: '/tasks', query: { task: taskId } }">{{ task.title || taskId }}</router-link>.</template>
-        <template v-else>This chat works on <router-link class="task-origin-link" :to="{ path: '/tasks', query: { task: taskId } }">a task on the board</router-link>.</template>
+        <template v-if="task">This chat works on the task <router-link class="task-origin-link" :to="{ name: 'task-detail', params: { taskId } }">{{ task.title || taskId }}</router-link>.</template>
+        <template v-else>This chat works on <router-link class="task-origin-link" :to="{ name: 'task-detail', params: { taskId } }">a task on the board</router-link>.</template>
       </p>
       <p v-if="statusWords" class="task-origin-status">{{ statusWords }}</p>
       <button

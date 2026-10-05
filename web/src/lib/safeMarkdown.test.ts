@@ -20,6 +20,14 @@ describe('safe markdown rendering', () => {
     expect(html).toContain('rel="noopener noreferrer"')
   })
 
+  it('keeps a task link in the app instead of opening a new tab', () => {
+    const id = '0123456789abcdef0123456789abcdef'
+    const html = renderMarkdown(`[Reply to Ivo](/tasks/${id}) and [short](/tasks/9920898d)`)
+    expect(html).toContain(`<a href="/tasks/${id}">Reply to Ivo</a>`)
+    // Not an address the app knows, so it is an ordinary link.
+    expect(html).toContain('href="/tasks/9920898d" target="_blank"')
+  })
+
   it('resolves relative markdown images through the workspace image endpoint', () => {
     const html = renderFileMarkdown('![Logo](assets/logo.png)', {
       resolveImageSrc: (href) => `/api/workspace-image?path=${encodeURIComponent(`/workspace/${href}`)}`,

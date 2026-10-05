@@ -195,7 +195,7 @@ function openItem(key: ReviewItem['key']) {
   if (key === 'tasks') {
     // One task opens its card; several open the board on the In review column.
     const only = tasksInReview.value.length === 1 ? tasksInReview.value[0] : null
-    void router.push(only ? { path: '/tasks', query: { task: only.id } } : '/tasks')
+    void router.push(only ? { name: 'task-detail', params: { taskId: only.id } } : '/tasks')
     return
   }
   if (key === 'automations') {

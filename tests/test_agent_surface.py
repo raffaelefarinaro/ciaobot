@@ -614,7 +614,13 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     # B5 (#1033) and A6 (#1039) added their lines on divergent branches and meet
     # here, so this is 11400 rather than either's 10600/11000: both sets of prose
     # have to travel or one feature's guarantee silently disappears.
-    assert len(cli) < 11400
+    # Raised again to 11700 after a real chat (2026-10-05) asked "what can I
+    # delegate to you?", did the work in its own turn, left every task untouched,
+    # and only found `in_review` from `--help`. The column names, the
+    # delegate-means-`task delegate` rule and the note-then-`in_review` rule for
+    # self-worked tasks are what that chat lacked; `ciao-capabilities` gets one
+    # line so feature questions stop being answered from general knowledge.
+    assert len(cli) < 11700
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(

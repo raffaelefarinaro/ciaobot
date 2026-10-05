@@ -63,6 +63,14 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
+    // One task, open in the board's detail dialog: the address an agent links
+    // to (lib/appLinks.ts) and the one the dialog keeps while it is open.
+    path: '/tasks/:taskId',
+    name: 'task-detail',
+    component: () => import('./components/ChatLayout.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     // The proposal queue's old address; To decide is where it lives now.
     path: '/proposals',
     redirect: '/memory/review?show=suggested',

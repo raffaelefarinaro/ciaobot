@@ -38,6 +38,45 @@ if (!fs.existsSync(path.join(STATIC_ROOT, 'index.html'))) {
 // the cookie rides both the API calls and the WebSocket handshake, so state
 // stays per-test even under `fullyParallel`.
 /**
+ * One task on the board, and a reply that links it by its `/tasks/<id>`
+ * address, so a spec can click the link in a real transcript and see the task
+ * open in place rather than in a second tab (lib/appLinks.ts).
+ */
+const TASK_ID = '0123456789abcdef0123456789abcdef'
+const TASK = {
+  id: TASK_ID,
+  title: 'Reply to Ivo in the Feedback Tracker',
+  status: 'backlog',
+  project_id: '',
+  due: '',
+  assignee: 'user',
+  chat_id: '',
+  attempt_id: '',
+  created_at: '2026-01-01T09:00:00+00:00',
+  updated_at: '2026-01-01T09:00:00+00:00',
+  revision: 'a'.repeat(64),
+  relative_path: `Workspace/Tasks/${TASK_ID}.md`,
+  attempt_state: '',
+  attempt_outcome: '',
+  attempt_summary: '',
+  attempt_detail: '',
+  live_attempt_id: '',
+  changed_since_delegated: false,
+}
+const TASK_LINK_TRANSCRIPT = [
+  { role: 'user', content: 'What is left from yesterday?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  {
+    role: 'assistant',
+    content: `One carryover item: [Reply to Ivo](/tasks/${TASK_ID}).`,
+    sent_at: '2026-01-01T09:50:20Z',
+    duration_ms: 20000,
+    effective_model: 'synthetic-model',
+    usage: { input_tokens: 18, output_tokens: 64, context_pct: '1%' },
+    turn_index: 0,
+  },
+]
+
+/**
  * Two settled turns, with turn metadata on each closing reply, so a spec can
  * select a message and see the action footer a real transcript renders.
  */
@@ -155,6 +194,7 @@ const GET_ROUTES = {
   '/api/schedules': () => SCHEDULES,
   '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': () => ({ actions: [] }),
+  '/api/tasks': () => ({ workspace: WORKSPACES[0].name, tasks: [TASK] }),
   // "After this update" is a second, per-workspace question, so it carries a
   // query string and cannot live in the exact-path table. A spec that needs the
   // section measured on screen opts in through POST /__fixture__/update-tasks;
@@ -254,6 +294,7 @@ const GET_PATTERNS = [
   // POST /__fixture__/transcript rather than giving every spec one.
   [/^\/api\/chats\/[^/]+\/messages$/, (req) => sessionOf(req).transcript || []],
   [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
+  [/^\/api\/tasks\/[0-9a-f]{32}$/, () => ({ workspace: WORKSPACES[0].name, task: { ...TASK, body: 'Find his comment and draft a reply.' } })],
   // The receipt behind a settled verification's accept, so the History card's
   // Undo is the real affordance a `note_apply` carries rather than an
   // assertion about one.
@@ -372,7 +413,9 @@ const server = http.createServer(async (req, res) => {
         ? FOLD_TRANSCRIPT
         : body?.shape === 'comment'
           ? COMMENT_TRANSCRIPT
-          : TRANSCRIPT
+          : body?.shape === 'task-link'
+            ? TASK_LINK_TRANSCRIPT
+            : TRANSCRIPT
       return sendJson(res, { ok: true, turns: state.transcript.length })
     }
     if (pathname === '/__fixture__/update-tasks') {

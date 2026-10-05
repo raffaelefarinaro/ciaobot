@@ -78,7 +78,7 @@ describe('TaskOriginNote', () => {
     const wrapper = mountNote([task()])
     expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
     const link = wrapper.get('a')
-    expect(JSON.parse(link.attributes('data-to')!)).toEqual({ path: '/tasks', query: { task: 'ship' } })
+    expect(JSON.parse(link.attributes('data-to')!)).toEqual({ name: 'task-detail', params: { taskId: 'ship' } })
     expect(wrapper.get('.task-origin-status').text()).toBe('Running')
     expect(wrapper.find('button').exists()).toBe(false)
   })
@@ -142,7 +142,7 @@ describe('TaskOriginNote', () => {
     const wrapper = mountNote([], CHAT, 'note')
     expect(wrapper.classes()).toContain('task-origin--note')
     expect(wrapper.text()).toContain('This chat works on a task on the board.')
-    expect(JSON.parse(wrapper.get('a').attributes('data-to')!)).toEqual({ path: '/tasks', query: { task: 'ship' } })
+    expect(JSON.parse(wrapper.get('a').attributes('data-to')!)).toEqual({ name: 'task-detail', params: { taskId: 'ship' } })
     expect(wrapper.find('.task-origin-status').exists()).toBe(false)
   })
 

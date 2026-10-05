@@ -147,6 +147,12 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 There is no `task delete` on this surface: a task record is the user's own
 Markdown file, and removing one is their decision, made in the PWA.
 
+To point the user at a task — in a reply, a daily log, any vault note — link it
+as `[Reply to Ivo](/tasks/<id>)` with the full 32-hex `id` from `task list`.
+The PWA opens that task's detail on the board, in place. A short prefix is not an
+id and renders as a dead link, and a link to the task's `Workspace/Tasks/` file
+only shows its raw Markdown.
+
 Three things about the board you cannot see from a single `task get`, all of
 which are the user's decision rather than yours to resolve:
 
