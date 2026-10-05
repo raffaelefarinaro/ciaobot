@@ -2244,6 +2244,38 @@ describe('TaskBoardView', () => {
   })
 
 
+  it('the card checkbox unlinks a settled attempt, after asking, then completes', async () => {
+    const wrapper = await mountWithBody([settledTask()])
+    apiPost.mockImplementation((url: string) => Promise.resolve(
+      url.endsWith('/detach')
+        ? { workspace: 'personal', task: { ...settledTask({ attempt_id: '', chat_id: '' }), revision: REVISION }, attempt: { attempt_id: SETTLED_ID, task_id: 'broke', state: 'interrupted' } }
+        : { workspace: 'personal', task: { ...settledTask({ status: 'done', attempt_id: '' }), revision: REVISION, body: '' } },
+    ))
+
+    await card(wrapper, 'Broke halfway').get('.task-check').trigger('click')
+    await flushPromises()
+
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(String(askConfirm.mock.calls[0]![0])).toContain('still linked to its last attempt (Interrupted)')
+    const posts = apiPost.mock.calls.map((c) => String(c[0]))
+    expect(posts).toEqual([`/api/tasks/broke/attempt/${SETTLED_ID}/detach`, '/api/tasks/broke/complete'])
+    wrapper.unmount()
+  })
+
+  it('the card checkbox says a refusal in a toast, not below the columns', async () => {
+    const wrapper = await mountWithBody([task({ id: 'plain', title: 'Never delegated' })])
+    const toast = vi.fn()
+    useProjectStore().pushErrorToast = toast
+    apiPost.mockRejectedValue(new Error('the task store is busy'))
+
+    await card(wrapper, 'Never delegated').get('.task-check').trigger('click')
+    await flushPromises()
+
+    expect(askConfirm).not.toHaveBeenCalled()
+    expect(toast).toHaveBeenCalledWith('Could not mark the task done', expect.any(String))
+    wrapper.unmount()
+  })
+
   it('the editor\'s Open chat goes to the chat, not to a preview under the editor', async () => {
     const wrapper = await mountWithBody([liveTask({ attempt_state: 'needs_you' })])
     const switchChat = vi.fn()
