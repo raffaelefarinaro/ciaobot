@@ -863,8 +863,9 @@
             <div class="settings-card-header">
               <p class="section-title">Background models</p>
               <p class="hint">
-                These background tasks use their own model setting, separate from the chat defaults above.
-                "Automatic" keeps the built-in default. Session insights is set per provider, on each provider above.
+                The critique panel uses its own model setting, separate from the chat defaults above.
+                "Automatic" keeps the built-in default. Session insights, the model that reads archived
+                chats into memory, names new chats and checks schedule results, is set on each provider above.
               </p>
             </div>
 
@@ -2551,19 +2552,28 @@ function aliasSectionEntry(provider: string): ModelSection {
   }
 }
 
-function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  const effective = providerDefaultModelEffective(provider)
+// One provider's catalog behind a single "Default" entry, which the caller
+// names (the sentinel it stores as "unset" and the label it shows).
+function providerSectionsWithDefault(
+  provider: AliasProviderKey,
+  sentinel: string,
+  label: (effective: string) => string,
+): ModelSection[] {
   return [
     {
       key: 'default',
       label: 'Default',
-      models: [DEFAULT_MODEL_SELECTION],
-      modelLabels: {
-        [DEFAULT_MODEL_SELECTION]: effective ? `Automatic (${effective})` : 'Automatic',
-      },
+      models: [sentinel],
+      modelLabels: { [sentinel]: label(providerDefaultModelEffective(provider)) },
     },
     aliasSectionEntry(provider),
   ]
+}
+
+function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
+  return providerSectionsWithDefault(provider, DEFAULT_MODEL_SELECTION, (effective) =>
+    effective ? `Automatic (${effective})` : 'Automatic',
+  )
 }
 
 function providerDefaultModelEffective(provider: AliasProviderKey): string {
@@ -2666,20 +2676,9 @@ function providerInsightsModelSelectorValue(provider: AliasProviderKey): string 
 }
 
 function providerInsightsModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  const effective = providerDefaultModelEffective(provider)
-  return [
-    {
-      key: 'default',
-      label: 'Default',
-      models: [DEFAULT_INSIGHTS_SELECTION],
-      modelLabels: {
-        [DEFAULT_INSIGHTS_SELECTION]: effective
-          ? `Same as default (${effective})`
-          : 'Same as default model',
-      },
-    },
-    aliasSectionEntry(provider),
-  ]
+  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, (effective) =>
+    effective ? `Same as default (${effective})` : 'Same as default model',
+  )
 }
 
 async function saveProviderInsightsModel(provider: AliasProviderKey, value: string | string[]) {

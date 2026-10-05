@@ -288,16 +288,14 @@ class ScheduleDispatcher:
             model = resolve_insights_model(
                 self._host._config, workspace, classifier_provider
             )
-            env: dict[str, str] = {}
         except Exception:  # noqa: BLE001
             logger.exception("Schedule attention classifier setup failed; keeping chat visible")
             return True
-        tracked_provider = classifier_provider
         async with job_runs.track(
             "schedule_attention_classifier",
             "Schedule attention classifier",
             model=model,
-            provider=tracked_provider,
+            provider=classifier_provider,
             extra={
                 "schedule_id": payload["schedule_id"],
                 "workspace": workspace or "",
@@ -315,7 +313,6 @@ class ScheduleDispatcher:
                     user_prompt,
                     system_prompt=system_prompt,
                     model=model,
-                    env=env,
                     timeout_s=_DEFAULT_TIMEOUT_S,
                     provider=classifier_provider,
                     cwd=self._host._config.workspace_root,

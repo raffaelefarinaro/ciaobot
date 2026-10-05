@@ -728,9 +728,9 @@ export interface ModelsResponse {
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
 // model overrides (Settings → Models tab).
 export interface RoutineSettings {
-  // Overrides as stored; empty string = automatic default.
   insights_enabled?: boolean
 
+  // Override as stored; empty string = automatic default.
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.

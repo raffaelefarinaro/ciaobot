@@ -36,9 +36,9 @@ What this module adds is the wiring around that one write:
   session whose id does not look like a chat id would not be recognised;
 * the model and provider are resolved the way the post-archive memory pass
   resolves its call (``insights.resolve_insights_model``), never from a
-  request body: the
-  per-provider insights model for the **source's** provider, or the workspace
-  default when no override is set. That is not the model C5's preview reports
+  request body: the per-provider Session insights model for the **source's**
+  provider, or that provider's default chat model when none is set. That is
+  not the model C5's preview reports
   (``preview_selected`` answers ``default_model_for_workspace`` for the
   *workspace's* provider), so the two can differ, and only this module's answer
   is the one that reads the conversation;
