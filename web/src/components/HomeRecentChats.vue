@@ -87,13 +87,13 @@
                       class="home-chat-title"
                       :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
+                    <span v-if="taskSignals.isDelegatedChat(chat)" class="home-chat-task">task</span>
                   </span>
                   <!-- Project plus a status phrase read from the same signals
                        that sorted the row into its tier, so the sub-line can
                        never claim more than the tier heading above it. -->
                   <span class="home-chat-meta">
                     <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
-                    <span v-if="taskSignals.isDelegatedChat(chat)" class="home-chat-task">task</span>
                     <span class="home-chat-status">{{ statusPhrase(entry.key, chat) }}</span>
                     <span v-if="chat.local === false" class="remote-chip">remote</span>
                   </span>
@@ -1166,13 +1166,23 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
+.home-chat-heading:has(.home-chat-task) .home-chat-title { flex: 0 1 auto; }
+
+/* The sidebar's task tag (ProjectSidebar `.chat-task-tag`): a squared mono
+   word after the title, never colour. */
 .home-chat-task {
+  display: inline-grid;
+  place-items: center;
   flex: 0 0 auto;
-  white-space: nowrap;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
 }
 
-.home-chat-project + .home-chat-task::before,
-.home-chat-task + .home-chat-status::before,
 .home-chat-project + .home-chat-status::before {
   content: '·';
   margin-right: 6px;
