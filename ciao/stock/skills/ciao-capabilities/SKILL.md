@@ -167,7 +167,7 @@ The file workflow is designed around model collaboration: keep a Markdown docume
 - **Approved work teaches Ciaobot how it is done.** Approving a delegated task archives its chat and runs a memory pass that treats it as a worked example: it proposes a skill update, a new skill, or memory notes for the procedure it followed, all waiting in **To decide** for you to accept.
 - **Archiving the chat does not lose the work.** Unfinished work in an archived chat is paused, and the card offers **Continue in a new chat**: the new chat is handed the earlier attempts' summaries and transcripts, so it picks up where the last one stopped.
 - **Every task has its own address**, `/tasks/<id>`, which opens it on the board. The agent links tasks that way in chats and notes (a daily log's carryover, for one), so clicking one opens the task in place; the address bar shows it while a task is open, so you can copy it.
-- From a chat, an agent can read and edit the board with `ciao task list | get | create | update | move | delegate`, and can `stop`/`resume`/`retry`/`detach` a delegation. It can never mark a task done — that is yours, always.
+- From a chat, an agent can read and edit the board with `ciao task list | get | create | update | move | delegate`, can `stop`/`resume`/`retry`/`detach` a delegation, and reports its own outcome with `ciao task report ID --outcome done|blocked|needs_input --summary-file FILE.md`. It can never mark a task done — that is yours, always.
 - Not in the board: ordering cards within a column, priorities, recurring tasks, due-date reminders, or anything running on your behalf without you.
 
 ### 9. After this update (the update task surface)

@@ -56,5 +56,6 @@
   "gws status": "gws_status",
   "workspace list": "workspaces_list",
   "task delegate": "task_delegate",
+  "task report": "task_report",
   "task attempt": "task_attempt_action"
 }

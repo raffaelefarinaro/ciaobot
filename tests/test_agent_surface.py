@@ -1,6 +1,7 @@
 """The agent CLI surface: dispatcher, route, CLI mapping and prompt variant."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import inspect
 import io
@@ -443,10 +444,14 @@ def test_cli_arguments_map_to_operations(argv: list[str], expected: tuple[str, d
     assert agent_cli.resolve(parser.parse_args(argv)) == expected
 
 
-def test_every_documented_command_parses() -> None:
+def test_every_documented_command_parses(tmp_path: Path) -> None:
     """The skill's telemetry table is the contract: each row must be a real command."""
     table = json.loads((Path(agent_cli._SKILL_PATH).parent / "commands.json").read_text(encoding="utf-8"))
     parser = agent_cli.build_parser()
+    # `task report` reads its summary at parse time, so it needs a real file
+    # rather than the placeholder names the flag-only rows get.
+    summary = tmp_path / "summary.md"
+    summary.write_text("did the thing\n", encoding="utf-8")
     required = {
         "memory update": ["--region", "memory", "--action", "add"],
         "vault search": ["q"], "vault review show": ["p"],
@@ -461,6 +466,7 @@ def test_every_documented_command_parses() -> None:
         "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
         "task complete": ["a" * 32, "--revision", "r"],
         "task delegate": ["a" * 32, "--revision", "r"],
+        "task report": ["a" * 32, "--outcome", "done", "--summary-file", str(summary)],
         "task attempt": ["a" * 32, "stop"],
         "schedule update": ["s"], "schedule pause": ["s"],
         "schedule resume": ["s"], "schedule run": ["s"], "schedule delete": ["s"],
@@ -474,6 +480,43 @@ def test_every_documented_command_parses() -> None:
         assert agent_cli.is_agent_invocation(argv), command
         op, _arguments = agent_cli.resolve(parser.parse_args(argv))
         assert op == operation, command
+
+
+def test_every_agent_command_is_in_the_telemetry_table() -> None:
+    """The other direction: a command the parser offers is a command we name.
+
+    `test_every_documented_command_parses` walks the table into the parser, so
+    a verb the CLI dispatches but the table never listed passed it — and
+    `task report` (#1064) was exactly that for the life of the operation. The
+    cost is quiet and lands on the eval, not the CLI: `behavioral_eval`
+    normalizes a `ciao <noun> <verb>` invocation to its operation *through this
+    table*, by longest matching prefix, so an unlisted verb never becomes
+    `task_report` and a probe whose agent reported a delegated task scored as a
+    wrong tool. `ciao help` is the one deliberate exclusion: it is the long
+    reference `AGENT_CLI.md` points at, not an operation.
+    """
+
+    def subparsers(parser: argparse.ArgumentParser) -> list[dict[str, argparse.ArgumentParser]]:
+        return [
+            action.choices
+            for action in parser._actions
+            if isinstance(getattr(action, "choices", None), dict) and action.dest != "help"
+        ]
+
+    def leaves(
+        parser: argparse.ArgumentParser, prefix: list[str]
+    ) -> list[str]:
+        groups = subparsers(parser)
+        if not groups:
+            return [" ".join(prefix)]
+        return [
+            leaf for choices in groups for name, sub in choices.items()
+            for leaf in leaves(sub, [*prefix, name])
+        ]
+
+    table = json.loads((Path(agent_cli._SKILL_PATH).parent / "commands.json").read_text(encoding="utf-8"))
+    unlisted = sorted(set(leaves(agent_cli.build_parser(), [])) - set(table) - {"help"})
+    assert unlisted == [], f"agent commands missing from ciao-cli/commands.json: {unlisted}"
 
 
 def test_shared_nouns_route_only_their_agent_verbs() -> None:
@@ -620,7 +663,14 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     # delegate-means-`task delegate` rule and the note-then-`in_review` rule for
     # self-worked tasks are what that chat lacked; `ciao-capabilities` gets one
     # line so feature questions stop being answered from general knowledge.
-    assert len(cli) < 11700
+    # Raised again to 12000 for `task report` (#1064), the same trade for one
+    # command: a delegated turn that ends without a report reads to the user as
+    # *Unfinished* rather than as a result to review, so the verb a delegated
+    # agent is required to call is exactly the one a verb list cannot imply. This
+    # is the fifth raise, and `docs/UPKEEP.md` records the standing argument that
+    # the next one should move a section OUT to the `ciao-cli` skill instead of
+    # buying a sixth. Pay for the line, and keep the ceiling honest.
+    assert len(cli) < 12000
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
