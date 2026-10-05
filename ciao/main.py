@@ -12,7 +12,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
 from ciao.legacy_node_state import (
@@ -36,6 +36,9 @@ from ciao.error_log import install_asyncio_noise_filter, setup_error_logging
 from ciao.os_support.limits import raise_file_descriptor_limit
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
+
+if TYPE_CHECKING:
+    from ciao.provider_service import ProviderService
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +306,26 @@ def _ensure_tool_dirs_on_path() -> None:
 
 #: How long the restart watchdog lets asyncio cleanup run before forcing the restart.
 RESTART_WATCHDOG_GRACE_S = 15
+
+#: How long shutdown waits for each provider to disconnect.
+PROVIDER_SHUTDOWN_TIMEOUT_S = 3
+
+
+async def _disconnect_for_shutdown(svc: ProviderService) -> None:
+    """Disconnect one provider, bounded, without letting a failure escape.
+
+    Running out the bound is routine (a turn was in flight and the CLI is still
+    winding down), so it is a warning, not an error traceback in the error log.
+    """
+    try:
+        await asyncio.wait_for(svc.disconnect(), timeout=PROVIDER_SHUTDOWN_TIMEOUT_S)
+    except TimeoutError:
+        logger.warning(
+            "Provider disconnect did not finish within %ss during shutdown",
+            PROVIDER_SHUTDOWN_TIMEOUT_S,
+        )
+    except Exception:
+        logger.exception("Provider disconnect failed during shutdown")
 
 
 # asyncio.run's cleanup phase (cancel tasks, shut down the default
@@ -1300,13 +1323,10 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         services = list(pcm._providers.values())
         pcm._providers.clear()
         pcm._provider_last_used.clear()
-        async def _one(svc):
-            try:
-                await asyncio.wait_for(svc.disconnect(), timeout=3)
-            except Exception:
-                logger.exception("Provider disconnect failed during shutdown")
         if services:
-            await asyncio.gather(*(_one(s) for s in services), return_exceptions=True)
+            await asyncio.gather(
+                *(_disconnect_for_shutdown(s) for s in services), return_exceptions=True
+            )
 
     async def _shutdown_background_runs() -> None:
         # Terminate every live background command before the loop closes. This
