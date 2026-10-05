@@ -718,11 +718,13 @@ def test_the_route_and_the_runner_share_one_begin(
         # runner is scheduled on, so the extraction actually progresses. A sleep
         # here would block the very loop it is waiting for.
         for _ in range(400):
-            listed = client.get(
+            response = client.get(
                 "/api/import/batches",
                 params={"workspace": "personal"},
                 cookies=cookies,
-            ).json()["batches"]
+            )
+            assert response.status_code == 200, (response.status_code, response.text)
+            listed = response.json()["batches"]
             settled = next(row for row in listed if row["batch_id"] == batch["batch_id"])
             if settled["status"] != "running":
                 break

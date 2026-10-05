@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,20 @@ import pytest
 from ciao import job_runs as jr
 from ciao import dag as dag_mod
 from ciao.dag import Edge, Node, NodeResult, run
+
+# A bash node runs its argv directly, with no shell. `true`, `echo` and `sleep`
+# are coreutils that Windows has only when Git's usr/bin is on PATH (as on a
+# hosted runner), so the commands are the running Python instead.
+_TRUE = [sys.executable, "-c", ""]
+_FALSE = [sys.executable, "-c", "raise SystemExit(1)"]
+
+
+def _echo(text: str) -> list[str]:
+    return [sys.executable, "-c", f"print({text!r})"]
+
+
+def _sleep(seconds: int) -> list[str]:
+    return [sys.executable, "-c", f"import time; time.sleep({seconds})"]
 
 
 def _job_runs(tmp_path: Path) -> list[dict]:
@@ -23,14 +38,14 @@ def _job_runs(tmp_path: Path) -> list[dict]:
 
 
 def test_unknown_edge_src_raises() -> None:
-    dag = [Node(id="a", kind="bash", payload={"cmd": "true"})]
+    dag = [Node(id="a", kind="bash", payload={"cmd": _TRUE})]
     edges = [Edge(src="missing", dst="a")]
     with pytest.raises(ValueError, match="src 'missing'"):
         run(dag, edges)
 
 
 def test_unknown_edge_dst_raises() -> None:
-    dag = [Node(id="a", kind="bash", payload={"cmd": "true"})]
+    dag = [Node(id="a", kind="bash", payload={"cmd": _TRUE})]
     edges = [Edge(src="a", dst="missing")]
     with pytest.raises(ValueError, match="dst 'missing'"):
         run(dag, edges)
@@ -39,8 +54,8 @@ def test_unknown_edge_dst_raises() -> None:
 def test_cycle_raises() -> None:
     # a -> b -> a
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "true"}),
-        Node(id="b", kind="bash", payload={"cmd": "true"}),
+        Node(id="a", kind="bash", payload={"cmd": _TRUE}),
+        Node(id="b", kind="bash", payload={"cmd": _TRUE}),
     ]
     edges = [Edge(src="a", dst="b"), Edge(src="b", dst="a")]
     with pytest.raises(ValueError, match="cycle"):
@@ -55,8 +70,8 @@ def test_no_start_node_raises() -> None:
     incoming edge. This test just confirms the multi-start path is
     covered (next test)."""
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "true"}),
-        Node(id="b", kind="bash", payload={"cmd": "true"}),
+        Node(id="a", kind="bash", payload={"cmd": _TRUE}),
+        Node(id="b", kind="bash", payload={"cmd": _TRUE}),
     ]
     edges = [Edge(src="a", dst="b"), Edge(src="b", dst="a")]  # cycle
     with pytest.raises(ValueError, match="cycle"):
@@ -65,8 +80,8 @@ def test_no_start_node_raises() -> None:
 
 def test_multiple_start_nodes_raises() -> None:
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "true"}),
-        Node(id="b", kind="bash", payload={"cmd": "true"}),
+        Node(id="a", kind="bash", payload={"cmd": _TRUE}),
+        Node(id="b", kind="bash", payload={"cmd": _TRUE}),
     ]
     edges = []  # neither has an incoming edge → both are starts
     with pytest.raises(ValueError, match="multiple start nodes"):
@@ -78,8 +93,8 @@ def test_multiple_start_nodes_raises() -> None:
 
 def test_bash_chain_runs_to_completion(tmp_path: Path) -> None:
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "echo hi"}),
-        Node(id="b", kind="bash", payload={"cmd": "echo there"}),
+        Node(id="a", kind="bash", payload={"cmd": _echo("hi")}),
+        Node(id="b", kind="bash", payload={"cmd": _echo("there")}),
     ]
     edges = [Edge(src="a", dst="b")]
     ctx = run(dag, edges, job="unit", label="chain")
@@ -99,8 +114,8 @@ def test_bash_failure_short_circuits_ok_branch(tmp_path: Path) -> None:
     ends). It does NOT raise — that is reserved for uncaught
     exceptions inside the executor (e.g. timeout)."""
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "false"}),
-        Node(id="b", kind="bash", payload={"cmd": "echo should-not-run"}),
+        Node(id="a", kind="bash", payload={"cmd": _FALSE}),
+        Node(id="b", kind="bash", payload={"cmd": _echo("should-not-run")}),
     ]
     edges = [Edge(src="a", dst="b")]
     ctx = run(dag, edges, job="unit", label="short")
@@ -120,8 +135,8 @@ def test_fail_branch_only_fires_on_failure() -> None:
     via the fail edge; (2) ``a`` succeeds → ``cleanup`` does NOT run."""
     # case 1: a fails -> cleanup runs (via fail edge), chain ends.
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "false"}),
-        Node(id="cleanup", kind="bash", payload={"cmd": "echo cleaned"}),
+        Node(id="a", kind="bash", payload={"cmd": _FALSE}),
+        Node(id="cleanup", kind="bash", payload={"cmd": _echo("cleaned")}),
     ]
     edges = [Edge(src="a", dst="cleanup", when="fail")]
     ctx = run(dag, edges, job="unit", label="fail-branch")
@@ -131,8 +146,8 @@ def test_fail_branch_only_fires_on_failure() -> None:
 
     # case 2: a succeeds -> cleanup must NOT run.
     dag2 = [
-        Node(id="a", kind="bash", payload={"cmd": "true"}),
-        Node(id="cleanup", kind="bash", payload={"cmd": "echo cleaned"}),
+        Node(id="a", kind="bash", payload={"cmd": _TRUE}),
+        Node(id="cleanup", kind="bash", payload={"cmd": _echo("cleaned")}),
     ]
     edges2 = [Edge(src="a", dst="cleanup", when="fail")]
     ctx2 = run(dag2, edges2, job="unit", label="fail-branch-skip")
@@ -144,8 +159,8 @@ def test_always_branch_fires_regardless() -> None:
     """An edge with when='always' should run whether the source succeeded
     or failed."""
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "true"}),
-        Node(id="tail", kind="bash", payload={"cmd": "echo always"}),
+        Node(id="a", kind="bash", payload={"cmd": _TRUE}),
+        Node(id="tail", kind="bash", payload={"cmd": _echo("always")}),
     ]
     edges = [Edge(src="a", dst="tail", when="always")]
     ctx = run(dag, edges, job="unit", label="always")
@@ -162,14 +177,14 @@ def test_gate_node_evaluates_callable() -> None:
         return ctx.get("count", 0) % 2 == 0
 
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "echo 4"}),
+        Node(id="a", kind="bash", payload={"cmd": _echo("4")}),
         Node(id="check", kind="gate", payload={"fn": is_even}),
     ]
     edges = [Edge(src="a", dst="check")]
     ctx = run(dag, edges, job="unit", label="gate")
     # gate reads ctx but doesn't write the input; provide it via initial_ctx
     dag2 = [
-        Node(id="a", kind="bash", payload={"cmd": "echo done"}),
+        Node(id="a", kind="bash", payload={"cmd": _echo("done")}),
         Node(id="check", kind="gate", payload={"fn": is_even}),
     ]
     ctx2 = run(dag2, edges, job="unit", label="gate", initial_ctx={"count": 4})
@@ -388,7 +403,7 @@ def test_subagent_requires_paths_are_formatted_from_ctx(
     # so the ctx-derived filename is ok.md.
     (tmp_path / "ok.md").write_text("## Adoption\nok\n", encoding="utf-8")
     dag = [
-        Node(id="prev", kind="bash", payload={"cmd": "echo done"}),
+        Node(id="prev", kind="bash", payload={"cmd": _echo("done")}),
         Node(
             id="agent",
             kind="subagent",
@@ -545,7 +560,7 @@ def test_bash_timeout_marks_node_failed(tmp_path: Path) -> None:
     recorded in job_runs with status ``error`` and the timeout message
     propagated into the row's ``error`` field, so the Automation page
     shows a red row instead of a silent green one."""
-    dag = [Node(id="slow", kind="bash", payload={"cmd": "sleep 5"}, timeout_s=0.2)]
+    dag = [Node(id="slow", kind="bash", payload={"cmd": _sleep(5)}, timeout_s=0.2)]
     ctx = run(dag, [], job="unit", label="timeout")
     assert ctx["slow"].ok is False
     assert "timeout" in (ctx["slow"].error or "").lower()
@@ -597,7 +612,7 @@ def test_expected_failed_noderesult_routes_without_marking_job_error(
     monkeypatch.setitem(dag_mod._EXECUTORS, "expected-fail", no_proposal)
     dag = [
         Node(id="check", kind="expected-fail"),
-        Node(id="stub", kind="bash", payload={"cmd": "echo stub"}),
+        Node(id="stub", kind="bash", payload={"cmd": _echo("stub")}),
     ]
     edges = [Edge(src="check", dst="stub", when="fail")]
 
@@ -640,8 +655,8 @@ def test_bash_missing_cmd_raises() -> None:
 
 def test_per_node_rows_have_model_and_provider(tmp_path) -> None:
     dag = [
-        Node(id="a", kind="bash", payload={"cmd": "true"}),
-        Node(id="b", kind="bash", payload={"cmd": "true", "model": "kimi-k2.7-code:cloud"}),
+        Node(id="a", kind="bash", payload={"cmd": _TRUE}),
+        Node(id="b", kind="bash", payload={"cmd": _TRUE, "model": "kimi-k2.7-code:cloud"}),
     ]
     edges = [Edge(src="a", dst="b")]
     run(dag, edges, job="unit", label="int")

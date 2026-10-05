@@ -473,18 +473,26 @@ def _pwa_port_from_env(workspace: Path, fallback: int) -> int:
 
 
 def _path_export_hint() -> str | None:
-    """A shell line that puts the interpreter's bin dir on PATH, or
+    """A shell line that puts the directory holding ``ciao`` on PATH, or
     ``None`` when it is already on PATH.
 
-    Ciaobot installs into a standalone venv (``~/.ciaobot-venv``) that is not
-    added to PATH, so ``ciao`` is normally invoked by absolute path. Shell
-    users who want to type ``ciao`` need this hint.
+    An installer engine's ``ciao`` is the launcher the receipt names, in uv's
+    bin dir (``~/.local/bin``), which the installer puts on PATH; the uv tool
+    env's own bin dir is never on PATH, so hinting at it told every installed
+    user to add a directory they do not need. Without a receipt (a checkout's
+    venv) the entry point sits next to the interpreter.
     """
 
+    from ciao import install_receipt
+
+    receipt = install_receipt.running_receipt()
     # Not .resolve(): a venv's bin/python is a symlink to the base interpreter,
     # and resolving it would report the base interpreter's bin dir instead of
     # the venv's own bin/ where the `ciao` entry point actually lives.
-    bin_dir = Path(sys.executable).parent
+    if receipt is not None and receipt.executable:
+        bin_dir = Path(receipt.executable).parent
+    else:
+        bin_dir = Path(sys.executable).parent
     entries = {
         str(Path(p).expanduser())
         for p in os.environ.get("PATH", "").split(os.pathsep)
@@ -511,7 +519,7 @@ def _print_setup_summary(workspace: Path, port: int) -> None:
     print(f"Open Ciaobot: {url}")
     hint = _path_export_hint()
     if hint is not None:
-        print("To run `ciao` from a shell, add its venv to PATH:")
+        print("To run `ciao` from a shell, add its directory to PATH:")
         print(f"  {hint}")
         # Only alongside the line it qualifies: with the bin dir already on PATH
         # there is nothing to change and nothing to wait for.

@@ -239,7 +239,8 @@ def test_run_step_reports_missing_binary_as_failed_step() -> None:
 def test_run_step_passes_through_success(tmp_path) -> None:
     from ciao.subprocess_step import run_step as _run_step
 
-    result = _run_step(["true"], cwd=str(tmp_path), timeout=5)
+    # Not `true`: Windows has it only when Git's usr/bin is on PATH.
+    result = _run_step([sys.executable, "-c", ""], cwd=str(tmp_path), timeout=5)
     assert result.returncode == 0
 
 

@@ -346,7 +346,8 @@ describe('ImportSources', () => {
     expect(text).toContain('2026-02-01')
     expect(text).toContain('isSidechain ×3')
     expect(text).toContain('claude / sonnet')
-    expect(text).toContain('4,800')
+    // In the runner's own locale: 4,800 in en-US, 4'800 in de-CH.
+    expect(text).toContain((4800).toLocaleString())
     expect(text).toContain('at most 10 conversations per batch')
     // The destination, and a cancel.
     expect(text).toContain('/tmp/p/memory-vault/personal')

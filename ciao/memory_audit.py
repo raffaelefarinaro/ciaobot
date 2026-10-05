@@ -163,12 +163,19 @@ def find_event_shaped(region: str, entries: list[str]) -> list[dict[str, Any]]:
     return findings
 
 
-def _candidate_paths(entry: str) -> list[str]:
-    """Path-shaped tokens in an entry, backticked or bare."""
+def _candidate_paths(entry: str, workspace_dir: Path) -> list[str]:
+    """Path-shaped tokens in an entry, backticked or bare.
+
+    Whitespace usually means a backticked command line rather than a path, so
+    such a token is dropped, except one that starts with this workspace's own
+    absolute path: on Windows that path often holds a space (every
+    ``C:\\Users\\First Last`` profile), and the entry is citing the workspace.
+    """
     candidates: list[str] = []
     seen: set[str] = set()
+    workspace_prefix = str(workspace_dir)
 
-    def add(raw: str) -> None:
+    def add(raw: str, *, backticked: bool) -> None:
         token = _trim_path_token(raw)
         # A bare `~` or `/` carries no information. Globs and `<placeholder>`
         # segments are patterns, not paths that could be checked for existence.
@@ -176,16 +183,18 @@ def _candidate_paths(entry: str) -> list[str]:
             return
         if "/" not in token or "://" in token or token.startswith(("http", "mailto:")):
             return
-        if any(ch.isspace() for ch in token):
+        if any(ch.isspace() for ch in token) and not (
+            backticked and token.startswith(workspace_prefix)
+        ):
             return
         if token not in seen:
             seen.add(token)
             candidates.append(token)
 
     for match in _BACKTICK_RE.finditer(entry):
-        add(match.group(1))
+        add(match.group(1), backticked=True)
     for token in re.split(r"[\s,;]+", _BACKTICK_RE.sub(" ", entry)):
-        add(token)
+        add(token, backticked=False)
     return candidates
 
 
@@ -262,7 +271,7 @@ def find_stale_paths(
     checked = 0
     unverifiable = 0
     for entry in entries:
-        for token in _candidate_paths(entry):
+        for token in _candidate_paths(entry, workspace_dir):
             if not _looks_like_path(token, workspace_dir):
                 continue
             exists, verifiable = _resolve(token, workspace_dir)
@@ -291,7 +300,7 @@ def _subjects(entry: str, workspace_dir: Path) -> set[str]:
             subjects.add(token.lower())
     for match in _SNAKE_RE.finditer(entry):
         subjects.add(match.group(0).lower())
-    for token in _candidate_paths(entry):
+    for token in _candidate_paths(entry, workspace_dir):
         if _looks_like_path(token, workspace_dir):
             subjects.add(_LINE_SUFFIX_RE.sub("", token).lower())
     return {
