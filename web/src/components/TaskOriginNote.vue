@@ -22,6 +22,7 @@ import { taskApiErrorMessage, taskAttemptLabel } from '../lib/taskBoard'
 import type { ChatInfo, Task } from '../lib/types'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import AppIcon from './AppIcon.vue'
+import { askConfirm } from '../lib/confirm'
 
 const props = defineProps<{
   chat: Pick<ChatInfo, 'chat_id' | 'helper'>
@@ -58,6 +59,56 @@ const canApprove = computed(() => {
   const t = task.value
   return !!t && !superseded.value && taskSignals.isAwaitingReview(t)
 })
+
+/**
+ * The user's override: the task is done, whatever the attempt last said
+ * (unfinished, waiting on input, interrupted). Only for the chat that holds the
+ * task, and never where Approve Done already says the same thing.
+ */
+const canMarkDone = computed(() => {
+  const t = task.value
+  return !!t && t.status !== 'done' && !superseded.value && !taskSignals.isAwaitingReview(t)
+})
+
+const emit = defineEmits<{ (e: 'marked-done'): void }>()
+
+async function markDone(): Promise<void> {
+  const t = task.value
+  const workspace = taskSignals.loadedWorkspace
+  if (!t || !workspace || approving.value) return
+  const ok = await askConfirm(
+    `Mark "${t.title}" done? Its attempt is detached, the task is closed, and this chat is archived. The transcript stays in your vault.`,
+    { title: 'Mark done', confirmLabel: 'Mark done and archive' },
+  )
+  if (!ok) return
+  approving.value = true
+  approveError.value = ''
+  let done = false
+  try {
+    let revision = t.revision
+    const attemptId = t.live_attempt_id || t.attempt_id
+    if (attemptId) {
+      const freed = await api.post<{ task?: { revision?: string } }>(
+        `/api/tasks/${encodeURIComponent(t.id)}/attempt/${encodeURIComponent(attemptId)}/detach`,
+        { workspace },
+      )
+      revision = freed?.task?.revision || revision
+    }
+    await api.post(`/api/tasks/${encodeURIComponent(t.id)}/complete`, {
+      workspace,
+      expected_revision: revision,
+    })
+    done = true
+  } catch (e) {
+    approveError.value = (e as { status?: number } | null)?.status === 409
+      ? 'This task changed since it was read. Check it and try again.'
+      : taskApiErrorMessage(e, 'Could not mark the task done')
+  } finally {
+    approving.value = false
+  }
+  await taskSignals.reload(workspace)
+  if (done) emit('marked-done')
+}
 
 const approving = ref(false)
 const approveError = ref('')
@@ -104,6 +155,14 @@ async function approve(): Promise<void> {
         :aria-label="`Approve the result of ${task!.title} and mark it done`"
         @click="approve"
       >{{ approving ? 'Approving…' : 'Approve Done' }}</button>
+      <button
+        v-else-if="canMarkDone"
+        type="button"
+        class="btn-small task-origin-approve"
+        :disabled="approving"
+        :aria-label="`Mark ${task!.title} done and archive this chat`"
+        @click="markDone"
+      >{{ approving ? 'Marking done…' : 'Mark done' }}</button>
       <p v-if="approveError" class="task-origin-error" role="alert">{{ approveError }}</p>
     </div>
   </div>

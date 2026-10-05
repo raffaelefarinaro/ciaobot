@@ -15,6 +15,8 @@ import type { ChatInfo, Task } from '../../lib/types'
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/api', () => ({ api: { get: apiGet, post: apiPost } }))
+const askConfirm = vi.hoisted(() => vi.fn())
+vi.mock('../../lib/confirm', () => ({ askConfirm }))
 
 const RouterLinkStub = defineComponent({
   name: 'RouterLink',
@@ -70,6 +72,8 @@ describe('TaskOriginNote', () => {
     setActivePinia(createPinia())
     apiGet.mockReset()
     apiPost.mockReset()
+    askConfirm.mockReset()
+    askConfirm.mockResolvedValue(true)
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [] })
   })
   afterEach(() => { vi.restoreAllMocks() })
@@ -80,13 +84,41 @@ describe('TaskOriginNote', () => {
     const link = wrapper.get('a')
     expect(JSON.parse(link.attributes('data-to')!)).toEqual({ name: 'task-detail', params: { taskId: 'ship' } })
     expect(wrapper.get('.task-origin-status').text()).toBe('Running')
-    expect(wrapper.find('button').exists()).toBe(false)
+    // The user can always override: detaching stops the turn.
+    expect(wrapper.get('button').text()).toBe('Mark done')
   })
 
-  it('says the agent needs input and offers no button: the composer is the answer', () => {
+  it('says the agent needs input, and still lets the user mark it done', () => {
     const wrapper = mountNote([task({ status: 'in_progress', attempt_state: 'needs_you', attempt_outcome: 'needs_input' })])
     expect(wrapper.get('.task-origin-status').text()).toBe('Needs input')
-    expect(wrapper.find('button').exists()).toBe(false)
+    expect(wrapper.get('button').text()).toBe('Mark done')
+  })
+
+  it('Mark done overrides the attempt: asks, detaches, completes, then hands the archive back', async () => {
+    const wrapper = mountNote([task({ attempt_state: 'needs_you', attempt_detail: 'the turn ended without a report from the agent' })])
+    const NEXT = 'b'.repeat(64)
+    apiPost.mockImplementation((url: string) => Promise.resolve(
+      url.endsWith('/detach') ? { task: { revision: NEXT } } : { task: { status: 'done' } },
+    ))
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(apiPost.mock.calls.map((c) => c[0])).toEqual([
+      '/api/tasks/ship/attempt/att-1/detach',
+      '/api/tasks/ship/complete',
+    ])
+    expect(apiPost.mock.calls[1]![1]).toEqual({ workspace: 'personal', expected_revision: NEXT })
+    expect(wrapper.emitted('marked-done')).toHaveLength(1)
+  })
+
+  it('Mark done does nothing when the user cancels', async () => {
+    askConfirm.mockResolvedValue(false)
+    const wrapper = mountNote([task({ attempt_state: 'interrupted', live_attempt_id: '' })])
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.emitted('marked-done')).toBeUndefined()
   })
 
   it('offers Approve Done for a result waiting on review, at the revision read', async () => {
