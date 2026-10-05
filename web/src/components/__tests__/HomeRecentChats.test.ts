@@ -714,6 +714,30 @@ describe('delegated task chats on Home', () => {
     wrapper.unmount()
   })
 
+  it('lets a live card speak for a running turn filed under needs you', async () => {
+    const wrapper = await mountWithTask({ chat_id: 'needs', attempt_state: 'running' })
+    const row = wrapper.get('.home-tier--needsYou').findAll('.home-chat-item')
+      .find(r => r.text().includes('Needs an answer'))!
+    expect(row.get('.home-chat-status').text()).toBe('waiting for you')
+    wrapper.unmount()
+  })
+
+  it('does not read an earlier attempt\'s chat as the task\'s current state', async () => {
+    seedChats()
+    const store = useProjectStore()
+    const quiet = store.chats.find(c => c.chat_id === 'quiet')!
+    quiet.helper = { kind: 'task_delegation', task_id: 'task-1', task_revision: 'r1', attempt_id: 'attempt-0' }
+    const signals = useTaskSignalsStore()
+    signals.tasks = [task({ chat_id: 'newer-chat', attempt_state: 'needs_you', attempt_outcome: 'needs_input' })]
+    signals.loadedWorkspace = 'personal'
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+    expect(wrapper.find('.home-tier--needsYou').text()).not.toContain('A quiet chat')
+    expect(rowFor(wrapper, 'A quiet chat').get('.home-chat-status').text()).toBe('no new activity')
+    wrapper.unmount()
+  })
+
   it('keeps a ready-for-review task out of needs you', async () => {
     const wrapper = await mountWithTask({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
     expect(wrapper.get('.home-tier--quiet').text()).toContain('A quiet chat')

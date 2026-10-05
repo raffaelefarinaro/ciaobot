@@ -1530,7 +1530,11 @@ export const useProjectStore = defineStore('projects', () => {
   function chatNeedsYou(chatId: string): boolean {
     if (chatNeedsInput(chatId)) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
-    return !!chat && taskSignals.chatTaskWaitingOnUser(chat)
+    if (!chat) return false
+    // Only the loaded workspace's tasks are held, and slugs collide across
+    // workspaces: another workspace's chat must not resolve against them.
+    const workspace = projects.value.find(p => p.project_id === chat.project_id)?.workspace
+    return workspace === taskSignals.loadedWorkspace && taskSignals.chatTaskWaitingOnUser(chat)
   }
 
   // The first outstanding question is useful on the home card, where it can

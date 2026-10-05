@@ -17,6 +17,7 @@ import { nextTick } from 'vue'
 import TaskBoardView from '../TaskBoardView.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskBoardStore } from '../../stores/taskBoard'
+import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { Task, TaskRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -185,6 +186,24 @@ describe('TaskBoardView', () => {
     document.body.innerHTML = ''
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('re-reads when the app-wide task signals refresh for this workspace', async () => {
+    await mountBoard()
+    const boardReads = () => apiGet.mock.calls.filter((c) => String(c[0]).startsWith('/api/tasks?')).length
+    const before = boardReads()
+    const signals = useTaskSignalsStore()
+
+    // Another workspace's refresh is not this board's news.
+    signals.loadedWorkspace = 'work'
+    signals.tasks = []
+    await flushPromises()
+    expect(boardReads()).toBe(before)
+
+    signals.loadedWorkspace = 'personal'
+    signals.tasks = [...BOARD] as Task[]
+    await flushPromises()
+    expect(boardReads()).toBe(before + 1)
   })
 
   it('reads the active workspace and draws the four columns with their counts', async () => {

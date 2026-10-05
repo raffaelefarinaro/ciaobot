@@ -2469,8 +2469,7 @@ class CiaoControlPlane:
         except RuntimeError:
             loop = self._loop
         if loop is None or loop.is_closed():
-            # No loop anywhere (a synchronous caller): publish in place.
-            self._publish_tasks_changed(hub, workspace)
+            # Subscribers live on the engine's loop; without one nobody listens.
             return
         with self._tasks_changed_guard:
             if workspace in self._tasks_changed_pending:

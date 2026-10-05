@@ -57,11 +57,7 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
 }
 
 // Tasks the agent reported done, waiting for the user's Approve on the board.
-const tasksInReview = computed(() => (
-  taskSignals.loadedWorkspace === projects.activeWorkspace
-    ? taskSignals.tasks.filter(taskSignals.isAwaitingReview)
-    : []
-))
+const tasksInReview = computed(() => taskSignals.inReview(projects.activeWorkspace))
 
 const items = computed<ReviewItem[]>(() => {
   const workspace = projects.activeWorkspace

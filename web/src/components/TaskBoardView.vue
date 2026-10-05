@@ -48,6 +48,7 @@ import PaneHeader from './PaneHeader.vue'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
 import { useTaskBoardStore, type TaskChanges } from '../stores/taskBoard'
+import { useTaskSignalsStore } from '../stores/taskSignals'
 import { askConfirm, pendingConfirm } from '../lib/confirm'
 import { renderUserMarkdown } from '../lib/safeMarkdown'
 import {
@@ -173,6 +174,13 @@ function reloadBoard() {
 }
 
 onMounted(load)
+// The engine announced a change (`tasks_changed`) and the app-wide signals
+// re-read: an agent reported, a turn settled, `ciao task` wrote. Re-read the
+// board too, so its columns agree with the sidebar count while it is open.
+const taskSignals = useTaskSignalsStore()
+watch(() => taskSignals.tasks, () => {
+  if (taskSignals.loadedWorkspace === workspace.value) load()
+})
 // A switch is the one case that must not keep the old rows: `reload` drops them
 // first, so the new workspace's own first-load and failed states are what shows.
 //

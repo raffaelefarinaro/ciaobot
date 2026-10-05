@@ -733,7 +733,7 @@
                       class="chat-title"
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
-                    <span v-if="isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
+                    <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
                     <ChatSignals
                       :chat-id="chat.chat_id"
                       density="row"
@@ -1558,11 +1558,6 @@ async function addProject() {
 function workspaceShortcut(name: string): string {
   const index = store.workspaceOptions.findIndex(workspace => workspace.name === name) + 1
   return index >= 1 && index <= 9 ? String(index) : ''
-}
-
-/** A chat a delegated board task works in: tagged in its row by text. */
-function isDelegatedChat(chat: ChatInfo): boolean {
-  return chat.helper?.kind === 'task_delegation' || !!taskSignals.taskForChat(chat)
 }
 
 function colorForChat(chat: { project_id: string }) {

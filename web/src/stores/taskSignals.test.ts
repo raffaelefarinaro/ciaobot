@@ -131,6 +131,53 @@ describe('useTaskSignalsStore', () => {
     expect(store.tasks.map(t => t.id)).toEqual(['work-task'])
   })
 
+  it('drops another workspace\'s rows as soon as a switch starts', async () => {
+    get.mockResolvedValueOnce({ tasks: [delegated({ id: 'personal-task' })] })
+    const store = useTaskSignalsStore()
+    await store.reload('personal')
+    const work = deferred<unknown>()
+    get.mockReturnValueOnce(work.promise as Promise<never>)
+
+    const pending = store.reload('work')
+    // Slugs collide across workspaces: held rows must not resolve work's chats.
+    expect(store.tasks).toEqual([])
+    expect(store.loadedWorkspace).toBe('')
+    work.resolve({ tasks: [delegated({ id: 'work-task' })] })
+    await pending
+    expect(store.tasks.map(t => t.id)).toEqual(['work-task'])
+  })
+
+  it('drops an older read of the same workspace overtaken by a switch away and back', async () => {
+    const stale = deferred<unknown>()
+    get.mockReturnValueOnce(stale.promise as Promise<never>)
+    get.mockResolvedValueOnce({ tasks: [delegated({ id: 'work-task' })] })
+    get.mockResolvedValueOnce({ tasks: [delegated({ id: 'fresh' })] })
+    const store = useTaskSignalsStore()
+
+    const a = store.reload('personal')
+    await store.reload('work')
+    await store.reload('personal')
+    stale.resolve({ tasks: [delegated({ id: 'stale' })] })
+    await a
+
+    expect(store.tasks.map(t => t.id)).toEqual(['fresh'])
+  })
+
+  it('does not report an earlier attempt\'s chat as waiting on the user', async () => {
+    const newer = 'b'.repeat(32)
+    get.mockResolvedValue({
+      tasks: [delegated({ chat_id: 'chat-new', attempt_id: newer, live_attempt_id: newer, attempt_state: 'needs_you' })],
+    })
+    const store = useTaskSignalsStore()
+    await store.reload('personal')
+
+    // The old chat still links back to its task, but the state is the newer attempt's.
+    const old = chat('chat-old', stamp('ship'))
+    expect(store.taskForChat(old)?.id).toBe('ship')
+    expect(store.chatTaskWaitingOnUser(old)).toBe(false)
+    expect(store.chatTaskWaitingOnUser(chat('chat-new', { ...stamp('ship')!, attempt_id: newer } as ChatInfo['helper']))).toBe(true)
+  })
+
   it('finds a chat\'s task by its stamp, then by the task\'s chat id', async () => {
     get.mockResolvedValue({
       tasks: [delegated({ id: 'stamped', chat_id: 'other' }), delegated({ id: 'linked', chat_id: 'chat-2' })],

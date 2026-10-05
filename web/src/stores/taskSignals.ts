@@ -36,7 +36,15 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
     }
     inflightWorkspace = workspace
     again = false
-    // Declared first so the `finally` below can compare against it.
+    if (workspace !== loadedWorkspace.value) {
+      // Another workspace's rows are not this one's: task slugs collide across
+      // workspaces, so held rows would resolve this workspace's chats to the
+      // other workspace's tasks until the read lands.
+      tasks.value = []
+      loadedWorkspace.value = ''
+    }
+    // Declared first so the reads below can tell whether a newer run (a switch
+    // away and back) replaced this one, and the `finally` can compare too.
     let run: Promise<void> | null = null
     run = (async () => {
       try {
@@ -46,13 +54,13 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
             const data = await api.get<unknown>(
               `/api/tasks?workspace=${encodeURIComponent(workspace)}`,
             )
-            if (inflightWorkspace !== workspace) return
+            if (inflight !== run) return
             tasks.value = readableTasks(taskRowsFrom(data))
             loadedWorkspace.value = workspace
           } catch {
             // Keep the last rows: a dropped read must not clear the counts.
           }
-        } while (again && inflightWorkspace === workspace)
+        } while (again && inflight === run)
       } finally {
         if (inflight === run) inflight = null
       }
@@ -89,15 +97,35 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
     return task.status !== 'done' && task.attempt_state === 'needs_you' && !!task.live_attempt_id
   }
 
+  /**
+   * Whether *chat* is where the task's current attempt runs. A chat from an
+   * earlier attempt still resolves to its task (for the link back), but the
+   * task's state is the newer attempt's, not this chat's.
+   */
+  function chatHoldsTask(chat: Pick<ChatInfo, 'chat_id' | 'helper'>, task: Task): boolean {
+    const helper = chat.helper
+    if (helper?.kind === 'task_delegation' && helper.attempt_id) return helper.attempt_id === task.attempt_id
+    return task.chat_id === chat.chat_id
+  }
+
+  /** A chat a delegated board task works in, by its stamp or the task's link. */
+  function isDelegatedChat(chat: Pick<ChatInfo, 'chat_id' | 'helper'>): boolean {
+    return chat.helper?.kind === 'task_delegation' || !!taskForChat(chat)
+  }
+
   /** Tasks the agent reported done that wait for review, in `workspace`. */
+  function inReview(workspace: string): Task[] {
+    if (workspace !== loadedWorkspace.value) return []
+    return tasks.value.filter(isAwaitingReview)
+  }
+
   function inReviewCount(workspace: string): number {
-    if (workspace !== loadedWorkspace.value) return 0
-    return tasks.value.filter(isAwaitingReview).length
+    return inReview(workspace).length
   }
 
   function chatTaskWaitingOnUser(chat: Pick<ChatInfo, 'chat_id' | 'helper'>): boolean {
     const task = taskForChat(chat)
-    return !!task && isWaitingOnUser(task)
+    return !!task && chatHoldsTask(chat, task) && isWaitingOnUser(task)
   }
 
   return {
@@ -107,6 +135,9 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
     taskForChat,
     isAwaitingReview,
     isWaitingOnUser,
+    chatHoldsTask,
+    isDelegatedChat,
+    inReview,
     inReviewCount,
     chatTaskWaitingOnUser,
   }

@@ -93,7 +93,7 @@
                        never claim more than the tier heading above it. -->
                   <span class="home-chat-meta">
                     <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
-                    <span v-if="isDelegated(chat)" class="home-chat-task">task</span>
+                    <span v-if="taskSignals.isDelegatedChat(chat)" class="home-chat-task">task</span>
                     <span class="home-chat-status">{{ statusPhrase(entry.key, chat) }}</span>
                     <span v-if="chat.local === false" class="remote-chip">remote</span>
                   </span>
@@ -465,16 +465,16 @@ function tierPhrase(tier: HomeTierKey): string {
   return 'no new activity'
 }
 
-function isDelegated(chat: ChatInfo): boolean {
-  return chat.helper?.kind === 'task_delegation' || !!taskSignals.taskForChat(chat)
-}
-
 // A delegated chat's sub-line names where its task stands, in the board's
 // own words, rather than the generic tier phrase. Its tier is unchanged:
 // the phrase says why the row sits where it does, never more.
 function statusPhrase(tier: HomeTierKey, chat: ChatInfo): string {
+  // A live question or permission card is what files the row under Needs you,
+  // whatever the attempt says (a running turn that raised an approval card).
+  if (tier === 'needsYou' && store.chatNeedsInput(chat.chat_id)) return tierPhrase(tier)
   const task = taskSignals.taskForChat(chat)
-  if (task) {
+  // A chat from an earlier attempt does not speak for the newer one.
+  if (task && taskSignals.chatHoldsTask(chat, task)) {
     if (taskSignals.isWaitingOnUser(task)) {
       if (task.attempt_outcome === 'needs_input') return 'needs input'
       if (task.attempt_outcome === 'blocked') return 'blocked'
