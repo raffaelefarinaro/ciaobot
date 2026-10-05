@@ -145,6 +145,8 @@ On Home, the review rail is titled **At a glance**. Actionable operator notices,
 
 Work details uses the pinned viewer's docked-window vocabulary: a tonal `--bg2` surface, border, 14px radius, inset spacing, and a separated title bar with a neutral × close control. The info tab is only the opener. Project context reads as prose directly below the linked project name. File mentions are clickable in place, with the canonical filename resolving to its full path; no separate document-link row or raw capsule fields are displayed. Token estimates still measure the sent capsule, not this presentation.
 
+The task board keeps the same four status groups on every device: **To do, In progress, In review, Done**. At a pane width of 940px or less, these groups stack vertically instead of becoming a mixed All tasks list. A status filter shows just its group. Column drag and Shift+Left/Right are reserved for the side-by-side layout; the editor's status controls remain available on narrow panes. The lane heading names a card's status, so cards do not repeat it in a badge. This replaces the earlier narrow-list rule.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.

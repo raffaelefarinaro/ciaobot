@@ -271,13 +271,15 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
-  it('names the status on a card in the mixed narrow list, where no column does', async () => {
+  it('names each narrow group in its heading without repeating status on cards', async () => {
     const wrapper = await mountBoard()
     reportPaneWidth(390)
     await nextTick()
-    expect(lanes(wrapper)).toHaveLength(1)
-    expect(card(wrapper, 'Wait on a key').get('.task-status-badge').text()).toBe('In review')
-    // Nothing to drag between in a list.
+    expect(lanes(wrapper)).toHaveLength(4)
+    const review = lanes(wrapper).find(lane => lane.get('.task-lane-label').text() === 'In review')!
+    expect(review.text()).toContain('Wait on a key')
+    expect(card(wrapper, 'Wait on a key').find('.task-status-badge').exists()).toBe(false)
+    // Stacked groups do not offer horizontal drag gestures.
     expect(card(wrapper, 'Wait on a key').attributes('draggable')).toBe('false')
     wrapper.unmount()
   })
@@ -1214,10 +1216,8 @@ describe('TaskBoardView', () => {
   })
 
   // The pane's own width decides, at the same 940px the CSS breakpoint uses.
-  // A window threshold could not: with the sidebar open a wide window can still
-  // leave the pane under the breakpoint, and the board then drew four stacked
-  // lanes — neither the four columns nor the status-filtered list.
-  it('the pane width, not the window, decides between columns and one list', async () => {
+  // A wide window can still have a narrow pane with the sidebar open.
+  it('preserves status groups when the pane narrows and disables column gestures', async () => {
     const original = window.innerWidth
     Object.defineProperty(window, 'innerWidth', { value: 1600, configurable: true })
     try {
@@ -1226,13 +1226,14 @@ describe('TaskBoardView', () => {
       await nextTick()
       expect(lanes(wrapper)).toHaveLength(4)
 
-      // Narrow pane, wide window: the list, which is the whole point of using
-      // the container's width.
+      // Narrow pane, wide window: the same four groups, stacked by CSS.
       reportPaneWidth(700)
       await nextTick()
-      expect(lanes(wrapper)).toHaveLength(1)
-      expect(lanes(wrapper)[0]!.get('.task-lane-label').text()).toBe('All tasks')
+      expect(lanes(wrapper).map(lane => lane.get('.task-lane-label').text()))
+        .toEqual(['To do', 'In progress', 'In review', 'Done'])
       expect(wrapper.findAll('.task-card')).toHaveLength(4)
+      expect(wrapper.findAll('.task-card').every(card => card.attributes('draggable') === 'false')).toBe(true)
+      expect(wrapper.get('.task-open').attributes('aria-keyshortcuts')).toBeUndefined()
       // …and picking a status is how the list narrows.
       await wrapper.findAll('.task-chip').find((c) => c.text().startsWith('Done'))!.trigger('click')
       await nextTick()

@@ -3,7 +3,7 @@
  * The workspace task board (`/tasks`).
  *
  * Four fixed columns — To do, In progress, In review, Done — on a wide pane, and
- * one status-filtered list on a narrow one. On the columns a card is dragged to
+ * the same groups stacked on a narrow one. On the columns a card is dragged to
  * another lane, or moved one lane over with Shift+←/→ while its title has focus.
  * Everywhere, the editor's status control is the path a screen reader and a phone
  * use: a card carries no status control of its own, because its column already
@@ -88,15 +88,15 @@ const board = useTaskBoardStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
 /**
- * Where the four columns become one list.
+ * Where the four columns become stacked status groups.
  *
  * One measurement, and it is the one the CSS below uses: the `chat-pane`
  * container's own inline size, against the same 940px the
  * `@container chat-pane (max-width: 940px)` rule uses. The window is not that
  * measurement — with the sidebar open or the split pane showing, a window
  * comfortably past any window threshold can still leave the pane under it, and
- * two thresholds is how the board ends up rendering four *stacked* lanes: not
- * the four columns, and not the status-filtered list either.
+ * the measurement also disables horizontal drag and keyboard movement when
+ * the status groups stack vertically.
  *
  * The pane root is a block that fills its container, so observing the root
  * measures the container. `contentRect` is the same inline-size the container
@@ -238,8 +238,9 @@ const filteredEmpty = computed(
 )
 
 const lanes = computed(() =>
-  taskLanes(filtered.value, { status: statusFilter.value, narrow: isNarrow.value }),
+  taskLanes(filtered.value, { status: statusFilter.value }),
 )
+const columnsShown = computed(() => lanes.value.length > 1 && !isNarrow.value)
 
 /**
  * The workspace's auto-managed General project, which the board treats as the
@@ -340,9 +341,9 @@ async function moveTo(task: Task, next: TaskStatus) {
 
 // ── Drag between columns ──────────────────────────────────────────────────
 //
-// Pointer only, and only while the four columns are drawn: the narrow list has
-// no lane to drop on. The id rides in the component rather than read back from
-// `dataTransfer`, which browsers hide until the drop.
+// Pointer only, and only while the four columns are drawn. Stacked groups use
+// the editor's status controls. The id rides in the component rather than read
+// back from `dataTransfer`, which browsers hide until the drop.
 
 const dragTaskId = ref('')
 const dropStatus = ref<TaskStatus | ''>('')
@@ -350,6 +351,7 @@ const dropStatus = ref<TaskStatus | ''>('')
 const dragTask = computed(() => tasks.value.find((task) => task.id === dragTaskId.value) ?? null)
 
 function onDragStart(task: Task, event: DragEvent) {
+  if (!columnsShown.value) { event.preventDefault(); return }
   dragTaskId.value = task.id
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = 'move'
@@ -365,7 +367,7 @@ function onDragEnd() {
 
 function onDragOver(status: TaskStatus | null, event: DragEvent) {
   const task = dragTask.value
-  if (!task || !status || status === task.status) return
+  if (!columnsShown.value || !task || !status || status === task.status) return
   event.preventDefault()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
   dropStatus.value = status
@@ -380,7 +382,7 @@ function onDragLeave(status: TaskStatus | null, event: DragEvent) {
 function onDrop(status: TaskStatus | null) {
   const task = dragTask.value
   onDragEnd()
-  if (task && status) void moveTo(task, status)
+  if (columnsShown.value && task && status) void moveTo(task, status)
 }
 
 /**
@@ -391,7 +393,7 @@ function onDrop(status: TaskStatus | null) {
  * follows the card into its new lane once the move has landed.
  */
 async function onCardKeydown(task: Task, event: KeyboardEvent) {
-  if (!event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || lanes.value.length < 2) return
+  if (!event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || !columnsShown.value) return
   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
   const order = TASK_STATUS_OPTIONS.map((option) => option.status)
   const next = order[order.indexOf(task.status) + (event.key === 'ArrowLeft' ? -1 : 1)]
@@ -1638,9 +1640,9 @@ const today = localDateKey()
             from the command line with <code>ciao task</code>.
           </p>
 
-          <!-- One card, one render path. Wide with no status picked the lanes are
-               the four columns, and a card drags between them; narrow (or
-               filtered) it is the one lane, and CSS lays it out as a list. -->
+          <!-- One card, one render path. Unfiltered status groups are columns
+               on wide panes and stacked sections on narrow panes. A status
+               filter selects one group on either layout. -->
           <div
             v-else
             class="task-lanes"
@@ -1670,7 +1672,7 @@ const today = localDateKey()
                   class="task-card"
                   :class="{ 'task-card--dragging': dragTaskId === task.id, 'task-card--done': task.status === 'done' }"
                   :data-task-id="task.id"
-                  :draggable="lanes.length > 1 && busyTaskId !== task.id ? 'true' : 'false'"
+                  :draggable="columnsShown && busyTaskId !== task.id ? 'true' : 'false'"
                   @click="openDetail(task)"
                   @dragstart="onDragStart(task, $event)"
                   @dragend="onDragEnd"
@@ -1713,16 +1715,16 @@ const today = localDateKey()
                       type="button"
                       class="task-open"
                       :aria-label="`Edit ${task.title}`"
-                      :aria-keyshortcuts="lanes.length > 1 ? 'Shift+ArrowLeft Shift+ArrowRight' : undefined"
+                      :aria-keyshortcuts="columnsShown ? 'Shift+ArrowLeft Shift+ArrowRight' : undefined"
                       @click.stop="openDetail(task)"
                       @keydown="onCardKeydown(task, $event)"
                     >{{ task.title }}</button>
                   </div>
                   <!-- Only what differs from the default: General and For me are what
                        most cards are, and saying so on each one buries the rest. The
-                       mixed list has no column to say a card's status, so it does. -->
+                       lane heading already states the card's status. -->
                   <p
-                    v-if="!lane.status || task.attempt_state || ownProject(task.project_id) || formatTaskDue(task.due)"
+                    v-if="task.attempt_state || ownProject(task.project_id) || formatTaskDue(task.due)"
                     class="task-meta"
                   >
                     <span
@@ -1730,7 +1732,6 @@ const today = localDateKey()
                       class="badge"
                       :class="attemptBadgeClass(task)"
                     >{{ taskAttemptLabel(task.attempt_state, task.attempt_outcome, task.attempt_detail) }}</span>
-                    <span v-if="!lane.status" class="badge badge--muted task-status-badge">{{ taskStatusLabel(task.status) }}</span>
                     <span v-if="ownProject(task.project_id)" class="task-project">{{ projectName(task.project_id) }}</span>
                     <span v-if="formatTaskDue(task.due)" class="badge" :class="isOverdue(task, today) ? 'badge--error' : 'badge--muted'">
                       {{ isOverdue(task, today) ? 'Overdue · ' : 'Due ' }}{{ formatTaskDue(task.due) }}
@@ -2502,12 +2503,12 @@ const today = localDateKey()
 .task-lanes--columns { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .task-lanes--list { grid-template-columns: minmax(0, 1fr); }
 
-/* A narrow pane gets the one lane the filters chose, read as a list. The grid
-   above already collapsed to a single track; the lane only has to stop dressing
-   itself like a column. Same 940px the script's NARROW_PANE_PX uses — one
-   measurement, two renderers. */
+/* Narrow panes preserve the four headings and stack their groups. The same
+   940px measurement disables column-only interactions in the script. */
 @container chat-pane (max-width: 940px) {
   .task-lanes--columns { grid-template-columns: minmax(0, 1fr); }
+  .task-lanes { row-gap: var(--space-5); }
+  .task-lanes .task-lane { min-height: 0; margin: 0; padding: 0; }
 }
 
 .task-lane {

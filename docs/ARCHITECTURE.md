@@ -17,6 +17,7 @@ Provider-neutral application context and durable Markdown knowledge do not imply
 For task-oriented reading paths, start with the [documentation hub](README.md).
 
 The chat's Work details rail is a closable docked window, using the pinned file viewer's visual vocabulary. `AgentContextSection.vue` shares readable project context and the canonical-document link between the rail and narrow-pane drawer; the underlying capsule and its token estimate are unchanged.
+The task board derives four status groups regardless of pane width. CSS stacks them below 940px; the pane measurement gates column-only drag and keyboard gestures, not task grouping.
 
 ## App repo layout
 

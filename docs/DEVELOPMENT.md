@@ -505,6 +505,7 @@ Settings. If you add a state, decide all four of those in the same change: what
 Home offers, what Settings lists, what a refusal says, and whether the outcome can
 be mistaken for "done".
 For Work details changes, verify the docked rail and narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list. The × closes the surface; the ⓘ tab reopens it, restoring focus between the rail heading and chat-body tab. Project context is readable prose with file mentions linked in place, resolving the canonical filename to its full path without a separate link row; token estimates count the sent capsule.
+For task-board layout changes, preserve To do, In progress, In review, and Done on every width: four columns above 940px of pane width, the same groups stacked below it. A status filter selects one group; horizontal drag and Shift+Left/Right movement are only available while columns are side by side. Earlier done tasks remain behind Show all.
 For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return
 bounded opaque file references rather than absolute paths; the server expands a

@@ -603,8 +603,8 @@ export function sortTasks(tasks: Task[]): Task[] {
 
 /** One lane of the board: a fixed column, or the one list a filter narrowed it to. */
 export interface TaskLane {
-  /** The status this lane draws, or `null` when it is the unfiltered list. */
-  status: TaskStatus | null
+  /** The status this lane draws on either layout. */
+  status: TaskStatus
   label: string
   tasks: Task[]
   /** Done tasks left out because they were not finished today; Show all lists them. */
@@ -644,17 +644,16 @@ function withDoneToday(tasks: Task[], now: Date): { kept: Task[]; earlierDone: n
 /**
  * The lanes the board draws.
  *
- * Wide with no status picked, that is the four fixed columns. Narrow — or with a
- * status picked on either layout — it is one lane holding the filtered tasks, so
- * a card, its status `<select>` and its count are rendered from one code path
- * rather than a second copy of the card for the narrow layout.
+ * With no status picked, both layouts keep the four fixed status groups.
+ * Layout decides whether they sit beside each other or stack vertically.
+ * Picking a status narrows either layout to that one group.
  */
 export function taskLanes(
   tasks: Task[],
-  options: { status: TaskStatus | 'all'; narrow: boolean; now?: Date },
+  options: { status: TaskStatus | 'all'; now?: Date },
 ): TaskLane[] {
   const now = options.now ?? new Date()
-  if (options.status === 'all' && !options.narrow) {
+  if (options.status === 'all') {
     return TASK_COLUMNS.map((column) => {
       const lane = tasks.filter((task) => task.status === column.status)
       const { kept, earlierDone } = column.status === 'done'
@@ -662,10 +661,6 @@ export function taskLanes(
         : { kept: lane, earlierDone: 0 }
       return { status: column.status, label: column.label, tasks: sortTasks(kept), earlierDone }
     })
-  }
-  if (options.status === 'all') {
-    const { kept, earlierDone } = withDoneToday(tasks, now)
-    return [{ status: null, label: 'All tasks', tasks: sortTasks(kept), earlierDone }]
   }
   const kept = tasks.filter((task) => task.status === options.status)
   return [{ status: options.status, label: taskStatusLabel(options.status), tasks: sortTasks(kept), earlierDone: 0 }]
