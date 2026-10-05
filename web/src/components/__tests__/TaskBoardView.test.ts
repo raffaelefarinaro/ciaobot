@@ -2327,6 +2327,61 @@ describe('TaskBoardView', () => {
       expect(sheet.findAll('.btn-chip').map((c) => c.text())).toContain('Retry')
       wrapper.unmount()
     })
+
+  describe('the /tasks/<id> address', () => {
+    async function mountAt(path: string) {
+      const { createMemoryHistory, createRouter } = await import('vue-router')
+      const { defineComponent } = await import('vue')
+      const Stub = defineComponent({ render: () => null })
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+          { path: '/tasks', name: 'tasks', component: Stub },
+          { path: '/tasks/:taskId', name: 'task-detail', component: Stub },
+        ],
+      })
+      await router.push(path)
+      apiGet.mockImplementation((url: string) => Promise.resolve(
+        url.includes('/api/tasks?')
+          ? { workspace: 'personal', tasks: BOARD }
+          : detailAnswer(task(), 'Linked from a chat.'),
+      ))
+      const wrapper = mount(TaskBoardView, { attachTo: document.body, global: { plugins: [router] } })
+      await flushPromises()
+      await nextTick()
+      return { wrapper, router }
+    }
+
+    it('opens the linked task once the board has loaded', async () => {
+      const { wrapper, router } = await mountAt('/tasks/ship')
+      const sheet = wrapper.get('.task-sheet')
+      expect(sheet.get<HTMLInputElement>('#task-detail-name').element.value).toBe('Ship the board')
+      expect(router.currentRoute.value.path).toBe('/tasks/ship')
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushPromises()
+      await nextTick()
+      expect(wrapper.find('.task-sheet').exists()).toBe(false)
+      expect(router.currentRoute.value.path).toBe('/tasks')
+      wrapper.unmount()
+    })
+
+    it('keeps the address of the task opened from the board', async () => {
+      const { wrapper, router } = await mountAt('/tasks')
+      await card(wrapper, 'Wait on a key').get('.task-open').trigger('click')
+      await flushPromises()
+      expect(router.currentRoute.value.path).toBe('/tasks/held')
+      wrapper.unmount()
+    })
+
+    it('says so when the linked task is not on this board, and drops the address', async () => {
+      const { wrapper, router } = await mountAt('/tasks/gone')
+      expect(wrapper.find('.task-sheet').exists()).toBe(false)
+      expect(wrapper.text()).toContain('The linked task is not on the personal board.')
+      expect(router.currentRoute.value.path).toBe('/tasks')
+      wrapper.unmount()
+    })
+  })
 })
 
 /** The pane's Retry path: a reload against the same workspace. */

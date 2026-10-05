@@ -345,6 +345,7 @@ import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import { startFileDiscussion } from '../lib/fileDiscussion'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
+import { handleAppLinkClick } from '../lib/appLinks'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
@@ -908,6 +909,9 @@ function editFromPopup(c: { id: string; comment: string; images?: string[] }): v
 function onMdClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
+  // The task opens behind this dialog, so the dialog closes first; a refused
+  // close (unsaved edits kept) leaves the user where they were.
+  if (handleAppLinkClick(e, () => store.close())) return
 
   const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
   if (fileLink) {

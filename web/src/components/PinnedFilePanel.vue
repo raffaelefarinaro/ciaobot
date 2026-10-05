@@ -340,6 +340,7 @@ import { useTypeToComment } from '../composables/useTypeToComment'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
+import { handleAppLinkClick } from '../lib/appLinks'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
@@ -995,6 +996,7 @@ function scrollToHighlight(id: string): void {
 function onMdClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
+  if (handleAppLinkClick(e)) return
 
   const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
   if (fileLink) {

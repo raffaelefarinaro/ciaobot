@@ -1345,6 +1345,7 @@ import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { subagentPath, shortAgentId } from '../lib/subagentIds'
+import { handleAppLinkClick } from '../lib/appLinks'
 
 /** The footer facts for one turn: when it landed, how long it took, which
  *  model answered and what it cost. Collected across the turn's assistant
@@ -3574,6 +3575,7 @@ function handleFileLinkClick(e: MouseEvent): void {
 // by delegation — a per-button listener would be dropped on every re-render.
 function handlePanelClick(e: MouseEvent): void {
   if (handleCodeCopyClick(e)) return
+  if (handleAppLinkClick(e)) return
   handleFileLinkClick(e)
 }
 

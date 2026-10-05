@@ -42,7 +42,8 @@
  * that resolve it** rather than silently rewritten.
  */
 import SkeletonLoader from './SkeletonLoader.vue'
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { routeLocationKey, routerKey } from 'vue-router'
 import PaneHeader from './PaneHeader.vue'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
@@ -1109,6 +1110,7 @@ function openDetail(task: Task) {
   savedAt.value = 0
   editingBody.value = false
   detailOpen.value = true
+  syncTaskAddress(task.id)
   void loadDescription(task.id)
   if (task.attempt_state) {
     // Re-read on every open: a turn may have reported since the last read.
@@ -1137,12 +1139,65 @@ async function closeDetail(options: { discard?: boolean } = {}) {
     if (!(await flushDetail())) return
     if (detailId.value !== closing) return
   }
+  const closed = detailId.value
   detailOpen.value = false
   detailId.value = ''
   descriptionState.value = 'idle'
   descriptionSeq++
   board.clearError()
+  // Only the address of the task that closed: one the user navigated to
+  // while this dialog was still open is theirs to keep.
+  if (routeTaskId.value === closed) syncTaskAddress('')
 }
+
+// ── Address ───────────────────────────────────────────────────────────────
+
+/**
+ * `/tasks/<id>` names the task open in the detail dialog.
+ *
+ * It is the address an agent links to from a chat or a note
+ * (lib/appLinks.ts), so arriving at it opens that task once the board holding
+ * it has loaded, and the dialog keeps it while open so the link can be copied
+ * back out. Both directions use `replace`: opening and closing a dialog is not
+ * a page the Back button should step through. Injected rather than
+ * `useRoute()` so a bare mount (the component tests) renders without a router.
+ */
+const router = inject(routerKey, null)
+const currentRoute = inject(routeLocationKey, null)
+const routeTaskId = computed(() => {
+  const id = currentRoute?.params.taskId
+  return typeof id === 'string' ? id : ''
+})
+/** The linked task is not on this workspace's board. */
+const missingTaskId = ref('')
+
+function syncTaskAddress(taskId: string): void {
+  if (!router || routeTaskId.value === taskId) return
+  void router.replace(taskId ? { name: 'task-detail', params: { taskId } } : { name: 'tasks' })
+}
+
+watch(
+  [routeTaskId, () => board.loadedWorkspace, tasks],
+  async () => {
+    const id = routeTaskId.value
+    if (!id || board.loadedWorkspace !== workspace.value) return
+    if (detailOpen.value && detailId.value === id) return
+    const task = tasks.value.find(t => t.id === id)
+    if (!task) {
+      missingTaskId.value = id
+      syncTaskAddress('')
+      return
+    }
+    missingTaskId.value = ''
+    // Another task's pending edit is written before this one replaces it.
+    if (detailOpen.value) {
+      await closeDetail()
+      if (detailOpen.value) return
+    }
+    openDetail(task)
+  },
+  { immediate: true },
+)
 
 /**
  * The editor's status control is a move, written the moment it is pressed.
@@ -1449,6 +1504,11 @@ const today = localDateKey()
           <p v-if="loadStale" class="task-stale" role="status">
             <span>{{ board.loadError }} These are the tasks as they were last read.</span>
             <button type="button" class="btn-chip task-chip" @click="reloadBoard">Retry</button>
+          </p>
+
+          <p v-if="missingTaskId" class="task-stale" role="status">
+            <span>The linked task is not on the {{ workspace }} board. It may have been deleted, or it belongs to another workspace.</span>
+            <button type="button" class="btn-chip task-chip" @click="missingTaskId = ''">Dismiss</button>
           </p>
 
           <p class="task-lede">
