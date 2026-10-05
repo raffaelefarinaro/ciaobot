@@ -44,14 +44,12 @@
           <router-link :to="`/project/${project.project_id}`" class="agent-context-name agent-context-project">{{ project.name }}</router-link>
           <span class="agent-context-meta">{{ formatTokens(briefTokens) }} tokens</span>
         </span>
-        <p v-if="project.context" class="agent-context-description">{{ project.context }}</p>
-        <button
-          v-if="project.vault_doc_path"
-          type="button"
-          class="agent-context-link agent-context-doc"
-          :title="`Open ${project.vault_doc_path}`"
-          @click="emit('open-file', project.vault_doc_path)"
-        >{{ project.vault_doc_path.split('/').pop() }}</button>
+        <p
+          v-if="project.context"
+          class="agent-context-description"
+          @click="openContextFile"
+          v-html="contextHtml"
+        ></p>
       </div>
     </div>
   </section>
@@ -60,6 +58,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
+import { linkifyText } from '../lib/filePaths'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
 
 const props = defineProps<{
@@ -100,6 +99,21 @@ const briefText = computed(() => {
   return lines.join('\n')
 })
 const briefTokens = computed(() => tokensFor(briefText.value.length))
+
+// Plain text is escaped by the shared linker; a canonical filename resolves
+// to its full path without adding another copy below the description.
+const contextHtml = computed(() => linkifyText(
+  props.project?.context || '',
+  props.project?.vault_doc_path ? [props.project.vault_doc_path] : [],
+))
+function openContextFile(event: MouseEvent) {
+  const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a.file-link')
+  const path = link?.getAttribute('data-file-path')
+  if (!path) return
+  event.preventDefault()
+  event.stopPropagation()
+  emit('open-file', path)
+}
 
 const contextPctLabel = computed(() => {
   const pct = props.contextPct
@@ -174,16 +188,13 @@ const contextPctLabel = computed(() => {
   text-underline-offset: 2px;
   cursor: pointer;
 }
-.agent-context-doc {
-  align-self: flex-start;
-  margin-top: var(--space-2);
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  text-align: left;
+.agent-context-description :deep(a.file-link) {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
 }
-@media (pointer: coarse) {
-  .agent-context-doc { min-height: var(--touch); }
-}
+.agent-context-description :deep(a.file-link:hover) { text-decoration-color: currentColor; }
 .agent-context-link:hover,
 .agent-context-project:hover { text-decoration-color: currentColor; }
 .agent-context-project {
