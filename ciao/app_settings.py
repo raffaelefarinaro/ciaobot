@@ -89,8 +89,6 @@ _RETIRED_MODEL_IDS = frozenset({"apple", "apfel"})
 
 
 def _drop_retired_models(settings: "AppSettings") -> None:
-    if settings.insights_model.lower() in _RETIRED_MODEL_IDS:
-        settings.insights_model = ""
     if settings.provider_insights_models:
         settings.provider_insights_models = {
             provider: model
@@ -124,8 +122,6 @@ class AppSettings:
     """
 
     insights_enabled: bool = True
-    # Model used by the post-archive memory pass.
-    insights_model: str = ""
 
     # The unattended backup service (ciao/backup_service.py). `backup_enabled`
     # is the owner's standing decision and defaults on, so an existing install
@@ -164,9 +160,35 @@ class AppSettings:
     # provider's own default ("auto").
     provider_default_thinking: dict[str, str] | None = None
 
-    # Per-provider memory-pass model. Missing entry = the provider's
-    # balanced default.
+    # Per-provider Session insights model. Missing entry = that provider's
+    # default chat model.
     provider_insights_models: dict[str, str] | None = None
+
+
+def _migrate_global_insights_model(raw: dict, settings: AppSettings) -> bool:
+    """Move the retired global ``insights_model`` into its provider's slot.
+
+    The one global override sent every chat's memory pass through one provider
+    (``opencode:<id>`` for opencode, a bare id for Claude). It is now chosen per
+    provider, so the stored choice lands on the provider it named, unless that
+    provider already has its own. Returns whether the file needs rewriting.
+    """
+    if "insights_model" not in raw:
+        return False
+    legacy = raw["insights_model"]
+    model = legacy.strip() if isinstance(legacy, str) else ""
+    if not model or model.lower() in _RETIRED_MODEL_IDS:
+        return True
+    provider, sep, rest = model.partition(":")
+    if sep and provider == "opencode":
+        model = rest.strip()
+    else:
+        provider = "claude"
+    current = dict(settings.provider_insights_models or {})
+    if model and provider not in current:
+        current[provider] = model
+        settings.provider_insights_models = _clean_provider_map(current) or None
+    return True
 
 
 class AppSettingsStore:
@@ -210,6 +232,12 @@ class AppSettingsStore:
             if cleaned:
                 setattr(settings, key, cleaned)
         _drop_retired_models(settings)
+        if isinstance(raw, dict) and _migrate_global_insights_model(raw, settings):
+            self.settings = settings
+            try:
+                self._save()
+            except OSError:
+                logger.warning("Could not rewrite migrated app settings at %s", self._path)
         return settings
 
     def _save(self) -> None:
@@ -291,7 +319,6 @@ class AppSettingsStore:
         """
         if self._defaults is None:
             self._defaults = {
-                "insights_model_override": config.insights_model_override,
                 "critique_models": config.critique_models,
             }
             for descriptor in provider_registry.descriptors():
@@ -306,7 +333,6 @@ class AppSettingsStore:
         d = self._defaults
         s = self.settings
         config.insights_enabled = s.insights_enabled
-        config.insights_model_override = s.insights_model or d["insights_model_override"]
         config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default models / thinking / routine models have no
         # env-backed default; absence means "use the provider's own default".

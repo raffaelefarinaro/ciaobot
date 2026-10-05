@@ -728,10 +728,9 @@ export interface ModelsResponse {
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
 // model overrides (Settings → Models tab).
 export interface RoutineSettings {
-  // Overrides as stored; empty string = automatic default.
-  insights_model: string
   insights_enabled?: boolean
 
+  // Override as stored; empty string = automatic default.
   critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
@@ -741,13 +740,9 @@ export interface RoutineSettings {
   provider_default_modes?: Record<string, string>
   // Per-provider default thinking level for new chats; missing = provider default.
   provider_default_thinking?: Record<string, string>
-  // Per-provider session-insights models; missing = provider default.
+  // Per-provider Session insights models; missing = that provider's default
+  // chat model.
   provider_insights_models?: Record<string, string>
-  // What actually runs right now, after defaults.
-  insights_model_effective: string
-  // On Automatic this resolves from the chat's workspace, so *_effective above
-  // is only the primary workspace's answer. Empty when an override is set.
-  insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
   model_options: {

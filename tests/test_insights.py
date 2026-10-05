@@ -4,6 +4,7 @@ the context-overflow classifier the schedule attention check shares."""
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from ciao import insights
 
@@ -24,10 +25,12 @@ def test_context_overflow_is_distinguished_from_a_transient_timeout() -> None:
     assert not insights.is_context_overflow(Exception("429 rate limit"))
 
 
-def test_routed_provider_prefix_selects_that_provider() -> None:
-    assert insights._resolve_insights_call(None, "opencode:gpt-5") == (
-        "gpt-5",
-        "opencode",
-        None,
+def test_a_providers_insights_model_wins_over_its_default() -> None:
+    defaults = {"claude": "sonnet", "opencode": "vendor/default"}
+    config = SimpleNamespace(
+        provider_insights_models={"opencode": "vendor/insights"},
+        default_model_for_workspace=lambda workspace, provider: defaults[provider],
     )
-    assert insights._resolve_insights_call(None, "sonnet") == ("sonnet", "claude", None)
+    assert insights.resolve_insights_model(config, "work", "opencode") == "vendor/insights"
+    # A provider without its own pick reads the session with its chat default.
+    assert insights.resolve_insights_model(config, "work", "claude") == "sonnet"

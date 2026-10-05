@@ -735,6 +735,22 @@
                       <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
                     </div>
                   </div>
+                  <div class="set-subrow">
+                    <span
+                      class="ws-label set-subrow-label"
+                      title="Reads archived chats into memory, names new chats, and checks schedule results for this provider."
+                    >Session insights</span>
+                    <div class="set-subrow-control">
+                      <ModelSelector
+                        v-if="getProviderSection(String(connKey))?.configurable"
+                        :model-value="providerInsightsModelSelectorValue(String(connKey) as AliasProviderKey)"
+                        :sections="providerInsightsModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                        @update:model-value="saveProviderInsightsModel(String(connKey) as AliasProviderKey, $event)"
+                      />
+                      <span v-else class="hint hint--compact">Automatic — same as the default model.</span>
+                    </div>
+                  </div>
                   <label class="set-subrow">
                     <span class="ws-label set-subrow-label">Permission mode</span>
                     <select
@@ -847,37 +863,10 @@
             <div class="settings-card-header">
               <p class="section-title">Background models</p>
               <p class="hint">
-                These background tasks use their own model setting, separate from the chat defaults above.
-                "Automatic" keeps the built-in default.
+                The critique panel uses its own model setting, separate from the chat defaults above.
+                "Automatic" keeps the built-in default. Session insights, the model that reads archived
+                chats into memory, names new chats and checks schedule results, is set on each provider above.
               </p>
-            </div>
-
-            <div class="routine-row">
-              <div class="routine-info">
-                <span class="routine-name">Session insights</span>
-                <span class="routine-detail">Runs the end-of-conversation memory pass when a chat is archived.</span>
-              </div>
-              <div class="routine-model-controls">
-                <select
-                  class="routine-select routine-select--provider"
-                  :value="routineProviderValue('insights_model')"
-                  :disabled="routinesSaving"
-                  @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="automatic">Automatic</option>
-                  <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
-                    {{ provider.label }}
-                  </option>
-                </select>
-                <ModelSelector
-                  v-if="routineProviderValue('insights_model') !== 'automatic'"
-                  :model-value="routineModelValue('insights_model')"
-                  :sections="routineModelSectionsFor('insights_model')"
-                  :disabled="routinesSaving"
-                  @update:model-value="saveRoutineModel('insights_model', $event)"
-                />
-                <span class="routine-model-hint">{{ routineModelSummary('insights_model') }}</span>
-              </div>
             </div>
 
             <div class="routine-row">
@@ -2410,9 +2399,6 @@ const routinesResult = ref('')
 
 // Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
-type RoutineModelKey = 'insights_model'
-// The routine pickers offer Automatic and each available provider.
-type RoutineProviderValue = 'automatic' | AliasProviderKey
 
 type AliasProviderSection = {
   key: AliasProviderKey
@@ -2422,10 +2408,6 @@ type AliasProviderSection = {
   // Whether the provider is signed in and reporting models. Routine selectors
   // filter to available sections.
   available: boolean
-}
-
-const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
-  insights_model: 'insights_model_effective',
 }
 
 async function fetchRoutines() {
@@ -2570,19 +2552,28 @@ function aliasSectionEntry(provider: string): ModelSection {
   }
 }
 
-function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  const effective = providerDefaultModelEffective(provider)
+// One provider's catalog behind a single "Default" entry, which the caller
+// names (the sentinel it stores as "unset" and the label it shows).
+function providerSectionsWithDefault(
+  provider: AliasProviderKey,
+  sentinel: string,
+  label: (effective: string) => string,
+): ModelSection[] {
   return [
     {
       key: 'default',
       label: 'Default',
-      models: [DEFAULT_MODEL_SELECTION],
-      modelLabels: {
-        [DEFAULT_MODEL_SELECTION]: effective ? `Automatic (${effective})` : 'Automatic',
-      },
+      models: [sentinel],
+      modelLabels: { [sentinel]: label(providerDefaultModelEffective(provider)) },
     },
     aliasSectionEntry(provider),
   ]
+}
+
+function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
+  return providerSectionsWithDefault(provider, DEFAULT_MODEL_SELECTION, (effective) =>
+    effective ? `Automatic (${effective})` : 'Automatic',
+  )
 }
 
 function providerDefaultModelEffective(provider: AliasProviderKey): string {
@@ -2671,108 +2662,32 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
   await saveRoutines({ provider_default_modes: modes })
 }
 
-function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
-  // Runtime-provider models need an explicit qualifier so the backend does not
-  // send a global routine override through Claude by default.
-  if (provider === 'opencode') {
-    return `${provider}:${model}`
-  }
-  return model
-}
-
 function aliasProviderLabel(provider: AliasProviderKey): string {
   return aliasProviderSections.value.find((section) => section.key === provider)?.label || provider
 }
 
-function routineEffectiveModel(key: RoutineModelKey): string {
-  const settings = routines.value
-  if (!settings) return ''
-  const effectiveKey = routineEffectiveKeys[key]
-  const value = settings[effectiveKey]
-  return typeof value === 'string' ? value : ''
+// ── Per-provider Session insights model (Models tab) ────────────────
+// Automatic reads the session with the provider's own default chat model
+// (ciao/insights.py::resolve_insights_model).
+const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
+
+function providerInsightsModelSelectorValue(provider: AliasProviderKey): string {
+  return routines.value?.provider_insights_models?.[provider] || DEFAULT_INSIGHTS_SELECTION
 }
 
-function inferRoutineModel(model: string): { provider: RoutineProviderValue; model: string } {
-  const raw = model.trim()
-  if (!raw) return { provider: 'automatic', model: '' }
-  for (const provider of ['opencode'] as const) {
-    const prefix = `${provider}:`
-    if (raw.startsWith(prefix)) {
-      return { provider, model: raw.slice(prefix.length) }
-    }
-  }
-  // A bare Claude tier alias is a real model id on Claude.
-  if (['haiku', 'sonnet', 'opus', 'fable'].includes(raw)) {
-    return { provider: 'claude', model: raw }
-  }
-  // A concrete model id on the default provider (Claude).
-  return { provider: 'claude', model: raw }
+function providerInsightsModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
+  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, (effective) =>
+    effective ? `Same as default (${effective})` : 'Same as default model',
+  )
 }
 
-function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
-  return inferRoutineModel(routines.value?.[key] || '').provider
-}
-
-function routineModelValue(key: RoutineModelKey): string {
-  const raw = routines.value?.[key] || ''
-  if (raw.trim()) return inferRoutineModel(raw).model
-  return routineEffectiveModel(key)
-}
-
-// The concrete-model sections for a routine once its provider is chosen.
-function routineModelSectionsFor(key: RoutineModelKey): ModelSection[] {
-  const provider = routineProviderValue(key)
-  if (provider === 'automatic') return []
-  return [aliasSectionEntry(provider)]
-}
-
-async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) {
-  const provider = providerValue as RoutineProviderValue
-  if (provider === 'automatic') {
-    await saveRoutines({ [key]: '' })
-    return
-  }
-  // Pick the provider's effective default model as the starting point.
-  const model = providerDefaultModelEffective(provider) || routineEffectiveModel(key)
-  await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
-}
-
-async function saveRoutineModel(key: RoutineModelKey, value: string | string[]) {
+async function saveProviderInsightsModel(provider: AliasProviderKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
-  if (!selected) {
-    await saveRoutines({ [key]: '' })
-    return
-  }
-  await saveRoutines({ [key]: selected })
-}
-
-// Automatic does not pick one model: resolve_insights_model takes the chat's
-// workspace and reads that workspace's tier. Naming a single model here read
-// as a global choice and was wrong for every workspace but the primary one, so
-// say what it follows and list the per-workspace answers.
-function routineWorkspaceModels(key: RoutineModelKey): Array<[string, string]> {
-  const settings = routines.value
-  if (!settings) return []
-  return Object.entries(settings.insights_model_by_workspace || {})
-}
-
-function routineModelSummary(key: RoutineModelKey): string {
-  const provider = routineProviderValue(key)
-  if (provider === 'automatic') {
-    const perWorkspace = routineWorkspaceModels(key)
-    const distinct = new Set(perWorkspace.map(([, model]) => model))
-    if (distinct.size > 1) {
-      const parts = perWorkspace.map(([ws, model]) => `${ws}: ${model || 'default'}`)
-      return `Automatic — follows each chat's workspace (${parts.join(' · ')})`
-    }
-    if (distinct.size === 1) {
-      return `Automatic — follows each chat's workspace (currently ${[...distinct][0] || 'default'} for all)`
-    }
-    return `Automatic: ${routineEffectiveModel(key) || 'default'}`
-  }
-  const model = routineModelValue(key)
-  if (provider === 'opencode') return `opencode: ${model || 'default'}`
-  return `${aliasProviderLabel(provider)}: ${model || 'default'}`
+  const model = selected === DEFAULT_INSIGHTS_SELECTION ? '' : selected.trim()
+  const models = { ...(routines.value?.provider_insights_models || {}) }
+  if (model) models[provider] = model
+  else delete models[provider]
+  await saveRoutines({ provider_insights_models: models })
 }
 
 // ── Provider connections (Models tab, chat providers card) ───────────────────
@@ -5409,41 +5324,6 @@ a.btn-secondary {
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
-.routine-model-controls {
-  width: 100%;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 136px;
-  gap: 8px;
-  align-items: start;
-}
-.routine-model-controls .routine-select {
-  max-width: none;
-  min-width: 0;
-  width: 100%;
-}
-.routine-model-hint {
-  grid-column: 1 / -1;
-  min-width: 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-.routine-model-hint code {
-  font-size: var(--text-xs);
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--bg);
-  color: var(--fg);
-}
-.routine-model-hint a {
-  color: var(--accent);
-  text-decoration: underline;
-}
-.routine-model-hint a:hover {
-  color: var(--accent2);
-}
 .setting-row--flush {
   border-top: 0;
   padding-top: 0;
@@ -5879,15 +5759,6 @@ a.btn-secondary {
   .routine-row {
     grid-template-columns: 1fr;
     gap: var(--space-3);
-  }
-  .routine-model-controls {
-    max-width: none;
-    min-width: 0;
-    width: 100%;
-    grid-template-columns: 1fr;
-  }
-  .routine-model-hint {
-    grid-column: 1;
   }
   .critique-model-picker {
     max-width: none;

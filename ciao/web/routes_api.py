@@ -5086,27 +5086,9 @@ def _routines_payload(config, app_settings) -> dict:
     from ciao.critique import critique_models_effective
 
     critique_effective = critique_models_effective(config)
-    if config.insights_model_override:
-        insights_effective = config.insights_model_override
-    else:
-        insights_effective = config.default_model_for_workspace(
-            config.primary_workspace()
-        )
-
-    # On Automatic the memory pass resolves per workspace
-    # (resolve_insights_model takes the chat's workspace), so the single
-    # *_effective value above is only the primary-workspace answer. Reporting it
-    # alone reads as a global choice and is wrong for every other workspace, so
-    # ship the whole map and let the UI say what actually varies. Empty when an
-    # override is set, because then one model really does apply everywhere.
-    insights_by_workspace: dict[str, str] = {}
-    for name in config.workspace_names():
-        if not config.insights_model_override:
-            insights_by_workspace[name] = config.default_model_for_workspace(name)
 
     return {
         # Overrides as stored ("" = automatic default).
-        "insights_model": s.insights_model,
         "insights_enabled": config.insights_enabled,
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
@@ -5120,13 +5102,9 @@ def _routines_payload(config, app_settings) -> dict:
         },
         # Per-provider default thinking level for new chats, as stored.
         "provider_default_thinking": s.provider_default_thinking or {},
-        # Per-provider routine models, as stored (missing = provider default).
+        # Per-provider Session insights models, as stored (missing = that
+        # provider's default chat model).
         "provider_insights_models": s.provider_insights_models or {},
-        # What actually runs right now, after defaults.
-        "insights_model_effective": insights_effective,
-        # Per-workspace resolution for the Automatic case; empty when overridden.
-        "insights_model_by_workspace": insights_by_workspace,
-
         "critique_models_effective": critique_effective,
         # Grouped options for the routine model selectors.
         "model_options": {

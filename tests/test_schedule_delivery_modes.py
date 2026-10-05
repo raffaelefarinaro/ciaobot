@@ -203,7 +203,7 @@ def _manager_for_classifier() -> ProjectChatManager:
         "PWA_AUTH_TOKEN": "t",
         "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
     })
-    manager._config.insights_model_override = "haiku"
+    manager._config.provider_insights_models = {"claude": "haiku"}
     manager._projects = {}
     return manager
 
@@ -231,11 +231,14 @@ async def test_schedule_attention_classifier_tracks_model_and_verdict(
     assert row["extra"]["reason"] == "routine"
 
 
-async def test_schedule_attention_classifier_routes_qualified_insights_provider(
+async def test_schedule_attention_classifier_uses_the_run_providers_insights_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = _manager_for_classifier()
-    manager._config.insights_model_override = "opencode:vendor/insights-model"
+    manager._config.provider_insights_models = {
+        "claude": "haiku",
+        "opencode": "vendor/insights-model",
+    }
     captured: dict[str, object] = {}
 
     async def fake_oneshot(*args, **kwargs):
@@ -244,8 +247,10 @@ async def test_schedule_attention_classifier_routes_qualified_insights_provider(
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
+    entry = _entry()
+    entry.provider = "opencode"
     assert await manager._schedule_run_needs_user(
-        _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+        entry, ScheduleRunOutcome(completed=True, final_text="done")
     ) is False
     assert captured["provider"] == "opencode"
     assert captured["model"] == "vendor/insights-model"

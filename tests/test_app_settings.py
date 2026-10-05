@@ -13,7 +13,6 @@ class FakeConfig:
     """Just the fields apply_to_config touches."""
 
     def __init__(self) -> None:
-        self.insights_model_override = ""
         self.insights_model = "sonnet"
         self.insights_enabled = True
         self.critique_models = ""
@@ -77,7 +76,7 @@ def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
         json.dumps(
             {
                 "bogus": "x",
-                "insights_model": 42,
+                "critique_models": 42,
                 "insights_enabled": "false",
                 # Retired with trajectory capture: an old file still carries it.
                 "trajectories_enabled": "false",
@@ -85,7 +84,7 @@ def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
         )
     )
     store = AppSettingsStore(path)
-    assert store.settings.insights_model == ""
+    assert store.settings.critique_models == ""
     assert store.settings.insights_enabled is True
     assert not hasattr(store.settings, "trajectories_enabled")
 
@@ -99,15 +98,15 @@ def test_load_corrupt_file_gives_defaults(tmp_path):
 def test_update_persists_and_roundtrips(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)
-    store.update({"insights_model": "gemma4:12b-it-qat", "ignored": "x"})
+    store.update({"critique_models": "opus,haiku", "ignored": "x"})
     assert json.loads(path.read_text()) == {
         "insights_enabled": True,
         "backup_enabled": True,
         "backup_paused": False,
-        "insights_model": "gemma4:12b-it-qat",
+        "critique_models": "opus,haiku",
     }
     # Fresh instance sees the persisted value.
-    assert AppSettingsStore(path).settings.insights_model == "gemma4:12b-it-qat"
+    assert AppSettingsStore(path).settings.critique_models == "opus,haiku"
 
 
 def test_update_rejects_a_non_string_value(tmp_path):
@@ -115,32 +114,48 @@ def test_update_rejects_a_non_string_value(tmp_path):
     # Engine-value validation went with the cloud engines; type checking is
     # what is left.
     with pytest.raises(ValueError):
-        store.update({"insights_model": 3})
+        store.update({"critique_models": 3})
 
 
-def test_apply_overlays_and_clear_restores_defaults(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
+@pytest.mark.parametrize(
+    ("legacy", "existing", "expected"),
+    [
+        # A bare id was a Claude model.
+        ("haiku", None, {"claude": "haiku"}),
+        # opencode was qualified so the global knob did not route through Claude.
+        ("opencode:vendor/model", None, {"opencode": "vendor/model"}),
+        # A provider that already has its own pick keeps it.
+        ("haiku", {"claude": "opus"}, {"claude": "opus"}),
+        ("opencode:vendor/model", {"claude": "opus"}, {"claude": "opus", "opencode": "vendor/model"}),
+        # Automatic and the retired on-device sentinel carry nothing over.
+        ("", None, None),
+        ("apple", None, None),
+    ],
+)
+def test_global_insights_model_moves_to_its_provider(tmp_path, legacy, existing, expected):
+    path = tmp_path / "app_settings.json"
+    raw: dict[str, object] = {"insights_model": legacy}
+    if existing is not None:
+        raw["provider_insights_models"] = existing
+    path.write_text(json.dumps(raw))
+
+    store = AppSettingsStore(path)
+
+    assert store.settings.provider_insights_models == expected
+    on_disk = json.loads(path.read_text())
+    # Rewritten once, so the retired key does not linger in the file.
+    assert "insights_model" not in on_disk
+    assert on_disk.get("provider_insights_models") == expected
     config = FakeConfig()
-
-    store.update({"insights_model": "gemma4:12b-it-qat"})
     store.apply_to_config(config)
-    assert config.insights_model_override == "gemma4:12b-it-qat"
-
-    # Clearing restores the default captured on first apply.
-    store.update({"insights_model": ""})
-    store.apply_to_config(config)
-    assert config.insights_model_override == ""
+    assert config.provider_insights_models == (expected or {})
 
 
-def test_insights_override_applies(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
-    config = FakeConfig()
-    store.update({"insights_model": "ministral-3:3b"})
-    store.apply_to_config(config)
-    assert config.insights_model_override == "ministral-3:3b"
-    store.update({"insights_model": ""})
-    store.apply_to_config(config)
-    assert config.insights_model_override == ""
+def test_a_file_without_the_global_insights_model_is_not_rewritten(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text('{"critique_models": "opus"}')
+    AppSettingsStore(path)
+    assert path.read_text() == '{"critique_models": "opus"}'
 
 
 def test_critique_models_override_applies(tmp_path):

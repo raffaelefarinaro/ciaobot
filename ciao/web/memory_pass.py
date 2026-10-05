@@ -365,15 +365,9 @@ class MemoryPassCoordinator:
             ):
                 return None
 
-        from ciao import insights
-
-        # The pass runs on the Session-insights model, resolved exactly the way
-        # the one-shot stage resolved it, so switching the constant on does not
-        # silently change which model writes to the vault.
-        model = host._insights_model_for(source, workspace)
-        eff_model, eff_provider, _note = insights._resolve_insights_call(
-            host._config, model, provider=source.provider or "claude"
-        )
+        # The pass runs on the source provider's Session insights model.
+        eff_model = host._insights_model_for(source, workspace)
+        eff_provider = source.provider or "claude"
 
         memory_project = self.ensure_project(workspace)
         chat = host.create_chat(

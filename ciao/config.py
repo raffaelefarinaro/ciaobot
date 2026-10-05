@@ -611,8 +611,9 @@ class CiaoConfig:
     # Per-provider default thinking level for new chats, set from the PWA
     # Settings → Models tab. A missing entry uses the provider's own default.
     provider_default_thinking: dict[str, str] = field(default_factory=dict)
-    # Per-provider memory-pass model, set from the PWA Settings → Models
-    # tab. A missing entry uses the provider's balanced default.
+    # Per-provider Session insights model (memory pass, chat titles, schedule
+    # attention check), set on each provider's card in Settings → Models. A
+    # missing entry uses that provider's default chat model.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
     pwa_port: int = 8443
     # The server binds all interfaces by default so the PWA is reachable over
@@ -623,14 +624,10 @@ class CiaoConfig:
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
-    # Fallback when the memory pass runs without workspace context. Live
-    # archives use :func:`ciao.insights.resolve_insights_model` instead.
+    # Claude model for the review-queue folds that run without a chat behind
+    # them. Chat-driven calls use :func:`ciao.insights.resolve_insights_model`.
     insights_model: str = "sonnet"
     insights_enabled: bool = True
-    # Operator override for the memory-pass model, set from the PWA Settings →
-    # Models tab (runtime settings store).
-    # Empty = automatic routing: the workspace's sonnet-tier model.
-    insights_model_override: str = ""
 
     # Comma-separated list of models for the adversarial_review MCP tool.
     # Empty string defaults to the script's built-in panel.
