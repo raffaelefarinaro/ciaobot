@@ -964,6 +964,8 @@ async function submitCreate() {
 // ── Detail ────────────────────────────────────────────────────────────────
 
 const detailOpen = ref(false)
+/** A status write the server refused, said beside the control that made it. */
+const statusError = ref('')
 const detailEl = ref<HTMLElement | null>(null)
 const detailTitleField = ref<HTMLInputElement | null>(null)
 const detailSaving = ref(false)
@@ -1107,6 +1109,7 @@ async function loadDescription(taskId: string) {
  * only while it is the record at the row's revision — {@link heldDescription}.
  */
 function openDetail(task: Task) {
+  statusError.value = ''
   board.clearError()
   detailId.value = task.id
   const held = heldDescription(task)
@@ -1214,6 +1217,25 @@ watch(
  * routing it through `complete` would mark a task done while the user chose
  * "In review" — a write to the record, not just to this dialog.
  */
+/**
+ * The editor's delegation control.
+ *
+ * The preview is a dialog of its own, and two modal sheets on one layer draw
+ * the later one on top: opened over the editor it sat behind it, and the user
+ * saw only the backdrop darken. So the editor closes first — writing any edit
+ * still waiting — and *Open chat*, which has nothing to confirm, goes straight
+ * to the chat.
+ */
+async function delegateFromDetail(task: Task) {
+  await closeDetail()
+  if (detailOpen.value) return
+  if (delegateModeFor(task) === 'open_chat') {
+    openAttemptChat(task)
+    return
+  }
+  void openDelegate(task)
+}
+
 async function setDetailStatus(next: TaskStatus) {
   if (!detailTask.value || next === detailForm.status || detailSaving.value) return
   // A field edit still waiting goes first, so the two writes do not race for
@@ -1221,6 +1243,27 @@ async function setDetailStatus(next: TaskStatus) {
   if (!(await flushDetail())) return
   const task = detailTask.value
   if (!task) return
+  statusError.value = ''
+  // A live attempt that has not reported a result holds the task, and the
+  // store refuses to complete a task out from under it. Done is still what the
+  // user asked for, so offer the one gesture that frees it: detach, which
+  // keeps the chat and its transcript and only lets the task go.
+  if (next === 'done' && task.live_attempt_id && task.attempt_state !== 'ready_for_review') {
+    const ok = await askConfirm(
+      'The agent\'s attempt on this task is still open. Detach it and mark the task done? The chat and its transcript stay as they are.',
+      { title: 'Mark done', confirmLabel: 'Detach and mark done' },
+    )
+    if (!ok) return
+    board.clearError()
+    detailSaving.value = true
+    const detached = await board.attemptAction(workspace.value, task.id, task.live_attempt_id, 'detach')
+    detailSaving.value = false
+    if (!detached) {
+      statusError.value = board.error
+      load()
+      return
+    }
+  }
   const revision = board.revisionOf(task.id)
   if (!revision) return
   board.clearError()
@@ -1230,6 +1273,7 @@ async function setDetailStatus(next: TaskStatus) {
     : await board.update(workspace.value, task.id, revision, { status: next })
   detailSaving.value = false
   if (!saved) {
+    statusError.value = board.error
     load()
     return
   }
@@ -2034,6 +2078,7 @@ const today = localDateKey()
                 @click="setDetailStatus(option.status)"
               >{{ option.label }}</button>
             </div>
+            <p v-if="statusError" class="task-action-error" role="alert">{{ statusError }}</p>
           </div>
           <div class="form-grid">
             <div class="form-group">
@@ -2141,7 +2186,7 @@ const today = localDateKey()
                 type="button"
                 class="btn-chip task-chip"
                 :disabled="detailSaving || board.saving || !detailTask"
-                @click="openDelegate(detailTask!)"
+                @click="delegateFromDetail(detailTask!)"
               >{{ detailDelegateLabel }}</button>
               <!-- The one gesture that completes a reviewed result. The same call the
                    card's Approve Done makes: the service releases the linkage and
