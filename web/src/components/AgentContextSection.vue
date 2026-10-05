@@ -39,20 +39,19 @@
         <small>Could not be read just now: {{ guide.error }}</small>
       </div>
       <!-- General with no description or doc sends no brief at all. -->
-      <div v-if="project && briefLines.length" class="rail-item agent-context-row agent-context-brief">
+      <div v-if="project && briefText" class="rail-item agent-context-row agent-context-brief">
         <span class="agent-context-row-top">
           <router-link :to="`/project/${project.project_id}`" class="agent-context-name agent-context-project">{{ project.name }}</router-link>
           <span class="agent-context-meta">{{ formatTokens(briefTokens) }} tokens</span>
         </span>
-        <small>Project brief, sent at the start and when it changes:</small>
-        <pre class="agent-context-brief-text"><template v-for="line in briefLines" :key="line.key">{{ line.prefix }}<button
-          v-if="line.path"
+        <p v-if="project.context" class="agent-context-description">{{ project.context }}</p>
+        <button
+          v-if="project.vault_doc_path"
           type="button"
-          class="agent-context-link"
-          :title="`Open ${line.path}`"
-          @click="emit('open-file', line.path)"
-        >{{ line.value }}</button><template v-else>{{ line.value }}</template>
-</template></pre>
+          class="agent-context-link agent-context-doc"
+          :title="`Open ${project.vault_doc_path}`"
+          @click="emit('open-file', project.vault_doc_path)"
+        >{{ project.vault_doc_path.split('/').pop() }}</button>
       </div>
     </div>
   </section>
@@ -85,22 +84,22 @@ watch(() => props.project?.workspace, loadGuide, { immediate: true })
 const guideName = computed(() => guide.value.path.split('/').pop() || 'AGENTS.md')
 const guideTokens = computed(() => tokensFor(guide.value.content.length))
 
-// The brief is the capsule's stable project lines (ciao/context/capsule.py),
-// rendered as sent: the name (General is implicit), the description and the
-// canonical doc's path. Not the doc itself. `field` mirrors capsule._field.
+// The brief is the capsule's stable project lines (ciao/context/capsule.py).
+// Count the capsule's sent text, not the readable presentation below the
+// project name. `field` mirrors capsule._field.
 function field(value: string, limit = 1200): string {
   return value.split(/\s+/).filter(Boolean).join(' ').slice(0, limit)
 }
-const briefLines = computed(() => {
+const briefText = computed(() => {
   const p = props.project
-  if (!p) return []
-  const lines: { key: string; prefix: string; value: string; path?: string }[] = []
-  if (p.name && p.name !== 'General') lines.push({ key: 'project', prefix: 'project=', value: `"${field(p.name, 180)}"` })
-  if (p.context) lines.push({ key: 'project_context', prefix: 'project_context=', value: field(p.context) })
-  if (p.vault_doc_path) lines.push({ key: 'canonical_doc', prefix: 'canonical_doc=', value: field(p.vault_doc_path, 300), path: p.vault_doc_path })
-  return lines
+  if (!p) return ''
+  const lines: string[] = []
+  if (p.name && p.name !== 'General') lines.push(`project="${field(p.name, 180)}"`)
+  if (p.context) lines.push(`project_context=${field(p.context)}`)
+  if (p.vault_doc_path) lines.push(`canonical_doc=${field(p.vault_doc_path, 300)}`)
+  return lines.join('\n')
 })
-const briefTokens = computed(() => tokensFor(briefLines.value.map((l) => l.prefix + l.value).join('\n').length))
+const briefTokens = computed(() => tokensFor(briefText.value.length))
 
 const contextPctLabel = computed(() => {
   const pct = props.contextPct
@@ -157,14 +156,9 @@ const contextPctLabel = computed(() => {
 .agent-context-row small { line-height: 1.4; }
 .agent-context-brief { cursor: default; }
 .agent-context-brief:hover { color: var(--fg); }
-.agent-context-brief-text {
+.agent-context-description {
   margin: 4px 0 0;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  background: var(--bg3);
   color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -180,10 +174,15 @@ const contextPctLabel = computed(() => {
   text-underline-offset: 2px;
   cursor: pointer;
 }
-.agent-context-brief-text .agent-context-link {
-  display: inline;
+.agent-context-doc {
+  align-self: flex-start;
+  margin-top: var(--space-2);
+  max-width: 100%;
+  overflow-wrap: anywhere;
   text-align: left;
-  color: inherit;
+}
+@media (pointer: coarse) {
+  .agent-context-doc { min-height: var(--touch); }
 }
 .agent-context-link:hover,
 .agent-context-project:hover { text-decoration-color: currentColor; }
