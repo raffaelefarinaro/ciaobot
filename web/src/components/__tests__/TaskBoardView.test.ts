@@ -42,6 +42,12 @@ vi.mock('../../lib/confirm', () => ({
   pendingConfirm,
 }))
 
+// A due date as the runner's own locale shows it: "Mar 20" in en-US, "20 Mar"
+// in en-GB or en-CH.
+function shortDate(year: number, month: number, day: number): string {
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 const REVISION = 'a'.repeat(64)
 const NEXT_REVISION = 'b'.repeat(64)
 const THIRD_REVISION = 'c'.repeat(64)
@@ -219,7 +225,7 @@ describe('TaskBoardView', () => {
     const shown = card(wrapper, 'Ship the board')
     expect(shown.get('.task-open').text()).toBe('Ship the board')
     expect(shown.get('.task-project').text()).toBe('Website')
-    expect(shown.text()).toContain('Due Mar 20')
+    expect(shown.text()).toContain(`Due ${shortDate(2099, 3, 20)}`)
     // Who it is for is the Agent block's business, not a label on every card.
     expect(shown.text()).not.toContain('For the agent')
     // Review is the column a card sits in (#1069), not a badge on it.
@@ -1130,7 +1136,7 @@ describe('TaskBoardView', () => {
       due: '2099-04-01',
     })
     expect(wrapper.find('.task-sheet').exists()).toBe(false)
-    expect(card(wrapper, 'First task').text()).toContain('Due Apr 1')
+    expect(card(wrapper, 'First task').text()).toContain(`Due ${shortDate(2099, 4, 1)}`)
     wrapper.unmount()
   })
 

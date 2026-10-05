@@ -206,6 +206,32 @@ def test_stale_paths_flags_missing_absolute_path_inside_workspace(
     assert len(findings) == 1
 
 
+def test_stale_paths_checks_a_workspace_path_that_holds_a_space(tmp_path: Path) -> None:
+    # Every "C:\Users\First Last" profile puts a space in the workspace path.
+    workspace = _workspace(tmp_path / "First Last")
+
+    findings, checked, _ = find_stale_paths(
+        "memory",
+        [f"Config sits at `{workspace}/secrets/absent.json` now."],
+        workspace_dir=workspace,
+    )
+
+    assert checked == 1
+    assert findings[0]["path"] == f"{workspace}/secrets/absent.json"
+
+
+def test_stale_paths_still_skips_a_backticked_command_line(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+
+    findings, checked, _ = find_stale_paths(
+        "memory",
+        ["Run `cat ~/notes/absent.md --plain` to see it."],
+        workspace_dir=workspace,
+    )
+
+    assert (findings, checked) == ([], 0)
+
+
 def test_stale_paths_leaves_foreign_absolute_path_unverified(tmp_path: Path) -> None:
     """A path on another machine is not evidence of rot, so do not claim it is."""
     workspace = _workspace(tmp_path)

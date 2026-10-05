@@ -74,8 +74,10 @@ jobs:
         node-version: '22'
         cache: 'npm'
         cache-dependency-path: web/package-lock.json
+    # uv before the suite: tests/test_windows_update_real.py skips without it,
+    # and skipped is how its offline-reinstall test went stale unnoticed.
     - name: Install Python dependencies
-      run: python -m pip install -e '.[test]'
+      run: python -m pip install -e '.[test]' uv
     # Blocking since C9 (#696): every module imports, mypy's win32 pass is
     # clean, and the backend and frontend suites pass. Each gate writes its log
     # and the job fails on it; the steps after a gate run on `!cancelled()`, so
@@ -180,7 +182,6 @@ jobs:
     - name: install.ps1 offline verification and analyzer (advisory)
       if: ${{ !cancelled() }}
       run: |
-        python -m pip install uv || true
         {
           echo "--- pwsh, file form ---"
           pwsh -NoProfile -File ./ps1-fixture/install.ps1 -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun
@@ -226,7 +227,6 @@ jobs:
             echo "no end-to-end wheel was built; skipping the run"
           else
             workspace="$RUNNER_TEMP/ps1-e2e-ws"
-            python -m pip install uv >/dev/null 2>&1 || true
             bin_dir="$(uv tool dir --bin 2>/dev/null)"
             echo "--- install ---"
             # The one-time setup URL is a credential, and Q3 keeps it out of the

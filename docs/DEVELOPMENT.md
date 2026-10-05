@@ -288,6 +288,15 @@ not run `ciao desktop uninstall` yet.
   `-Uninstall`) stay advisory: a hosted runner has no interactive logon, so a
   task that does not start there is a datum, not a verdict. Known flaky
   Windows tests are listed in #696's C9 tracking comment.
+  The runner is elevated and has uv and Git's `usr\bin` on `PATH`; a
+  contributor's Windows account usually has neither the symlink privilege nor
+  the coreutils. Without Developer Mode, a test that creates a symlink of its
+  own is skipped ("cannot create a symlink here", `tests/conftest.py`) rather
+  than failing with WinError 1314, so a local run reports more skips than CI;
+  a symlink the engine itself makes still fails, since the engine must not
+  need one on Windows. The suite also points `LOCALAPPDATA` at each test's
+  home, so a machine with Ciaobot installed does not hand its real logon-task
+  workspace to config-discovery tests.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both

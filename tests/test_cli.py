@@ -1424,6 +1424,28 @@ def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli._path_export_hint() is None
 
 
+def test_path_export_hint_names_the_installed_launcher_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import install_receipt
+
+    # An installer engine runs from a uv tool env whose own bin dir is never on
+    # PATH; `ciao` is the launcher in uv's bin dir, which the installer adds.
+    launcher_dir = tmp_path / "First Last" / ".local" / "bin"
+    install_receipt.write_receipt(install_receipt.InstallReceipt(
+        version="1.2.3", executable=str(launcher_dir / "ciao.exe"), python=sys.executable,
+        service_backend="windows-task", service_label="\\Ciaobot\\Engine",
+        installed_at="2026-10-05T00:00:00+00:00",
+    ))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(launcher_dir)]))
+    assert cli._path_export_hint() is None
+
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(Path(sys.executable).parent)]))
+    hint = cli._path_export_hint()
+    assert hint is not None
+    assert str(launcher_dir) in hint
+
+
 def test_path_export_hint_uses_the_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "path_hint", lambda directory, *, persist: "HINT")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
