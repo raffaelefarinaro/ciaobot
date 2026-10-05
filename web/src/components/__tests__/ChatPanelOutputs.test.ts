@@ -14,6 +14,7 @@ import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { useTaskSignalsStore } from '../../stores/taskSignals'
 import ChatPanel from '../ChatPanel.vue'
 
 const PaneHeaderStub = defineComponent({
@@ -297,6 +298,37 @@ describe('ChatPanel Outputs section', () => {
     expect(notice.text()).toContain('This chat is archived.')
     expect(notice.find('.continue-chat-btn').text()).toBe('Continue in new chat')
     expect(wrapper.find('textarea.chat-input').exists()).toBe(false)
+  })
+
+  it('continues an archived task chat as a new attempt, not a plain chat', async () => {
+    // A plain continuation carries no delegation: its report is refused and the
+    // card stays stuck on the archived chat's interrupted attempt.
+    const { wrapper, store } = await mountPanel()
+    const attemptId = 'b'.repeat(32)
+    const chat = store.chats[0]
+    chat.archived = true
+    chat.helper = { kind: 'task_delegation', task_id: 't1', task_revision: 'r'.repeat(64), attempt_id: attemptId }
+    const signals = useTaskSignalsStore()
+    signals.loadedWorkspace = 'personal'
+    signals.tasks = [{
+      id: 't1', title: 'Decide on proposals', status: 'in_progress', chat_id: chat.chat_id,
+      attempt_id: attemptId, attempt_state: 'interrupted', live_attempt_id: '',
+    } as never]
+    const post = vi.spyOn(api, 'post').mockResolvedValue({
+      workspace: 'personal', chat_id: 'chat-next', attempt: { attempt_id: 'c'.repeat(32), chat_id: 'chat-next' },
+    })
+    const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue()
+    const continuePlain = vi.spyOn(store, 'continueArchivedChat')
+    await flushPromises()
+
+    const button = wrapper.get('.continue-chat-btn')
+    expect(button.text()).toBe('Continue the task in a new chat')
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(post).toHaveBeenCalledWith(`/api/tasks/t1/attempt/${attemptId}/retry`, { workspace: 'personal' })
+    expect(switchChat).toHaveBeenCalledWith('chat-next')
+    expect(continuePlain).not.toHaveBeenCalled()
   })
 
   it('deduplicates repeated action/path pairs in the Work inspector', async () => {

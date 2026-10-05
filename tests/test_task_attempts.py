@@ -838,13 +838,14 @@ def test_a_report_needs_a_known_outcome_a_summary_and_a_live_attempt(tmp_path: P
         store.report(attempt.attempt_id, "done", "x")
 
 
-def test_a_new_turn_owes_a_new_report_but_keeps_the_last_summary(tmp_path: Path) -> None:
+def test_a_new_turn_keeps_the_last_report_until_a_new_one(tmp_path: Path) -> None:
     store = _store(tmp_path)
     attempt = _start(store).attempt
     store.report(attempt.attempt_id, "needs_input", "Which region?")
     store.finish(attempt.attempt_id, "needs_you")
     continued = store.continue_turn(attempt.attempt_id)
-    assert continued.outcome == ""
+    assert continued.state == "running"
+    assert continued.outcome == "needs_input"
     assert continued.summary == "Which region?"
     # Every other transition carries both fields rather than dropping them.
     store.report(attempt.attempt_id, "done", "All set.")

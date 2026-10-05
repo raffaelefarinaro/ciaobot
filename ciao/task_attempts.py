@@ -914,11 +914,14 @@ class TaskAttemptStore:
             record = _require(records, attempt_id)
             if not record.is_live:
                 raise TaskAttemptError("invalid_attempt", "only a live attempt can continue")
-            # A new turn owes a new report: the last one described the turn
-            # before. The summary stays, so the card keeps saying what it said.
+            # The last report stands until the agent makes a new one. A
+            # follow-up turn is usually conversation about the result ("dd is
+            # DoorDash"), and clearing the report made that one reply turn a
+            # finished result into *Unfinished*. The agent is told to report
+            # again whenever its result changes.
             running = replace(
                 record, state="running", updated_at=self._now(), ended_at="",
-                detail="", owner=_PROCESS_TOKEN, outcome="",
+                detail="", owner=_PROCESS_TOKEN,
             )
             records[record.attempt_id] = running
             continued.append(running)
@@ -1319,6 +1322,10 @@ DELEGATION_INSTRUCTION = (
     "If you need an answer from the user to go on, ask it here with your question "
     "tool and carry on once they reply. Report `needs_input` only if you end the "
     "turn still waiting on them.\n"
+    "\n"
+    "Later turns in this chat keep your last report. Report again whenever your "
+    "result changes. If the user says the task is done, report `done` with what "
+    "was agreed and tell them to press Approve Done; you cannot close it yourself.\n"
     "\n"
     "Do not mark the task done, and do not try to: closing it is the user's "
     "decision. Ask for whatever approval you need in the ordinary way — an "

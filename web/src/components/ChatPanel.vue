@@ -1009,7 +1009,7 @@
           <div class="archived-notice-row">
             <span>This chat is archived.</span>
             <button class="btn-sm primary continue-chat-btn" @click="continueChat" :disabled="isContinuing">
-              {{ isContinuing ? 'Continuing...' : 'Continue in new chat' }}
+              {{ isContinuing ? 'Continuing...' : heldSettledTask ? 'Continue the task in a new chat' : 'Continue in new chat' }}
             </button>
           </div>
           <!-- The memory pass this chat spawned, if one did. The pass lives in
@@ -1302,6 +1302,9 @@ import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import TaskOriginNote from './TaskOriginNote.vue'
+import { useTaskSignalsStore } from '../stores/taskSignals'
+import { isLiveAttemptState } from '../lib/taskBoard'
+import type { TaskAttemptActionResponse } from '../lib/types'
 import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import { linkifyText } from '../lib/filePaths'
@@ -4369,10 +4372,39 @@ async function doArchive() {
   emit('close')
 }
 
+const taskSignals = useTaskSignalsStore()
+
+/**
+ * The task this archived chat's attempt still holds, settled because the chat
+ * was archived. Continuing it as a plain chat would lose the task: the new chat
+ * carries no delegation, so its report is refused and the card stays stuck. The
+ * board's own way on is a retry, which starts a new attempt in a new chat that
+ * is handed what this one did.
+ */
+const heldSettledTask = computed(() => {
+  const current = chat.value
+  if (!current || current.helper?.kind !== 'task_delegation') return null
+  const task = taskSignals.taskForChat(current)
+  if (!task || task.status === 'done' || !task.attempt_id) return null
+  if (!taskSignals.chatHoldsTask(current, task)) return null
+  return isLiveAttemptState(task.attempt_state) ? null : task
+})
+
 async function continueChat() {
   if (!chat.value) return
   isContinuing.value = true
   try {
+    const task = heldSettledTask.value
+    if (task) {
+      const answer = await api.post<TaskAttemptActionResponse>(
+        `/api/tasks/${encodeURIComponent(task.id)}/attempt/${encodeURIComponent(task.attempt_id)}/retry`,
+        { workspace: taskSignals.loadedWorkspace },
+      )
+      void taskSignals.reload(taskSignals.loadedWorkspace)
+      const next = answer?.attempt?.chat_id || answer?.chat_id
+      if (next) await store.switchChat(next)
+      return
+    }
     await store.continueArchivedChat(chat.value.chat_id)
   } catch (e) {
     console.error('Failed to continue archived chat:', e)
