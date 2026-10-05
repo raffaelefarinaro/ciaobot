@@ -4255,6 +4255,54 @@ def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
     assert identity in entries[0]["reason"], entries[0]["reason"]
 
 
+def test_a_rerooted_curation_plan_reads_the_workspace_guide_not_the_install_root_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regions pass measures the guide the workspace's sessions load.
+
+    After the re-rooting the install root keeps a near-empty `AGENTS.md` and each
+    workspace owns its own. Planning from the install root saw an empty
+    `ciao:memory` region every night, so consolidation was never scheduled while
+    `memory status` reported the real region at its cap.
+    """
+    from ciao.config import reset_reroot_cache
+
+    root = tmp_path / "workspace"
+    vault = root / "personal" / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    (root / ".runtime" / "migration").mkdir(parents=True)
+    (root / ".runtime" / "migration" / "workspace-rooting.json").write_text(
+        json.dumps({"status": "migrated"}), encoding="utf-8"
+    )
+    (root / ".runtime" / "workspaces.json").write_text(
+        json.dumps({"personal": {"name": "personal", "vault_root": str(vault)}}),
+        encoding="utf-8",
+    )
+    (root / "AGENTS.md").write_text(
+        "<!-- ciao:memory:start cap=3000 -->\n- one\n<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    full = "\n".join(f"- durable fact number {i:03d} that fills the region" for i in range(60))
+    (root / "personal" / "AGENTS.md").write_text(
+        f"<!-- ciao:memory:start cap=3000 -->\n{full}\n<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    reset_reroot_cache()
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+
+    _workspace, _vault, guide, _budget, _registry, name = cli._curation_context(
+        _curation_args()
+    )
+
+    assert name == "personal"
+    assert guide == root / "personal" / "AGENTS.md"
+    payload, _worklist = cli._curation_plan(_curation_args())
+    assert any(item["pass"] == "regions" for item in payload["items"]), payload["items"]
+
+
 def test_an_explicit_vault_root_is_planned_under_its_registered_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

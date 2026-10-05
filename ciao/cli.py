@@ -4554,13 +4554,42 @@ def _curation_context(
     from ciao.curation_run import RunBudget
 
     workspace, vault, registry_root, name = _resolve_workspace_and_vaults(args)
-    guide = Path(args.guide).expanduser().resolve() if args.guide else guide_path(workspace)
+    if args.guide:
+        guide = Path(args.guide).expanduser().resolve()
+    else:
+        guide = guide_path(_curation_agent_root(workspace, name))
     defaults = RunBudget()
     budget = RunBudget(
         max_items=args.max_items if args.max_items is not None else defaults.max_items,
         max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,
     )
     return workspace, vault, guide, budget, registry_root, name
+
+
+def _curation_agent_root(workspace: Path, name: str | None) -> Path:
+    """The root whose ``AGENTS.md`` holds the regions this run consolidates.
+
+    ``workspace`` is the install root, which owns the guide only before the
+    re-rooting. Afterwards each workspace has its own guide under
+    ``agent_root(name)`` and the install root keeps a near-empty one, so a plan
+    read from the install root saw an empty ``ciao:memory`` region on every
+    night and never scheduled the consolidation pass while ``memory status``
+    (which reads the agent root) reported the region over its cap.
+    """
+    if name is None:
+        return workspace
+    from ciao.config import CiaoConfig, installed_workspace_env
+
+    env_source = installed_workspace_env(os.environ)
+    env_source["CIAO_WORKSPACE"] = str(workspace)
+    if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+        # A read-only resolution must not mint a session secret (see
+        # `_resolve_workspace_and_vaults`).
+        env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
+    config = CiaoConfig.from_env(env_source)
+    if config.workspace(name) is None:
+        return workspace
+    return config.agent_root(name)
 
 
 def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
