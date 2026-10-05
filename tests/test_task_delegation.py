@@ -2422,7 +2422,10 @@ async def test_approving_a_delegated_result_archives_its_chat_and_queues_a_learn
     )
     current = _get_task(plane, task["id"])
 
-    plane.workspace_task_action(
+    # The route runs the approval in a worker thread (`asyncio.to_thread`),
+    # where there is no running loop: the archive must still be scheduled.
+    await asyncio.to_thread(
+        plane.workspace_task_action,
         "personal", "complete", task["id"], expected_revision=current["revision"], actor="user",
     )
     for _ in range(20):
