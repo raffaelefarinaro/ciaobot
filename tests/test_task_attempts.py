@@ -356,6 +356,26 @@ def test_a_restart_derives_a_running_attempt_as_interrupted(
     assert restarted.get_live(TASK_ID) is None
 
 
+@pytest.mark.parametrize("ended", ["ready_for_review", "needs_you"])
+def test_a_restart_keeps_an_attempt_whose_turn_had_already_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ended: str
+) -> None:
+    """Only `running` claims a turn in flight. A result waiting for review, or a
+    turn that ended waiting on the user, lost nothing to the restart: it stays
+    live, so the card stays In review and a reply still continues it."""
+    store = _store(tmp_path)
+    attempt = _start(store).attempt
+    store.finish(attempt.attempt_id, ended)
+
+    monkeypatch.setattr("ciao.task_attempts._PROCESS_TOKEN", "99999-restarted")
+    restarted = _store(tmp_path)
+
+    live = restarted.get_live(TASK_ID)
+    assert live is not None and live.attempt_id == attempt.attempt_id
+    assert live.state == ended
+    assert restarted.recover_interrupted() == ()
+
+
 def test_a_restart_never_replays_a_stranded_attempt(tmp_path: Path, monkeypatch) -> None:
     """Deriving `interrupted` is a read-time answer; nothing in the store starts a
     turn, so a stranded attempt is never dispatched again by being read."""

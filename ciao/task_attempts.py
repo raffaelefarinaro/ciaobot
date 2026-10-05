@@ -36,8 +36,10 @@ Five rules, and each of them is a refusal somebody could otherwise have taken:
   which derives the same answer) records it ``interrupted``: never replayed,
   because re-running a turn nobody confirmed is worse than asking.
 * **A crash is derived, not remembered.** Every record carries the
-  ``owner`` token of the process that wrote it. A live attempt owned by another
-  process cannot have a turn running in this one, so it *is* ``interrupted`` —
+  ``owner`` token of the process that wrote it. A ``running`` attempt owned by
+  another process cannot have a turn running in this one, so it *is*
+  ``interrupted`` (a ``ready_for_review`` or ``needs_you`` one had already ended
+  its turn, so a restart leaves it as it was) —
   which is how a restart re-derives it without a startup sweep and without any
   state this module would have to keep in memory.
 * **A finished turn is not a finished task.** Settling here writes
@@ -106,8 +108,8 @@ LIVE_STATES = frozenset({"running", "needs_you", "ready_for_review"})
 
 :meth:`TaskAttemptStore.get_live` returns only these, and a ``start`` against a
 task that has one returns it rather than minting a second. They are also exactly
-the states a derived ``interrupted`` replaces, because a live attempt written by
-another process cannot have a turn running in this one.
+the states a live check holds across a restart; only ``running`` is derived
+``interrupted`` there, because only it claims a turn in flight.
 
 A *released* record is not live whatever state it is in — see
 :attr:`TaskAttempt.released` and :attr:`TaskAttempt.is_live`, which is the whole
@@ -627,7 +629,7 @@ class TaskAttemptStore:
         """
         derived: dict[str, TaskAttempt] = {}
         for attempt_id, record in records.items():
-            if record.is_live and record.owner != _PROCESS_TOKEN:
+            if _stranded(record):
                 record = _interrupted(record)
             derived[attempt_id] = record
         return derived
@@ -780,7 +782,7 @@ class TaskAttemptStore:
         stranded = [
             record
             for record in self._read_raw().values()
-            if record.is_live and record.owner != _PROCESS_TOKEN
+            if _stranded(record)
         ]
         if not stranded:
             return ()
@@ -1186,6 +1188,17 @@ def _decode_entry(attempt_id: Any, entry: Any, *, path_name: str) -> TaskAttempt
         outcome=outcome if outcome in OUTCOMES else "",
         summary=_summary(summary) if isinstance(summary, str) else "",
     )
+
+
+def _stranded(record: TaskAttempt) -> bool:
+    """A ``running`` attempt another process wrote: its turn died with that process.
+
+    Only ``running`` claims a turn in flight. ``ready_for_review`` and
+    ``needs_you`` are written when a turn *ends* — with a result to review, or
+    waiting on the user — so a restart takes nothing from them: the result is
+    still there, and a reply in the chat still continues the attempt.
+    """
+    return record.is_live and record.state == "running" and record.owner != _PROCESS_TOKEN
 
 
 def _interrupted(record: TaskAttempt) -> TaskAttempt:
