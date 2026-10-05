@@ -1115,6 +1115,7 @@ class TaskBoardStore:
         vault_root: Path,
         runtime_dir: Path,
         clock: Callable[[], datetime],
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         if not isinstance(workspace, str) or not workspace.strip():
             raise ValueError("workspace must be a non-empty string")
@@ -1122,6 +1123,10 @@ class TaskBoardStore:
         self._vault_root = Path(vault_root)
         self._runtime_dir = Path(runtime_dir)
         self._clock = clock
+        #: Called after every write that landed — a replaced file or a removed
+        #: one — so the engine can tell open clients the board moved. Never
+        #: called for a refused or failed write.
+        self._on_change = on_change
 
     # -- paths ------------------------------------------------------
 
@@ -1402,6 +1407,11 @@ class TaskBoardStore:
                 tmp.unlink()
             except OSError:
                 pass
+        self._changed()
+
+    def _changed(self) -> None:
+        if self._on_change is not None:
+            self._on_change()
 
     @staticmethod
     def _fsync_dir(directory: Path) -> None:
@@ -1731,6 +1741,7 @@ class TaskBoardStore:
                     f"could not remove task {task_id}; the file is unchanged: {exc}",
                 ) from None
             self._fsync_dir(path.parent)
+        self._changed()
 
     def _plan_changes(
         self, document: TaskDocument, changes: dict[str, object], actor: Actor

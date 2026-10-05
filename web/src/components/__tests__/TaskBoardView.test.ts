@@ -32,6 +32,20 @@ vi.mock('../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: apiPatch, del: apiDel },
 }))
 
+// The board reads `?task=` to open one task's editor. A reactive route stands in
+// for the router; `replace` writes the query back the way the router would.
+const route = vi.hoisted(() => ({ value: null as null | { query: Record<string, unknown> } }))
+const routerReplace = vi.hoisted(() => vi.fn())
+vi.mock('vue-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('vue-router')>()
+  const { reactive } = await import('vue')
+  route.value = reactive({ query: {} as Record<string, unknown> })
+  routerReplace.mockImplementation(async (to: { query: Record<string, unknown> }) => {
+    route.value!.query = to.query
+  })
+  return { ...actual, useRoute: () => route.value, useRouter: () => ({ replace: routerReplace }) }
+})
+
 // The app's confirm lives in App.vue, not in the pane, so it is mocked rather
 // than mounted: a delete has to be answerable from here without a second dialog.
 // `pendingConfirm` is a real ref-shaped slot because the pane reads it to decide
@@ -137,6 +151,8 @@ describe('TaskBoardView', () => {
     askConfirm.mockReset()
     askConfirm.mockResolvedValue(true)
     pendingConfirm.value = null
+    if (route.value) route.value.query = {}
+    routerReplace.mockClear()
     // jsdom has no ResizeObserver and no layout, so the pane's width is driven
     // from here: the component reads the same `contentRect.width` a real
     // observer would hand it.
@@ -457,6 +473,56 @@ describe('TaskBoardView', () => {
     await nextTick()
     expect(wrapper.find('.task-sheet').exists()).toBe(false)
     expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
+  })
+
+  it('opens the editor named by ?task= once the rows load, and drops the query on close', async () => {
+    route.value!.query = { task: 'doing' }
+    apiGet.mockImplementation((url: string) => Promise.resolve(
+      url.includes('/api/tasks?')
+        ? { workspace: 'personal', tasks: BOARD }
+        : detailAnswer(BOARD[1] as Task, 'Prose.'),
+    ))
+    const wrapper = mount(TaskBoardView, { attachTo: document.body })
+    await flushPromises()
+    await nextTick()
+
+    const sheet = wrapper.get('.task-sheet')
+    expect(sheet.get<HTMLInputElement>('#task-detail-name').element.value).toBe('Wire the store')
+    expect(routerReplace).not.toHaveBeenCalled()
+
+    await wrapper.get('.task-sheet .btn-icon[aria-label="Close"]').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
+    expect(routerReplace).toHaveBeenCalledWith({ query: {} })
+    // Closing does not reopen it.
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('opens a task when ?task= changes on a board already showing', async () => {
+    apiGet.mockImplementation((url: string) => Promise.resolve(
+      url.includes('/api/tasks?')
+        ? { workspace: 'personal', tasks: BOARD }
+        : detailAnswer(task(), 'Prose.'),
+    ))
+    const wrapper = mount(TaskBoardView, { attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
+
+    route.value!.query = { task: 'ship' }
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.get<HTMLInputElement>('#task-detail-name').element.value).toBe('Ship the board')
+    wrapper.unmount()
+  })
+
+  it('drops a ?task= the loaded board does not hold', async () => {
+    route.value!.query = { task: 'gone', other: 'kept' }
+    const wrapper = await mountBoard()
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
+    expect(routerReplace).toHaveBeenCalledWith({ query: { other: 'kept' } })
     wrapper.unmount()
   })
 

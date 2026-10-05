@@ -10,6 +10,8 @@ import {
   setListIndex,
   useProjectStore,
 } from './projects'
+import { useTaskSignalsStore } from './taskSignals'
+import { nextTick } from 'vue'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -6151,5 +6153,136 @@ describe('memory pass surfaces', () => {
       label: 'needs attention',
       blocking: true,
     })
+  })
+})
+
+describe('delegated task signals', () => {
+  const ATTEMPT = 'a'.repeat(32)
+
+  function taskRow(over: Record<string, unknown> = {}) {
+    return {
+      id: 't1', title: 'Delegated', status: 'in_progress', project_id: '', due: '',
+      assignee: 'agent', chat_id: 'c-task', attempt_id: ATTEMPT, live_attempt_id: ATTEMPT,
+      created_at: '', updated_at: '', revision: 'r'.repeat(64), relative_path: 'Tasks/t1.md',
+      attempt_state: 'needs_you', attempt_outcome: 'needs_input', attempt_summary: '',
+      attempt_detail: '', changed_since_delegated: false,
+      ...over,
+    }
+  }
+
+  function tasksGet(rows: unknown[]) {
+    apiGet.mockImplementation((path: string) => (
+      path.startsWith('/api/tasks?')
+        ? Promise.resolve({ tasks: rows })
+        : Promise.resolve([])
+    ))
+  }
+
+  function taskReads(): string[] {
+    return apiGet.mock.calls.map(c => c[0] as string).filter(p => p.startsWith('/api/tasks?'))
+  }
+
+  async function seeded(rows: unknown[]) {
+    tasksGet(rows)
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
+    store.chats = [
+      {
+        chat_id: 'c-task', project_id: 'p1', title: 'Delegated', archived: false, local: true,
+        helper: { kind: 'task_delegation', task_id: 't1', task_revision: 'r'.repeat(64), attempt_id: ATTEMPT },
+      },
+      { chat_id: 'c-plain', project_id: 'p1', title: 'Plain', archived: false, local: true },
+    ] as unknown as typeof store.chats
+    await useTaskSignalsStore().reload('personal')
+    return store
+  }
+
+  test('a chat whose task stopped for the user needs you, without a pending card', async () => {
+    const store = await seeded([taskRow()])
+    const chat = store.chats[0]
+    expect(store.chatNeedsYou('c-task')).toBe(true)
+    // No question or permission card: the card-driven signal stays off.
+    expect(store.chatNeedsInput('c-task')).toBe(false)
+    expect(store.chatIsAttentionItem(chat)).toBe(true)
+    expect(store.attentionChatCount).toBe(1)
+    expect(store.chatNeedsYou('c-plain')).toBe(false)
+  })
+
+  test('the project counts a chat whose task stopped for the user', async () => {
+    const store = await seeded([taskRow()])
+    for (const chat of store.chats) chat.created_at = '2026-10-05T08:00:00Z'
+    expect(store.projectNeedsInput('p1')).toBe(1)
+    expect(store.workspaceNeedsInput('personal')).toBe(1)
+  })
+
+  test('a running or review-ready task does not need you', async () => {
+    const store = await seeded([taskRow({ attempt_state: 'running', attempt_outcome: '' })])
+    expect(store.chatNeedsYou('c-task')).toBe(false)
+    expect(store.chatIsAttentionItem(store.chats[0])).toBe(false)
+
+    tasksGet([taskRow({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })])
+    await useTaskSignalsStore().reload('personal')
+    expect(store.chatNeedsYou('c-task')).toBe(false)
+  })
+
+  test('a pending question still needs you on an ordinary chat', async () => {
+    const store = await seeded([])
+    store.chats[1].pending_question = JSON.stringify({ questions: [{ question: 'Which?' }] })
+    expect(store.chatNeedsYou('c-plain')).toBe(true)
+  })
+
+  test('tasks_changed for the active workspace re-reads the board, another workspace does not', async () => {
+    tasksGet([])
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+
+    sock.onmessage?.({ data: JSON.stringify({ type: 'tasks_changed', workspace: 'work' }) })
+    expect(taskReads()).toEqual([])
+
+    sock.onmessage?.({ data: JSON.stringify({ type: 'tasks_changed', workspace: 'personal' }) })
+    expect(taskReads()).toEqual(['/api/tasks?workspace=personal'])
+  })
+
+  test('an events snapshot after boot re-reads the board', () => {
+    tasksGet([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const snapshot = JSON.stringify({ type: 'snapshot', active_streams: [] })
+
+    // Before boot the workspace is not known yet; fetchAll reads it then.
+    sock.onmessage?.({ data: snapshot })
+    expect(taskReads()).toEqual([])
+
+    store.bootstrapped = true
+    sock.onmessage?.({ data: snapshot })
+    expect(taskReads()).toEqual(['/api/tasks?workspace=personal'])
+  })
+
+  test('a workspace switch after boot re-reads the new workspace', async () => {
+    tasksGet([])
+    const store = useProjectStore()
+    store.bootstrapped = true
+    store.activeWorkspace = 'work'
+    await nextTick()
+    expect(taskReads()).toEqual(['/api/tasks?workspace=work'])
+  })
+
+  test('boot reads the resolved workspace', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') {
+        return Promise.resolve({ workspaces: [{ name: 'work' }], active: 'work' })
+      }
+      if (path.startsWith('/api/tasks?')) return Promise.resolve({ tasks: [] })
+      return Promise.resolve([])
+    })
+    const store = useProjectStore()
+    await store.fetchAll()
+    expect(taskReads()).toContain('/api/tasks?workspace=work')
+    expect(taskReads()).not.toContain('/api/tasks?workspace=personal')
   })
 })

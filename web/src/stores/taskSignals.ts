@@ -22,26 +22,43 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
   const loadedWorkspace = ref('')
   let inflight: Promise<void> | null = null
   let inflightWorkspace = ''
+  // A reload asked for while one is reading the same workspace. The read in
+  // flight may have started before the change that prompted the ask, so it is
+  // not enough to join it: one more read follows. Any number of asks during a
+  // read collapse into that one.
+  let again = false
 
   async function reload(workspace: string): Promise<void> {
     if (!workspace) return
-    if (inflight && inflightWorkspace === workspace) return inflight
+    if (inflight && inflightWorkspace === workspace) {
+      again = true
+      return inflight
+    }
     inflightWorkspace = workspace
-    inflight = (async () => {
+    again = false
+    // Declared first so the `finally` below can compare against it.
+    let run: Promise<void> | null = null
+    run = (async () => {
       try {
-        const data = await api.get<unknown>(
-          `/api/tasks?workspace=${encodeURIComponent(workspace)}`,
-        )
-        if (inflightWorkspace !== workspace) return
-        tasks.value = readableTasks(taskRowsFrom(data))
-        loadedWorkspace.value = workspace
-      } catch {
-        // Keep the last rows: a dropped read must not clear the counts.
+        do {
+          again = false
+          try {
+            const data = await api.get<unknown>(
+              `/api/tasks?workspace=${encodeURIComponent(workspace)}`,
+            )
+            if (inflightWorkspace !== workspace) return
+            tasks.value = readableTasks(taskRowsFrom(data))
+            loadedWorkspace.value = workspace
+          } catch {
+            // Keep the last rows: a dropped read must not clear the counts.
+          }
+        } while (again && inflightWorkspace === workspace)
       } finally {
-        if (inflightWorkspace === workspace) inflight = null
+        if (inflight === run) inflight = null
       }
     })()
-    return inflight
+    inflight = run
+    return run
   }
 
   /**

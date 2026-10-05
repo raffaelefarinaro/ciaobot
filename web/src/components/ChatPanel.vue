@@ -102,6 +102,7 @@
       <AppIcon class="chat-origin-note-icon" name="spark" :size="16" />
       <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
     </p>
+    <TaskOriginNote v-if="!railShown && !inspectorOpen" :chat="chat" variant="note" />
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
@@ -195,6 +196,12 @@
           @open-file="openFileCard"
           @expand-step="expandLazyStep"
         />
+        <!-- A delegated chat's first message is the engine's prompt for the
+             agent, so it reads as the task that was handed over, with the
+             prompt itself one disclosure away. -->
+        <div v-else-if="item.kind === 'user' && taskHandover && item.msg === taskHandover.msg" class="message-wrap task-handover-wrap">
+          <TaskHandoverCard :handover="taskHandover.handover" :prompt="item.msg.content" :known-paths="knownFilePaths" />
+        </div>
         <!-- User message -->
         <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'message-wrap--selected': tappedMessageKey === `user-${i}` }">
           <div
@@ -1168,13 +1175,15 @@
       aria-labelledby="chat-work-rail-title"
     >
       <!-- Where this chat came from, above everything else: one line naming the
-           automation that runs here, and — for the one app-owned chat — the
-           conversation its memory pass is distilling. Its cadence and controls
-           live on the automation's own page. -->
+           automation that runs here, the board task a delegated chat works on,
+           and — for the one app-owned chat — the conversation its memory pass
+           is distilling. Its cadence and controls live on the automation's own
+           page. -->
       <p v-for="s in chatSchedules" :key="`rail-sched-${s.schedule_id}`" class="chat-rail-origin">
         <AppIcon class="chat-rail-origin-icon" name="clock" :size="16" />
         <span>This chat comes from the automation <router-link :to="`/schedules/${s.schedule_id}`">{{ s.title || 'Automation' }}</router-link>.</span>
       </p>
+      <TaskOriginNote :chat="chat" variant="rail" />
       <p v-if="memoryPassOrigin" class="chat-rail-origin">
         <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
         <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
@@ -1292,6 +1301,9 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
+import TaskOriginNote from './TaskOriginNote.vue'
+import TaskHandoverCard from './TaskHandoverCard.vue'
+import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
@@ -1628,6 +1640,20 @@ const memoryPassOrigin = computed<{ chatId: string; title: string } | null>(() =
   const title = store.chats.find(c => c.chat_id === source.chatId)?.title || source.title
   if (!title) return null
   return { chatId: source.chatId, title }
+})
+
+/**
+ * A delegated chat's first message, read back as the task that was handed
+ * over, or null. Only for a chat the engine stamped as a task delegation, only
+ * its first user message, and only when that message carries the fenced
+ * description `build_prompt` writes; anything else renders as typed.
+ */
+const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | null>(() => {
+  if (chat.value.helper?.kind !== 'task_delegation') return null
+  const msg = store.activeMessages.find(m => m.role === 'user')
+  if (!msg) return null
+  const handover = parseTaskHandover(msg.content)
+  return handover ? { msg, handover } : null
 })
 
 // The source is archived, so the transcript is the only thing it can open.
@@ -4486,8 +4512,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   display: flex;
   gap: 10px;
   align-items: center;
-  margin: 0 0 12px;
-  padding: 9px 12px;
+  /* Clear of the header rule and of the Work details tab over its corner. */
+  margin: 12px 0;
+  padding: 9px calc(34px + 12px) 9px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg2);
@@ -4496,6 +4523,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   line-height: 1.45;
 }
 .chat-origin-note-icon { flex: none; color: var(--fg3); }
+@media (pointer: coarse) {
+  .chat-origin-note { padding-right: calc(var(--touch) + 12px); }
+}
 .chat-origin-link {
   min-height: 0;
   padding: 0;
@@ -4959,6 +4989,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 .message-wrap.assistant {
   align-self: flex-start;
+}
+
+/* The handed-over task spans the column: it is the brief the turns below
+   answer, not a bubble the user typed. */
+.message-wrap.task-handover-wrap {
+  align-self: stretch;
 }
 
 .message-row {

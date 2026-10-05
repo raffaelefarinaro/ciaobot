@@ -440,12 +440,16 @@ class TaskAttemptStore:
         workspace: str,
         runtime_dir: Path,
         clock: Callable[[], datetime],
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         if not isinstance(workspace, str) or not workspace.strip():
             raise ValueError("workspace must be a non-empty string")
         self._workspace = workspace
         self._runtime_dir = Path(runtime_dir)
         self._clock = clock
+        #: Called after every document write that landed, so the engine can tell
+        #: open clients an attempt moved. Never called for a failed write.
+        self._on_change = on_change
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", workspace) or "workspace"
         self._path = self._runtime_dir / f"task-attempts-{safe}.json"
 
@@ -604,6 +608,8 @@ class TaskAttemptStore:
                 temporary.unlink()
             except OSError:
                 pass
+        if self._on_change is not None:
+            self._on_change()
 
     def _derive(self, records: dict[str, TaskAttempt]) -> dict[str, TaskAttempt]:
         """Every attempt owned by another process is ``interrupted``.

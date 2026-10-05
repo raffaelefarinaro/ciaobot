@@ -473,6 +473,9 @@ export type EventsWsMessage =
   // payload: the client refetches /api/schedules, which is the only place the
   // computed running/next_run fields are assembled.
   | { type: 'schedules_changed' }
+  // A board task or one of its attempts changed in `workspace` (the same name
+  // `/api/tasks?workspace=` takes). No payload: the client re-reads the board.
+  | { type: 'tasks_changed'; workspace: string }
   // A workspace was archived or restored (here or on another device). No
   // payload: the client refetches /api/workspaces.
   | { type: 'workspaces_changed' }

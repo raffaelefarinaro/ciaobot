@@ -18,8 +18,8 @@
  * that own a turn — Stop and Detach for a live one, Resume and Retry for a
  * settled one, on the card's foot and in the editor. Four things this pane is careful not to imply:
  *
- * - A finished turn is a **badge**, never *Done*. `ready_for_review` draws in
- *   *In progress* and only the user's own Done moves the card.
+ * - A finished turn is a **badge**, never *Done*. `ready_for_review` sits in
+ *   *In review* until approved, and only the user's own Done moves it to *Done*.
  * - The delegated turn is **attended**. The preview says so, and the server holds
  *   to it: an approval card the turn raises is an ordinary Needs-you card in that
  *   chat, not something swallowed because nobody was there.
@@ -43,6 +43,7 @@
  */
 import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import PaneHeader from './PaneHeader.vue'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
@@ -1142,7 +1143,47 @@ async function closeDetail(options: { discard?: boolean } = {}) {
   descriptionState.value = 'idle'
   descriptionSeq++
   board.clearError()
+  clearRequestedTask()
 }
+
+// ── Deep link ─────────────────────────────────────────────────────────────
+//
+// `/tasks?task=<id>` opens that task's editor: a delegated chat links back to
+// its task this way. It waits for the workspace's rows, opens once, and the
+// query goes when the editor closes, so Back and a reload do not reopen a
+// dialog the user dismissed. An id the loaded board does not hold (deleted, or
+// another workspace's) is dropped the same way rather than left in the address.
+
+const route = useRoute()
+const router = useRouter()
+const requestedTaskId = computed(() => {
+  const value = route.query.task
+  return typeof value === 'string' ? value : ''
+})
+
+function clearRequestedTask() {
+  if (!requestedTaskId.value) return
+  const query = { ...route.query }
+  delete query.task
+  void router.replace({ query })
+}
+
+// Not `immediate`: rows left from an earlier visit may predate the task, so the
+// first look is after the mount's own refresh has landed.
+watch(
+  [requestedTaskId, () => board.loadedWorkspace, () => board.loading, tasks],
+  ([id, loaded, loading]) => {
+    if (!id || loading || !loaded || loaded !== workspace.value) return
+    if (detailOpen.value && detailId.value === id) return
+    const task = tasks.value.find((row) => row.id === id)
+    if (!task) {
+      clearRequestedTask()
+      return
+    }
+    if (detailOpen.value) return
+    openDetail(task)
+  },
+)
 
 /**
  * The editor's status control is a move, written the moment it is pressed.

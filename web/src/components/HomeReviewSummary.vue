@@ -32,12 +32,13 @@ import { useProjectStore } from '../stores/projects'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskStore } from '../stores/tasks'
+import { useTaskSignalsStore } from '../stores/taskSignals'
 import { reviewPath } from '../stores/memoryMap'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 
 type ReviewState = 'ready' | 'loading' | 'stale' | 'error'
 type ReviewItem = {
-  key: 'memory' | 'retirement' | 'automations'
+  key: 'tasks' | 'memory' | 'retirement' | 'automations'
   title: string
   detail: string
   count: number
@@ -49,13 +50,22 @@ const projects = useProjectStore()
 const proposals = useProposalsStore()
 const retirement = useVaultReviewStore()
 const tasks = useTaskStore()
+const taskSignals = useTaskSignalsStore()
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : pluralForm}`
 }
 
+// Tasks the agent reported done, waiting for the user's Approve on the board.
+const tasksInReview = computed(() => (
+  taskSignals.loadedWorkspace === projects.activeWorkspace
+    ? taskSignals.tasks.filter(taskSignals.isAwaitingReview)
+    : []
+))
+
 const items = computed<ReviewItem[]>(() => {
   const workspace = projects.activeWorkspace
+  const inReview = tasksInReview.value
   const proposalCount = proposals.scopedRows(workspace).length
   let proposalState: ReviewState = 'ready'
   let proposalDetail = proposalCount
@@ -118,6 +128,15 @@ const items = computed<ReviewItem[]>(() => {
 
   return [
     {
+      key: 'tasks',
+      title: plural(inReview.length, 'task in review', 'tasks in review'),
+      detail: inReview.length === 1
+        ? `${inReview[0].title} · the agent says it is done.`
+        : 'The agent says these are done. Approve or send them back.',
+      count: inReview.length,
+      state: 'ready',
+    },
+    {
       key: 'memory',
       title: proposalCount && proposalState !== 'loading'
         ? plural(proposalCount, 'memory proposal')
@@ -177,6 +196,12 @@ function formatRun(value: string): string {
 }
 
 function openItem(key: ReviewItem['key']) {
+  if (key === 'tasks') {
+    // One task opens its card; several open the board on the In review column.
+    const only = tasksInReview.value.length === 1 ? tasksInReview.value[0] : null
+    void router.push(only ? { path: '/tasks', query: { task: only.id } } : '/tasks')
+    return
+  }
   if (key === 'automations') {
     void router.push('/schedules')
     return
