@@ -586,10 +586,7 @@
       aria-labelledby="chat-work-inspector-title"
     >
       <header class="chat-work-inspector-header">
-        <div>
-          <span class="chat-work-inspector-kicker">Conversation</span>
-          <h2 id="chat-work-inspector-title">Work details</h2>
-        </div>
+        <h2 id="chat-work-inspector-title">Work details</h2>
         <button
           ref="inspectorCloseButton"
           type="button"
@@ -597,7 +594,7 @@
           aria-label="Close work details"
           title="Close"
           @click="inspectorOpen = false"
-        >×</button>
+        ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
       </header>
 
       <div class="chat-work-tabs" role="tablist" aria-label="Work detail sections">
@@ -1174,6 +1171,19 @@
       class="chat-rail"
       aria-labelledby="chat-work-rail-title"
     >
+      <div class="chat-rail-head">
+        <h2 id="chat-work-rail-title" class="rail-title">Work details</h2>
+        <button
+          ref="railHideButton"
+          type="button"
+          class="btn-icon chat-rail-hide"
+          aria-expanded="true"
+          aria-controls="chat-work-rail"
+          aria-label="Hide work details"
+          title="Close work details"
+          @click="hideRail"
+        ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
+      </div>
       <!-- Where this chat came from, above everything else: one line naming the
            automation that runs here, the board task a delegated chat works on,
            and — for the one app-owned chat — the conversation its memory pass
@@ -1188,21 +1198,6 @@
         <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
         <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
       </p>
-      <div class="chat-rail-head">
-        <h2 id="chat-work-rail-title" class="rail-title">Work details</h2>
-        <button
-          ref="railHideButton"
-          type="button"
-          class="btn-icon chat-rail-hide active"
-          aria-expanded="true"
-          aria-controls="chat-work-rail"
-          aria-label="Hide work details"
-          title="Hide work details"
-          @click="hideRail"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
-        </button>
-      </div>
       <!-- What the agent is given. The project also lives here on wide panes;
            the header only names it when this rail is hidden. -->
       <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
@@ -4490,22 +4485,20 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  margin: 0 0 10px;
+  min-height: 52px;
+  margin: -16px -16px 16px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--border);
 }
 .chat-rail-head .rail-title { margin-bottom: 0; }
-/* Same 34px box as the tab that reopens it, pulled into the heading's line
-   height so the row does not grow. Not pulled past the right edge: the rail
-   scrolls, so an overhang widened it, and focusing the button on reopen
-   scrolled the whole rail sideways, cutting off its left edge. */
 .chat-rail-hide {
   min-width: 34px;
   min-height: 34px;
-  margin: -7px 0;
   padding: 7px;
-  color: var(--accent);
+  color: var(--fg2);
 }
 @media (pointer: coarse) {
-  .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); margin-block: -12px; }
+  .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); }
 }
 
 .chat-column {
@@ -4521,12 +4514,14 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   width: var(--page-rail);
   min-width: 0;
   overflow-y: auto;
-  /* Scrolls, but without a visible bar: the rail is a quiet side column. */
-  scrollbar-width: none;
-  padding: 28px 0 24px;
+  margin-block: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
   font-size: var(--text-sm);
 }
-.chat-rail::-webkit-scrollbar { display: none; }
 
 .chat-rail-origin {
   display: flex;
@@ -7164,7 +7159,6 @@ details[open] > .activity-summary::before {
   border-bottom: 1px solid var(--border);
 }
 
-.chat-work-inspector-kicker,
 .chat-work-label {
   display: block;
   color: var(--fg2);

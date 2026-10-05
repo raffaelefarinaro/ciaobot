@@ -37,10 +37,12 @@ describe('AgentContextSection', () => {
     expect(rows[0].text()).toContain('AGENTS.md')
     expect(rows[0].text()).toContain('1k tokens')
     expect(rows[1].text()).toContain('Launch')
-    expect(rows[1].get('pre').text()).toBe(
-      'project="Launch"\nproject_context=Public beta launch planning.\ncanonical_doc=work/memory-vault/projects/launch.md',
-    )
-    await rows[1].get('pre button').trigger('click')
+    expect(rows[1].get('.agent-context-description').text()).toBe('Public beta launch planning.')
+    expect(rows[1].find('pre').exists()).toBe(false)
+    expect(rows[1].text()).not.toContain('project_context=')
+    expect(rows[1].text()).not.toContain('Project brief, sent')
+    expect(rows[1].get('.agent-context-doc').text()).toBe('launch.md')
+    await rows[1].get('.agent-context-doc').trigger('click')
     expect(wrapper.emitted('open-file')?.[0]).toEqual(['work/memory-vault/projects/launch.md'])
     expect(wrapper.getComponent(RouterLinkStub).props('to')).toBe('/project/p1')
     await rows[0].trigger('click')

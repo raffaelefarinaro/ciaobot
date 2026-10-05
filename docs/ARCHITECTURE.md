@@ -18,6 +18,8 @@ For task-oriented reading paths, start with the [documentation hub](README.md).
 
 ## App repo layout
 
+The chat's Work details rail is a closable docked window, using the pinned file viewer's visual vocabulary. `AgentContextSection.vue` shares readable project context and the canonical-document link between the rail and narrow-pane drawer; the underlying capsule and its token estimate are unchanged.
+
 ```
 README.md                      Product intro, quickstart, doc index.
 AGENTS.md                      Contributor guide for coding agents. Native providers load it at session start (Claude Code reads it directly since 2.1.277).

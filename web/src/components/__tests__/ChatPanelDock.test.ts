@@ -197,7 +197,8 @@ describe('ChatPanel automation origin', () => {
 
     expect(wrapper.find('.ctx-bar').exists()).toBe(false)
     const rail = wrapper.get('#chat-work-rail')
-    expect(rail.element.firstElementChild?.classList.contains('chat-rail-origin')).toBe(true)
+    expect(rail.element.firstElementChild?.classList.contains('chat-rail-head')).toBe(true)
+    expect(rail.element.children[1]?.classList.contains('chat-rail-origin')).toBe(true)
     const origin = rail.get('.chat-rail-origin')
     expect(origin.text()).toBe('This chat comes from the automation schedule-1.')
     expect(origin.getComponent(RouterLinkStub).props('to')).toBe('/schedules/schedule-1')

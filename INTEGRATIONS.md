@@ -2,6 +2,8 @@
 
 One-time setup for external tools and CLI dependencies.
 
+The chat's Work details window displays project context and a link to its canonical document; this is a presentation of existing context, with no new integration, configuration, or change to what providers receive.
+
 SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the module docstring of `ciao/providers/claude.py`.
 
 ## Install
