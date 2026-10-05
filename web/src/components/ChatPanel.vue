@@ -102,7 +102,7 @@
       <AppIcon class="chat-origin-note-icon" name="spark" :size="16" />
       <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
     </p>
-    <TaskOriginNote v-if="!railShown && !inspectorOpen" :chat="chat" variant="note" />
+    <TaskOriginNote v-if="!railShown && !inspectorOpen" :chat="chat" variant="note" @marked-done="archiveAfterTaskDone" />
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
@@ -1183,7 +1183,7 @@
         <AppIcon class="chat-rail-origin-icon" name="clock" :size="16" />
         <span>This chat comes from the automation <router-link :to="`/schedules/${s.schedule_id}`">{{ s.title || 'Automation' }}</router-link>.</span>
       </p>
-      <TaskOriginNote :chat="chat" variant="rail" />
+      <TaskOriginNote :chat="chat" variant="rail" @marked-done="archiveAfterTaskDone" />
       <p v-if="memoryPassOrigin" class="chat-rail-origin">
         <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
         <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
@@ -4355,6 +4355,17 @@ watch(showModelPicker, (open) => {
     window.addEventListener('keydown', keyHandler, { once: true })
   }, 0)
 })
+
+/** The task note's Mark done already asked, and said the chat would be archived. */
+async function archiveAfterTaskDone() {
+  if (!chat.value || chat.value.archived) return
+  try {
+    await store.archiveChat(chat.value.chat_id)
+  } catch {
+    return
+  }
+  emit('close')
+}
 
 async function doArchive() {
   if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, {

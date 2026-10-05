@@ -402,14 +402,58 @@ async function onCardKeydown(task: Task, event: KeyboardEvent) {
   paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${task.id}"] .task-open`)?.focus()
 }
 
-async function markDone(task: Task) {
-  const revision = board.revisionOf(task.id)
-  if (!revision) return
+/**
+ * Free a task an attempt still holds, so Done can complete it.
+ *
+ * The store refuses to complete a task linked to an attempt — an open one
+ * (running, waiting on the user) or a settled one still linked (interrupted,
+ * failed, stopped). Approving a result waiting for review is the one case it
+ * completes in a single gesture. For the rest Done is still what the user
+ * asked for, so it asks once and detaches: the chat and its transcript stay,
+ * only the link goes. Resolves whether the completion may go ahead.
+ */
+async function releaseForDone(task: Task): Promise<boolean> {
+  if (!task.attempt_id) return true
+  if (task.live_attempt_id && task.attempt_state === 'ready_for_review') return true
+  const open = Boolean(task.live_attempt_id)
+  const ok = await askConfirm(
+    open
+      ? 'The agent\'s attempt on this task is still open. Detach it and mark the task done? The chat and its transcript stay as they are.'
+      : `This task is still linked to its last attempt (${taskAttemptLabel(task.attempt_state, task.attempt_outcome, task.attempt_detail)}). Unlink it and mark the task done? The chat and its transcript stay as they are.`,
+    { title: 'Mark done', confirmLabel: open ? 'Detach and mark done' : 'Unlink and mark done' },
+  )
+  if (!ok) return false
   board.clearError()
+  const detached = await board.attemptAction(
+    workspace.value, task.id, task.live_attempt_id || task.attempt_id, 'detach',
+  )
+  return Boolean(detached)
+}
+
+async function markDone(task: Task) {
   busyTaskId.value = task.id
+  if (!(await releaseForDone(task))) {
+    busyTaskId.value = ''
+    if (board.error) {
+      projectStore.pushErrorToast('Could not mark the task done', board.error)
+      load()
+    }
+    return
+  }
+  const revision = board.revisionOf(task.id)
+  if (!revision) {
+    busyTaskId.value = ''
+    return
+  }
+  board.clearError()
   await board.complete(workspace.value, task.id, revision)
   busyTaskId.value = ''
-  if (board.error) load()
+  if (board.error) {
+    // The board's own message sits below the columns, out of sight from the
+    // card that was ticked; say it where the user is looking.
+    projectStore.pushErrorToast('Could not mark the task done', board.error)
+    load()
+  }
 }
 
 /**
@@ -1244,23 +1288,15 @@ async function setDetailStatus(next: TaskStatus) {
   const task = detailTask.value
   if (!task) return
   statusError.value = ''
-  // A live attempt that has not reported a result holds the task, and the
-  // store refuses to complete a task out from under it. Done is still what the
-  // user asked for, so offer the one gesture that frees it: detach, which
-  // keeps the chat and its transcript and only lets the task go.
-  if (next === 'done' && task.live_attempt_id && task.attempt_state !== 'ready_for_review') {
-    const ok = await askConfirm(
-      'The agent\'s attempt on this task is still open. Detach it and mark the task done? The chat and its transcript stay as they are.',
-      { title: 'Mark done', confirmLabel: 'Detach and mark done' },
-    )
-    if (!ok) return
-    board.clearError()
+  if (next === 'done') {
     detailSaving.value = true
-    const detached = await board.attemptAction(workspace.value, task.id, task.live_attempt_id, 'detach')
+    const freed = await releaseForDone(task)
     detailSaving.value = false
-    if (!detached) {
-      statusError.value = board.error
-      load()
+    if (!freed) {
+      if (board.error) {
+        statusError.value = board.error
+        load()
+      }
       return
     }
   }
@@ -1625,7 +1661,7 @@ const today = localDateKey()
                 <span class="badge badge--muted">{{ lane.tasks.length }}</span>
               </h3>
               <p v-if="!lane.tasks.length" class="task-lane-empty">
-                {{ dragTask && lane.status && dragTask.status !== lane.status ? 'Drop here.' : 'Nothing here.' }}
+                {{ dragTask && lane.status && dragTask.status !== lane.status ? 'Drop here.' : lane.status === 'done' && lane.earlierDone ? 'Nothing done today.' : 'Nothing here.' }}
               </p>
               <ul v-else class="task-cards">
                 <li
@@ -1821,6 +1857,12 @@ const today = localDateKey()
                   </div>
                 </li>
               </ul>
+              <button
+                v-if="lane.earlierDone"
+                type="button"
+                class="task-lane-more"
+                @click="statusFilter = 'done'"
+              >{{ lane.earlierDone }} done earlier · Show all</button>
             </section>
           </div>
 
@@ -2496,6 +2538,23 @@ const today = localDateKey()
   font-weight: 650;
   letter-spacing: -0.01em;
 }
+.task-lane-more {
+  align-self: flex-start;
+  margin-top: var(--space-2);
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg3);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+.task-lane-more:hover { color: var(--fg); text-decoration-color: currentColor; }
+.task-lane-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+@media (pointer: coarse) { .task-lane-more { min-height: var(--touch); } }
 .task-lane-empty {
   margin: 0;
   color: var(--fg3);

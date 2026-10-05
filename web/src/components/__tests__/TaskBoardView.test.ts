@@ -130,6 +130,10 @@ describe('TaskBoardView', () => {
   let reportPaneWidth = (_width: number) => {}
 
   beforeEach(() => {
+    // The fixtures are dated 2026-03-01; Done keeps only today's, so the
+    // board is read on that day.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-03-01T12:00:00Z'))
     setActivePinia(createPinia())
     apiGet.mockReset()
     apiPost.mockReset()
@@ -167,6 +171,7 @@ describe('TaskBoardView', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     document.body.innerHTML = ''
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
@@ -188,6 +193,23 @@ describe('TaskBoardView', () => {
     signals.tasks = [...BOARD] as Task[]
     await flushPromises()
     expect(boardReads()).toBe(before + 1)
+  })
+
+  it('keeps Done to today, with the rest one click away', async () => {
+    const wrapper = await mountBoard([
+      task({ id: 'today', title: 'Landed today', status: 'done' }),
+      task({ id: 'old', title: 'Landed last week', status: 'done', updated_at: '2026-02-20T09:00:00+00:00' }),
+    ])
+    const done = lanes(wrapper).find((lane) => lane.get('.task-lane-label').text() === 'Done')!
+    expect(done.text()).toContain('Landed today')
+    expect(done.text()).not.toContain('Landed last week')
+    const more = done.get('.task-lane-more')
+    expect(more.text()).toBe('1 done earlier · Show all')
+
+    await more.trigger('click')
+    await nextTick()
+    expect(wrapper.text()).toContain('Landed last week')
+    expect(wrapper.find('.task-lane-more').exists()).toBe(false)
   })
 
   it('reads the active workspace and draws the four columns with their counts', async () => {
@@ -2221,6 +2243,38 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+
+  it('the card checkbox unlinks a settled attempt, after asking, then completes', async () => {
+    const wrapper = await mountWithBody([settledTask()])
+    apiPost.mockImplementation((url: string) => Promise.resolve(
+      url.endsWith('/detach')
+        ? { workspace: 'personal', task: { ...settledTask({ attempt_id: '', chat_id: '' }), revision: REVISION }, attempt: { attempt_id: SETTLED_ID, task_id: 'broke', state: 'interrupted' } }
+        : { workspace: 'personal', task: { ...settledTask({ status: 'done', attempt_id: '' }), revision: REVISION, body: '' } },
+    ))
+
+    await card(wrapper, 'Broke halfway').get('.task-check').trigger('click')
+    await flushPromises()
+
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(String(askConfirm.mock.calls[0]![0])).toContain('still linked to its last attempt (Interrupted)')
+    const posts = apiPost.mock.calls.map((c) => String(c[0]))
+    expect(posts).toEqual([`/api/tasks/broke/attempt/${SETTLED_ID}/detach`, '/api/tasks/broke/complete'])
+    wrapper.unmount()
+  })
+
+  it('the card checkbox says a refusal in a toast, not below the columns', async () => {
+    const wrapper = await mountWithBody([task({ id: 'plain', title: 'Never delegated' })])
+    const toast = vi.fn()
+    useProjectStore().pushErrorToast = toast
+    apiPost.mockRejectedValue(new Error('the task store is busy'))
+
+    await card(wrapper, 'Never delegated').get('.task-check').trigger('click')
+    await flushPromises()
+
+    expect(askConfirm).not.toHaveBeenCalled()
+    expect(toast).toHaveBeenCalledWith('Could not mark the task done', expect.any(String))
+    wrapper.unmount()
+  })
 
   it('the editor\'s Open chat goes to the chat, not to a preview under the editor', async () => {
     const wrapper = await mountWithBody([liveTask({ attempt_state: 'needs_you' })])
