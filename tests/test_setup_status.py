@@ -1483,6 +1483,71 @@ def test_discover_claude_system_skills_merges_standalone_skills(
     ]
 
 
+def test_discover_claude_system_skills_lists_synced_skills_and_loaded_plugins(
+    monkeypatch, tmp_path
+) -> None:
+    """claude.ai-synced skills sit under synced/<bucket>/, and synced plugins
+    report `loaded` rather than `enabled`. The folder is not a skill."""
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+
+    class FakeResult:
+        stdout = (
+            "❯ skill-creator@claude-plugins-official\n"
+            "  Status: ✔ enabled\n"
+            "❯ telegram@claude-plugins-official\n"
+            "  Status: ✘ disabled\n"
+            "Synced from claude.ai:\n"
+            "❯ cowork-plugin-management@synced\n"
+            "  Path: /x\n"
+            "  Status: ✔ loaded\n"
+        )
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(
+        setup_status.subprocess, "run", lambda *_a, **_k: FakeResult()
+    )
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "impeccable").mkdir(parents=True)
+    bucket = skills_dir / "synced" / "org_user"
+    for name in ("docx", "pdf"):
+        (bucket / name).mkdir(parents=True)
+        (bucket / name / "SKILL.md").write_text("---\n---\n", encoding="utf-8")
+    (bucket / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: skills_dir
+    )
+
+    assert setup_status.discover_claude_system_skills() == [
+        "cowork-plugin-management",
+        "docx",
+        "impeccable",
+        "pdf",
+        "skill-creator",
+    ]
+
+
+def test_claude_probe_reports_bundled_skills_once_a_chat_recorded_them(
+    monkeypatch, tmp_path
+) -> None:
+    from ciao import setup_status
+
+    monkeypatch.setattr(setup_status, "_claude_bundled_skills", None)
+    monkeypatch.setattr(
+        setup_status, "_claude_status", lambda *_a, **_k: {"name": "claude", "ok": True}
+    )
+    probe = lambda: setup_status.claude_status_probe({}, config_path=tmp_path / "c.yaml")  # noqa: E731
+
+    assert "bundled_skills" not in probe()
+
+    setup_status.record_claude_bundled_skills(["simplify", "code-review", " "])
+
+    assert probe()["bundled_skills"] == ["code-review", "simplify"]
+
+
 def test_discover_claude_system_skills_falls_back_to_installed_plugins(
     monkeypatch, tmp_path
 ) -> None:

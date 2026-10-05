@@ -824,9 +824,24 @@
                       </template>
                       <template v-else>
                         <span class="hint hint--compact">
-                          {{ conn.ok ? 'None reported by this CLI' : 'Connect to discover' }}
+                          {{ !conn.ok ? 'Connect to discover' : conn.skills ? 'None reported by this CLI' : 'Could not read this list. Press Verify to try again.' }}
                         </span>
                       </template>
+                    </div>
+
+                    <!-- Skills the CLI ships itself, not installed by the user -->
+                    <div class="ws-connectors-header" style="margin-top: 10px;">
+                      <span class="ws-label">Built into {{ conn.label || connKey }} ({{ conn.bundled_skills?.length ?? 0 }})</span>
+                    </div>
+                    <div class="workspace-connector-pills">
+                      <template v-if="conn.bundled_skills && conn.bundled_skills.length">
+                        <span v-for="skill in conn.bundled_skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Ships with ${conn.label || connKey}: ${skill}`">
+                          <span class="pill-dot"></span> {{ skill }}
+                        </span>
+                      </template>
+                      <span v-else class="hint hint--compact">
+                        {{ !conn.ok ? 'Connect to discover' : conn.bundled_skills ? 'None reported by this CLI' : conn.skills ? 'Listed after the next chat with this CLI.' : 'Could not read this list. Press Verify to try again.' }}
+                      </span>
                     </div>
                   </div>
                 </details>
@@ -3199,8 +3214,11 @@ function providerBringsCounts(providerId: string, conn: ProviderConnection): str
   const mcps = connectionMcps(providerId).length
   const skills = conn.skills?.length ?? 0
   const mcpLabel = `${mcps} MCP ${mcps === 1 ? 'server' : 'servers'}`
-  const skillLabel = `${skills} ${skills === 1 ? 'skill or plugin' : 'skills & plugins'}`
-  return `${mcpLabel}, ${skillLabel}`
+  const skillLabel = conn.ok && !conn.skills
+    ? 'skills not read'
+    : `${skills} ${skills === 1 ? 'skill or plugin' : 'skills & plugins'}`
+  const bundled = conn.bundled_skills?.length
+  return bundled ? `${mcpLabel}, ${skillLabel}, ${bundled} built in` : `${mcpLabel}, ${skillLabel}`
 }
 
 

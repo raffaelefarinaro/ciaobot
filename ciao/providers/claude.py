@@ -83,6 +83,7 @@ from ciao.providers.base import (
     rate_limit_quota_payload,
 )
 from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
+from ciao.setup_status import record_claude_bundled_skills
 
 logger = logging.getLogger(__name__)
 
@@ -882,6 +883,8 @@ class ClaudeProvider(BaseSDKProvider):
                         # connection-drop notices, model "<synthetic>"); keep
                         # the last real call rather than clobbering it.
                         last_main_msg = msg
+                    elif isinstance(msg, SystemMessage) and msg.subtype == "init":
+                        await self._record_bundled_skills(client, msg.data or {})
                     for event in self._convert_message(msg):
                         if isinstance(event, ResultEvent):
                             pending_result = event
@@ -1379,6 +1382,36 @@ class ClaudeProvider(BaseSDKProvider):
             ]
 
         return []
+
+    @staticmethod
+    async def _record_bundled_skills(client: Any, init: dict[str, Any]) -> None:
+        """Note which of this chat's skills ship with Claude Code itself.
+
+        The init payload lists every skill the chat can load but not where each
+        came from; the initialize response flags built-in commands but mixes
+        skills with slash commands like /clear. Their intersection is exactly
+        the bundled skills, after Ciaobot's own overrides.
+        """
+        skills = init.get("skills")
+        if not isinstance(skills, list):
+            return
+        try:
+            info = await client.get_server_info()
+        except Exception:  # noqa: BLE001 — Settings detail, never fail a turn
+            logger.debug("get_server_info failed; bundled skills not recorded", exc_info=True)
+            return
+        commands = (info or {}).get("commands")
+        if not isinstance(commands, list):
+            return
+        if not any(isinstance(c, dict) and "builtin" in c for c in commands):
+            # A CLI that predates the flag cannot say; "unknown", not "none".
+            return
+        builtin = {
+            command.get("name")
+            for command in commands
+            if isinstance(command, dict) and command.get("builtin") is True
+        }
+        record_claude_bundled_skills(name for name in skills if name in builtin)
 
     @staticmethod
     def _extract_usage(msg: ResultMessage) -> dict[str, str]:
