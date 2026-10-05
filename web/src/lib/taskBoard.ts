@@ -607,6 +607,38 @@ export interface TaskLane {
   status: TaskStatus | null
   label: string
   tasks: Task[]
+  /** Done tasks left out because they were not finished today; Show all lists them. */
+  earlierDone: number
+}
+
+/**
+ * Whether a done task was finished today, in the viewer's own day.
+ *
+ * The record has no completion stamp, so its last write stands in for one:
+ * completing a task writes it, and an edit to an old done task brings it back
+ * for the day, which is the honest reading of "touched today".
+ */
+export function doneToday(task: Task, now: Date = new Date()): boolean {
+  const at = new Date(task.updated_at)
+  if (Number.isNaN(at.getTime())) return false
+  return at.getFullYear() === now.getFullYear()
+    && at.getMonth() === now.getMonth()
+    && at.getDate() === now.getDate()
+}
+
+/**
+ * The unfiltered board keeps Done to today: the column is where a finished
+ * card visibly lands, not a history that grows for ever. The Done filter
+ * lists every done task.
+ */
+function withDoneToday(tasks: Task[], now: Date): { kept: Task[]; earlierDone: number } {
+  const kept: Task[] = []
+  let earlierDone = 0
+  for (const task of tasks) {
+    if (task.status === 'done' && !doneToday(task, now)) earlierDone += 1
+    else kept.push(task)
+  }
+  return { kept, earlierDone }
 }
 
 /**
@@ -619,22 +651,24 @@ export interface TaskLane {
  */
 export function taskLanes(
   tasks: Task[],
-  options: { status: TaskStatus | 'all'; narrow: boolean },
+  options: { status: TaskStatus | 'all'; narrow: boolean; now?: Date },
 ): TaskLane[] {
+  const now = options.now ?? new Date()
   if (options.status === 'all' && !options.narrow) {
-    return TASK_COLUMNS.map((column) => ({
-      status: column.status,
-      label: column.label,
-      tasks: sortTasks(tasks.filter((task) => task.status === column.status)),
-    }))
+    return TASK_COLUMNS.map((column) => {
+      const lane = tasks.filter((task) => task.status === column.status)
+      const { kept, earlierDone } = column.status === 'done'
+        ? withDoneToday(lane, now)
+        : { kept: lane, earlierDone: 0 }
+      return { status: column.status, label: column.label, tasks: sortTasks(kept), earlierDone }
+    })
   }
-  const label = options.status === 'all'
-    ? 'All tasks'
-    : taskStatusLabel(options.status)
-  const kept = options.status === 'all'
-    ? tasks
-    : tasks.filter((task) => task.status === options.status)
-  return [{ status: options.status === 'all' ? null : options.status, label, tasks: sortTasks(kept) }]
+  if (options.status === 'all') {
+    const { kept, earlierDone } = withDoneToday(tasks, now)
+    return [{ status: null, label: 'All tasks', tasks: sortTasks(kept), earlierDone }]
+  }
+  const kept = tasks.filter((task) => task.status === options.status)
+  return [{ status: options.status, label: taskStatusLabel(options.status), tasks: sortTasks(kept), earlierDone: 0 }]
 }
 
 /** The board's counts per status, unreadable files excluded. */

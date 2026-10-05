@@ -1625,7 +1625,7 @@ const today = localDateKey()
                 <span class="badge badge--muted">{{ lane.tasks.length }}</span>
               </h3>
               <p v-if="!lane.tasks.length" class="task-lane-empty">
-                {{ dragTask && lane.status && dragTask.status !== lane.status ? 'Drop here.' : 'Nothing here.' }}
+                {{ dragTask && lane.status && dragTask.status !== lane.status ? 'Drop here.' : lane.status === 'done' && lane.earlierDone ? 'Nothing done today.' : 'Nothing here.' }}
               </p>
               <ul v-else class="task-cards">
                 <li
@@ -1821,6 +1821,12 @@ const today = localDateKey()
                   </div>
                 </li>
               </ul>
+              <button
+                v-if="lane.earlierDone"
+                type="button"
+                class="task-lane-more"
+                @click="statusFilter = 'done'"
+              >{{ lane.earlierDone }} done earlier · Show all</button>
             </section>
           </div>
 
@@ -2496,6 +2502,23 @@ const today = localDateKey()
   font-weight: 650;
   letter-spacing: -0.01em;
 }
+.task-lane-more {
+  align-self: flex-start;
+  margin-top: var(--space-2);
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg3);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+.task-lane-more:hover { color: var(--fg); text-decoration-color: currentColor; }
+.task-lane-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+@media (pointer: coarse) { .task-lane-more { min-height: var(--touch); } }
 .task-lane-empty {
   margin: 0;
   color: var(--fg3);

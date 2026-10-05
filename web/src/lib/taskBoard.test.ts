@@ -38,6 +38,9 @@ import {
 } from './taskBoard'
 import type { Task } from './types'
 
+/** The day the fixtures' `updated_at` falls on, so Done keeps them. */
+const FIXTURE_DAY = new Date('2026-03-01T12:00:00Z')
+
 function task(overrides: Partial<Task> = {}): Task {
   return {
     id: 'a',
@@ -166,7 +169,7 @@ describe('taskLanes', () => {
   ]
 
   it('gives a wide unfiltered board the four fixed columns, in board order', () => {
-    const lanes = taskLanes(rows, { status: 'all', narrow: false })
+    const lanes = taskLanes(rows, { status: 'all', narrow: false, now: FIXTURE_DAY })
     expect(lanes.map((lane) => lane.label)).toEqual(['To do', 'In progress', 'In review', 'Done'])
     expect(lanes.map((lane) => lane.tasks.map((t) => t.id))).toEqual([
       ['b1', 'b2'],
@@ -177,7 +180,7 @@ describe('taskLanes', () => {
   })
 
   it('gives a narrow board one list holding everything', () => {
-    const lanes = taskLanes(rows, { status: 'all', narrow: true })
+    const lanes = taskLanes(rows, { status: 'all', narrow: true, now: FIXTURE_DAY })
     expect(lanes).toHaveLength(1)
     expect(lanes[0]!.status).toBeNull()
     expect(lanes[0]!.tasks.map((t) => t.id).sort()).toEqual(['b1', 'b2', 'd1', 'h1', 'i1'])
@@ -185,7 +188,7 @@ describe('taskLanes', () => {
 
   it('narrows to one lane on either layout when a status is picked', () => {
     for (const narrow of [false, true]) {
-      const lanes = taskLanes(rows, { status: 'in_review', narrow })
+      const lanes = taskLanes(rows, { status: 'in_review', narrow, now: FIXTURE_DAY })
       expect(lanes).toHaveLength(1)
       expect(lanes[0]!.label).toBe('In review')
       expect(lanes[0]!.tasks.map((t) => t.id)).toEqual(['h1'])
@@ -193,7 +196,7 @@ describe('taskLanes', () => {
   })
 
   it('shows an empty lane rather than dropping a column', () => {
-    const lanes = taskLanes([task({ status: 'done' })], { status: 'all', narrow: false })
+    const lanes = taskLanes([task({ status: 'done' })], { status: 'all', narrow: false, now: FIXTURE_DAY })
     expect(lanes).toHaveLength(4)
     expect(lanes[0]!.tasks).toEqual([])
     expect(lanes[3]!.tasks).toHaveLength(1)
@@ -396,5 +399,27 @@ describe('splitTaskLog / joinTaskLog', () => {
   it('leaves a body with no log alone', () => {
     expect(splitTaskLog('Plain.\n')).toEqual({ description: 'Plain.\n', log: '' })
     expect(joinTaskLog('Plain.\n', '')).toBe('Plain.\n')
+  })
+})
+
+describe('Done keeps to today on the unfiltered board', () => {
+  it('leaves earlier done tasks to Show all, and counts them', () => {
+    const rows = [
+      task({ id: 'today', status: 'done', updated_at: '2026-03-01T08:00:00Z' }),
+      task({ id: 'old', status: 'done', updated_at: '2026-02-20T08:00:00Z' }),
+      task({ id: 'open', status: 'backlog', updated_at: '2026-01-01T08:00:00Z' }),
+    ]
+    const done = taskLanes(rows, { status: 'all', narrow: false, now: FIXTURE_DAY }).find(l => l.status === 'done')!
+    expect(done.tasks.map(t => t.id)).toEqual(['today'])
+    expect(done.earlierDone).toBe(1)
+
+    const list = taskLanes(rows, { status: 'all', narrow: true, now: FIXTURE_DAY })[0]!
+    expect(list.tasks.map(t => t.id).sort()).toEqual(['open', 'today'])
+    expect(list.earlierDone).toBe(1)
+
+    // The Done filter is the whole history.
+    const all = taskLanes(rows, { status: 'done', narrow: false, now: FIXTURE_DAY })[0]!
+    expect(all.tasks.map(t => t.id).sort()).toEqual(['old', 'today'])
+    expect(all.earlierDone).toBe(0)
   })
 })
