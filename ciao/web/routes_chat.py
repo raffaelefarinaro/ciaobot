@@ -300,7 +300,17 @@ async def ws_chat(websocket: WebSocket) -> None:
 
             if msg_type == "message":
                 text = msg.get("text", "")
-                if not text:
+                images = []
+                for ref in msg.get("images", []):
+                    attachment = pcm.resolve_image_ref(ref)
+                    if attachment:
+                        images.append(attachment)
+
+                # An image-only follow-up is a real message: the images are
+                # the content, so they go out with an empty prompt instead of
+                # being dropped without a word (#1112). Only an entry with
+                # neither text nor images has nothing to send.
+                if not str(text or "").strip() and not images:
                     continue
 
                 # A client with an open socket to a chat that was archived
@@ -319,12 +329,6 @@ async def ws_chat(websocket: WebSocket) -> None:
                     except (WebSocketDisconnect, RuntimeError):
                         break
                     continue
-
-                images = []
-                for ref in msg.get("images", []):
-                    attachment = pcm.resolve_image_ref(ref)
-                    if attachment:
-                        images.append(attachment)
 
                 # Concurrent-send handling. A message sent while a stream is in
                 # flight is buffered for flush when the turn finishes. Same-turn
