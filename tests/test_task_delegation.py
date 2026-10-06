@@ -1106,6 +1106,24 @@ async def test_a_stream_with_no_result_and_a_leftover_permission_card_is_interru
     assert _attempt_store(plane).get_live(task["id"]) is None
 
 
+async def test_a_stream_with_no_result_and_a_leftover_native_question_card_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    """A native question form keeps the turn open, so a saved card here is a leftover."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Lost with a native card")
+    pcm.next_events = [{"type": "text", "text": "half an answer"}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": [], "request_id": "que_1"}'
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+
 async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
     tmp_path: Path,
 ) -> None:

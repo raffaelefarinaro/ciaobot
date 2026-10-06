@@ -268,6 +268,25 @@ def _chat_needs_user(chat: Any) -> bool:
     )
 
 
+def _chat_paused_on_question(chat: Any) -> bool:
+    """Whether a chat's last turn ended paused on a question card.
+
+    Only a card without a native ``request_id`` pauses by ending the stream:
+    the drive loop stops the provider and waits for the answer. A native
+    (opencode) form keeps an attended turn open until it is answered, and the
+    card stays saved until the reply is acknowledged, so a native card on a
+    stream that has already ended is a leftover from a lost turn.
+    """
+    raw = getattr(chat, "pending_question", "") if chat is not None else ""
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return True
+    return not (isinstance(payload, dict) and payload.get("request_id"))
+
+
 def _task_row_with_attempt(
     document: TaskDocument,
     live: TaskAttempt | None,
@@ -3763,10 +3782,10 @@ class CiaoControlPlane:
             # chat with a question card up is a paused turn, not a lost one. A
             # permission card does not count: that pause keeps the stream open, and
             # the card stays saved after the stream ends until the answer is
-            # confirmed, so here it can only be a leftover.
+            # confirmed, so here it can only be a leftover. A native (opencode)
+            # question card does not count either, for the same reason.
             try:
-                chat = self.pcm.get_chat(chat_id)
-                waiting = chat is not None and bool(getattr(chat, "pending_question", ""))
+                waiting = _chat_paused_on_question(self.pcm.get_chat(chat_id))
             except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
                 logger.exception("delegation: could not read chat %s after the turn", chat_id)
                 waiting = False
