@@ -5103,11 +5103,11 @@ class ProjectChatManager:
         return self._subagents.running_counts()
 
     @property
-    def background_run_counts(self) -> dict[str, int]:
-        """Live ``background_run_start`` count per chat (>0 only).
+    def background_runs(self) -> dict[str, list[dict[str, Any]]]:
+        """Live ``background_run_start`` runs per chat, as PWA summaries.
 
         Read from the runner's registry, not a cached tally, so a client
-        reconnecting mid-run gets the real number rather than whatever it had
+        reconnecting mid-run gets the real rows rather than whatever it had
         when its socket dropped. (A restart does not carry runs over:
         ``BackgroundRunner.start`` resolves every non-terminal run as an
         orphan before the server serves, so the registry is already honest by
@@ -5118,32 +5118,53 @@ class ProjectChatManager:
             return {}
         try:
             # ``_background_runner`` is typed Any (wired after construction),
-            # so the annotation is what keeps this a dict[str, int].
-            counts: dict[str, int] = runner.active_counts()
+            # so the annotation is what keeps this typed.
+            active: dict[str, list[Any]] = runner.active_runs()
         except Exception:  # noqa: BLE001 — an indicator must not break /ws/events
-            logger.exception("Background run counts unavailable")
+            logger.exception("Background runs unavailable")
             return {}
-        return counts
+        return {
+            chat_id: [run.summary() for run in runs]
+            for chat_id, runs in active.items()
+        }
 
-    def announce_background_runs(self, chat_id: str) -> None:
-        """Publish this chat's live background-run count to connected clients.
+    def _background_run_summaries(self, chat_id: str) -> list[dict[str, Any]]:
+        """One chat's live run summaries, without summarising every chat's."""
+        runner = self._background_runner
+        if runner is None:
+            return []
+        try:
+            active: dict[str, list[Any]] = runner.active_runs()
+        except Exception:  # noqa: BLE001 — an indicator must not break the edge
+            logger.exception("Background runs unavailable")
+            return []
+        return [run.summary() for run in active.get(chat_id, [])]
+
+    def announce_background_runs(
+        self, chat_id: str, *, finished: Any | None = None
+    ) -> None:
+        """Publish this chat's live background runs to connected clients.
 
         Called on both edges (a run starting, a run finishing). A background
         run is deliberately non-blocking, so the chat's turn ends while the
         command is still going; this event is the only thing that keeps the
         chat from looking finished. Distinct from ``chat_subagents_ready``:
-        these runs have no transcript and no agent to open, only a count and
-        a log.
+        these runs have no transcript and no agent to open, only a command
+        and a log. ``finished`` is the run that just ended, so the client can
+        say how it ended instead of the row silently vanishing.
         """
         if not chat_id:
             return
         chat = self._chats.get(chat_id)
-        self._events.publish({
+        event: dict[str, Any] = {
             "type": "chat_background_runs",
             "chat_id": chat_id,
             "project_id": chat.project_id if chat is not None else "",
-            "running": self.background_run_counts.get(chat_id, 0),
-        })
+            "runs": self._background_run_summaries(chat_id),
+        }
+        if finished is not None:
+            event["finished"] = finished.summary()
+        self._events.publish(event)
 
     def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
         """Move queued follow-ups off the (about-to-be-torn-down) stream onto
