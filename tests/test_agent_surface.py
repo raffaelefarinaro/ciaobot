@@ -1033,7 +1033,13 @@ def _two_workspace_plane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     # The seam the re-rooting migration flips: per-workspace directories.
     monkeypatch.setattr(CiaoConfig, "agent_root", lambda self, name: tmp_path / name)
-    pcm = SimpleNamespace(get_active_stream=lambda chat_id: None)
+    # `file_surface` records its intent through the manager for a chat-scoped
+    # principal (#1118), so this fake declares the method rather than relying on
+    # a production-side getattr shim that does not exist.
+    pcm = SimpleNamespace(
+        get_active_stream=lambda chat_id: None,
+        surface_chat_file=lambda chat_id, path: None,
+    )
     plane = CiaoControlPlane(
         config, project_chat_manager=pcm, schedule_manager=SimpleNamespace()
     )
