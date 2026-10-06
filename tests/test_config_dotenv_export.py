@@ -108,28 +108,29 @@ def test_export_false_keeps_the_process_environment_winning(
     assert config.pwa_auth_token == "from-the-shell"
 
 
-def test_a_leaked_relative_runtime_root_cannot_survive_a_test(
+def test_a_dotenv_runtime_root_is_never_exported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The concrete harm the autouse fixture exists to stop.
-
-    `.env` carries `CIAO_RUNTIME_ROOT=.runtime`, which is relative. Leaked into
-    a later caller whose `CIAO_WORKSPACE` is unset, it resolves against the cwd
-    — which is how a CLI run wrote its outcome log into the repository checkout
-    instead of its own workspace.
+    """`.env` used to carry `CIAO_RUNTIME_ROOT=.runtime`, which is relative.
+    Leaked into a later caller whose `CIAO_WORKSPACE` is unset, it resolved
+    against the cwd — which is how a CLI run wrote its outcome log into the
+    repository checkout. The line is no longer read, so it never reaches
+    `os.environ`; the rest of the file still does, and is reset as before.
     """
     workspace = _workspace_with_env(
-        tmp_path / "ws", "CIAO_RUNTIME_ROOT=.runtime\n"
+        tmp_path / "ws", "CIAO_RUNTIME_ROOT=.runtime\nCIAO_TEST_EXPORTED=1\n"
     )
     monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
     monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+    monkeypatch.delenv("CIAO_TEST_EXPORTED", raising=False)
 
     CiaoConfig.from_env()
-    assert os.environ.get("CIAO_RUNTIME_ROOT") == ".runtime"
+    assert "CIAO_RUNTIME_ROOT" not in os.environ
+    assert os.environ.get("CIAO_TEST_EXPORTED") == "1"
 
     # The autouse fixture runs this at teardown for every test.
     reset_exported_dotenv()
-    assert "CIAO_RUNTIME_ROOT" not in os.environ
+    assert "CIAO_TEST_EXPORTED" not in os.environ
 
 
 def test_a_whitespace_only_workspace_does_not_resolve_to_the_cwd(

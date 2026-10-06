@@ -135,8 +135,8 @@ def _reset_exported_dotenv() -> None:
     ``monkeypatch`` cannot undo a key it never saw set, so one test's fixture
     workspace leaked into every test after it.
 
-    That is not merely untidy. A ``.env`` sets ``CIAO_RUNTIME_ROOT=.runtime``,
-    which is relative; leaked into a later test whose ``CIAO_WORKSPACE`` is
+    That is not merely untidy. A ``.env`` used to set
+    ``CIAO_RUNTIME_ROOT=.runtime`` (no longer exported), which is relative; leaked into a later test whose ``CIAO_WORKSPACE`` is
     unset, it resolved against the cwd and sent that test's outcome log into
     the repository checkout's own ``.runtime`` instead of its ``tmp_path``.
     """

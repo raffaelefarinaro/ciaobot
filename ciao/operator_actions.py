@@ -989,10 +989,38 @@ def _is_setup_written_default(name: str, value: str) -> bool:
     return default is not None and value.strip().lower() == default
 
 
+# Ignored in `.env` only: the process environment (a service definition, test
+# isolation) still sets it, so it is read from the file, never from the merged
+# source. Setup wrote `.runtime`; any value naming `<workspace>/.runtime` is that
+# default and stays silent.
+_RUNTIME_ROOT_HINT = (
+    "remove it: the runtime folder is always <workspace>/.runtime now; move "
+    "its contents there before deleting the line"
+)
+
+
+def _dotenv_runtime_root_moved(config: Any) -> bool:
+    """Whether the workspace `.env` sets a non-default ``CIAO_RUNTIME_ROOT``."""
+    workspace = getattr(config, "workspace_root", None)
+    if not workspace:
+        return False
+    from ciao.macos_service import read_dotenv
+
+    root = Path(workspace).expanduser()
+    raw = read_dotenv(root / ".env").get("CIAO_RUNTIME_ROOT", "").strip()
+    if not raw:
+        return False
+    named = Path(raw).expanduser()
+    if not named.is_absolute():
+        named = root / named
+    return named.resolve() != (root / ".runtime").resolve()
+
+
 def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction]:
     """Environment variables the engine no longer reads.
 
     `PWA_AUTH_REQUIRED` went when password protection became unconditional;
+    `CIAO_RUNTIME_ROOT` is no longer read from `.env`;
     the server variables moved to Settings after a one-time import;
     `CIAO_WORKSPACES` gave way to the Settings-owned runtime registry. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
@@ -1005,6 +1033,8 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
         if str(source.get(name, "")).strip()
         and not _is_setup_written_default(name, str(source.get(name, "")))
     ]
+    if _dotenv_runtime_root_moved(context.config):
+        stale.append(("CIAO_RUNTIME_ROOT", _RUNTIME_ROOT_HINT))
     if not stale:
         return []
     names = ", ".join(name for name, _hint in stale)

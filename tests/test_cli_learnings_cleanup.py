@@ -1259,20 +1259,17 @@ def test_a_bare_shell_writes_the_receipt_to_the_installed_runtime(
     assert not (elsewhere / ".runtime").exists()
 
 
-def test_a_bare_shell_reads_the_installed_dotenv(
+def test_a_bare_shell_ignores_a_runtime_root_in_the_installed_dotenv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A setting the install keeps in its `.env` reaches a bare-shell run.
+    """A bare-shell run reaches the installed runtime, `<install>/.runtime`.
 
-    The receipt reaching the installed runtime is only half of what the install
-    says: the runtime root it uses can be a setting of its own, and that setting
-    lives in the workspace `.env` the running server reads. The explicit env this
-    command hands `from_env` skips discovery entirely, so the inline copy of the
-    LaunchAgent lookup carried the workspace across and dropped the overlay — and
-    a receipt written under the default root is a review the update task never
-    sees. Relative, exactly as `.env` writes it: resolved against the install.
+    `CIAO_RUNTIME_ROOT` is no longer read from the workspace `.env` (only the
+    process environment moves the runtime root), so a leftover line naming
+    another directory must not divert the receipt there: the server, which
+    ignores the line too, would never see it.
     """
     vault = _per_root_install(
         tmp_path, monkeypatch, records=(RETIRED_RECORD, UNPROPOSED_RECORD)
@@ -1280,9 +1277,6 @@ def test_a_bare_shell_reads_the_installed_dotenv(
     approval = _write_approval(tmp_path, _approvals(RETIRED_RECORD))
     install = tmp_path / "install"
     runtime = install / ".runtime"
-    # An install whose runtime root is its own keeps the registry there, so the
-    # workspace name still resolves: this run must reach the custom root AND
-    # still read the install, not fall back to the vault directory's name.
     custom = install / "custom-runtime"
     custom.mkdir()
     (custom / "workspaces.json").write_text(
@@ -1313,10 +1307,10 @@ def test_a_bare_shell_reads_the_installed_dotenv(
         ]
     ) == 0
 
-    receipt = next((custom / "migration").glob("learnings-cleanup-*.json"))
+    receipt = next((runtime / "migration").glob("learnings-cleanup-*.json"))
     assert json.loads(receipt.read_text(encoding="utf-8"))["workspace"] == WORKSPACE
     assert "Removed 1 entr(y/ies)." in capsys.readouterr().out
-    assert not (runtime / "migration").exists(), "the default root is not this install's"
+    assert not (custom / "migration").exists(), "a .env runtime root is not read"
     assert not (elsewhere / ".runtime").exists()
 
 

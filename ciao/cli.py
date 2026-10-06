@@ -3424,9 +3424,9 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
     if dotenv_path.is_file():
         from dotenv import dotenv_values
 
-        config_source.update(
-            {key: value for key, value in dotenv_values(dotenv_path).items() if value is not None}
-        )
+        from ciao.config import without_ignored_dotenv_keys
+
+        config_source.update(without_ignored_dotenv_keys(dotenv_values(dotenv_path)))
     if args.workspace is None:
         config_source.update(os.environ)
     # Anchored to the already-resolved `workspace`, not `_resolve_runtime_root`'s
@@ -5788,6 +5788,8 @@ def _sync_skills_command(args: argparse.Namespace) -> int:
 
 
 def _load_env_file(path: Path) -> None:
+    from ciao.config import DOTENV_IGNORED_KEYS
+
     if not path.exists():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -5796,7 +5798,7 @@ def _load_env_file(path: Path) -> None:
             continue
         key, value = cleaned.split("=", 1)
         key = key.strip()
-        if key and key not in os.environ:
+        if key and key not in os.environ and key not in DOTENV_IGNORED_KEYS:
             os.environ[key] = value.strip().strip("'\"")
 
 
@@ -5896,9 +5898,15 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     # and every /ws and authed /api request would be rejected.
     from ciao.app_settings import read_app_settings
 
-    host = read_app_settings(
-        workspace_root / RUNTIME_DIR_NAME / "app_settings.json"
-    ).pwa_host
+    # The runtime root is `<workspace>/.runtime` unless the process
+    # environment names another (a `.env` line is not read).
+    runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+    runtime_root = (
+        Path(runtime_env).expanduser() if runtime_env else Path(RUNTIME_DIR_NAME)
+    )
+    if not runtime_root.is_absolute():
+        runtime_root = workspace_root / runtime_root
+    host = read_app_settings(runtime_root / "app_settings.json").pwa_host
     if host in ("0.0.0.0", "127.0.0.1", "::", "::1", ""):
         host = "localhost"
     port = os.environ.get("PWA_PORT", "8443")

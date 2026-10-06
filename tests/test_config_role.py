@@ -416,3 +416,37 @@ def test_a_folder_with_only_a_dotenv_is_not_a_workspace(tmp_path: Path, monkeypa
 
     assert config.bootstrap_mode is True
     assert config.workspace_root == (tmp_path / "boot").resolve()
+
+
+def test_dotenv_runtime_root_is_not_read(tmp_path, monkeypatch) -> None:
+    """The runtime root is `<workspace>/.runtime` unless the PROCESS environment
+    names another; a `CIAO_RUNTIME_ROOT` line in `.env` is dropped, and is not
+    exported into `os.environ` either, where other readers would pick it up."""
+    import os
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".env").write_text(
+        f"PWA_AUTH_TOKEN=pw\nCIAO_RUNTIME_ROOT={tmp_path / 'elsewhere'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    for export in (False, True):
+        config = CiaoConfig.from_env(export=export)
+        assert config.state_path.parent == (workspace / ".runtime").resolve()
+    assert "CIAO_RUNTIME_ROOT" not in os.environ
+    assert os.environ.get("PWA_AUTH_TOKEN") == "pw"
+
+
+def test_process_runtime_root_still_moves_the_runtime(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".env").write_text("PWA_AUTH_TOKEN=pw\n", encoding="utf-8")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(tmp_path / "isolated"))
+
+    config = CiaoConfig.from_env(export=False)
+
+    assert config.state_path.parent == (tmp_path / "isolated").resolve()

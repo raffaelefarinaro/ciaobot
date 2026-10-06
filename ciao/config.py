@@ -83,6 +83,22 @@ LEGACY_GWS_PROFILE_IMPORT_MARKER = "gws-profile-env-imported.json"
 # read permanently changed its caller's environment.
 _EXPORTED_DOTENV_KEYS: set[str] = set()
 
+# Variables a workspace ``.env`` can no longer set. The runtime root is
+# ``<workspace>/.runtime`` unless the PROCESS environment names another one (a
+# service definition, test isolation); a ``CIAO_RUNTIME_ROOT`` line in ``.env``
+# is dropped wherever the file is read, so no reader can disagree about where
+# the runtime lives. The legacy-env-ignored tile reports a non-default one.
+DOTENV_IGNORED_KEYS: frozenset[str] = frozenset({"CIAO_RUNTIME_ROOT"})
+
+
+def without_ignored_dotenv_keys(values: Mapping[str, str | None]) -> dict[str, str]:
+    """``values`` read from a workspace ``.env``, minus :data:`DOTENV_IGNORED_KEYS`."""
+    return {
+        key: value
+        for key, value in values.items()
+        if key and value is not None and key not in DOTENV_IGNORED_KEYS
+    }
+
 
 def _workspace_env(source: Any) -> str:
     """``CIAO_WORKSPACE`` as a usable path, or "" — never raw whitespace.
@@ -147,11 +163,7 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     # the runtime root), so `discover_workspace`'s `is_dir()` guard is part of
     # this rule.
     try:
-        overlay: dict[str, str] = {
-            key: value
-            for key, value in dotenv_values(dotenv_path).items()
-            if key and value is not None
-        }
+        overlay: dict[str, str] = without_ignored_dotenv_keys(dotenv_values(dotenv_path))
     except OSError:
         overlay = {}
     # The pin is the merge's final word, not the overlay's: discovery is entered
@@ -174,10 +186,10 @@ def reset_exported_dotenv() -> None:
     the operator exported themselves.
 
     Tests use it to stop one fixture's workspace bleeding into the next. It
-    matters more than tidiness: a `.env` sets `CIAO_RUNTIME_ROOT=.runtime`,
-    which is RELATIVE, and once leaked it resolves against whatever cwd the
-    next caller happens to have — which is how a later CLI run wrote its
-    outcome log into the repo checkout instead of its own workspace.
+    matters more than tidiness: a leaked RELATIVE path (`.env` used to carry
+    `CIAO_RUNTIME_ROOT=.runtime`) resolves against whatever cwd the next
+    caller happens to have — which is how a later CLI run wrote its outcome
+    log into the repo checkout instead of its own workspace.
     """
     for key in sorted(_EXPORTED_DOTENV_KEYS):
         os.environ.pop(key, None)
@@ -1618,16 +1630,17 @@ class CiaoConfig:
                     # operator exported themselves.
                     before = set(os.environ)
                     load_dotenv(dotenv_path)
-                    _EXPORTED_DOTENV_KEYS.update(set(os.environ) - before)
+                    added = set(os.environ) - before
+                    for key in added & DOTENV_IGNORED_KEYS:
+                        os.environ.pop(key, None)
+                    _EXPORTED_DOTENV_KEYS.update(added - DOTENV_IGNORED_KEYS)
                 else:
                     from dotenv import dotenv_values
 
                     try:
-                        overlay = {
-                            key: value
-                            for key, value in dotenv_values(dotenv_path).items()
-                            if key and value is not None
-                        }
+                        overlay = without_ignored_dotenv_keys(
+                            dotenv_values(dotenv_path)
+                        )
                     except OSError:
                         overlay = {}
             if export:
