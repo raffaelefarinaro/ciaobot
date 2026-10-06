@@ -362,6 +362,33 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
+  it('ChatLayout leaves Esc to an open dialog or menu, and leaves the page otherwise', async () => {
+    const router = makeRouter()
+    await router.push('/tasks')
+    await router.isReady()
+    const mod = await import('../ChatLayout.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    const esc = () => document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+
+    // Reka marks every open dialog, menu and popover this way; its own Esc
+    // listener runs after ChatLayout's, so the page must not act first.
+    const layer = document.createElement('div')
+    layer.setAttribute('data-dismissable-layer', '')
+    document.body.appendChild(layer)
+    esc()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/tasks')
+
+    layer.remove()
+    esc()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/')
+    wrapper.unmount()
+  })
+
   it('ChatLayout renders the task board at /tasks', async () => {
     const router = makeRouter()
     await router.push('/tasks')

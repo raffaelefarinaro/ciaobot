@@ -1,7 +1,4 @@
 <template>
-  <!-- Esc is stopped at the dialog and closes it by hand: the app's "Esc leaves
-       Settings" shortcut listens on window and is registered before Reka's own
-       Esc listener, so letting the key bubble would navigate away underneath. -->
   <DialogRoot :open="open" modal @update:open="value => { if (!value) emit('close') }">
     <DialogPortal>
       <DialogOverlay class="move-backdrop" />
@@ -9,7 +6,6 @@
         class="move-card"
         aria-modal="true"
         @open-auto-focus="onOpenAutoFocus"
-        @keydown.esc.stop.prevent="emit('close')"
       >
         <DialogTitle as="p" class="move-title">Move workspace</DialogTitle>
         <DialogDescription as="p" class="move-hint">

@@ -915,6 +915,11 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     // The confirm dialog and the file viewer own Esc while they are up.
     if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    // Any open Reka layer (dialog, menu, popover) owns Esc: Reka marks each one
+    // `data-dismissable-layer` and closes it from its own window listener,
+    // which is registered after this one and so runs after it. Without this,
+    // Esc in a dialog on Settings or Automations also left the page.
+    if (document.querySelector('[data-dismissable-layer]')) return
     // A nested control that handled the key already, without claiming it. Popups
     // like ModelSelector close on Esc but do not stopPropagation, and treating
     // that press as "go home" both discarded their dismissal and navigated away
