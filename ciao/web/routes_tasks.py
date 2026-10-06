@@ -84,9 +84,10 @@ _WRITE_KEYS = ("workspace", "expected_revision", "body")
 
 #: Body keys ``POST /delegate`` may carry. Deliberately its own set rather than
 #: ``_WRITE_KEYS``: a delegation carries no editable task fields at all. The
-#: prompt is built server-side from the record, so there is no body key through
-#: which a request could hand the agent work nobody filed.
-_DELEGATE_KEYS = ("workspace", "expected_revision", "project_id")
+#: prompt is built server-side from the record; ``instructions`` is the user's
+#: note for this hand-over, quoted after the description in its own fence, so it
+#: can shape how the task is done but cannot replace the task.
+_DELEGATE_KEYS = ("workspace", "expected_revision", "project_id", "instructions")
 
 #: Body keys ``POST …/attempt/{attempt_id}/update`` may carry. Its own set rather
 #: than a reuse: an update carries the message the user approved and the revision it
@@ -292,7 +293,8 @@ async def task_update(request: Request) -> JSONResponse:
 
 
 async def task_delegate(request: Request) -> JSONResponse:
-    """Hand one task to the agent: ``{"workspace", "expected_revision", "project_id"}``.
+    """Hand one task to the agent: ``{"workspace", "expected_revision", "project_id",
+    "instructions"}``.
 
     200 with the attempt, the chat it runs in and the task as it now stands.
     ``created: false`` means a live attempt already existed and **nothing** was
@@ -328,6 +330,13 @@ async def task_delegate(request: Request) -> JSONResponse:
             f"Not part of a delegation: {', '.join(unknown)}.",
             400,
         )
+    instructions = body.get("instructions", "")
+    if not isinstance(instructions, str):
+        # Quoted into the prompt as typed, so a list or object must not be
+        # stringified into its repr and handed to the agent as the user's words.
+        return _refusal(
+            "invalid_task_field", "Delegation instructions must be text.", 400
+        )
     try:
         outcome = plane.workspace_task_delegate(
             workspace,
@@ -335,6 +344,7 @@ async def task_delegate(request: Request) -> JSONResponse:
             expected_revision=revision,
             project_id=str(body.get("project_id")) if body.get("project_id") else None,
             actor="user",
+            instructions=instructions,
         )
     except ControlPlaneError as exc:
         return _error(exc)
