@@ -141,6 +141,16 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal-count').exists()).toBe(false)
   })
 
+  it('shows one dot, not two, for an unread chat that needs an answer', () => {
+    const { store } = seed()
+    store.chats[0].last_activity_at = '2026-08-11T12:00:00Z'
+    store.chats[0].last_read_at = '2026-08-10T12:00:00Z'
+    store.chats[0].pending_question = JSON.stringify({ questions: [{ question: 'Answer me' }] })
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(wrapper.find('.chat-signal--needs').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--unread').exists()).toBe(false)
+  })
+
   it('gives needs-you precedence over working and keeps row density unlabeled', () => {
     const { store } = seed()
     store.chats[0].pending_question = JSON.stringify({ questions: [{ question: 'Answer me' }] })

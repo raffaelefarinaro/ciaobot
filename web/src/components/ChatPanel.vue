@@ -5212,7 +5212,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 2px 16px;
+  gap: 2px 12px;
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -5714,9 +5714,12 @@ details[open] > .activity-summary::before {
   line-height: 1.3;
 }
 
+/* Proportional, not mono: mono set the facts ~40% wider, which pushed them
+   off the buttons' line onto one of their own on an ordinary pane. Tabular
+   figures keep the numbers steady. */
 .message-actions .message-meta {
   margin-top: 0;
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .message.user .message-meta {

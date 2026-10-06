@@ -168,19 +168,19 @@ describe('outputActionTag', () => {
 describe('formatTokenUsage', () => {
   it('spells out input and output token labels with thousands separators and styled spans', () => {
     expect(formatTokenUsage({ input_tokens: '2', output_tokens: '1079' }))
-      .toBe('Tokens <span class="token-number">2</span> in · <span class="token-number">1,079</span> out')
+      .toBe('<span class="token-number">2</span> in / <span class="token-number">1,079</span> out')
   })
 
   it('omits a missing side without hiding the available value', () => {
     expect(formatTokenUsage({ output_tokens: '1079' }))
-      .toBe('Tokens <span class="token-number">1,079</span> out')
+      .toBe('<span class="token-number">1,079</span> out')
     expect(formatTokenUsage({ input_tokens: '2' }))
-      .toBe('Tokens <span class="token-number">2</span> in')
+      .toBe('<span class="token-number">2</span> in')
   })
 
   it('handles numbers, zero values, and empty values correctly', () => {
     expect(formatTokenUsage({ input_tokens: 0, output_tokens: 0 }))
-      .toBe('Tokens <span class="token-number">0</span> in · <span class="token-number">0</span> out')
+      .toBe('<span class="token-number">0</span> in / <span class="token-number">0</span> out')
     expect(formatTokenUsage({ input_tokens: null, output_tokens: undefined }))
       .toBe('')
     expect(formatTokenUsage({ input_tokens: '', output_tokens: '' }))
@@ -193,9 +193,9 @@ describe('formatTokenUsage', () => {
     // The rail states occupancy as a meter against the window's size. A bare
     // percentage in the footer gave one number two homes, so the footer reports
     // cost only — and a turn whose usage carried nothing but a percentage now
-    // says nothing at all rather than a bare "Tokens 42.3% ctx".
+    // says nothing at all rather than a bare "42.3% ctx".
     expect(formatTokenUsage({ input_tokens: '2', output_tokens: '1079', context_pct: '42.3%' }))
-      .toBe('Tokens <span class="token-number">2</span> in · <span class="token-number">1,079</span> out')
+      .toBe('<span class="token-number">2</span> in / <span class="token-number">1,079</span> out')
     expect(formatTokenUsage({ context_pct: '8.4%' }))
       .toBe('')
   })

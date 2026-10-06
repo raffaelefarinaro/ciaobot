@@ -61,8 +61,10 @@
       :aria-label="intervalTitle"
     >↻</span>
 
+    <!-- Not beside needs-you: that dot already asks for the chat to be
+         opened, and a second one next to it reads as a stutter. -->
     <span
-      v-if="unread"
+      v-if="unread && primarySignal !== 'needs'"
       class="chat-signal chat-signal--unread"
       title="Unread chat"
       aria-label="Unread chat"
