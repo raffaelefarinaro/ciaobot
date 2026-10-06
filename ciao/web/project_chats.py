@@ -6852,8 +6852,13 @@ class ProjectChatManager:
             payload["duration_ms"] = duration_ms
         return payload
 
-    async def stop_chat(self, chat_id: str) -> bool:
+    async def stop_chat(self, chat_id: str, *, park_queue: bool = False) -> bool:
         """Stop the chat's in-flight turn.
+
+        ``park_queue`` is for the task board's Stop and Detach: queued
+        follow-ups are moved onto the chat (re-seeded by the next user turn)
+        instead of running after the stop, so a stopped delegated task stops
+        working. A composer Stop leaves them to run, as before.
 
         Two layers, so Stop works with every provider and never hangs:
 
@@ -6867,6 +6872,8 @@ class ProjectChatManager:
            flush.
         """
         stream = self._broker.get(chat_id)
+        if park_queue and stream is not None and not stream.background:
+            self._park_pending_for_retry(chat_id, stream)
         if stream is not None:
             stream.user_stopped = True
             if stream.background:

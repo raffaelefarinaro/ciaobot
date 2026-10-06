@@ -243,7 +243,7 @@ class _RecordingPcm:
         stream.queued.append(text)
         return True
 
-    async def stop_chat(self, chat_id):
+    async def stop_chat(self, chat_id, *, park_queue=False):
         """The manager's Stop, which is ``async`` — as the real one is.
 
         The flag is set only *inside* the coroutine, so a caller that built one and
@@ -252,7 +252,7 @@ class _RecordingPcm:
         the provider turn keeps running while the attempt is recorded ``stopped``
         over it, and a synchronous fake cannot see that at all.
         """
-        self.calls.append(("stop_chat", (chat_id,), {}))
+        self.calls.append(("stop_chat", (chat_id,), {"park_queue": park_queue}))
         self.stop_awaited += 1
         return True
 
@@ -1749,7 +1749,7 @@ async def test_a_stop_awaits_the_chat_managers_stop(tmp_path: Path) -> None:
 
     assert pcm.stop_awaited == 1
     assert [call for call in pcm.calls if call[0] == "stop_chat"] == [
-        ("stop_chat", ("chat-1",), {})
+        ("stop_chat", ("chat-1",), {"park_queue": True})
     ]
 
 
