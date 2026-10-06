@@ -474,6 +474,7 @@ def _calls() -> tuple[list[tuple[str, ...]], Any]:
     return calls, systemctl
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_reads_and_repoints_the_workspace(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
@@ -498,6 +499,7 @@ def test_linux_unit_reads_and_repoints_the_workspace(tmp_path: Path) -> None:
     assert calls == [("daemon-reload",), ("daemon-reload",)]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_refuses_a_repoint_that_changes_nothing(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
@@ -519,6 +521,7 @@ def test_linux_host_drives_systemctl_and_reads_the_port(tmp_path: Path) -> None:
     assert calls == [("start", "ciaobot.service"), ("stop", "ciaobot.service")]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_repoints_once_when_the_new_path_ends_with_the_old(tmp_path: Path) -> None:
     from ciao.linux_service import render_service
 
@@ -565,6 +568,7 @@ def test_start_route_refuses_on_linux(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "administrator" in response.json()["error"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_finds_drop_ins_that_name_the_workspace(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
