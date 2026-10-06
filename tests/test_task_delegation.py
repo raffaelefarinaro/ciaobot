@@ -1052,6 +1052,71 @@ async def test_a_finished_turn_with_a_saved_native_question_card_settles_needs_y
     assert row["status"] != "in_review"
 
 
+async def test_answering_a_native_card_resettles_a_done_attempt_to_review(
+    tmp_path: Path,
+) -> None:
+    """Answering the held card, without sending anything, is what moves the attempt.
+
+    A native card holds a done-reported attempt at ``needs_you`` because the card
+    blocks every new turn in the chat (#1110). Answering it clears the card and
+    starts no turn, so unless the answer path re-settles the attempt it stays
+    waiting on the user forever. This is that path: while the card is still up the
+    re-settle refuses, and once it is cleared the attempt goes to Review.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Finished behind a native card")
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": [], "request_id": "que_1"}'
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
+
+    # The card is still up: the chat is not free, so nothing moves.
+    assert plane.resettle_after_question_answer("chat-1") is False
+    assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
+
+    # The user answers it; the card is cleared and no composer turn starts.
+    pcm.get_chat("chat-1").pending_question = ""
+    assert plane.resettle_after_question_answer("chat-1") is True
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "ready_for_review"
+    assert row["status"] == "in_review"
+
+
+async def test_answering_a_native_card_leaves_a_non_done_attempt_alone(
+    tmp_path: Path,
+) -> None:
+    """Only a ``done`` report is a result to review (#1064).
+
+    An attempt the agent reported ``blocked`` or ``needs_input`` is genuinely
+    waiting on the user, so answering the card must not put an unfinished result in
+    front of them as a finished one.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Waiting, not done")
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": [], "request_id": "que_1"}'
+    plane.workspace_task_report(
+        "personal", task["id"], outcome="needs_input", summary="Which branch?", chat_id="chat-1"
+    )
+    await _end_turns(pcm)
+    assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
+
+    pcm.get_chat("chat-1").pending_question = ""
+    assert plane.resettle_after_question_answer("chat-1") is False
+    assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
+
+
+def test_resettle_is_a_noop_for_a_chat_with_no_delegated_attempt(tmp_path: Path) -> None:
+    """A chat nothing was delegated to has no attempt to move, card or not."""
+    plane, pcm = _world(tmp_path)
+    pcm.create_chat("project-home", title="Just a chat")
+
+    assert plane.resettle_after_question_answer("chat-1") is False
+    assert plane.resettle_after_question_answer("chat-does-not-exist") is False
+
+
 async def test_a_finished_turn_with_a_leftover_legacy_question_card_goes_to_review(
     tmp_path: Path,
 ) -> None:

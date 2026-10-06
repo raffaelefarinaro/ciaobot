@@ -3975,6 +3975,66 @@ class CiaoControlPlane:
                 attempt_id,
             )
 
+    def resettle_after_question_answer(self, chat_id: str) -> bool:
+        """Re-settle a delegated attempt after its native question card is answered.
+
+        A native (opencode, ``request_id``) question form owns the chat until its
+        reply is acknowledged. When a turn ends with a ``done`` report while that
+        card is still saved, ``_settle_from_result`` is right to leave the attempt
+        ``needs_you`` — the card blocks every new turn, so the result is not there
+        to review yet. But answering the card starts no turn, so nothing re-settles
+        the attempt and the card sits ``needs_you`` even though the agent reported
+        done (#1110). This is the missing door: once the card is acknowledged and
+        cleared, a live attempt that was held ``needs_you`` only by that card, with
+        ``done`` already on the row, becomes ``ready_for_review``.
+
+        Refuses everything else, and every refusal is deliberate: no live attempt
+        (nothing was delegated, or the answer's own continuation owns the chat now);
+        an attempt that no longer holds the task; a state that is not ``needs_you``;
+        an outcome the agent never reported as done; or a chat that still needs the
+        user (another card is up). None of those is a result waiting to be reviewed,
+        and moving one would put an empty or unfinished result in front of the user.
+        """
+        workspace, task_id, attempt_id = self._delegated_chat(chat_id)
+        if not workspace or not task_id or not attempt_id:
+            return False
+        try:
+            live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: could not read attempt %s after its card was answered",
+                attempt_id,
+            )
+            return False
+        if live is None or live.attempt_id != attempt_id or live.chat_id != chat_id:
+            return False
+        if live.state != "needs_you" or live.outcome != "done":
+            return False
+        try:
+            chat = self.pcm.get_chat(chat_id)
+        except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
+            logger.exception("delegation: could not read chat %s after its card", chat_id)
+            return False
+        if _chat_has_native_question(chat):
+            # Another native card is still up: the chat is not free, and the
+            # turn has not been handed back to the user yet.
+            return False
+        try:
+            settled = self._attempt_call(
+                workspace,
+                lambda store: store.finish(attempt_id, "ready_for_review", detail=""),
+            )
+        except ControlPlaneError:
+            logger.exception(
+                "delegation: attempt %s could not be re-settled after its card was answered",
+                attempt_id,
+            )
+            return False
+        if settled.state == "ready_for_review":
+            self._mark_review_ready(workspace, task_id, attempt_id)
+        self._record_log(workspace, attempt_id)
+        return True
+
     def workspace_task_attempts(self, workspace: str, task_id: str) -> dict[str, Any]:
         """One task's whole attempt history, live attempt first.
 
