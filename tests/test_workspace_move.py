@@ -633,3 +633,91 @@ def test_rollback_moves_the_folder_back_before_rewriting_it(tmp_path: Path, monk
     result, _service, _posts = _run(tmp_path, _Host(start_ok=False))
     assert result.phase == "rolled_back"
     assert seen[-1] == (str(tmp_path / "old"), True)
+
+
+class _RefusingHost(_Host):
+    """Will not start again after a preflight refusal."""
+
+    def start_engine(self) -> Any:
+        self.calls.append("start")
+        return SimpleNamespace(ok=False, message="schtasks /Run failed")
+
+
+def test_a_refusal_says_when_the_engine_did_not_start_again(tmp_path: Path) -> None:
+    host = _RefusingHost()
+    result, _service, _posts = _run(tmp_path, host, service_type=_RefusingService)
+    assert result.phase == "failed"
+    assert "refused to update" in result.error
+    assert "did not start again: schtasks /Run failed" in result.error
+
+
+class _RollbackStopRaisesHost(_Host):
+    def stop_engine(self, wait: Any = None) -> bool:
+        if "stop" in self.calls:
+            raise OSError("launchctl is gone")
+        return super().stop_engine(wait)
+
+
+def test_a_rollback_stop_that_raises_is_recorded(tmp_path: Path) -> None:
+    result, _service, _posts = _run(tmp_path, _RollbackStopRaisesHost(start_ok=False))
+    assert result.phase == "rollback_failed"
+    assert "launchctl is gone" in result.error
+    assert (tmp_path / "new" / ".env").is_file()
+
+
+def test_rollback_does_not_start_the_engine_at_a_missing_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if Path(dst) == tmp_path / "old":
+            raise OSError("The process cannot access the file")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(workspace_move.os, "rename", rename)
+    host = _Host(start_ok=False)
+    result, service, _posts = _run(tmp_path, host)
+    assert result.phase == "rollback_failed"
+    assert "moving the folder back" in result.error
+    assert "not starting the engine" in result.error
+    assert service.workspace() == tmp_path / "old"
+    assert host.calls == ["stop", "start", "stop"]
+
+
+def test_windows_preflight_explains_a_refused_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import windows_service
+
+    def refuse(_definition: Path, name: str = "") -> None:
+        raise windows_service.WindowsServiceError("schtasks /Create failed: Access is denied.")
+
+    monkeypatch.setattr(windows_service, "register_task", refuse)
+    definition = workspace_move.WindowsServiceDefinition(tmp_path / "task.xml")
+    with pytest.raises(workspace_move.MoveError, match="elevated shell"):
+        definition.preflight()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX permission bits, not root",
+)
+@pytest.mark.parametrize("kind", ["mac", "linux"])
+def test_preflight_refuses_a_definition_folder_it_cannot_write(tmp_path: Path, kind: str) -> None:
+    folder = tmp_path / "defs"
+    folder.mkdir()
+    path = folder / "definition"
+    path.write_text("x", encoding="utf-8")
+    definition: Any = (
+        workspace_move.MacServiceDefinition(path)
+        if kind == "mac"
+        else workspace_move.LinuxServiceDefinition(path, systemctl=lambda *_a: None)
+    )
+    definition.preflight()
+    folder.chmod(0o500)
+    try:
+        with pytest.raises(workspace_move.MoveError, match="cannot rewrite"):
+            definition.preflight()
+    finally:
+        folder.chmod(0o700)

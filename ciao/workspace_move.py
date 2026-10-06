@@ -916,7 +916,8 @@ class LinuxServiceDefinition:
         self._reload()
 
     def preflight(self) -> None:
-        if not os.access(self.path, os.W_OK):
+        # The repoint writes a temp file beside the unit and renames it over.
+        if not os.access(self.path, os.W_OK) or not os.access(self.path.parent, os.W_OK):
             raise MoveError(f"cannot rewrite {self.path}; run the move as root")
 
     def _reload(self) -> None:
@@ -1232,9 +1233,17 @@ def run_move(
             raise MoveError("the engine did not stop")
         try:
             service.preflight()
-        except Exception:
-            host.start_engine()
-            raise
+        except Exception as refusal:  # noqa: BLE001 — recorded for the operator
+            reason = str(refusal) or refusal.__class__.__name__
+            try:
+                started = host.start_engine()
+                restarted = bool(getattr(started, "ok", True))
+                detail = str(getattr(started, "message", "") or "")
+            except Exception as start_exc:  # noqa: BLE001
+                restarted, detail = False, str(start_exc)
+            if not restarted:
+                reason = f"{reason}; the engine did not start again: {detail or 'no reason given'}"
+            raise MoveError(reason) from refusal
     except Exception as exc:  # noqa: BLE001 — recorded for the operator
         reopen()
         advance("failed", str(exc) or exc.__class__.__name__)
@@ -1270,13 +1279,19 @@ def run_move(
     except Exception as exc:  # noqa: BLE001 — every failure rolls back
         reason = str(exc) or exc.__class__.__name__
         advance("rolling_back", reason)
-        if not host.stop_engine(wait=wait_until_unreachable):
+        try:
+            stopped = host.stop_engine(wait=wait_until_unreachable)
+        except Exception as rollback_exc:  # noqa: BLE001
+            advance("rollback_failed", f"{reason}; rollback: stopping the engine: {rollback_exc}")
+            return op
+        if not stopped:
             # Never move the folder out from under a running engine.
             advance("rollback_failed", f"{reason}; rollback: the engine at the new folder did not stop")
             return op
         # Every step runs even when an earlier one failed, and the engine is
-        # started last whatever happened: a half rollback with the engine up
-        # is easier to finish by hand than one with the engine down.
+        # started last whenever the definition names a folder that is there: a
+        # half rollback with the engine up is easier to finish by hand than one
+        # with the engine down, but not one serving a folder that is missing.
         errors: list[str] = []
         if backed_up:
             try:
@@ -1288,15 +1303,30 @@ def run_move(
                 # Rename first: on Windows a file link is a hard link and a
                 # directory link a junction, and both need their target to exist.
                 os.rename(target, source)
-                rewrite_workspace_state(source, str(target), str(source))
             except Exception as rollback_exc:  # noqa: BLE001
                 errors.append(f"moving the folder back: {rollback_exc}")
+            else:
+                try:
+                    rewrite_workspace_state(source, str(target), str(source))
+                except Exception as rollback_exc:  # noqa: BLE001
+                    errors.append(f"rewriting the folder's paths back: {rollback_exc}")
         try:
-            host.start_engine()
-            if not wait_until_ready():
-                errors.append("the engine did not come back at the old folder")
-        except Exception as rollback_exc:  # noqa: BLE001
-            errors.append(f"starting the engine: {rollback_exc}")
+            named = service.workspace()
+        except Exception:  # noqa: BLE001 — an unreadable definition names nothing
+            named = None
+        if named is None or not named.is_dir():
+            errors.append(f"not starting the engine: the service names {named or 'no folder'}, which is not there")
+        else:
+            try:
+                started = host.start_engine()
+                if not bool(getattr(started, "ok", True)):
+                    errors.append(
+                        f"starting the engine: {getattr(started, 'message', '') or 'the engine did not start'}"
+                    )
+                elif not wait_until_ready():
+                    errors.append("the engine did not come back at the old folder")
+            except Exception as rollback_exc:  # noqa: BLE001
+                errors.append(f"starting the engine: {rollback_exc}")
         if errors:
             advance("rollback_failed", f"{reason}; rollback: {'; '.join(errors)}")
             return op
