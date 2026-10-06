@@ -9,6 +9,7 @@ exact ``killpg`` calls the call sites made before the module existed.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -114,9 +115,17 @@ def test_terminate_does_not_raise_and_close_leaves_the_tree_running(tmp_path: Pa
     second = ProcessTree(other.pid)
     try:
         second.terminate()
+        other.wait(timeout=15)
     finally:
-        second.kill()
+        # Once SIGTERM has ended the leader its group holds only a zombie,
+        # and macOS killpg answers EPERM for that, as callers already
+        # expect (background.py, git_proc._reap). Under load the leader
+        # can be gone before this cleanup runs (#1098).
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            second.kill()
         second.close()
+        if other.poll() is None:
+            other.kill()
         other.wait(timeout=15)
 
 
