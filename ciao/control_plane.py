@@ -3760,9 +3760,13 @@ class CiaoControlPlane:
         if not seen_result:
             # A turn paused on a question card ends its stream without a result
             # (the drive loop stops the provider and waits for the answer), so a
-            # chat that is waiting on the user is a paused turn, not a lost one.
+            # chat with a question card up is a paused turn, not a lost one. A
+            # permission card does not count: that pause keeps the stream open, and
+            # the card stays saved after the stream ends until the answer is
+            # confirmed, so here it can only be a leftover.
             try:
-                waiting = _chat_needs_user(self.pcm.get_chat(chat_id))
+                chat = self.pcm.get_chat(chat_id)
+                waiting = chat is not None and bool(getattr(chat, "pending_question", ""))
             except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
                 logger.exception("delegation: could not read chat %s after the turn", chat_id)
                 waiting = False

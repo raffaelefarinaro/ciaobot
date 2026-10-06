@@ -1077,13 +1077,33 @@ async def test_a_chat_paused_on_a_question_can_still_report_and_finish(
     pcm.next_events = [{"type": "result", "text": "Done."}]
     pcm.answer_in_chat("chat-1", "Option A.")
 
-    _agent_says_done(plane)
+    plane.workspace_task_report(
+        "personal", task["id"], outcome="done", summary="Did the work.", chat_id="chat-1"
+    )
 
     await _end_turns(pcm)
 
     row = _get_task(plane, task["id"])
     assert row["attempt_state"] == "ready_for_review"
     assert row["status"] == "in_review"
+
+
+async def test_a_stream_with_no_result_and_a_leftover_permission_card_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    """A permission pause keeps the stream open, so a saved card here is a leftover."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Lost with a stale card")
+    pcm.next_events = [{"type": "text", "text": "half an answer"}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_permission = '{"tool": "Bash"}'
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    assert _attempt_store(plane).get_live(task["id"]) is None
 
 
 async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
