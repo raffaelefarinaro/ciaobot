@@ -5320,19 +5320,28 @@ class CiaoControlPlane:
         return _ok({"path": target.relative_to(root).as_posix(), "size": len(content.encode('utf-8'))})
 
     def file_surface(self, principal: AgentPrincipal, path: str) -> dict[str, Any]:
-        """Validate a workspace file exists so the PWA can open it in the pinned
-        preview panel. The actual surfacing happens client-side, keyed off this
-        tool call showing up in the turn's trace — see extract_file_touches in
-        ciao/web/chat_broker.py. Pin delivery does not read either field below;
-        neither one proves the panel opened or failed to open.
+        """Validate a workspace file exists and record that the agent meant to
+        surface it, so the PWA opens it in the pinned preview panel.
+
+        The call itself is the explicit intent, and it is recorded durably here
+        and nowhere else (`ProjectChatManager.surface_chat_file`, #1118) — after
+        this method's own scoped existence and type checks have passed, so the
+        recorded identity is a path this principal was actually allowed to name.
+        It does not depend on a browser being present: a surface with zero
+        viewers is still persisted, because the panel may open later. Replaying
+        the turn's browser tool traces is deliberately NOT how pins are made; a
+        reprocessor would be a second writer competing with the one authoritative
+        call. A dismissal the user recorded for that exact path wins, and an
+        unscoped principal mutates no chat at all.
 
         ``viewers`` is how many `/ws/chat/{chat_id}` sockets are open for this
         chat right now, from the connection tracker. It reflects real client
         presence and is independent of whether a turn is streaming.
 
         ``stream_state`` is ``"active"`` when a turn is currently streaming for
-        this chat, or ``"none"`` otherwise. It says nothing about whether a
-        client is attached to that turn.
+        this chat, or ``"none"`` otherwise. Neither field proves anything about
+        the panel actually rendering: the pin is what the panel reads, and a
+        zero-viewer surface is still persisted.
 
         On a ``file_not_found`` miss the error carries ``error.suggestions`` —
         up to three nearest existing paths under the workspace root, ranked by
@@ -5356,6 +5365,15 @@ class CiaoControlPlane:
             raise
         if not target.is_file():
             raise ControlPlaneError("unsupported_file", "Only an existing file can be surfaced.")
+        if principal.chat_id:
+            # Only a chat-scoped principal can pin: an unscoped one validates
+            # and reports, and must not pick a chat on the model's behalf.
+            # Recorded after both checks above, so what is stored is a path this
+            # principal was allowed to name, resolved the same way a manual pin
+            # resolves it so the two writers produce the same identity key.
+            self.pcm.surface_chat_file(
+                principal.chat_id, target.resolve().as_posix()
+            )
         viewers, stream_state = self._file_surface_signal(principal.chat_id)
         return _ok(
             {

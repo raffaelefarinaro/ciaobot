@@ -61,6 +61,33 @@ class UnknownModelError(ValueError):
     """
 
 
+class ChatPinConflictError(Exception):
+    """A manual pin write quoted a ``expected_revision`` that is no longer current.
+
+    A pin is one shared selection per chat, so a write from a device that was
+    looking at an older selection must not replace it silently. Carries the
+    authoritative current pin state so the HTTP layer can answer 409 with what
+    is actually selected instead of making the client guess.
+    """
+
+    def __init__(self, pin: dict[str, Any]) -> None:
+        super().__init__("Pin revision conflict")
+        self.pin = pin
+
+
+def _restored_pin_paths(raw: Any) -> list[str]:
+    """Canonical dismissed-pin paths out of a registry record.
+
+    A record written before pins existed has no key at all, which restores as
+    "nothing dismissed" — the state a chat that never pinned anything is in
+    anyway. Entries that are not non-empty strings are dropped rather than
+    becoming identity keys nothing can match.
+    """
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if isinstance(item, str) and item]
+
+
 import yaml
 
 from ciao.os_support.media_types import guess_type as guess_media_type
@@ -504,6 +531,25 @@ class ChatInfo:
     # {"steps": {"memory_pass": {"status": ..., "extra": {"chat_id": ...}}},
     #  "updated_at": iso}
     postprocess: dict = field(default_factory=dict)
+    # Durable pinned-file state for this chat (#1118), stored here so it
+    # survives both a browser change of device and an engine restart instead of
+    # living in one browser's storage.
+    #
+    # `pinned_file_path` is a canonical POSIX host path (`Path.resolve()
+    # .as_posix()`), never a display or relative form: paths are identity keys
+    # here, so there is no fuzzy matching and no extension guessing. Empty
+    # means the panel is closed.
+    # `dismissed_pin_paths` are the paths the user closed on purpose. Agent
+    # surfacing (`surface_chat_file`) leaves a dismissed path alone; a manual
+    # repin of that same path clears its own dismissal.
+    # `pin_revision` counts real changes to this pair and is what a manual write
+    # quotes as `expected_revision`, so a write that raced a newer selection
+    # conflicts instead of silently replacing it. A record written before this
+    # feature has none of the three keys and restores as "nothing pinned,
+    # nothing dismissed, revision 0".
+    pinned_file_path: str = ""
+    dismissed_pin_paths: list[str] = field(default_factory=list)
+    pin_revision: int = 0
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         d = {
@@ -531,6 +577,9 @@ class ChatInfo:
             "schedule_id": self.schedule_id,
             "schedule_title": self.schedule_title,
             "helper": dict(self.helper),
+            "pinned_file_path": self.pinned_file_path,
+            "dismissed_pin_paths": list(self.dismissed_pin_paths),
+            "pin_revision": self.pin_revision,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -546,6 +595,24 @@ class ChatInfo:
         if local is not None:
             d["local"] = local
         return d
+
+
+def chat_pin_payload(chat: ChatInfo) -> dict[str, Any]:
+    """The one wire shape for a chat's pin state (#1118).
+
+    ``path`` is the canonical POSIX host path currently pinned ("" = closed),
+    ``dismissed_paths`` are the paths the user closed on purpose, and
+    ``revision`` is the per-chat counter a manual write has to quote. The list
+    is copied, so a caller holding the payload cannot mutate chat state through
+    it. This is what the chat-list/detail payloads, the `chat_pin_changed`
+    event, the 409 conflict body and the `/ws/events` snapshot all read, so
+    they cannot disagree about the answer.
+    """
+    return {
+        "path": chat.pinned_file_path,
+        "dismissed_paths": list(chat.dismissed_pin_paths),
+        "revision": chat.pin_revision,
+    }
 
 
 @dataclass(slots=True, frozen=True)
@@ -846,6 +913,13 @@ class ProjectChatManager:
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
                 helper=chat_service._normalize_chat_helper(cd.get("helper")),
+                # A record written before pins existed (#1118) has none of
+                # these keys and restores unpinned at revision 0. Nothing is
+                # imported from any browser: the engine's registry is the only
+                # source of a pin.
+                pinned_file_path=str(cd.get("pinned_file_path", "") or ""),
+                dismissed_pin_paths=_restored_pin_paths(cd.get("dismissed_pin_paths")),
+                pin_revision=int(cd.get("pin_revision", 0) or 0),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
@@ -944,6 +1018,9 @@ class ProjectChatManager:
                     "schedule_title": c.schedule_title,
                     "helper": c.helper,
                     "postprocess": c.postprocess,
+                    "pinned_file_path": c.pinned_file_path,
+                    "dismissed_pin_paths": list(c.dismissed_pin_paths),
+                    "pin_revision": c.pin_revision,
                 }
                 for cid, c in self._chats.items()
             },
@@ -2941,6 +3018,115 @@ class ProjectChatManager:
                 "old_project_id": moved_from,
             })
         return chat
+
+    # ── Chat pins (durable pinned-file state, #1118) ─────────────────────
+
+    @property
+    def chat_pin_states(self) -> dict[str, dict[str, Any]]:
+        """Pin state for every persisted chat, keyed by chat id.
+
+        Chats with no pin and archived chats are included deliberately: a
+        client reconnecting after a gap has to be able to *close* a pin the
+        engine no longer holds, and it cannot do that for a chat the map
+        omits. Absence is therefore never read as "keep whatever you had".
+        """
+        return {cid: chat_pin_payload(chat) for cid, chat in self._chats.items()}
+
+    def set_chat_pin(
+        self, chat_id: str, path: str, *, expected_revision: int
+    ) -> dict[str, Any] | None:
+        """Apply a manual pin change. Returns the new pin payload, or ``None``
+        for a chat that does not exist.
+
+        ``expected_revision`` is compared against the chat's current revision
+        *before* anything is mutated, and a mismatch raises
+        ``ChatPinConflictError``: a device that raced a newer selection must
+        not replace it silently. An empty ``path`` closes the panel and
+        dismisses the path the server currently has selected; a nonempty one
+        selects it and clears only that path's own dismissal.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        if expected_revision != chat.pin_revision:
+            raise ChatPinConflictError(chat_pin_payload(chat))
+        return self._apply_pin(chat, path, manual=True)
+
+    def surface_chat_file(self, chat_id: str, path: str) -> dict[str, Any] | None:
+        """Record a server-owned surfacing of ``path`` for this chat.
+
+        This is the only place explicit agent intent becomes durable state, and
+        it deliberately does not care whether a browser is attached: a surface
+        with zero viewers still has to be there when one shows up. It respects
+        a dismissal for that exact path and otherwise replaces the pin.
+
+        Returns the current pin payload, or ``None`` for a chat that does not
+        exist (an unscoped or stale principal must not create state).
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        return self._apply_pin(chat, path, manual=False)
+
+    def _apply_pin(
+        self, chat: ChatInfo, path: str, *, manual: bool
+    ) -> dict[str, Any]:
+        """The single pin mutation/save/publish path, synchronous and await-free.
+
+        One writer, one save and one event for both callers: a manual write and
+        a server-owned surface can land in the same tick without interleaving
+        half-applied state. A no-op leaves the revision alone and publishes
+        nothing, so an unchanged reconnect or a repeated surface is not an
+        event storm.
+        """
+        target = path.strip()
+        dismissed = list(chat.dismissed_pin_paths)
+        if target:
+            if manual:
+                # Selecting a path re-arms it: only its own dismissal goes.
+                dismissed = [known for known in dismissed if known != target]
+            elif target in dismissed:
+                # The user closed this exact path; surfacing it again would
+                # reopen what they dismissed. Nothing changed, so nothing fires.
+                return chat_pin_payload(chat)
+            pinned = target
+        else:
+            pinned = ""
+            if manual and chat.pinned_file_path:
+                # Dismiss what the SERVER had selected, not the empty string
+                # the caller sent, and record it once.
+                current = chat.pinned_file_path
+                if current not in dismissed:
+                    dismissed.append(current)
+        if pinned == chat.pinned_file_path and dismissed == chat.dismissed_pin_paths:
+            return chat_pin_payload(chat)
+
+        previous = (
+            chat.pinned_file_path,
+            list(chat.dismissed_pin_paths),
+            chat.pin_revision,
+        )
+        chat.pinned_file_path = pinned
+        chat.dismissed_pin_paths = dismissed
+        chat.pin_revision = previous[2] + 1
+        try:
+            self._save(reason="chat_pin")
+        except Exception:
+            # Nothing is published and nothing looks accepted: the pre-write
+            # fields go back, and `_last_local_payload` was never advanced past
+            # them, so the next save still sees the original baseline.
+            (
+                chat.pinned_file_path,
+                chat.dismissed_pin_paths,
+                chat.pin_revision,
+            ) = previous
+            raise
+        self._events.publish({
+            "type": "chat_pin_changed",
+            "chat_id": chat.chat_id,
+            **chat_pin_payload(chat),
+        })
+        return chat_pin_payload(chat)
 
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
