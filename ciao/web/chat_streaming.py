@@ -826,12 +826,16 @@ class ChatStreaming:
 
                 next_pending = stream.drain_one()
                 skipped_blank = False
-                while next_pending is not None and not str(
-                    next_pending.get("text", "")
-                ).strip():
-                    # A blank follow-up has nothing to send. Continuing the turn
-                    # loop with it would re-run the previous prompt (#1102), so
-                    # take the next entry instead.
+                while next_pending is not None and not (
+                    str(next_pending.get("text", "")).strip()
+                    or next_pending.get("images")
+                ):
+                    # A follow-up with neither text nor images has nothing to
+                    # send. Continuing the turn loop with it would re-run the
+                    # previous prompt (#1102), so take the next entry instead.
+                    # Blank text alone is sendable when images ride along: the
+                    # turn goes out with an empty prompt and those images
+                    # rather than dropping them without a word (#1112).
                     skipped_blank = True
                     next_pending = stream.drain_one()
                 if skipped_blank:

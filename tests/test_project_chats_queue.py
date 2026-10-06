@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from ciao.config import CiaoConfig
-from ciao.models import ResultEvent, ToolUseEvent
+from ciao.models import ImageAttachment, ResultEvent, ToolUseEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
@@ -54,6 +54,14 @@ async def _wait_for(predicate, timeout: float = 2.0, step: float = 0.01) -> None
             return
         await asyncio.sleep(step)
     raise AssertionError(f"timed out waiting for predicate {predicate!r}")
+
+
+def _write_media(tmp_path: Path, filename: str = "shot.png") -> Path:
+    """Write a real file under the manager's media_root so refs resolve."""
+    media = tmp_path / ".runtime" / "media"
+    media.mkdir(parents=True, exist_ok=True)
+    (media / filename).write_bytes(b"\x89PNG\r\n\x1a\n")
+    return media / filename
 
 
 async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
@@ -320,6 +328,207 @@ async def test_a_blank_follow_up_before_an_errored_turn_keeps_the_real_chip(
     assert [e.get("id") for e in queue_states[-1]["queue"]] == ["q-a"], (
         f"parked follow-up lost its chip: {queue_states[-1]!r}"
     )
+
+
+async def test_image_only_queued_follow_up_flushes_with_images(
+    tmp_path: Path,
+) -> None:
+    """A queued follow-up with blank text but images must reach the provider.
+
+    The drive loop's blank skip read "no text" as "nothing to send" and dropped
+    the entry without a word, so the images the user attached never went out
+    (#1112). Image-only is sendable: the turn goes out with an empty prompt and
+    the resolved images.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-image-only", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="image-only-followup-test")
+    shot = _write_media(tmp_path)
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(
+            (prompt, [img.original_filename for img in images or []])
+        )
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-img",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    # A follow-up whose text is blank and whose images are the content.
+    assert (
+        pcm.queue_message(
+            chat.chat_id,
+            "   ",
+            images=[
+                ImageAttachment(
+                    path=shot,
+                    mime_type="image/png",
+                    original_filename="shot.png",
+                )
+            ],
+            entry_id="q-img",
+        )
+        is True
+    )
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # It ran: as its own turn, with the images attached and no invented
+    # placeholder prompt text.
+    assert [prompt for prompt, _ in turn_calls] == ["initial", ""], turn_calls
+    assert turn_calls[1][1] == ["shot.png"], turn_calls
+
+    echoes = [e for e in captured if e.get("type") == "user_echo"]
+    assert [e["text"] for e in echoes] == ["initial", ""], echoes
+    assert echoes[1]["images"] == ["shot.png"], echoes
+    assert echoes[1].get("entry_id") == "q-img", echoes
+
+
+async def test_whitespace_text_without_images_is_ignored(tmp_path: Path) -> None:
+    """Blank text with no images is the one case that stays unsendable (#1112).
+
+    Nothing is lost when it is skipped: the entry carries no images, so there
+    is nothing to silently drop, and no provider call may happen for it.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-blank-no-images", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="blank-no-images-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(
+            (prompt, [img.original_filename for img in images or []])
+        )
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-blank",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    assert pcm.queue_message(chat.chat_id, "   ", entry_id="q-blank") is True
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # No second turn for an entry with neither text nor images...
+    assert [prompt for prompt, _ in turn_calls] == ["initial"], turn_calls
+    # ...and no turn carries images that would have been lost with it.
+    assert all(not images for _, images in turn_calls), turn_calls
+
+    echoes = [e for e in captured if e.get("type") == "user_echo"]
+    assert [e["text"] for e in echoes] == ["initial"], echoes
+    assert all(not e.get("images") for e in echoes), echoes
+
+
+async def test_reseed_preserves_image_only_entries(tmp_path: Path) -> None:
+    """The `pending_queue` re-seed must keep an image-only parked entry.
+
+    The re-seed skipped every entry with no text, so a follow-up parked by a
+    question-pause with images but blank text lost them for good when the user
+    answered (#1112). An entry with neither text nor images is still dropped —
+    there is nothing to send.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-reseed-images", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="reseed-image-only-test")
+    _write_media(tmp_path)
+
+    pcm._chats[chat.chat_id].pending_queue = [
+        {"id": "q-img", "text": "   ", "images": ["shot.png"]},
+        {"id": "q-empty", "text": "", "images": []},
+    ]
+
+    turn_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(
+            (prompt, [img.original_filename for img in images or []])
+        )
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-reseed",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "answer")
+    # The re-seed is synchronous inside `start_stream` — the drive task only
+    # runs at the next await point.
+    assert [e["id"] for e in stream.pending] == ["q-img"], stream.pending
+
+    captured: list[dict] = []
+
+    async def consume(s) -> None:
+        async for ev in s.subscribe():
+            captured.append(ev)
+
+    consumer = asyncio.create_task(consume(stream))
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The answer turn, then the image-only follow-up with its image attached.
+    assert turn_calls == [("answer", []), ("", ["shot.png"])], turn_calls
+    assert pcm._chats[chat.chat_id].pending_queue == []
 
 
 def test_question_notification_prefers_text_prompt_alias(tmp_path: Path) -> None:

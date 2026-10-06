@@ -5144,6 +5144,12 @@ class ProjectChatManager:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
+        if not str(text or "").strip() and not image_refs:
+            # Blank text with images left is a valid entry — it flushes as an
+            # image-only follow-up. Blank text with no images is not: refuse
+            # the edit instead of keeping a chip nothing would ever send
+            # (#1112).
+            return False
         stream = self._broker.get(chat_id)
         if stream is not None and not stream.background:
             if not stream.edit_pending(entry_id, text, image_refs):
@@ -5780,11 +5786,15 @@ class ProjectChatManager:
             if chat_meta.pending_queue:
                 for entry in chat_meta.pending_queue:
                     text = str(entry.get("text", ""))
-                    if not text:
+                    parked_refs = [str(ref) for ref in (entry.get("images") or [])]
+                    # Same rule as every other ingress point: an image-only
+                    # parked follow-up has something to send, only an entry
+                    # with neither text nor images does not (#1112).
+                    if not text.strip() and not parked_refs:
                         continue
                     stream.enqueue(
                         text,
-                        [str(ref) for ref in (entry.get("images") or [])],
+                        parked_refs,
                         entry_id=entry.get("id") or None,
                     )
                 chat_meta.pending_queue = []
