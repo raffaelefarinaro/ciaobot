@@ -1,8 +1,8 @@
 """Marker recording when setup provisioned a brand-new workspace.
 
-`setup_workspace` writes `.runtime/setup-completed-at` only when it creates a
-workspace's `.env` from scratch (a first-time install, not a rerun over an
-existing one). Startup reads it to hold system-routine catch-up for
+`setup_workspace` writes `.runtime/setup-completed-at` only on a first-time
+setup (a fresh `.env` or no registry yet), not on a rerun over an existing
+install. Startup reads it to hold system-routine catch-up for
 `SETUP_CATCH_UP_GRACE`: a brand-new install should be greeted by its
 onboarding chat, not by four parallel routine chats, so within the grace
 window the routines wait for their next regular tick instead of replaying the
@@ -37,7 +37,22 @@ WORKSPACE_REGISTRY_FILENAME = "workspaces.json"
 
 def is_set_up_workspace(root: Path) -> bool:
     """Whether ``root`` is a workspace `ciao setup` has provisioned."""
-    return (root / RUNTIME_DIR_NAME / WORKSPACE_REGISTRY_FILENAME).is_file()
+    if (root / RUNTIME_DIR_NAME / WORKSPACE_REGISTRY_FILENAME).is_file():
+        return True
+    return _has_legacy_workspaces_env(root)
+
+
+def _has_legacy_workspaces_env(root: Path) -> bool:
+    """Pre-1.0 path: a `.env` with a non-empty ``CIAO_WORKSPACES``.
+
+    Such an install has no registry until its first start on a release that
+    imports the variable, so an upgrade must still recognise it. Delete
+    together with the other pre-1.0 imports (``import_legacy_workspaces_env``
+    and the installer's matching check in `scripts/install-engine.sh`).
+    """
+    from ciao.macos_service import read_dotenv
+
+    return bool(read_dotenv(root / ".env").get("CIAO_WORKSPACES", "").strip())
 
 
 def marker_path(runtime_root: Path) -> Path:

@@ -3251,6 +3251,37 @@ def test_migrate_as_host_with_no_recoverable_workspace_asks_for_one(
 
 @runs_the_sh_installer
 @needs_local_tools
+def test_migrate_as_host_accepts_a_pre_1_0_workspace_with_only_ciao_workspaces(
+    tmp_path: Path,
+) -> None:
+    # Pre-1.0 path: an install configured only through CIAO_WORKSPACES in its
+    # `.env` has no registry until it first starts on a release that imports
+    # the variable, and is still the workspace to keep.
+    harness = _harness(tmp_path)
+    home = _desktop_install_without_a_workspace(harness, tmp_path)
+    legacy = home / "Legacy"
+    legacy.mkdir()
+    (legacy / ".env").write_text(
+        'PWA_PORT=8443\nCIAO_WORKSPACES=[{"name":"personal"}]\n', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--as-host",
+        "--workspace",
+        str(legacy),
+        "--no-start",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["workspace"] == str(legacy)
+
+
+@runs_the_sh_installer
+@needs_local_tools
 def test_migrate_as_host_refuses_a_workspace_that_was_never_set_up(tmp_path: Path) -> None:
     # An existing directory is not yet a Ciaobot workspace. Handing an engine
     # over to one with no `.runtime/workspaces.json` would start it with a fresh password and a

@@ -2191,3 +2191,34 @@ def test_winning_ownership_after_a_probe_lands_serves_its_result(monkeypatch, tm
     assert ss.discover_claude_mcps(tmp_path) == ["Airtable"]
     assert calls == [], "the landed result must be served instead of re-probed"
     assert ss._claude_mcps_inflight is None, "ownership must be handed back"
+
+
+def test_a_registry_marks_a_set_up_workspace(tmp_path: Path) -> None:
+    from ciao.setup_marker import is_set_up_workspace
+
+    assert not is_set_up_workspace(tmp_path)
+    (tmp_path / ".runtime").mkdir()
+    (tmp_path / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    assert is_set_up_workspace(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('CIAO_WORKSPACES=[{"name":"personal"}]', True),
+        ("CIAO_WORKSPACES='[{\"name\":\"personal\"}]'", True),
+        ("CIAO_WORKSPACES=", False),
+        ('CIAO_WORKSPACES=""', False),
+        ('# CIAO_WORKSPACES=[{"name":"personal"}]', False),
+        ("PWA_PORT=8443", False),
+    ],
+)
+def test_a_pre_1_0_workspaces_env_marks_a_set_up_workspace(
+    tmp_path: Path, line: str, expected: bool
+) -> None:
+    """Pre-1.0 path: no registry until the first start on a release that
+    imports CIAO_WORKSPACES, so the `.env` variable still counts."""
+    from ciao.setup_marker import is_set_up_workspace
+
+    (tmp_path / ".env").write_text(line + "\n", encoding="utf-8")
+    assert is_set_up_workspace(tmp_path) is expected

@@ -189,7 +189,7 @@ is what stops the app's own agent from staying loaded next to the engine that
 replaced it. That path also settles the workspace before it takes any
 before-image or asks the app to quit, and only ever hands over the one the
 engine being replaced runs in: a `--workspace` naming a different directory, one
-that does not exist, or a directory with no `.runtime/workspaces.json` in it (one `ciao setup` never provisioned) is refused, no
+that does not exist, or a directory with no `.runtime/workspaces.json` in it (one `ciao setup` never provisioned; a pre-1.0 `.env` with a non-empty `CIAO_WORKSPACES` still counts) is refused, no
 workspace is created during a hand-over, and an `--as-host` override on a state
 whose workspace could not be recovered has to name an existing one rather than
 get a fresh `~/Ciaobot`. Taking a different workspace would start a second engine
