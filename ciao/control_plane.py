@@ -251,23 +251,6 @@ def _attempt_error(exc: TaskAttemptError) -> ControlPlaneError:
     return ControlPlaneError(code, str(exc), retryable=retryable)
 
 
-def _chat_needs_user(chat: Any) -> bool:
-    """Whether a chat is waiting on the user rather than finished.
-
-    A question and a permission card are both an ordinary turn that has paused
-    for an answer, so the attempt settles ``needs_you`` instead of
-    ``ready_for_review``: the result is not there yet, and the board's badge
-    should say so rather than ask the user to review nothing. A chat the store
-    cannot answer is not a finished one either — it is unknown, which the caller
-    turns into ``interrupted``.
-    """
-    if chat is None:
-        return False
-    return bool(
-        getattr(chat, "pending_question", "") or getattr(chat, "pending_permission", "")
-    )
-
-
 def _chat_paused_on_question(chat: Any) -> bool:
     """Whether a chat's last turn ended paused on a question card.
 
@@ -3798,7 +3781,9 @@ class CiaoControlPlane:
                 logger.exception("delegation: could not read chat %s after the turn", chat_id)
                 waiting = False
             if waiting:
-                self._settle_from_result(workspace, attempt_id, task_id, chat_id, stream, {})
+                self._settle_from_result(
+                    workspace, attempt_id, task_id, chat_id, stream, {}, paused_on_question=True
+                )
                 return
             # The stream ended without a result event. Whatever the turn did — a
             # provider drop, a cancel the manager swallowed, a subscription that
@@ -3820,6 +3805,8 @@ class CiaoControlPlane:
         chat_id: str,
         stream: Any,
         result: Mapping[str, Any],
+        *,
+        paused_on_question: bool = False,
     ) -> None:
         """Write the attempt's end state from the turn's own result event.
 
@@ -3830,6 +3817,13 @@ class CiaoControlPlane:
         the task. A watcher that settled a task another attempt now owns would
         flag somebody else's work for review, and one that settled a detached task
         would put a badge on a card nobody delegated any more.
+
+        ``paused_on_question`` is the caller's word that the turn ended paused on a
+        question card (no result, see ``_await_turn``). Saved cards are not read
+        here: once a turn has ended with a result, a permission card or a native
+        question card can only be a leftover — both keep the stream open while they
+        are really up — and counting them would hold a finished, reported turn at
+        ``needs_you`` (#1097).
         """
         try:
             stopped = bool(result.get("stopped"))
@@ -3837,11 +3831,6 @@ class CiaoControlPlane:
             text = str(result.get("text") or "")
         except Exception:  # noqa: BLE001 — a malformed event is still just an outcome
             stopped, errored, text = False, False, ""
-        try:
-            chat = self.pcm.get_chat(chat_id)
-        except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
-            logger.exception("delegation: could not read chat %s after the turn", chat_id)
-            chat = None
         try:
             live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
             if live is None or live.attempt_id != attempt_id or live.chat_id != chat_id:
@@ -3857,7 +3846,7 @@ class CiaoControlPlane:
             state, detail = "stopped", "the turn was stopped"
         elif errored:
             state, detail = "failed", text[:400] or "the turn ended in an error"
-        elif _chat_needs_user(chat):
+        elif paused_on_question:
             state, detail = "needs_you", ""
         elif live.outcome == "done":
             state, detail = "ready_for_review", ""
