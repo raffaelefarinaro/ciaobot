@@ -158,10 +158,6 @@ def test_rewrite_workspace_state(tmp_path: Path) -> None:
 
     old_receipt = vault_migration.receipt_path(runtime, vault)
     old_receipt.write_text(json.dumps({"vault_root": str(vault)}), encoding="utf-8")
-    (new / "commands").mkdir()
-    (new / "commands" / "remember.md").write_text("x", encoding="utf-8")
-    (new / ".claude" / "commands").mkdir(parents=True)
-    os.symlink(old / "commands" / "remember.md", new / ".claude" / "commands" / "remember.md")
 
     workspace_move.rewrite_workspace_state(new, str(old), str(new))
 
@@ -177,8 +173,20 @@ def test_rewrite_workspace_state(tmp_path: Path) -> None:
     rekeyed = vault_migration.receipt_path(runtime, new_vault)
     assert rekeyed.is_file() and not old_receipt.exists()
     assert json.loads(rekeyed.read_text(encoding="utf-8"))["vault_root"] == str(new_vault)
-    link = new / ".claude" / "commands" / "remember.md"
-    assert os.readlink(link) == str(new / "commands" / "remember.md")
+
+
+def test_links_are_repointed_after_the_folder_moves(tmp_path: Path) -> None:
+    from ciao.os_support import links
+
+    old, new = tmp_path / "old", tmp_path / "new"
+    (old / "skills" / "remember").mkdir(parents=True)
+    (old / ".claude" / "skills").mkdir(parents=True)
+    # Absolute, as sync-skills writes command mirrors (a junction on Windows).
+    links.link_dir(old / "skills" / "remember", old / ".claude" / "skills" / "remember")
+    os.rename(old, new)
+
+    assert workspace_move.relink_symlinks(new, str(old), str(new)) == 1
+    assert links.points_to(new / ".claude" / "skills" / "remember", new / "skills" / "remember")
 
 
 def test_claude_sessions_are_copied_and_trust_rekeyed(tmp_path: Path) -> None:
@@ -419,6 +427,9 @@ def test_plan_route_returns_the_dry_run(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(workspace_move, "registered_workspace", lambda: tmp_path)
     monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
     monkeypatch.setattr(workspace_move, "engine_running", lambda: True)
+    # The route asks the machine it runs on; on Linux the plan refuses the
+    # platform before anything else.
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
     body = _client(tmp_path, peer="127.0.0.1").post(
         "/api/workspace-move/plan", json={"target": str(tmp_path / "inside")}

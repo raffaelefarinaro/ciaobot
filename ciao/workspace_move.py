@@ -292,7 +292,7 @@ def plan(
     *,
     registered: Path | None,
     python: str = sys.executable,
-    platform: str = sys.platform,
+    platform: str | None = None,
     update_in_flight: bool = False,
     engine_running: bool = True,
     state_dir: Path | None = None,
@@ -303,6 +303,7 @@ def plan(
     repoints that definition, so a definition for another folder, or none, is a
     refusal rather than something to guess around.
     """
+    platform = platform or sys.platform
     source = source.expanduser().resolve()
     raw = target_raw.strip()
     result = MovePlan(source=str(source), target=raw)
