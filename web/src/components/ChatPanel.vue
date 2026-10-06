@@ -4549,7 +4549,14 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   width: var(--page-rail);
   min-width: 0;
   overflow-y: auto;
-  margin-block: 8px;
+  /* As tall as its content, not the pane: a short rail is a window resting
+     at the top, not an empty column. It scrolls once it would pass the
+     bottom. The 16px insets match the composer's gap to the pane edge
+     (.input-bar's bottom padding), so rail and composer sit on one line. */
+  align-self: flex-start;
+  max-height: calc(100% - 32px);
+  box-sizing: border-box;
+  margin-block: 16px;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
