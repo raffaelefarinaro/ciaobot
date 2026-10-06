@@ -45,14 +45,12 @@ def is_context_overflow(exc: Exception) -> bool:
     return "too long" in text or "context window" in text or "context_length_exceeded" in text
 
 
-_MODEL_REFUSAL_MARKERS = (
-    # opencode reports this on a one-shot call (#1066) whose model is served
-    # only from opencode's own client. Only the text is known here; that the
-    # restriction is permanent, or that a different config could not lift it,
-    # is not something this module can establish.
-    "free tier can only be used from within opencode",
-)
-"""Provider messages that name the model as unusable for this call."""
+# Provider messages that name the model as unusable for this call. opencode
+# reports this one on a one-shot call (#1066) whose model is served only from
+# opencode's own client. Only the text is known here; that the restriction is
+# permanent, or that a different config could not lift it, is not something
+# this module can establish.
+_MODEL_REFUSAL_MARKERS = ("free tier can only be used from within opencode",)
 
 
 def is_model_refused(exc: Exception) -> bool:
