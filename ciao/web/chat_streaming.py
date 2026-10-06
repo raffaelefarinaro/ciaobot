@@ -835,7 +835,12 @@ class ChatStreaming:
                     skipped_blank = True
                     next_pending = stream.drain_one()
                 if skipped_blank:
-                    stream.publish({"type": "queue_state", "queue": stream.pending})
+                    # Keep the entry we are about to run (or park) in the list:
+                    # its chip clears on its own user_echo.
+                    remaining = stream.pending
+                    if next_pending is not None:
+                        remaining = [next_pending, *remaining]
+                    stream.publish({"type": "queue_state", "queue": remaining})
                 if stream.user_stopped:
                     stream.user_stopped = False
                     if next_pending is not None:
