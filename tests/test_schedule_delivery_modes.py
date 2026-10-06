@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -274,6 +275,77 @@ async def test_schedule_attention_classifier_tracks_failure(
     assert row["status"] == "error"
     assert row["model"] == "haiku"
     assert row["error"] == "model unavailable"
+
+
+async def test_schedule_attention_classifier_warns_on_a_refused_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A free-tier model cannot serve a server-side one-shot (#1066).
+
+    It fails on every dispatch, the chat is correctly kept visible, and the
+    operator needs the model named once — not a traceback per run. The
+    deliberate degradation is a warning; a genuine fault stays an exception.
+    """
+
+    async def fake_oneshot(*args, **kwargs):
+        raise RuntimeError(
+            "Error from provider (Console): OpenCode's free tier can only be "
+            "used from within OpenCode"
+        )
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    with caplog.at_level(logging.WARNING, logger="ciao.web.schedule_dispatch"):
+        needs_user = await _manager_for_classifier()._schedule_run_needs_user(
+            _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+        )
+
+    assert needs_user is True
+    row = _job_rows(tmp_path)[0]
+    assert row["status"] == "error"
+    assert row["extra"]["model_refused"] is True
+    assert "free tier can only be used from within OpenCode" in row["error"]
+    assert row["extra"].get("context_overflow") is None
+    # The classifier's own record must be the warning, and must carry no
+    # traceback: a `logger.warning(..., exc_info=True)` would otherwise satisfy
+    # a check that only looked for the absence of ERROR records.
+    classifier = [
+        r for r in caplog.records if r.name == "ciao.web.schedule_dispatch"
+    ]
+    assert [r.levelno for r in classifier] == [logging.WARNING]
+    assert classifier[0].exc_info is None
+    assert "haiku" in classifier[0].getMessage()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_schedule_attention_classifier_still_raises_for_transient_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the refusal is demoted; tail latency keeps its traceback (#1066)."""
+
+    async def fake_oneshot(*args, **kwargs):
+        raise ConnectionError("connection reset by peer")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    with caplog.at_level(logging.WARNING, logger="ciao.web.schedule_dispatch"):
+        needs_user = await _manager_for_classifier()._schedule_run_needs_user(
+            _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+        )
+
+    assert needs_user is True
+    row = _job_rows(tmp_path)[0]
+    assert row["status"] == "error"
+    assert "model_refused" not in row["extra"]
+    # The traceback must be on the classifier's own record, not merely present
+    # somewhere in the capture.
+    classifier = [
+        r
+        for r in caplog.records
+        if r.name == "ciao.web.schedule_dispatch" and r.levelno >= logging.ERROR
+    ]
+    assert len(classifier) == 1
+    assert classifier[0].exc_info is not None
 
 
 async def test_schedule_attention_classifier_records_bare_timeout_type(

@@ -2855,6 +2855,10 @@ class OpencodeProvider(BaseSDKProvider):
         prompt_rejected = False
         prompt_receipt_error = ""
         terminal_seen = False
+        # Set by the degraded recovery below, never by the reconnect loop: a
+        # permission the reload re-emitted is still unanswered when the result is
+        # published (#1111).
+        recovered_with_pending = False
 
         async def _pump_once() -> AsyncGenerator[StreamEvent, None]:
             """One SSE subscription, pumped until idle or premature close."""
@@ -2988,6 +2992,11 @@ class OpencodeProvider(BaseSDKProvider):
             ):
                 for converted in await self._reload_pending_requests(client, session_id):
                     saw_output = True
+                    # A request this turn never saw is now up in the chat as a
+                    # live card, and the result below is published over it.
+                    recovered_with_pending = recovered_with_pending or isinstance(
+                        converted, (PermissionRequestEvent, ToolUseEvent)
+                    )
                     yield converted
                 self._turn_recovered_via_poll = False
                 async for converted in self._reconcile_interrupted_turn(
@@ -3018,6 +3027,7 @@ class OpencodeProvider(BaseSDKProvider):
             usage=self._usage,
             cost_usd=self._cost,
             fallback_final=(bool(error) and saw_output) or degraded_final,
+            recovered_with_pending=recovered_with_pending,
         )
 
     async def _augment_context_pct(

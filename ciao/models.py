@@ -274,6 +274,11 @@ class ResultEvent(StreamEvent):
     # True when the provider completed without a separate final-answer item
     # and the last substantive commentary was promoted as a visible fallback.
     fallback_final: bool = False
+    # True when this turn's degraded recovery (an SSE drop after the prompt was
+    # accepted) re-emitted a permission or question request that is still
+    # unanswered. The result is then published over a live card, so a watcher
+    # reading it must not treat the attempt as finished work (#1111).
+    recovered_with_pending: bool = False
 
 
 @dataclass(slots=True)
