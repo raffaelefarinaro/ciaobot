@@ -32,12 +32,6 @@ async function mountCard() {
   return wrapper
 }
 
-function button(view: VueWrapper, label: string) {
-  const match = view.findAll('button').find((b) => b.text() === label)
-  if (!match) throw new Error(`no button labelled ${label}`)
-  return match
-}
-
 beforeEach(() => {
   vi.clearAllMocks()
   vi.stubGlobal('Notification', { permission: 'granted', requestPermission: vi.fn() })

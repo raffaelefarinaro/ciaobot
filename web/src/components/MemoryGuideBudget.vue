@@ -109,7 +109,6 @@ const guideStats = computed(() => {
     key: string; label: string; usedChars: number; charLimit: number; pct: number;
     tokens: number; entryCount: number; expiredCount: number; malformedCount: number; overCap: boolean
   }> = []
-  let totalChars = 0
   for (const key of ['memory', 'profile'] as const) {
     const re = GUIDE_REGION_RE[key]
     const match = content.match(re)
@@ -121,7 +120,6 @@ const guideStats = computed(() => {
     }
     const entries = body ? parseEntriesForRegion(body) : []
     const used = serializeLen(entries)
-    totalChars += used
     let expired = 0, malformed = 0
     for (const e of entries) { const info = expirationInfo(e); if (info.expired) expired++; if (info.malformed) malformed++ }
     const pct = cap ? Math.round((used / cap) * 100 * 10) / 10 : 0

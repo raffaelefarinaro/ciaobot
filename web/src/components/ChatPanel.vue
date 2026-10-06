@@ -1366,7 +1366,6 @@ import {
   collapseOutputsByName,
   shortDirname,
   outputActionTag,
-  traceSummaryMetaParts,
   type TraceOutput,
 } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'

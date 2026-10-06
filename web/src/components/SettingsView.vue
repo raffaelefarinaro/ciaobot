@@ -2746,10 +2746,6 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
   await saveRoutines({ provider_default_modes: modes })
 }
 
-function aliasProviderLabel(provider: AliasProviderKey): string {
-  return aliasProviderSections.value.find((section) => section.key === provider)?.label || provider
-}
-
 // ── Per-provider Session insights model (Models tab) ────────────────
 // Automatic reads the session with the provider's own default chat model
 // (ciao/insights.py::resolve_insights_model).
@@ -2968,7 +2964,7 @@ async function gwsReloginStart(profileName: string) {
         'The sign-in tab was blocked by the browser. Open this link, then finish here:'
       gwsAuthUrls.value[profileName] = res.auth_url
     }
-    gwsPollRelogin(profileName)
+    gwsPollRelogin()
   } catch (e) {
     if (tab) tab.close()
     const msg = errorMessage(e, 'Could not start the sign-in flow.')
@@ -2995,7 +2991,7 @@ function gwsClearRelogin(profileName: string) {
   delete gwsRedirectUrls.value[profileName]
 }
 
-function gwsPollRelogin(profileName: string) {
+function gwsPollRelogin() {
   if (gwsReloginTimer) return
   gwsReloginTimer = setInterval(async () => {
     if (gwsReloginPolling) return
@@ -3805,32 +3801,6 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     color: normalizeWorkspaceColor(ws.color),
   }
-}
-
-function workspaceModelSectionsForProvider(provider: WorkspaceProvider): ModelSection[] {
-  if (provider.startsWith('custom:')) {
-    const section = sectionsFromModelsResponse(workspaceModels.value)
-      .find((item) => item.key === provider)
-    return section ? [section] : []
-  }
-  if (provider === 'opencode') {
-    const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === provider)
-    return section ? [section] : []
-  }
-  // Claude's models are the tier aliases plus any configured concrete ids.
-  const section = sectionsFromModelsResponse(workspaceModels.value)
-    .find((item) => item.key === 'anthropic')
-  return section
-    ? [{ ...section }]
-    : [{
-        key: provider,
-        label: aliasProviderLabel(provider as AliasProviderKey),
-        models: [],
-      }]
-}
-
-function workspaceModelSectionsForForm(form: WorkspaceForm): ModelSection[] {
-  return workspaceModelSectionsForProvider(form.default_provider)
 }
 
 const workspaceForms = ref<WorkspaceForm[]>([])
