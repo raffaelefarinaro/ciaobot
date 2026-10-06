@@ -3,7 +3,6 @@ import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
-import { useFileViewerStore } from './fileViewer'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
@@ -21,6 +20,7 @@ import type {
   ArchivedWorkspacesResponse,
   ProjectInfo,
   ChatInfo,
+  ChatPinState,
   ChatPostprocess,
   ChatMessage,
   RunningSubagent,
@@ -162,7 +162,17 @@ export const useProjectStore = defineStore('projects', () => {
   // localStorage keys that back them. The refs below ARE that module's refs —
   // it is a plain factory, not a second Pinia store — so the names this store
   // returns behave exactly as when they were declared here.
-  const annotations = createChatAnnotations({ activeChatId })
+  //
+  // Chat pins are server-owned: the factory resolves chat-vs-project ownership
+  // from the actual chat rows and routes chat pin writes through a PATCH.
+  const annotations = createChatAnnotations({
+    activeChatId,
+    ownerOf: (id) => (chats.value.some(c => c.chat_id === id) ? 'chat' : 'project'),
+    mutateChatPin: (chatId, path, expectedRevision) => patchChatPin(chatId, path, expectedRevision),
+    notifyPinError: (chatId, message) => {
+      pushErrorToast('Could not update pinned file', message)
+    },
+  })
   const {
     pendingImages,
     pendingComments,
@@ -180,6 +190,11 @@ export const useProjectStore = defineStore('projects', () => {
     pinFile,
     unpinFile,
     pinnedFileFor,
+    applyChatPinState,
+    applyChatPinsSnapshot,
+    dropChatPinState,
+    pruneChatPins,
+    isChatPinPending,
     addPendingChatComment,
     removePendingChatComment,
     clearPendingChatComments,
@@ -1813,6 +1828,11 @@ export const useProjectStore = defineStore('projects', () => {
   function reconcileChatList(nextChats: ChatInfo[]) {
     chats.value = applyPendingArchived(nextChats)
 
+    // Hydrate server-owned pin state from every chat payload, and prune any
+    // chat id a pre-#1119 build left in the browser-local pin/dismissal keys.
+    for (const chat of nextChats) applyChatPinFromChatInfo(chat)
+    pruneChatPins(nextChats.map(ch => ch.chat_id))
+
     // Rebase any receipt-time snippet stamps now that the server's real
     // activity times are available (see lastResultSnippetNeedsRebase).
     if (lastResultSnippetNeedsRebase.size) {
@@ -2306,6 +2326,7 @@ export const useProjectStore = defineStore('projects', () => {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, { title })
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
+    applyChatPinFromChatInfo(c)
   }
 
   async function updateChat(
@@ -2320,6 +2341,7 @@ export const useProjectStore = defineStore('projects', () => {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
+    applyChatPinFromChatInfo(c)
   }
 
   async function handoverChat(
@@ -2363,6 +2385,7 @@ export const useProjectStore = defineStore('projects', () => {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, { project_id: targetProjectId })
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
+    applyChatPinFromChatInfo(c)
     return c
   }
 
@@ -2608,6 +2631,49 @@ export const useProjectStore = defineStore('projects', () => {
     const idx = chats.value.findIndex(x => x.chat_id === chat.chat_id)
     if (idx >= 0) chats.value[idx] = chat
     else chats.value.push(chat)
+    applyChatPinFromChatInfo(chat)
+  }
+
+  function chatPinStateFromChat(chat: ChatInfo): ChatPinState {
+    return {
+      path: chat.pinned_file_path ?? '',
+      dismissed_paths: chat.dismissed_pin_paths ?? [],
+      revision: chat.pin_revision ?? 0,
+    }
+  }
+
+  // Hydrate the server-owned pin state from one ChatInfo payload. Skips when
+  // the payload carries no pin revision (a chat predating the feature, or a
+  // payload that simply never had the fields). The revision guard inside
+  // `applyChatPinState` keeps a GET that raced a newer event from rolling back.
+  function applyChatPinFromChatInfo(chat: ChatInfo): void {
+    if (typeof chat.pin_revision !== 'number') return
+    applyChatPinState(chat.chat_id, chatPinStateFromChat(chat), { source: 'chat-payload' })
+  }
+
+  interface PinConflictPayload { error?: string; pin?: ChatPinState }
+
+  // The PATCH behind a manual chat pin/unpin. `path === ''` closes the current
+  // pin. Success returns the full `ChatInfo`; a stale revision returns the 409
+  // body's `pin` (server truth) so the caller applies it without resubmitting.
+  async function patchChatPin(
+    chatId: string,
+    path: string,
+    expectedRevision: number,
+  ): Promise<ChatPinState> {
+    try {
+      const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, {
+        pin: { path, expected_revision: expectedRevision },
+      })
+      replaceChat(c)
+      return chatPinStateFromChat(c)
+    } catch (e) {
+      const err = e as { status?: number; payload?: PinConflictPayload }
+      if (err?.status === 409 && err.payload?.error === 'pin_revision_conflict' && err.payload.pin) {
+        return err.payload.pin
+      }
+      throw e
+    }
   }
 
   async function newSession(chatId: string) {
@@ -2617,6 +2683,7 @@ export const useProjectStore = defineStore('projects', () => {
     pendingArchived.value.delete(chatId)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
+    applyChatPinFromChatInfo(c)
     messages.value[chatId] = []
     persistMessages()
     // Reconnect WebSocket for fresh session
@@ -3979,6 +4046,10 @@ export const useProjectStore = defineStore('projects', () => {
         // over — the runner resolves them as orphans — so an empty map after
         // one is the truth, not a gap.)
         backgroundRuns.value = { ...(msg.background_runs || {}) }
+        // Authoritative per-chat pin state for every persisted chat (including
+        // closed/archived), so a client that missed a pin/unpin while its socket
+        // was down heals to server truth instead of writing stale browser state.
+        applyChatPinsSnapshot(msg.chat_pins)
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -4252,6 +4323,18 @@ export const useProjectStore = defineStore('projects', () => {
         if (chat) chat.postprocess = msg.postprocess || null
         break
       }
+      case 'chat_pin_changed': {
+        // A pin/replace/unpin happened on another device. Apply server truth and
+        // nothing else: this must not select or navigate the chat, mark it read,
+        // stop a stream, or emit any mutation (the revision guard dedups an event
+        // that echoes a write this client itself just acknowledged).
+        applyChatPinState(msg.chat_id, {
+          path: msg.path,
+          dismissed_paths: msg.dismissed_paths,
+          revision: msg.revision,
+        }, { source: 'event' })
+        break
+      }
       case 'chat_deleted': {
         // Fires when the server prunes an empty chat (user created a "New
         // Chat" and never sent a message, then moved on) or when another
@@ -4261,6 +4344,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
         }
+        dropChatPinState(msg.chat_id)
         if (messages.value[msg.chat_id]) delete messages.value[msg.chat_id]
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
@@ -5103,50 +5187,11 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
-  // Show a file the agent deliberately surfaced via the `file_surface` MCP
-  // tool (action === 'surfaced'). Ordinary Write/Edit touches only ever get an
-  // inline card: this used to be guessed at by extension (.md/.csv) plus a
-  // bookkeeping skip-list, which both missed real deliverables and fired on
-  // noisy writes. An explicit tool call is a genuine signal; an extension is not.
-  //
-  // Because the call is explicit, it outranks whatever is currently pinned and
-  // replaces it. The only thing it respects is a dismissal of the *same* path
-  // (see dismissedAutoPins): the user closed that file, and a WS reconnect
-  // replaying the stream buffer must not shove it back. On a narrow viewport
-  // there is no split panel, so open the viewer modal instead of dropping the
-  // request on the floor. localStorage-backed like every other pin.
-  function _applySurfaceRequests(
-    chatId: string,
-    touches: Array<{ file_path?: string; action?: string }>,
-  ): void {
-    if (typeof window === 'undefined') return
-    // Freshest surfaced artifact wins (last touch in the batch).
-    for (let i = touches.length - 1; i >= 0; i--) {
-      const touch = touches[i]
-      if (touch?.action !== 'surfaced') continue
-      const raw = touch.file_path
-      if (!raw || !isPlausibleFilePath(raw)) continue
-      if (annotations.isAutoPinDismissed(chatId, raw)) return
-      if (pinnedFileFor(chatId) === raw) return
-      if (window.innerWidth <= 768) {
-        _openSurfacedInViewer(raw, chatId)
-        return
-      }
-      pinFile(chatId, raw)
-      return
-    }
-  }
-
-  // Mobile fallback for an explicit surface. Never interrupts: an already-open
-  // viewer (the user may be mid-edit there) keeps whatever it is showing, and
-  // the inline file card stays as the way in.
-  function _openSurfacedInViewer(path: string, chatId: string): void {
-    try {
-      const viewer = useFileViewerStore()
-      if (viewer.isOpen) return
-      void viewer.open(path, null, chatId)
-    } catch { /* store unavailable outside an app context */ }
-  }
+  // The `file_surface` MCP tool is the engine's durable surface-intent writer:
+  // it records the pin server-side, and the browser learns about it through the
+  // `chat_pin_changed` event / snapshot, never by re-deriving a pin from replayed
+  // `tool_use` touches. Ordinary Write/Edit touches still get an inline card
+  // (`_pushFileCard`), but no client-side pin mutation or auto-open remains here.
 
   function _flushTimeline(chatId: string): StreamEntry[] {
     const entries = streamingTimeline.value[chatId] || []
@@ -5407,7 +5452,6 @@ export const useProjectStore = defineStore('projects', () => {
               tool_use_id: event.tool_use_id,
             })
           }
-          _applySurfaceRequests(chatId, touches)
           break
         }
 
@@ -5868,7 +5912,7 @@ export const useProjectStore = defineStore('projects', () => {
     addPendingChatCommentImage, removePendingChatCommentImage,
     addFileCommentImage, removeFileCommentImage,
     fileCommentsFor, removeFileComment, updateFileComment,
-    pinFile, unpinFile, pinnedFileFor,
+    pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,

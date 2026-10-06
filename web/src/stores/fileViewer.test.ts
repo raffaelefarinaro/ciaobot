@@ -2,7 +2,9 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 import { fileViewerKindForPath, useFileViewerStore } from './fileViewer'
+import { useProjectStore } from './projects'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -308,5 +310,101 @@ describe('stale responses', () => {
     expect(posted).toEqual([
       { chat_id: 'chat-1', path: 'notes/b.md', content: 'NOTE CONTENT' },
     ])
+  })
+})
+
+describe('shared-pin surface', () => {
+  function seedChat(chatId: string) {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'T',
+      model: 'm',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: false,
+    }]
+    return store
+  }
+
+  test('remote close reconciles the shared-pin preview but not an ordinary one', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('content')))
+    const projectStore = seedChat('chat-1')
+    projectStore.applyChatPinState('chat-1', { path: 'notes/a.txt', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    const store = useFileViewerStore()
+
+    await store.openSharedPin('notes/a.txt', 'chat-1')
+    expect(store.sharedPinChatId).toBe('chat-1')
+    expect(store.isOpen).toBe(true)
+
+    projectStore.applyChatPinState('chat-1', { path: '', dismissed_paths: ['notes/a.txt'], revision: 2 }, { source: 'event' })
+    await nextTick()
+    await nextTick()
+    expect(store.isOpen).toBe(false)
+
+    // An ordinary manual open is not the shared pin; a remote change leaves it.
+    await store.open('notes/b.txt', null, 'chat-1')
+    expect(store.isOpen).toBe(true)
+    projectStore.applyChatPinState('chat-1', { path: '/x.md', dismissed_paths: [], revision: 3 }, { source: 'event' })
+    await nextTick()
+    await nextTick()
+    expect(store.isOpen).toBe(true)
+  })
+
+  test('remote close while dirty preserves the buffer', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('saved content')))
+    const projectStore = seedChat('chat-1')
+    projectStore.applyChatPinState('chat-1', { path: 'notes/a.txt', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    const store = useFileViewerStore()
+
+    await store.openSharedPin('notes/a.txt', 'chat-1')
+    store.startEditing()
+    store.editBuffer = 'unsaved draft'
+    expect(store.isDirty).toBe(true)
+
+    projectStore.applyChatPinState('chat-1', { path: '', dismissed_paths: ['notes/a.txt'], revision: 2 }, { source: 'event' })
+    await nextTick()
+    await nextTick()
+
+    // The editor and its buffer survive; the open is demoted to ordinary.
+    expect(store.isOpen).toBe(true)
+    expect(store.editBuffer).toBe('unsaved draft')
+    expect(store.sharedPinChatId).toBe('')
+  })
+
+  test('local dismissal of the shared preview issues one unpin', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('content')))
+    const projectStore = seedChat('chat-1')
+    projectStore.applyChatPinState('chat-1', { path: 'notes/a.txt', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    const store = useFileViewerStore()
+
+    await store.openSharedPin('notes/a.txt', 'chat-1')
+    const unpin = vi.spyOn(projectStore, 'unpinFile').mockResolvedValue(undefined)
+
+    await store.dismissSharedPin()
+
+    expect(unpin).toHaveBeenCalledTimes(1)
+    expect(unpin).toHaveBeenCalledWith('chat-1')
+    expect(store.isOpen).toBe(false)
+  })
+
+  test('event-driven close issues no unpin', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('content')))
+    const projectStore = seedChat('chat-1')
+    projectStore.applyChatPinState('chat-1', { path: 'notes/a.txt', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    const store = useFileViewerStore()
+
+    await store.openSharedPin('notes/a.txt', 'chat-1')
+    const unpin = vi.spyOn(projectStore, 'unpinFile').mockResolvedValue(undefined)
+
+    projectStore.applyChatPinState('chat-1', { path: '', dismissed_paths: ['notes/a.txt'], revision: 2 }, { source: 'event' })
+    await nextTick()
+    await nextTick()
+
+    expect(store.isOpen).toBe(false)
+    expect(unpin).not.toHaveBeenCalled()
   })
 })

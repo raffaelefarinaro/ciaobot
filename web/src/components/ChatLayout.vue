@@ -176,7 +176,33 @@
           :agent-id="subagentRoute.agentId"
           @open-sidebar="sidebarCollapsed = false"
         />
-        <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        <template v-else-if="store.activeChat">
+          <!-- Narrow shared pin: a compact native opener for the chat's
+               server-owned pin, not a forced split pane and never an
+               auto-opened modal. -->
+          <div v-if="narrowSharedPin" class="narrow-pin-opener">
+            <button
+              type="button"
+              class="narrow-pin-btn"
+              :aria-label="`Open pinned file ${narrowSharedPinBase}`"
+              :title="narrowSharedPin"
+              @click="openNarrowSharedPin"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
+              <span class="narrow-pin-name">{{ narrowSharedPinBase }}</span>
+            </button>
+            <button
+              type="button"
+              class="narrow-pin-close btn-icon"
+              aria-label="Unpin file"
+              :disabled="narrowSharedPinPending"
+              @click="unpinCurrent"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        </template>
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
@@ -672,8 +698,34 @@ const pinnedFilePath = computed(() => {
   if (isMobile.value) return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
 })
-function unpinCurrent(): void {
-  if (activePinKey.value) store.unpinFile(activePinKey.value)
+// On a narrow device there is no split pane: the chat's shared (server-owned)
+// pin is a compact opener within the chat. Only a chat route carries one — a
+// project route and Home have no narrow pin (their pins stay desktop-local).
+const narrowSharedPin = computed(() => {
+  if (!isMobile.value) return ''
+  const key = activePinKey.value
+  if (!key || projectIdParam.value) return ''
+  return store.pinnedFileFor(key) || ''
+})
+const narrowSharedPinPending = computed(() => {
+  const key = activePinKey.value
+  return !!key && store.isChatPinPending(key)
+})
+const narrowSharedPinBase = computed(() => {
+  const p = narrowSharedPin.value
+  const idx = p.lastIndexOf('/')
+  return idx === -1 ? p : p.slice(idx + 1)
+})
+function openNarrowSharedPin(): void {
+  const key = activePinKey.value
+  const path = narrowSharedPin.value
+  if (!key || !path) return
+  void fileViewer.open(path, null, key)
+}
+async function unpinCurrent(): Promise<void> {
+  const key = activePinKey.value
+  if (!key) return
+  await store.unpinFile(key)
 }
 
 function onResize() {
@@ -1625,6 +1677,43 @@ onBeforeUnmount(() => {
 }
 
 @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+
+/* Narrow shared-pin opener: a compact in-chat bar naming the chat's pinned
+   file, so a phone gets the same server-owned pin state without a split pane
+   or an unsolicited modal. Every control keeps the 44px touch target. */
+.narrow-pin-opener {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+.narrow-pin-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.narrow-pin-btn:hover { background: var(--bg3); }
+.narrow-pin-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.narrow-pin-close {
+  flex: 0 0 auto;
+}
 
 /* Split-screen layout for pinned file viewer. Both panes share width 50/50
    by default; min-width is a soft floor during drag so a compressed window

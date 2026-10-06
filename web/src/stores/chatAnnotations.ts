@@ -2,6 +2,7 @@ import { computed, ref, type Ref } from 'vue'
 import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
 import { formatChatComments, formatFileComments, type ChatCommentAnchor } from '../lib/commentContext'
 import { setListIndex } from '../lib/safeList'
+import type { ChatPinState } from '../lib/types'
 
 /**
  * Everything the user stages against the *next* message, plus the durable
@@ -71,8 +72,35 @@ export type PreparedMessage = {
   chatComments: PendingChatComment[]
 }
 
-export function createChatAnnotations(deps: { activeChatId: Ref<string | null> }) {
-  const { activeChatId } = deps
+/**
+ * A server-side chat pin mutation. `path === ''` closes (and dismisses) the
+ * current path; a non-empty path pins it. The callback returns the server's
+ * authoritative `ChatPinState` on success **and** on a revision conflict (the
+ * 409 body's `pin`), so the caller applies acknowledged truth either way and
+ * never resubmits on its own. It throws on any other failure (network, 5xx),
+ * leaving the previous acknowledged state intact for an explicit retry.
+ */
+export type ChatPinMutator = (
+  chatId: string,
+  path: string,
+  expectedRevision: number,
+) => Promise<ChatPinState>
+
+export interface ChatAnnotationsDeps {
+  activeChatId: Ref<string | null>
+  /**
+   * Whether an id names a chat (server-owned pin) or a project (browser-local
+   * pin). Resolved against the actual chat rows, never an id-prefix heuristic.
+   */
+  ownerOf: (id: string) => 'chat' | 'project'
+  /** The server PATCH for a chat pin, supplied by the projects store. */
+  mutateChatPin: ChatPinMutator
+  /** Surface an action error (409 conflict, network failure) for a chat. */
+  notifyPinError: (chatId: string, message: string) => void
+}
+
+export function createChatAnnotations(deps: ChatAnnotationsDeps) {
+  const { activeChatId, ownerOf, mutateChatPin, notifyPinError } = deps
 
   const pendingImagesByChat = ref<Record<string, string[]>>({})
   const pendingImages = computed<string[]>({
@@ -102,12 +130,20 @@ export function createChatAnnotations(deps: { activeChatId: Ref<string | null> }
       persistPendingChatComments()
     },
   })
-  // Pinned file paths per chat/project. Dismissals are remembered per *path*,
-  // not per chat: a replayed `file_surface` event (WS reconnect replays the
-  // in-flight stream's buffer) must not reopen a file the user closed, but a
-  // later surface of a *different* file is a new deliverable and must still
-  // open. A chat-wide flag conflated the two and silently swallowed every
-  // subsequent surface request for the rest of the chat.
+  // Server-owned chat pins, keyed by chat_id. This is authoritative truth and
+  // is the ONLY source `pinnedFileFor` reads for a chat id: it is hydrated
+  // from `ChatInfo` payloads, the `chat_pin_changed` event and the snapshot,
+  // and mutated only through `mutateChatPin`. Never persisted locally.
+  const serverChatPins = ref<Record<string, ChatPinState>>({})
+  // Per-chat in-flight pin write. Serializes/duplicate-disables pin/unpin so a
+  // second click cannot race the first PATCH.
+  const chatPinPending = ref<Record<string, boolean>>({})
+
+  // Browser-local *project* pins and their per-path dismissals. Chats must
+  // never read or write these keys: `ownerOf` routes a chat id to the server
+  // map above. Any chat id left in storage from an older build is pruned once
+  // the chat rows are known (see `pruneChatPins`) rather than being read or
+  // uploaded.
   const pinnedFilePaths = ref<Record<string, string>>({})
   const dismissedAutoPins = ref<Record<string, string[]>>({})
 
@@ -299,45 +335,133 @@ export function createChatAnnotations(deps: { activeChatId: Ref<string | null> }
     persistPendingComments()
   }
 
-  // ── Pinned file viewer (per chat/project) ──────────────────────────
-  function pinFile(id: string, path: string): void {
-    pinnedFilePaths.value = { ...pinnedFilePaths.value, [id]: path }
-    // Pinning a file the user had closed clears that path's dismissal, so a
-    // later surface of it is allowed to reopen it again.
-    const dismissed = dismissedAutoPins.value[id]
-    if (dismissed?.includes(path)) {
-      const remaining = dismissed.filter(p => p !== path)
-      const nextDismissed = { ...dismissedAutoPins.value }
-      if (remaining.length) nextDismissed[id] = remaining
-      else delete nextDismissed[id]
-      dismissedAutoPins.value = nextDismissed
-      persistDismissedAutoPins()
-    }
-    persistPinnedFiles()
+  // ── Pinned file viewer (server chat pins + local project pins) ──────
+
+  function applyChatPinState(id: string, state: ChatPinState, _opts?: { source?: string }): void {
+    const current = serverChatPins.value[id]
+    // An older (or same) revision can never undo a newer one; same revision is
+    // idempotent. This is what keeps a GET/PATCH response that raced a live
+    // event from rolling the pin back.
+    if (current && current.revision >= state.revision) return
+    serverChatPins.value = { ...serverChatPins.value, [id]: state }
   }
-  function unpinFile(id: string): void {
-    const next = { ...pinnedFilePaths.value }
-    const closedPath = next[id]
+
+  /**
+   * Authoritative reconciliation from the `/ws/events` snapshot's `chat_pins`
+   * map. The snapshot names every persisted chat (including closed/empty and
+   * archived states), so entries missing from it are dropped and a closed pin
+   * missed while offline heals without writing browser leftovers back.
+   */
+  function applyChatPinsSnapshot(snapshot: Record<string, ChatPinState> | undefined): void {
+    if (!snapshot) return
+    // The snapshot's keys are chat ids by construction, so a wholesale replace
+    // is correct: a chat absent here (deleted, or never pinned) drops out, and
+    // a closed pin missed while offline heals to the server's '' path.
+    serverChatPins.value = { ...snapshot }
+  }
+
+  /** Drop a chat's server-owned pin state (the chat was deleted). */
+  function dropChatPinState(id: string): void {
+    if (!(id in serverChatPins.value)) return
+    const next = { ...serverChatPins.value }
     delete next[id]
-    pinnedFilePaths.value = next
-    if (closedPath) {
-      const dismissed = dismissedAutoPins.value[id] || []
-      if (!dismissed.includes(closedPath)) {
-        dismissedAutoPins.value = {
-          ...dismissedAutoPins.value,
-          [id]: [...dismissed, closedPath],
-        }
+    serverChatPins.value = next
+  }
+
+  /**
+   * Once the authoritative chat rows are known, remove any chat id left in the
+   * browser-local pin/dismissal keys by an older build. They are never read as
+   * chat state (`pinnedFileFor` routes chats to the server map), so this just
+   * stops them lingering — and, in the dismissals, stops a stale chat key from
+   * being mistaken for a project one.
+   */
+  function pruneChatPins(chatIds: Iterable<string>): void {
+    const known = new Set(chatIds)
+    let pinsChanged = false
+    for (const id of Object.keys(pinnedFilePaths.value)) {
+      if (!known.has(id)) continue
+      delete pinnedFilePaths.value[id]
+      pinsChanged = true
+    }
+    let dismissedChanged = false
+    for (const id of Object.keys(dismissedAutoPins.value)) {
+      if (!known.has(id)) continue
+      delete dismissedAutoPins.value[id]
+      dismissedChanged = true
+    }
+    if (pinsChanged) persistPinnedFiles()
+    if (dismissedChanged) persistDismissedAutoPins()
+  }
+
+  async function mutateChatPinTo(chatId: string, path: string): Promise<void> {
+    if (chatPinPending.value[chatId]) return
+    // Capture the chat and target path now: the selection (or route) can move
+    // while the PATCH is in flight, and the write must still land on the chat
+    // the user acted on, never wherever the app has navigated to since.
+    const expectedRevision = serverChatPins.value[chatId]?.revision ?? 0
+    chatPinPending.value[chatId] = true
+    try {
+      const state = await mutateChatPin(chatId, path, expectedRevision)
+      applyChatPinState(chatId, state, { source: 'mutation' })
+    } catch (e) {
+      // Leave the acknowledged state intact and surface the failure; an
+      // explicit retry re-presents the same acknowledged revision.
+      notifyPinError(chatId, e instanceof Error ? e.message : String(e))
+    } finally {
+      delete chatPinPending.value[chatId]
+    }
+  }
+
+  function pinFile(id: string, path: string): Promise<void> {
+    if (ownerOf(id) === 'project') {
+      pinnedFilePaths.value = { ...pinnedFilePaths.value, [id]: path }
+      // Pinning a file the user had closed clears that path's dismissal.
+      const dismissed = dismissedAutoPins.value[id]
+      if (dismissed?.includes(path)) {
+        const remaining = dismissed.filter(p => p !== path)
+        const nextDismissed = { ...dismissedAutoPins.value }
+        if (remaining.length) nextDismissed[id] = remaining
+        else delete nextDismissed[id]
+        dismissedAutoPins.value = nextDismissed
         persistDismissedAutoPins()
       }
+      persistPinnedFiles()
+      return Promise.resolve()
     }
-    persistPinnedFiles()
+    return mutateChatPinTo(id, path)
+  }
+  function unpinFile(id: string): Promise<void> {
+    if (ownerOf(id) === 'project') {
+      const next = { ...pinnedFilePaths.value }
+      const closedPath = next[id]
+      delete next[id]
+      pinnedFilePaths.value = next
+      if (closedPath) {
+        const dismissed = dismissedAutoPins.value[id] || []
+        if (!dismissed.includes(closedPath)) {
+          dismissedAutoPins.value = {
+            ...dismissedAutoPins.value,
+            [id]: [...dismissed, closedPath],
+          }
+          persistDismissedAutoPins()
+        }
+      }
+      persistPinnedFiles()
+      return Promise.resolve()
+    }
+    return mutateChatPinTo(id, '')
   }
   function pinnedFileFor(id: string): string | undefined {
+    if (ownerOf(id) === 'chat') return serverChatPins.value[id]?.path || undefined
     return pinnedFilePaths.value[id]
   }
-  /** True when the user closed this exact path in this chat (see `unpinFile`). */
+  /** True when the user closed this exact path in this *project* (see `unpinFile`). */
   function isAutoPinDismissed(id: string, path: string): boolean {
     return Boolean(dismissedAutoPins.value[id]?.includes(path))
+  }
+  /** True while a chat pin write is in flight (used to disable the control). */
+  function isChatPinPending(id: string): boolean {
+    return Boolean(chatPinPending.value[id])
   }
 
   // ── Pending chat comments ─────────────────────────────────────────
@@ -510,6 +634,11 @@ export function createChatAnnotations(deps: { activeChatId: Ref<string | null> }
     pinFile,
     unpinFile,
     pinnedFileFor,
+    applyChatPinState,
+    applyChatPinsSnapshot,
+    dropChatPinState,
+    pruneChatPins,
+    isChatPinPending,
     addPendingChatComment,
     removePendingChatComment,
     clearPendingChatComments,
