@@ -5744,17 +5744,13 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
 # Settings → Main workspace. Every route but the status read is for the
 # computer running Ciaobot only: browsing folders and moving the install are
 # filesystem operations a phone or a remote browser has no business making.
-# "Local" is the TCP peer (`is_loopback_client`), plus a localhost Host header
-# and a same-host Origin so a DNS-rebound page on this machine cannot ride the
-# session cookie.
+# "Local" is the setup routes' rule (`_localhost_request`: a loopback TCP peer
+# whose Host names loopback) plus a same-host Origin, so a DNS-rebound page on
+# this machine cannot ride the session cookie.
 
 
 def _workspace_move_local(request: Request) -> bool:
-    return (
-        is_loopback_client(request)
-        and _localhost_request(request)
-        and _setup_finish_origin_allowed(request)
-    )
+    return _localhost_request(request) and _setup_finish_origin_allowed(request)
 
 
 def _workspace_move_guard(request: Request) -> JSONResponse | None:
