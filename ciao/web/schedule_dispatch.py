@@ -303,7 +303,11 @@ class ScheduleDispatcher:
         ) as run:
             try:
                 from ciao.providers.oneshot import run_oneshot
-                from ciao.insights import _DEFAULT_TIMEOUT_S, is_context_overflow
+                from ciao.insights import (
+                    _DEFAULT_TIMEOUT_S,
+                    is_context_overflow,
+                    is_model_refused,
+                )
 
                 # Same env-tunable budget as the other one-shot jobs: a slow
                 # local model can take minutes on a successful call, so a hard
@@ -353,6 +357,22 @@ class ScheduleDispatcher:
                     logger.warning(
                         "Schedule attention classifier hit the context window "
                         "with model %s; keeping chat visible",
+                        model,
+                    )
+                elif is_model_refused(exc):
+                    # The configured insights model refused this one-shot call
+                    # (#1066). The conservative default is the right behaviour
+                    # and needs no traceback; what the operator needs is the
+                    # model named and the workaround pointed at. This is a text
+                    # match on the provider message, not proof the model can
+                    # never serve a call — hence "refused", not "unusable".
+                    run.extra["model_refused"] = True
+                    logger.warning(
+                        "Schedule attention classifier model %s was refused by "
+                        "the provider for a one-shot call, so this auto-archived "
+                        "run keeps its chat visible; picking a Session insights "
+                        "model that serves one-shots in Settings → Models avoids "
+                        "the warning on later runs",
                         model,
                     )
                 else:
