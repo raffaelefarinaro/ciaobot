@@ -258,7 +258,13 @@ watcher left over from a detached or retried attempt cannot put a Review badge o
 a card another attempt now owns. A stream that ends without a `result` event
 settles `interrupted`, not `ready_for_review`: there is no answer to review, and
 an empty result dressed as a finished one is the one reading the user cannot
-recover from without opening the chat.
+recover from without opening the chat. The one exception is a turn paused on a
+question card. The drive loop stops the provider and ends the stream with no
+`result`, so when the chat has a `pending_question` the attempt settles
+`needs_you` and the next turn re-attaches it (#1092). A saved permission card or
+a native (opencode) question card with a `request_id` does not count: both keep
+the turn open while they are up and can outlive it, so on a stream that has
+already ended they are leftovers.
 
 The gesture routes (`stop`, `detach`) await `ProjectChatManager.stop_chat`, which
 is `async`. `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` checks `task_id`

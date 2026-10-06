@@ -1028,6 +1028,102 @@ async def test_a_stream_with_no_result_is_interrupted_not_a_review(
     assert _attempt_store(plane).get_live(task["id"]) is None
 
 
+async def test_a_turn_paused_on_a_question_without_a_result_settles_needs_you(
+    tmp_path: Path,
+) -> None:
+    """A turn paused on a question card ends its stream without a result.
+
+    The drive loop stops the provider and waits for the answer, and no `result`
+    event is published for the paused turn. Reading the chat distinguishes a
+    paused turn from a lost one: it is waiting on the user, so the attempt is
+    ``needs_you`` — a live state the next turn re-attaches to.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="One question first")
+    pcm.next_events = [{"type": "text", "text": "One question first."}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "needs_you"
+    assert row["status"] != "in_review"
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "needs_you"
+    assert _attempt_store(plane).get_live(task["id"]) is not None
+
+
+async def test_a_chat_paused_on_a_question_can_still_report_and_finish(
+    tmp_path: Path,
+) -> None:
+    """Answering the card re-attaches the attempt, so the agent can report.
+
+    Because the paused attempt settles ``needs_you`` rather than ``interrupted``
+    it stays live; the answer's turn re-attaches it and a later report finds it
+    the holder instead of raising ``task_report_not_holder``.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Ask, then finish")
+    pcm.next_events = [{"type": "text", "text": "One question first."}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
+
+    await _end_turns(pcm)
+
+    assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
+    # Answer the card and restore a turn that reports the finished work.
+    pcm.get_chat("chat-1").pending_question = ""
+    pcm.next_events = [{"type": "result", "text": "Done."}]
+    pcm.answer_in_chat("chat-1", "Option A.")
+
+    plane.workspace_task_report(
+        "personal", task["id"], outcome="done", summary="Did the work.", chat_id="chat-1"
+    )
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "ready_for_review"
+    assert row["status"] == "in_review"
+
+
+async def test_a_stream_with_no_result_and_a_leftover_permission_card_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    """A permission pause keeps the stream open, so a saved card here is a leftover."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Lost with a stale card")
+    pcm.next_events = [{"type": "text", "text": "half an answer"}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_permission = '{"tool": "Bash"}'
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+
+async def test_a_stream_with_no_result_and_a_leftover_native_question_card_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    """A native question form keeps the turn open, so a saved card here is a leftover."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Lost with a native card")
+    pcm.next_events = [{"type": "text", "text": "half an answer"}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": [], "request_id": "que_1"}'
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+
 async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
     tmp_path: Path,
 ) -> None:

@@ -268,6 +268,25 @@ def _chat_needs_user(chat: Any) -> bool:
     )
 
 
+def _chat_paused_on_question(chat: Any) -> bool:
+    """Whether a chat's last turn ended paused on a question card.
+
+    Only a card without a native ``request_id`` pauses by ending the stream:
+    the drive loop stops the provider and waits for the answer. A native
+    (opencode) form keeps an attended turn open until it is answered, and the
+    card stays saved until the reply is acknowledged, so a native card on a
+    stream that has already ended is a leftover from a lost turn.
+    """
+    raw = getattr(chat, "pending_question", "") if chat is not None else ""
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return True
+    return not (isinstance(payload, dict) and payload.get("request_id"))
+
+
 def _task_row_with_attempt(
     document: TaskDocument,
     live: TaskAttempt | None,
@@ -3758,6 +3777,21 @@ class CiaoControlPlane:
         if not self._is_current_turn(workspace, attempt_id, stream):
             return
         if not seen_result:
+            # A turn paused on a question card ends its stream without a result
+            # (the drive loop stops the provider and waits for the answer), so a
+            # chat with a question card up is a paused turn, not a lost one. A
+            # permission card does not count: that pause keeps the stream open, and
+            # the card stays saved after the stream ends until the answer is
+            # confirmed, so here it can only be a leftover. A native (opencode)
+            # question card does not count either, for the same reason.
+            try:
+                waiting = _chat_paused_on_question(self.pcm.get_chat(chat_id))
+            except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
+                logger.exception("delegation: could not read chat %s after the turn", chat_id)
+                waiting = False
+            if waiting:
+                self._settle_from_result(workspace, attempt_id, task_id, chat_id, stream, {})
+                return
             # The stream ended without a result event. Whatever the turn did — a
             # provider drop, a cancel the manager swallowed, a subscription that
             # closed early — this engine never saw an answer, so there is nothing
