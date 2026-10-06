@@ -182,6 +182,13 @@ opencode auth login</code></pre>
       <p>With a local model (for example <a href="https://ollama.com">Ollama</a>) through opencode, yes. Google, web search and cloud models need a connection, of course.</p>
       <h3>Something's wrong. Where do I look?</h3>
       <p>Ask Ciaobot first ("why did my morning agenda not run?"); it can read its own logs and diagnose most problems. It can also <a href="./#together">report the bug on GitHub</a> for you.</p>
+      <h3>I forgot my Ciaobot password</h3>
+      <p>Nobody can reset it for you, not even us: Ciaobot runs only on your computer, so there is no account to recover. You can get back in yourself, on the computer that runs Ciaobot:</p>
+      <ul>
+        <li><strong>Sign in without it.</strong> In the Terminal, run <code>ciao setup-url --workspace ~/your-folder</code>, using the folder you picked during setup. It prints a one-time link; open it in a browser on that same computer.</li>
+        <li><strong>Look it up.</strong> The password is the <code>PWA_AUTH_TOKEN=</code> line of the <code>.env</code> file in that folder. Run <code>cat ~/your-folder/.env</code> in the Terminal, or open the file in a text editor. Finder hides it; press <kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> to show hidden files.</li>
+        <li><strong>Change it.</strong> Edit that line (at least 4 characters), save, and run <code>ciao service restart</code>. Every device then signs in with the new password.</li>
+      </ul>
       <h3>How do I update or uninstall?</h3>
       <p>To update, run the one-line install command again, or use <strong>Settings → General</strong> in Ciaobot, which installs the new engine for you. To stop Ciaobot, run <code>ciao service stop</code> in the Terminal; your notes folder is kept. If you are still on the old macOS app, run the one-liner with <code>--migrate</code>: it installs the engine and removes the old app for you.</p>
     </section>
