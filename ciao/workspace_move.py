@@ -266,12 +266,16 @@ def _keep_owner(path: Path, like: Path, *, follow: bool = True) -> None:
 
 
 def _keep_owner_tree(root: Path, like: Path) -> None:
-    if not _running_as_root():
+    if sys.platform == "win32" or not _running_as_root():
         return
-    _keep_owner(root, like)
+    try:
+        st = like.stat()
+    except OSError:
+        return
+    os.chown(root, st.st_uid, st.st_gid)
     for dirpath, dirnames, filenames in os.walk(root):
         for name in [*dirnames, *filenames]:
-            _keep_owner(Path(dirpath) / name, like, follow=False)
+            os.lchown(Path(dirpath) / name, st.st_uid, st.st_gid)
 
 
 def _write_text_atomic(target: Path, text: str, *, private: bool = False) -> None:
@@ -413,7 +417,12 @@ def plan(
                 f"The destination is inside ~/{protected}, which macOS privacy protection "
                 "blocks the background engine from reading. Choose another folder, e.g. ~/ciaobot."
             )
-    if registered is None:
+    if registered is None and platform.startswith("linux"):
+        result.refusals.append(
+            f"No Ciaobot unit names a workspace in {LINUX_UNIT_DIR / LINUX_UNIT}, so there is "
+            "nothing to repoint. Install it as docs/LINUX.md describes."
+        )
+    elif registered is None:
         result.refusals.append(
             "No Ciaobot service is registered, so there is nothing to repoint. "
             "Run `ciao setup --workspace <folder> --load-launchd` instead."
@@ -810,15 +819,48 @@ class LinuxServiceDefinition:
         return found
 
     def workspace(self) -> Path | None:
-        value = self._environment("CIAO_WORKSPACE") or self._setting("WorkingDirectory")
-        return Path(value.replace("%%", "%")) if value else None
+        # `_environment` has already undoubled `%`; WorkingDirectory= has not.
+        value = self._environment("CIAO_WORKSPACE")
+        if not value:
+            directory = self._setting("WorkingDirectory")
+            value = directory.replace("%%", "%") if directory else None
+        return Path(value) if value else None
 
     def home(self) -> Path | None:
+        """The service account's home: ``HOME=`` in the unit, else ``User=``'s.
+
+        systemd sets HOME from User= when the unit does not, so a hand-written
+        unit without it still has one, and it is never root's.
+        """
         value = self._environment("HOME")
-        return Path(value) if value else None
+        if value:
+            return Path(value)
+        if sys.platform == "win32":
+            return None
+        import pwd
+
+        user = self.user()
+        if not user:
+            return None
+        try:
+            return Path(pwd.getpwnam(user).pw_dir)
+        except KeyError:
+            return None
 
     def user(self) -> str | None:
         return self._setting("User")
+
+    def drop_ins_naming(self, folder: Path) -> list[Path]:
+        """Drop-ins (``<unit>.d/*.conf``) that name ``folder``: the move rewrites only the unit."""
+        directory = self.path.parent / f"{self.path.name}.d"
+        found: list[Path] = []
+        for conf in sorted(directory.glob("*.conf")) if directory.is_dir() else []:
+            try:
+                if str(folder) in conf.read_text(encoding="utf-8"):
+                    found.append(conf)
+            except OSError:
+                continue
+        return found
 
     def backup(self, dest: Path) -> None:
         shutil.copy2(self.path, dest)
@@ -827,8 +869,12 @@ class LinuxServiceDefinition:
         text = self.path.read_text(encoding="utf-8")
         rewritten = text
         # The unit holds the path as written and with `%` doubled (specifiers).
-        for before, after in ((str(old), str(new)), (str(old).replace("%", "%%"), str(new).replace("%", "%%"))):
-            pattern = re.compile(re.escape(before) + r'(?=[/"\s]|$)', re.MULTILINE)
+        # One pass when there is no `%`: a second would rewrite the new path
+        # again whenever it ends with the old one (/srv/a -> /home/srv/a).
+        forms = {str(old): str(new), str(old).replace("%", "%%"): str(new).replace("%", "%%")}
+        for before, after in forms.items():
+            # A whole path only: it starts a value (after `=`, a quote or space).
+            pattern = re.compile(r'(?<=[="\s])' + re.escape(before) + r'(?=[/"\s]|$)', re.MULTILINE)
             rewritten = pattern.sub(after.replace("\\", r"\\"), rewritten)
         if rewritten == text:
             raise MoveError(f"could not repoint the workspace in {self.path}")
@@ -957,11 +1003,21 @@ def spawn_job(op: MoveOperation, state_dir: Path) -> None:
 
     On Linux the administrator's own root shell is already outside the
     service's control group, so the move runs right here, in the foreground.
+    Ctrl-C and a dropped SSH session are ignored while it runs: either would
+    otherwise kill it past every rollback, leaving the engine drained or
+    stopped and the folder half-moved.
     """
     if sys.platform == "win32":
         _spawn_windows_job(op, state_dir)
     elif sys.platform.startswith("linux"):
-        execute(op.id, state_dir)
+        import signal
+
+        previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGHUP)}
+        try:
+            execute(op.id, state_dir)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
     else:
         _spawn_mac_job(op, state_dir)
 
@@ -1243,7 +1299,7 @@ def _linux_service_can_reach() -> Callable[[Path], bool] | None:
 
 def plan_for(source: Path, target_raw: str) -> MovePlan:
     """:func:`plan` with this machine's service, engine, update and move state."""
-    return plan(
+    result = plan(
         source,
         target_raw,
         registered=registered_workspace(),
@@ -1251,6 +1307,13 @@ def plan_for(source: Path, target_raw: str) -> MovePlan:
         engine_running=engine_running(),
         service_can_reach=_linux_service_can_reach(),
     )
+    if sys.platform.startswith("linux"):
+        for conf in LinuxServiceDefinition().drop_ins_naming(source.expanduser().resolve()):
+            result.refusals.append(
+                f"{conf} also names the workspace and the move only rewrites the unit. "
+                "Fold it into the unit or remove that line first."
+            )
+    return result
 
 
 def execute(operation_id: str, state_dir: Path) -> MoveOperation:

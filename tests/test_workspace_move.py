@@ -517,3 +517,60 @@ def test_linux_host_drives_systemctl_and_reads_the_port(tmp_path: Path) -> None:
     assert host.start_engine().ok is True
     assert host.stop_engine(wait=lambda: True) is True
     assert calls == [("start", "ciaobot.service"), ("stop", "ciaobot.service")]
+
+
+def test_linux_unit_repoints_once_when_the_new_path_ends_with_the_old(tmp_path: Path) -> None:
+    from ciao.linux_service import render_service
+
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(
+        render_service(
+            workspace=Path("/srv/ciaobot"),
+            user="ciaobot",
+            home=Path("/var/lib/ciaobot"),
+            python=Path("/opt/ciaobot/venv/bin/python"),
+        ),
+        encoding="utf-8",
+    )
+    _calls_list, systemctl = _calls()
+    definition = workspace_move.LinuxServiceDefinition(unit, systemctl=systemctl)
+    definition.repoint(Path("/srv/ciaobot"), Path("/home/srv/ciaobot"))
+    text = unit.read_text(encoding="utf-8")
+    assert "WorkingDirectory=/home/srv/ciaobot\n" in text
+    assert 'Environment="CIAO_WORKSPACE=/home/srv/ciaobot"' in text
+    assert definition.workspace() == Path("/home/srv/ciaobot")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX accounts")
+def test_linux_unit_home_falls_back_to_the_service_account(tmp_path: Path) -> None:
+    import getpass
+    import pwd
+
+    me = getpass.getuser()
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(f"[Service]\nUser={me}\nWorkingDirectory=/srv/ciaobot\n", encoding="utf-8")
+    definition = workspace_move.LinuxServiceDefinition(unit)
+    assert definition.home() == Path(pwd.getpwnam(me).pw_dir)
+
+
+def test_start_route_refuses_on_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.web.routes_api import workspace_move_start_endpoint
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    app = Starlette(routes=[Route("/api/workspace-move", workspace_move_start_endpoint, methods=["POST"])])
+    app.state.config = SimpleNamespace(workspace_root=str(tmp_path), pwa_port=8443)
+    client = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000))
+    response = client.post("/api/workspace-move", json={"target": str(tmp_path.parent / "new")})
+    assert response.status_code == 403
+    assert "administrator" in response.json()["error"]
+
+
+def test_linux_unit_finds_drop_ins_that_name_the_workspace(tmp_path: Path) -> None:
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(_UNIT, encoding="utf-8")
+    drop_ins = tmp_path / "ciaobot.service.d"
+    drop_ins.mkdir()
+    (drop_ins / "override.conf").write_text('[Service]\nEnvironment="CIAO_WORKSPACE=/srv/ciao%x"\n', encoding="utf-8")
+    (drop_ins / "limits.conf").write_text("[Service]\nLimitNOFILE=8192\n", encoding="utf-8")
+    definition = workspace_move.LinuxServiceDefinition(unit, systemctl=_calls()[1])
+    assert definition.drop_ins_naming(Path("/srv/ciao%x")) == [drop_ins / "override.conf"]

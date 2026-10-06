@@ -5819,6 +5819,14 @@ async def workspace_move_start_endpoint(request: Request) -> JSONResponse:
     guard = _workspace_move_guard(request)
     if guard is not None:
         return guard
+    if sys.platform.startswith("linux"):
+        # On Linux the move runs in the caller's process, not as a sibling
+        # job: started from here it would stop the engine running it, even
+        # when the engine runs as root and the plan lets it through.
+        return JSONResponse(
+            {"error": "On Linux the administrator moves the workspace with `sudo ciao workspace-move`."},
+            status_code=403,
+        )
     target = await _workspace_move_target(request)
     if isinstance(target, JSONResponse):
         return target
