@@ -143,6 +143,14 @@ class ServiceDefinition(Protocol):
         """Put the bytes saved by :meth:`backup` back and make them current."""
         ...
 
+    def preflight(self) -> None:
+        """Raise ``MoveError`` now if :meth:`repoint` would be refused later.
+
+        Run with the engine stopped and nothing moved yet, so a refusal costs
+        a restart rather than a rollback.
+        """
+        ...
+
 
 # ── state ────────────────────────────────────────────────────────────
 
@@ -732,6 +740,10 @@ class MacServiceDefinition:
     def restore(self, backup: Path) -> None:
         shutil.copy2(backup, self.path)
 
+    def preflight(self) -> None:
+        if not os.access(self.path, os.W_OK) or not os.access(self.path.parent, os.W_OK):
+            raise MoveError(f"cannot rewrite {self.path}")
+
 
 class WindowsServiceDefinition:
     """The engine logon task's XML, re-registered after every change."""
@@ -778,6 +790,24 @@ class WindowsServiceDefinition:
 
         shutil.copy2(backup, self.path)
         windows_service.register_task(self.path)
+
+    def preflight(self) -> None:
+        """Re-register the unchanged task: the one way to learn it may be changed.
+
+        A task registered from an elevated shell can only be changed by an
+        elevated process, and the move job runs at the user's normal integrity
+        level; `schtasks /Create /F` then answers "Access is denied".
+        """
+        from ciao import windows_service
+
+        try:
+            windows_service.register_task(self.path)
+        except windows_service.WindowsServiceError as exc:
+            raise MoveError(
+                f"Windows refused to update the Ciaobot logon task ({exc}). It was probably "
+                "registered from an elevated shell; re-run setup from a normal PowerShell, "
+                "then move again."
+            ) from exc
 
 
 class LinuxServiceDefinition:
@@ -884,6 +914,11 @@ class LinuxServiceDefinition:
     def restore(self, backup: Path) -> None:
         shutil.copy2(backup, self.path)
         self._reload()
+
+    def preflight(self) -> None:
+        # The repoint writes a temp file beside the unit and renames it over.
+        if not os.access(self.path, os.W_OK) or not os.access(self.path.parent, os.W_OK):
+            raise MoveError(f"cannot rewrite {self.path}; run the move as root")
 
     def _reload(self) -> None:
         completed = self._systemctl("daemon-reload")
@@ -1022,24 +1057,42 @@ def spawn_job(op: MoveOperation, state_dir: Path) -> None:
         _spawn_mac_job(op, state_dir)
 
 
+def _engine_bundle_ids() -> list[str]:
+    """The engine plist's ``AssociatedBundleIdentifiers``, for the move job to share.
+
+    macOS announces every new background job by the program it runs, which
+    for the move job is the engine's Python. Naming the bundle the engine's own
+    job names makes it read as Ciaobot (the branded server host) instead.
+    """
+    try:
+        plist = MacServiceDefinition()._load()
+    except (OSError, ValueError, MoveError):
+        return []
+    bundles = plist.get("AssociatedBundleIdentifiers")
+    if not isinstance(bundles, list):
+        return []
+    return [str(bundle) for bundle in bundles if isinstance(bundle, str) and bundle]
+
+
 def _spawn_mac_job(op: MoveOperation, state_dir: Path) -> None:
     from ciao import macos_service
     from ciao.update_host import _write_plist
 
     log = str(state_dir / JOB_LOG_NAME)
-    plist_path = _write_plist(
-        {
-            "Label": JOB_LABEL,
-            "ProgramArguments": _job_argv(op, state_dir),
-            "WorkingDirectory": str(state_dir),
-            "RunAtLoad": True,
-            "KeepAlive": False,
-            "AbandonProcessGroup": True,
-            "StandardOutPath": log,
-            "StandardErrorPath": log,
-        },
-        state_dir / JOB_PLIST_NAME,
-    )
+    job: dict[str, Any] = {
+        "Label": JOB_LABEL,
+        "ProgramArguments": _job_argv(op, state_dir),
+        "WorkingDirectory": str(state_dir),
+        "RunAtLoad": True,
+        "KeepAlive": False,
+        "AbandonProcessGroup": True,
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+    }
+    bundles = _engine_bundle_ids()
+    if bundles:
+        job["AssociatedBundleIdentifiers"] = bundles
+    plist_path = _write_plist(job, state_dir / JOB_PLIST_NAME)
     domain = f"gui/{macos_service._getuid()}"
     macos_service._launchctl(["bootout", f"{domain}/{JOB_LABEL}"])
     bootstrap = macos_service._launchctl(["bootstrap", domain, str(plist_path)])
@@ -1196,6 +1249,19 @@ def run_move(
         if not host.stop_engine(wait=wait_until_unreachable):
             host.start_engine()
             raise MoveError("the engine did not stop")
+        try:
+            service.preflight()
+        except Exception as refusal:  # noqa: BLE001 — recorded for the operator
+            reason = str(refusal) or refusal.__class__.__name__
+            try:
+                started = host.start_engine()
+                restarted = bool(getattr(started, "ok", True))
+                detail = str(getattr(started, "message", "") or "")
+            except Exception as start_exc:  # noqa: BLE001
+                restarted, detail = False, str(start_exc)
+            if not restarted:
+                reason = f"{reason}; the engine did not start again: {detail or 'no reason given'}"
+            raise MoveError(reason) from refusal
     except Exception as exc:  # noqa: BLE001 — recorded for the operator
         reopen()
         advance("failed", str(exc) or exc.__class__.__name__)
@@ -1232,18 +1298,55 @@ def run_move(
         reason = str(exc) or exc.__class__.__name__
         advance("rolling_back", reason)
         try:
-            if not host.stop_engine(wait=wait_until_unreachable):
-                raise MoveError("the engine at the new folder did not stop")
-            if backed_up:
-                service.restore(backup)
-            if moved:
-                rewrite_workspace_state(target, str(target), str(source))
-                os.rename(target, source)
-            host.start_engine()
-            if not wait_until_ready():
-                raise MoveError("the engine did not come back at the old folder")
+            stopped = host.stop_engine(wait=wait_until_unreachable)
         except Exception as rollback_exc:  # noqa: BLE001
-            advance("rollback_failed", f"{reason}; rollback: {rollback_exc}")
+            advance("rollback_failed", f"{reason}; rollback: stopping the engine: {rollback_exc}")
+            return op
+        if not stopped:
+            # Never move the folder out from under a running engine.
+            advance("rollback_failed", f"{reason}; rollback: the engine at the new folder did not stop")
+            return op
+        # Every step runs even when an earlier one failed, and the engine is
+        # started last whenever the definition names a folder that is there: a
+        # half rollback with the engine up is easier to finish by hand than one
+        # with the engine down, but not one serving a folder that is missing.
+        errors: list[str] = []
+        if backed_up:
+            try:
+                service.restore(backup)
+            except Exception as rollback_exc:  # noqa: BLE001
+                errors.append(f"restoring the service definition: {rollback_exc}")
+        if moved:
+            try:
+                # Rename first: on Windows a file link is a hard link and a
+                # directory link a junction, and both need their target to exist.
+                os.rename(target, source)
+            except Exception as rollback_exc:  # noqa: BLE001
+                errors.append(f"moving the folder back: {rollback_exc}")
+            else:
+                try:
+                    rewrite_workspace_state(source, str(target), str(source))
+                except Exception as rollback_exc:  # noqa: BLE001
+                    errors.append(f"rewriting the folder's paths back: {rollback_exc}")
+        try:
+            named = service.workspace()
+        except Exception:  # noqa: BLE001 — an unreadable definition names nothing
+            named = None
+        if named is None or not named.is_dir():
+            errors.append(f"not starting the engine: the service names {named or 'no folder'}, which is not there")
+        else:
+            try:
+                started = host.start_engine()
+                if not bool(getattr(started, "ok", True)):
+                    errors.append(
+                        f"starting the engine: {getattr(started, 'message', '') or 'the engine did not start'}"
+                    )
+                elif not wait_until_ready():
+                    errors.append("the engine did not come back at the old folder")
+            except Exception as rollback_exc:  # noqa: BLE001
+                errors.append(f"starting the engine: {rollback_exc}")
+        if errors:
+            advance("rollback_failed", f"{reason}; rollback: {'; '.join(errors)}")
             return op
         advance("rolled_back", reason)
         return op

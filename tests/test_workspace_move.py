@@ -268,6 +268,9 @@ class _Service:
     def restore(self, backup: Path) -> None:
         self.path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
 
+    def preflight(self) -> None:
+        pass
+
 
 def _run(
     tmp_path: Path,
@@ -578,3 +581,164 @@ def test_linux_unit_finds_drop_ins_that_name_the_workspace(tmp_path: Path) -> No
     (drop_ins / "limits.conf").write_text("[Service]\nLimitNOFILE=8192\n", encoding="utf-8")
     definition = workspace_move.LinuxServiceDefinition(unit, systemctl=_calls()[1])
     assert definition.drop_ins_naming(Path("/srv/ciao%x")) == [drop_ins / "override.conf"]
+
+
+# ── refusals the service makes, and the rollback that follows ────────
+
+
+class _RefusingService(_Service):
+    def preflight(self) -> None:
+        raise workspace_move.MoveError("Windows refused to update the Ciaobot logon task")
+
+
+def test_run_move_stops_before_moving_when_the_definition_cannot_change(tmp_path: Path) -> None:
+    host = _Host()
+    result, service, _posts = _run(tmp_path, host, service_type=_RefusingService)
+    assert result.phase == "failed"
+    assert "refused to update" in result.error
+    assert (tmp_path / "old" / ".env").is_file() and not (tmp_path / "new").exists()
+    assert service.workspace() == tmp_path / "old"
+    assert host.calls == ["stop", "start"]
+
+
+class _RepointAndRestoreFail(_Service):
+    def repoint(self, old: Path, new: Path) -> None:
+        raise workspace_move.MoveError("Access is denied.")
+
+    def restore(self, backup: Path) -> None:
+        raise workspace_move.MoveError("Access is denied.")
+
+
+def test_rollback_keeps_going_when_a_step_fails(tmp_path: Path) -> None:
+    host = _Host()
+    result, _service, _posts = _run(tmp_path, host, service_type=_RepointAndRestoreFail)
+    assert result.phase == "rollback_failed"
+    assert "restoring the service definition" in result.error
+    # The folder still went back and the engine was started last.
+    assert (tmp_path / "old" / ".env").is_file() and not (tmp_path / "new").exists()
+    assert host.calls[-1] == "start"
+
+
+def test_rollback_moves_the_folder_back_before_rewriting_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows links (hard links, junctions) need their target to exist, so the
+    # paths under the old root must be real again before they are rewritten.
+    seen: list[tuple[str, bool]] = []
+    real = workspace_move.rewrite_workspace_state
+
+    def recording(root: Path, old: str, new: str) -> None:
+        seen.append((new, Path(new).is_dir()))
+        real(root, old, new)
+
+    monkeypatch.setattr(workspace_move, "rewrite_workspace_state", recording)
+    result, _service, _posts = _run(tmp_path, _Host(start_ok=False))
+    assert result.phase == "rolled_back"
+    assert seen[-1] == (str(tmp_path / "old"), True)
+
+
+class _RefusingHost(_Host):
+    """Will not start again after a preflight refusal."""
+
+    def start_engine(self) -> Any:
+        self.calls.append("start")
+        return SimpleNamespace(ok=False, message="schtasks /Run failed")
+
+
+def test_a_refusal_says_when_the_engine_did_not_start_again(tmp_path: Path) -> None:
+    host = _RefusingHost()
+    result, _service, _posts = _run(tmp_path, host, service_type=_RefusingService)
+    assert result.phase == "failed"
+    assert "refused to update" in result.error
+    assert "did not start again: schtasks /Run failed" in result.error
+
+
+class _RollbackStopRaisesHost(_Host):
+    def stop_engine(self, wait: Any = None) -> bool:
+        if "stop" in self.calls:
+            raise OSError("launchctl is gone")
+        return super().stop_engine(wait)
+
+
+def test_a_rollback_stop_that_raises_is_recorded(tmp_path: Path) -> None:
+    result, _service, _posts = _run(tmp_path, _RollbackStopRaisesHost(start_ok=False))
+    assert result.phase == "rollback_failed"
+    assert "launchctl is gone" in result.error
+    assert (tmp_path / "new" / ".env").is_file()
+
+
+def test_rollback_does_not_start_the_engine_at_a_missing_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if Path(dst) == tmp_path / "old":
+            raise OSError("The process cannot access the file")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(workspace_move.os, "rename", rename)
+    host = _Host(start_ok=False)
+    result, service, _posts = _run(tmp_path, host)
+    assert result.phase == "rollback_failed"
+    assert "moving the folder back" in result.error
+    assert "not starting the engine" in result.error
+    assert service.workspace() == tmp_path / "old"
+    assert host.calls == ["stop", "start", "stop"]
+
+
+def test_windows_preflight_explains_a_refused_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import windows_service
+
+    def refuse(_definition: Path, name: str = "") -> None:
+        raise windows_service.WindowsServiceError("schtasks /Create failed: Access is denied.")
+
+    monkeypatch.setattr(windows_service, "register_task", refuse)
+    definition = workspace_move.WindowsServiceDefinition(tmp_path / "task.xml")
+    with pytest.raises(workspace_move.MoveError, match="elevated shell"):
+        definition.preflight()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX permission bits, not root",
+)
+@pytest.mark.parametrize("kind", ["mac", "linux"])
+def test_preflight_refuses_a_definition_folder_it_cannot_write(tmp_path: Path, kind: str) -> None:
+    folder = tmp_path / "defs"
+    folder.mkdir()
+    path = folder / "definition"
+    path.write_text("x", encoding="utf-8")
+    definition: Any = (
+        workspace_move.MacServiceDefinition(path)
+        if kind == "mac"
+        else workspace_move.LinuxServiceDefinition(path, systemctl=lambda *_a: None)
+    )
+    definition.preflight()
+    folder.chmod(0o500)
+    try:
+        with pytest.raises(workspace_move.MoveError, match="cannot rewrite"):
+            definition.preflight()
+    finally:
+        folder.chmod(0o700)
+
+
+def test_the_mac_move_job_shares_the_engine_bundle_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import plistlib
+
+    from ciao import macos_service
+
+    engine = tmp_path / "com.ciao.server.plist"
+    engine.write_bytes(plistlib.dumps({"Label": "com.ciao.server", "AssociatedBundleIdentifiers": ["local.ciaobot.server"]}))
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    engine.rename(agents / engine.name)
+    monkeypatch.setattr(macos_service, "default_launch_agents_dir", lambda: agents)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(macos_service, "_launchctl", lambda args, **_kw: calls.append(args) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
+    op = workspace_move.MoveOperation("op1", "queued", "/a", "/b", "", "", port=8443, python="/py")
+    workspace_move._spawn_mac_job(op, tmp_path)
+    job = plistlib.loads((tmp_path / workspace_move.JOB_PLIST_NAME).read_bytes())
+    assert job["AssociatedBundleIdentifiers"] == ["local.ciaobot.server"]
+    assert calls[-1][0] == "bootstrap"
