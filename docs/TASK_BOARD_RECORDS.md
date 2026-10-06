@@ -198,10 +198,12 @@ state the turn actually ended in.
 ### Known limitations
 
 - **A pending permission card does not end the turn, so the attempt reads
-  `running` while it is up.** Saved cards are not read once a turn has ended
-  with a result: a permission card is kept until the response endpoint confirms
-  the answer and can outlive its turn, so only a question card on a stream that
-  ended without a result counts as a pause (#1092, #1097).
+  `running` while it is up.** Once a turn has ended with a result, a saved
+  permission card is ignored: it is kept until the response endpoint confirms the
+  answer and can outlive its turn. A question card counts as a pause in two cases:
+  a legacy card on a stream that ended without a result, or a native (opencode)
+  card still saved after any turn, because that card blocks new turns until it is
+  answered (#1092, #1097).
 - **An attended turn in a delegated chat that did not *start* there is not
   announced.** Re-attaching (see "Re-attaching the watcher") covers every turn
   `ProjectChatManager.start_stream` begins, which is every route to the model

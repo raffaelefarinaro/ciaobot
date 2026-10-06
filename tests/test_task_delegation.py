@@ -1031,20 +1031,38 @@ async def test_a_finished_turn_with_a_leftover_permission_card_goes_to_review(
     assert row["status"] == "in_review"
 
 
-async def test_a_finished_turn_with_a_leftover_native_question_card_goes_to_review(
+async def test_a_finished_turn_with_a_saved_native_question_card_settles_needs_you(
     tmp_path: Path,
 ) -> None:
-    """A native question card is a leftover too once the turn has ended with a result.
+    """A native question card blocks every new turn in the chat until it is answered.
 
-    A native (opencode, ``request_id``) form keeps an attended turn open until it is
-    answered, and the card stays saved until the reply is acknowledged — so on a
-    stream that has already ended with a ``done`` report it cannot be a live pause,
-    and the task still reaches In review (#1097).
+    ``start_stream`` refuses one, so even a reported, finished turn waits on the user
+    instead of going to review.
     """
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Finished with a stale native card")
     _delegate(plane, task)
     pcm.get_chat("chat-1").pending_question = '{"questions": [], "request_id": "que_1"}'
+    _agent_says_done(plane)
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "needs_you"
+    assert row["status"] != "in_review"
+
+
+async def test_a_finished_turn_with_a_leftover_legacy_question_card_goes_to_review(
+    tmp_path: Path,
+) -> None:
+    """A legacy question card pauses by ending the stream without a result.
+
+    The next turn clears it, so one saved alongside a result is a leftover (#1097).
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Finished with a stale legacy card")
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
     _agent_says_done(plane)
 
     await _end_turns(pcm)
@@ -1547,7 +1565,7 @@ async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
     follow it, or the badge describes a moment the conversation has moved past.
     """
     plane, pcm = _world(tmp_path)
-    task = _create(plane, title="Needs an approval")
+    task = _create(plane, title="Needs an answer")
     pcm.next_events = [{"type": "text", "text": "One question first."}]
     outcome = _delegate(plane, task)
     pcm.get_chat("chat-1").pending_question = '{"questions": []}'
@@ -1559,7 +1577,7 @@ async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
     # started by answering in the composer, which is also what answers the card.
     pcm.get_chat("chat-1").pending_question = ""
     pcm.next_events = [{"type": "result", "text": "done", "is_error": False}]
-    pcm.answer_in_chat("chat-1", "Yes, write it.")
+    pcm.answer_in_chat("chat-1", "Use the default.")
     _agent_says_done(plane)
     await _end_turns(pcm)
 
@@ -1593,7 +1611,7 @@ async def test_a_live_continuation_records_its_error(tmp_path: Path, path: str) 
         )
         _update(plane, edited, outcome["attempt"], "Use the revised description")
     else:
-        pcm.answer_in_chat("chat-1", "Approved")
+        pcm.answer_in_chat("chat-1", "Use the default.")
     running = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
     assert running.state == "running"
     assert running.ended_at == ""

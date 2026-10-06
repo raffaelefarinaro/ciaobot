@@ -270,6 +270,23 @@ def _chat_paused_on_question(chat: Any) -> bool:
     return not (isinstance(payload, dict) and payload.get("request_id"))
 
 
+def _chat_has_native_question(chat: Any) -> bool:
+    """Whether a chat has a native (opencode, ``request_id``) question card saved.
+
+    Such a card owns the chat until its reply is acknowledged:
+    ``start_stream`` refuses a new turn while it is saved, so a task cannot
+    be reviewed or sent back past it, whatever the turn's result said.
+    """
+    raw = getattr(chat, "pending_question", "") if chat is not None else ""
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("request_id"))
+
+
 def _task_row_with_attempt(
     document: TaskDocument,
     live: TaskAttempt | None,
@@ -3795,7 +3812,15 @@ class CiaoControlPlane:
                 workspace, attempt_id, "the turn ended without a result"
             )
             return
-        self._settle_from_result(workspace, attempt_id, task_id, chat_id, stream, result)
+        try:
+            native_question = _chat_has_native_question(self.pcm.get_chat(chat_id))
+        except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
+            logger.exception("delegation: could not read chat %s after the turn", chat_id)
+            native_question = False
+        self._settle_from_result(
+            workspace, attempt_id, task_id, chat_id, stream, result,
+            paused_on_question=native_question,
+        )
 
     def _settle_from_result(
         self,
@@ -3819,11 +3844,12 @@ class CiaoControlPlane:
         would put a badge on a card nobody delegated any more.
 
         ``paused_on_question`` is the caller's word that the turn ended paused on a
-        question card (no result, see ``_await_turn``). Saved cards are not read
-        here: once a turn has ended with a result, a permission card or a native
-        question card can only be a leftover — both keep the stream open while they
-        are really up — and counting them would hold a finished, reported turn at
-        ``needs_you`` (#1097).
+        question card (no result, see ``_await_turn``). It is also set when a native
+        (opencode) question card is still saved after a result: that card blocks every
+        new turn in the chat until it is answered, so the task must wait on the user
+        rather than go to review. A permission card is not counted: it keeps the stream
+        open while it is really up, and one still saved after a result is a leftover
+        that would hold a finished, reported turn at ``needs_you`` (#1097).
         """
         try:
             stopped = bool(result.get("stopped"))
