@@ -401,15 +401,27 @@ def plan(
         result.warnings.append(
             "This folder has git worktrees. Run `git worktree repair` in the new folder afterwards."
         )
-    schedules = source / ".runtime" / "schedules.json"
     try:
-        if str(source) in schedules.read_text(encoding="utf-8"):
-            result.warnings.append(
-                "Some automation prompts mention the old folder by path. Edit them after the move."
-            )
-    except OSError:
-        pass
+        schedules: Any = json.loads((source / ".runtime" / "schedules.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        schedules = None
+    # Searched in the parsed values, not the raw text: JSON escapes the
+    # backslashes of a Windows path.
+    if _mentions(schedules, str(source)):
+        result.warnings.append(
+            "Some automation prompts mention the old folder by path. Edit them after the move."
+        )
     return result
+
+
+def _mentions(data: Any, needle: str) -> bool:
+    if isinstance(data, str):
+        return needle in data
+    if isinstance(data, list):
+        return any(_mentions(item, needle) for item in data)
+    if isinstance(data, dict):
+        return any(_mentions(value, needle) for value in data.values())
+    return False
 
 
 # ── path rewriting ───────────────────────────────────────────────────
