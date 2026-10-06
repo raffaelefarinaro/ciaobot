@@ -21,6 +21,7 @@ from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,
     setup_finish_endpoint,
+    setup_inspect_folder_endpoint,
     setup_list_dirs_endpoint,
     setup_mkdir_endpoint,
     setup_status_endpoint,
@@ -773,6 +774,29 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     assert registry[0]["name"] == "journal"
     assert registry[0]["vault_root"] == "."
 
+
+def test_setup_finish_records_vault_mode_for_folder_with_its_own_env(tmp_path) -> None:
+    """A notes folder that already holds an unrelated `.env` is still a first
+    setup: setup merges into that file, and the onboarding chat must still
+    learn that the folder is existing notes, not a scratch vault."""
+    ws = tmp_path / "notes"
+    ws.mkdir()
+    (ws / "ideas.md").write_text("# Ideas\n", encoding="utf-8")
+    (ws / ".env").write_text("SOME_TOOL_KEY=abc\n", encoding="utf-8")
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(ws),
+            "workspace_name": "journal",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+    assert resp.status_code == 200
+    assert "SOME_TOOL_KEY=abc" in (ws / ".env").read_text(encoding="utf-8")
+    assert read_setup_vault_mode(ws / ".runtime") == "existing"
+
     loaded = CiaoConfig.from_env(
         {
             "PWA_AUTH_TOKEN": "test-token",
@@ -1160,6 +1184,7 @@ def _folder_picker_client(tmp_path, *, bootstrap: bool = True, base_url: str = "
     app = Starlette(
         routes=[
             Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
+            Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
             Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
         ],
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
@@ -1255,6 +1280,20 @@ def test_setup_mkdir_requires_bootstrap_mode(tmp_path) -> None:
 
     assert resp.status_code == 404
     assert not (tmp_path / "workspace").exists()
+
+
+def test_setup_inspect_folder_reachable_without_session_in_bootstrap(tmp_path) -> None:
+    """The first-run wizard has no session yet; with password protection always
+    on, the folder probe must be on the public list like the other setup
+    filesystem routes, or the wizard never shows existing workspaces."""
+    target = tmp_path / "notes"
+    target.mkdir()
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+
+    assert resp.status_code == 200
+    assert "existing_workspaces" in resp.json()
 
 
 def test_tcc_protected_location_flags_desktop(monkeypatch, tmp_path) -> None:

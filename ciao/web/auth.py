@@ -43,6 +43,7 @@ _PUBLIC_API = {
     "/api/setup-status",
     "/api/setup/finish",
     "/api/setup/list-dirs",
+    "/api/setup/inspect-folder",
     "/api/setup/mkdir",
 }
 

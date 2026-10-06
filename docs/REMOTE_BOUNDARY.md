@@ -25,7 +25,7 @@ carried by the session.
   `ciao_session` cookie, minus a small public allowlist (`/api/auth`,
   `/api/auth/check`, `/api/startup-status`, `/api/active-chats`,
   `/api/setup-status`, `/api/setup/finish`, `/api/setup/list-dirs`,
-  `/api/setup/mkdir`). Every `/ws/*` handshake is checked for same-origin and
+  `/api/setup/inspect-folder`, `/api/setup/mkdir`). Every `/ws/*` handshake is checked for same-origin and
   then for the session. Every state-changing `/api/*` request must present an
   `Origin` or `Referer` that matches the request host, allowing for a
   proxy-declared `X-Forwarded-Host`.

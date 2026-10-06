@@ -363,14 +363,19 @@ class AppSettingsStore:
         value so the API route can 400 instead of persisting garbage.
         """
         known = {f.name for f in fields(AppSettings)} - _INTERNAL_FIELDS
+        # Built on a copy and swapped in only once every key validated, so a
+        # 400 on one key never leaves an earlier key of the same PATCH applied
+        # in memory (shown by the next GET, persisted by the next save).
+        updated = replace(self.settings)
+        explicit: set[str] = set()
         for key, value in changes.items():
             if key not in known:
                 continue
             if key in _BOOLEAN_FIELDS:
                 if not isinstance(value, bool):
                     raise ValueError(f"{key} must be a boolean")
-                setattr(self.settings, key, value)
-                self._explicit_fields.add(key)
+                setattr(updated, key, value)
+                explicit.add(key)
                 continue
             if key in _NESTED_CLEANERS:
                 if not isinstance(value, dict):
@@ -390,7 +395,7 @@ class AppSettingsStore:
                         raise ValueError(
                             f"{key} entries must be one of {', '.join(_MODES)}"
                         )
-                setattr(self.settings, key, _NESTED_CLEANERS[key](value))
+                setattr(updated, key, _NESTED_CLEANERS[key](value))
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
@@ -403,8 +408,10 @@ class AppSettingsStore:
                 value = value.lower()
             if key == "app_repo" and value and not Path(value).expanduser().is_absolute():
                 raise ValueError("app_repo must be an absolute path")
-            setattr(self.settings, key, value)
-        _drop_retired_models(self.settings)
+            setattr(updated, key, value)
+        _drop_retired_models(updated)
+        self.settings = updated
+        self._explicit_fields.update(explicit)
         self._save()
         return self.settings
 
@@ -454,7 +461,9 @@ class AppSettingsStore:
                     continue
                 self.settings.pwa_host = raw
             else:
-                self.settings.app_repo = str(Path(raw).expanduser())
+                # Resolved now, as the retired variable was at startup: the
+                # setting only accepts an absolute path.
+                self.settings.app_repo = str(Path(raw).expanduser().resolve())
             imported.append(name)
         self.settings.legacy_env_imported = True
         self._explicit_fields.add("legacy_env_imported")

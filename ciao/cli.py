@@ -1083,6 +1083,9 @@ def setup_workspace(
         # vault_root / disallowed_tools / allowlist for the same name. Import
         # the variable first so the registry setup sees is the real one.
         _import_legacy_workspaces_for_setup(root, existing_env)
+    # No registry yet means this folder has never been set up, even when it
+    # already holds a `.env` of its own (a notes folder or a project checkout).
+    first_setup = not workspaces_registry.exists()
     registered_vaults = _setup_registry_vaults(
         workspaces_registry,
         workspace_root=root,
@@ -1103,21 +1106,13 @@ def setup_workspace(
         ("CIAO_VAULT_ROOT", vault_value),
         ("PWA_PORT", str(port)),
     ])
-    if not existing_env and not env_path.exists():
+    fresh_env = not existing_env and not env_path.exists()
+    if fresh_env:
         # The password is in here in clear text: owner-only from creation.
         write_private_text(
             env_path, "\n".join(f"{key}={value}" for key, value in desired_env) + "\n"
         )
         written.append(env_path)
-        # First-time setup: stamp when this workspace was provisioned so the
-        # post-setup restart can hold system-routine catch-up for a grace
-        # period. The onboarding chat should be the first thing a new user
-        # sees, not four parallel routine chats replaying missed runs.
-        from ciao.setup_marker import write_setup_marker
-
-        written.append(
-            write_setup_marker(root / RUNTIME_DIR_NAME, vault_mode=vault_mode)
-        )
     else:
         # Merge into the user's file: keep every existing line untouched
         # (values, comments, unknown variables) and append only the Ciaobot
@@ -1139,6 +1134,19 @@ def setup_workspace(
                 encoding="utf-8", newline="",
             )
             written.append(env_path)
+    if first_setup or fresh_env:
+        # First-time setup: stamp when this workspace was provisioned so the
+        # post-setup restart can hold system-routine catch-up for a grace
+        # period. The onboarding chat should be the first thing a new user
+        # sees, not four parallel routine chats replaying missed runs. The
+        # marker also carries the vault mode the onboarding chat reads, so it
+        # is written for a first setup into a folder with a `.env` of its own
+        # too (the merge branch above), not only for a brand-new `.env`.
+        from ciao.setup_marker import write_setup_marker
+
+        written.append(
+            write_setup_marker(root / RUNTIME_DIR_NAME, vault_mode=vault_mode)
+        )
 
     runtime_root = root / RUNTIME_DIR_NAME
 
@@ -5953,7 +5961,7 @@ def _register_launchd_service(workspace: Path) -> Path:
     """Write the server LaunchAgent for an already set-up workspace."""
     from ciao import macos_service
 
-    root = _require_set_up_workspace(workspace)
+    root = _validate_service_workspace(workspace)
     from ciao.setup_status import tcc_protected_location
 
     protected = tcc_protected_location(root)
@@ -6099,12 +6107,6 @@ def _validate_service_workspace(workspace: Path) -> Path:
     is one. The macOS TCC check is left out -- it names launchd and macOS
     privacy protection, neither of which exists on Windows.
     """
-
-    return _require_set_up_workspace(workspace)
-
-
-def _require_set_up_workspace(workspace: Path) -> Path:
-    """``workspace`` resolved, or ``RuntimeError`` when it is no set-up workspace."""
     from ciao.setup_marker import is_set_up_workspace
 
     root = workspace.expanduser().resolve()

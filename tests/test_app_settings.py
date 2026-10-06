@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -345,7 +346,7 @@ def test_legacy_env_values_are_imported_once(tmp_path):
     assert imported == ["PWA_HOST", "CIAO_LOG_LEVEL", "CIAO_DEV_MODE", "CIAO_APP_REPO"]
     s = AppSettingsStore(path).settings
     assert (s.pwa_host, s.log_level, s.dev_mode, s.app_repo) == (
-        "127.0.0.1", "debug", True, "/src/ciaobot",
+        "127.0.0.1", "debug", True, str(Path("/src/ciaobot").resolve()),
     )
     assert s.legacy_env_imported is True
 
@@ -354,6 +355,25 @@ def test_legacy_env_values_are_imported_once(tmp_path):
     again.update({"pwa_host": "", "dev_mode": False})
     assert again.import_legacy_env({"PWA_HOST": "127.0.0.1", "CIAO_DEV_MODE": "true"}) == []
     assert AppSettingsStore(path).settings.pwa_host == ""
+    assert AppSettingsStore(path).settings.dev_mode is False
+
+
+def test_a_relative_legacy_app_repo_is_imported_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    store.import_legacy_env({"CIAO_APP_REPO": "checkout"})
+    assert store.settings.app_repo == str((tmp_path / "checkout").resolve())
+
+
+def test_a_rejected_patch_applies_none_of_its_keys(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+
+    with pytest.raises(ValueError):
+        store.update({"dev_mode": True, "pwa_host": "bad host"})
+
+    assert store.settings.dev_mode is False
+    store.update({"log_level": "debug"})
     assert AppSettingsStore(path).settings.dev_mode is False
 
 
