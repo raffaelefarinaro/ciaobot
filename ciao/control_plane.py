@@ -56,6 +56,7 @@ from ciao.schedules import (
 )
 from ciao.task_attempts import (
     HANDOFF_ATTEMPTS,
+    MAX_INSTRUCTIONS_CHARS,
     RESUMABLE_STATES,
     PreviousAttempt,
     TaskAttempt,
@@ -250,21 +251,40 @@ def _attempt_error(exc: TaskAttemptError) -> ControlPlaneError:
     return ControlPlaneError(code, str(exc), retryable=retryable)
 
 
-def _chat_needs_user(chat: Any) -> bool:
-    """Whether a chat is waiting on the user rather than finished.
+def _chat_paused_on_question(chat: Any) -> bool:
+    """Whether a chat's last turn ended paused on a question card.
 
-    A question and a permission card are both an ordinary turn that has paused
-    for an answer, so the attempt settles ``needs_you`` instead of
-    ``ready_for_review``: the result is not there yet, and the board's badge
-    should say so rather than ask the user to review nothing. A chat the store
-    cannot answer is not a finished one either — it is unknown, which the caller
-    turns into ``interrupted``.
+    Only a card without a native ``request_id`` pauses by ending the stream:
+    the drive loop stops the provider and waits for the answer. A native
+    (opencode) form keeps an attended turn open until it is answered, and the
+    card stays saved until the reply is acknowledged, so a native card on a
+    stream that has already ended is a leftover from a lost turn.
     """
-    if chat is None:
+    raw = getattr(chat, "pending_question", "") if chat is not None else ""
+    if not raw:
         return False
-    return bool(
-        getattr(chat, "pending_question", "") or getattr(chat, "pending_permission", "")
-    )
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return True
+    return not (isinstance(payload, dict) and payload.get("request_id"))
+
+
+def _chat_has_native_question(chat: Any) -> bool:
+    """Whether a chat has a native (opencode, ``request_id``) question card saved.
+
+    Such a card owns the chat until its reply is acknowledged:
+    ``start_stream`` refuses a new turn while it is saved, so a task cannot
+    be reviewed or sent back past it, whatever the turn's result said.
+    """
+    raw = getattr(chat, "pending_question", "") if chat is not None else ""
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("request_id"))
 
 
 def _task_row_with_attempt(
@@ -3106,6 +3126,7 @@ class CiaoControlPlane:
         expected_revision: str,
         project_id: str | None = None,
         actor: Actor = "user",
+        instructions: str = "",
     ) -> dict[str, Any]:
         """Hand one task to the agent as an ordinary chat, exactly once.
 
@@ -3119,7 +3140,9 @@ class CiaoControlPlane:
            created and no turn is started: a second delegation of a delegated task
            is a race, not a request for two turns.
         3. Resolve the project (see :meth:`_delegation_project`) and build the
-           prompt from the task's own fields. There is no caller-supplied prompt.
+           prompt from the task's own fields. The only caller text is
+           *instructions*, the user's note for this hand-over, quoted in its own
+           fence after the description; it cannot replace the task.
         4. Create **one ordinary chat** in that project, titled for the task and
            stamped with a ``task_delegation`` helper naming the task, its revision
            and the attempt — the provenance that lets the board link back to it
@@ -3146,6 +3169,13 @@ class CiaoControlPlane:
         *Done*, never a side effect of asking for work.
         """
         clean = str(task_id or "").strip()
+        note = str(instructions or "").strip()
+        if len(note) > MAX_INSTRUCTIONS_CHARS:
+            raise ControlPlaneError(
+                "invalid_task",
+                f"delegation instructions are limited to {MAX_INSTRUCTIONS_CHARS} "
+                "characters; put longer guidance in the task's description.",
+            )
         document = self._task_call(workspace, lambda store: store.get(clean))
         revision = document.revision
         if str(expected_revision or "").strip() != revision:
@@ -3188,6 +3218,7 @@ class CiaoControlPlane:
             relative_path=document.relative_path,
             body=document.body,
             previous_attempts=self._previous_attempts(workspace, record.id),
+            instructions=note,
         )
         attempt_id = uuid.uuid4().hex
         # Two revisions are in play from here, and they are not the same one. The
@@ -3725,12 +3756,20 @@ class CiaoControlPlane:
     async def _await_turn(
         self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
     ) -> None:
-        """Consume the turn's stream and settle the attempt once it ends."""
+        """Consume the turn's stream and settle the attempt from its final turn once it ends."""
         result: dict[str, Any] = {}
         seen_result = False
         try:
             async for event in stream.subscribe():
-                if event.get("type") == "result":
+                kind = event.get("type")
+                if kind == "user_echo":
+                    # A queued follow-up runs as a new turn on the same stream,
+                    # announced by its own echo. The attempt is settled from the
+                    # turn that ended the stream, so an earlier turn's result
+                    # (a Stop, say) must not decide it (#1096).
+                    result = {}
+                    seen_result = False
+                elif kind == "result":
                     result = dict(event)
                     seen_result = True
         except asyncio.CancelledError:
@@ -3746,6 +3785,23 @@ class CiaoControlPlane:
         if not self._is_current_turn(workspace, attempt_id, stream):
             return
         if not seen_result:
+            # A turn paused on a question card ends its stream without a result
+            # (the drive loop stops the provider and waits for the answer), so a
+            # chat with a question card up is a paused turn, not a lost one. A
+            # permission card does not count: that pause keeps the stream open, and
+            # the card stays saved after the stream ends until the answer is
+            # confirmed, so here it can only be a leftover. A native (opencode)
+            # question card does not count either, for the same reason.
+            try:
+                waiting = _chat_paused_on_question(self.pcm.get_chat(chat_id))
+            except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
+                logger.exception("delegation: could not read chat %s after the turn", chat_id)
+                waiting = False
+            if waiting:
+                self._settle_from_result(
+                    workspace, attempt_id, task_id, chat_id, stream, {}, paused_on_question=True
+                )
+                return
             # The stream ended without a result event. Whatever the turn did — a
             # provider drop, a cancel the manager swallowed, a subscription that
             # closed early — this engine never saw an answer, so there is nothing
@@ -3756,7 +3812,15 @@ class CiaoControlPlane:
                 workspace, attempt_id, "the turn ended without a result"
             )
             return
-        self._settle_from_result(workspace, attempt_id, task_id, chat_id, stream, result)
+        try:
+            native_question = _chat_has_native_question(self.pcm.get_chat(chat_id))
+        except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
+            logger.exception("delegation: could not read chat %s after the turn", chat_id)
+            native_question = False
+        self._settle_from_result(
+            workspace, attempt_id, task_id, chat_id, stream, result,
+            paused_on_question=native_question,
+        )
 
     def _settle_from_result(
         self,
@@ -3766,6 +3830,8 @@ class CiaoControlPlane:
         chat_id: str,
         stream: Any,
         result: Mapping[str, Any],
+        *,
+        paused_on_question: bool = False,
     ) -> None:
         """Write the attempt's end state from the turn's own result event.
 
@@ -3776,6 +3842,14 @@ class CiaoControlPlane:
         the task. A watcher that settled a task another attempt now owns would
         flag somebody else's work for review, and one that settled a detached task
         would put a badge on a card nobody delegated any more.
+
+        ``paused_on_question`` is the caller's word that the turn ended paused on a
+        question card (no result, see ``_await_turn``). It is also set when a native
+        (opencode) question card is still saved after a result: that card blocks every
+        new turn in the chat until it is answered, so the task must wait on the user
+        rather than go to review. A permission card is not counted: it keeps the stream
+        open while it is really up, and one still saved after a result is a leftover
+        that would hold a finished, reported turn at ``needs_you`` (#1097).
         """
         try:
             stopped = bool(result.get("stopped"))
@@ -3783,11 +3857,6 @@ class CiaoControlPlane:
             text = str(result.get("text") or "")
         except Exception:  # noqa: BLE001 — a malformed event is still just an outcome
             stopped, errored, text = False, False, ""
-        try:
-            chat = self.pcm.get_chat(chat_id)
-        except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
-            logger.exception("delegation: could not read chat %s after the turn", chat_id)
-            chat = None
         try:
             live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
             if live is None or live.attempt_id != attempt_id or live.chat_id != chat_id:
@@ -3803,7 +3872,7 @@ class CiaoControlPlane:
             state, detail = "stopped", "the turn was stopped"
         elif errored:
             state, detail = "failed", text[:400] or "the turn ended in an error"
-        elif _chat_needs_user(chat):
+        elif paused_on_question:
             state, detail = "needs_you", ""
         elif live.outcome == "done":
             state, detail = "ready_for_review", ""
@@ -4138,13 +4207,17 @@ class CiaoControlPlane:
         A manager with no ``stop_chat`` is not a refusal: the attempt still settles,
         and the turn's own end settles it again. Losing the manager would be the
         wrong trade for the record, so this is logged rather than raised.
+
+        Queued follow-ups are parked on the chat rather than run (``park_queue``):
+        a board Stop or Detach ends the delegated work, while a composer Stop
+        does not (#1103).
         """
         stop = getattr(self.pcm, "stop_chat", None)
         if not callable(stop):
             logger.warning("delegation: the chat manager cannot stop chat %s", chat_id)
             return
         try:
-            await stop(chat_id)
+            await stop(chat_id, park_queue=True)
         except Exception:  # noqa: BLE001 — a failed stop is not a failed gesture
             logger.exception("delegation: could not stop the turn in chat %s", chat_id)
 

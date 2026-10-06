@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import asdict, replace
 from importlib import resources
 from pathlib import Path, PurePosixPath
@@ -3397,6 +3398,66 @@ def _print_vault_relocate_result(payload: dict[str, Any], *, applied: bool) -> N
             print(f"\nRestart required: {payload['restart_note']}")
     elif not applied and not payload.get("refused") and (moves or payload.get("whole_directory")):
         print("\nRe-run with --apply to write this change.")
+
+
+def _workspace_move_command(args: argparse.Namespace) -> int:
+    """Move the install workspace to another folder and repoint the service.
+
+    Prints the plan by default and changes nothing. --apply hands the move to a
+    one-shot job beside the engine's service (the same call Settings → Main
+    workspace makes), then follows it until it finishes. There is no --undo:
+    moving the folder back is the same command.
+    """
+    from ciao import workspace_move
+
+    if args.workspace is not None:
+        source = Path(args.workspace).expanduser().resolve()
+    else:
+        registered = workspace_move.registered_workspace()
+        source = (registered or Path(os.environ.get("CIAO_WORKSPACE") or ".")).expanduser().resolve()
+    move_plan = workspace_move.plan_for(source, args.target)
+    if args.json and not args.apply:
+        print(json.dumps(move_plan.as_dict(), indent=2))
+        return 0 if move_plan.ok else 1
+    print(f"Move {move_plan.source}")
+    print(f"  to {move_plan.target}")
+    for refusal in move_plan.refusals:
+        print(f"Refused: {refusal}")
+    for warning in move_plan.warnings:
+        print(f"Warning: {warning}")
+    if not move_plan.ok:
+        return 1
+    if not args.apply:
+        print("Nothing changed. Re-run with --apply to move it.")
+        return 0
+    if sys.platform.startswith("linux"):
+        print("Moving. Ciaobot stops once running chats finish, and starts again from the new folder.")
+    try:
+        op = workspace_move.start(move_plan, port=workspace_move.engine_port())
+    except workspace_move.MoveError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    seen = ""
+    while True:
+        current = workspace_move.read_operation()
+        if current is None or current.id != op.id:
+            print("Error: the move's record was replaced or removed.", file=sys.stderr)
+            return 1
+        if current.phase != seen:
+            seen = current.phase
+            print(f"- {seen}")
+        if current.phase in workspace_move.TERMINAL_PHASES:
+            if current.error:
+                print(current.error, file=sys.stderr)
+            return 0 if current.phase == "done" else 1
+        if workspace_move.abandoned(current):
+            print(
+                f"Error: the move job stopped during '{current.phase}' without finishing. "
+                f"See {workspace_move.default_state_dir() / workspace_move.JOB_LOG_NAME}.",
+                file=sys.stderr,
+            )
+            return 1
+        time.sleep(1)
 
 
 def _vault_relocate_command(args: argparse.Namespace) -> int:
@@ -7088,6 +7149,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reroot_parser.set_defaults(func=_workspace_reroot_command)
+
+    move_parser = subparsers.add_parser(
+        "workspace-move",
+        help="Move the install workspace to another folder.",
+        description=(
+            "Move the whole install workspace (.env, .runtime, the vault, skills, "
+            "every agent root) to TARGET on the same disk, repair what recorded "
+            "the old path, repoint the engine's service and restart it. Prints "
+            "the plan by default and changes nothing; --apply performs it. "
+            "Settings -> Main workspace runs the same move. To undo, move it back."
+        ),
+    )
+    move_parser.add_argument("target", help="The new folder. It must not exist, or be empty.")
+    move_parser.add_argument(
+        "--workspace", type=Path, default=None,
+        help="The workspace to move. Defaults to the one the service runs.",
+    )
+    move_parser.add_argument("--apply", action="store_true", help="Perform the move.")
+    move_parser.add_argument("--json", action="store_true", help="Print the plan as JSON.")
+    move_parser.set_defaults(func=_workspace_move_command)
 
     relocate_parser = subparsers.add_parser(
         "vault-relocate",

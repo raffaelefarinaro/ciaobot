@@ -1281,11 +1281,12 @@ def _age_key(record: TaskAttempt) -> tuple[str, str]:
 
 # ── The delegated turn ──────────────────────────────────────────────────
 #
-# The prompt and the provenance stamp are server-owned. There is no parameter
-# through which a caller may supply prompt text: a task hand-edited into the vault
-# is the task, and a delegation that let a request body rewrite the instruction
-# would hand the agent work nobody filed. Both builders take the record's own
-# fields and nothing else.
+# The prompt and the provenance stamp are server-owned. No caller text can
+# replace the task: a task hand-edited into the vault is the task, and a
+# delegation that let a request body rewrite the instruction would hand the agent
+# work nobody filed. Both builders take the record's own fields; the one caller
+# text is the user's hand-over *instructions*, quoted in their own fence after
+# the description, which shape how the task is done but cannot stand in for it.
 
 
 #: The fence the task's Markdown body is quoted inside, and the tag that closes
@@ -1295,6 +1296,16 @@ def _age_key(record: TaskAttempt) -> tuple[str, str]:
 #: about to be given.
 DELEGATION_FENCE_OPEN = "<task-board-task>"
 DELEGATION_FENCE_CLOSE = "</task-board-task>"
+
+#: The fence the user's hand-over instructions are quoted inside. Its own tag
+#: rather than the task's: the description is the work, these are how the user
+#: wants it done and what they expect back, and the agent is told which is which.
+INSTRUCTIONS_FENCE_OPEN = "<delegation-instructions>"
+INSTRUCTIONS_FENCE_CLOSE = "</delegation-instructions>"
+
+#: The longest hand-over instructions a delegation takes. A note typed into the
+#: sheet, not a second description: anything longer belongs in the task itself.
+MAX_INSTRUCTIONS_CHARS = 4000
 
 #: How the agent says how far it got (#1064). One command, named in full in
 #: every prompt, because a turn that ends without it is read as unfinished.
@@ -1360,8 +1371,11 @@ def _neutralize(text: str) -> str:
     carrying a literal ``</task-board-task>`` would otherwise close the fence and
     have everything after it read as Ciaobot's own framing.
     """
-    return text.replace(DELEGATION_FENCE_OPEN, "&lt;task-board-task&gt;").replace(
-        DELEGATION_FENCE_CLOSE, "&lt;/task-board-task&gt;"
+    return (
+        text.replace(DELEGATION_FENCE_OPEN, "&lt;task-board-task&gt;")
+        .replace(DELEGATION_FENCE_CLOSE, "&lt;/task-board-task&gt;")
+        .replace(INSTRUCTIONS_FENCE_OPEN, "&lt;delegation-instructions&gt;")
+        .replace(INSTRUCTIONS_FENCE_CLOSE, "&lt;/delegation-instructions&gt;")
     )
 
 
@@ -1376,6 +1390,7 @@ def build_prompt(
     relative_path: str,
     body: str,
     previous_attempts: tuple[PreviousAttempt, ...] = (),
+    instructions: str = "",
 ) -> str:
     """The user prompt for one delegated task.
 
@@ -1391,6 +1406,11 @@ def build_prompt(
     The body's own delegation log is stripped before it is quoted: the history is
     handed over in its own section (*previous_attempts*, newest first), framed as
     what was tried rather than as part of the work to do.
+
+    *instructions* is what the user typed into the delegation sheet for this one
+    hand-over — how to go about it, what they expect when it is finished. It is
+    the user's own direction, quoted in its own fence after the description so
+    the agent can tell the work from the way it is wanted done.
     """
     header = [
         DELEGATION_INSTRUCTION.format(report=REPORT_COMMAND.format(task_id=task_id)),
@@ -1410,6 +1430,19 @@ def build_prompt(
         _neutralize(strip_log(body)).strip(),
         DELEGATION_FENCE_CLOSE,
     ]
+    note = instructions.strip()
+    if note:
+        header += [
+            "",
+            "The user added instructions for this hand-over, between the "
+            "delegation-instructions tags: how they want the work done and what they "
+            "expect when it is finished. Follow them together with the description; "
+            "where the two disagree, these are the newer word.",
+            "",
+            INSTRUCTIONS_FENCE_OPEN,
+            _neutralize(note),
+            INSTRUCTIONS_FENCE_CLOSE,
+        ]
     if previous_attempts:
         header += ["", *_handoff_lines(previous_attempts[:HANDOFF_ATTEMPTS])]
     return "\n".join(header)

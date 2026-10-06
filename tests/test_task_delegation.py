@@ -243,7 +243,7 @@ class _RecordingPcm:
         stream.queued.append(text)
         return True
 
-    async def stop_chat(self, chat_id):
+    async def stop_chat(self, chat_id, *, park_queue=False):
         """The manager's Stop, which is ``async`` — as the real one is.
 
         The flag is set only *inside* the coroutine, so a caller that built one and
@@ -252,7 +252,7 @@ class _RecordingPcm:
         the provider turn keeps running while the attempt is recorded ``stopped``
         over it, and a synchronous fake cannot see that at all.
         """
-        self.calls.append(("stop_chat", (chat_id,), {}))
+        self.calls.append(("stop_chat", (chat_id,), {"park_queue": park_queue}))
         self.stop_awaited += 1
         return True
 
@@ -980,16 +980,21 @@ async def test_a_finished_turn_settles_ready_for_review_and_never_done(
     assert row["assignee"] == "agent"
 
 
-async def test_a_turn_waiting_on_an_approval_card_settles_needs_you(
+async def test_a_finished_turn_without_a_report_ignores_a_leftover_permission_card(
     tmp_path: Path,
 ) -> None:
-    """A paused turn is not a finished one. The badge says the result is not there
-    yet rather than asking the user to review nothing — which is the whole reason
-    delegation never passes ``unattended``."""
+    """A leftover permission card does not decide a turn the agent never reported.
+
+    The turn ends with a result and no ``done`` report, so it waits on the user for
+    the report's sake — the card is a leftover kept until the response endpoint
+    confirms the answer, and it is *not* what makes the attempt ``needs_you``. The
+    detail says so, proving the card was ignored.
+    """
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Needs an approval")
     _delegate(plane, task)
-    # The chat is paused on a permission card, exactly as `_drive` leaves it.
+    # The chat still has a permission card, exactly as `_drive` leaves one behind
+    # after its turn has ended.
     pcm.get_chat("chat-1").pending_permission = "Write /notes.md"
 
     await _end_turns(pcm)
@@ -997,8 +1002,74 @@ async def test_a_turn_waiting_on_an_approval_card_settles_needs_you(
     row = _get_task(plane, task["id"])
     assert row["attempt_state"] == "needs_you"
     assert row["status"] != "done"
-    # And no Review badge: there is no result yet, so there is nothing to review.
+    # And no Review badge: there is no report, so there is nothing to review.
     assert row["status"] != "in_review"
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.detail == "the turn ended without a report from the agent"
+
+
+async def test_a_finished_turn_with_a_leftover_permission_card_goes_to_review(
+    tmp_path: Path,
+) -> None:
+    """A permission card left behind must not hold a reported, finished turn.
+
+    Once a turn has ended with a result and a ``done`` report, the card can only be
+    a leftover: a permission wait keeps the stream open, and the card is kept until
+    the response endpoint confirms the answer. It must not keep the task out of In
+    review (#1097).
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Finished with a stale card")
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_permission = "Write /notes.md"
+    _agent_says_done(plane)
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "ready_for_review"
+    assert row["status"] == "in_review"
+
+
+async def test_a_finished_turn_with_a_saved_native_question_card_settles_needs_you(
+    tmp_path: Path,
+) -> None:
+    """A native question card blocks every new turn in the chat until it is answered.
+
+    ``start_stream`` refuses one, so even a reported, finished turn waits on the user
+    instead of going to review.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Finished with a stale native card")
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": [], "request_id": "que_1"}'
+    _agent_says_done(plane)
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "needs_you"
+    assert row["status"] != "in_review"
+
+
+async def test_a_finished_turn_with_a_leftover_legacy_question_card_goes_to_review(
+    tmp_path: Path,
+) -> None:
+    """A legacy question card pauses by ending the stream without a result.
+
+    The next turn clears it, so one saved alongside a result is a leftover (#1097).
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Finished with a stale legacy card")
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
+    _agent_says_done(plane)
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "ready_for_review"
+    assert row["status"] == "in_review"
 
 
 async def test_a_stream_with_no_result_is_interrupted_not_a_review(
@@ -1026,6 +1097,183 @@ async def test_a_stream_with_no_result_is_interrupted_not_a_review(
     assert attempt.detail == "the turn ended without a result"
     # Which is also what makes it resumable: the user can continue that chat.
     assert _attempt_store(plane).get_live(task["id"]) is None
+
+
+async def test_a_turn_paused_on_a_question_without_a_result_settles_needs_you(
+    tmp_path: Path,
+) -> None:
+    """A turn paused on a question card ends its stream without a result.
+
+    The drive loop stops the provider and waits for the answer, and no `result`
+    event is published for the paused turn. Reading the chat distinguishes a
+    paused turn from a lost one: it is waiting on the user, so the attempt is
+    ``needs_you`` — a live state the next turn re-attaches to.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="One question first")
+    pcm.next_events = [{"type": "text", "text": "One question first."}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "needs_you"
+    assert row["status"] != "in_review"
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "needs_you"
+    assert _attempt_store(plane).get_live(task["id"]) is not None
+
+
+async def test_a_chat_paused_on_a_question_can_still_report_and_finish(
+    tmp_path: Path,
+) -> None:
+    """Answering the card re-attaches the attempt, so the agent can report.
+
+    Because the paused attempt settles ``needs_you`` rather than ``interrupted``
+    it stays live; the answer's turn re-attaches it and a later report finds it
+    the holder instead of raising ``task_report_not_holder``.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Ask, then finish")
+    pcm.next_events = [{"type": "text", "text": "One question first."}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
+
+    await _end_turns(pcm)
+
+    assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
+    # Answer the card and restore a turn that reports the finished work.
+    pcm.get_chat("chat-1").pending_question = ""
+    pcm.next_events = [{"type": "result", "text": "Done."}]
+    pcm.answer_in_chat("chat-1", "Option A.")
+
+    plane.workspace_task_report(
+        "personal", task["id"], outcome="done", summary="Did the work.", chat_id="chat-1"
+    )
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "ready_for_review"
+    assert row["status"] == "in_review"
+
+
+async def test_a_stream_with_no_result_and_a_leftover_permission_card_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    """A permission pause keeps the stream open, so a saved card here is a leftover."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Lost with a stale card")
+    pcm.next_events = [{"type": "text", "text": "half an answer"}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_permission = '{"tool": "Bash"}'
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+
+async def test_a_stream_with_no_result_and_a_leftover_native_question_card_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    """A native question form keeps the turn open, so a saved card here is a leftover."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Lost with a native card")
+    pcm.next_events = [{"type": "text", "text": "half an answer"}]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": [], "request_id": "que_1"}'
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+
+async def test_a_follow_up_paused_on_a_question_is_not_settled_by_the_stopped_turn_before_it(
+    tmp_path: Path,
+) -> None:
+    """A stream carries several turns; only the last one decides the attempt.
+
+    Turn 1 is stopped, which publishes a ``stopped`` result. The queued follow-up
+    then runs as a new turn on the same stream and pauses on a question card, so
+    it publishes no result. The stopped result belongs to a turn that is no longer
+    the one that ended the stream: reading it would settle the attempt ``stopped``
+    and leave the card's answer unable to re-attach it.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Stop, then ask")
+    pcm.next_events = [
+        {"type": "result", "text": "", "stopped": True},
+        {"type": "user_echo", "text": "and then this"},
+        {"type": "text", "text": "One question first."},
+    ]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "needs_you"
+    assert _attempt_store(plane).get_live(task["id"]) is not None
+
+
+async def test_a_lost_follow_up_is_interrupted_even_after_an_earlier_result(
+    tmp_path: Path,
+) -> None:
+    """An earlier turn's result cannot stand in for the final turn's missing one.
+
+    Turn 1 finishes with a result. The queued follow-up runs as a new turn on the
+    same stream and ends with neither a result nor a card, so no answer was seen
+    for it. Settling from turn 1's result would dress an empty final turn as
+    finished work; the honest reading is ``interrupted``.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="A lost follow-up")
+    pcm.next_events = [
+        {"type": "result", "text": "done", "is_error": False},
+        {"type": "user_echo", "text": "and then this"},
+        {"type": "text", "text": "half an answer"},
+    ]
+    _delegate(plane, task)
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+
+async def test_a_follow_up_that_finishes_is_settled_from_its_own_result(
+    tmp_path: Path,
+) -> None:
+    """The final turn's result settles the attempt, not the stopped turn before it.
+
+    Turn 1 is stopped; the queued follow-up then reports the work done and ends
+    with its own result. The attempt is ``ready_for_review``, not ``stopped``: the
+    result that ended the stream is the one that counts.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Stop, then finish")
+    pcm.next_events = [
+        {"type": "result", "text": "", "stopped": True},
+        {"type": "user_echo", "text": "and then this"},
+        {"type": "result", "text": "done", "is_error": False},
+    ]
+    _delegate(plane, task)
+    plane.workspace_task_report(
+        "personal", task["id"], outcome="done", summary="Did the work.", chat_id="chat-1"
+    )
+
+    await _end_turns(pcm)
+
+    assert _get_task(plane, task["id"])["attempt_state"] == "ready_for_review"
 
 
 async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
@@ -1311,23 +1559,25 @@ async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
 ) -> None:
     """The re-attach, on the path the board did not start.
 
-    The turn ends waiting on an approval card, so the attempt settles `needs_you`.
+    The turn ends waiting on a question card, so the attempt settles `needs_you`.
     The user answers in that chat — a different turn in the same conversation, which
     the watcher that settled the first one knows nothing about. The attempt must
     follow it, or the badge describes a moment the conversation has moved past.
     """
     plane, pcm = _world(tmp_path)
-    task = _create(plane, title="Needs an approval")
+    task = _create(plane, title="Needs an answer")
+    pcm.next_events = [{"type": "text", "text": "One question first."}]
     outcome = _delegate(plane, task)
-    pcm.get_chat("chat-1").pending_permission = "Write /notes.md"
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
     _agent_says_done(plane)
     await _end_turns(pcm)
     assert _get_task(plane, task["id"])["attempt_state"] == "needs_you"
 
     # The manager announces every turn a person starts; this is the one the user
     # started by answering in the composer, which is also what answers the card.
-    pcm.get_chat("chat-1").pending_permission = ""
-    pcm.answer_in_chat("chat-1", "Yes, write it.")
+    pcm.get_chat("chat-1").pending_question = ""
+    pcm.next_events = [{"type": "result", "text": "done", "is_error": False}]
+    pcm.answer_in_chat("chat-1", "Use the default.")
     _agent_says_done(plane)
     await _end_turns(pcm)
 
@@ -1343,14 +1593,16 @@ async def test_answering_a_needs_you_turn_in_the_chat_moves_the_attempt(
 async def test_a_live_continuation_records_its_error(tmp_path: Path, path: str) -> None:
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Continue the same attempt")
+    if path == "answer":
+        pcm.next_events = [{"type": "text", "text": "One question first."}]
     outcome = _delegate(plane, task)
     if path == "answer":
-        pcm.get_chat("chat-1").pending_permission = "Allow write"
+        pcm.get_chat("chat-1").pending_question = '{"questions": []}'
     _agent_says_done(plane)
     await _end_turns(pcm)
     before = _get_task(plane, task["id"])
     assert before["attempt_state"] == ("needs_you" if path == "answer" else "ready_for_review")
-    pcm.get_chat("chat-1").pending_permission = ""
+    pcm.get_chat("chat-1").pending_question = ""
     pcm.next_events = [{"type": "result", "text": "provider failed", "is_error": True}]
     if path == "update":
         edited = plane.workspace_task_update(
@@ -1359,7 +1611,7 @@ async def test_a_live_continuation_records_its_error(tmp_path: Path, path: str) 
         )
         _update(plane, edited, outcome["attempt"], "Use the revised description")
     else:
-        pcm.answer_in_chat("chat-1", "Approved")
+        pcm.answer_in_chat("chat-1", "Use the default.")
     running = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
     assert running.state == "running"
     assert running.ended_at == ""
@@ -1635,6 +1887,25 @@ async def test_detaching_a_running_turn_stops_it_before_releasing_the_task(
     assert _attempt_store(plane).get(outcome["attempt"]["attempt_id"]).state == "stopped"
 
 
+async def test_a_detach_parks_the_chat_queue(tmp_path: Path) -> None:
+    """A board Detach ends the delegated work, so it parks the queue too.
+
+    ``_attempt_detach`` stops a running attempt and settles it ``stopped``; a
+    follow-up that ran afterwards would have the same orphaned-result problem
+    as a board Stop (#1103). So the detach's Stop must pass ``park_queue=True``.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Detach parks")
+    outcome = _delegate(plane, task)
+
+    await _act(plane, outcome["attempt"]["attempt_id"], "detach")
+    await _end_turns(pcm)
+
+    assert [call for call in pcm.calls if call[0] == "stop_chat"] == [
+        ("stop_chat", ("chat-1",), {"park_queue": True})
+    ]
+
+
 async def test_a_stop_awaits_the_chat_managers_stop(tmp_path: Path) -> None:
     """``ProjectChatManager.stop_chat`` is ``async``, and that is the whole of it.
 
@@ -1653,7 +1924,7 @@ async def test_a_stop_awaits_the_chat_managers_stop(tmp_path: Path) -> None:
 
     assert pcm.stop_awaited == 1
     assert [call for call in pcm.calls if call[0] == "stop_chat"] == [
-        ("stop_chat", ("chat-1",), {})
+        ("stop_chat", ("chat-1",), {"park_queue": True})
     ]
 
 

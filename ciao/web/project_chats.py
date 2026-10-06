@@ -4510,7 +4510,18 @@ class ProjectChatManager:
                 env["CIAO_VAULT_ROOT"] = str(self._config.agent_vault_root(workspace))
         except (AttributeError, ValueError, OSError):
             logger.debug("could not resolve the agent vault root for %r", workspace)
-        env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
+        gws_profile = self._workspace_gws_profile(workspace)
+        env["GWS_PROFILE"] = gws_profile
+        # Point a bare `gws` at the same credential dir `ciao gws` would use.
+        # Without it, an agent that skips the wrapper reads `~/.config/gws`
+        # (often a stale keyring-encrypted login) and reports Google as
+        # unauthenticated while the workspace account is connected.
+        if gws_profile:
+            from ciao.gws_auth import profile_config_dir
+
+            config_dir = profile_config_dir(self._config, gws_profile)
+            if config_dir is not None:
+                env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
@@ -5104,11 +5115,11 @@ class ProjectChatManager:
         return self._subagents.running_counts()
 
     @property
-    def background_run_counts(self) -> dict[str, int]:
-        """Live ``background_run_start`` count per chat (>0 only).
+    def background_runs(self) -> dict[str, list[dict[str, Any]]]:
+        """Live ``background_run_start`` runs per chat, as PWA summaries.
 
         Read from the runner's registry, not a cached tally, so a client
-        reconnecting mid-run gets the real number rather than whatever it had
+        reconnecting mid-run gets the real rows rather than whatever it had
         when its socket dropped. (A restart does not carry runs over:
         ``BackgroundRunner.start`` resolves every non-terminal run as an
         orphan before the server serves, so the registry is already honest by
@@ -5119,32 +5130,53 @@ class ProjectChatManager:
             return {}
         try:
             # ``_background_runner`` is typed Any (wired after construction),
-            # so the annotation is what keeps this a dict[str, int].
-            counts: dict[str, int] = runner.active_counts()
+            # so the annotation is what keeps this typed.
+            active: dict[str, list[Any]] = runner.active_runs()
         except Exception:  # noqa: BLE001 — an indicator must not break /ws/events
-            logger.exception("Background run counts unavailable")
+            logger.exception("Background runs unavailable")
             return {}
-        return counts
+        return {
+            chat_id: [run.summary() for run in runs]
+            for chat_id, runs in active.items()
+        }
 
-    def announce_background_runs(self, chat_id: str) -> None:
-        """Publish this chat's live background-run count to connected clients.
+    def _background_run_summaries(self, chat_id: str) -> list[dict[str, Any]]:
+        """One chat's live run summaries, without summarising every chat's."""
+        runner = self._background_runner
+        if runner is None:
+            return []
+        try:
+            active: dict[str, list[Any]] = runner.active_runs()
+        except Exception:  # noqa: BLE001 — an indicator must not break the edge
+            logger.exception("Background runs unavailable")
+            return []
+        return [run.summary() for run in active.get(chat_id, [])]
+
+    def announce_background_runs(
+        self, chat_id: str, *, finished: Any | None = None
+    ) -> None:
+        """Publish this chat's live background runs to connected clients.
 
         Called on both edges (a run starting, a run finishing). A background
         run is deliberately non-blocking, so the chat's turn ends while the
         command is still going; this event is the only thing that keeps the
         chat from looking finished. Distinct from ``chat_subagents_ready``:
-        these runs have no transcript and no agent to open, only a count and
-        a log.
+        these runs have no transcript and no agent to open, only a command
+        and a log. ``finished`` is the run that just ended, so the client can
+        say how it ended instead of the row silently vanishing.
         """
         if not chat_id:
             return
         chat = self._chats.get(chat_id)
-        self._events.publish({
+        event: dict[str, Any] = {
             "type": "chat_background_runs",
             "chat_id": chat_id,
             "project_id": chat.project_id if chat is not None else "",
-            "running": self.background_run_counts.get(chat_id, 0),
-        })
+            "runs": self._background_run_summaries(chat_id),
+        }
+        if finished is not None:
+            event["finished"] = finished.summary()
+        self._events.publish(event)
 
     def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
         """Move queued follow-ups off the (about-to-be-torn-down) stream onto
@@ -6832,8 +6864,14 @@ class ProjectChatManager:
             payload["duration_ms"] = duration_ms
         return payload
 
-    async def stop_chat(self, chat_id: str) -> bool:
+    async def stop_chat(self, chat_id: str, *, park_queue: bool = False) -> bool:
         """Stop the chat's in-flight turn.
+
+        ``park_queue`` is for the task board's Stop and Detach: the stream is
+        flagged (``park_on_stop``) so the drive loop parks the queued follow-ups
+        on the chat (re-seeded by the next user turn) instead of running them,
+        including any queued while the stop is in flight. A composer Stop
+        leaves them to run, as before.
 
         Two layers, so Stop works with every provider and never hangs:
 
@@ -6844,11 +6882,13 @@ class ProjectChatManager:
            expires, cancel the turn task. The drive loop turns that into a
            synthetic result carrying the partial answer, so every client
            leaves streaming state immediately and queued follow-ups still
-           flush.
+           flush (unless ``park_queue``).
         """
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
+            if park_queue and not stream.background:
+                stream.park_on_stop = True
             if stream.background:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).

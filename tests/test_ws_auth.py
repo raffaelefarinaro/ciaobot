@@ -31,7 +31,7 @@ def _events_app() -> Starlette:
         active_stream_chat_ids=lambda: [],
         get_chat=lambda _cid: None,
         background_agent_counts={},
-        background_run_counts={},
+        background_runs={},
         events=SimpleNamespace(attach=_IdleSubscription),
     )
     return app
@@ -83,7 +83,7 @@ def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> Non
         active_stream_chat_ids=_ids,
         get_chat=lambda _cid: None,
         background_agent_counts={},
-        background_run_counts={},
+        background_runs={},
         events=hub,
     )
     with _signed_client(app).websocket_connect(
@@ -106,7 +106,7 @@ def test_snapshot_failure_detaches_the_events_subscription() -> None:
         active_stream_chat_ids=_boom,
         get_chat=lambda _cid: None,
         background_agent_counts={},
-        background_run_counts={},
+        background_runs={},
         events=hub,
     )
     with pytest.raises(KeyError):

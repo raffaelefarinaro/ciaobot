@@ -348,6 +348,25 @@ export interface RunningSubagent {
   turn_index?: number | null
 }
 
+/**
+ * A tracked `background_run_start` command, as /ws/events reports it. No pid,
+ * cwd or log path: every connected client receives these.
+ */
+export interface BackgroundRunSummary {
+  run_id: string
+  label: string
+  cmd: string[]
+  started_at: string
+  // "queued" | "running" while live; "ok" | "error" | "cancelled" once ended.
+  status: string
+  exit_code: number | null
+}
+
+/** `GET /api/chats/{id}/background-runs/{run}/log`. */
+export interface BackgroundRunLog extends BackgroundRunSummary {
+  last_lines: string[]
+}
+
 /** `GET /api/subagents/running`. Chats with nothing running are omitted. */
 export interface RunningSubagentsResponse {
   chats?: Record<string, RunningSubagent[]>
@@ -450,13 +469,13 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, number>; restarting?: boolean }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number; nudged?: boolean }
-  | { type: 'chat_background_runs'; chat_id: string; project_id: string; running: number }
+  | { type: 'chat_background_runs'; chat_id: string; project_id: string; runs: BackgroundRunSummary[]; finished?: BackgroundRunSummary }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
