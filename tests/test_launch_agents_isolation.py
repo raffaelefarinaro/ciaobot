@@ -42,14 +42,14 @@ def test_setup_does_not_touch_the_real_launch_agents_dir(tmp_path: Path) -> None
     real = Path.home() / "Library" / "LaunchAgents" / "com.ciao.server.plist"
     before = real.read_bytes() if real.exists() else None
 
-    setup_workspace(tmp_path / "ws", auth_token="t", auth_required=False)
+    setup_workspace(tmp_path / "ws", auth_token="t")
 
     after = real.read_bytes() if real.exists() else None
     assert after == before, "setup rewrote the operator's real LaunchAgent plist"
 
 
 def test_setup_writes_the_plist_into_the_redirected_dir(tmp_path: Path) -> None:
-    setup_workspace(tmp_path / "ws", auth_token="t", auth_required=False)
+    setup_workspace(tmp_path / "ws", auth_token="t")
 
     redirected = tmp_path / "LaunchAgents" / "com.ciao.server.plist"
     assert redirected.exists(), "the plist went somewhere other than the override"
@@ -94,28 +94,28 @@ def test_setup_refuses_to_repoint_real_launch_agent_without_confirm(
 
     other = tmp_path / "other-ws"
     with pytest.raises(RuntimeError, match="Refusing to repoint"):
-        setup_workspace(other, auth_token="t", auth_required=False)
+        setup_workspace(other, auth_token="t")
 
     assert plist.read_bytes() == before, "real plist was mutated despite refusal"
 
     # Explicit opt-in must still allow an intentional move.
-    setup_workspace(other, auth_token="t", auth_required=False, confirm_repoint=True)
+    setup_workspace(other, auth_token="t", confirm_repoint=True)
     with plist.open("rb") as handle:
         after_data = plistlib.load(handle)
     assert str(other.resolve()) in after_data["EnvironmentVariables"]["CIAO_WORKSPACE"]
 
     # Idempotent rerun on the same workspace must not require confirm.
-    setup_workspace(other, auth_token="t", auth_required=False)
+    setup_workspace(other, auth_token="t")
 
     # Moving back to the original workspace without confirm must still be blocked.
     with pytest.raises(RuntimeError, match="Refusing to repoint"):
-        setup_workspace(real_workspace, auth_token="t", auth_required=False)
+        setup_workspace(real_workspace, auth_token="t")
 
     setup_workspace(
-        real_workspace, auth_token="t", auth_required=False, confirm_repoint=True
+        real_workspace, auth_token="t", confirm_repoint=True
     )
     with plist.open("rb") as handle:
         restored = plistlib.load(handle)
     assert str(real_workspace.resolve()) in restored["EnvironmentVariables"]["CIAO_WORKSPACE"]
     # Now a same-workspace rerun without confirm must not raise.
-    setup_workspace(real_workspace, auth_token="t", auth_required=False)
+    setup_workspace(real_workspace, auth_token="t")

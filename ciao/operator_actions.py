@@ -967,6 +967,7 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
     ("CLAUDE_PERMISSION_MODE", "remove it: execution mode is always auto"),
     # The workspace list is runtime state owned by Settings. Server startup
     # imports the variable into workspaces.json once; after that it is inert.
+    ("PWA_AUTH_REQUIRED", "remove it: password protection is always on"),
     (
         "CIAO_WORKSPACES",
         "remove it: its workspaces were imported into workspaces.json once, "

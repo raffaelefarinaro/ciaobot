@@ -16,6 +16,7 @@ from starlette.testclient import TestClient
 from ciao import vault_index
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.web.app import create_app
+from tests.session import signed_in
 
 
 def _note(path: Path, title: str, related: str = "") -> None:
@@ -43,7 +44,6 @@ def rerooted(tmp_path: Path) -> CiaoConfig:
     reset_reroot_cache()
     return CiaoConfig(
         pwa_auth_token="test-token",
-        pwa_auth_required=False,
         workspace_root=tmp_path,
         vault_root=tmp_path / "memory-vault",
         state_path=tmp_path / ".runtime" / "state.json",
@@ -74,7 +74,7 @@ def scanned(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def test_a_scoped_graph_request_scans_only_that_workspaces_vault(
     rerooted: CiaoConfig, scanned: list[str]
 ) -> None:
-    client = TestClient(create_app(rerooted))
+    client = signed_in(TestClient(create_app(rerooted)))
 
     resp = client.get("/api/vault/graph?workspace=work")
 
@@ -85,7 +85,7 @@ def test_a_scoped_graph_request_scans_only_that_workspaces_vault(
 def test_an_unscoped_graph_request_still_scans_every_root(
     rerooted: CiaoConfig, scanned: list[str]
 ) -> None:
-    client = TestClient(create_app(rerooted))
+    client = signed_in(TestClient(create_app(rerooted)))
 
     resp = client.get("/api/vault/graph")
 
@@ -106,7 +106,7 @@ def test_scoping_the_scan_does_not_change_the_scoped_graph(
     Every field the Memory Map reads has to come back identical to what the
     scan-everything-then-filter route produced, ids and degrees included.
     """
-    client = TestClient(create_app(rerooted))
+    client = signed_in(TestClient(create_app(rerooted)))
 
     scoped = client.get("/api/vault/graph?workspace=personal").json()
 
@@ -141,7 +141,7 @@ def test_an_unknown_workspace_is_not_read_as_scan_everything(
     the entry filter still has to empty the graph, or a typo in the picker
     would hand back the whole install.
     """
-    client = TestClient(create_app(rerooted))
+    client = signed_in(TestClient(create_app(rerooted)))
 
     data = client.get("/api/vault/graph?workspace=ghost").json()
 
@@ -160,13 +160,12 @@ def test_a_shared_vault_install_is_still_scoped_by_the_entry_filter(
     reset_reroot_cache()
     config = CiaoConfig(
         pwa_auth_token="test-token",
-        pwa_auth_required=False,
         workspace_root=tmp_path,
         vault_root=vault,
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    client = TestClient(create_app(config))
+    client = signed_in(TestClient(create_app(config)))
 
     data = client.get("/api/vault/graph?workspace=personal").json()
 

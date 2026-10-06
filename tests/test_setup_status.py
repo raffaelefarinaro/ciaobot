@@ -613,7 +613,6 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("PWA_PORT", "")
     monkeypatch.setenv("PWA_AUTH_TOKEN", "")
-    monkeypatch.setenv("PWA_AUTH_REQUIRED", "")
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     restarts: list[int] = []
@@ -655,10 +654,9 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     # relaunched process through the environment too: load_dotenv would not
     # override a PWA_AUTH_TOKEN already set for the bootstrap run.
     assert os.environ["PWA_AUTH_TOKEN"] == "wizard-pass"
-    assert os.environ["PWA_AUTH_REQUIRED"] == "true"
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "PWA_AUTH_TOKEN=wizard-pass" in env_text
-    assert "PWA_AUTH_REQUIRED=true" in env_text
+    assert "PWA_AUTH_REQUIRED" not in env_text
     assert "CIAO_PUSH_CONTACT" not in env_text
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
@@ -816,7 +814,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
 
 
 def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
-    """Host auth_check must mirror AuthMiddleware when PWA_AUTH_REQUIRED is on."""
+    """Host auth_check must mirror AuthMiddleware: a session is always required."""
     from ciao.web.auth import SESSION_COOKIE
     from ciao.web.routes_auth import auth_check
 
@@ -828,7 +826,6 @@ def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
     app.state.serializer = serializer
     app.state.config = CiaoConfig.from_env(
         {
-            "PWA_AUTH_REQUIRED": "true",
             "PWA_AUTH_TOKEN": "secret",
             "CIAO_WORKSPACE": str(tmp_path / "ws"),
         }

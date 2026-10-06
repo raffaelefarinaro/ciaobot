@@ -45,7 +45,6 @@ For HTTPS reverse proxy hosting, set these values in the workspace `.env`:
 ```dotenv
 PWA_HOST=127.0.0.1
 PWA_PORT=8443
-PWA_AUTH_REQUIRED=true
 ```
 
 The proxy must forward the public host as `X-Forwarded-Host` (nginx:

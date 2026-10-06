@@ -19,7 +19,7 @@ def test_linux_setup_preserves_configuration_without_desktop_side_effects(tmp_pa
     assert cli.main(args) == 0
     config = (workspace / ".env").read_text()
     assert "PWA_PORT=8544" in config
-    assert "PWA_AUTH_REQUIRED=true" in config
+    assert "PWA_AUTH_REQUIRED" not in config
     assert is_private(workspace / ".env")
     assert not (tmp_path / "LaunchAgents").exists()
     assert not (tmp_path / "Library").exists()

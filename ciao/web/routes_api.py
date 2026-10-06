@@ -5183,15 +5183,12 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     """Return startup phase progress and the host's own version state."""
     from ciao import __version__
 
-    config = getattr(request.app.state, "config", None)
-
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
     latest_version, update_available = await _cached_update_hint(request)
     payload.update({
         "version": __version__,
         "desktop_api_version": 1,
-        "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
         "latest_version": latest_version,
         "update_available": update_available,
     })
@@ -5520,7 +5517,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
                 setup_workspace,
                 workspace,
                 auth_token=password,
-                auth_required=True,
                 vault_root=str(body.get("vault_root", "")).strip() or None,
                 vault_mode=vault_mode,
                 workspace_name=workspace_name,
@@ -5543,7 +5539,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
     # bootstrap process would outrank the password just written to .env.
     os.environ["PWA_AUTH_TOKEN"] = password
-    os.environ["PWA_AUTH_REQUIRED"] = "true"
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. Nothing
     # menu-bar related happens here any more: Ciaobot.app is the menu bar, and

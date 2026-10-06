@@ -448,22 +448,11 @@
                 >Keeping it private</a>
               </p>
             </div>
-            <span
-              v-if="authSettings"
-              class="badge"
-              :class="authSettings.auth_required ? 'badge--success' : 'badge--warn'"
-            >
-              {{ authSettings.auth_required ? 'on' : 'off' }}
-            </span>
           </div>
           <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
           <template v-else>
             <div class="settings-form-panel">
-              <p v-if="!authSettings.auth_required" class="hint hint--warn">
-                This instance is running unprotected because PWA_AUTH_REQUIRED=false is set in the
-                workspace .env. Setting a password here turns protection back on.
-              </p>
-              <label v-if="authSettings.auth_required" class="settings-field">
+              <label class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
                   v-model="authCurrentPassword"
@@ -4265,7 +4254,6 @@ async function fetchLocalStatus() {
 
 // ── PWA password (Settings → home) ─────────────────────────────────────
 interface AuthSettings {
-  auth_required: boolean
   password_configured: boolean
 }
 
@@ -4276,12 +4264,12 @@ const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
 const authSettingsError = ref(false)
 
-// Protection is the default and cannot be switched off from here (the server
-// rejects `auth_required: false`), so this card only changes the password.
+// Protection is always on, so this card only changes the password, and the
+// server always asks for the current one.
 const canSaveAuthSettings = computed(() => {
   if (!authSettings.value) return false
   if (!authNewPassword.value.trim()) return false
-  if (authSettings.value.auth_required && !authCurrentPassword.value) return false
+  if (!authCurrentPassword.value) return false
   return true
 })
 
@@ -4304,7 +4292,6 @@ async function saveAuthSettings() {
       current_password: authCurrentPassword.value,
     })
     authSettings.value = {
-      auth_required: res.auth_required,
       password_configured: res.password_configured,
     }
     authCurrentPassword.value = ''

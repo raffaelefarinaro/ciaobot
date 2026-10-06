@@ -600,7 +600,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
 
     middleware = [
         Middleware(SecurityHeadersMiddleware),
-        Middleware(AuthMiddleware, serializer=serializer, auth_required=config.pwa_auth_required),
+        Middleware(AuthMiddleware, serializer=serializer),
     ]
 
     @asynccontextmanager

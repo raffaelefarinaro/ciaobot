@@ -1160,6 +1160,22 @@ def test_retired_ciao_workspaces_variable_is_surfaced(tmp_path: Path) -> None:
     assert "Settings" in actions[0].chat_prompt
 
 
+def test_retired_auth_switch_is_surfaced(tmp_path: Path) -> None:
+    """Password protection is always on, so PWA_AUTH_REQUIRED=false no longer
+    does what the .env says."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"PWA_AUTH_REQUIRED": "false"}
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    assert "PWA_AUTH_REQUIRED" in actions[0].detail
+
+
 def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
     config = _RerootedConfig(tmp_path)
     for name in ("personal", "work"):

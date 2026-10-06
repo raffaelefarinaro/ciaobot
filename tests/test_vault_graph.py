@@ -4,6 +4,7 @@ import pytest
 from starlette.testclient import TestClient
 from ciao.config import CiaoConfig
 from ciao.web.app import create_app
+from tests.session import signed_in
 
 
 @pytest.fixture
@@ -45,11 +46,10 @@ def client(tmp_path):
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime",
         media_root=tmp_path / "media",
-        pwa_auth_required=False,
         vault_root=vault,
     )
     app = create_app(cfg)
-    return TestClient(app)
+    return signed_in(TestClient(app))
 
 
 def _node(data, title):
@@ -286,10 +286,9 @@ def _checked_client(tmp_path):
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime",
         media_root=tmp_path / "media",
-        pwa_auth_required=False,
         vault_root=vault,
     )
-    return TestClient(create_app(cfg)), cfg, vault
+    return signed_in(TestClient(create_app(cfg))), cfg, vault
 
 
 def _record(cfg, title: str, *, proposal_id: str = "") -> None:

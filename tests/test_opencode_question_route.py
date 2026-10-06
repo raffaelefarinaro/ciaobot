@@ -10,6 +10,8 @@ from starlette.testclient import TestClient
 
 from ciao.providers.opencode import QuestionResponseResult
 from ciao.web.routes_chat import ws_chat
+from itsdangerous import URLSafeTimedSerializer
+from tests.session import signed_in
 
 
 class _Manager:
@@ -35,12 +37,13 @@ def _app(manager: _Manager) -> Starlette:
     app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
     app.state.project_chat_manager = manager
     app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
     return app
 
 
 def test_question_response_forwards_the_v2_reply_shape() -> None:
     manager = _Manager()
-    with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_json({
             "type": "question_response",
             "request_id": "form-1",
@@ -66,7 +69,7 @@ def test_question_response_forwards_the_v2_reply_shape() -> None:
 
 def test_question_response_forwards_the_v2_cancel_shape() -> None:
     manager = _Manager()
-    with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_json({
             "type": "question_response",
             "request_id": "form-1",
@@ -86,7 +89,7 @@ def test_question_response_forwards_the_v2_cancel_shape() -> None:
 
 def test_question_response_rejects_a_missing_or_unknown_action() -> None:
     manager = _Manager()
-    with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_json({
             "type": "question_response",
             "request_id": "form-1",
@@ -102,7 +105,7 @@ def test_question_response_rejects_a_missing_or_unknown_action() -> None:
 
 def test_permission_response_requires_a_json_boolean() -> None:
     manager = _Manager()
-    with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_json({
             "type": "permission_response",
             "request_id": "permission-1",
@@ -118,7 +121,7 @@ def test_permission_response_requires_a_json_boolean() -> None:
 
 def test_permission_response_forwards_a_boolean_verdict_and_session() -> None:
     manager = _Manager()
-    with TestClient(_app(manager)).websocket_connect("/ws/chat/chat-1") as ws:
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_json({
             "type": "permission_response",
             "request_id": "permission-1",

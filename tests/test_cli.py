@@ -531,9 +531,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert rc == 0
     assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:2] == [
         "PWA_AUTH_TOKEN=test-token",
-        # Password protection is the default and is pinned explicitly, so an
-        # unset value never has to be guessed at on the next start.
-        "PWA_AUTH_REQUIRED=true",
+        "CIAO_WORKSPACE=.",
     ]
     # Agent assets belong to the WORKSPACE root, not the install root: a fresh
     # setup now builds the per-workspace layout directly instead of the shared one
@@ -598,32 +596,6 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert setup_token
 
 
-def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
-    """`--no-auth` is the only way a scripted setup gets an unprotected
-    dashboard, and it must be pinned in .env — an unset value now means on."""
-    workspace = tmp_path / "workspace"
-
-    rc = cli.main(
-        [
-            "setup",
-            "--workspace",
-            str(workspace),
-            "--auth-token",
-            "test-token",
-            "--no-auth",
-            "--launch-agents-dir",
-            str(tmp_path / "LaunchAgents"),
-            "--app-dir",
-            str(tmp_path / "Applications"),
-        ]
-    )
-
-    assert rc == 0
-    env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
-    assert "PWA_AUTH_REQUIRED=false" in env_lines
-    assert "PWA_AUTH_REQUIRED=true" not in env_lines
-
-
 def _setup_cli_args(tmp_path: Path) -> list[str]:
     return [
         "setup",
@@ -631,7 +603,6 @@ def _setup_cli_args(tmp_path: Path) -> list[str]:
         str(tmp_path / "workspace"),
         "--auth-token",
         "test-token",
-        "--no-auth",
         "--launch-agents-dir",
         str(tmp_path / "LaunchAgents"),
         "--app-dir",
@@ -3633,7 +3604,7 @@ def _per_root_workspace(root: Path) -> None:
     """Scaffold a migrated per-workspace install like setup_workspace does."""
     from ciao.cli import setup_workspace
 
-    setup_workspace(root, auth_token="t", auth_required=True)
+    setup_workspace(root, auth_token="t")
 
 
 def test_cli_health_reports_the_installed_workspace_from_a_bare_shell(
@@ -3697,9 +3668,8 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
     """A bare-shell `ciao run` against a stopped install must adopt the
     workspace .env's auth settings, not the bare shell's absence of them.
 
-    Discovery used to apply its overlay after PWA_AUTH_TOKEN and
-    PWA_AUTH_REQUIRED were parsed, so the started server ignored the
-    workspace's configured password and booted unauthenticated.
+    Discovery used to apply its overlay after PWA_AUTH_TOKEN was parsed, so
+    the started server ignored the workspace's configured password.
     """
     from ciao.config import CiaoConfig, reset_reroot_cache
 
@@ -3708,8 +3678,7 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
     # A distinctive token in the .env, as a configured install has.
     env_path = workspace / ".env"
     env_path.write_text(
-        (env_path.read_text(encoding="utf-8")).replace("PWA_AUTH_TOKEN=t", "PWA_AUTH_TOKEN=ws-secret-token")
-        + "PWA_AUTH_REQUIRED=true\n",
+        (env_path.read_text(encoding="utf-8")).replace("PWA_AUTH_TOKEN=t", "PWA_AUTH_TOKEN=ws-secret-token"),
         encoding="utf-8",
     )
     agents = tmp_path / "LaunchAgents"
@@ -3723,7 +3692,6 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
         "CIAO_VAULT_ROOT",
         "CIAO_BOOTSTRAP_WORKSPACE",
         "PWA_AUTH_TOKEN",
-        "PWA_AUTH_REQUIRED",
     ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / "home").mkdir()
@@ -3736,7 +3704,6 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
 
     assert config.workspace_root == workspace.resolve()
     assert config.pwa_auth_token == "ws-secret-token"
-    assert config.pwa_auth_required is True
 
 
 def test_config_discovery_survives_an_exported_empty_workspace(
@@ -3774,7 +3741,6 @@ def test_config_discovery_survives_an_exported_empty_workspace(
         "CIAO_VAULT_ROOT",
         "CIAO_BOOTSTRAP_WORKSPACE",
         "PWA_AUTH_TOKEN",
-        "PWA_AUTH_REQUIRED",
     ):
         monkeypatch.delenv(name, raising=False)
     # The whole point: present in the environment, but empty.

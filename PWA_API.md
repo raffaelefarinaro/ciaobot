@@ -6,12 +6,12 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 ## Auth And Browser Security
 
-- Password protection is on by default. `PWA_AUTH_TOKEN` is the dashboard password: the first-run wizard asks for it, `POST /api/auth/settings` changes it, and only `PWA_AUTH_REQUIRED=false` in the workspace `.env` turns protection off.
+- Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is always required). A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, and it only answers in bootstrap mode.) All `/ws/*` routes require the signed session cookie.
 - Node mode is gone: there is one engine per install and a browser either talks to it directly or not at all. There is no second origin, no local-control capability header, and no session bridge between origins. `docs/REMOTE_BOUNDARY.md` records what replaced the old model.
 - `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), `password` (required — the dashboard password, at least 4 characters; setup always enables protection), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
@@ -29,7 +29,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
-| GET, POST | `/api/auth/settings` | Read protection state, or set/change the PWA password (cannot disable protection) |
+| GET, POST | `/api/auth/settings` | Read whether a password is configured, or change the PWA password (`current_password` required) |
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project |

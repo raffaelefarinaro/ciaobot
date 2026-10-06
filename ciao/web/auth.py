@@ -187,7 +187,7 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
 
     Cross-origin browser connections are always rejected (WebSockets are not
     covered by CORS, so an unchecked handshake allows cross-site hijacking);
-    a session cookie is required only when auth is enabled, same as `/api/*`.
+    a session cookie is always required, same as `/api/*`.
     Closes the socket and returns False when the connection is not allowed.
     """
     origin = websocket.headers.get("origin")
@@ -201,10 +201,7 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
         )
         await websocket.close(code=4003, reason="forbidden origin")
         return False
-    config = getattr(websocket.app.state, "config", None)
-    if getattr(config, "pwa_auth_required", False) and not verify_session(
-        websocket, websocket.app.state.serializer
-    ):
+    if not verify_session(websocket, websocket.app.state.serializer):
         await websocket.close(code=4001, reason="unauthorized")
         return False
     return True
@@ -278,17 +275,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         app,
         *,
         serializer: URLSafeTimedSerializer,
-        auth_required: bool = False,
     ) -> None:
         super().__init__(app)
         self._serializer = serializer
-        self._auth_required = auth_required
-
-    def _auth_required_now(self, request: Request) -> bool:
-        config = getattr(request.app.state, "config", None)
-        if config is not None and hasattr(config, "pwa_auth_required"):
-            return bool(config.pwa_auth_required)
-        return self._auth_required
 
     def _serializer_now(self, request: Request) -> URLSafeTimedSerializer:
         serializer = getattr(request.app.state, "serializer", None)
@@ -314,9 +303,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if not _state_change_origin_allowed(request):
                 return JSONResponse({"error": "forbidden origin"}, status_code=403)
             return await call_next(request)
-        if self._auth_required_now(request) and not verify_session(
-            request, self._serializer_now(request)
-        ):
+        if not verify_session(request, self._serializer_now(request)):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if path.startswith("/api/") and not _state_change_origin_allowed(request):
             return JSONResponse({"error": "forbidden origin"}, status_code=403)

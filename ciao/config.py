@@ -573,9 +573,6 @@ class CiaoConfig:
     workspace_root: Path
     state_path: Path
     media_root: Path
-    # Real installs get this from ``from_env``, which defaults it to True (see
-    # there); the field default only covers configs built directly in code.
-    pwa_auth_required: bool = False
     dev_mode: bool = False
     # Path to the Ciaobot source checkout for developer-only deploy/restart
     # workflows. Packaged apps update the app bundle atomically instead. From
@@ -1652,25 +1649,9 @@ class CiaoConfig:
             source = installed_workspace_env(source)
 
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
-        pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
-        if pwa_auth_required_raw:
-            pwa_auth_required = pwa_auth_required_raw in {"true", "1", "yes", "y"}
-        else:
-            # Password protection is the default: setup asks for a password and
-            # writes PWA_AUTH_REQUIRED explicitly, so an unset value means either
-            # a workspace .env that predates the default or a hand-rolled one.
-            # Those are protected as soon as a token exists — the token *is* the
-            # password, readable in the workspace .env, and `ciao setup-url`
-            # mints a one-time localhost login for whoever no longer knows it.
-            # Without a token there is nothing a human could type, and enforcing
-            # would lock the owner out of their own install (the session secret
-            # is machine-generated), so protection stays off until a password is
-            # set in Settings.
-            pwa_auth_required = bool(pwa_auth_token)
-        bootstrap_mode = not (
-            (bool(pwa_auth_token) or not pwa_auth_required)
-            and bool(_workspace_env(source))
-        )
+        # Password protection is always on; there is no setting that turns it
+        # off. Without a workspace this is the first-run wizard.
+        bootstrap_mode = not _workspace_env(source)
         if bootstrap_mode:
             workspace_root = _bootstrap_workspace(source)
             runtime_default = workspace_root / ".runtime"
@@ -1683,10 +1664,11 @@ class CiaoConfig:
             ).expanduser().resolve()
             runtime_default = Path(".runtime")
             if not pwa_auth_token:
-                # No token configured (auth is typically off on this branch).
-                # Persist a random per-workspace secret instead of a shared
-                # constant, so the session-signing key is never a publicly
-                # known value baked into the source on any install.
+                # A workspace .env with no password (hand-written; setup always
+                # writes one). Sessions still have to be signed, so persist a
+                # random per-workspace secret rather than a shared constant.
+                # Protection stays on: the owner signs in with a one-time
+                # `ciao setup-url` login, or sets PWA_AUTH_TOKEN in `.env`.
                 pwa_auth_token = _read_or_create_secret(
                     workspace_root / ".runtime" / "session-secret"
                 )
@@ -1745,7 +1727,6 @@ class CiaoConfig:
             workspace_root=workspace_root,
             state_path=state_path,
             media_root=media_root,
-            pwa_auth_required=pwa_auth_required,
             dev_mode=dev_mode,
             app_repo=app_repo,
             vault_mode=vault_mode,

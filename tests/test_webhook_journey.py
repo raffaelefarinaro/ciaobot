@@ -127,7 +127,6 @@ def _config(tmp_path: Path, monkeypatch) -> CiaoConfig:
     runtime.mkdir(parents=True, exist_ok=True)
     return CiaoConfig(
         pwa_auth_token="test-token",
-        pwa_auth_required=True,
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",

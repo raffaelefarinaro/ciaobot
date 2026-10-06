@@ -250,7 +250,6 @@ def test_package_update_endpoint_explains_app_owned_updates() -> None:
     app.state.config = CiaoConfig.from_env(
         {
             "PWA_AUTH_TOKEN": "test-token",
-            "PWA_AUTH_REQUIRED": "false",
             "CIAO_WORKSPACE": "/tmp/ciaobot-test-workspace",
         }
     )
@@ -281,7 +280,6 @@ def test_package_update_endpoint_installer_is_guidance() -> None:
     app.state.config = CiaoConfig.from_env(
         {
             "PWA_AUTH_TOKEN": "test-token",
-            "PWA_AUTH_REQUIRED": "false",
             "CIAO_WORKSPACE": "/tmp/ciaobot-test-workspace",
         }
     )

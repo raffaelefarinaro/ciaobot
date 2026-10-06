@@ -19,7 +19,7 @@ def test_restart_requires_auth_and_calls_drain_hook_without_a_checkout():
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = SimpleNamespace(
-        pwa_auth_required=True, pwa_auth_token="restart-test",
+        pwa_auth_token="restart-test",
     )
     calls = []
     app.state.request_restart = calls.append

@@ -50,7 +50,6 @@ def _world(tmp_path: Path, monkeypatch) -> tuple[TestClient, dict[str, str], Cia
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
         pwa_auth_token="test-token",
-        pwa_auth_required=True,
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",

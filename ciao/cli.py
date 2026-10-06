@@ -989,7 +989,6 @@ def setup_workspace(
     workspace: Path | str,
     *,
     auth_token: str | None = None,
-    auth_required: bool = True,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
     workspace_name: str | None = None,
@@ -1094,12 +1093,8 @@ def setup_workspace(
     name = requested_name or "personal"
 
     token = auth_token or secrets.token_urlsafe(32)
-    # Always pin PWA_AUTH_REQUIRED: an unset value is read as "protect when a
-    # token exists" (see CiaoConfig.from_env), and a setup that deliberately
-    # opted out must survive that default.
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
-        ("PWA_AUTH_REQUIRED", "true" if auth_required else "false"),
     ]
     desired_env.extend([
         ("CIAO_WORKSPACE", "."),
@@ -1607,7 +1602,6 @@ def _setup_command(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-    auth_required = not args.no_auth
     env_path = root / ".env"
     try:
         had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
@@ -1618,7 +1612,6 @@ def _setup_command(args: argparse.Namespace) -> int:
         written = setup_workspace(
             args.workspace,
             auth_token=args.auth_token,
-            auth_required=auth_required,
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -1639,7 +1632,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     setup_rc = SETUP_MEMORY_FAILED_RC if sync_failures else 0
-    if auth_required and not args.auth_token and not had_token:
+    if not args.auth_token and not had_token:
         print(
             "\nPassword protection is on. No --auth-token was given, so a random "
             f"password was written to {root / '.env'} (PWA_AUTH_TOKEN).\n"
@@ -6427,14 +6420,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "PWA password to write when .env is new (a random one is generated "
             "when omitted)."
-        ),
-    )
-    setup_parser.add_argument(
-        "--no-auth",
-        action="store_true",
-        help=(
-            "Write PWA_AUTH_REQUIRED=false instead of protecting the dashboard "
-            "with a password. Only for a machine nobody else can reach."
         ),
     )
     setup_parser.add_argument(

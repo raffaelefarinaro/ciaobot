@@ -288,38 +288,23 @@ def test_missing_auth_token_enters_bootstrap_mode_with_persisted_token(tmp_path:
     assert restarted.pwa_auth_token == config.pwa_auth_token
 
 
-def test_password_protection_is_on_by_default(tmp_path: Path) -> None:
-    """A configured workspace with a token is protected without asking: the
-    token is the password, so an .env written before the default flipped (no
-    PWA_AUTH_REQUIRED line) still ends up protected."""
+def test_configured_workspace_is_not_bootstrap(tmp_path: Path) -> None:
     config = CiaoConfig.from_env(
         {"CIAO_WORKSPACE": str(tmp_path), "PWA_AUTH_TOKEN": "hunter2"}
     )
 
-    assert config.pwa_auth_required is True
+    assert config.pwa_auth_token == "hunter2"
     assert config.bootstrap_mode is False
+    assert not hasattr(config, "pwa_auth_required")
 
 
-def test_password_protection_can_be_opted_out_in_env(tmp_path: Path) -> None:
-    config = CiaoConfig.from_env(
-        {
-            "CIAO_WORKSPACE": str(tmp_path),
-            "PWA_AUTH_TOKEN": "hunter2",
-            "PWA_AUTH_REQUIRED": "false",
-        }
-    )
-
-    assert config.pwa_auth_required is False
-
-
-def test_missing_token_without_auth_persists_random_secret_not_a_constant(tmp_path: Path) -> None:
+def test_missing_token_persists_random_secret_not_a_constant(tmp_path: Path) -> None:
     env = {"CIAO_WORKSPACE": str(tmp_path)}  # no PWA_AUTH_TOKEN
 
     config = CiaoConfig.from_env(env)
 
-    # Nothing a human could type exists yet, so enforcing would lock the owner
-    # out of their own install: protection waits for a password.
-    assert config.pwa_auth_required is False
+    # Sessions are still signed (and required) with a machine-generated
+    # secret; the owner signs in with a one-time `ciao setup-url` login.
     assert config.bootstrap_mode is False
     assert config.pwa_auth_token != "ciao-insecure-fallback-secret-key"
     assert len(config.pwa_auth_token) >= 32

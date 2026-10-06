@@ -24,8 +24,11 @@ from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from itsdangerous import URLSafeTimedSerializer
+
 from ciao.web import routes_chat
 from ciao.web.routes_chat import ws_chat
+from tests.session import signed_in
 
 
 def _app(started: list[tuple[str, str]]) -> Starlette:
@@ -42,12 +45,13 @@ def _app(started: list[tuple[str, str]]) -> Starlette:
     app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
     app.state.project_chat_manager = manager
     app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
     return app
 
 
 def test_message_starts_turn_even_when_socket_dies_immediately() -> None:
     started: list[tuple[str, str]] = []
-    client = TestClient(_app(started))
+    client = signed_in(TestClient(_app(started)))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_text('{"type":"message","text":"hello there"}')
         # The client dies right after the frame (suspension). Exiting the
@@ -59,7 +63,7 @@ def test_message_starts_turn_even_when_socket_dies_immediately() -> None:
 
 def test_message_acks_thinking_when_socket_stays_open() -> None:
     started: list[tuple[str, str]] = []
-    client = TestClient(_app(started))
+    client = signed_in(TestClient(_app(started)))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_text('{"type":"message","text":"hello there"}')
         assert ws.receive_json() == {"type": "status", "message": "thinking"}
@@ -68,7 +72,7 @@ def test_message_acks_thinking_when_socket_stays_open() -> None:
 
 def test_empty_message_is_ignored_without_starting_a_stream() -> None:
     started: list[tuple[str, str]] = []
-    client = TestClient(_app(started))
+    client = signed_in(TestClient(_app(started)))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_text('{"type":"message","text":""}')
     assert started == []
@@ -88,8 +92,9 @@ def test_archived_chat_is_rejected_without_starting_a_stream() ->  None:
     app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
     app.state.project_chat_manager = manager
     app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
 
-    client = TestClient(app)
+    client = signed_in(TestClient(app))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_text('{"type":"message","text":"hello"}')
         assert ws.receive_json()["archived"] is True
@@ -100,7 +105,7 @@ def test_idle_chat_socket_receives_keepalive(monkeypatch) -> None:
     """An idle chat must get frames, or the PWA watchdog calls it half-open."""
     monkeypatch.setattr(routes_chat, "STREAM_KEEPALIVE_SECONDS", 0.05)
     monkeypatch.setattr(routes_chat, "_ATTACH_POLL_SECONDS", 0.01)
-    client = TestClient(_app([]))
+    client = signed_in(TestClient(_app([])))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
         assert ws.receive_json() == {"type": "keepalive"}
         # It repeats: the client stamps liveness on every keepalive.

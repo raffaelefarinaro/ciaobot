@@ -47,11 +47,11 @@ class _FakePCM:
         return SimpleNamespace()
 
 
-def _client(*, pcm=None, auth_required: bool = False):
+def _client(*, pcm=None):
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
         routes=[Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"])],
-        middleware=[Middleware(AuthMiddleware, serializer=serializer, auth_required=auth_required)],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.serializer = serializer
     app.state.config = SimpleNamespace(claude_default_model="opus")
@@ -77,10 +77,9 @@ def test_chat_prompt_success() -> None:
 
 
 def test_chat_prompt_unauthorized() -> None:
-    """With auth enabled (non-default since auth-off-by-default), a missing
-    session cookie is rejected."""
+    """A missing session cookie is rejected."""
     pcm = _FakePCM()
-    client, _ = _client(pcm=pcm, auth_required=True)
+    client, _ = _client(pcm=pcm)
     resp = client.post(
         "/api/chats/chat-123/prompt",
         json={"prompt": "Hello world!"},
