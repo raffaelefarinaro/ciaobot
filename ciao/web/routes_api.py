@@ -2310,6 +2310,50 @@ async def chat_stop(request: Request) -> JSONResponse:
     return JSONResponse({"stopped": stopped})
 
 
+def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
+    """The runner and the run named in the path, if this chat owns it.
+
+    A run owned by another chat answers 404, like a missing one: the Work
+    details rail only ever asks about its own chat's runs.
+    """
+    runner = getattr(request.app.state, "background_runner", None)
+    if runner is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    run = runner.get(request.path_params["run_id"])
+    if run is None or run.parent_chat_id != request.path_params["chat_id"]:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return runner, run
+
+
+async def chat_background_run_log(request: Request) -> JSONResponse:
+    """The last lines of a background run's log, for the Work details rail."""
+    resolved = _chat_background_run(request)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    runner, run = resolved
+    return JSONResponse({**run.summary(), "last_lines": runner.tail(run.run_id)})
+
+
+async def chat_background_run_cancel(request: Request) -> JSONResponse:
+    """Stop a background run from the Work details rail.
+
+    The finish edge announces itself over /ws/events and wakes the chat, the
+    same as a cancel the agent asked for.
+    """
+    resolved = _chat_background_run(request)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    runner, run = resolved
+    from ciao.background import BackgroundRunError
+
+    try:
+        updated = await runner.cancel(run.run_id)
+    except BackgroundRunError:
+        # Pruned between the lookup and the cancel.
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(updated.summary())
+
+
 async def chat_prompt(request: Request) -> JSONResponse:
     """Send a prompt to start a model turn in the chat (background task)."""
     from ciao.models import ImageAttachment

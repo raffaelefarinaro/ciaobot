@@ -25,6 +25,8 @@ import type {
   ChatMessage,
   RunningSubagent,
   RunningSubagentsResponse,
+  BackgroundRunLog,
+  BackgroundRunSummary,
   SubagentTranscript,
   WsEvent,
   EventsWsMessage,
@@ -83,6 +85,9 @@ export { setListIndex } from '../lib/safeList'
 // Must match `_DEFAULT_CHAT_TITLE` on the server: `_is_empty_chat` uses it to
 // tell an abandoned draft from a chat the user deliberately named.
 const DEFAULT_CHAT_TITLE = 'New Chat'
+
+// How long the composer says how a background run ended before the line goes.
+const FINISHED_RUN_NOTICE_MS = 6000
 
 export const useProjectStore = defineStore('projects', () => {
   const projects = ref<ProjectInfo[]>([])
@@ -226,13 +231,17 @@ export const useProjectStore = defineStore('projects', () => {
   // running" indicator so the user can see work is ongoing during the quiet
   // gap between the turn ending and the agents reporting back.
   const backgroundAgents = ref<Record<string, number>>({})
-  // Per-chat count of live `background_run_start` command runs. Driven by
-  // `chat_background_runs` over /ws/events and re-seeded from the snapshot.
-  // Separate from `backgroundAgents`: a background run has no transcript and
-  // nothing to open, so it gets a count-only indicator. Without it the chat
-  // goes fully idle the moment the turn ends, with nothing saying a command
-  // is still going — the tool is non-blocking by design.
-  const backgroundRuns = ref<Record<string, number>>({})
+  // Per-chat live `background_run_start` command runs, oldest first. Driven
+  // by `chat_background_runs` over /ws/events and re-seeded from the snapshot.
+  // Separate from `backgroundAgents`: a background run has no transcript to
+  // open, only a command, a log and a Stop. Without it the chat goes fully
+  // idle the moment the turn ends, with nothing saying a command is still
+  // going — the tool is non-blocking by design.
+  const backgroundRuns = ref<Record<string, BackgroundRunSummary[]>>({})
+  // The run that most recently ended in each chat, held for a few seconds so
+  // the composer can say how it ended instead of the line just vanishing.
+  const finishedBackgroundRuns = ref<Record<string, BackgroundRunSummary>>({})
+  const finishedRunTimers = new Map<string, ReturnType<typeof setTimeout>>()
   // Full-screen restart overlay while the server drains active chats and
   // relaunches. Driven by /ws/events `server_restarting` (and the same
   // signal on the per-chat socket when a send is rejected mid-drain).
@@ -888,8 +897,8 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
-  const activeBackgroundRuns = computed(() =>
-    backgroundRuns.value[activeChatId.value || ''] || 0
+  const activeBackgroundRuns = computed<BackgroundRunSummary[]>(() =>
+    backgroundRuns.value[activeChatId.value || ''] || []
   )
 
   // Paused while the read-only subagent view is open for this chat: that
@@ -989,7 +998,7 @@ export const useProjectStore = defineStore('projects', () => {
   // gate would poll /api/subagents/running for rows that cannot exist.
   const anyChatBusy = computed(() =>
     anyChatWorking.value
-    || Object.values(backgroundRuns.value).some(n => n > 0),
+    || Object.values(backgroundRuns.value).some(runs => runs.length > 0),
   )
 
   // The server keeps a row "running" until the agent's transcript goes idle,
@@ -1090,7 +1099,22 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function chatHasBackgroundRuns(chatId: string): boolean {
-    return (backgroundRuns.value[chatId] || 0) > 0
+    return (backgroundRuns.value[chatId]?.length || 0) > 0
+  }
+
+  async function fetchBackgroundRunLog(chatId: string, runId: string): Promise<BackgroundRunLog> {
+    return api.get<BackgroundRunLog>(
+      `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/log`,
+    )
+  }
+
+  // The row leaves when the finish edge arrives over /ws/events, not here, so
+  // every client drops it at the same moment.
+  async function cancelBackgroundRun(chatId: string, runId: string): Promise<void> {
+    await api.post(
+      `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/cancel`,
+      {},
+    )
   }
 
   // Subagents this chat has working right now, from /api/subagents/running.
@@ -4069,13 +4093,22 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'chat_background_runs': {
-        // Count-only: there is no transcript to pull and no agent row to
-        // refresh, unlike `chat_subagents_ready`. The finishing run delivers
-        // its own wake turn, which arrives as a normal chat result.
-        if (msg.running > 0) {
-          backgroundRuns.value[msg.chat_id] = msg.running
+        // No transcript to pull and no agent row to refresh, unlike
+        // `chat_subagents_ready`. The finishing run delivers its own wake
+        // turn, which arrives as a normal chat result.
+        if (msg.runs?.length) {
+          backgroundRuns.value[msg.chat_id] = msg.runs
         } else {
           delete backgroundRuns.value[msg.chat_id]
+        }
+        if (msg.finished) {
+          const chatId = msg.chat_id
+          finishedBackgroundRuns.value[chatId] = msg.finished
+          clearTimeout(finishedRunTimers.get(chatId))
+          finishedRunTimers.set(chatId, setTimeout(() => {
+            delete finishedBackgroundRuns.value[chatId]
+            finishedRunTimers.delete(chatId)
+          }, FINISHED_RUN_NOTICE_MS))
         }
         break
       }
@@ -5789,13 +5822,13 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,

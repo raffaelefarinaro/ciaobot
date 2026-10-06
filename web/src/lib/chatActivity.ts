@@ -200,7 +200,9 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
     parts.push(`<span class="token-number">${formatNum(outputVal)}</span> out`)
   }
   if (!parts.length) return ''
-  return `Tokens ${parts.join(' · ')}`
+  // "8 in / 1,915 out": the in/out pair already says these are tokens, and
+  // the slash keeps them one unit beside the footer's other ` · ` facts.
+  return parts.join(' / ')
 }
 
 /** One ordered piece of a rendered turn: either an Activity trace (grouped
