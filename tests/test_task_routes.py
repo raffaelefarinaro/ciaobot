@@ -724,9 +724,48 @@ async def test_delegation_launches_one_attended_chat_and_no_prompt_body(
     assert "Steps and links." in prompt
 
 
+async def test_a_delegation_carries_the_users_hand_over_instructions(world) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Draft the runbook", body="Steps and links.")
+
+    response = _delegate(
+        client, cookies, task, pcm, instructions="Keep it to one page; done = a PR link."
+    )
+
+    assert response.status_code == 200, response.text
+    _chat_id, prompt = pcm.start_stream_calls[0]
+    assert "Steps and links." in prompt
+    assert "Keep it to one page; done = a PR link." in prompt
+    assert prompt.index("Steps and links.") < prompt.index("Keep it to one page")
+
+
+async def test_overlong_instructions_are_refused_before_anything_starts(world) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Bounded note")
+
+    response = _delegate(client, cookies, task, pcm, instructions="x" * 4001)
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task"
+    assert pcm.create_chat_calls == []
+    assert pcm.start_stream_calls == []
+
+
+async def test_non_text_instructions_are_refused_rather_than_stringified(world) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Typed note")
+
+    response = _delegate(client, cookies, task, pcm, instructions=["do", "this"])
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task_field"
+    assert pcm.create_chat_calls == []
+    assert pcm.start_stream_calls == []
+
+
 async def test_a_delegation_body_cannot_carry_prompt_or_task_fields(world) -> None:
-    """Only `project_id` is a delegation input besides the workspace and the
-    revision, so a typo is a 400 rather than a store refusal reported as a broken
+    """Only `project_id` and the hand-over `instructions` are delegation inputs
+    besides the workspace and the revision, so a typo is a 400 rather than a store refusal reported as a broken
     task."""
     client, cookies, _config, pcm = world
     task = _create(client, cookies, title="Bounded input")

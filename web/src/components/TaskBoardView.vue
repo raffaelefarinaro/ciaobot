@@ -535,6 +535,17 @@ const delegateBodyState = ref<'idle' | 'loading' | 'failed'>('idle')
 let delegateSeq = 0
 /** What the sheet's confirm does, chosen when the sheet opens. */
 const delegateMode = ref<DelegateMode>('delegate')
+/**
+ * The user's note for this one hand-over: how to go about it, what they expect
+ * back. Sent with a new attempt (`delegate`, `retry`) and quoted after the
+ * description; never saved on the task.
+ */
+const delegateInstructions = ref('')
+/** The server's own bound, so the field stops where the request would be refused. */
+const MAX_DELEGATE_INSTRUCTIONS = 4000
+const delegateTakesInstructions = computed(
+  () => delegateMode.value === 'delegate' || delegateMode.value === 'retry',
+)
 
 /** The task the preview is for, or undefined once it is gone. */
 const delegateTask = computed(
@@ -663,6 +674,8 @@ async function openDelegate(task: Task, mode?: DelegateMode) {
   // A sheet about to send something supersedes a note about something already
   // sent, and the note belongs to one card rather than to the board.
   if (updateSentTaskId.value === task.id) updateSentTaskId.value = ''
+  // A retry of the body read keeps what was typed; a new sheet starts empty.
+  if (delegateTaskId.value !== task.id || !delegateOpen.value) delegateInstructions.value = ''
   delegateTaskId.value = task.id
   delegateMode.value = mode ?? delegateModeFor(task)
   delegateBody.value = ''
@@ -706,6 +719,7 @@ function resetDelegate() {
   delegateRevision.value = ''
   delegateBodyState.value = 'idle'
   delegateMode.value = 'delegate'
+  delegateInstructions.value = ''
   // Invalidate any read still in flight, so its answer cannot fill a later dialog.
   delegateSeq++
   board.clearError()
@@ -752,7 +766,9 @@ async function submitDelegate() {
       workspace.value, task.id, task.attempt_id, 'resume',
     )
   } else {
-    outcome = await board.delegate(workspace.value, task.id, revision)
+    outcome = await board.delegate(
+      workspace.value, task.id, revision, undefined, delegateInstructions.value,
+    )
   }
   if (seq !== delegateSeq || workspace.value !== originWorkspace) return
   delegateBusy.value = false
@@ -2013,6 +2029,22 @@ const today = localDateKey()
             </details>
           </template>
 
+          <!-- The user's note for this hand-over. Its own field rather than an
+               edit to the description: it shapes this attempt only, and the task
+               stays as filed. -->
+          <div v-if="delegateTakesInstructions" class="form-group">
+            <label for="task-delegate-instructions">Instructions for the agent</label>
+            <textarea
+              id="task-delegate-instructions"
+              v-model="delegateInstructions"
+              rows="3"
+              :maxlength="MAX_DELEGATE_INSTRUCTIONS"
+              :disabled="delegateBusy"
+              placeholder="How to go about it, what to avoid, what you expect when it's done"
+            ></textarea>
+            <p class="hint">Optional. Added after the description, for this attempt only.</p>
+          </div>
+
           <p v-if="delegateMode === 'open_chat'" class="hint">
             This task's attempt is still live. Confirming opens the chat it is
             running in rather than starting a second turn.
@@ -2970,15 +3002,40 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   font-size: var(--text-sm);
   cursor: pointer;
 }
+/* The same reading rules as the detail dialog's `.task-body`: without an indent
+   an ordered list's numbers hang outside the box. */
 .task-preview-body {
+  max-height: 18rem;
+  overflow-y: auto;
   margin-top: var(--space-2);
   padding: var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
+  font-size: var(--text-sm);
+  line-height: 1.6;
   overflow-wrap: anywhere;
 }
 .task-preview-body :deep(p:first-child) { margin-top: 0; }
+.task-preview-body :deep(p),
+.task-preview-body :deep(ul),
+.task-preview-body :deep(ol) { margin: 0 0 0.6em; }
+.task-preview-body :deep(ul),
+.task-preview-body :deep(ol) { padding-left: 1.4em; }
+.task-preview-body :deep(li > ul),
+.task-preview-body :deep(li > ol) { margin: 0.2em 0 0; }
+.task-preview-body :deep(p:last-child),
+.task-preview-body :deep(ul:last-child),
+.task-preview-body :deep(ol:last-child) { margin-bottom: 0; }
+.task-preview-body :deep(pre) { overflow-x: auto; }
+.task-preview-body :deep(code) {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+.task-preview-body :deep(pre code) { padding: 0; background: none; }
 /* The exact text a Send update would put into the delegated chat. A <pre>, not
    the Markdown renderer: it is a message to a chat, not prose the user wrote in
    their own vault, and wrapping it is the point. */
@@ -3032,6 +3089,4 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.task-preview-body :deep(p:last-child) { margin-bottom: 0; }
-.task-preview-body :deep(pre) { overflow-x: auto; }
 </style>

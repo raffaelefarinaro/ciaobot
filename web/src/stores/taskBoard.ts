@@ -514,9 +514,10 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    *
    * The whole of the no-escalation property lives on the server: it launches
    * through `start_stream` with the default attendance, so an approval card the
-   * delegated turn raises is an ordinary Needs-you card in that chat. There is no
-   * body key for prompt text either — the prompt is built from the record's own
-   * fields, so a board cannot hand the agent work nobody filed.
+   * delegated turn raises is an ordinary Needs-you card in that chat. The prompt is
+   * built from the record's own fields; `instructions` is the user's note for this
+   * one hand-over (how to do it, what done looks like), quoted after the
+   * description rather than replacing it.
    *
    * `created: false` in the answer is the normal outcome of a double click or a
    * race with an agent: the attempt that is already running is returned and
@@ -528,6 +529,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     taskId: string,
     expectedRevision: string,
     projectId?: string,
+    instructions?: string,
   ): Promise<TaskDelegateResponse['attempt'] | null> {
     if (!workspace || !taskId || !expectedRevision) return null
     // This write's answer is about to be the newest record the board holds.
@@ -541,6 +543,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
           workspace,
           expected_revision: expectedRevision,
           ...(projectId ? { project_id: projectId } : {}),
+          ...(instructions?.trim() ? { instructions: instructions.trim() } : {}),
         },
       )
       // The board moved to another workspace while this delegated. The attempt

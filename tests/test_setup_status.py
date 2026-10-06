@@ -26,6 +26,10 @@ from ciao.web.routes_api import (
 )
 
 
+# The setup routes check the TCP peer; TestClient defaults to "testclient".
+_LOOPBACK_PEER = ("127.0.0.1", 50000)
+
+
 @pytest.fixture(autouse=True)
 def claude_cli_present(monkeypatch):
     """Pretend the ``claude`` CLI is installed.
@@ -629,7 +633,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     notes = tmp_path / "notes"
     launch_agents = tmp_path / "LaunchAgents"
     apps = tmp_path / "Applications"
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -687,7 +691,7 @@ def _finish_client(tmp_path) -> TestClient:
     app.state.config = config
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
-    return TestClient(app, base_url="http://localhost:8443")
+    return TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
 
 
 def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
@@ -797,7 +801,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.serializer = serializer
-    client = TestClient(app, base_url="http://localhost:8443")
+    client = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
     client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
 
     app.state.config = CiaoConfig.from_env(
@@ -833,7 +837,7 @@ def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
             "CIAO_WORKSPACE": str(tmp_path / "ws"),
         }
     )
-    client = TestClient(app, base_url="http://localhost:8443")
+    client = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
 
     assert client.get("/api/auth/check").status_code == 401
 
@@ -893,7 +897,7 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -978,7 +982,7 @@ def test_setup_finish_handoff_goes_through_the_backend(
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -1039,7 +1043,7 @@ def test_setup_finish_requires_workspace(tmp_path) -> None:
     app.state.config = config
     app.state.serializer = serializer
 
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={"vault_root": str(tmp_path / "notes")},
     )
@@ -1061,7 +1065,7 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
     app.state.serializer = serializer
 
     workspace = tmp_path / "workspace"
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -1093,7 +1097,7 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
     app.state.config = config
     app.state.serializer = serializer
 
-    resp = TestClient(app, base_url="http://0.0.0.0:8443").post(
+    resp = TestClient(app, base_url="http://0.0.0.0:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -1119,7 +1123,7 @@ def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
     app.state.config = config
     app.state.serializer = serializer
 
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={"workspace": str(tmp_path / "workspace")},
         cookies={"ciao_session": serializer.dumps({"user": "owner"})},
@@ -1151,7 +1155,40 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
     assert "open the wizard at http://localhost:8443" in resp.json()["error"]
 
 
-def _folder_picker_client(tmp_path, *, bootstrap: bool = True, base_url: str = "http://localhost:8443") -> TestClient:
+def test_setup_routes_refuse_a_lan_peer_claiming_localhost(tmp_path) -> None:
+    """First run binds 0.0.0.0: a LAN client can send `Host: localhost`, so
+    the Host header alone must not make the setup routes reachable."""
+    lan = ("192.168.1.20", 50000)
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    app.state.request_restart = lambda code: None
+
+    finish = TestClient(app, base_url="http://localhost:8443", client=lan).post(
+        "/api/setup/finish",
+        json={"password": "wizard-pass", "workspace": str(tmp_path / "workspace")},
+    )
+    listing = _folder_picker_client(tmp_path, peer=lan).get(
+        "/api/setup/list-dirs", params={"path": str(tmp_path)}
+    )
+
+    assert finish.status_code == 403
+    assert not (tmp_path / "workspace" / ".env").exists()
+    assert listing.status_code == 403
+
+
+def _folder_picker_client(
+    tmp_path,
+    *,
+    bootstrap: bool = True,
+    base_url: str = "http://localhost:8443",
+    peer: tuple[str, int] = _LOOPBACK_PEER,
+) -> TestClient:
     if bootstrap:
         config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     else:
@@ -1166,7 +1203,7 @@ def _folder_picker_client(tmp_path, *, bootstrap: bool = True, base_url: str = "
     )
     app.state.config = config
     app.state.serializer = serializer
-    return TestClient(app, base_url=base_url)
+    return TestClient(app, base_url=base_url, client=peer)
 
 
 def test_setup_list_dirs_requires_bootstrap_mode(tmp_path) -> None:
