@@ -97,6 +97,27 @@ Settings → Restart drains active chat work and re-executes the backend. A dire
 `systemctl stop/restart` is an administrative stop, not that application drain:
 wait for active work to finish first. Systemd allows up to 120 seconds for shutdown.
 
+## Moving the workspace
+
+Editing `CIAO_WORKSPACE` in the workspace `.env` cannot move it: the engine
+finds that `.env` inside the folder the unit names. Move it as the
+administrator, on the same disk:
+
+```sh
+sudo /opt/ciaobot/venv/bin/ciao workspace-move /srv/new-folder          # plan only
+sudo /opt/ciaobot/venv/bin/ciao workspace-move /srv/new-folder --apply
+```
+
+It drains running chats, stops the unit, renames the folder, rewrites the old
+path in `.env`, `.runtime` and the command links (keeping every file owned by the
+service account), copies the account's Claude Code sessions to the new folder's
+name, repoints `WorkingDirectory=` and `CIAO_WORKSPACE` in
+`/etc/systemd/system/ciaobot.service`, runs `daemon-reload` and starts the unit.
+If the engine does not come back, everything is put back. It refuses a folder
+the service account cannot enter. Settings → Main workspace shows this command
+instead of a Move button, since the service account cannot stop its own unit.
+To undo, move it back.
+
 ## HTTPS access
 
 Use Tailscale Serve for private HTTPS access, or point a domain at the VPS and

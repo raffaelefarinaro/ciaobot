@@ -390,7 +390,12 @@
           <p v-if="workspaceMoveOutcome" class="hint workspace-move-outcome" :class="{ 'workspace-move-outcome--error': workspaceMoveOutcome.error }">
             {{ workspaceMoveOutcome.text }}
           </p>
-          <div v-if="workspaceMove?.local" class="workspace-move-row">
+          <p v-if="workspaceMove?.admin_only" class="hint">
+            On Linux the administrator moves it: run
+            <code>sudo /opt/ciaobot/venv/bin/ciao workspace-move &lt;new folder&gt; --apply</code>
+            on the server.
+          </p>
+          <div v-else-if="workspaceMove?.local" class="workspace-move-row">
             <button class="btn-small" type="button" @click="workspaceMoveOpen = true">Move&hellip;</button>
           </div>
           <p v-else-if="workspaceMove" class="hint">
@@ -398,7 +403,7 @@
             <code>ciao workspace-move &lt;new folder&gt;</code> there.
           </p>
           <WorkspaceMoveDialog
-            v-if="workspaceMove?.local"
+            v-if="workspaceMove?.local && !workspaceMove.admin_only"
             :open="workspaceMoveOpen"
             :workspace-root="workspaceMove.workspace_root"
             @close="workspaceMoveOpen = false"
@@ -2453,6 +2458,7 @@ interface WorkspaceMoveOperation {
 interface WorkspaceMoveStatus {
   workspace_root: string
   local: boolean
+  admin_only?: boolean
   operation: WorkspaceMoveOperation | null
 }
 

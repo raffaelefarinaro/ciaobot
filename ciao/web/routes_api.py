@@ -5771,6 +5771,9 @@ async def workspace_move_status_endpoint(request: Request) -> JSONResponse:
         {
             "workspace_root": str(Path(request.app.state.config.workspace_root).resolve()),
             "local": _workspace_move_local(request),
+            # On Linux the service account cannot stop its own root-owned
+            # unit; the administrator moves it with `sudo ciao workspace-move`.
+            "admin_only": sys.platform.startswith("linux"),
             "operation": asdict(op) if op is not None else None,
         }
     )

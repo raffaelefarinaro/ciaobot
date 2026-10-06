@@ -57,7 +57,8 @@ def test_plan_accepts_a_new_folder_and_an_empty_one(tmp_path: Path) -> None:
         ("old", {}, "already in"),
         ("new", {"registered": None}, "No Ciaobot service"),
         ("new", {"registered": Path("/elsewhere")}, "runs the workspace at"),
-        ("new", {"platform": "linux"}, "macOS and Windows"),
+        ("new", {"platform": "linux", "admin": False}, "the administrator moves"),
+        ("new", {"platform": "freebsd14"}, "not supported"),
         ("new", {"update_in_flight": True}, "engine update"),
         ("new", {"engine_running": False}, "not running"),
         ("missing/new", {}, "does not exist"),
@@ -72,6 +73,17 @@ def test_plan_refusals(tmp_path: Path, target: str, kwargs: dict[str, Any], need
     result = _plan(source, raw, **kwargs)
     assert not result.ok
     assert any(needle in refusal for refusal in result.refusals), result.refusals
+
+
+def test_plan_accepts_linux_as_root(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "old")
+    assert _plan(source, tmp_path / "new", platform="linux", admin=True).ok
+
+
+def test_plan_refuses_a_folder_the_service_account_cannot_reach(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "old")
+    result = _plan(source, tmp_path / "new", platform="linux", admin=True, service_can_reach=lambda _p: False)
+    assert any("service account cannot open" in r for r in result.refusals)
 
 
 def test_plan_refuses_an_engine_python_inside_the_workspace(tmp_path: Path) -> None:
@@ -436,3 +448,72 @@ def test_plan_route_returns_the_dry_run(tmp_path: Path, monkeypatch: pytest.Monk
     ).json()
     assert body["ok"] is False
     assert any("inside the current workspace" in r for r in body["refusals"])
+
+
+# ── Linux: the systemd unit ──────────────────────────────────────────
+
+
+_UNIT = """[Service]
+Type=simple
+User=ciaobot
+WorkingDirectory=/srv/ciao%%x
+Environment="CIAO_WORKSPACE=/srv/ciao%x"
+Environment="HOME=/var/lib/ciaobot"
+Environment="PATH=/opt/ciaobot/venv/bin:/var/lib/ciaobot/.local/bin:/usr/bin"
+ExecStart="/opt/ciaobot/venv/bin/python" -m ciao.cli run
+"""
+
+
+def _calls() -> tuple[list[tuple[str, ...]], Any]:
+    calls: list[tuple[str, ...]] = []
+
+    def systemctl(*args: str) -> Any:
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    return calls, systemctl
+
+
+def test_linux_unit_reads_and_repoints_the_workspace(tmp_path: Path) -> None:
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(_UNIT, encoding="utf-8")
+    calls, systemctl = _calls()
+    definition = workspace_move.LinuxServiceDefinition(unit, systemctl=systemctl)
+    assert definition.workspace() == Path("/srv/ciao%x")
+    assert definition.home() == Path("/var/lib/ciaobot")
+
+    backup = tmp_path / "backup"
+    definition.backup(backup)
+    definition.repoint(Path("/srv/ciao%x"), Path("/data/ciao%x"))
+
+    text = unit.read_text(encoding="utf-8")
+    assert "WorkingDirectory=/data/ciao%%x\n" in text
+    assert 'Environment="CIAO_WORKSPACE=/data/ciao%x"' in text
+    assert "/opt/ciaobot/venv/bin/python" in text
+    assert definition.workspace() == Path("/data/ciao%x")
+    assert calls == [("daemon-reload",)]
+
+    definition.restore(backup)
+    assert unit.read_text(encoding="utf-8") == _UNIT
+    assert calls == [("daemon-reload",), ("daemon-reload",)]
+
+
+def test_linux_unit_refuses_a_repoint_that_changes_nothing(tmp_path: Path) -> None:
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(_UNIT, encoding="utf-8")
+    _calls_list, systemctl = _calls()
+    definition = workspace_move.LinuxServiceDefinition(unit, systemctl=systemctl)
+    with pytest.raises(workspace_move.MoveError):
+        definition.repoint(Path("/elsewhere"), Path("/data/x"))
+    assert unit.read_text(encoding="utf-8") == _UNIT
+
+
+def test_linux_host_drives_systemctl_and_reads_the_port(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path / "ws")
+    (workspace / ".env").write_text("PWA_PORT=9443\n", encoding="utf-8")
+    calls, systemctl = _calls()
+    host = workspace_move.LinuxEngineHost(workspace, systemctl=systemctl)
+    assert host.engine_port() == 9443
+    assert host.start_engine().ok is True
+    assert host.stop_engine(wait=lambda: True) is True
+    assert calls == [("start", "ciaobot.service"), ("stop", "ciaobot.service")]
