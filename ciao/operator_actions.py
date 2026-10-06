@@ -960,14 +960,9 @@ def _detect_mcp_uncomposed(context: DetectionContext) -> list[OperatorAction]:
 
 
 _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
-    ("CIAO_DISALLOWED_TOOLS_PERSONAL", "set a workspace's disallowed_tools in workspaces.json"),
-    ("CIAO_DISALLOWED_TOOLS_WORK", "set a workspace's disallowed_tools in workspaces.json"),
-    # Execution mode is fixed at auto for every provider; there is no override.
-    ("CLAUDE_EXECUTION_MODE", "remove it: execution mode is always auto"),
-    ("CLAUDE_PERMISSION_MODE", "remove it: execution mode is always auto"),
+    ("PWA_AUTH_REQUIRED", "remove it: password protection is always on"),
     # The workspace list is runtime state owned by Settings. Server startup
     # imports the variable into workspaces.json once; after that it is inert.
-    ("PWA_AUTH_REQUIRED", "remove it: password protection is always on"),
     (
         "CIAO_WORKSPACES",
         "remove it: its workspaces were imported into workspaces.json once, "
@@ -979,10 +974,8 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
 def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction]:
     """Environment variables the engine no longer reads.
 
-    Some described the two hardcoded `personal`/`work` names and went with the
-    bootstrap registry that manufactured them; the execution-mode vars were
-    retired when auto became the only mode; `CIAO_WORKSPACES` gave way to the
-    Settings-owned runtime registry. A variable that is set and silently
+    `PWA_AUTH_REQUIRED` went when password protection became unconditional;
+    `CIAO_WORKSPACES` gave way to the Settings-owned runtime registry. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
     is in effect. Chat-only — the fix edits `.env`, which is theirs.
     """
@@ -1008,10 +1001,8 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
                 f"These variables in my `.env` are no longer read by the engine: "
                 f"{names}. For each one: "
                 + "; ".join(f"{name}: {hint}" for name, hint in stale)
-                + ". Tell me its current value and the workspace it was meant "
-                "for, and move any setting that has no home yet onto that "
-                "workspace in `.runtime/workspaces.json` (`disallowed_tools` is "
-                "a per-workspace field there). Ask before changing a value "
+                + ". Tell me its current value and check that the setting that "
+                "replaced it says what I want. Ask before changing a value "
                 "rather than assuming the old one still reflects what I want, "
                 "and comment the variable out of `.env` once its setting has a "
                 "new home."
