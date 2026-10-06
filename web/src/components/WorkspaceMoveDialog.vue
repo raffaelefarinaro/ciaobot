@@ -149,9 +149,13 @@ async function browse(path: string) {
 let planSeq = 0
 async function refreshPlan() {
   const dest = target.value
-  plan.value = null
-  if (!dest) return
+  // Bumped before the early return too, so a plan still in flight for the
+  // previous destination cannot land after the name was cleared.
   const seq = ++planSeq
+  plan.value = null
+  error.value = ''
+  planning.value = false
+  if (!dest) return
   planning.value = true
   try {
     const result = await api.post<MovePlan>('/api/workspace-move/plan', { target: dest })

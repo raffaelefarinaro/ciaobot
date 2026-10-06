@@ -91,6 +91,10 @@ _IDLE_POLLS_REQUIRED = 3
 _DRAIN_TIMEOUT = 600.0
 _STOP_TIMEOUT = 30.0
 _READY_TIMEOUT = 120.0
+_QUEUED_GRACE = 120.0
+# Phases in which nothing on disk has changed yet: a job that died here left
+# the workspace where it was.
+_PRE_MOVE_PHASES = frozenset({"queued", "draining", "stopping"})
 
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -196,6 +200,41 @@ def in_flight(op: MoveOperation | None) -> bool:
     return op is not None and op.phase not in TERMINAL_PHASES
 
 
+def job_running(state_dir: Path | None = None) -> bool:
+    """Whether a move job holds the move lock right now."""
+    path = (state_dir or default_state_dir()) / LOCK_NAME
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return False
+    with handle:
+        try:
+            lock_exclusive(handle.fileno(), blocking=False)
+        except OSError:
+            return True
+        unlock(handle.fileno())
+        return False
+
+
+def _age_seconds(stamp: str) -> float:
+    try:
+        return (datetime.now(UTC) - datetime.fromisoformat(stamp)).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def abandoned(op: MoveOperation | None, state_dir: Path | None = None) -> bool:
+    """An in-flight record no job is working on: the job crashed, or the machine
+    rebooted under it. A queued record gets a grace period, because the job takes
+    the lock only once launchd or Task Scheduler has started it."""
+    if not in_flight(op):
+        return False
+    assert op is not None
+    if op.phase == "queued" and _age_seconds(op.updated_at) < _QUEUED_GRACE:
+        return False
+    return not job_running(state_dir)
+
+
 def _write_text_atomic(target: Path, text: str, *, private: bool = False) -> None:
     fd, tmp_name = mkstemp_private(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
@@ -255,6 +294,7 @@ def plan(
     python: str = sys.executable,
     platform: str = sys.platform,
     update_in_flight: bool = False,
+    engine_running: bool = True,
     state_dir: Path | None = None,
 ) -> MovePlan:
     """Whether ``source`` can move to ``target_raw``, and what to know first.
@@ -332,8 +372,23 @@ def plan(
         )
     if update_in_flight:
         result.refusals.append("An engine update is in progress. Try again when it has finished.")
-    if in_flight(read_operation(state_dir)):
-        result.refusals.append("A workspace move is already in progress.")
+    if not engine_running:
+        # The job drains running chats through the engine before it stops it,
+        # so a stopped engine is a refusal rather than a mid-move failure.
+        result.refusals.append(
+            "Ciaobot is not running. Start it with `ciao service start`, then move it."
+        )
+    previous = read_operation(state_dir)
+    if in_flight(previous):
+        assert previous is not None
+        if not abandoned(previous, state_dir):
+            result.refusals.append("A workspace move is already in progress.")
+        elif previous.phase not in _PRE_MOVE_PHASES:
+            result.refusals.append(
+                f"A previous move from {previous.source} to {previous.target} stopped during "
+                f"'{previous.phase}' without finishing. Check both folders and the service, then "
+                f"delete {(state_dir or default_state_dir()) / OPERATION_NAME} to move again."
+            )
 
     if (source / ".venv").exists():
         result.warnings.append(
@@ -629,11 +684,13 @@ class WindowsServiceDefinition:
         if current is None:
             raise MoveError(f"{self.path} names no working directory")
         updated = rewrite_prefix(str(current), str(old), str(new))
-        xml = xml.replace(
+        rewritten = xml.replace(
             f"<WorkingDirectory>{escape(str(current))}</WorkingDirectory>",
             f"<WorkingDirectory>{escape(updated)}</WorkingDirectory>",
         )
-        self.path.write_bytes(xml.encode("utf-16"))
+        if updated == str(current) or rewritten == xml:
+            raise MoveError(f"could not repoint the working directory in {self.path}")
+        self.path.write_bytes(rewritten.encode("utf-16"))
         windows_service.register_task(self.path)
 
     def restore(self, backup: Path) -> None:
@@ -778,6 +835,31 @@ def _post_json(url: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _server_lock_held(workspace: Path) -> bool:
+    """Whether a process holds ``workspace``'s engine ``server.lock``.
+
+    The runtime root is resolved the way the engine resolves it:
+    ``CIAO_RUNTIME_ROOT`` from the workspace's ``.env``, else ``.runtime``.
+    """
+    from ciao.macos_service import read_dotenv
+
+    runtime_raw = read_dotenv(workspace / ".env").get("CIAO_RUNTIME_ROOT", "").strip()
+    runtime = Path(runtime_raw).expanduser() if runtime_raw else workspace / ".runtime"
+    if not runtime.is_absolute():
+        runtime = workspace / runtime
+    try:
+        handle = (runtime / "server.lock").open("rb")
+    except OSError:
+        return False
+    with handle:
+        try:
+            lock_exclusive(handle.fileno(), blocking=False)
+        except OSError:
+            return True
+        unlock(handle.fileno())
+        return False
+
+
 def _lock(state_dir: Path) -> IO[str]:
     handle = open(state_dir / LOCK_NAME, "a+", encoding="utf-8", newline="")
     try:
@@ -811,9 +893,15 @@ def run_move(
         op.updated_at = _now()
         write_operation(op, state_dir)
 
+    # The folder the engine is running from: where to look for its lock.
+    engine_root = source
+
     def wait_until_unreachable() -> bool:
+        # The port closes before the process has finished shutting down; its
+        # last writes go to absolute paths under the folder, so the stop is
+        # confirmed only once `server.lock` is released as well.
         deadline = clock() + _STOP_TIMEOUT
-        while get(f"{base}/api/startup-status") is not None:
+        while get(f"{base}/api/startup-status") is not None or _server_lock_held(engine_root):
             if clock() >= deadline:
                 return False
             sleep(_POLL_INTERVAL)
@@ -859,21 +947,25 @@ def run_move(
         return op
 
     moved = False
-    repointed = False
+    backed_up = False
     try:
         advance("moving")
         if target.is_dir() and not any(target.iterdir()):
             target.rmdir()
         os.rename(source, target)
         moved = True
+        engine_root = target
         advance("rewriting")
         rewrite_workspace_state(target, str(source), str(target))
         copy_claude_sessions(source, target, home=claude_home)
         rekey_claude_json(str(source), str(target), home=claude_home)
         advance("repointing")
         service.backup(backup)
+        # Restored on any failure from here on: a repoint can fail after it has
+        # already rewritten the definition (Windows writes the XML, then
+        # registers it).
+        backed_up = True
         service.repoint(source, target)
-        repointed = True
         advance("starting")
         started = host.start_engine()
         if not bool(getattr(started, "ok", True)):
@@ -885,8 +977,9 @@ def run_move(
         reason = str(exc) or exc.__class__.__name__
         advance("rolling_back", reason)
         try:
-            host.stop_engine(wait=wait_until_unreachable)
-            if repointed:
+            if not host.stop_engine(wait=wait_until_unreachable):
+                raise MoveError("the engine at the new folder did not stop")
+            if backed_up:
                 service.restore(backup)
             if moved:
                 rewrite_workspace_state(target, str(target), str(source))
@@ -924,13 +1017,22 @@ def engine_port() -> int:
     return current_update_host().engine_port()
 
 
+def engine_running() -> bool:
+    try:
+        port = engine_port()
+    except Exception:  # noqa: BLE001 — no update host: the plan refuses the platform
+        return False
+    return _get_json(f"http://localhost:{port}/api/startup-status") is not None
+
+
 def plan_for(source: Path, target_raw: str) -> MovePlan:
-    """:func:`plan` with this machine's service, update and move state."""
+    """:func:`plan` with this machine's service, engine, update and move state."""
     return plan(
         source,
         target_raw,
         registered=registered_workspace(),
         update_in_flight=update_in_flight(),
+        engine_running=engine_running(),
     )
 
 
@@ -947,7 +1049,11 @@ def main(argv: list[str] | None = None) -> int:
     if op is None or op.id != args.operation or op.phase != "queued":
         print(f"no queued workspace move {args.operation}", file=sys.stderr)
         return 1
-    handle = _lock(state_dir)
+    try:
+        handle = _lock(state_dir)
+    except MoveError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     try:
         from ciao.update_host import current_update_host
 

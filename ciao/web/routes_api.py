@@ -5640,6 +5640,11 @@ async def setup_list_dirs_endpoint(request: Request) -> JSONResponse:
     guard = _setup_fs_guard(request)
     if guard is not None:
         return guard
+    return _dir_listing_response(request)
+
+
+def _dir_listing_response(request: Request) -> JSONResponse:
+    """The folder-picker listing for ``?path=``, shared by every picker route."""
     raw = str(request.query_params.get("path") or "~").strip() or "~"
     target = _resolve_setup_dir(raw)
     if target is None:
@@ -5771,14 +5776,7 @@ async def workspace_move_dirs_endpoint(request: Request) -> JSONResponse:
     guard = _workspace_move_guard(request)
     if guard is not None:
         return guard
-    raw = str(request.query_params.get("path") or "~").strip() or "~"
-    target = _resolve_setup_dir(raw)
-    if target is None:
-        return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
-    try:
-        return JSONResponse(_setup_dir_listing(target))
-    except OSError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+    return _dir_listing_response(request)
 
 
 async def _workspace_move_target(request: Request) -> str | JSONResponse:

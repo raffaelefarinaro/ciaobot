@@ -59,6 +59,7 @@ def test_plan_accepts_a_new_folder_and_an_empty_one(tmp_path: Path) -> None:
         ("new", {"registered": Path("/elsewhere")}, "runs the workspace at"),
         ("new", {"platform": "linux"}, "macOS and Windows"),
         ("new", {"update_in_flight": True}, "engine update"),
+        ("new", {"engine_running": False}, "not running"),
         ("missing/new", {}, "does not exist"),
         ("relative", {}, "absolute"),
     ],
@@ -97,7 +98,37 @@ def test_plan_refuses_a_second_move_while_one_runs(tmp_path: Path) -> None:
     workspace_move.write_operation(
         workspace_move.MoveOperation("1", "moving", str(source), "/x", "", ""), state
     )
+    handle = workspace_move._lock(state)
+    try:
+        assert any("already in progress" in r for r in _plan(source, tmp_path / "new").refusals)
+    finally:
+        handle.close()
+
+
+def test_plan_treats_a_fresh_queued_record_as_running(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "old")
+    now = workspace_move._now()
+    workspace_move.write_operation(
+        workspace_move.MoveOperation("1", "queued", str(source), "/x", now, now), tmp_path / "state"
+    )
     assert any("already in progress" in r for r in _plan(source, tmp_path / "new").refusals)
+
+
+def test_plan_ignores_a_job_that_died_before_anything_moved(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "old")
+    workspace_move.write_operation(
+        workspace_move.MoveOperation("1", "draining", str(source), "/x", "", ""), tmp_path / "state"
+    )
+    assert _plan(source, tmp_path / "new").ok
+
+
+def test_plan_refuses_after_a_job_that_died_mid_move(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "old")
+    workspace_move.write_operation(
+        workspace_move.MoveOperation("1", "rewriting", str(source), "/x", "", ""), tmp_path / "state"
+    )
+    refusals = _plan(source, tmp_path / "new").refusals
+    assert any("stopped during 'rewriting'" in r for r in refusals), refusals
 
 
 # ── rewrites ─────────────────────────────────────────────────────────
@@ -218,12 +249,21 @@ class _Service:
         self.path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
 
 
-def _run(tmp_path: Path, host: _Host, *, drained: bool = True) -> tuple[workspace_move.MoveOperation, _Service, list[str]]:
+def _run(
+    tmp_path: Path,
+    host: _Host,
+    *,
+    drained: bool = True,
+    service_type: type[_Service] = _Service,
+    prepare: Any = None,
+) -> tuple[workspace_move.MoveOperation, _Service, list[str]]:
     source = _workspace(tmp_path / "old")
+    if prepare is not None:
+        prepare(source)
     target = tmp_path / "new"
     state = tmp_path / "state"
     state.mkdir()
-    service = _Service(tmp_path / "definition", source)
+    service = service_type(tmp_path / "definition", source)
     op = workspace_move.MoveOperation("op1", "queued", str(source), str(target), "", "", port=8443)
     posts: list[str] = []
     clock = iter(range(0, 100_000, 10))
@@ -289,6 +329,61 @@ def test_run_move_restarts_the_engine_when_it_will_not_stop(tmp_path: Path) -> N
     assert (tmp_path / "old").is_dir()
 
 
+class _HalfRepointService(_Service):
+    """Rewrites the definition, then fails to register it (the Windows shape)."""
+
+    def repoint(self, old: Path, new: Path) -> None:
+        super().repoint(old, new)
+        raise RuntimeError("schtasks /Create failed")
+
+
+def test_run_move_restores_a_definition_the_repoint_half_wrote(tmp_path: Path) -> None:
+    host = _Host()
+    result, service, _posts = _run(tmp_path, host, service_type=_HalfRepointService)
+    assert result.phase == "rolled_back", result.error
+    assert service.workspace() == tmp_path / "old"
+    assert (tmp_path / "old" / ".env").is_file()
+
+
+class _StopsOnceHost(_Host):
+    """Stops for the move, but not for the rollback."""
+
+    def stop_engine(self, wait: Any = None) -> bool:
+        if "stop" in self.calls:
+            self.stops = False
+        return super().stop_engine(wait)
+
+
+def test_run_move_does_not_move_back_under_an_engine_that_will_not_stop(tmp_path: Path) -> None:
+    host = _StopsOnceHost(start_ok=False)
+    result, _service, _posts = _run(tmp_path, host)
+    assert result.phase == "rollback_failed"
+    assert "did not stop" in result.error
+    assert (tmp_path / "new" / ".env").is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="flock semantics")
+def test_run_move_waits_for_the_engine_to_release_its_lock(tmp_path: Path) -> None:
+    from ciao.os_support.locks import lock_exclusive
+
+    held: list[Any] = []
+
+    def hold_lock(source: Path) -> None:
+        handle = (source / ".runtime" / "server.lock").open("a+")
+        lock_exclusive(handle.fileno(), blocking=False)
+        held.append(handle)
+
+    host = _Host()
+    try:
+        result, _service, _posts = _run(tmp_path, host, prepare=hold_lock)
+    finally:
+        for handle in held:
+            handle.close()
+    assert result.phase == "failed"
+    assert host.calls == ["stop", "start"]
+    assert (tmp_path / "old" / ".env").is_file()
+
+
 # ── routes ───────────────────────────────────────────────────────────
 
 
@@ -323,6 +418,7 @@ def test_routes_are_for_this_computer_only(tmp_path: Path, monkeypatch: pytest.M
 def test_plan_route_returns_the_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workspace_move, "registered_workspace", lambda: tmp_path)
     monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
+    monkeypatch.setattr(workspace_move, "engine_running", lambda: True)
     monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
     body = _client(tmp_path, peer="127.0.0.1").post(
         "/api/workspace-move/plan", json={"target": str(tmp_path / "inside")}

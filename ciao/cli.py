@@ -3440,14 +3440,23 @@ def _workspace_move_command(args: argparse.Namespace) -> int:
     seen = ""
     while True:
         current = workspace_move.read_operation()
-        if current is not None and current.id == op.id:
-            if current.phase != seen:
-                seen = current.phase
-                print(f"- {seen}")
-            if current.phase in workspace_move.TERMINAL_PHASES:
-                if current.error:
-                    print(current.error, file=sys.stderr)
-                return 0 if current.phase == "done" else 1
+        if current is None or current.id != op.id:
+            print("Error: the move's record was replaced or removed.", file=sys.stderr)
+            return 1
+        if current.phase != seen:
+            seen = current.phase
+            print(f"- {seen}")
+        if current.phase in workspace_move.TERMINAL_PHASES:
+            if current.error:
+                print(current.error, file=sys.stderr)
+            return 0 if current.phase == "done" else 1
+        if workspace_move.abandoned(current):
+            print(
+                f"Error: the move job stopped during '{current.phase}' without finishing. "
+                f"See {workspace_move.default_state_dir() / workspace_move.JOB_LOG_NAME}.",
+                file=sys.stderr,
+            )
+            return 1
         time.sleep(1)
 
 
