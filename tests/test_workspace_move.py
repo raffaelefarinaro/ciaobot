@@ -721,3 +721,24 @@ def test_preflight_refuses_a_definition_folder_it_cannot_write(tmp_path: Path, k
             definition.preflight()
     finally:
         folder.chmod(0o700)
+
+
+def test_the_mac_move_job_shares_the_engine_bundle_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import plistlib
+
+    from ciao import macos_service
+
+    engine = tmp_path / "com.ciao.server.plist"
+    engine.write_bytes(plistlib.dumps({"Label": "com.ciao.server", "AssociatedBundleIdentifiers": ["local.ciaobot.server"]}))
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    engine.rename(agents / engine.name)
+    monkeypatch.setattr(macos_service, "default_launch_agents_dir", lambda: agents)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(macos_service, "_launchctl", lambda args, **_kw: calls.append(args) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
+    op = workspace_move.MoveOperation("op1", "queued", "/a", "/b", "", "", port=8443, python="/py")
+    workspace_move._spawn_mac_job(op, tmp_path)
+    job = plistlib.loads((tmp_path / workspace_move.JOB_PLIST_NAME).read_bytes())
+    assert job["AssociatedBundleIdentifiers"] == ["local.ciaobot.server"]
+    assert calls[-1][0] == "bootstrap"

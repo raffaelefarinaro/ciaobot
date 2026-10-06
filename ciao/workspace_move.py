@@ -1057,24 +1057,42 @@ def spawn_job(op: MoveOperation, state_dir: Path) -> None:
         _spawn_mac_job(op, state_dir)
 
 
+def _engine_bundle_ids() -> list[str]:
+    """The engine plist's ``AssociatedBundleIdentifiers``, for the move job to share.
+
+    macOS announces every new background job by the program it runs, which
+    for the move job is the engine's Python. Naming the bundle the engine's own
+    job names makes it read as Ciaobot (the branded server host) instead.
+    """
+    try:
+        plist = MacServiceDefinition()._load()
+    except (OSError, ValueError, MoveError):
+        return []
+    bundles = plist.get("AssociatedBundleIdentifiers")
+    if not isinstance(bundles, list):
+        return []
+    return [str(bundle) for bundle in bundles if isinstance(bundle, str) and bundle]
+
+
 def _spawn_mac_job(op: MoveOperation, state_dir: Path) -> None:
     from ciao import macos_service
     from ciao.update_host import _write_plist
 
     log = str(state_dir / JOB_LOG_NAME)
-    plist_path = _write_plist(
-        {
-            "Label": JOB_LABEL,
-            "ProgramArguments": _job_argv(op, state_dir),
-            "WorkingDirectory": str(state_dir),
-            "RunAtLoad": True,
-            "KeepAlive": False,
-            "AbandonProcessGroup": True,
-            "StandardOutPath": log,
-            "StandardErrorPath": log,
-        },
-        state_dir / JOB_PLIST_NAME,
-    )
+    job: dict[str, Any] = {
+        "Label": JOB_LABEL,
+        "ProgramArguments": _job_argv(op, state_dir),
+        "WorkingDirectory": str(state_dir),
+        "RunAtLoad": True,
+        "KeepAlive": False,
+        "AbandonProcessGroup": True,
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+    }
+    bundles = _engine_bundle_ids()
+    if bundles:
+        job["AssociatedBundleIdentifiers"] = bundles
+    plist_path = _write_plist(job, state_dir / JOB_PLIST_NAME)
     domain = f"gui/{macos_service._getuid()}"
     macos_service._launchctl(["bootout", f"{domain}/{JOB_LABEL}"])
     bootstrap = macos_service._launchctl(["bootstrap", domain, str(plist_path)])
