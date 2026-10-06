@@ -5725,6 +5725,110 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
+# ── Moving the install workspace ─────────────────────────────────────────
+#
+# Settings → Main workspace. Every route but the status read is for the
+# computer running Ciaobot only: browsing folders and moving the install are
+# filesystem operations a phone or a remote browser has no business making.
+# "Local" is the TCP peer (`is_loopback_client`), plus a localhost Host header
+# and a same-host Origin so a DNS-rebound page on this machine cannot ride the
+# session cookie.
+
+
+def _workspace_move_local(request: Request) -> bool:
+    return (
+        is_loopback_client(request)
+        and _localhost_request(request)
+        and _setup_finish_origin_allowed(request)
+    )
+
+
+def _workspace_move_guard(request: Request) -> JSONResponse | None:
+    if _workspace_move_local(request):
+        return None
+    return JSONResponse(
+        {"error": "Moving the workspace is only available on the computer running Ciaobot."},
+        status_code=403,
+    )
+
+
+async def workspace_move_status_endpoint(request: Request) -> JSONResponse:
+    """Where the workspace is, whether this browser may move it, and the last move."""
+    from ciao import workspace_move
+
+    op = await asyncio.to_thread(workspace_move.read_operation)
+    return JSONResponse(
+        {
+            "workspace_root": str(Path(request.app.state.config.workspace_root).resolve()),
+            "local": _workspace_move_local(request),
+            "operation": asdict(op) if op is not None else None,
+        }
+    )
+
+
+async def workspace_move_dirs_endpoint(request: Request) -> JSONResponse:
+    """The folder picker's listing, for choosing where the workspace goes."""
+    guard = _workspace_move_guard(request)
+    if guard is not None:
+        return guard
+    raw = str(request.query_params.get("path") or "~").strip() or "~"
+    target = _resolve_setup_dir(raw)
+    if target is None:
+        return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
+    try:
+        return JSONResponse(_setup_dir_listing(target))
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def _workspace_move_target(request: Request) -> str | JSONResponse:
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json object is required"}, status_code=400)
+    return str(body.get("target", "")).strip()
+
+
+async def workspace_move_plan_endpoint(request: Request) -> JSONResponse:
+    """Dry run: whether the move is possible and what to know first."""
+    from ciao import workspace_move
+
+    guard = _workspace_move_guard(request)
+    if guard is not None:
+        return guard
+    target = await _workspace_move_target(request)
+    if isinstance(target, JSONResponse):
+        return target
+    source = Path(request.app.state.config.workspace_root)
+    move_plan = await asyncio.to_thread(workspace_move.plan_for, source, target)
+    return JSONResponse(move_plan.as_dict())
+
+
+async def workspace_move_start_endpoint(request: Request) -> JSONResponse:
+    """Start the move. The engine stops, moves and restarts; the page reloads."""
+    from ciao import workspace_move
+
+    guard = _workspace_move_guard(request)
+    if guard is not None:
+        return guard
+    target = await _workspace_move_target(request)
+    if isinstance(target, JSONResponse):
+        return target
+    source = Path(request.app.state.config.workspace_root)
+    move_plan = await asyncio.to_thread(workspace_move.plan_for, source, target)
+    if not move_plan.ok:
+        return JSONResponse({**move_plan.as_dict(), "error": " ".join(move_plan.refusals)}, status_code=409)
+    try:
+        op = await asyncio.to_thread(
+            workspace_move.start, move_plan, port=request.app.state.config.pwa_port
+        )
+    except workspace_move.MoveError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"operation": asdict(op)}, status_code=202)
+
+
 # ── Admin ────────────────────────────────────────────────────────────────
 
 
