@@ -1,4 +1,4 @@
-"""Regression guards for the Python runtime security pins (#953).
+"""Regression guards for the Python runtime security pins (#953, #1081).
 
 PyJWT 2.13.0 mutated the caller's ``options`` dict in place when a token was
 decoded without signature verification (GHSA-gvp8-978c-rx2q, alert #61):
@@ -17,15 +17,34 @@ delegates JWT to MCP, so this test guards the pinned version rather than a
 Ciaobot code path. It uses only the installed package, a fixed in-process key
 and a token whose ``exp`` is already in the past — no secret, no network and no
 wall-clock wait.
+
+``multidict`` 6.7.1 carries CVE-2026-104874 (a reference leak in the
+``CIMultiDict``/``MultiDict`` items-view union and subtraction paths,
+availability-only), fixed in 6.9.1. It is reached at runtime through ``mcp``
+1.29.0 → ``aiohttp`` 3.14.3 → ``multidict``, and ``aiohttp`` allows
+``multidict>=4.5,<7.0``, so the patched release is permitted. Unlike the PyJWT
+pin, this one guards no reproduced Ciaobot behaviour: it is pinned for
+reachability, and the test asserts the installed floor rather than an app
+invariant.
 """
 
 from __future__ import annotations
 
 import copy
 import datetime as dt
+from importlib import metadata
 
 import jwt
 import pytest
+
+
+def _as_version(raw: str) -> tuple[int, ...]:
+    """Compare release numbers without pulling in a version parser."""
+    parts: list[int] = []
+    for chunk in raw.split("."):
+        digits = "".join(ch for ch in chunk if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
 
 
 def test_pyjwt_unverified_peek_does_not_mutate_reused_options() -> None:
@@ -57,3 +76,12 @@ def test_pyjwt_unverified_peek_does_not_mutate_reused_options() -> None:
     options["verify_signature"] = True
     with pytest.raises(jwt.ExpiredSignatureError):
         jwt.decode(token, key=key, options=options, algorithms=["HS256"])
+
+
+def test_multidict_floor_covers_cve_2026_104874() -> None:
+    version = metadata.version("multidict")
+    assert _as_version(version) >= _as_version("6.9.1"), (
+        f"multidict {version} predates the CVE-2026-104874 fix in 6.9.1; the "
+        "runtime pin exists because a wheel install resolves the declared "
+        "dependency, not uv.lock (#1081)"
+    )

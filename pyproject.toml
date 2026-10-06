@@ -11,13 +11,18 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
   "claude-agent-sdk[otel]==0.2.163",
-  # Runtime security pins for transitive dependencies (#953). `mcp` accepts
-  # PyJWT[crypto]>=2.10.1 and `pywebpush`->`requests` accepts urllib3>=1.26,<3,
-  # but a wheel install resolves published Requires-Dist rather than uv.lock, so
-  # the patched floor has to be declared here too. Drop these once the owners
-  # raise their own floors above the patched versions.
+  # Runtime security pins for transitive dependencies (#953, #1081). `mcp`
+  # accepts PyJWT[crypto]>=2.10.1, `pywebpush`->`requests` accepts
+  # urllib3>=1.26,<3, and `mcp`->`aiohttp` (3.14.3) accepts
+  # multidict>=4.5,<7.0, but a wheel install resolves published Requires-Dist
+  # rather than uv.lock, so the patched floor has to be declared here too.
+  # multidict is a transitive of a transitive and is pinned for reachability on
+  # CVE-2026-104874 (fixed 6.9.1) rather than for a reproduced Ciaobot
+  # behaviour. Drop these once the owners raise their own floors above the
+  # patched versions.
   "PyJWT[crypto]==2.15.1",
   "urllib3==2.8.0",
+  "multidict==6.9.1",
   # Agent-facing control plane shared by Claude Code and Codex.
   "mcp>=1.29.0,<2.0",
   "starlette==1.7.0",

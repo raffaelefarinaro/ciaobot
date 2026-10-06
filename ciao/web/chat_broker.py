@@ -516,6 +516,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["stopped"] = True
         if event.fallback_final:
             payload["fallback_final"] = True
+        if event.recovered_with_pending:
+            payload["recovered_with_pending"] = True
         if event.quota:
             payload["quota"] = event.quota
         return payload

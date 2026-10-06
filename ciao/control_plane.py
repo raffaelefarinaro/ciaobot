@@ -3850,13 +3850,20 @@ class CiaoControlPlane:
         rather than go to review. A permission card is not counted: it keeps the stream
         open while it is really up, and one still saved after a result is a leftover
         that would hold a finished, reported turn at ``needs_you`` (#1097).
+
+        A permission that is genuinely waiting is not read off the card but off the
+        result itself: ``recovered_with_pending`` is the provider saying its degraded
+        recovery re-emitted one it could not confirm answered (#1111). No saved card
+        exists yet on that path, so the marker is the only evidence — and an attempt
+        whose turn recovered over an unanswered approval is not work to review.
         """
         try:
             stopped = bool(result.get("stopped"))
             errored = bool(result.get("is_error"))
             text = str(result.get("text") or "")
+            recovered_pending = bool(result.get("recovered_with_pending"))
         except Exception:  # noqa: BLE001 — a malformed event is still just an outcome
-            stopped, errored, text = False, False, ""
+            stopped, errored, text, recovered_pending = False, False, "", False
         try:
             live = self._attempt_call(workspace, lambda store: store.get_live(task_id))
             if live is None or live.attempt_id != attempt_id or live.chat_id != chat_id:
@@ -3874,6 +3881,11 @@ class CiaoControlPlane:
             state, detail = "failed", text[:400] or "the turn ended in an error"
         elif paused_on_question:
             state, detail = "needs_you", ""
+        elif recovered_pending:
+            state, detail = (
+                "needs_you",
+                "a permission request was still pending when the turn recovered",
+            )
         elif live.outcome == "done":
             state, detail = "ready_for_review", ""
         elif live.outcome in ("blocked", "needs_input"):
