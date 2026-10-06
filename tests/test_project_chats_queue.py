@@ -135,6 +135,124 @@ async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
     assert echoes[2].get("entry_id") == "q-b"
 
 
+async def test_a_blank_queued_follow_up_does_not_rerun_the_previous_prompt(
+    tmp_path: Path,
+) -> None:
+    """A whitespace-only queued follow-up must be skipped, not re-run (#1102)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-blank", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="blank-followup-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-x",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    # A blank follow-up, then a real one.
+    assert pcm.queue_message(chat.chat_id, "   ", entry_id="q-blank") is True
+    assert pcm.queue_message(chat.chat_id, "msg A", entry_id="q-a") is True
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The blank follow-up must not re-run "initial"; only "msg A" runs next.
+    assert turn_calls == ["initial", "msg A"], f"got {turn_calls!r}"
+
+    echoes = [e for e in captured if e.get("type") == "user_echo"]
+    assert len(echoes) == 2, f"expected 2 user_echo events, got {echoes!r}"
+
+    queue_states = [e for e in captured if e.get("type") == "queue_state"]
+    assert queue_states, "expected a queue_state event for the skipped blank entry"
+    assert all(
+        entry.get("id") != "q-blank"
+        for state in queue_states
+        for entry in state.get("queue", [])
+    ), f"skipped entry still present in {queue_states!r}"
+
+
+async def test_a_blank_last_follow_up_ends_the_stream_without_another_turn(
+    tmp_path: Path,
+) -> None:
+    """A trailing whitespace-only follow-up must end the stream (#1102)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-blank-last", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="blank-last-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-x",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    assert pcm.queue_message(chat.chat_id, "   ", entry_id="q-blank") is True
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    assert turn_calls == ["initial"], f"got {turn_calls!r}"
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1, f"expected 1 result event, got {results!r}"
+
+
 def test_question_notification_prefers_text_prompt_alias(tmp_path: Path) -> None:
     """Alternate AskUserQuestion shape uses `text` instead of `question`.
 
