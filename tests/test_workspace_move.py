@@ -268,6 +268,9 @@ class _Service:
     def restore(self, backup: Path) -> None:
         self.path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
 
+    def preflight(self) -> None:
+        pass
+
 
 def _run(
     tmp_path: Path,
@@ -578,3 +581,55 @@ def test_linux_unit_finds_drop_ins_that_name_the_workspace(tmp_path: Path) -> No
     (drop_ins / "limits.conf").write_text("[Service]\nLimitNOFILE=8192\n", encoding="utf-8")
     definition = workspace_move.LinuxServiceDefinition(unit, systemctl=_calls()[1])
     assert definition.drop_ins_naming(Path("/srv/ciao%x")) == [drop_ins / "override.conf"]
+
+
+# ── refusals the service makes, and the rollback that follows ────────
+
+
+class _RefusingService(_Service):
+    def preflight(self) -> None:
+        raise workspace_move.MoveError("Windows refused to update the Ciaobot logon task")
+
+
+def test_run_move_stops_before_moving_when_the_definition_cannot_change(tmp_path: Path) -> None:
+    host = _Host()
+    result, service, _posts = _run(tmp_path, host, service_type=_RefusingService)
+    assert result.phase == "failed"
+    assert "refused to update" in result.error
+    assert (tmp_path / "old" / ".env").is_file() and not (tmp_path / "new").exists()
+    assert service.workspace() == tmp_path / "old"
+    assert host.calls == ["stop", "start"]
+
+
+class _RepointAndRestoreFail(_Service):
+    def repoint(self, old: Path, new: Path) -> None:
+        raise workspace_move.MoveError("Access is denied.")
+
+    def restore(self, backup: Path) -> None:
+        raise workspace_move.MoveError("Access is denied.")
+
+
+def test_rollback_keeps_going_when_a_step_fails(tmp_path: Path) -> None:
+    host = _Host()
+    result, _service, _posts = _run(tmp_path, host, service_type=_RepointAndRestoreFail)
+    assert result.phase == "rollback_failed"
+    assert "restoring the service definition" in result.error
+    # The folder still went back and the engine was started last.
+    assert (tmp_path / "old" / ".env").is_file() and not (tmp_path / "new").exists()
+    assert host.calls[-1] == "start"
+
+
+def test_rollback_moves_the_folder_back_before_rewriting_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows links (hard links, junctions) need their target to exist, so the
+    # paths under the old root must be real again before they are rewritten.
+    seen: list[tuple[str, bool]] = []
+    real = workspace_move.rewrite_workspace_state
+
+    def recording(root: Path, old: str, new: str) -> None:
+        seen.append((new, Path(new).is_dir()))
+        real(root, old, new)
+
+    monkeypatch.setattr(workspace_move, "rewrite_workspace_state", recording)
+    result, _service, _posts = _run(tmp_path, _Host(start_ok=False))
+    assert result.phase == "rolled_back"
+    assert seen[-1] == (str(tmp_path / "old"), True)
