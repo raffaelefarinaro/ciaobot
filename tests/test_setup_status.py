@@ -65,16 +65,27 @@ def _config(tmp_path, env_extra: dict[str, str] | None = None) -> CiaoConfig:
     return CiaoConfig.from_env(env)
 
 
-def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
+def _sign_in_claude(monkeypatch) -> None:
+    """Report the Claude CLI as signed in, so a provider is ready."""
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_auth_status",
+        lambda *args, **kwargs: {
+            "logged_in": True,
+            "unparseable": False,
+            "email": "operator@example.com",
+            "org_name": "",
+        },
+    )
+
+
+def test_setup_status_reports_workspace_and_required_config(tmp_path, monkeypatch) -> None:
+    _sign_in_claude(monkeypatch)
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
 
     data = setup_status(
         config,
-        env={
-            "PWA_AUTH_TOKEN": "test-token",
-            "ANTHROPIC_API_KEY": "sk-anthropic",
-        },
+        env={"PWA_AUTH_TOKEN": "test-token"},
     )
 
     checks = {row["id"]: row for row in data["checks"]}
@@ -87,7 +98,7 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
     assert data["configured"] is True
 
 
-def test_setup_status_reports_the_workspace_guide(tmp_path) -> None:
+def test_setup_status_reports_the_workspace_guide(tmp_path, monkeypatch) -> None:
     """The optional guide check tracks whether the workspace has a guide.
 
     It used to check that AGENTS.md resolved to CLAUDE.md. There is one guide
@@ -95,9 +106,10 @@ def test_setup_status_reports_the_workspace_guide(tmp_path) -> None:
     gone; a workspace that has been migrated correctly must not be reported
     as broken for lacking the second file.
     """
+    _sign_in_claude(monkeypatch)
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
-    env = {"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"}
+    env = {"PWA_AUTH_TOKEN": "test-token"}
 
     checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
     assert checks["workspace_guides"]["ok"] is False
@@ -115,7 +127,7 @@ def test_setup_status_accepts_a_pre_migration_guide(tmp_path) -> None:
     """An install that has not run the guide migration still has its guide."""
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
-    env = {"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"}
+    env = {"PWA_AUTH_TOKEN": "test-token"}
     (tmp_path / "CLAUDE.md").write_text("# Legacy guide\n", encoding="utf-8")
 
     checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
@@ -151,7 +163,7 @@ def test_setup_status_survives_a_deleted_working_directory(tmp_path, monkeypatch
 
     data = setup_status(
         config,
-        env={"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"},
+        env={"PWA_AUTH_TOKEN": "test-token"},
     )
 
     checks = {row["id"]: row for row in data["checks"]}
@@ -196,15 +208,15 @@ def test_setup_status_detects_claude_cli_oauth(tmp_path, monkeypatch) -> None:
     assert "operator@example.com" in data["providers"]["claude"]["detail"]
 
 
-def test_setup_status_detects_claude_api_key_without_oauth(tmp_path) -> None:
+def test_setup_status_does_not_treat_an_api_key_as_claude_auth(tmp_path) -> None:
+    """Claude auth is the CLI login only; an inherited API key is not reported."""
     secret = "sk-ant-secret-value"
     config = _config(tmp_path)
     data = setup_status(config, env={"ANTHROPIC_API_KEY": secret})
 
     claude = data["providers"]["claude"]
-    assert claude["ok"] is True
-    assert claude["auth"] == "api_key"
-    assert claude["account"] == "Anthropic API"
+    assert claude["ok"] is False
+    assert claude["auth"] == "missing"
     assert secret not in json.dumps(data)
 
 
@@ -403,17 +415,13 @@ def test_setup_status_explains_desktop_login_is_app_private(tmp_path, monkeypatc
 def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
     tmp_path, monkeypatch
 ) -> None:
-    """No CLI means no chats, so setup asks for the install, not for a login.
-
-    An API key alone does not make Claude usable: Ciaobot drives the ``claude``
-    binary through the Agent SDK.
-    """
+    """No CLI means no chats, so setup asks for the install, not for a login."""
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
     monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
     config = _config(tmp_path)
 
-    claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
+    claude = setup_status(config, env={})["providers"]["claude"]
 
     assert claude["ok"] is False
     assert claude["auth"] == "not_installed"
@@ -448,7 +456,7 @@ def test_setup_status_reports_the_resolved_cli_path(tmp_path) -> None:
     """The wizard shows which binary it would run, not just that one exists."""
     config = _config(tmp_path)
 
-    claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
+    claude = setup_status(config, env={})["providers"]["claude"]
 
     assert claude["cli_path"] == "/usr/local/bin/claude"
 

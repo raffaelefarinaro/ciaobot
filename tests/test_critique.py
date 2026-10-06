@@ -135,11 +135,14 @@ def test_resolve_critique_panel_cli_override_wins() -> None:
     assert crt.resolve_critique_panel(config, override="only-this") == ["only-this"]
 
 
-def test_is_anthropic_available_accepts_an_api_key(monkeypatch) -> None:
+def test_is_anthropic_available_ignores_an_api_key(monkeypatch) -> None:
+    import ciao.setup_status as setup_status
+
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-value")
     monkeypatch.setattr(crt, "_ANTHROPIC_AVAILABLE_CACHE", None)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
 
-    assert crt.is_anthropic_available() is True
+    assert crt.is_anthropic_available() is False
 
 
 def _panel(
