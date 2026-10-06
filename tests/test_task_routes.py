@@ -141,7 +141,7 @@ class _Pcm:
         """
         return False
 
-    async def stop_chat(self, chat_id: str):
+    async def stop_chat(self, chat_id: str, *, park_queue: bool = False):
         """The manager's Stop, which is `async` as the real one is.
 
         The recording happens inside the coroutine, so `stopped` is empty unless the

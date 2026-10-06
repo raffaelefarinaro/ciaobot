@@ -6863,8 +6863,14 @@ class ProjectChatManager:
             payload["duration_ms"] = duration_ms
         return payload
 
-    async def stop_chat(self, chat_id: str) -> bool:
+    async def stop_chat(self, chat_id: str, *, park_queue: bool = False) -> bool:
         """Stop the chat's in-flight turn.
+
+        ``park_queue`` is for the task board's Stop and Detach: the stream is
+        flagged (``park_on_stop``) so the drive loop parks the queued follow-ups
+        on the chat (re-seeded by the next user turn) instead of running them,
+        including any queued while the stop is in flight. A composer Stop
+        leaves them to run, as before.
 
         Two layers, so Stop works with every provider and never hangs:
 
@@ -6875,11 +6881,13 @@ class ProjectChatManager:
            expires, cancel the turn task. The drive loop turns that into a
            synthetic result carrying the partial answer, so every client
            leaves streaming state immediately and queued follow-ups still
-           flush.
+           flush (unless ``park_queue``).
         """
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
+            if park_queue and not stream.background:
+                stream.park_on_stop = True
             if stream.background:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).

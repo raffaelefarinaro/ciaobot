@@ -4207,13 +4207,17 @@ class CiaoControlPlane:
         A manager with no ``stop_chat`` is not a refusal: the attempt still settles,
         and the turn's own end settles it again. Losing the manager would be the
         wrong trade for the record, so this is logged rather than raised.
+
+        Queued follow-ups are parked on the chat rather than run (``park_queue``):
+        a board Stop or Detach ends the delegated work, while a composer Stop
+        does not (#1103).
         """
         stop = getattr(self.pcm, "stop_chat", None)
         if not callable(stop):
             logger.warning("delegation: the chat manager cannot stop chat %s", chat_id)
             return
         try:
-            await stop(chat_id)
+            await stop(chat_id, park_queue=True)
         except Exception:  # noqa: BLE001 — a failed stop is not a failed gesture
             logger.exception("delegation: could not stop the turn in chat %s", chat_id)
 

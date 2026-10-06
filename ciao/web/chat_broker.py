@@ -553,6 +553,7 @@ class ChatStream:
         "_pending",
         "_pending_id_seq",
         "user_stopped",
+        "park_on_stop",
         "background",
         # The asyncio.Task currently iterating this stream's turn events.
         # Set by the drive loop before awaiting the turn; cleared when the
@@ -591,6 +592,10 @@ class ChatStream:
         # after an interrupted turn (a user stop is intentional, not an
         # error, so queued follow-ups should still go out).
         self.user_stopped: bool = False
+        # Set with `user_stopped` by a task-board Stop or Detach (#1103): the
+        # drive loop parks the queued follow-ups on the chat instead of
+        # running them, so a stopped delegated task stops working.
+        self.park_on_stop: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active
