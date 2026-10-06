@@ -1398,8 +1398,8 @@ def setup_workspace(
             # above, through `_registered_service_workspace`.
             #
             # The renderer refuses values the task would only reject at logon:
-            # an interpreter that is not python*.exe, a UNC workspace, a
-            # missing USERNAME. Both setup callers report RuntimeError, so a
+            # an interpreter that is not python*.exe, a UNC workspace, an
+            # unreadable account SID. Both setup callers report RuntimeError, so a
             # bad value is a message and an exit code, never a traceback.
             try:
                 written.append(windows_service.write_task_definition(
