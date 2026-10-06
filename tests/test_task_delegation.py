@@ -1072,6 +1072,57 @@ async def test_a_finished_turn_with_a_leftover_legacy_question_card_goes_to_revi
     assert row["status"] == "in_review"
 
 
+async def test_recovered_result_with_pending_permission_stays_needs_you(
+    tmp_path: Path,
+) -> None:
+    """A result recovered over an unanswered permission is not work to review.
+
+    The opencode provider's degraded recovery re-emits a permission it could not
+    confirm answered and publishes a result over it, saying so on the result
+    itself (#1111). Nothing is saved on the chat yet — the stream is the only
+    evidence — so the agent's own ``done`` report must not put the attempt in In
+    review while a user still has an approval card to answer.
+    """
+    plane, pcm = _world(tmp_path / "marked")
+    task = _create(plane, title="Recovered over a live approval")
+    pcm.next_events = [
+        {
+            "type": "result",
+            "text": "done",
+            "is_error": False,
+            "recovered_with_pending": True,
+        }
+    ]
+    _delegate(plane, task)
+    _agent_says_done(plane)
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "needs_you"
+    assert row["status"] != "in_review"
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.detail == (
+        "a permission request was still pending when the turn recovered"
+    )
+    # The report is kept on the attempt: answering the card re-settles it (#1110).
+    assert attempt.outcome == "done"
+
+    # The marker is the whole difference: the same turn without one is a review,
+    # which is what every ordinary result still settles to.
+    plane, pcm = _world(tmp_path / "unmarked")
+    task = _create(plane, title="Recovered with nothing pending")
+    pcm.next_events = [{"type": "result", "text": "done", "is_error": False}]
+    _delegate(plane, task)
+    _agent_says_done(plane)
+
+    await _end_turns(pcm)
+
+    row = _get_task(plane, task["id"])
+    assert row["attempt_state"] == "ready_for_review"
+    assert row["status"] == "in_review"
+
+
 async def test_a_stream_with_no_result_is_interrupted_not_a_review(
     tmp_path: Path,
 ) -> None:

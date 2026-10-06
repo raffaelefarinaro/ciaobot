@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import pytest
 
-from ciao.models import AgentRequest
+from ciao.models import AgentRequest, PermissionRequestEvent
 from ciao.providers.opencode import OpencodeProvider
 from tests.test_opencode_provider import _FakeEventStream, _provider
 
@@ -622,3 +622,89 @@ async def test_rejected_prompt_yields_exactly_one_terminal_error(
     assert results[0].is_error is True
     assert "OpenCode rejected the prompt" in results[0].result
     assert "model not configured" in results[0].result
+
+
+class _ScriptedPermissionClient(_RecoveryClient):
+    """A recovery client whose session still has one pending permission (#1111).
+
+    The first read of ``/api/session/{id}/permission`` is the post-prompt handover
+    reload, which by construction runs before this turn can have raised anything —
+    a request found there is already on its way up the stream. So a request that
+    only the degraded reload can find is what ``pending`` scripts: it appeared
+    during the outage, was never answered, and the result is published over it.
+    """
+
+    def __init__(
+        self,
+        attempts: list[Any],
+        messages: list[dict[str, Any]],
+        *,
+        pending: bool,
+    ) -> None:
+        super().__init__(attempts, messages)
+        self.pending = pending
+        self.permission_reads = 0
+
+    async def get(self, path: str, *, params=None):
+        if path != "/api/session/s1/permission":
+            return await super().get(path, params=params)
+        self.permission_reads += 1
+        requests = [
+            {
+                "id": "per_1",
+                "sessionID": "s1",
+                "action": "bash",
+                "state": "pending",
+                "metadata": {"command": "rm -rf build"},
+            }
+        ] if self.pending and self.permission_reads > 1 else []
+
+        class _Permissions:
+            status_code = 200
+
+            def raise_for_status(self) -> None:
+                return None
+
+            @staticmethod
+            def json():
+                return {"data": requests}
+
+        return _Permissions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("pending", "expected"), [(True, True), (False, False)])
+async def test_degraded_recovery_marks_result_when_permission_pending(
+    pending, expected, tmp_path, monkeypatch
+) -> None:
+    """A result recovered over a live permission says so, and only then (#1111).
+
+    The reloaded request is genuinely unanswered when the terminal result goes
+    out, and no saved card exists yet to say so — so the result carries the
+    marker, and the delegation watcher keeps the attempt at ``needs_you`` over it.
+    """
+    provider = _provider(tmp_path)
+    client = _ScriptedPermissionClient(
+        [
+            _FlakyStream([], fail_after=0),
+            httpx.ConnectError("server gone"),
+            httpx.ConnectError("server gone"),
+        ],
+        messages=[
+            {"id": "msg_u2", "type": "user", "text": "hi"},
+            {"id": "idle_ok", "type": "idle", "outcome": "succeeded"},
+        ],
+        pending=pending,
+    )
+    _wire(provider, monkeypatch, client)
+
+    events = [
+        event async for event in provider.run_streaming(_REQUEST, lambda _h: None)
+    ]
+
+    result = events[-1]
+    assert result.type == "result"
+    assert result.recovered_with_pending is expected
+    # The card itself is unaffected either way: it is the *result* that has to
+    # report the request it was published over.
+    assert any(isinstance(event, PermissionRequestEvent) for event in events) is pending
