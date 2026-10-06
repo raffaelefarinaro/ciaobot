@@ -1124,6 +1124,87 @@ async def test_a_stream_with_no_result_and_a_leftover_native_question_card_is_in
     assert _attempt_store(plane).get_live(task["id"]) is None
 
 
+async def test_a_follow_up_paused_on_a_question_is_not_settled_by_the_stopped_turn_before_it(
+    tmp_path: Path,
+) -> None:
+    """A stream carries several turns; only the last one decides the attempt.
+
+    Turn 1 is stopped, which publishes a ``stopped`` result. The queued follow-up
+    then runs as a new turn on the same stream and pauses on a question card, so
+    it publishes no result. The stopped result belongs to a turn that is no longer
+    the one that ended the stream: reading it would settle the attempt ``stopped``
+    and leave the card's answer unable to re-attach it.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Stop, then ask")
+    pcm.next_events = [
+        {"type": "result", "text": "", "stopped": True},
+        {"type": "user_echo", "text": "and then this"},
+        {"type": "text", "text": "One question first."},
+    ]
+    _delegate(plane, task)
+    pcm.get_chat("chat-1").pending_question = '{"questions": []}'
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "needs_you"
+    assert _attempt_store(plane).get_live(task["id"]) is not None
+
+
+async def test_a_lost_follow_up_is_interrupted_even_after_an_earlier_result(
+    tmp_path: Path,
+) -> None:
+    """An earlier turn's result cannot stand in for the final turn's missing one.
+
+    Turn 1 finishes with a result. The queued follow-up runs as a new turn on the
+    same stream and ends with neither a result nor a card, so no answer was seen
+    for it. Settling from turn 1's result would dress an empty final turn as
+    finished work; the honest reading is ``interrupted``.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="A lost follow-up")
+    pcm.next_events = [
+        {"type": "result", "text": "done", "is_error": False},
+        {"type": "user_echo", "text": "and then this"},
+        {"type": "text", "text": "half an answer"},
+    ]
+    _delegate(plane, task)
+
+    await _end_turns(pcm)
+
+    attempt = _attempt_store(plane).list_for_task(task["id"])[0]
+    assert attempt.state == "interrupted"
+    assert attempt.detail == "the turn ended without a result"
+    assert _attempt_store(plane).get_live(task["id"]) is None
+
+
+async def test_a_follow_up_that_finishes_is_settled_from_its_own_result(
+    tmp_path: Path,
+) -> None:
+    """The final turn's result settles the attempt, not the stopped turn before it.
+
+    Turn 1 is stopped; the queued follow-up then reports the work done and ends
+    with its own result. The attempt is ``ready_for_review``, not ``stopped``: the
+    result that ended the stream is the one that counts.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Stop, then finish")
+    pcm.next_events = [
+        {"type": "result", "text": "", "stopped": True},
+        {"type": "user_echo", "text": "and then this"},
+        {"type": "result", "text": "done", "is_error": False},
+    ]
+    _delegate(plane, task)
+    plane.workspace_task_report(
+        "personal", task["id"], outcome="done", summary="Did the work.", chat_id="chat-1"
+    )
+
+    await _end_turns(pcm)
+
+    assert _get_task(plane, task["id"])["attempt_state"] == "ready_for_review"
+
+
 async def test_a_clean_settle_is_not_reported_as_changed_since_delegated(
     tmp_path: Path,
 ) -> None:
