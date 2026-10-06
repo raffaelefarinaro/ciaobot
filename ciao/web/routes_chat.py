@@ -447,7 +447,7 @@ async def ws_events(websocket: WebSocket) -> None:
             # finished. A restart does not carry them over — the runner
             # resolves non-terminal runs as orphans on start — so this only
             # ever reports runs the live process is actually supervising.
-            "background_runs": pcm.background_run_counts,
+            "background_runs": pcm.background_runs,
             # Late connectors that missed `server_restarting` still get the
             # overlay instead of a chat-level turn rejection.
             "restarting": bool(getattr(pcm, "_restart_draining", False)),

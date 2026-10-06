@@ -237,7 +237,7 @@ describe('composer focus on opening a chat', () => {
     contextTab.focus()
     await tabs[0].trigger('keydown', { key: 'ArrowRight' })
     await nextTick()
-    expect(inspector.get('#work-panel-activity').text()).toContain('Subagents running')
+    expect(inspector.get('#work-panel-activity').text()).toContain('Running')
     expect(document.activeElement).toBe(inspector.findAll('[role="tab"]')[1].element)
 
     await inspector.findAll('[role="tab"]')[1].trigger('keydown', { key: 'End' })

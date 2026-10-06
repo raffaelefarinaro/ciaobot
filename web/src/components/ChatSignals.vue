@@ -75,6 +75,7 @@ import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import type { WorkspaceColorId } from '../lib/workspaceColors'
+import { backgroundRunLabel } from '../lib/backgroundRuns'
 
 const props = withDefaults(defineProps<{
   chatId: string
@@ -100,11 +101,14 @@ const agentCount = computed(() => Math.max(
 const agentsTitle = computed(() =>
   agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`,
 )
-// Tracked background command runs. Wording mirrors the ChatPanel dock pill
-// ("N background runs") so the same activity is not named two ways.
-const runCount = computed(() => Number(store.backgroundRuns[props.chatId] || 0))
+// Tracked background command runs. One run is named, the way the composer's
+// run line names it, so hovering the row says what is going.
+const runs = computed(() => store.backgroundRuns[props.chatId] || [])
+const runCount = computed(() => runs.value.length)
 const runsTitle = computed(() =>
-  runCount.value === 1 ? '1 background run' : `${runCount.value} background runs`,
+  runCount.value === 1
+    ? `Background run: ${backgroundRunLabel(runs.value[0])}`
+    : `${runCount.value} background runs`,
 )
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
 const unread = computed(() => store.chatUnread(props.chatId) > 0)

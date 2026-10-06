@@ -637,7 +637,8 @@
         role="tabpanel"
         aria-labelledby="work-tab-activity"
       >
-        <span class="chat-work-label">Subagents running</span>
+        <span class="chat-work-label">Running</span>
+        <BackgroundRunRows v-if="chatRuns.length" :chat-id="chat.chat_id" :runs="chatRuns" :now="nowTs" />
         <div v-if="runningSubagents.length" class="rail-list">
           <router-link
             v-for="sub in runningSubagents"
@@ -649,7 +650,7 @@
             <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
           </router-link>
         </div>
-        <p v-else class="chat-work-note">None right now.</p>
+        <p v-if="!runningSubagents.length && !chatRuns.length" class="chat-work-note">Nothing right now.</p>
         <p class="chat-work-note">Tool steps stay collapsed in the transcript; open Activity on a turn for its full sequence.</p>
       </section>
 
@@ -962,6 +963,29 @@
       <span v-else class="dock-agent-link dock-agent-link--pending">details loading…</span>
     </div>
 
+    <!-- Background command runs: a status line, not a dock pill. Nothing here
+         is the user's move, so it does not join the strip's disclosure; it
+         names the run and how long it has gone, and opens Work details, where
+         the run has its log and a Stop. Hidden while the turn's own live line
+         is showing activity; it is the quiet gap after the turn that needs it.
+         For a few seconds after a run ends it says how it ended. -->
+    <div v-if="runStatus" class="run-status-wrap">
+      <button
+        type="button"
+        class="run-status"
+        :class="`run-status--${runStatus.tone}`"
+        title="Show in Work details"
+        :aria-label="`${runStatus.prefix}${runStatus.text}. Show in Work details`"
+        @click="openRunDetails"
+      >
+        <span class="run-status-dot" aria-hidden="true" />
+        <span class="run-status-text">{{ runStatus.text }}</span>
+        <span v-if="runStatus.elapsed" class="run-status-elapsed">{{ runStatus.elapsed }}</span>
+      </button>
+    </div>
+    <!-- Announces a run starting or ending, never the ticking age. -->
+    <span class="sr-only" role="status" aria-live="polite">{{ runStatus ? `${runStatus.prefix}${runStatus.text}` : '' }}</span>
+
     <!-- @-mention picker (textarea version: inserts plain backend-facing text) -->
     <div v-if="showMentionPicker" class="commands-picker mention-picker" role="listbox" aria-label="Mentions">
       <div
@@ -1211,9 +1235,16 @@
           @open-file="openInspectorFile"
         />
       </div>
-      <section v-if="runningSubagents.length" class="rail-section" aria-labelledby="chat-rail-subagents">
-        <p id="chat-rail-subagents" class="rail-label">Subagents running</p>
-        <div class="rail-list">
+      <section
+        v-if="runningSubagents.length || chatRuns.length"
+        ref="railRunningEl"
+        class="rail-section chat-rail-running"
+        aria-labelledby="chat-rail-running"
+        tabindex="-1"
+      >
+        <p id="chat-rail-running" class="rail-label">Running</p>
+        <BackgroundRunRows v-if="chatRuns.length" :chat-id="chat.chat_id" :runs="chatRuns" :now="nowTs" />
+        <div v-if="runningSubagents.length" class="rail-list">
           <router-link
             v-for="sub in runningSubagents"
             :key="sub.agent_id"
@@ -1313,6 +1344,8 @@ import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeU
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
+import { backgroundRunElapsed, backgroundRunLabel, backgroundRunOutcome } from '../lib/backgroundRuns'
+import BackgroundRunRows from './BackgroundRunRows.vue'
 import {
   activityLines,
   buildTurnParts,
@@ -1474,11 +1507,12 @@ const {
 } = composer
 const isContinuing = ref(false)
 
-// Ticks once a second while streaming so the live elapsed-time label in the
-// "Working..." trace meta advances.
+// Ticks once a second while streaming or while a background run is going, so
+// the live elapsed-time labels (the "Working..." trace meta, a run's age)
+// advance.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
-watch(() => store.isStreaming, (streaming) => {
+watch(() => store.isStreaming || store.activeBackgroundRuns.length > 0, (streaming) => {
   if (streaming && !clockTimer) {
     nowTs.value = Date.now()
     clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
@@ -1755,10 +1789,6 @@ const dockAgentsPillShown = computed(
   () => store.activeBackgroundAgents > 0 && !chat.value?.archived,
 )
 
-const dockRunsPillShown = computed(
-  () => store.activeBackgroundRuns > 0 && !chat.value?.archived,
-)
-
 const dockDeferred = computed<DockItem[]>(() => {
   const items: DockItem[] = []
   const extraApprovals = pendingApprovals.value.length - 1
@@ -1775,15 +1805,6 @@ const dockDeferred = computed<DockItem[]>(() => {
   if (dockAgentsPillShown.value) {
     const n = store.activeBackgroundAgents
     items.push({ key: 'agents', label: `${n} agent${n === 1 ? '' : 's'} running` })
-  }
-  // Tracked `background_run_start` commands. A separate pill, not folded into
-  // the agents one: these have no transcript to open, so the count is all
-  // there is to show, and the wording has to stay honest about that. Shown
-  // even while the chat is idle — that quiet gap is exactly when the user
-  // has no other sign the command is still going.
-  if (dockRunsPillShown.value) {
-    const n = store.activeBackgroundRuns
-    items.push({ key: 'runs', label: `${n} background run${n === 1 ? '' : 's'}` })
   }
   return items
 })
@@ -1900,6 +1921,29 @@ const contextPct = computed<number | null>(() => {
 })
 
 const runningSubagents = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
+const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))
+
+const runStatus = computed(() => {
+  const current = chat.value
+  if (!current || current.archived) return null
+  // The turn's own live line outranks this one, for a live run and an outcome
+  // alike; and a run still going outranks how another one ended.
+  if (store.isStreaming) return null
+  const runs = chatRuns.value
+  const finished = store.finishedBackgroundRuns[current.chat_id]
+  if (!runs.length && finished) {
+    const outcome = backgroundRunOutcome(finished)
+    return { prefix: 'Background run: ', text: outcome.text, tone: outcome.tone, elapsed: '' }
+  }
+  if (!runs.length) return null
+  const more = runs.length > 1 ? ` and ${runs.length - 1} more` : ''
+  return {
+    prefix: 'Running in the background: ',
+    text: `${backgroundRunLabel(runs[0])}${more}`,
+    tone: 'live' as const,
+    elapsed: backgroundRunElapsed(runs[0], nowTs.value),
+  }
+})
 function subagentLabel(sub: RunningSubagent): string {
   return (sub.description || '').trim() || shortAgentId(sub.agent_id)
 }
@@ -1946,6 +1990,18 @@ function toggleWorkDetails() {
 function hideRail() {
   railOpen.value = false
   void nextTick(() => inspectorTrigger.value?.focus())
+}
+
+const railRunningEl = ref<HTMLElement | null>(null)
+function openRunDetails() {
+  if (isWidePane.value) {
+    railOpen.value = true
+    // A finished run's notice can outlive the Running section it points at.
+    void nextTick(() => (railRunningEl.value ?? railHideButton.value)?.focus())
+    return
+  }
+  inspectorTab.value = 'activity'
+  openInspector()
 }
 
 function openProjectKnowledge() {
@@ -5894,6 +5950,86 @@ details[open] > .activity-summary::before {
   border: 1px solid var(--warning);
   color: var(--warning);
   background: none;
+}
+
+/* Background run status line: one quiet row in the dock strip's rhythm, the
+   sidebar's pulse at its start. A whole-row button because the whole line
+   means one thing (show me this run); no chevron, since nothing opens here. */
+.run-status-wrap { flex-shrink: 0; }
+
+.run-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--touch);
+  padding: var(--space-2) 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-status:hover { background: var(--bg2); color: var(--fg); }
+
+.run-status:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.run-status-dot {
+  width: 8px;
+  height: 8px;
+  margin-left: 2px;
+  border-radius: 50%;
+  background: var(--fg3);
+  flex-shrink: 0;
+}
+
+.run-status--live .run-status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+  animation: run-status-pulse 1.1s ease-in-out infinite;
+}
+
+/* Same beat as the sidebar's run signal (ChatSignals.vue). */
+@keyframes run-status-pulse {
+  0%, 100% { transform: scale(0.55); opacity: 0.35; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+.run-status--ok .run-status-dot { background: var(--success); }
+.run-status--error .run-status-dot { background: var(--error); }
+.run-status--error { color: var(--error); }
+
+.run-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-status-elapsed {
+  flex-shrink: 0;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-status--live .run-status-dot { animation: none; }
+}
+
+/* Focus lands here from the composer's run line; the outline says where. */
+.chat-rail-running:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .dock-agent-links {

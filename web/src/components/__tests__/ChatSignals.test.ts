@@ -6,6 +6,11 @@ import { mount } from '@vue/test-utils'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatSignals from '../ChatSignals.vue'
+import type { BackgroundRunSummary } from '../../lib/types'
+
+function run(runId: string, label = ''): BackgroundRunSummary {
+  return { run_id: runId, label, cmd: ['uv', 'sync'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null }
+}
 
 function seed() {
   const store = useProjectStore()
@@ -56,15 +61,15 @@ describe('ChatSignals', () => {
     // component — so the most-seen surface, the sidebar row, showed nothing at
     // all for a chat whose only activity was a run.
     const { store } = seed()
-    store.backgroundRuns = { 'chat-1': 1 }
+    store.backgroundRuns = { 'chat-1': [run('r1', 'Clone rizzo-flow')] }
     const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(one.find('.chat-signal--runs').exists()).toBe(true)
     expect(one.find('.chat-signal--runs .activity-spinner').exists()).toBe(true)
-    expect(one.find('.chat-signal--runs').attributes('aria-label')).toBe('1 background run')
+    expect(one.find('.chat-signal--runs').attributes('aria-label')).toBe('Background run: Clone rizzo-flow')
     // One run needs no number, the same rule the agents chip follows.
     expect(one.find('.chat-signal-count').exists()).toBe(false)
 
-    store.backgroundRuns = { 'chat-1': 3 }
+    store.backgroundRuns = { 'chat-1': [run('r1'), run('r2'), run('r3')] }
     const many = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(many.find('.chat-signal-count').text()).toBe('3')
     expect(many.find('.chat-signal--runs').attributes('aria-label')).toBe('3 background runs')
@@ -75,7 +80,7 @@ describe('ChatSignals', () => {
     // the agent is the more useful thing to point at.
     const { store } = seed()
     store.backgroundAgents = { 'chat-1': 1 }
-    store.backgroundRuns = { 'chat-1': 2 }
+    store.backgroundRuns = { 'chat-1': [run('r1'), run('r2')] }
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(wrapper.find('.chat-signal--agents').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--runs').exists()).toBe(false)
