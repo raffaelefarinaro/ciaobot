@@ -360,18 +360,19 @@ class ScheduleDispatcher:
                         model,
                     )
                 elif is_model_refused(exc):
-                    # The configured insights model cannot serve a server-side
-                    # one-shot at all (#1066), so this recurs on every dispatch
-                    # of this schedule. The conservative default is the right
-                    # behaviour and needs no traceback; what the operator needs
-                    # is the model named and the fix pointed at, once.
+                    # The configured insights model refused this one-shot call
+                    # (#1066). The conservative default is the right behaviour
+                    # and needs no traceback; what the operator needs is the
+                    # model named and the workaround pointed at. This is a text
+                    # match on the provider message, not proof the model can
+                    # never serve a call — hence "refused", not "unusable".
                     run.extra["model_refused"] = True
                     logger.warning(
-                        "Schedule attention classifier model %s is refused by "
-                        "the provider for server-side one-shot calls, so every "
-                        "auto-archived run of this schedule keeps its chat "
-                        "visible; set a Session insights model that serves "
-                        "one-shots in Settings → Models",
+                        "Schedule attention classifier model %s was refused by "
+                        "the provider for a one-shot call, so this auto-archived "
+                        "run keeps its chat visible; picking a Session insights "
+                        "model that serves one-shots in Settings → Models avoids "
+                        "the warning on later runs",
                         model,
                     )
                 else:

@@ -306,9 +306,16 @@ async def test_schedule_attention_classifier_warns_on_a_refused_model(
     assert row["extra"]["model_refused"] is True
     assert "free tier can only be used from within OpenCode" in row["error"]
     assert row["extra"].get("context_overflow") is None
-    # No traceback: a deterministic refusal is not a fault to triage.
+    # The classifier's own record must be the warning, and must carry no
+    # traceback: a `logger.warning(..., exc_info=True)` would otherwise satisfy
+    # a check that only looked for the absence of ERROR records.
+    classifier = [
+        r for r in caplog.records if r.name == "ciao.web.schedule_dispatch"
+    ]
+    assert [r.levelno for r in classifier] == [logging.WARNING]
+    assert classifier[0].exc_info is None
+    assert "haiku" in classifier[0].getMessage()
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert any("haiku" in r.getMessage() for r in caplog.records)
 
 
 async def test_schedule_attention_classifier_still_raises_for_transient_failures(
@@ -330,8 +337,15 @@ async def test_schedule_attention_classifier_still_raises_for_transient_failures
     row = _job_rows(tmp_path)[0]
     assert row["status"] == "error"
     assert "model_refused" not in row["extra"]
-    assert [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert any(r.exc_info for r in caplog.records)
+    # The traceback must be on the classifier's own record, not merely present
+    # somewhere in the capture.
+    classifier = [
+        r
+        for r in caplog.records
+        if r.name == "ciao.web.schedule_dispatch" and r.levelno >= logging.ERROR
+    ]
+    assert len(classifier) == 1
+    assert classifier[0].exc_info is not None
 
 
 async def test_schedule_attention_classifier_records_bare_timeout_type(
