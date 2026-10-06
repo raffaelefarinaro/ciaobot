@@ -3756,12 +3756,20 @@ class CiaoControlPlane:
     async def _await_turn(
         self, workspace: str, attempt_id: str, task_id: str, chat_id: str, stream: Any
     ) -> None:
-        """Consume the turn's stream and settle the attempt once it ends."""
+        """Consume the turn's stream and settle the attempt from its final turn once it ends."""
         result: dict[str, Any] = {}
         seen_result = False
         try:
             async for event in stream.subscribe():
-                if event.get("type") == "result":
+                kind = event.get("type")
+                if kind == "user_echo":
+                    # A queued follow-up runs as a new turn on the same stream,
+                    # announced by its own echo. The attempt is settled from the
+                    # turn that ended the stream, so an earlier turn's result
+                    # (a Stop, say) must not decide it (#1096).
+                    result = {}
+                    seen_result = False
+                elif kind == "result":
                     result = dict(event)
                     seen_result = True
         except asyncio.CancelledError:
