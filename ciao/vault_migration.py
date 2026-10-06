@@ -7,7 +7,7 @@ Needed at three moments, all of which land on an existing vault:
   `log`. Those are `unknown_type` findings from the moment `vault-lint` starts
   checking, and `os-audit` exits 1 on them, so an upgrade that shipped the check
   without this would hand every existing install a permanently unhealthy audit.
-* **Onboarding an existing vault** (``CIAO_VAULT_MODE=existing``). Same problem,
+* **Onboarding an existing vault** (existing-folder setup). Same problem,
   except the vault was never Ciaobot-shaped to begin with.
 * **Fresh install.** Nothing to do: the vault is created conformant, and the
   receipt records that so nothing rescans on every boot.

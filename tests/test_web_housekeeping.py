@@ -38,7 +38,6 @@ class _Config(CiaoConfig):
     def __init__(self, tmp_path: Path, workspaces: tuple[str, ...] = ("personal",)) -> None:
         self.workspace_root = tmp_path
         self.vault_root = tmp_path / "memory-vault"
-        self.vault_mode = "scratch"
         self.state_path = tmp_path / ".runtime" / "state.json"
         self._names = list(workspaces)
 

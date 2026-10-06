@@ -407,7 +407,7 @@ def _scope_prefix(root_dir: Path, base: Path) -> str | None:
     under the base, so no prefix describes its rows and callers must fail closed
     rather than read the empty prefix as "everything".
 
-    That case is a supported layout, not a corrupt one: ``CIAO_VAULT_MODE=existing``
+    That case is a supported layout, not a corrupt one: existing-folder setup
     with an absolute vault root points a workspace at a vault outside the
     install, while ``path_base`` stays the install root. Compared against
     ``base`` exactly as the key-writing loop does — unresolved — so the scope can
@@ -575,7 +575,7 @@ def _index_directory(
         # Nothing identifies this pass's rows (the indexed directory is outside
         # the key base), so pruning would have to guess. The old code guessed
         # "everything": the empty prefix put every row in scope, and one pass
-        # over a vault outside the install — CIAO_VAULT_MODE=existing with an
+        # over a vault outside the install — existing-folder setup with an
         # absolute root — deleted every OTHER agent root's rows. Keeping rows
         # for notes deleted from this vault is the strictly smaller error: they
         # are stale search hits until a pass that can be scoped runs, whereas

@@ -5,8 +5,9 @@ Setup, dev workflow, testing, and change guidelines. For the system design, read
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine
-from Settings through `POST /api/admin/restart`; `CIAO_DEV_MODE=true` on a
-source checkout retains the source deploy workflow.
+from Settings through `POST /api/admin/restart`; developer mode (Settings →
+General → Developer, with the source checkout set there) on a source checkout
+retains the source deploy workflow.
 
 ```bash
 python3.12 -m venv .venv
@@ -188,7 +189,7 @@ is what stops the app's own agent from staying loaded next to the engine that
 replaced it. That path also settles the workspace before it takes any
 before-image or asks the app to quit, and only ever hands over the one the
 engine being replaced runs in: a `--workspace` naming a different directory, one
-that does not exist, or a directory with no `.env` in it is refused, no
+that does not exist, or a directory with no `.runtime/workspaces.json` in it (one `ciao setup` never provisioned; a pre-1.0 `.env` with a non-empty `CIAO_WORKSPACES` still counts) is refused, no
 workspace is created during a hand-over, and an `--as-host` override on a state
 whose workspace could not be recovered has to name an existing one rather than
 get a fresh `~/Ciaobot`. Taking a different workspace would start a second engine
@@ -2035,7 +2036,7 @@ against a fake manager over a temp packaged root.
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `AGENTS.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
 - **New API routes must be documented.** Add the route to `PWA_API.md`; state-changing routes also need an Agent recipe or an allowlist entry in `tests/test_pwa_api_docs.py`. New `CIAO_*` env vars must land in `INTEGRATIONS.md` or the allowlist in `tests/test_env_vars_documented.py`. Both are test-enforced.
 - **Never restart the ciao service yourself** from inside the PWA. Apply code changes and ask the operator to hit Deploy.
-- **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN` (the dashboard password; protection is on unless `PWA_AUTH_REQUIRED=false`).
+- **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN` (the dashboard password; protection is always on).
 - **Keep edits minimal and consistent with existing patterns.** Don't refactor unrelated code; if unrelated changes appear, pause and ask.
 - **Avoid destructive git** (force push, hard reset on shared branches) unless explicitly asked.
 - **Use the branch model in `CONTRIBUTING.md`.** Day-to-day PRs target `develop`; release PRs target `main`.

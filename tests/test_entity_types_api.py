@@ -25,6 +25,7 @@ from starlette.testclient import TestClient
 from ciao import entity_types
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.web.app import create_app
+from tests.session import signed_in
 
 
 def _note(vault: Path, name: str, note_type: str) -> None:
@@ -48,7 +49,6 @@ def client(vault: Path) -> TestClient:
     tmp_path = vault.parent
     cfg = CiaoConfig(
         pwa_auth_token="test-secret",
-        pwa_auth_required=False,
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime",
         media_root=tmp_path / "media",
@@ -59,7 +59,7 @@ def client(vault: Path) -> TestClient:
             )
         },
     )
-    return TestClient(create_app(cfg))
+    return signed_in(TestClient(create_app(cfg)))
 
 
 def _rows(client: TestClient) -> list[dict[str, Any]]:

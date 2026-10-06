@@ -764,6 +764,22 @@ export interface RoutineSettings {
   provider_insights_models?: Record<string, string>
 
   critique_models_effective: string
+  // Server settings that used to be workspace .env variables, as stored
+  // ("" = default). The bind address and log level apply at the next start.
+  pwa_host?: string
+  log_level?: string
+  dev_mode?: boolean
+  app_repo?: string
+  server_defaults?: {
+    pwa_host: string
+    log_level: string
+    log_levels: string[]
+  }
+  // What the running engine bound and logs at.
+  server_running?: {
+    pwa_host: string
+    log_level: string
+  }
   model_options: {
     anthropic: string[]
   }

@@ -151,7 +151,7 @@ def test_home_walk_requires_update_tile_only_for_newer_published_version() -> No
 
     # A reused authenticated session is explicitly not proof auth is disabled.
     assert "session" in lowered
-    assert "auth_required" in text
+    assert "/api/auth/check" in text
     assert "reusing" in lowered or "reused" in lowered
 
     # The setup card is browser/device state, not engine state.

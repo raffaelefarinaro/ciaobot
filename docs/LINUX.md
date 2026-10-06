@@ -40,12 +40,12 @@ and transfer `ciao/web/static/` with the source. The server does not need Vite.
 Setup generates the dashboard password in `/srv/ciaobot/.env`, mode `0600`, and
 prints a one-time login URL. Existing passwords and config are preserved on rerun.
 
-For HTTPS reverse proxy hosting, set these values in the workspace `.env`:
+For HTTPS reverse proxy hosting, set Settings → General → Network access to
+**This computer only** (the bind address, `127.0.0.1`) and restart the service,
+and keep the port in the workspace `.env`:
 
 ```dotenv
-PWA_HOST=127.0.0.1
 PWA_PORT=8443
-PWA_AUTH_REQUIRED=true
 ```
 
 The proxy must forward the public host as `X-Forwarded-Host` (nginx:

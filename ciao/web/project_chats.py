@@ -1278,8 +1278,9 @@ class ProjectChatManager:
         self._save()
 
     def _create_onboarding_chat(self, project_id: str) -> None:
-        import os
-        vault_mode = os.environ.get("CIAO_VAULT_MODE", "scratch").strip().lower()
+        from ciao.setup_marker import read_setup_vault_mode
+
+        vault_mode = read_setup_vault_mode(self._config.state_path.parent)
         project = self._projects.get(project_id)
         workspace_name = project.workspace if project is not None else "personal"
         vault_root = str(

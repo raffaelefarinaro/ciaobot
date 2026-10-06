@@ -23,10 +23,10 @@ class _IdleSubscription:
         yield  # pragma: no cover
 
 
-def _events_app(*, auth_required: bool) -> Starlette:
+def _events_app() -> Starlette:
     app = Starlette(routes=[WebSocketRoute("/ws/events", ws_events)])
     app.state.serializer = URLSafeTimedSerializer("test-secret")
-    app.state.config = SimpleNamespace(pwa_auth_required=auth_required)
+    app.state.config = SimpleNamespace()
     app.state.project_chat_manager = SimpleNamespace(
         active_stream_chat_ids=lambda: [],
         get_chat=lambda _cid: None,
@@ -37,23 +37,21 @@ def _events_app(*, auth_required: bool) -> Starlette:
     return app
 
 
-def test_ws_connects_without_session_when_auth_off() -> None:
-    client = TestClient(_events_app(auth_required=False))
-    with client.websocket_connect(
-        "/ws/events", headers={"Origin": "http://testserver"}
-    ) as ws:
-        assert ws.receive_json()["type"] == "snapshot"
+def _signed_client(app: Starlette) -> TestClient:
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE, app.state.serializer.dumps({"user": "owner"}))
+    return client
 
 
-def test_ws_requires_session_when_auth_on() -> None:
-    client = TestClient(_events_app(auth_required=True))
+def test_ws_requires_session() -> None:
+    client = TestClient(_events_app())
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/ws/events"):
             pass
 
 
-def test_ws_accepts_session_cookie_when_auth_on() -> None:
-    app = _events_app(auth_required=True)
+def test_ws_accepts_session_cookie() -> None:
+    app = _events_app()
     client = TestClient(app)
     client.cookies.set(SESSION_COOKIE, app.state.serializer.dumps({"user": "owner"}))
     with client.websocket_connect("/ws/events") as ws:
@@ -61,7 +59,7 @@ def test_ws_accepts_session_cookie_when_auth_on() -> None:
 
 
 def test_ws_rejects_cross_origin() -> None:
-    client = TestClient(_events_app(auth_required=False))
+    client = TestClient(_events_app())
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(
             "/ws/events", headers={"Origin": "http://evil.example"}
@@ -80,7 +78,7 @@ def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> Non
         hub.publish({"type": "chat_streaming_done", "chat_id": "c1"})
         return []
 
-    app = _events_app(auth_required=False)
+    app = _events_app()
     app.state.project_chat_manager = SimpleNamespace(
         active_stream_chat_ids=_ids,
         get_chat=lambda _cid: None,
@@ -88,7 +86,7 @@ def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> Non
         background_runs={},
         events=hub,
     )
-    with TestClient(app).websocket_connect(
+    with _signed_client(app).websocket_connect(
         "/ws/events", headers={"Origin": "http://testserver"}
     ) as ws:
         assert ws.receive_json()["type"] == "snapshot"
@@ -103,7 +101,7 @@ def test_snapshot_failure_detaches_the_events_subscription() -> None:
     def _boom() -> list[str]:
         raise KeyError("boom")
 
-    app = _events_app(auth_required=False)
+    app = _events_app()
     app.state.project_chat_manager = SimpleNamespace(
         active_stream_chat_ids=_boom,
         get_chat=lambda _cid: None,
@@ -112,7 +110,7 @@ def test_snapshot_failure_detaches_the_events_subscription() -> None:
         events=hub,
     )
     with pytest.raises(KeyError):
-        with TestClient(app).websocket_connect(
+        with _signed_client(app).websocket_connect(
             "/ws/events", headers={"Origin": "http://testserver"}
         ):
             pass  # pragma: no cover

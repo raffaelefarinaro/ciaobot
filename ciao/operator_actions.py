@@ -960,11 +960,13 @@ def _detect_mcp_uncomposed(context: DetectionContext) -> list[OperatorAction]:
 
 
 _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
-    ("CIAO_DISALLOWED_TOOLS_PERSONAL", "set a workspace's disallowed_tools in workspaces.json"),
-    ("CIAO_DISALLOWED_TOOLS_WORK", "set a workspace's disallowed_tools in workspaces.json"),
-    # Execution mode is fixed at auto for every provider; there is no override.
-    ("CLAUDE_EXECUTION_MODE", "remove it: execution mode is always auto"),
-    ("CLAUDE_PERMISSION_MODE", "remove it: execution mode is always auto"),
+    ("PWA_AUTH_REQUIRED", "remove it: password protection is always on"),
+    # Server settings that moved to Settings. Server startup imports each one
+    # into `.runtime/app_settings.json` once; after that they are inert.
+    ("PWA_HOST", "remove it: it was imported once into Settings → General → Network access"),
+    ("CIAO_LOG_LEVEL", "remove it: it was imported once into Settings → General → Developer"),
+    ("CIAO_DEV_MODE", "remove it: it was imported once into Settings → General → Developer"),
+    ("CIAO_APP_REPO", "remove it: it was imported once into Settings → General → Developer"),
     # The workspace list is runtime state owned by Settings. Server startup
     # imports the variable into workspaces.json once; after that it is inert.
     (
@@ -975,18 +977,64 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Values `ciao setup` itself wrote into every `.env`. They say what is still
+# true, so flagging them would put the tile on every upgraded install for a line
+# the operator never chose. `CIAO_VAULT_MODE` is never listed at all: setup
+# wrote it and nothing the operator sets there changes behaviour now.
+_SETUP_WRITTEN_DEFAULTS: dict[str, str] = {"PWA_AUTH_REQUIRED": "true"}
+
+
+def _is_setup_written_default(name: str, value: str) -> bool:
+    default = _SETUP_WRITTEN_DEFAULTS.get(name)
+    return default is not None and value.strip().lower() == default
+
+
+# Ignored in `.env` only: the process environment (a service definition, test
+# isolation) still sets it, so it is read from the file, never from the merged
+# source. Setup wrote `.runtime`; any value naming `<workspace>/.runtime` is that
+# default and stays silent.
+_RUNTIME_ROOT_HINT = (
+    "remove it: the runtime folder is always <workspace>/.runtime now; move "
+    "its contents there before deleting the line"
+)
+
+
+def _dotenv_runtime_root_moved(config: Any) -> bool:
+    """Whether the workspace `.env` sets a non-default ``CIAO_RUNTIME_ROOT``."""
+    workspace = getattr(config, "workspace_root", None)
+    if not workspace:
+        return False
+    from ciao.macos_service import read_dotenv
+
+    root = Path(workspace).expanduser()
+    raw = read_dotenv(root / ".env").get("CIAO_RUNTIME_ROOT", "").strip()
+    if not raw:
+        return False
+    named = Path(raw).expanduser()
+    if not named.is_absolute():
+        named = root / named
+    return named.resolve() != (root / ".runtime").resolve()
+
+
 def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction]:
     """Environment variables the engine no longer reads.
 
-    Some described the two hardcoded `personal`/`work` names and went with the
-    bootstrap registry that manufactured them; the execution-mode vars were
-    retired when auto became the only mode; `CIAO_WORKSPACES` gave way to the
-    Settings-owned runtime registry. A variable that is set and silently
+    `PWA_AUTH_REQUIRED` went when password protection became unconditional;
+    `CIAO_RUNTIME_ROOT` is no longer read from `.env`;
+    the server variables moved to Settings after a one-time import;
+    `CIAO_WORKSPACES` gave way to the Settings-owned runtime registry. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
     is in effect. Chat-only — the fix edits `.env`, which is theirs.
     """
     source = getattr(context.config, "env_source", None) or os.environ
-    stale = [(name, hint) for name, hint in _IGNORED_ENV_VARS if str(source.get(name, "")).strip()]
+    stale = [
+        (name, hint)
+        for name, hint in _IGNORED_ENV_VARS
+        if str(source.get(name, "")).strip()
+        and not _is_setup_written_default(name, str(source.get(name, "")))
+    ]
+    if _dotenv_runtime_root_moved(context.config):
+        stale.append(("CIAO_RUNTIME_ROOT", _RUNTIME_ROOT_HINT))
     if not stale:
         return []
     names = ", ".join(name for name, _hint in stale)
@@ -1007,10 +1055,8 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
                 f"These variables in my `.env` are no longer read by the engine: "
                 f"{names}. For each one: "
                 + "; ".join(f"{name}: {hint}" for name, hint in stale)
-                + ". Tell me its current value and the workspace it was meant "
-                "for, and move any setting that has no home yet onto that "
-                "workspace in `.runtime/workspaces.json` (`disallowed_tools` is "
-                "a per-workspace field there). Ask before changing a value "
+                + ". Tell me its current value and check that the setting that "
+                "replaced it says what I want. Ask before changing a value "
                 "rather than assuming the old one still reflects what I want, "
                 "and comment the variable out of `.env` once its setting has a "
                 "new home."

@@ -5,8 +5,8 @@ Two RotatingFileHandlers are wired into the root logger:
 - ``server_errors.log`` always receives every ERROR+ record. A schedule can
   tail the file, feed it to an error-triage automation, and clear it after a
   successful run.
-- ``server_debug.log`` receives everything DEBUG+ when ``CIAO_LOG_LEVEL=debug``
-  is set, giving verbose runtime detail (provider stderr noise, lifecycle
+- ``server_debug.log`` receives everything DEBUG+ when the log level setting
+  (Settings → General → Developer) is ``debug``, giving verbose runtime detail (provider stderr noise, lifecycle
   events) that survives console rotation and is surfaced through the debug
   issue report so the agent can inspect its own behavior.
 """
@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
-import os
 from collections import deque
 from pathlib import Path
 
@@ -31,14 +30,14 @@ DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 DEBUG_LOG_BACKUP_COUNT = 2
 
 
-def resolve_log_level() -> int:
-    """Resolve the effective root-logger level from ``CIAO_LOG_LEVEL``.
+def resolve_log_level(raw: str) -> int:
+    """Resolve the effective root-logger level from the log level setting.
 
     Accepts standard level names (case-insensitive) or numeric values;
     anything unrecognized falls back to INFO with a warning so a typo can
     never silence or flood logging by accident.
     """
-    raw = os.environ.get("CIAO_LOG_LEVEL", "").strip()
+    raw = (raw or "").strip()
     if not raw:
         return logging.INFO
     if raw.isdigit():
@@ -47,7 +46,7 @@ def resolve_log_level() -> int:
     if isinstance(resolved, int):
         return resolved
     logger.warning(
-        "Unrecognized CIAO_LOG_LEVEL %r; falling back to INFO", raw
+        "Unrecognized log level %r; falling back to INFO", raw
     )
     return logging.INFO
 
@@ -76,15 +75,13 @@ def setup_error_logging(workspace_root: Path) -> None:
     root.addHandler(handler)
 
 
-def setup_debug_logging(workspace_root: Path, level: int | None = None) -> None:
+def setup_debug_logging(workspace_root: Path, level: int) -> None:
     """Attach a rotating DEBUG file handler when verbose logging is enabled.
 
-    A no-op unless the resolved level (``CIAO_LOG_LEVEL``, default INFO) is
-    DEBUG or finer, so default installs keep exactly today's behavior. The
-    root logger must already be at that level for records to reach the
-    handler; ``main()`` configures that from the same env var.
+    A no-op unless ``level`` (the resolved log level setting, default INFO) is
+    DEBUG or finer, so default installs keep exactly today's behavior.
     """
-    effective = resolve_log_level() if level is None else level
+    effective = level
     if effective > logging.DEBUG:
         return
 
@@ -168,7 +165,7 @@ def tail_error_log(workspace_root: Path, lines: int = 200) -> str:
 def tail_debug_log(workspace_root: Path, lines: int = 200) -> str:
     """Return the last *lines* of the debug log, or an empty string.
 
-    Empty unless ``CIAO_LOG_LEVEL=debug`` produced a log this session.
+    Empty unless the debug log level produced a log this session.
     """
     return _tail_log(workspace_root / ".runtime" / DEBUG_LOG_NAME, lines)
 

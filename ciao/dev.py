@@ -55,7 +55,9 @@ def build_dev_environment(
         raise RuntimeError(f"{web_dir} does not exist; run ciao dev from an app checkout.")
 
     env = dict(base_env if base_env is not None else os.environ)
-    for key, value in _load_env_file(root / ".env").items():
+    from ciao.config import without_ignored_dotenv_keys
+
+    for key, value in without_ignored_dotenv_keys(_load_env_file(root / ".env")).items():
         env.setdefault(key, value)
     if not env.get("PWA_AUTH_TOKEN"):
         raise RuntimeError("Set PWA_AUTH_TOKEN in .env first.")

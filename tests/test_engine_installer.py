@@ -1091,6 +1091,7 @@ def _desktop_install(
     workspace = home / "Ciaobot"
     (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
     (workspace / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     if node_state is not None:
         text = node_state if isinstance(node_state, str) else json.dumps(node_state)
         (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
@@ -1326,7 +1327,7 @@ def test_migrate_unreadable_state_never_guesses(
         )
     elif break_state == "missing-runtime-root":
         _desktop_install(harness, tmp_path)
-        (home / "Ciaobot" / ".runtime").rmdir()
+        shutil.rmtree(home / "Ciaobot" / ".runtime")
     else:
         _desktop_install(harness, tmp_path, {"role": "standby", "host_url": "https://"})
     untouched = _replaced_state(harness)
@@ -3084,6 +3085,7 @@ def test_migrate_host_refuses_a_different_workspace(
     another = home / "Another"
     (another / ".runtime").mkdir(parents=True)
     (another / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    (another / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
 
     result = _run_installer(
         harness,
@@ -3223,6 +3225,7 @@ def test_migrate_as_host_with_no_recoverable_workspace_asks_for_one(
     existing = home / "KeepMe"
     (existing / ".runtime").mkdir(parents=True)
     (existing / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    (existing / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
 
     accepted = _run_installer(
         harness,
@@ -3248,9 +3251,40 @@ def test_migrate_as_host_with_no_recoverable_workspace_asks_for_one(
 
 @runs_the_sh_installer
 @needs_local_tools
-def test_migrate_as_host_refuses_a_workspace_without_an_env(tmp_path: Path) -> None:
+def test_migrate_as_host_accepts_a_pre_1_0_workspace_with_only_ciao_workspaces(
+    tmp_path: Path,
+) -> None:
+    # Pre-1.0 path: an install configured only through CIAO_WORKSPACES in its
+    # `.env` has no registry until it first starts on a release that imports
+    # the variable, and is still the workspace to keep.
+    harness = _harness(tmp_path)
+    home = _desktop_install_without_a_workspace(harness, tmp_path)
+    legacy = home / "Legacy"
+    legacy.mkdir()
+    (legacy / ".env").write_text(
+        'PWA_PORT=8443\nCIAO_WORKSPACES=[{"name":"personal"}]\n', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--as-host",
+        "--workspace",
+        str(legacy),
+        "--no-start",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["workspace"] == str(legacy)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_migrate_as_host_refuses_a_workspace_that_was_never_set_up(tmp_path: Path) -> None:
     # An existing directory is not yet a Ciaobot workspace. Handing an engine
-    # over to one with no `.env` would start it with a fresh password and a
+    # over to one with no `.runtime/workspaces.json` would start it with a fresh password and a
     # fresh runtime root next to the real ones, which is the same second
     # workspace as creating a new one - so it is refused here too, where it is
     # still a refusal and not an install.
@@ -3271,7 +3305,7 @@ def test_migrate_as_host_refuses_a_workspace_without_an_env(tmp_path: Path) -> N
     )
 
     assert result.returncode == 1
-    assert "no .env" in result.stderr
+    assert "no .runtime/workspaces.json" in result.stderr
     assert "Nothing on this Mac has been changed" in result.stderr
     assert "tool install" not in _log(harness, "uv-calls.log")
     assert _log(harness, "launchctl.log") == ""

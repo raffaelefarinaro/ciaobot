@@ -22,7 +22,7 @@ from ciao.web.agent_assets import workspace_health
 
 
 def _fresh(tmp_path: Path) -> CiaoConfig:
-    setup_workspace(tmp_path, auth_token="t", auth_required=False)
+    setup_workspace(tmp_path, auth_token="t")
     reset_reroot_cache()
     return CiaoConfig.from_env({
         "PWA_AUTH_TOKEN": "t",

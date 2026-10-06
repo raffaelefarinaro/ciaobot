@@ -64,8 +64,9 @@ def _write_bundle(path: Path, executable: str) -> None:
 def test_discover_runtime_prefers_workspace_dotenv(tmp_path: Path) -> None:
     workspace = tmp_path / "Ciao Workspace"
     workspace.mkdir()
+    # A CIAO_RUNTIME_ROOT in `.env` is not read: the service definition's is.
     (workspace / ".env").write_text(
-        "PWA_PORT=9555\nCIAO_RUNTIME_ROOT=var/runtime\n",
+        "PWA_PORT=9555\nCIAO_RUNTIME_ROOT=elsewhere\n",
         encoding="utf-8",
     )
     agents = tmp_path / "LaunchAgents"
@@ -74,7 +75,10 @@ def test_discover_runtime_prefers_workspace_dotenv(tmp_path: Path) -> None:
         plistlib.dumps(
             {
                 "WorkingDirectory": str(workspace),
-                "EnvironmentVariables": {"CIAO_PORT": "8443"},
+                "EnvironmentVariables": {
+                    "CIAO_PORT": "8443",
+                    "CIAO_RUNTIME_ROOT": str(workspace / "var/runtime"),
+                },
                 "ProgramArguments": ["/stable/python", "-m", "ciao.cli", "run"],
             }
         )
@@ -363,6 +367,8 @@ def test_service_start_registers_missing_launch_agent(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     calls: list[list[str]] = []
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(
@@ -414,7 +420,7 @@ def test_service_start_without_workspace_reports_setup_hint(
     assert calls == []
 
 
-def test_service_start_rejects_directory_without_env(
+def test_service_start_rejects_a_directory_that_was_never_set_up(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     from ciao import cli
@@ -439,7 +445,7 @@ def test_service_start_rejects_directory_without_env(
         Path(os.environ["CIAO_LAUNCH_AGENTS_DIR"]) / "com.ciao.server.plist"
     )
     assert rc == 1
-    assert "no .env" in payload["message"]
+    assert "no .runtime/workspaces.json" in payload["message"]
     assert not plist_path.exists()
     assert calls == []
 
@@ -452,6 +458,8 @@ def test_service_start_rejects_source_checkout(
     workspace = tmp_path / "ws"
     (workspace / "ciao").mkdir(parents=True)
     (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     (workspace / "pyproject.toml").write_text("", encoding="utf-8")
     (workspace / "ciao" / "__init__.py").write_text("", encoding="utf-8")
     calls: list[list[str]] = []
@@ -486,6 +494,8 @@ def test_service_start_rejects_tcc_protected_workspace(
     workspace = home / "Documents" / "ws"
     workspace.mkdir(parents=True)
     (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     calls: list[list[str]] = []
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(sys, "platform", "darwin")
@@ -511,9 +521,11 @@ def test_service_start_rejects_tcc_protected_workspace(
 
 
 @launchd_only
-def test_service_start_register_honors_runtime_root_and_engine_path(
+def test_service_start_register_pins_the_runtime_root_and_honors_engine_path(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
+    """The runtime root is always `<workspace>/.runtime`: a CIAO_RUNTIME_ROOT
+    left in an old `.env` is not read when the service definition is written."""
     from ciao import cli
 
     workspace = tmp_path / "ws"
@@ -521,6 +533,8 @@ def test_service_start_register_honors_runtime_root_and_engine_path(
     (workspace / ".env").write_text(
         "PWA_PORT=9555\nCIAO_RUNTIME_ROOT=rt\n", encoding="utf-8"
     )
+    (workspace / ".runtime").mkdir()
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     engine = tmp_path / "bin" / "ciao"
     calls: list[list[str]] = []
     monkeypatch.setenv("CIAO_ENGINE_PATH", str(engine))
@@ -544,7 +558,7 @@ def test_service_start_register_honors_runtime_root_and_engine_path(
     plist_data = plistlib.loads(plist_path.read_bytes())
     assert (
         plist_data["EnvironmentVariables"]["CIAO_RUNTIME_ROOT"]
-        == str((workspace / "rt").resolve())
+        == str((workspace / ".runtime").resolve())
     )
     assert plist_data["ProgramArguments"][0] == str(engine)
     assert "-m" not in plist_data["ProgramArguments"]
@@ -561,6 +575,8 @@ def test_service_start_refuses_workspace_mismatch(
     for workspace in (ws_a, ws_b):
         workspace.mkdir()
         (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+        (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+        (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     calls: list[list[str]] = []
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(
@@ -690,6 +706,8 @@ def _desktop_host_agents(
     workspace = tmp_path / "workspace"
     (workspace / ".runtime").mkdir(parents=True)
     (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     program = tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "bin" / "ciao"
     program.parent.mkdir(parents=True)
     program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")

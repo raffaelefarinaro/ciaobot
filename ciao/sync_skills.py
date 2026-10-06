@@ -1137,8 +1137,13 @@ def _config_for_root(root: Path):
     if dotenv_path.is_file():
         try:
             from dotenv import dotenv_values
-            for key, value in (dotenv_values(dotenv_path) or {}).items():
-                if value is not None and key not in env:
+
+            from ciao.config import without_ignored_dotenv_keys
+
+            for key, value in without_ignored_dotenv_keys(
+                dotenv_values(dotenv_path) or {}
+            ).items():
+                if key not in env:
                     env[key] = value
         except Exception:  # noqa: BLE001 — env loading must not block sync
             logger.debug("sync: could not load %s", dotenv_path, exc_info=True)

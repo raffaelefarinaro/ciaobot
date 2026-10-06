@@ -51,6 +51,7 @@ from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.web.auth import is_loopback_client
 from ciao.web.document_conversion import is_anydoc_document
+from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -5150,6 +5151,26 @@ def _routines_payload(config, app_settings) -> dict:
         # provider's default chat model).
         "provider_insights_models": s.provider_insights_models or {},
         "critique_models_effective": critique_effective,
+        # Server settings that used to be workspace `.env` variables, as
+        # stored ("" = default). The bind address and the log level are read
+        # at startup, so a change takes effect after a restart; developer mode
+        # and the source checkout apply at once.
+        "pwa_host": s.pwa_host,
+        "log_level": s.log_level,
+        "dev_mode": s.dev_mode,
+        "app_repo": s.app_repo,
+        "server_defaults": {
+            "pwa_host": DEFAULT_PWA_HOST,
+            "log_level": DEFAULT_LOG_LEVEL,
+            "log_levels": list(LOG_LEVELS),
+        },
+        # What the running server bound and logs at (the config keeps its
+        # startup values), so the page can say a saved change is waiting for a
+        # restart.
+        "server_running": {
+            "pwa_host": config.pwa_host,
+            "log_level": config.log_level,
+        },
         # Grouped options for the routine model selectors.
         "model_options": {
             "anthropic": list(CLAUDE_MODELS),
@@ -5227,15 +5248,12 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     """Return startup phase progress and the host's own version state."""
     from ciao import __version__
 
-    config = getattr(request.app.state, "config", None)
-
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
     latest_version, update_available = await _cached_update_hint(request)
     payload.update({
         "version": __version__,
         "desktop_api_version": 1,
-        "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
         "latest_version": latest_version,
         "update_available": update_available,
     })
@@ -5573,7 +5591,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
                 setup_workspace,
                 workspace,
                 auth_token=password,
-                auth_required=True,
                 vault_root=str(body.get("vault_root", "")).strip() or None,
                 vault_mode=vault_mode,
                 workspace_name=workspace_name,
@@ -5596,7 +5613,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
     # bootstrap process would outrank the password just written to .env.
     os.environ["PWA_AUTH_TOKEN"] = password
-    os.environ["PWA_AUTH_REQUIRED"] = "true"
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. Nothing
     # menu-bar related happens here any more: Ciaobot.app is the menu bar, and
@@ -5738,7 +5754,6 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     # notes folder (no prior scaffold) is the vault itself; otherwise the
     # vault lives under memory-vault/.
     mode = detect_vault_mode(target)
-    existing_env_path = target / ".env"
     vault_root = target / "memory-vault"
     if mode == "existing" and not vault_root.is_dir():
         vault_root = target
@@ -5748,7 +5763,6 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
         "mode": mode,
         "vault_root": str(vault_root),
         "existing_workspaces": nested,
-        "has_env": existing_env_path.is_file(),
     })
 
 
@@ -6084,7 +6098,8 @@ def _pip_install_hint(output: str) -> str:
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
-    ``CIAO_APP_REPO`` wins over the module path for developer-mode deploys. A
+    The source checkout setting (Settings → General → Developer) wins over the
+    module path for developer-mode deploys. A
     packaged app does not resolve a checkout for production updates.
     """
     configured = getattr(config, "app_repo", None)
@@ -6126,7 +6141,7 @@ def _restart_only(config, *, dev_mode: bool) -> bool:
     checkout, so it only makes sense for a developer running from one. A
     packaged Ciaobot.app never qualifies: its embedded runtime is not a
     checkout, and ``pip install -e`` cannot replace it even when
-    ``CIAO_APP_REPO`` names one. Linux hosts outside dev mode are
+    the developer source checkout setting names one. Linux hosts outside dev mode are
     administrator-managed and restart only. Everywhere else, including Linux
     dev mode, anything that is not a deployable checkout (a plain package
     install) restarts only too, since deploy would stop at "locate checkout".
@@ -6288,7 +6303,8 @@ async def admin_deploy(request: Request) -> JSONResponse:
     problem = _checkout_problem(codebase_root)
     if problem:
         hint = (
-            f"{problem}. Set CIAO_APP_REPO to the ciaobot checkout so Restart can "
+            f"{problem}. Set the source checkout in Settings → General → Developer "
+            "to the ciaobot checkout so Restart can "
             "pull, reinstall, and rebuild from source."
         )
         steps.append({"step": "locate checkout", "ok": False, "output": hint})
@@ -6712,10 +6728,11 @@ async def local_status(request: Request) -> JSONResponse:
             {"error": "local session manager not initialised"}, status_code=500
         )
     status = dict(mgr.status())
-    status["restart_only"] = _restart_only(
-        getattr(request.app.state, "config", None),
-        dev_mode=bool(status.get("dev_mode", False)),
-    )
+    config = getattr(request.app.state, "config", None)
+    # Developer mode is a Settings toggle, so it is read live from the config
+    # the settings store overlays rather than captured at startup.
+    status["dev_mode"] = bool(getattr(config, "dev_mode", False))
+    status["restart_only"] = _restart_only(config, dev_mode=status["dev_mode"])
     return JSONResponse(status)
 
 
@@ -6992,13 +7009,13 @@ async def handover_merge(request: Request) -> JSONResponse:
 async def debug_issues(request: Request) -> JSONResponse:
     """Runtime issue report (server errors + failed job runs) for self-fix.
 
-    Only available when ``CIAO_DEV_MODE`` is set; hidden (404) otherwise so
+    Only available in developer mode (Settings); hidden (404) otherwise so
     the endpoint does not advertise itself on production instances.
     """
     config = request.app.state.config
     if not getattr(config, "dev_mode", False):
         return JSONResponse(
-            {"error": "debug endpoints require CIAO_DEV_MODE"}, status_code=404
+            {"error": "debug endpoints require developer mode"}, status_code=404
         )
     from ciao.debug_report import DEFAULT_LOG_LINES, build_issue_report
 

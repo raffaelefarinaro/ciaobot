@@ -15,11 +15,13 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
+from ciao.setup_marker import read_setup_vault_mode
 from ciao.setup_status import claude_auth_status, claude_path_command, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,
     setup_finish_endpoint,
+    setup_inspect_folder_endpoint,
     setup_list_dirs_endpoint,
     setup_mkdir_endpoint,
     setup_status_endpoint,
@@ -625,7 +627,6 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("PWA_PORT", "")
     monkeypatch.setenv("PWA_AUTH_TOKEN", "")
-    monkeypatch.setenv("PWA_AUTH_REQUIRED", "")
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     restarts: list[int] = []
@@ -667,10 +668,9 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     # relaunched process through the environment too: load_dotenv would not
     # override a PWA_AUTH_TOKEN already set for the bootstrap run.
     assert os.environ["PWA_AUTH_TOKEN"] == "wizard-pass"
-    assert os.environ["PWA_AUTH_REQUIRED"] == "true"
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "PWA_AUTH_TOKEN=wizard-pass" in env_text
-    assert "PWA_AUTH_REQUIRED=true" in env_text
+    assert "PWA_AUTH_REQUIRED" not in env_text
     assert "CIAO_PUSH_CONTACT" not in env_text
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
@@ -719,7 +719,8 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     )
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
-    assert "CIAO_VAULT_MODE=scratch" in env_text
+    assert "CIAO_VAULT_MODE" not in env_text
+    assert read_setup_vault_mode(ws / ".runtime") == "scratch"
     # `<workspace>/memory-vault`: the wizard creates the per-workspace layout
     # directly, so a new install never has a shared vault to migrate.
     assert (ws / "life" / "memory-vault" / "MEMORY.md").is_file()
@@ -774,7 +775,8 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     )
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
-    assert "CIAO_VAULT_MODE=existing" in env_text
+    assert "CIAO_VAULT_MODE" not in env_text
+    assert read_setup_vault_mode(ws / ".runtime") == "existing"
     assert "CIAO_VAULT_ROOT=." in env_text
     assert (ws / "MEMORY.md").is_file()
     assert not (ws / "memory-vault").exists()
@@ -783,6 +785,29 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     )
     assert registry[0]["name"] == "journal"
     assert registry[0]["vault_root"] == "."
+
+
+def test_setup_finish_records_vault_mode_for_folder_with_its_own_env(tmp_path) -> None:
+    """A notes folder that already holds an unrelated `.env` is still a first
+    setup: setup merges into that file, and the onboarding chat must still
+    learn that the folder is existing notes, not a scratch vault."""
+    ws = tmp_path / "notes"
+    ws.mkdir()
+    (ws / "ideas.md").write_text("# Ideas\n", encoding="utf-8")
+    (ws / ".env").write_text("SOME_TOOL_KEY=abc\n", encoding="utf-8")
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(ws),
+            "workspace_name": "journal",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+    assert resp.status_code == 200
+    assert "SOME_TOOL_KEY=abc" in (ws / ".env").read_text(encoding="utf-8")
+    assert read_setup_vault_mode(ws / ".runtime") == "existing"
 
     loaded = CiaoConfig.from_env(
         {
@@ -828,7 +853,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
 
 
 def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
-    """Host auth_check must mirror AuthMiddleware when PWA_AUTH_REQUIRED is on."""
+    """Host auth_check must mirror AuthMiddleware: a session is always required."""
     from ciao.web.auth import SESSION_COOKIE
     from ciao.web.routes_auth import auth_check
 
@@ -840,7 +865,6 @@ def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
     app.state.serializer = serializer
     app.state.config = CiaoConfig.from_env(
         {
-            "PWA_AUTH_REQUIRED": "true",
             "PWA_AUTH_TOKEN": "secret",
             "CIAO_WORKSPACE": str(tmp_path / "ws"),
         }
@@ -1205,6 +1229,7 @@ def _folder_picker_client(
     app = Starlette(
         routes=[
             Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
+            Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
             Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
         ],
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
@@ -1300,6 +1325,20 @@ def test_setup_mkdir_requires_bootstrap_mode(tmp_path) -> None:
 
     assert resp.status_code == 404
     assert not (tmp_path / "workspace").exists()
+
+
+def test_setup_inspect_folder_reachable_without_session_in_bootstrap(tmp_path) -> None:
+    """The first-run wizard has no session yet; with password protection always
+    on, the folder probe must be on the public list like the other setup
+    filesystem routes, or the wizard never shows existing workspaces."""
+    target = tmp_path / "notes"
+    target.mkdir()
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+
+    assert resp.status_code == 200
+    assert "existing_workspaces" in resp.json()
 
 
 def test_tcc_protected_location_flags_desktop(monkeypatch, tmp_path) -> None:
@@ -2197,3 +2236,34 @@ def test_winning_ownership_after_a_probe_lands_serves_its_result(monkeypatch, tm
     assert ss.discover_claude_mcps(tmp_path) == ["Airtable"]
     assert calls == [], "the landed result must be served instead of re-probed"
     assert ss._claude_mcps_inflight is None, "ownership must be handed back"
+
+
+def test_a_registry_marks_a_set_up_workspace(tmp_path: Path) -> None:
+    from ciao.setup_marker import is_set_up_workspace
+
+    assert not is_set_up_workspace(tmp_path)
+    (tmp_path / ".runtime").mkdir()
+    (tmp_path / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    assert is_set_up_workspace(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('CIAO_WORKSPACES=[{"name":"personal"}]', True),
+        ("CIAO_WORKSPACES='[{\"name\":\"personal\"}]'", True),
+        ("CIAO_WORKSPACES=", False),
+        ('CIAO_WORKSPACES=""', False),
+        ('# CIAO_WORKSPACES=[{"name":"personal"}]', False),
+        ("PWA_PORT=8443", False),
+    ],
+)
+def test_a_pre_1_0_workspaces_env_marks_a_set_up_workspace(
+    tmp_path: Path, line: str, expected: bool
+) -> None:
+    """Pre-1.0 path: no registry until the first start on a release that
+    imports CIAO_WORKSPACES, so the `.env` variable still counts."""
+    from ciao.setup_marker import is_set_up_workspace
+
+    (tmp_path / ".env").write_text(line + "\n", encoding="utf-8")
+    assert is_set_up_workspace(tmp_path) is expected

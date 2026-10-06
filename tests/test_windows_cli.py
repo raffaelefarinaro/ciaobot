@@ -128,6 +128,8 @@ def _workspace(path: Path, *, port: int | None = None) -> Path:
     if port is not None:
         env.append(f"PWA_PORT={port}\n")
     (path / ".env").write_text("".join(env), encoding="utf-8")
+    (path / ".runtime").mkdir(exist_ok=True)
+    (path / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     return path.resolve()
 
 

@@ -13,9 +13,10 @@ Screenshots go to `$TMPDIR/ciao-release-walk/<version>/`, named
 
 Open the app at **the origin this install actually serves** — the URL the
 `/ciao-dev-install` skill printed, or the address the installed service is bound to —
-not a hard-coded `127.0.0.1:8443`. `PWA_HOST` defaults to `0.0.0.0` and
-`PWA_PORT` to `8443` (`INTEGRATIONS.md`), but the operator may have changed
-either, so read the running config rather than assume. Wait for the document to
+not a hard-coded `127.0.0.1:8443`. The bind address defaults to `0.0.0.0`
+(Settings → General → Network access) and `PWA_PORT` to `8443`
+(`INTEGRATIONS.md`), but the operator may have changed either, so read the
+running config rather than assume. Wait for the document to
 load, then note the final URL and the page title.
 
 **Then stop and ask the operator to type the dashboard password into the visible
@@ -27,10 +28,10 @@ The `LoginView` is at `web/src/components/LoginView.vue`; the field is
 If the page is *not* a login form, do **not** conclude the install has no door.
 The browser may simply be reusing an already-signed-in session: once a session
 cookie is present the route guard sends you straight to the app, and an
-authenticated session is not proof that authentication is off. Tell the two
-apart from the app itself — the PWA password card on Settings → General reports
-`auth_required` (`GET /api/auth/settings`). Only `auth_required: false` means
-there is genuinely no password.
+authenticated session is not proof that authentication is off. Password
+protection is always on, so a reused session is the only way past the door:
+`GET /api/auth/check` without the cookie (a private window, or `curl`) must
+answer 401.
 
 ## Step 2 — the app loads
 
@@ -115,8 +116,8 @@ Fill one: **pass** / **finding** / **blocked**.
 Record:
 
 - Engine answered, and the served asset hash matches disk.
-- Whether the door was a login form or a reused session (with `auth_required`
-  from `/api/auth/settings` as the tie-breaker).
+- Whether the door was a login form or a reused session (with a cookieless
+  `/api/auth/check` answering 401 as the tie-breaker).
 - `/api/package/status`: `current_version`, `latest_version`,
   `update_available`, and whether the tile matched it.
 - Anything that looked wrong, wrong at this width, or slow to settle, with the

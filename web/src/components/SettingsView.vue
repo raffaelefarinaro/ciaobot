@@ -469,22 +469,11 @@
                 >Keeping it private</a>
               </p>
             </div>
-            <span
-              v-if="authSettings"
-              class="badge"
-              :class="authSettings.auth_required ? 'badge--success' : 'badge--warn'"
-            >
-              {{ authSettings.auth_required ? 'on' : 'off' }}
-            </span>
           </div>
           <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
           <template v-else>
             <div class="settings-form-panel">
-              <p v-if="!authSettings.auth_required" class="hint hint--warn">
-                This instance is running unprotected because PWA_AUTH_REQUIRED=false is set in the
-                workspace .env. Setting a password here turns protection back on.
-              </p>
-              <label v-if="authSettings.auth_required" class="settings-field">
+              <label class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
                   v-model="authCurrentPassword"
@@ -524,6 +513,14 @@
         <!-- Other devices — where to open Ciaobot from a phone or another
              computer. The one place to set the trusted HTTPS address. -->
         <SettingsDevices />
+
+        <!-- Network access and the developer switches: server settings that
+             used to live in the workspace .env. -->
+        <SettingsServer
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
 
         <!-- Installing is optional and the guidance is permanent: the Home setup
              reminder can be closed for good, so Settings keeps the steps. -->
@@ -2106,6 +2103,7 @@ import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
+import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
@@ -4301,6 +4299,15 @@ async function fixIssuesInChat() {
 // ── Workspace git sync (current branch) ──────────────────────────────────
 const localStatus = ref<LocalStatus | null>(null)
 
+// Developer mode is a setting now; the Debug card reads it from the local
+// status, so a toggle refreshes that rather than waiting for a reload.
+watch(
+  () => routines.value?.dev_mode,
+  (current, previous) => {
+    if (previous !== undefined && current !== previous) void fetchLocalStatus()
+  },
+)
+
 async function fetchLocalStatus() {
   try {
     localStatus.value = await api.get<LocalStatus>('/api/local/status')
@@ -4311,7 +4318,6 @@ async function fetchLocalStatus() {
 
 // ── PWA password (Settings → home) ─────────────────────────────────────
 interface AuthSettings {
-  auth_required: boolean
   password_configured: boolean
 }
 
@@ -4322,12 +4328,12 @@ const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
 const authSettingsError = ref(false)
 
-// Protection is the default and cannot be switched off from here (the server
-// rejects `auth_required: false`), so this card only changes the password.
+// Protection is always on, so this card only changes the password, and the
+// server always asks for the current one.
 const canSaveAuthSettings = computed(() => {
   if (!authSettings.value) return false
   if (!authNewPassword.value.trim()) return false
-  if (authSettings.value.auth_required && !authCurrentPassword.value) return false
+  if (!authCurrentPassword.value) return false
   return true
 })
 
@@ -4350,7 +4356,6 @@ async function saveAuthSettings() {
       current_password: authCurrentPassword.value,
     })
     authSettings.value = {
-      auth_required: res.auth_required,
       password_configured: res.password_configured,
     }
     authCurrentPassword.value = ''

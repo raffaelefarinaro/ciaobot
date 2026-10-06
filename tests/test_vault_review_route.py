@@ -14,6 +14,7 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
 from ciao.web.app import create_app
+from tests.session import signed_in
 
 
 @pytest.fixture
@@ -29,10 +30,9 @@ def client(tmp_path: Path):
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime",
         media_root=tmp_path / "media",
-        pwa_auth_required=False,
         vault_root=vault,
     )
-    return TestClient(create_app(cfg))
+    return signed_in(TestClient(create_app(cfg)))
 
 
 def _count_generations(monkeypatch) -> list[int]:

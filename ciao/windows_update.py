@@ -165,12 +165,12 @@ class WindowsUpdateHost:
         return macos_service.read_dotenv(workspace / ".env") if workspace else {}
 
     def _server_lock(self) -> Path:
-        """The engine's ``server.lock``: ``CIAO_RUNTIME_ROOT`` or ``<workspace>/.runtime``.
+        """The engine's ``server.lock``, in ``<workspace>/.runtime``.
 
-        Resolved the way the engine resolves it, from the workspace's ``.env``. A
-        machine whose task names no workspace has no engine this host can watch,
-        and is refused rather than guessed at: a stop that cannot be confirmed
-        is a stop that did not happen.
+        The logon task sets no runtime root, so the engine it starts uses the
+        workspace's ``.runtime``. A machine whose task names no workspace has no
+        engine this host can watch, and is refused rather than guessed at: a stop
+        that cannot be confirmed is a stop that did not happen.
         """
         workspace = self._workspace()
         if workspace is None:
@@ -178,11 +178,7 @@ class WindowsUpdateHost:
                 f"the {windows_service.TASK_NAME} task names no workspace, so the "
                 "engine's runtime lock cannot be found"
             )
-        runtime_raw = self._dotenv(workspace).get("CIAO_RUNTIME_ROOT", "").strip()
-        runtime = Path(runtime_raw).expanduser() if runtime_raw else Path(".runtime")
-        if not runtime.is_absolute():
-            runtime = workspace / runtime
-        return runtime / "server.lock"
+        return workspace / ".runtime" / "server.lock"
 
     def _engine_holds_lock(self) -> bool:
         """Whether a process holds the engine's ``server.lock`` right now."""

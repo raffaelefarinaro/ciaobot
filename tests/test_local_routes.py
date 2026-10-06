@@ -524,7 +524,7 @@ def test_the_backup_routes_need_a_session(tmp_path: Path) -> None:
         routes=_routes(),
         middleware=[
             Middleware(
-                AuthMiddleware, serializer=serializer, auth_required=True
+                AuthMiddleware, serializer=serializer
             )
         ],
     )
@@ -532,7 +532,7 @@ def test_the_backup_routes_need_a_session(tmp_path: Path) -> None:
     # The middleware reads the requirement off the config, so that is what has
     # to carry it (a duck-typed stand-in is enough: these routes never read
     # anything else off the config).
-    app.state.config = SimpleNamespace(pwa_auth_required=True)
+    app.state.config = SimpleNamespace()
     app.state.backup_service = _backup_client(config)[2]
     client = TestClient(app, base_url=_ORIGIN)
 
@@ -710,12 +710,12 @@ def test_the_setup_routes_need_a_session(tmp_path: Path) -> None:
         routes=_routes(),
         middleware=[
             Middleware(
-                AuthMiddleware, serializer=serializer, auth_required=True
+                AuthMiddleware, serializer=serializer
             )
         ],
     )
     app.state.serializer = serializer
-    app.state.config = SimpleNamespace(pwa_auth_required=True)
+    app.state.config = SimpleNamespace()
     app.state.project_chat_manager = _FakePCM()
     app.state.backup_service = _backup_client(config)[2]
     client = TestClient(app, base_url=_ORIGIN)

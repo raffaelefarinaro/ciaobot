@@ -1131,13 +1131,13 @@ def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> Non
     for name in ("personal", "work"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    config.env_source = {"CIAO_DISALLOWED_TOOLS_WORK": "Bash", "CIAO_VAULT_ROOT": "x"}
+    config.env_source = {"PWA_AUTH_REQUIRED": "false", "CIAO_VAULT_ROOT": "x"}
 
     actions = [a for a in detect_actions(_context(tmp_path, config=config))
                if a.kind == "legacy-env-ignored"]
 
     assert len(actions) == 1
-    assert "CIAO_DISALLOWED_TOOLS_WORK" in actions[0].detail
+    assert "PWA_AUTH_REQUIRED" in actions[0].detail
     # A variable that IS still read must not be dragged in.
     assert "CIAO_VAULT_ROOT" not in actions[0].detail
     assert not actions[0].run_label
@@ -1158,6 +1158,55 @@ def test_retired_ciao_workspaces_variable_is_surfaced(tmp_path: Path) -> None:
     assert len(actions) == 1
     assert "CIAO_WORKSPACES" in actions[0].detail
     assert "Settings" in actions[0].chat_prompt
+
+
+def test_retired_auth_switch_is_surfaced(tmp_path: Path) -> None:
+    """Password protection is always on, so PWA_AUTH_REQUIRED=false no longer
+    does what the .env says."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"PWA_AUTH_REQUIRED": "false"}
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    assert "PWA_AUTH_REQUIRED" in actions[0].detail
+
+
+def test_server_variables_that_moved_to_settings_are_surfaced(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {
+        "PWA_HOST": "127.0.0.1",
+        "CIAO_LOG_LEVEL": "debug",
+        "CIAO_DEV_MODE": "true",
+        "CIAO_APP_REPO": "/src",
+    }
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    for name in config.env_source:
+        assert name in actions[0].detail
+    assert "Settings" in actions[0].chat_prompt
+
+
+def test_lines_setup_wrote_itself_do_not_raise_the_tile(tmp_path: Path) -> None:
+    """Every pre-upgrade `.env` carries PWA_AUTH_REQUIRED=true and
+    CIAO_VAULT_MODE from setup; both still describe reality, so no tile."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"PWA_AUTH_REQUIRED": "true", "CIAO_VAULT_MODE": "scratch"}
+
+    assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))
 
 
 def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
@@ -1213,3 +1262,40 @@ def test_no_shared_mcp_config_means_no_tile(tmp_path: Path) -> None:
     assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))
 
 
+
+
+def test_a_moved_runtime_root_in_dotenv_raises_the_tile(tmp_path: Path) -> None:
+    """`.env` no longer sets the runtime root; a non-default value names a
+    runtime the engine does not use, so the operator has to hear about it."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {}
+    (tmp_path / ".env").write_text(
+        f"CIAO_RUNTIME_ROOT={tmp_path / 'elsewhere'}\n", encoding="utf-8"
+    )
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    assert "CIAO_RUNTIME_ROOT" in actions[0].detail
+
+
+@pytest.mark.parametrize(
+    "value", [".runtime", "./.runtime", "{root}/.runtime"]
+)
+def test_the_runtime_root_setup_wrote_stays_silent(tmp_path: Path, value: str) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    # The service definition sets it in the process environment; that is not
+    # a `.env` line and must not raise the tile either.
+    config.env_source = {"CIAO_RUNTIME_ROOT": str(tmp_path / "isolated")}
+    (tmp_path / ".env").write_text(
+        f"CIAO_RUNTIME_ROOT={value.format(root=tmp_path)}\n", encoding="utf-8"
+    )
+
+    assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))

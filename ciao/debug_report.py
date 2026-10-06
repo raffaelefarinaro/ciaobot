@@ -134,7 +134,7 @@ def build_issue_report(
         "debug_log_path": str(workspace_root / ".runtime" / DEBUG_LOG_NAME),
         "failed_jobs": failed_jobs,
         # Only errors and failed jobs count as issues: the debug log is
-        # ambient verbose output (empty unless CIAO_LOG_LEVEL=debug), so it
+        # ambient verbose output (empty unless the log level is debug), so it
         # must never trip the startup triage on its own.
         "has_issues": bool(error_log.strip() or failed_jobs),
     }
@@ -165,7 +165,7 @@ def format_issue_report(report: dict) -> str:
     if debug_log:
         path = report.get("debug_log_path") or "server_debug.log"
         parts.append(
-            f"## Debug log tail ({path}, verbose CIAO_LOG_LEVEL=debug output)"
+            f"## Debug log tail ({path}, verbose debug-level output)"
         )
         parts.append("```\n" + debug_log + "\n```")
 

@@ -354,7 +354,7 @@ def test_no_test_can_reach_the_real_search_database(tmp_path: Path) -> None:
 
 # -- a vault outside the key base (re-rooting defect) ------------------------
 #
-# `CIAO_VAULT_MODE=existing` with an absolute vault root points a workspace at a
+# Existing-folder setup with an absolute vault root points a workspace at a
 # vault OUTSIDE the install, while `path_base` stays the install root. The scope
 # then had no prefix and degraded to `""` — which the prune reads as "every row"
 # and the search filter reads as "every root". So one index pass over such a

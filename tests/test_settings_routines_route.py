@@ -191,3 +191,34 @@ def test_routines_no_longer_reports_the_on_device_model(tmp_path):
     data = client.get("/api/settings/routines").json()
     assert "apple_model_available" not in data
     assert "apple_model_unavailable_reason" not in data
+
+
+def test_server_settings_patch_keeps_the_running_values(monkeypatch, tmp_path):
+    """The bind address and log level are saved now and used at the next start;
+    developer mode applies at once."""
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+    client, config = _make_client(tmp_path)
+
+    before = client.get("/api/settings/routines").json()
+    assert before["pwa_host"] == "" and before["log_level"] == ""
+    assert before["server_running"] == {"pwa_host": "0.0.0.0", "log_level": "info"}
+    assert before["server_defaults"]["log_levels"] == ["debug", "info", "warning", "error"]
+
+    res = client.patch(
+        "/api/settings/routines",
+        json={"pwa_host": "127.0.0.1", "log_level": "debug", "dev_mode": True},
+    )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert (data["pwa_host"], data["log_level"], data["dev_mode"]) == ("127.0.0.1", "debug", True)
+    assert data["server_running"] == {"pwa_host": "0.0.0.0", "log_level": "info"}
+    assert config.dev_mode is True
+    assert config.pwa_host == "0.0.0.0"
+
+
+def test_server_settings_patch_rejects_a_bad_host(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+    client, _config = _make_client(tmp_path)
+    res = client.patch("/api/settings/routines", json={"pwa_host": "two words"})
+    assert res.status_code == 400
