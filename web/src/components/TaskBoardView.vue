@@ -72,7 +72,6 @@ import {
   taskReconcileBadgeClass,
   taskReconcileLabel,
   taskReconcileNotes,
-  taskStatusLabel,
   titleSegments,
   splitTaskLog,
   joinTaskLog,

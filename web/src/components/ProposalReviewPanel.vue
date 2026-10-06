@@ -297,12 +297,6 @@ function linkedChatId(rowId: string): string | undefined {
   return proposalChatLinks.value[rowId]
 }
 
-function linkedChat(rowId: string) {
-  const id = linkedChatId(rowId)
-  if (!id) return undefined
-  return projectStore.chats.find(c => c.chat_id === id)
-}
-
 /** The chat implementing this row, from whichever surface owns the association.
  *
  * A skill row's chat is on the RECORD — the server opened it, and the server
@@ -1099,17 +1093,6 @@ function moveTargets(row: ProposalRow): string[] {
 
 function doDismiss(row: ProposalRow) {
   void store.act(row.id, 'dismiss')
-}
-
-async function openWorkspaceChat(workspace: string, title: string) {
-  const target = workspace || projectStore.activeWorkspace
-  if (projectStore.activeWorkspace !== target) {
-    await projectStore.switchWorkspace(target)
-  }
-  let project = projectStore.projects.find((p) => p.workspace === target && Boolean(p.is_auto))
-  if (!project) project = await projectStore.createProject('General')
-  if (!project) return null
-  return projectStore.createChat(project.project_id, title)
 }
 
 async function openWorkspaceChatInBackground(workspace: string, title: string, helper: ProposalHelper) {
